@@ -1,6 +1,8 @@
-import type { CSSProperties } from "react";
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+
+import { useFocusScopePortalBranch } from "./FocusScope";
 
 const MENU_GAP_PX = 4;
 const MENU_VIEWPORT_PADDING_PX = 8;
@@ -53,6 +55,7 @@ const TRIGGER_MAX_WIDTH_PX = 320;
 export interface MenuSelectItem {
   value: string;
   label: string;
+  disabled?: boolean;
 }
 
 export interface MenuSelectGroup {
@@ -225,6 +228,7 @@ export function MenuSelect({
   const [filterText, setFilterText] = useState("");
   const [minWidthPx, setMinWidthPx] = useState<number | undefined>(undefined);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const portalOwnerRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
   const filterInputRef = useRef<HTMLInputElement>(null);
@@ -312,6 +316,14 @@ export function MenuSelect({
     setOpen(true);
   }, [closeMenu, disabled, open, useBottomSheet]);
 
+  useFocusScopePortalBranch({
+    active: open,
+    containerRef: menuRef,
+    ownerRef: portalOwnerRef,
+    anchorRef: triggerRef,
+    onDismiss: closeMenu,
+  });
+
   useLayoutEffect(() => {
     if (!open) return;
     updatePosition();
@@ -326,11 +338,29 @@ export function MenuSelect({
     const menu = menuRef.current;
     const selectedOption =
       selectedValue != null
-        ? menu?.querySelector<HTMLButtonElement>(`[role="option"][aria-selected="true"]`)
+        ? menu?.querySelector<HTMLButtonElement>(`[role="option"][aria-selected="true"]:not(:disabled)`)
         : null;
-    (selectedOption ?? menu?.querySelector<HTMLButtonElement>('[role="option"]'))?.focus();
+    (selectedOption ?? menu?.querySelector<HTMLButtonElement>('[role="option"]:not(:disabled)'))?.focus();
     selectedOption?.scrollIntoView({ block: "nearest" });
   }, [open, selectedValue, updatePosition, useBottomSheet, filterable]);
+
+  const handleMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const options = menuRef.current?.querySelectorAll<HTMLButtonElement>(
+      '[role="option"]:not(:disabled)',
+    );
+    if (!options || options.length === 0) return;
+    event.preventDefault();
+    const current = Array.prototype.indexOf.call(options, document.activeElement);
+    const next =
+      current < 0
+        ? event.key === "ArrowDown"
+          ? 0
+          : options.length - 1
+        : (current + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+    options[next].focus();
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -341,23 +371,11 @@ export function MenuSelect({
       closeMenu();
     };
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing || event.keyCode === 229) return;
       if (event.key === "Escape") {
         closeMenu();
         triggerRef.current?.focus();
-        return;
       }
-      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-      const options = menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]');
-      if (!options || options.length === 0) return;
-      event.preventDefault();
-      const current = Array.prototype.indexOf.call(options, document.activeElement);
-      const next =
-        current < 0
-          ? event.key === "ArrowDown"
-            ? 0
-            : options.length - 1
-          : (current + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
-      options[next].focus();
     };
     const handleScroll = (event: Event) => {
       const target = event.target as Node | null;
@@ -393,6 +411,7 @@ export function MenuSelect({
       key={item.value}
       type="button"
       role="option"
+      disabled={item.disabled}
       onClick={() => {
         onSelect(item.value);
         closeMenu();
@@ -404,7 +423,7 @@ export function MenuSelect({
       aria-selected={selectedValue === item.value}
       style={getOptionStyle?.(item)}
       className={[
-        "flex w-full min-w-0 items-center px-3 py-2 text-left text-sm transition-colors hover:bg-white/10 focus-visible:bg-white/10 focus-visible:outline-none",
+        "flex w-full min-w-0 items-center px-3 py-2 text-left text-sm transition-colors hover:bg-white/10 focus-visible:bg-white/10 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40",
         selectedValue === item.value ? "bg-white/10 text-white" : "text-slate-200",
       ].join(" ")}
       title={item.label}
@@ -452,7 +471,7 @@ export function MenuSelect({
 
       {open &&
         createPortal(
-          <>
+          <div ref={portalOwnerRef} className="contents">
             {useBottomSheet && (
               <button
                 type="button"
@@ -463,6 +482,7 @@ export function MenuSelect({
             )}
             <div
               ref={menuRef}
+              onKeyDown={handleMenuKeyDown}
               id={listboxId}
               role="listbox"
               aria-label={ariaLabel ?? label}
@@ -518,7 +538,7 @@ export function MenuSelect({
                 </div>
               )}
             </div>
-          </>,
+          </div>,
           document.body,
         )}
     </div>

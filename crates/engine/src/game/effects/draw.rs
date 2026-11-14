@@ -1,13 +1,21 @@
 use std::collections::HashSet;
+use std::ops::ControlFlow;
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::static_abilities::prohibition_scope_matches_player;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{
+    AbilityDefinition, Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter,
+};
 use crate::types::events::{GameEvent, PlayerActionKind};
-use crate::types::game_state::{DrawSequenceOrigin, GameState, PendingDrawDelivery};
+use crate::types::format::ZoneScope;
+use crate::types::game_state::{
+    DrawDealer, DrawDealerSeat, DrawDealerStage, DrawSequenceFrameId, DrawSequenceOrigin,
+    GameState, PendingDrawDelivery,
+};
 use crate::types::identifiers::ObjectId;
-use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
+use crate::types::proposed_event::{AppliedReplacementKey, DrawEventStage, ProposedEvent};
 use crate::types::statics::StaticMode;
 #[cfg(test)]
 use crate::types::zones::Zone;
@@ -26,9 +34,10 @@ use crate::types::zones::Zone;
 /// for draw restrictions, `select_cards_to_draw` for library delivery, and
 /// `replacement::proposed_draw_survives_replacement` — which shares its
 /// applicability and substitution classifiers with the live pipeline — for the
-/// replacement leg. The individual draw is modeled as the same
-/// `ProposedEvent::Draw` shape `draw_through_replacement_with_applied` proposes,
-/// so the preflight and the resolver ask the identical question.
+/// replacement leg. The one-card draw is modeled as the same two
+/// `ProposedEvent::Draw` events the draw sequence proposes — the instruction,
+/// then its individual draw (CR 121.2a) — so the preflight and the resolver ask
+/// the identical questions.
 ///
 /// The single engine authority an AI draw-payoff preflight consults so it never
 /// credits a no-op draw.
@@ -37,14 +46,22 @@ pub fn can_draw_at_least_one(state: &GameState, player_id: crate::types::player:
     if select_cards_to_draw(state, player_id, allowed as usize).is_empty() {
         return false;
     }
-    // CR 121.2: the individual draw the payoff would ride on — the same event
-    // shape `draw_through_replacement_with_applied` proposes for one card.
-    let proposed = ProposedEvent::Draw {
-        player_id,
-        count: 1,
-        applied: HashSet::new(),
+    // CR 121.2 + CR 121.2a: the one-card instruction the payoff would ride on and
+    // its individual draw — the same events `start_draw_sequence` proposes, which
+    // proposes the instruction only when a replacement could apply to it.
+    let survives = |stage| {
+        replacement::proposed_draw_survives_replacement(
+            state,
+            &ProposedEvent::Draw {
+                player_id,
+                count: 1,
+                stage,
+                applied: HashSet::new(),
+            },
+        )
     };
-    replacement::proposed_draw_survives_replacement(state, &proposed)
+    (!replacement::draw_instruction_may_be_replaced(state) || survives(DrawEventStage::Instruction))
+        && survives(DrawEventStage::Individual)
 }
 
 /// Exact delivery fact for one fully specified draw instruction.
@@ -136,6 +153,12 @@ pub(crate) fn allowed_draw_count(
     let Some(player) = state.players.iter().find(|p| p.id == player_id) else {
         return 0;
     };
+    // CR 800.4a: a player who has left the game is no longer a player in it and
+    // draws nothing; a draw still owed to them is an event that can't happen
+    // (CR 614.17c), like one a can't-draw effect forbids.
+    if player.is_eliminated {
+        return 0;
+    }
 
     let mut allowed = count;
     // CR 702.26b + CR 604.1: `battlefield_active_statics` owns the phased-out /
@@ -199,13 +222,16 @@ pub(crate) fn select_cards_to_draw(
     player_id: crate::types::player::PlayerId,
     count: usize,
 ) -> Vec<crate::types::identifiers::ObjectId> {
-    let Some(player) = state.players.iter().find(|p| p.id == player_id) else {
+    if !state.players.iter().any(|p| p.id == player_id) {
         return Vec::new();
-    };
+    }
+    // CR 121.1 + CR 400.1: the drawing player's library, which is the shared
+    // pile in a shared-library format.
+    let library = state.library_of(player_id);
     if draws_from_bottom(state, player_id) {
-        player.library.iter().rev().take(count).copied().collect()
+        library.iter().rev().take(count).copied().collect()
     } else {
-        player.library.iter().take(count).copied().collect()
+        library.iter().take(count).copied().collect()
     }
 }
 
@@ -223,6 +249,77 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 608.2d: "Draw up to N" is encoded as `count: UpTo { max }`, and the
+    // magnitude is a choice the DRAWING player announces while the effect is
+    // applied — not a value the game state determines. `peel_up_to` splits the
+    // wrapper into its upper-bound expression and the may-draw-fewer flag so
+    // the prompt below can honour it.
+    //
+    // The generic resolver cannot do this: `game/quantity.rs` folds
+    // `UpTo { max } => recurse(max)`, which ANSWERS the choice as the upper
+    // bound. Before this guard existed, `resolve` read the count through that
+    // transparent path and Arcane Denial's "Its controller may draw up to two
+    // cards" always drew exactly two, with both 0 and 1 unreachable (#8543).
+    if let Effect::Draw { count, target } = &ability.effect {
+        let (max_expr, up_to) = count.peel_up_to();
+        if up_to {
+            // CR 107.1b: a calculation yielding a negative number uses zero.
+            let max = resolve_quantity_with_targets(state, max_expr, ability).max(0) as u32;
+            // A zero upper bound has exactly one legal answer, so it needs no
+            // round-trip; it falls through to the mandatory path below and
+            // resolves as a zero-count draw.
+            if max > 0 {
+                let Some(drawing_player) =
+                    super::resolve_player_for_context_ref(state, ability, target)
+                else {
+                    // CR 608.2b + CR 608.2c: a missing player draws nothing, the zero result a zero-card draw hands on.
+                    state.last_effect_count = Some(0);
+                    return Ok(());
+                };
+                // CR 121.3: "if an effect says that a player can't draw cards
+                // and another effect offers that player the choice to draw a
+                // card, that player can't choose to do so." CR 121.3a extends
+                // that to a chooser who is not the drawer and keys the test on
+                // the DRAWER — which is why `drawing_player`, not
+                // `ability.controller`, is the subject here (Arcane Denial's
+                // exact shape).
+                //
+                // GATE, DO NOT CLAMP. The test is `== 0`, not
+                // `0..=allowed_draw_count(..)`. CR 121.3 withholds the choice
+                // only when an effect says the player can't draw cards *at all*;
+                // a `PerTurnDrawLimit` with draws still remaining says no such
+                // thing, so "up to two" under a one-per-turn limit must still
+                // offer 2 and then deliver 1. CR 101.2's "can't" precedence is
+                // applied per individual draw downstream by
+                // `apply_draw_after_replacement`, which calls
+                // `allowed_draw_count` itself; clamping the ANNOUNCEMENT here
+                // would apply the same restriction twice, at the wrong layer.
+                //
+                // With `max > 0`, `min(max, remaining) == 0` holds exactly when
+                // `remaining == 0`, so the `max` argument is not load-bearing to
+                // the gate — this asks "may this player draw at all right now".
+                //
+                // NOT `can_draw_at_least_one`, which looks like the helper for
+                // this and is not: it also answers false for an empty library
+                // and for a replacement-removed draw, and CR 121.3's FIRST
+                // sentence requires the choice to stay open in both of those
+                // cases. Using it here would silently reintroduce the
+                // library-size clamp this menu must never have.
+                if allowed_draw_count(state, drawing_player, max) > 0 {
+                    prompt_up_to_draw_count(state, ability, target, drawing_player, max);
+                    return Ok(());
+                }
+                // Falls through to the mandatory path, exactly as a printed
+                // `Draw { Fixed(max) }` under the same prohibition does: the
+                // draw sequence runs, `apply_draw_after_replacement` clamps
+                // every unit to zero, and `EffectResolved { kind: Draw }` still
+                // fires. No CR 704.5b exposure — `attempted_empty_library` is
+                // gated on `allowed_count > 0`, so a forbidden draw records no
+                // empty-library attempt.
+            }
+        }
+    }
+
     let (num_cards, drawing_player) = match &ability.effect {
         // CR 107.1b: Resolve with full ability context so `QuantityRef::Variable { "X" }`
         // finds the caster-chosen X on the ability.
@@ -230,12 +327,10 @@ pub fn resolve(
         // chosen during spell announcement and is in `ability.targets` —
         // `target_player()` reads it back, falling back to controller for
         // context-ref filters that don't surface a target slot.
-        // CR 608.2d: "Draw up to N" is encoded as `count: UpTo { max }`.
-        // Generic resolution sees `UpTo` transparently as `max`, so this
-        // call already returns the upper-bound count. By the time we reach
-        // here the engine has already resolved the chosen count via the
-        // player choice mechanism in `engine_resolution_choices` and
-        // baked it into the ProposedEvent::Draw count.
+        // CR 608.2d: any `UpTo` count that reaches here is either the
+        // already-answered `Fixed` branch the prompt above installed, or an
+        // `UpTo` whose maximum resolved to 0. Both are mandatory counts, so
+        // reading them through the transparent generic resolver is correct.
         Effect::Draw { count, target } => (
             // CR 107.1b: a calculation yielding a negative number uses zero
             // instead. Clamp before the `as u32` cast — an unclamped negative
@@ -249,7 +344,13 @@ pub fn resolve(
             // like Swans of Bryn Argoll.
             super::resolve_player_for_context_ref(state, ability, target),
         ),
-        _ => (1, ability.controller),
+        _ => (1, Some(ability.controller)),
+    };
+    // CR 608.2b: a declared player whose target was illegal draws nothing.
+    let Some(drawing_player) = drawing_player else {
+        // CR 608.2b + CR 608.2c: as above.
+        state.last_effect_count = Some(0);
+        return Ok(());
     };
 
     // CR 121.2: Route through the draw-sequence stack so a multi-card draw
@@ -274,6 +375,100 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 608.2d: open the resolution-time count choice for an "up to N" draw.
+///
+/// Offers every legal answer (0..=`max`) as a branch of the existing
+/// `WaitingFor::ChooseOneOfBranch` round-trip. This is the same shape
+/// `stickers::prompt_count_choice` uses — the other resolver whose `up_to` is a
+/// pure magnitude with nothing to select. (The object-selecting `up_to`
+/// resolvers, `sacrifice` and `search_library`, derive their count from the
+/// chosen objects instead and so need a different prompt.)
+///
+/// Callers must have already cleared the CR 121.3 gate (`allowed_draw_count > 0`
+/// for `drawing_player`): this builds the menu unconditionally and does not
+/// re-check whether the choice may be offered at all.
+///
+/// Three properties CR 608.2d requires of the offer:
+///
+/// * **Not clamped to library size.** CR 121.3: "If there are no cards in a
+///   player's library and an effect offers that player the choice to draw a
+///   card, that player can choose to do so." CR 608.2d carries the same
+///   exemption from its own "can't choose an option that's illegal or
+///   impossible" restriction. Choosing more cards than the library holds is a
+///   legal announcement; the shortfall is settled later by CR 704.5b (a player
+///   who attempted to draw from an empty library loses at the next state-based
+///   check), not by narrowing this menu.
+/// * **Choosing 0 resolves.** The `Fixed { value: 0 }` branch re-enters
+///   `resolve`, runs a zero-count draw sequence, and emits
+///   `EffectResolved { kind: Draw }`. An ability that never resolved emits no
+///   such event, so "drew nothing by choice" stays distinguishable from "did
+///   not happen".
+/// * **The chooser is the drawing player, not the ability's controller.** For
+///   Arcane Denial ("Its controller may draw up to two cards") the countered
+///   spell's controller decides. Passing that player as the sole chooser also
+///   keeps the branch's own player resolution consistent: whichever rung of
+///   `resolve_player_for_context_ref` the filter takes,
+///   `choose_one_of::resolve_branch` has already seeded the branch's scoped
+///   player and appended `TargetRef::Player(chooser)` to the inherited parent
+///   targets, so every rung converges on this same player.
+fn prompt_up_to_draw_count(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+    drawing_player: crate::types::player::PlayerId,
+    max: u32,
+) {
+    let branches = (0..=max)
+        .map(|amount| {
+            let mut branch = AbilityDefinition::new(
+                // Preserve the parent's ability kind so a delayed-trigger draw
+                // (Arcane Denial) stays a triggered ability in the branch.
+                ability.kind,
+                Effect::Draw {
+                    // The branch IS the announced answer, so it carries a plain
+                    // count — re-entering `resolve` with it cannot re-prompt.
+                    count: QuantityExpr::Fixed {
+                        value: amount as i32,
+                    },
+                    target: target.clone(),
+                },
+            );
+            branch.description = Some(match amount {
+                0 => "Draw no cards".to_string(),
+                1 => "Draw 1 card".to_string(),
+                n => format!("Draw {n} cards"),
+            });
+            branch
+        })
+        .collect();
+
+    super::choose_one_of::prompt_next(
+        state,
+        super::choose_one_of::PromptRequest {
+            controller: ability.controller,
+            source_id: ability.source_id,
+            branches,
+            parent_occurrences: crate::types::game_state::ParentTargetOccurrences::of(ability),
+            context: ability.context.clone(),
+            // CR 608.2c: the trailing instructions of this chain ("…, then
+            // discard a card") are parked by `resolve_ability_chain`'s generic
+            // pause path, which already lists `WaitingFor::ChooseOneOfBranch` in
+            // `waits_for_resolution_choice`. Handing them over here as well
+            // would run the tail twice.
+            continuation: None,
+            // CR 608.2 (run boon-blockers-20261010): synthetic draw-amount
+            // branches carry no trigger-event context — None is a no-op.
+            trigger_context: None,
+            // CR 614.5 + CR 616.1f: a replacement effect "gets only one
+            // opportunity to affect an event". Carry the already-applied keys
+            // into the branch so the answered draw cannot re-invoke a
+            // replacement this instruction has already consumed.
+            replacement_applied: ability.replacement_applied.clone(),
+            players: vec![drawing_player],
+        },
+    );
 }
 
 /// CR 121.2: Begin one draw instruction — "if a player is instructed to draw
@@ -344,8 +539,98 @@ fn start_draw_sequence_with_origin_outcome(
     origin: DrawSequenceOrigin,
     events: &mut Vec<GameEvent>,
 ) -> DrawSequenceOutcome {
-    let frame_id = state.push_draw_sequence_with_origin(player, count, applied, origin);
+    let Some(frame_id) =
+        state.try_push_draw_sequence_with_origin(player, 0, applied.clone(), origin)
+    else {
+        return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
+    };
+    if let ControlFlow::Break(parked) =
+        consult_draw_instruction(state, frame_id, player, count, applied, events)
+    {
+        return parked;
+    }
     resume_draw_sequence_outcome(state, frame_id, events)
+}
+
+/// CR 121.2a: a replacement that refers to the number of cards drawn modifies
+/// the instruction "before considering any of the individual card draws", so the
+/// whole instruction is proposed once, before any unit, inside the already-pushed
+/// `frame_id` (the frame owes nothing until the consult settles its count via
+/// `settle_draw_instruction`). A substitute's continuation then drains under this
+/// frame (CR 616.1g) and a choice parks on it. When no replacement could apply to
+/// the instruction the consult is skipped and the frame owes the full count.
+///
+/// `Break` carries the parked outcome: a choice, or a prompt its continuation
+/// raised, resumes this frame.
+fn consult_draw_instruction(
+    state: &mut GameState,
+    frame_id: DrawSequenceFrameId,
+    player: crate::types::player::PlayerId,
+    count: u32,
+    applied: HashSet<AppliedReplacementKey>,
+    events: &mut Vec<GameEvent>,
+) -> ControlFlow<DrawSequenceOutcome> {
+    if count == 0 || !replacement::draw_instruction_may_be_replaced(state) {
+        let frame = state
+            .active_draw_sequence_if(frame_id)
+            .expect("a draw instruction is consulted on its own active frame");
+        frame.remaining = count;
+        frame.applied = applied;
+        return ControlFlow::Continue(());
+    }
+    let result = draw_through_replacement_with_applied(
+        state,
+        player,
+        count,
+        DrawEventStage::Instruction,
+        applied,
+        events,
+        |state, event, _events| settle_draw_instruction(state, event),
+    );
+    let resumable = !matches!(result, ReplacementResult::NeedsChoice(_))
+        && state
+            .active_draw_sequence()
+            .is_some_and(|frame| frame.frame_id == frame_id);
+    if resumable {
+        return ControlFlow::Continue(());
+    }
+    ControlFlow::Break(DrawSequenceOutcome::Parked(ReplacementResult::NeedsChoice(
+        state
+            .waiting_for
+            .acting_player()
+            .unwrap_or(state.active_player),
+    )))
+}
+
+/// CR 121.2a + CR 614.5: Settle a replaced draw instruction into its active
+/// frame. The surviving count becomes the individual draws still owed, and the
+/// replacements already applied to the instruction ride on every one of them.
+/// Nothing is delivered here: each owed unit is proposed as its own individual
+/// draw when the frame resumes (CR 121.2).
+pub(crate) fn settle_draw_instruction(state: &mut GameState, event: ProposedEvent) {
+    let ProposedEvent::Draw {
+        player_id,
+        count,
+        stage: DrawEventStage::Instruction,
+        applied,
+    } = event
+    else {
+        debug_assert!(
+            false,
+            "settle_draw_instruction called without a draw instruction"
+        );
+        return;
+    };
+    match state.active_draw_sequence_mut() {
+        Some(frame) if frame.player == player_id => {
+            frame.remaining = count;
+            frame.applied = applied;
+        }
+        _ => debug_assert!(
+            false,
+            "a draw instruction settles into its own active frame"
+        ),
+    }
 }
 
 /// CR 121.6b: The single post-pause driver for a draw instruction — "if an effect
@@ -378,6 +663,23 @@ pub(crate) fn resume_draw_sequence(
     events: &mut Vec<GameEvent>,
 ) -> replacement::ReplacementResult {
     resume_draw_sequence_outcome(state, frame_id, events).into_replacement_result()
+}
+
+fn credit_completed_draw_child_result(
+    state: &mut GameState,
+    frame: &crate::types::game_state::DrawSequenceFrame,
+) -> bool {
+    let Some(owner_id) = frame.delivery_owner else {
+        return true;
+    };
+    let Some(owner) = state.draw_sequence_frame_mut(owner_id) else {
+        return false;
+    };
+    if owner.player != frame.player {
+        return false;
+    }
+    owner.accumulated += frame.accumulated;
+    true
 }
 
 fn resume_draw_sequence_outcome(
@@ -422,18 +724,24 @@ fn resume_draw_sequence_outcome(
             );
             return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
         };
+        if let Some(next) = frame.settling_seat() {
+            if let ControlFlow::Break(parked) = settle_dealer_seat(state, frame_id, next, events) {
+                return parked;
+            }
+            continue;
+        }
         if frame.remaining == 0 {
             break;
         }
         frame.remaining -= 1;
-        let player = frame.player;
-        let applied = frame.applied.clone();
+        let (player, applied) = frame.begin_next_unit();
 
         let mut unit_drawn: u32 = 0;
         let result = draw_through_replacement_with_applied(
             state,
             player,
             1,
+            DrawEventStage::Individual,
             applied,
             events,
             |state, event, events| {
@@ -477,11 +785,32 @@ fn resume_draw_sequence_outcome(
         }
     }
 
-    let Some(frame) = state.pop_active_draw_sequence(frame_id) else {
+    let Some(mut frame) = state.pop_active_draw_sequence(frame_id) else {
         debug_assert!(false, "draw frame {frame_id:?} vanished before completion");
         return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
     };
-    state.last_effect_count = Some(frame.accumulated as i32);
+    if !credit_completed_draw_child_result(state, &frame) {
+        return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
+    }
+    let seat_deliveries = frame.dealer_deliveries();
+    let delivered_total = seat_deliveries.as_ref().map_or(frame.accumulated, |seats| {
+        seats.iter().map(|&(_, delivered)| delivered).sum()
+    });
+    state.last_effect_count = Some(delivered_total as i32);
+    if let Some(seats) = &seat_deliveries {
+        // CR 608.2c: a seat that drew nothing drew zero this way, so every seat of
+        // the instruction is in the table.
+        super::install_previous_effect_counts_by_player(
+            state,
+            Some(
+                seats
+                    .iter()
+                    .map(|&(player, delivered)| (player, delivered as i32))
+                    .collect(),
+            ),
+            false,
+        );
+    }
     // Record the drawing player exactly once per
     // settled draw INSTRUCTION — the emission granularity is the whole draw, not
     // the per-card unit that `apply_draw_after_replacement` settles. `frame.player`
@@ -492,16 +821,21 @@ fn resume_draw_sequence_outcome(
     // replaced away) records nothing because that player did not draw. The generic
     // post-effect scan in `effects/mod.rs` folds this
     // event into `player_actions_this_way` (a set — dedups the drawer for a
-    // multi-card draw) and `player_actions_this_turn` (a Vec — now one entry per
-    // draw event, not per card).
-    if frame.accumulated > 0 {
-        events.push(GameEvent::PlayerPerformedAction {
-            player_id: frame.player,
-            action: PlayerActionKind::Draw,
-            look_count: None,
-            scry_bottom_count: None,
-            scry_top_count: None,
-        });
+    // multi-card draw). This completion site records `player_actions_this_turn`
+    // once per emitted instruction event, so `PlayerActionsThisTurn { Draw }`
+    // counts completed instructions rather than cards.
+    let drawers = seat_deliveries.unwrap_or_else(|| vec![(frame.player, frame.accumulated)]);
+    for (player, delivered) in drawers {
+        if delivered > 0 {
+            events.push(GameEvent::PlayerPerformedAction {
+                player_id: player,
+                action: PlayerActionKind::Draw,
+                look_count: None,
+                scry_bottom_count: None,
+                scry_top_count: None,
+            });
+            super::record_player_action_this_turn(state, player, PlayerActionKind::Draw);
+        }
     }
     match frame.origin {
         DrawSequenceOrigin::Plain => {
@@ -520,11 +854,11 @@ fn resume_draw_sequence_outcome(
         }
     }
 
-    // CR 615.5: A `Draw` with a chained follow-up leaves that follow-up in the
-    // normal pending-continuation slot. Keep this paused drain resident until
-    // that chain runs: its `PostReplacementSourceController` read still needs
-    // the prevented-event context. A draw without a parked follow-up is the
-    // terminal action of this dispatch and can retire the exact top entry now.
+    // CR 608.2c + CR 121.6b: A `Draw` with a chained follow-up leaves that
+    // follow-up in the normal pending-continuation slot. Keep this paused drain
+    // resident until that chain runs: its `PostReplacementSourceController` read
+    // still needs the prevented-event context. A draw without a parked follow-up
+    // is the terminal action of this dispatch and can retire the exact top entry now.
     // Nested replacement dispatches retain their own stack entries, so this
     // never pops an outer paused event context.
     if state.active_ability_continuation().is_none() {
@@ -543,19 +877,164 @@ fn resume_draw_sequence_outcome(
         result: ReplacementResult::Execute(ProposedEvent::Draw {
             player_id: frame.player,
             count: 0,
+            stage: DrawEventStage::Instruction,
             applied: HashSet::new(),
         }),
-        delivered: frame.accumulated,
+        delivered: delivered_total,
     }
+}
+
+/// How a simultaneous draw instruction started.
+pub(crate) enum SimultaneousDraw {
+    /// Every seat settled and drew; the per-seat table is published.
+    Completed,
+    /// A replacement prompt parked the frame; its answer resumes it.
+    Parked,
+}
+
+/// CR 121.2 + CR 121.2c as modified by the format's `DealOrder`: the dealer's
+/// seats when `seats` (one bound `Draw` per player, in dealing order) make
+/// several players draw at once from a shared library, else `None` and the caller
+/// keeps the sequential per-player fan-out. The gate and the per-seat count are
+/// one pass so they cannot disagree.
+pub(crate) fn plan_simultaneous_draw(
+    state: &GameState,
+    seats: &[(crate::types::player::PlayerId, ResolvedAbility)],
+) -> Option<Vec<DrawDealerSeat>> {
+    if seats.len() < 2
+        || state.format_config.format.shared_zones().library != ZoneScope::Shared
+        || state
+            .active_draw_sequence()
+            .is_some_and(|frame| frame.capture_next_child_delivery)
+    {
+        return None;
+    }
+    seats
+        .iter()
+        .map(|(player, ability)| {
+            let Effect::Draw { count, target } = &ability.effect else {
+                return None;
+            };
+            // The dealing order is anchored on the active player; an override
+            // keeps the sequential fan-out, as does an "up to" count (the drawer's
+            // announced choice, a prompt the dealer does not own).
+            if ability.starting_with.is_some()
+                || count.peel_up_to().1
+                || !super::scoped_library_search::has_no_resolution_riders(ability)
+                || super::resolve_player_for_context_ref(state, ability, target) != Some(*player)
+            {
+                return None;
+            }
+            Some(DrawDealerSeat {
+                player: *player,
+                // CR 121.2a: every seat's count settles before any card moves.
+                count: resolve_quantity_with_targets(state, count, ability).max(0) as u32,
+                applied: ability.replacement_applied.clone(),
+                accumulated: 0,
+            })
+        })
+        .collect()
+}
+
+/// CR 121.2 + CR 121.2a: begin one simultaneous draw instruction over `seats`
+/// (from [`plan_simultaneous_draw`]). The dealer never yields by itself; it
+/// returns only on completion or where the replacement pipeline parks.
+pub(crate) fn start_simultaneous_draw(
+    state: &mut GameState,
+    seats: Vec<DrawDealerSeat>,
+    events: &mut Vec<GameEvent>,
+) -> SimultaneousDraw {
+    let first = seats.first().expect("a dealer has seats").clone();
+    let frame_id = state.push_draw_sequence_with_origin(
+        first.player,
+        0,
+        first.applied.clone(),
+        DrawSequenceOrigin::Plain,
+    );
+    state
+        .active_draw_sequence_if(frame_id)
+        .expect("the pushed frame is active")
+        .dealer = Some(DrawDealer {
+        stage: DrawDealerStage::Settling { next: 0 },
+        seats,
+    });
+    if consult_draw_instruction(
+        state,
+        frame_id,
+        first.player,
+        first.count,
+        first.applied,
+        events,
+    )
+    .is_break()
+    {
+        return SimultaneousDraw::Parked;
+    }
+    match resume_draw_sequence_outcome(state, frame_id, events) {
+        DrawSequenceOutcome::Completed { .. } => SimultaneousDraw::Completed,
+        DrawSequenceOutcome::Parked(_) => SimultaneousDraw::Parked,
+    }
+}
+
+/// CR 121.2a: seat `next`'s instruction has settled into the frame (its consult
+/// completed, so `frame.remaining` is the settled count). Record it, then either
+/// consult the following seat's instruction or, after the last seat, build the
+/// deal schedule. `Break` is a parked consult.
+fn settle_dealer_seat(
+    state: &mut GameState,
+    frame_id: DrawSequenceFrameId,
+    next: usize,
+    events: &mut Vec<GameEvent>,
+) -> ControlFlow<DrawSequenceOutcome> {
+    let frame = state
+        .active_draw_sequence_if(frame_id)
+        .expect("the settling frame is active");
+    let (settled_count, settled_applied) = (frame.remaining, frame.applied.clone());
+    frame.remaining = 0;
+    let dealer = frame
+        .dealer
+        .as_mut()
+        .expect("a settling frame has a dealer");
+    dealer.seats[next].count = settled_count;
+    dealer.seats[next].applied = settled_applied;
+    if let Some(following) = dealer.seats.get(next + 1) {
+        let (player, count, applied) =
+            (following.player, following.count, following.applied.clone());
+        dealer.stage = DrawDealerStage::Settling { next: next + 1 };
+        frame.player = player;
+        frame.applied = applied.clone();
+        return consult_draw_instruction(state, frame_id, player, count, applied, events);
+    }
+    // CR 121.2c as modified by the format's `DealOrder`: `deal_sequence` owns the
+    // order, starting with the active player.
+    let settled: Vec<_> = dealer
+        .seats
+        .iter()
+        .map(|seat| (seat.player, seat.count as usize))
+        .collect();
+    let schedule = crate::game::mulligan::deal_sequence(state, &settled);
+    let frame = state
+        .active_draw_sequence_if(frame_id)
+        .expect("the settling frame is active");
+    frame.remaining = u32::try_from(schedule.len()).expect("a deal schedule fits in u32");
+    frame
+        .dealer
+        .as_mut()
+        .expect("a settling frame has a dealer")
+        .stage = DrawDealerStage::Dealing { schedule };
+    ControlFlow::Continue(())
 }
 
 /// CR 614.5: Propose a draw while preserving replacements already applied to
 /// the instruction that produced it. The public wrapper starts a fresh draw;
 /// draw sequences use this authority to resume replacement continuations.
+/// `stage` is which of the two draw proposals this is (CR 121.2a): the whole
+/// instruction, or one of its individual draws.
 fn draw_through_replacement_with_applied(
     state: &mut GameState,
     player_id: crate::types::player::PlayerId,
     count: u32,
+    stage: DrawEventStage,
     applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
     apply_executed: impl FnOnce(&mut GameState, ProposedEvent, &mut Vec<GameEvent>),
@@ -563,6 +1042,7 @@ fn draw_through_replacement_with_applied(
     let proposed = ProposedEvent::Draw {
         player_id,
         count,
+        stage,
         applied,
     };
     let result = replacement::replace_event(state, proposed, events);
@@ -608,6 +1088,7 @@ pub fn apply_draw_after_replacement(
     let ProposedEvent::Draw {
         player_id,
         count,
+        stage,
         applied,
     } = event
     else {
@@ -617,6 +1098,13 @@ pub fn apply_draw_after_replacement(
         );
         return 0;
     };
+    // CR 121.2: an instruction is settled into its frame and drawn one
+    // individual draw at a time, never delivered here as one batch.
+    debug_assert_eq!(
+        stage,
+        DrawEventStage::Individual,
+        "apply_draw_after_replacement called with a draw instruction"
+    );
 
     let allowed_count = allowed_draw_count(state, player_id, count);
     // CR 121.1 + CR 613.11: card selection routes through the single
@@ -678,6 +1166,7 @@ fn resume_pending_draw_delivery(
                 state,
                 crate::game::zone_pipeline::ZoneMoveRequest::draw(
                     pending.current,
+                    pending.player,
                     pending.applied.clone(),
                 ),
                 events,
@@ -893,6 +1382,78 @@ mod tests {
 
         assert!(state.players[0].hand.contains(&c1));
         assert!(state.players[0].hand.contains(&c2));
+    }
+
+    #[test]
+    fn mismatched_child_cannot_consume_pending_delivery_owner() {
+        let mut state = GameState::new_two_player(43);
+        let owner = state.push_draw_sequence_with_origin(
+            PlayerId(0),
+            1,
+            HashSet::new(),
+            crate::types::game_state::DrawSequenceOrigin::Plain,
+        );
+        state
+            .active_draw_sequence_mut()
+            .expect("owner frame is active")
+            .capture_next_child_delivery = true;
+
+        let child = state.try_push_draw_sequence_with_origin(
+            PlayerId(1),
+            1,
+            HashSet::new(),
+            crate::types::game_state::DrawSequenceOrigin::Plain,
+        );
+        assert_eq!(child, None);
+        assert_eq!(
+            state.active_draw_sequence().map(|frame| frame.frame_id),
+            Some(owner)
+        );
+        assert!(
+            !state
+                .active_draw_sequence()
+                .unwrap()
+                .capture_next_child_delivery
+        );
+        assert!(state
+            .active_multi_draw_frame()
+            .unwrap()
+            .draw_sequences
+            .validate()
+            .is_ok());
+    }
+
+    #[test]
+    fn cross_player_child_result_is_not_credited_to_parent() {
+        let mut state = GameState::new_two_player(44);
+        let owner = state.push_draw_sequence_with_origin(
+            PlayerId(0),
+            1,
+            HashSet::new(),
+            crate::types::game_state::DrawSequenceOrigin::Plain,
+        );
+        let child = state.push_draw_sequence_with_origin(
+            PlayerId(1),
+            1,
+            HashSet::new(),
+            crate::types::game_state::DrawSequenceOrigin::Plain,
+        );
+        let child_frame = state
+            .draw_sequence_frame_mut(child)
+            .expect("child frame is live");
+        child_frame.delivery_owner = Some(owner);
+        child_frame.accumulated = 1;
+        let completed = state
+            .pop_active_draw_sequence(child)
+            .expect("the child frame completes");
+
+        assert!(!credit_completed_draw_child_result(&mut state, &completed));
+        assert_eq!(
+            state
+                .draw_sequence_frame_mut(owner)
+                .map(|frame| frame.accumulated),
+            Some(0)
+        );
     }
 
     #[test]
@@ -1549,6 +2110,96 @@ mod tests {
             "top card must remain in the library"
         );
     }
+
+    fn seat_ability(player: PlayerId, count: i32) -> (PlayerId, ResolvedAbility) {
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: count },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            player,
+        );
+        ability.set_scoped_player_recursive(player);
+        (player, ability)
+    }
+
+    fn dandan_state() -> GameState {
+        GameState::new(crate::types::format::FormatConfig::dandan(), 2, 42)
+    }
+
+    fn two_seats() -> Vec<(PlayerId, ResolvedAbility)> {
+        vec![seat_ability(PlayerId(0), 3), seat_ability(PlayerId(1), 2)]
+    }
+
+    #[test]
+    fn plan_simultaneous_draw_reads_each_seats_count_over_a_shared_library() {
+        let plan = plan_simultaneous_draw(&dandan_state(), &two_seats()).expect("a bare draw");
+        let counts: Vec<_> = plan.iter().map(|seat| (seat.player, seat.count)).collect();
+        assert_eq!(counts, [(PlayerId(0), 3), (PlayerId(1), 2)]);
+    }
+
+    #[test]
+    fn plan_simultaneous_draw_refuses_everything_the_dealer_does_not_own() {
+        let state = dandan_state();
+        assert!(
+            plan_simultaneous_draw(&state, &two_seats()).is_some(),
+            "reach: the unmodified seats are planned"
+        );
+        assert!(
+            plan_simultaneous_draw(&state, &two_seats()[..1]).is_none(),
+            "a single seat"
+        );
+        assert!(
+            plan_simultaneous_draw(&GameState::new_two_player(42), &two_seats()).is_none(),
+            "separate libraries"
+        );
+        type Mutation = fn(&mut ResolvedAbility);
+        let refused: [(&str, Mutation); 6] = [
+            ("up to", |ability| {
+                ability.effect = Effect::Draw {
+                    count: QuantityExpr::UpTo {
+                        max: Box::new(QuantityExpr::Fixed { value: 2 }),
+                    },
+                    target: TargetFilter::Controller,
+                };
+            }),
+            ("local sub_ability", |ability| {
+                ability.sub_ability = Some(Box::new(make_ability(1)));
+            }),
+            ("non-draw head", |ability| {
+                ability.effect = Effect::Mill {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                    destination: Zone::Graveyard,
+                };
+            }),
+            ("another drawer", |ability| {
+                ability.effect = Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Player,
+                };
+                ability.targets = vec![crate::types::ability::TargetRef::Player(PlayerId(1))];
+            }),
+            ("starting_with override", |ability| {
+                ability.starting_with = Some(crate::types::ability::ControllerRef::You);
+            }),
+            ("applied replacement", |ability| {
+                ability
+                    .replacement_applied
+                    .insert(AppliedReplacementKey::Floating { index: 0 });
+            }),
+        ];
+        for (label, mutate) in refused {
+            let mut seats = two_seats();
+            mutate(&mut seats[0].1);
+            assert!(
+                plan_simultaneous_draw(&state, &seats).is_none(),
+                "{label} keeps the sequential fan-out"
+            );
+        }
+    }
 }
 
 /// CR 121.1 + CR 614.5: tranche-4 draw-pipeline migration coverage. These drive
@@ -1674,6 +2325,8 @@ mod tranche4_draw_pipeline_tests {
         let redirect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Graveyard,
                 target: TargetFilter::SelfRef,
@@ -1713,6 +2366,7 @@ mod tranche4_draw_pipeline_tests {
             ProposedEvent::Draw {
                 player_id: P0,
                 count: 1,
+                stage: DrawEventStage::Individual,
                 applied,
             },
             &mut events,
@@ -1748,6 +2402,8 @@ mod tranche4_draw_pipeline_tests {
         let redirect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Graveyard,
                 target: TargetFilter::SelfRef,
@@ -1781,6 +2437,7 @@ mod tranche4_draw_pipeline_tests {
             ProposedEvent::Draw {
                 player_id: P0,
                 count: 1,
+                stage: DrawEventStage::Individual,
                 applied: std::collections::HashSet::new(),
             },
             &mut events,

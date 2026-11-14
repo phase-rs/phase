@@ -131,6 +131,12 @@ pub fn commander_lethal_headroom(
 /// commander. Hand/library components are not eligible for this SBA helper.
 pub fn commander_eligible_for_zone_return(state: &GameState) -> Option<(ObjectId, PlayerId, Zone)> {
     state.objects.values().find_map(|obj| {
+        // CR 903.3 + CR 111.6: command-zone roles designate cards, not tokens.
+        // This defensive gate also lets CR 704.5d remove malformed legacy
+        // token copies instead of pausing SBA processing for an impossible choice.
+        if obj.is_token {
+            return None;
+        }
         // Oathbreaker RC: signature spells return to the command zone just like
         // commanders.
         if !obj.uses_command_zone_rules() {
@@ -144,47 +150,87 @@ pub fn commander_eligible_for_zone_return(state: &GameState) -> Option<(ObjectId
         if state.commander_declined_zone_return.contains(&obj.id) {
             return None;
         }
+        // CR 903.9a + CR 800.4a: the return is the OWNER's choice, and a player who has left
+        // the game is no longer one of CR 102.1's people in the game — their owned objects
+        // left with them and they no longer receive priority to answer. Offering it would park
+        // the SBA loop on a choice nobody can make.
+        if !crate::game::players::is_alive(state, obj.owner) {
+            return None;
+        }
         Some((obj.id, obj.owner, obj.zone))
     })
 }
 
-/// CR 903.4: Compute the combined color identity of `player`'s commander(s).
+/// CR 903.4 + CR 903.4a + CR 903.4f + CR 702.124c: The combined color identity of
+/// `player`'s commander(s), or `None` when the player has no commander.
 ///
-/// Color identity is the union of every commander's color (indicator/CDA)
-/// plus every color symbol in its mana cost (derived via
-/// `derive_colors_from_mana_cost`). Rules-text mana symbols are not yet
-/// parsed into structured data.
+/// `None` (CR 903.4f: the quality is undefined) is distinct from `Some(vec![])`
+/// (a colorless commander: a defined identity containing no colors). Partner
+/// commanders combine (CR 702.124c).
 ///
-/// Returns an empty vector if the player has no commander. Callers must
-/// interpret that per CR 903.4f: "If an ability refers to the colors or
-/// number of colors in a commander's color identity, that quality is
-/// undefined if that player doesn't have a commander."
-pub fn commander_color_identity(state: &GameState, player: PlayerId) -> Vec<ManaColor> {
+/// Source of truth, in order:
+/// 1. The registered deck pool's `current_commander` faces (CR 903.4a: identity
+///    is established for the card as the game began, and includes back faces per
+///    CR 903.4d). A registered colorless commander is authoritative: its empty
+///    union is returned as `Some(vec![])` rather than falling through.
+/// 2. When no pool with a non-empty `current_commander` is registered for `player`
+///    (scenarios, tests, and every seat of a game without commanders), the printed
+///    `base_color` and `base_mana_cost` of `is_commander` objects owned by `player`.
+///
+/// Limitation of the fallback: it approximates identity from the current face's
+/// printed color and mana cost. It does not read mana symbols in rules text
+/// (CR 903.4 "mana cost or rules text"), nor the other face of a transformed
+/// double-faced commander (CR 903.4d), and a face-down commander reads as
+/// colorless. Real commander games take path 1.
+pub fn defined_commander_color_identity(
+    state: &GameState,
+    player: PlayerId,
+) -> Option<Vec<ManaColor>> {
     let mut identity: Vec<ManaColor> = Vec::new();
-    if let Some(pool) = state.deck_pools.iter().find(|pool| pool.player == player) {
+    if let Some(pool) = state
+        .deck_pools
+        .iter()
+        .find(|pool| pool.player == player && !pool.current_commander.is_empty())
+    {
         for entry in pool.current_commander.iter() {
             for color in card_face_color_identity(&entry.card) {
                 push_identity_color(&mut identity, color);
             }
         }
-        if !identity.is_empty() {
-            return identity;
-        }
+        return Some(identity);
     }
 
+    let mut has_commander = false;
     for obj in state
         .objects
         .values()
         .filter(|obj| obj.is_commander && obj.owner == player)
     {
-        for &c in &obj.color {
+        has_commander = true;
+        // CR 903.4a: identity is established before the game and is not changed by
+        // color-changing effects (CR 613.1e, layer 5) or copy effects (CR 613.1a,
+        // layer 1) applied to the commander object, so read the printed
+        // characteristics, never the layer-modified `color` / `mana_cost`.
+        for &c in &obj.base_color {
             push_identity_color(&mut identity, c);
         }
-        for c in super::printed_cards::derive_colors_from_mana_cost(&obj.mana_cost) {
+        for c in super::printed_cards::derive_colors_from_mana_cost(&obj.base_mana_cost) {
             push_identity_color(&mut identity, c);
         }
     }
-    identity
+    has_commander.then_some(identity)
+}
+
+/// CR 903.4: Compute the combined color identity of `player`'s commander(s).
+///
+/// Returns an empty vector both if the player has no commander and if their
+/// commander is colorless; callers that must tell these apart use
+/// [`defined_commander_color_identity`]. Callers must interpret the no-commander
+/// case per CR 903.4f: "If an ability refers to the colors or number of colors
+/// in a commander's color identity, that quality is undefined if that player
+/// doesn't have a commander."
+pub fn commander_color_identity(state: &GameState, player: PlayerId) -> Vec<ManaColor> {
+    defined_commander_color_identity(state, player).unwrap_or_default()
 }
 
 fn card_face_color_identity(face: &CardFace) -> Vec<ManaColor> {
@@ -220,8 +266,10 @@ fn push_identity_color(identity: &mut Vec<ManaColor>, color: ManaColor) {
 /// CR 205.3m: creature types are the subtypes shared by creatures and kindreds,
 /// so only commanders that are creatures contribute. Reads
 /// `deck_pools.current_commander` first (pre-game registration), falling back to
-/// live `is_commander && owner == player` objects — the same precedence as
-/// [`commander_color_identity`]. Partner commanders merge their type sets.
+/// live `is_commander && owner == player` objects when the pool yields no
+/// creature types (unlike [`defined_commander_color_identity`], where a registered
+/// commander's identity is authoritative even when it is colorless). Partner
+/// commanders merge their type sets.
 /// Subtypes are deduplicated case-insensitively, preserving first-seen casing.
 ///
 /// Returns an empty vector when the player has no commander (CR 903.3: a card
@@ -230,8 +278,10 @@ fn push_identity_color(identity: &mut Vec<ManaColor>, color: ManaColor) {
 /// set as "no type shared" — the spend simply doesn't qualify.
 //
 // TODO(strict): CR 702.73a — a Changeling commander is every creature type and
-// should match any creature subtype. Mirrors the color-identity helper's scope:
-// printed/effective subtypes only, no CDA expansion, until that is generalized.
+// should match any creature subtype. Reads the registered printed subtypes, or the
+// commander object's current (layer-modified) subtypes in the object fallback (no
+// pool, or a pool whose commanders yield no creature types); no CDA expansion,
+// until that is generalized.
 pub fn commander_creature_types(state: &GameState, player: PlayerId) -> Vec<String> {
     let mut types: Vec<String> = Vec::new();
 
@@ -567,6 +617,237 @@ mod tests {
         let _ = obj_id; // suppress unused warning
     }
 
+    /// CR 903.9a + CR 800.4a: the command-zone return is a choice, and a player who has left
+    /// the game makes none. The pair differs in owner liveness alone, so the refusal is
+    /// attributable to that and not to a board that produces no choice at all.
+    #[test]
+    fn zone_return_eligibility_ends_at_the_games_edge() {
+        let mut state = setup_commander_game();
+        let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(1), "Kaalia", vec![]);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Exile, &mut events);
+
+        assert_eq!(
+            commander_eligible_for_zone_return(&state),
+            Some((cmd_id, PlayerId(1), Zone::Exile)),
+            "control: with its owner in the game the exiled commander is eligible"
+        );
+
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(1))
+            .expect("seat exists")
+            .is_eliminated = true;
+        assert_eq!(
+            commander_eligible_for_zone_return(&state),
+            None,
+            "CR 102.1: the owner is no longer one of the people in the game"
+        );
+    }
+
+    /// CR 903.9a: the liveness conjunct is added BESIDE the already-declined filter, so a
+    /// living owner who declined this cycle is still refused.
+    #[test]
+    fn a_living_owner_who_declined_is_still_refused() {
+        let mut state = setup_commander_game();
+        let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(1), "Kaalia", vec![]);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Exile, &mut events);
+        assert!(
+            commander_eligible_for_zone_return(&state).is_some(),
+            "control: the same board before the decline is eligible"
+        );
+
+        state.commander_declined_zone_return.insert(cmd_id);
+        assert!(
+            crate::game::players::is_alive(&state, PlayerId(1)),
+            "reach-guard: the owner must be ALIVE, else the liveness conjunct answers first \
+             and this row stops testing the declined filter"
+        );
+        assert_eq!(commander_eligible_for_zone_return(&state), None);
+    }
+
+    /// CR 903.9a + CR 800.4a at the SBA pause the predicate feeds: a seat eliminated while its
+    /// commander sits in exile is not asked to choose. Both halves run through
+    /// `check_state_based_actions`, the production entry, on the same board shape and the same
+    /// commander.
+    #[test]
+    fn a_departed_seat_is_not_parked_on_a_commander_zone_choice() {
+        use crate::game::sba::check_state_based_actions;
+        use crate::types::game_state::WaitingFor;
+
+        let build = || {
+            let mut state = setup_commander_game();
+            let cmd_id =
+                create_commander_in_command_zone(&mut state, PlayerId(1), "Kaalia", vec![]);
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Exile, &mut events);
+            (state, cmd_id, events)
+        };
+
+        let (mut alive, cmd_id, mut events) = build();
+        check_state_based_actions(&mut alive, &mut events);
+        assert!(
+            matches!(
+                alive.waiting_for,
+                WaitingFor::CommanderZoneChoice {
+                    player: PlayerId(1),
+                    commander_id,
+                    current_zone: Zone::Exile,
+                } if commander_id == cmd_id
+            ),
+            "control: with its owner in the game this board DOES park the choice; got {:?}",
+            alive.waiting_for
+        );
+
+        let (mut departed, cmd_id, mut events) = build();
+        crate::game::elimination::eliminate_player(&mut departed, PlayerId(1), &mut events);
+        assert_eq!(
+            departed.objects[&cmd_id].zone,
+            Zone::Exile,
+            "reach-guard: CR 800.4a leaves the owned commander in exile, so every conjunct \
+             except liveness still admits it"
+        );
+        assert!(
+            departed.players.iter().filter(|p| !p.is_eliminated).count() >= 2,
+            "reach-guard: the game must continue past the departure, or the SBA loop ends \
+             before it reaches the CR 903.9a check"
+        );
+
+        check_state_based_actions(&mut departed, &mut events);
+        assert!(
+            !matches!(departed.waiting_for, WaitingFor::CommanderZoneChoice { .. }),
+            "CR 800.4a: the departed owner receives no priority and makes no choice; got {:?}",
+            departed.waiting_for
+        );
+    }
+
+    #[test]
+    fn token_command_zone_roles_are_not_sba_eligible() {
+        let mut state = setup_commander_game();
+        let commander = create_commander_in_command_zone(
+            &mut state,
+            PlayerId(0),
+            "Malformed Commander Copy",
+            vec![],
+        );
+        let signature_card_id = CardId(state.next_object_id);
+        let signature_spell = create_object(
+            &mut state,
+            signature_card_id,
+            PlayerId(1),
+            "Malformed Signature Copy".to_string(),
+            Zone::Exile,
+        );
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, commander, Zone::Graveyard, &mut events);
+        state.objects.get_mut(&commander).unwrap().is_token = true;
+        let signature = state.objects.get_mut(&signature_spell).unwrap();
+        signature.is_token = true;
+        signature.mark_signature_spell();
+
+        assert!(
+            commander_eligible_for_zone_return(&state).is_none(),
+            "CR 903.3: tokens with copied command-zone roles are not eligible"
+        );
+    }
+
+    #[test]
+    fn token_command_zone_roles_cease_without_blocking_sba_progress() {
+        use crate::game::sba::check_state_based_actions;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = setup_commander_game();
+        let commander = create_commander_in_command_zone(
+            &mut state,
+            PlayerId(0),
+            "Malformed Commander Copy",
+            vec![],
+        );
+        let signature_card_id = CardId(state.next_object_id);
+        let signature_spell = create_object(
+            &mut state,
+            signature_card_id,
+            PlayerId(1),
+            "Malformed Signature Copy".to_string(),
+            Zone::Exile,
+        );
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, commander, Zone::Graveyard, &mut events);
+        state.objects.get_mut(&commander).unwrap().is_token = true;
+        let signature = state.objects.get_mut(&signature_spell).unwrap();
+        signature.is_token = true;
+        signature.mark_signature_spell();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::CommanderZoneChoice { .. }),
+            "malformed token roles must not create an unreachable commander choice"
+        );
+        assert!(
+            !state.objects.contains_key(&commander)
+                && !state.objects.contains_key(&signature_spell),
+            "CR 704.5d: token copies outside the battlefield must cease to exist"
+        );
+    }
+
+    #[test]
+    fn non_token_commander_and_signature_spell_remain_sba_eligible() {
+        use crate::game::sba::check_state_based_actions;
+        use crate::types::game_state::WaitingFor;
+
+        let mut commander_state = setup_commander_game();
+        let commander = create_commander_in_command_zone(
+            &mut commander_state,
+            PlayerId(0),
+            "Commander",
+            vec![],
+        );
+        let mut commander_events = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut commander_state,
+            commander,
+            Zone::Graveyard,
+            &mut commander_events,
+        );
+        check_state_based_actions(&mut commander_state, &mut commander_events);
+        assert!(matches!(
+            commander_state.waiting_for,
+            WaitingFor::CommanderZoneChoice {
+                commander_id,
+                current_zone: Zone::Graveyard,
+                ..
+            } if commander_id == commander
+        ));
+
+        let mut signature_state = setup_commander_game();
+        let signature_card_id = CardId(signature_state.next_object_id);
+        let signature_spell = create_object(
+            &mut signature_state,
+            signature_card_id,
+            PlayerId(1),
+            "Signature Spell".to_string(),
+            Zone::Exile,
+        );
+        signature_state
+            .objects
+            .get_mut(&signature_spell)
+            .unwrap()
+            .mark_signature_spell();
+        let mut signature_events = Vec::new();
+        check_state_based_actions(&mut signature_state, &mut signature_events);
+        assert!(matches!(
+            signature_state.waiting_for,
+            WaitingFor::CommanderZoneChoice {
+                commander_id,
+                current_zone: Zone::Exile,
+                ..
+            } if commander_id == signature_spell
+        ));
+    }
+
     // --- Control-Condition Phasing Tests (CR 702.26b) ---
 
     #[test]
@@ -600,19 +881,24 @@ mod tests {
 
     #[test]
     fn commander_color_identity_unions_color_and_mana_cost() {
-        // CR 903.4: Identity = commander color + mana-cost colors. A two-color
-        // commander with a mono-color mana cost reports exactly those colors.
+        // CR 903.4: Identity = commander color + mana-cost colors. A blue commander
+        // whose printed mana cost has a red symbol reports exactly {U, R}: the red
+        // comes only from `base_mana_cost` (the fallback reads printed
+        // characteristics, CR 903.4a), so dropping that loop fails this test.
         let mut state = setup_commander_game();
         let cmd_id = create_commander_in_command_zone(
             &mut state,
             PlayerId(0),
             "Niv-Mizzet",
-            vec![ManaColor::Blue, ManaColor::Red],
+            vec![ManaColor::Blue],
         );
-        state.objects.get_mut(&cmd_id).unwrap().mana_cost = ManaCost::Cost {
-            shards: vec![ManaCostShard::Blue, ManaCostShard::Red],
+        let printed_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
             generic: 1,
         };
+        let cmd = state.objects.get_mut(&cmd_id).unwrap();
+        cmd.mana_cost = printed_cost.clone();
+        cmd.base_mana_cost = printed_cost;
 
         let identity = commander_color_identity(&state, PlayerId(0));
         assert_eq!(identity.len(), 2);
@@ -676,6 +962,153 @@ mod tests {
         assert_eq!(identity.len(), 2);
         assert!(identity.contains(&ManaColor::White));
         assert!(identity.contains(&ManaColor::Black));
+    }
+
+    /// A registered pool commander with an explicit identity, no live object.
+    fn register_pool_commander(
+        state: &mut GameState,
+        player: PlayerId,
+        color_identity: Vec<ManaColor>,
+    ) {
+        state.deck_pools.push(PlayerDeckPool {
+            player,
+            current_commander: Arc::new(vec![DeckEntry {
+                card: CardFace {
+                    color_identity,
+                    ..CardFace::default()
+                },
+                count: 1,
+            }]),
+            ..PlayerDeckPool::default()
+        });
+    }
+
+    #[test]
+    fn defined_identity_is_none_without_commander() {
+        // CR 903.4f: no commander -> the identity quality is undefined.
+        let state = setup_commander_game();
+        assert_eq!(defined_commander_color_identity(&state, PlayerId(0)), None);
+    }
+
+    #[test]
+    fn defined_identity_is_none_with_an_empty_registered_pool() {
+        // CR 903.4f: production registers a `PlayerDeckPool` for every seat (see
+        // deck_loading), so in a game without commanders the pool exists but its
+        // `current_commander` is empty. That is "no commander" (undefined), never
+        // a colorless commander (a defined, empty identity): dropping the
+        // non-empty-pool guard would make this `Some(vec![])`.
+        let mut state = setup_commander_game();
+        state.deck_pools.push(PlayerDeckPool {
+            player: PlayerId(0),
+            ..PlayerDeckPool::default()
+        });
+        assert!(state.deck_pools[0].current_commander.is_empty());
+        assert_eq!(defined_commander_color_identity(&state, PlayerId(0)), None);
+    }
+
+    #[test]
+    fn defined_identity_is_some_empty_for_colorless_commander_object() {
+        // CR 903.4: a colorless commander has a defined identity with no colors,
+        // distinct from "no commander" (CR 903.4f).
+        let mut state = setup_commander_game();
+        create_commander_in_command_zone(&mut state, PlayerId(0), "Kozilek", vec![]);
+        assert_eq!(
+            defined_commander_color_identity(&state, PlayerId(0)),
+            Some(vec![])
+        );
+        // The legacy accessor still flattens both cases to an empty vector.
+        assert!(commander_color_identity(&state, PlayerId(0)).is_empty());
+    }
+
+    #[test]
+    fn defined_identity_ignores_other_players_commanders() {
+        let mut state = setup_commander_game();
+        create_commander_in_command_zone(
+            &mut state,
+            PlayerId(1),
+            "Opponent",
+            vec![ManaColor::Green],
+        );
+        assert_eq!(defined_commander_color_identity(&state, PlayerId(0)), None);
+        assert_eq!(
+            defined_commander_color_identity(&state, PlayerId(1)),
+            Some(vec![ManaColor::Green])
+        );
+    }
+
+    #[test]
+    fn registered_colorless_commander_ignores_current_object_color() {
+        // CR 903.4a: a painted (layer-modified) color on a registered colorless
+        // commander's object never leaks into its identity. The pool branch itself is
+        // discriminated by registered_colorless_commander_without_object_is_defined_empty.
+        let mut state = setup_commander_game();
+        register_pool_commander(&mut state, PlayerId(0), vec![]);
+        let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(0), "Kozilek", vec![]);
+        state.objects.get_mut(&cmd_id).unwrap().color = vec![ManaColor::Black];
+
+        assert_eq!(
+            defined_commander_color_identity(&state, PlayerId(0)),
+            Some(vec![])
+        );
+    }
+
+    #[test]
+    fn registered_colorless_commander_without_object_is_defined_empty() {
+        // CR 903.4a + CR 903.4f: with only the pool registered (no live commander
+        // object to fall back on), a colorless commander is Some(empty), not None.
+        // This discriminates the pool branch from the object fallback.
+        let mut state = setup_commander_game();
+        register_pool_commander(&mut state, PlayerId(0), vec![]);
+
+        assert_eq!(
+            defined_commander_color_identity(&state, PlayerId(0)),
+            Some(vec![])
+        );
+    }
+
+    #[test]
+    fn defined_identity_merges_partners() {
+        // CR 702.124c: partner commanders combine their identities.
+        let mut state = setup_commander_game();
+        create_commander_in_command_zone(
+            &mut state,
+            PlayerId(0),
+            "Partner A",
+            vec![ManaColor::White],
+        );
+        create_commander_in_command_zone(
+            &mut state,
+            PlayerId(0),
+            "Partner B",
+            vec![ManaColor::Black],
+        );
+
+        let identity = defined_commander_color_identity(&state, PlayerId(0)).unwrap();
+        assert_eq!(identity.len(), 2);
+        assert!(identity.contains(&ManaColor::White));
+        assert!(identity.contains(&ManaColor::Black));
+    }
+
+    #[test]
+    fn poolless_commander_identity_reads_printed_not_layered_color() {
+        // CR 903.4a + CR 613.1e: a layer-5 color change (or a changed mana cost)
+        // on the commander object does not change its color identity.
+        let mut state = setup_commander_game();
+        let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(0), "Kozilek", vec![]);
+        let obj = state.objects.get_mut(&cmd_id).unwrap();
+        obj.base_color = vec![];
+        obj.base_mana_cost = ManaCost::generic(3);
+        obj.color = vec![ManaColor::Blue];
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        obj.base_characteristics_initialized = true;
+
+        assert_eq!(
+            defined_commander_color_identity(&state, PlayerId(0)),
+            Some(vec![])
+        );
     }
 
     #[test]

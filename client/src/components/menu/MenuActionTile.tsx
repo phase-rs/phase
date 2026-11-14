@@ -11,6 +11,7 @@ interface ToneStyle {
   text: string;
   border: string;
   token: string;
+  wash: string;
   /** Tone as a space-separated rgb channel for the motif particle field. */
   rgb: string;
 }
@@ -20,18 +21,21 @@ const TONE: Record<MenuTileTone, ToneStyle> = {
     text: "text-arcane-text",
     border: "border-white/10",
     token: "border-arcane/60 text-arcane-soft",
+    wash: "bg-[radial-gradient(100%_120%_at_100%_0%,rgba(56,189,248,0.14),transparent_62%)]",
     rgb: "56 189 248",
   },
   jade: {
     text: "text-jade-text",
     border: "border-white/10",
     token: "border-jade/60 text-jade-soft",
+    wash: "bg-[radial-gradient(100%_120%_at_100%_0%,rgba(52,211,153,0.14),transparent_62%)]",
     rgb: "52 211 153",
   },
   ember: {
     text: "text-ember-text",
     border: "border-white/10",
     token: "border-ember/60 text-ember-soft",
+    wash: "bg-[radial-gradient(100%_120%_at_100%_0%,rgba(245,158,11,0.16),transparent_62%)]",
     rgb: "245 158 11",
   },
 };
@@ -44,21 +48,17 @@ interface MenuActionTileProps {
   enterLabel: string;
   onClick: () => void;
   disabled?: boolean;
-  /** Renders the section icon at the requested size — the tile draws it twice
-   *  (a large faint art-window backdrop and a small title-bar token), so the
-   *  caller controls whether that's an <img> section icon or an inline SVG. */
+  /** Renders the section icon at the requested size. The tile uses the same
+   *  icon for its quiet watermark and its compact action token. */
   renderIcon: (className: string) => ReactNode;
-  /** Optional thematic hover treatment. When set, the art window's rest-state
-   *  section ghost cross-fades on hover into a crisp themed hero glyph wrapped
-   *  in a tone-colored particle field (see {@link TileMotifLayer}). */
+  /** Optional, restrained hover particle treatment around the watermark. */
   motif?: TileMotif;
 }
 
 /**
- * The signature "bento" action tile used across the menu surfaces: a serif
- * title bar with a tone-ringed icon token, a neutral art window holding a
- * large faint icon, and a flavor/description body ending in an "ENTER →" cue.
- * Shared by the home dashboard and the draft landing so both read identically.
+ * The shared primary action control for the home dashboard and draft landing.
+ * One quiet material surface holds the icon, title, explanation, and CTA so a
+ * choice reads as one confident button rather than a stack of small panels.
  */
 export function MenuActionTile({
   title,
@@ -71,15 +71,7 @@ export function MenuActionTile({
   motif,
 }: MenuActionTileProps) {
   const t = TONE[tone];
-  // When a motif owns the hover, the section icon resolves from its faint
-  // rotated rest state into a crisp, upright, brightened focus while the
-  // particle field animates over it — same icon throughout, no jarring glyph swap.
-  // Without a motif it keeps its subtler brighten-on-hover. Disabled tiles
-  // never animate (no hover label fires).
   const showMotif = Boolean(motif) && !disabled;
-  const ghostHover = showMotif
-    ? "group-hover:rotate-0 group-hover:scale-110 group-hover:opacity-90"
-    : "group-hover:-rotate-3 group-hover:scale-110 group-hover:opacity-30";
   return (
     <motion.button
       type="button"
@@ -88,31 +80,29 @@ export function MenuActionTile({
       initial="rest"
       animate="rest"
       whileHover={disabled ? undefined : "hover"}
-      className={`group relative flex flex-col items-stretch gap-2 rounded-[10px] border p-[7px] text-left transition-colors duration-150 surface-card ${
-        disabled ? "cursor-not-allowed opacity-50" : `cursor-pointer ${t.border} hover:border-hairline-hover hover:bg-slate-900/88`
+      className={`group relative isolate flex min-h-[178px] overflow-hidden rounded-[12px] border text-left shadow-[0_12px_30px_rgba(0,0,0,0.22)] transition-all duration-200 surface-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/35 focus-visible:ring-offset-2 focus-visible:ring-offset-[#060a16] ${
+        disabled ? "cursor-not-allowed opacity-50" : `cursor-pointer ${t.border} hover:-translate-y-0.5 hover:border-hairline-hover hover:shadow-[0_18px_38px_rgba(0,0,0,0.32)]`
       }`}
     >
-      <div className="flex items-center justify-between gap-2 rounded-[8px] bg-white/[0.06] px-3 py-2 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.05)]">
-        <span className="font-display text-[1.18rem] font-semibold tracking-[-0.02em] text-fg">
-          {title}
-        </span>
-        <span className={`flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[8px] border-[1.5px] bg-black/40 ${t.token}`}>
-          {renderIcon("h-4 w-4")}
-        </span>
+      <span aria-hidden="true" className={`pointer-events-none absolute inset-0 ${t.wash}`} />
+      <div aria-hidden="true" className="pointer-events-none absolute -right-4 -top-5 h-32 w-32 opacity-[0.10] transition-all duration-300 group-hover:-right-1 group-hover:opacity-[0.16]">
+        {renderIcon("h-32 w-32")}
+        {showMotif && <TileMotifLayer className="inset-0" motif={motif!} color={`rgb(${t.rgb})`} />}
       </div>
-      <div className="relative flex min-h-[120px] flex-1 items-center justify-center overflow-hidden rounded-[6px] bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(0,0,0,0.32))] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.35)] [@media(max-height:540px)]:min-h-[64px]">
-        <span className={`relative -rotate-6 opacity-[0.14] transition-all duration-300 ${ghostHover}`}>
-          {renderIcon("h-28 w-28 [@media(max-height:540px)]:h-16 [@media(max-height:540px)]:w-16")}
+      <div className="relative z-10 flex w-full flex-col items-start px-5 py-5">
+        <span className={`flex h-10 w-10 items-center justify-center rounded-[9px] border bg-black/28 shadow-[inset_0_1px_rgba(255,255,255,0.07)] ${t.token}`}>
+          {renderIcon("h-5 w-5")}
         </span>
-        {/* Particle field renders in front of the icon so motes sparkle over it. */}
-        {showMotif && <TileMotifLayer motif={motif!} color={`rgb(${t.rgb})`} />}
-      </div>
-      <div className="flex flex-col gap-2 rounded-[7px] bg-black/24 px-3 py-2.5 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]">
-        <p className="text-[0.82rem] leading-snug text-fg-card-body">{description}</p>
-        <span className={`inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] ${t.text}`}>
-          {enterLabel}
-          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-current"><path d="m13.2 5.4 1.4-1.4 8 8-8 8-1.4-1.4 5.6-5.6H2v-2h16.8l-5.6-5.6Z" /></svg>
-        </span>
+        <div className="mt-auto max-w-[15.5rem] pt-5">
+          <h2 className="font-display text-[1.35rem] font-semibold leading-none tracking-[-0.025em] text-fg">
+            {title}
+          </h2>
+          <p className="mt-2 text-[0.84rem] leading-snug text-fg-card-body">{description}</p>
+          <span className={`mt-4 inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.11em] ${t.text}`}>
+            {enterLabel}
+            <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-current transition-transform duration-150 group-hover:translate-x-0.5"><path d="m13.2 5.4 1.4-1.4 8 8-8 8-1.4-1.4 5.6-5.6H2v-2h16.8l-5.6-5.6Z" /></svg>
+          </span>
+        </div>
       </div>
     </motion.button>
   );

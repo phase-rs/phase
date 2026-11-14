@@ -4,7 +4,12 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { detectInitialLanguage, resources, SUPPORTED_LNGS } from "./resources";
+import {
+  detectInitialLanguage,
+  normalizeSupportedLng,
+  resources,
+  SUPPORTED_LNGS,
+} from "./resources";
 
 const LOCALES_DIR = join(dirname(fileURLToPath(import.meta.url)), "locales");
 
@@ -67,6 +72,36 @@ describe("i18n resources", () => {
 
   it("detects a supported language or falls back to en", () => {
     expect(SUPPORTED_LNGS as readonly string[]).toContain(detectInitialLanguage());
+  });
+
+  it("normalizes browser and persisted locale tags to a supported app locale", () => {
+    expect(normalizeSupportedLng("PT-br", "en")).toBe("pt");
+    expect(normalizeSupportedLng("ja-JP", "en")).toBe("ja");
+    expect(normalizeSupportedLng(" de-CH ", "en")).toBe("de");
+    expect(normalizeSupportedLng("zh-Hans", "fr")).toBe("zh");
+    expect(normalizeSupportedLng("zh-CN", "en")).toBe("zh");
+    expect(normalizeSupportedLng("zh", "en")).toBe("zh");
+    // An explicit `hans` script subtag outranks a region in BCP 47, so these
+    // are Simplified script with a Traditional-leaning region and must stay on
+    // the Simplified catalog. Matching a Traditional subtag anywhere in the tag
+    // sent them to English — a valid tag silently losing its locale.
+    expect(normalizeSupportedLng("zh-Hans-HK", "en")).toBe("zh");
+    expect(normalizeSupportedLng("zh-Hans-MO", "en")).toBe("zh");
+    expect(normalizeSupportedLng("zh-Hans-TW", "en")).toBe("zh");
+    expect(normalizeSupportedLng(null, "it")).toBe("it");
+  });
+
+  // The app ships a Simplified (`zh`) catalog and no Traditional one, and the
+  // Chinese card-content sources it draws on are Simplified-only. `zh-TW` must
+  // therefore land on English rather than being folded into `zh` by the prefix
+  // split — otherwise a Traditional reader would get Simplified chrome *and*
+  // Simplified card text, wrong on both axes without any signal that it happened.
+  it("keeps Traditional Chinese tags off the Simplified catalog", () => {
+    for (const tag of ["zh-Hant", "zh-TW", "zh-HK", "zh-MO", "zh-Hant-TW", "ZH-hant"]) {
+      expect(normalizeSupportedLng(tag, "en")).toBe("en");
+      // The fallback argument is the caller's, and must survive untouched.
+      expect(normalizeSupportedLng(tag, "de")).toBe("de");
+    }
   });
 });
 

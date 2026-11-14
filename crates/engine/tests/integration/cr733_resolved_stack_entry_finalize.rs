@@ -18,8 +18,9 @@
 //! move `actual_mana_spent` and cannot tell "the ability was written back" from
 //! "the ability was never written". Do not replace it with a creature.
 
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::stack::apply_resolved_stack_entry_finalize;
+use engine::types::ability::{Effect, ResolvedAbility};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, GameState, StackEntryKind};
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -105,6 +106,11 @@ fn pre_finalize_state(state: &GameState, command: &ResolvedStackEntryFinalizeCom
             predecessor.stack_paid_facts.remove(&command.object);
         }
     }
+    predecessor
+        .objects
+        .get_mut(&command.object)
+        .expect("the spell object is live in the pre-finalize state")
+        .cast_occurrence = command.expected_old_cast_occurrence;
     predecessor
 }
 
@@ -192,6 +198,10 @@ fn real_cast_journals_an_exact_stack_entry_finalize() {
         replay.stack_paid_facts[&entry.id], state.stack_paid_facts[&entry.id],
         "CR 601.2i: replay installs the recorded paid-facts snapshot"
     );
+    assert_eq!(
+        replay.objects[&entry.id].cast_occurrence, state.objects[&entry.id].cast_occurrence,
+        "CR 601.2i: replay installs the recorded object cast provenance"
+    );
 
     // Re-applying is not idempotent: the predecessor no longer matches, so the
     // command fails closed rather than silently re-retagging.
@@ -277,6 +287,133 @@ fn a_divergent_paid_facts_predecessor_installs_neither_half() {
         predecessor.stack_paid_facts[&command.object], foreign,
         "the rejected replay must not have installed its snapshot either"
     );
+}
+
+#[test]
+fn a_divergent_cast_occurrence_predecessor_installs_nothing() {
+    let (state, journal_start) = cast_and_hold_on_stack();
+    let commands = finalizations(&state, journal_start);
+    let command = &commands[0];
+    let mut predecessor = pre_finalize_state(&state, command);
+    predecessor
+        .objects
+        .get_mut(&command.object)
+        .expect("the pre-finalize spell object is live")
+        .cast_occurrence = Some(engine::types::game_state::CastOccurrence {
+        caster: P1,
+        turn_journal_index: 77,
+    });
+    let kind_before = predecessor.stack[command.entry_position].kind.clone();
+    let paid_before = predecessor.stack_paid_facts.get(&command.object).cloned();
+    let object_before = predecessor.objects[&command.object].clone();
+
+    assert!(matches!(
+        apply_resolved_stack_entry_finalize(&mut predecessor, command),
+        Err(ResolvedStackEntryFinalizeReplayInvariantError::CastOccurrenceMismatch(id))
+            if id == command.object
+    ));
+    assert_eq!(predecessor.stack[command.entry_position].kind, kind_before);
+    assert_eq!(
+        predecessor.stack_paid_facts.get(&command.object),
+        paid_before.as_ref()
+    );
+    assert_eq!(
+        predecessor.objects[&command.object].cast_occurrence,
+        object_before.cast_occurrence
+    );
+}
+
+#[test]
+fn malformed_resulting_cast_occurrence_installs_nothing() {
+    let (state, journal_start) = cast_and_hold_on_stack();
+    let command = finalizations(&state, journal_start).remove(0);
+
+    for malformed in [
+        engine::types::game_state::CastOccurrence {
+            caster: P1,
+            turn_journal_index: 0,
+        },
+        engine::types::game_state::CastOccurrence {
+            caster: P0,
+            turn_journal_index: 77,
+        },
+    ] {
+        let mut forged = command.clone();
+        forged.resulting_cast_occurrence = Some(malformed);
+        let mut predecessor = pre_finalize_state(&state, &command);
+        let kind_before = predecessor.stack[command.entry_position].kind.clone();
+        let paid_before = predecessor.stack_paid_facts.get(&command.object).cloned();
+        let object_before = predecessor.objects[&command.object].clone();
+
+        assert!(matches!(
+            apply_resolved_stack_entry_finalize(&mut predecessor, &forged),
+            Err(ResolvedStackEntryFinalizeReplayInvariantError::CastOccurrenceMismatch(id))
+                if id == command.object
+        ));
+        assert_eq!(predecessor.stack[command.entry_position].kind, kind_before);
+        assert_eq!(
+            predecessor.stack_paid_facts.get(&command.object),
+            paid_before.as_ref()
+        );
+        assert_eq!(
+            predecessor.objects[&command.object].cast_occurrence,
+            object_before.cast_occurrence
+        );
+    }
+
+    let mut wrong_object_record = pre_finalize_state(&state, &command);
+    let occurrence = command
+        .resulting_cast_occurrence
+        .expect("a real cast finalization carries provenance");
+    wrong_object_record
+        .spells_cast_this_turn_by_player
+        .get_mut(&occurrence.caster)
+        .and_then(|records| records.get_mut(occurrence.turn_journal_index as usize))
+        .expect("the real cast record is present")
+        .spell_object_id = Some(engine::types::identifiers::ObjectId(99_999));
+    let before = wrong_object_record.clone();
+    assert!(matches!(
+        apply_resolved_stack_entry_finalize(&mut wrong_object_record, &command),
+        Err(ResolvedStackEntryFinalizeReplayInvariantError::CastOccurrenceMismatch(id))
+            if id == command.object
+    ));
+    assert_eq!(wrong_object_record, before);
+
+    let mut divergent_graph = command.clone();
+    let StackEntryKind::Spell {
+        ability: Some(root),
+        ..
+    } = divergent_graph.resulting_kind.as_mut()
+    else {
+        panic!("the fixture's finalized spell carries an ability graph");
+    };
+    root.sub_ability = Some(Box::new(ResolvedAbility::new(
+        Effect::NoOp,
+        Vec::new(),
+        command.object,
+        P0,
+    )));
+    let mut predecessor = pre_finalize_state(&state, &command);
+    let before = predecessor.clone();
+    assert!(matches!(
+        apply_resolved_stack_entry_finalize(&mut predecessor, &divergent_graph),
+        Err(ResolvedStackEntryFinalizeReplayInvariantError::CastOccurrenceMismatch(id))
+            if id == command.object
+    ));
+    assert_eq!(predecessor, before);
+}
+
+#[test]
+fn legacy_none_resulting_cast_occurrence_remains_replayable() {
+    let (state, journal_start) = cast_and_hold_on_stack();
+    let command = finalizations(&state, journal_start).remove(0);
+    let mut legacy = command.clone();
+    legacy.resulting_cast_occurrence = None;
+    let mut predecessor = pre_finalize_state(&state, &command);
+
+    apply_resolved_stack_entry_finalize(&mut predecessor, &legacy)
+        .expect("legacy finalization without cast provenance remains valid");
+    assert_eq!(predecessor.objects[&command.object].cast_occurrence, None);
 }
 /// The `Some` side of `expected_old_paid_facts`, which no ordinary cast
 /// produces.

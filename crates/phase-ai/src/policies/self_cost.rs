@@ -45,6 +45,7 @@ use engine::game::effects::counters::{preview_counter_addition, CounterAdditionP
 use engine::game::effects::draw::{preview_draw_delivery, DrawDeliveryPreview};
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::players;
 use engine::game::quantity::resolve_quantity;
 use engine::types::ability::{
@@ -65,11 +66,12 @@ use crate::features::mana_ramp::target_filter_references_land;
 use crate::features::DeckFeatures;
 
 use super::effect_classify::{
-    aggregate_player_impact_in, extract_target_filter, lethal_to_creature,
-    targeted_player_impact_in, PLAYER_IMPACT_PREFERENCE_BAND,
+    aggregate_player_impact_in, extract_target_filter, filter_admits_player, lethal_to_creature,
+    targeted_player_impact_in_with_bound_parent_target, PLAYER_IMPACT_PREFERENCE_BAND,
 };
 use super::self_protection_classify::{
     any_immediate_threat, is_self_protection_effect, self_protection_effect_payoff,
+    target_filter_self_scoped,
 };
 use super::strategy_helpers::{sacrifice_cost, targetable_threat_value, SINGLE_CARD_VALUE};
 
@@ -244,6 +246,57 @@ pub(crate) fn real_self_cost(
     }
 }
 
+/// True when the cost spends an amount of life that is material on its own,
+/// independent of what [`real_self_cost`] prices it at.
+///
+/// This exists because the two functions answer different questions. Pricing
+/// feeds a *comparison* against a payoff; this feeds a *bound* on a branch where
+/// the payoff has already been certified trivial and there is nothing to compare
+/// against. `self_cost_value.rs`'s module docs carry the full argument for why
+/// the bound is stated as a life count rather than as a price.
+///
+/// The folds mirror [`real_self_cost`]'s exactly, because they walk the same
+/// tree with the same payment semantics: `Composite` charges every leg, so ANY
+/// material leg makes the whole cost material; `OneOf` lets the payer choose, so
+/// the cost is material only when EVERY alternative is (an empty `OneOf` charges
+/// nothing and is not material, matching the `0.0` `real_self_cost` folds it
+/// to).
+///
+/// Every other cost shape is `false`, for two different reasons. Discard and
+/// hand-exile already price at `self_cost_discard_per_card` (1.0) per card,
+/// which is exactly the caller's real-cost floor, so listing them would change
+/// no verdict. Sacrifice is deliberately excluded: it is priced against the
+/// specific permanent the cost would consume, and the cheap end of that range
+/// (`sacrifice_token_cost`) sits *below* the floor on purpose, so that cracking
+/// a Clue, Food or Treasure stays available — a count bound has no meaning
+/// there, because the resource is not fungible the way life is.
+pub(crate) fn cost_is_material(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    penalties: &PolicyPenalties,
+) -> bool {
+    match cost {
+        AbilityCost::PayLife { amount } => {
+            let points = resolve_quantity(state, amount, ai_player, source_id);
+            // A zero-life leg costs nothing and can never be material, whatever
+            // threshold a deserialized config carries.
+            points > 0 && points >= penalties.self_cost_material_life
+        }
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .any(|c| cost_is_material(state, ai_player, source_id, c, penalties)),
+        AbilityCost::OneOf { costs } => {
+            !costs.is_empty()
+                && costs
+                    .iter()
+                    .all(|c| cost_is_material(state, ai_player, source_id, c, penalties))
+        }
+        _ => false,
+    }
+}
+
 /// Cost of the permanent(s) the sacrifice would consume. A `SelfRef` sacrifice
 /// is priced against the ability's own source (never the cheapest permanent);
 /// any other filter takes the cheapest AI-controlled match.
@@ -251,12 +304,12 @@ pub(crate) fn real_self_cost(
 /// **KNOWN MISPRICING on the `SelfRef` branch when the source is a land.**
 /// `sacrifice_cost` charges `sacrifice_land_penalty`, whose stated rationale is
 /// CR 305.2's one-land-per-turn rate limit on the replacement drop. CR 305.4
-/// (`docs/MagicCompRules.txt:1700`) refutes that for a fetchland: "Effects may
-/// also allow players to 'put' lands onto the battlefield. This isn't the same
-/// as 'playing a land' and doesn't count as a land played during the current
-/// turn." A fetchland puts its replacement onto the battlefield, so it consumes
-/// no land drop and is close to manabase-neutral — yet this path prices it as a
-/// full land lost, and the AI under-activates it.
+/// refutes that for a fetchland: "Effects may also allow players to 'put' lands
+/// onto the battlefield. This isn't the same as 'playing a land' and doesn't
+/// count as a land played during the current turn." A fetchland puts its
+/// replacement onto the battlefield, so it consumes no land drop and is close
+/// to manabase-neutral — yet this path prices it as a full land lost, and the
+/// AI under-activates it.
 ///
 /// Not corrected here, but the correction is **cheap and the parts already
 /// exist** — this is a scoping decision, not a research problem. The discount
@@ -311,8 +364,17 @@ fn sacrifice_leaf_cost(
 /// Outcome of pricing an in-scope self-cost ability's payoff chain.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum BenefitAppraisal {
-    /// Every effect in the chain is trivial or unmodeled — no real payoff.
-    Trivial,
+    /// No effect in the chain carries a real payoff.
+    ///
+    /// `any_unmodeled` separates the two very different ways a chain lands
+    /// here. With `false` the chain is **Trivial-proper**: every effect was
+    /// judged by an explicit classifier arm and every one of them said
+    /// "trivial", so "there is no payoff" is a positive finding. With `true`
+    /// at least one effect has no classifier arm at all
+    /// ([`EffectTriviality::Unmodeled`] — `Effect::Pump` among them), so "no
+    /// payoff" is only an absence of evidence. A caller imposing a categorical
+    /// bound on the strength of the appraisal alone must require `false`.
+    Trivial { any_unmodeled: bool },
     /// Every effect is explicitly classified, every non-trivial effect carries
     /// a confident card-equivalent price, and `value` is their sum.
     Priced { value: f64 },
@@ -432,8 +494,10 @@ pub(crate) fn appraise_benefit(
     if !any_nontrivial {
         // All-trivial AND all-unmodeled chains land here — preserving the old
         // `benefit_is_trivial() == true` behaviour byte for byte (the catch-all
-        // mapped to trivial), so the reject/marginal gate is not weakened.
-        return BenefitAppraisal::Trivial;
+        // mapped to trivial), so the reject/marginal gate is not weakened. The
+        // flag is carried, not acted on: it lets a caller tell the two cases
+        // apart without changing which chains land here.
+        return BenefitAppraisal::Trivial { any_unmodeled };
     }
     if any_unmodeled {
         // An unmodeled rider beside a priced effect makes the sum neither a
@@ -509,6 +573,18 @@ fn effect_benefit_value(
             resolve_quantity(state, amount, ai_player, source_id).max(0) as f64
                 * penalties.self_cost_pay_life_per_point,
         ),
+        // CR 707.2 + CR 202.3: a token copy of a creature card with the chosen
+        // mana value. Priced X-AGNOSTICALLY at one card-equivalent: at the
+        // activation decision the player has not announced X yet
+        // (`ResolvedAbility::chosen_x` is `None`, so the `Variable("X")` bound
+        // resolves to 0), and pricing a payoff off a placeholder zero would be
+        // worse than pricing it off its shape. One card in hand becomes one
+        // creature on the battlefield, so `SINGLE_CARD_VALUE` is the honest
+        // floor; how big that creature should be is the scheduling question,
+        // which `MomirCurvePolicy` owns.
+        Effect::CreateTokenCopyFromPool { .. } => {
+            (recipient == RecipientClass::AiOnly).then_some(SINGLE_CARD_VALUE)
+        }
         _ => None,
     }
 }
@@ -640,11 +716,12 @@ fn predicted_root_player_recipient(
     let mut opponent_accepted = false;
 
     for player in state.players.iter().filter(|player| !player.is_eliminated) {
-        let impact = targeted_player_impact_in(
+        let impact = targeted_player_impact_in_with_bound_parent_target(
             state,
             source_controller,
             Some(source_id),
             effects,
+            player.id,
             player.id,
         )
         .unwrap_or(aggregate);
@@ -722,6 +799,67 @@ fn recipient_class_for_filter(
     }
 }
 
+/// CR 400.7: an effect that moves the ability's own subject off the battlefield
+/// to hand or exile is a **save**, not removal — the object ceases to exist and
+/// returns as a new object, so whatever was aimed at it no longer applies.
+///
+/// This arm exists because the removal arms price a zone change through
+/// `removal_is_trivial` → `targetable_threat_value`, which is 0 for a permanent
+/// the AI already controls. Without it every self-bounce is "trivial", and the
+/// materiality veto forbids Selenia, Dark Angel ("Pay 2 life: Return Selenia to
+/// its owner's hand") from saving itself with a Doom Blade on the stack.
+///
+/// **Class, not a card.** In `data/card-data.json` the activated-ability shape
+/// `Bounce { target: SelfRef }` covers 67 cards (Selenia, Crovax Ascendant Hero,
+/// Amugaba, Arcanis the Omnipotent, …) and every one carries
+/// `destination: null`, i.e. hand. Self-scoped `ChangeZone` adds `Hand` (54) and
+/// `Exile` (37 — Aetherling, Anurid Brushhopper, Argent Sphinx: "exile it,
+/// return it at end of turn").
+///
+/// The subject predicate is `target_filter_self_scoped`, the same one
+/// `is_self_protection_effect` already applies to `Effect::PhaseOut` — the
+/// blink-to-dodge sibling of this class — so both dodge shapes read the subject
+/// through one authority.
+///
+/// Destinations are deliberately narrow. `Graveyard` is a self-sacrifice,
+/// `Battlefield` is self-reanimation from the graveyard (149 cards), and
+/// `Library` gives the card up outright (7); none of those is a save, and this
+/// predicate claims none of them.
+fn is_self_scoped_save_effect(effect: &Effect) -> bool {
+    match effect {
+        Effect::Bounce { target, .. } => target_filter_self_scoped(target),
+        Effect::ChangeZone {
+            destination: Zone::Hand | Zone::Exile,
+            target,
+            ..
+        } => target_filter_self_scoped(target),
+        _ => false,
+    }
+}
+
+/// The gate every "save the source" shape shares: protection is only worth a
+/// real cost when there is something to protect against.
+///
+/// Single authority for the self-protection grant (Adanto Vanguard's
+/// indestructible) and the self-scoped zone-change dodge (Selenia's bounce), so
+/// the two cannot drift. `self_protection_effect_payoff` answers exactly for the
+/// `GenericEffect` grant shape and returns `None` for the zone-change shapes,
+/// which then fall through to the threat check — and if the classifier is later
+/// taught to preview a dodge exactly, this arm picks that up with no change.
+fn save_shape_triviality(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    effect: &Effect,
+) -> EffectTriviality {
+    EffectTriviality::from_is_trivial(
+        match self_protection_effect_payoff(state, ai_player, source_id, effect) {
+            Some(has_payoff) => !has_payoff,
+            None => !any_immediate_threat(state, ai_player),
+        },
+    )
+}
+
 /// Whether a single effect carries a meaningful immediate advantage, and
 /// whether this module models it at all.
 fn effect_triviality(
@@ -786,6 +924,12 @@ fn effect_triviality(
             resolve_quantity(state, amount, ai_player, source_id) <= TRIVIAL_LIFEGAIN_CEILING
                 && !ai_life_critical(state, ai_player),
         ),
+        // A self-scoped zone change is a SAVE, not removal. This arm MUST stay
+        // above the two removal arms below, which `Bounce` and
+        // `ChangeZone { destination: Exile }` would otherwise match.
+        effect if is_self_scoped_save_effect(effect) => {
+            save_shape_triviality(state, ai_player, source_id, effect)
+        }
         // Removal is non-trivial when a worthwhile opponent creature can be hit.
         Effect::Destroy { target, .. } | Effect::Bounce { target, .. } => {
             EffectTriviality::from_is_trivial(removal_is_trivial(
@@ -838,13 +982,21 @@ fn effect_triviality(
             !(ability_searches_library_for_land(ability) || target_filter_references_land(filter)),
         ),
         // A self-protection grant is only worth a cost when a threat is live.
-        effect if is_self_protection_effect(effect) => EffectTriviality::from_is_trivial(
-            match self_protection_effect_payoff(state, ai_player, source_id, effect) {
-                Some(has_payoff) => !has_payoff,
-                None => !any_immediate_threat(state, ai_player),
-            },
-        ),
+        effect if is_self_protection_effect(effect) => {
+            save_shape_triviality(state, ai_player, source_id, effect)
+        }
         // No modeled board impact at all — the honest third answer.
+        // CR 707.2 + CR 202.3: a token that's a copy of a creature card chosen
+        // at random from the whole corpus (the Momir's Madness emblem). It is a
+        // real permanent, not an absence of evidence — leaving it `Unmodeled`
+        // priced the payoff at zero and made `SelfCostValuePolicy` hard-veto
+        // every activation whose discard met `REAL_COST_FLOOR`, which is every
+        // activation. Only the controller's own token is a benefit here.
+        Effect::CreateTokenCopyFromPool { .. } => match recipient {
+            RecipientClass::AiOnly => EffectTriviality::NonTrivial,
+            RecipientClass::OpponentOnly => EffectTriviality::Trivial,
+            RecipientClass::Mixed => EffectTriviality::NonTrivial,
+        },
         _ => EffectTriviality::Unmodeled,
     }
 }
@@ -867,23 +1019,13 @@ fn deal_damage_is_trivial(
     if value > FACE_DAMAGE_TRIVIAL_CEILING {
         return false;
     }
-    if filter_can_target_player(target) && damage_lethal_to_opponent(state, ai_player, value) {
+    if filter_admits_player(target) && damage_lethal_to_opponent(state, ai_player, value) {
         return false;
     }
     if damage_kills_creature(state, ai_player, source_id, target, value) {
         return false;
     }
     true
-}
-
-fn filter_can_target_player(target: &TargetFilter) -> bool {
-    match target {
-        TargetFilter::Any | TargetFilter::Player => true,
-        // Typed filters select permanents, not players.
-        TargetFilter::Typed(_) => false,
-        // Unknown/compound filters: fail-open (assume a player could be hit).
-        _ => true,
-    }
 }
 
 fn damage_lethal_to_opponent(state: &GameState, ai_player: PlayerId, value: i32) -> bool {

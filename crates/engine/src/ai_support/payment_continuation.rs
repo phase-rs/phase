@@ -6,27 +6,32 @@
 //! only after bounded reducer simulation reaches the matching root's real stack
 //! finalization.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
-use crate::ai_support::legal_actions;
-use crate::game::engine::apply_as_current_for_simulation;
+use crate::ai_support::candidate_actions;
+use crate::game::engine::{apply_as_current_for_simulation, apply_interaction_for_simulation};
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CollectEvidenceResume, CostResume, DeferredLifeCostResume, GameState, ManaAbilityCostCursor,
-    ManaAbilityResume, ManaChoiceContext, PendingCast, PendingCostMoveResume, PendingManaAbility,
-    StackEntryKind, WaitingFor,
+    ManaAbilityResume, ManaChoiceContext, PendingCast, PendingCostMoveCompletion,
+    PendingCostMoveResume, PendingManaAbility, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
-/// Maximum reducer applications made while witnessing one proposed successor.
+/// Maximum non-cancellation roots the bounded batch can safely enumerate.
+pub const PAYMENT_CONTINUATION_MAX_ROOTS: usize = 64;
+/// Maximum reducer applications made while witnessing one payment decision.
 ///
-/// The supplied action counts as one application. The bound is per witness,
-/// not per candidate list: callers that inspect `A` raw payment candidates may
-/// therefore cause at most `PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS * A`
-/// applications.
-pub const PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS: usize = 64;
+/// Root actions and their continuation search share this bound, so inspecting
+/// many engine-issued options cannot multiply the work of the payment oracle.
+/// Each decision uses a smaller root-proportional slice, with this value as its
+/// ceiling; a full 64-root wave still leaves one continuation application per
+/// root after its first reducer application.
+pub const PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS: usize = PAYMENT_CONTINUATION_MAX_ROOTS * 4;
+const PAYMENT_CONTINUATION_MIN_REDUCER_ATTEMPTS: usize = 16;
 
 /// Mode-free identity of the announced spell or activated ability being paid.
 ///
@@ -81,6 +86,61 @@ pub enum PaymentContinuationUnsupported {
 pub struct AcceptedPaymentSuccessor {
     pub action: GameAction,
     pub state: GameState,
+    pub step: PaymentContinuationStep,
+}
+
+/// What the accepted edge's own reducer step did to the payment root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaymentContinuationStep {
+    /// CR 601.2h–i / CR 602.2b: this step paid the total cost and finalized
+    /// the announced root.
+    Finalizes,
+    /// The same root is still being paid after this step; a later action
+    /// finalizes it.
+    Continues,
+}
+
+/// The completedness of one decision-wide payment proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaymentContinuationBatchStatus {
+    NotAffiliated,
+    UnsupportedAffiliated(PaymentContinuationUnsupported),
+    /// Every supplied root was considered within the shared bound. An empty
+    /// certificate vector is the only proof that no supplied payment finishes.
+    Complete,
+    /// The search stopped before it could make a no-payment claim. Consumers
+    /// must not use partial certificates as evidence that payment is available.
+    Indeterminate(PaymentContinuationIndeterminate),
+}
+
+/// Why a batch payment witness could not prove a complete answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaymentContinuationIndeterminate {
+    OverRootCapacity,
+    AttemptBudgetExhausted,
+    MissingFinalizationBaseline,
+    PartialDirectPaymentSearch,
+    /// An offer search stopped at its first completion; the other roots were
+    /// not judged.
+    StoppedAtFirstCompletion,
+    /// An offer search met a branch it may not certify or expand: one that
+    /// left the supported payment carriers, lost the root without finalizing
+    /// it, or wasn't information-safe.
+    UnexploredBranch,
+}
+
+/// Index-aligned result for exactly the input action slice.
+#[derive(Debug, Clone)]
+pub struct PaymentContinuationBatch {
+    pub status: PaymentContinuationBatchStatus,
+    pub successors: Vec<Option<AcceptedPaymentSuccessor>>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PaymentContinuationWitnessCounters {
+    pub root_applies: usize,
+    pub continuation_applies: usize,
+    pub total_attempts: usize,
 }
 
 /// Classify the current payment carrier without guessing cross-carrier state.
@@ -118,6 +178,10 @@ pub fn classify_payment_continuation(state: &GameState) -> PaymentContinuationSt
             pending_mana_ability: mana_ability,
             ..
         }
+        | WaitingFor::ManaAbilityManaPayment {
+            pending_mana_ability: mana_ability,
+            ..
+        }
         | WaitingFor::PayAmountChoice {
             pending_mana_ability: Some(mana_ability),
             ..
@@ -148,29 +212,608 @@ pub fn witness_payment_continuation(
     state: &GameState,
     action: &GameAction,
 ) -> Option<AcceptedPaymentSuccessor> {
-    let PaymentContinuationState::Affiliated(root) = classify_payment_continuation(state) else {
-        return None;
+    let batch = witness_payment_continuations(state, std::slice::from_ref(action));
+    batch.successors.into_iter().next().flatten()
+}
+
+/// Witness all raw actions for one exact payment decision with a shared bounded
+/// reducer search. The output has one entry for every input position; callers
+/// must retain that position rather than re-associating equivalent actions.
+pub fn witness_payment_continuations(
+    state: &GameState,
+    actions: &[GameAction],
+) -> PaymentContinuationBatch {
+    witness_payment_continuations_inner(state, actions, SearchPolicy::EveryRoot, None).0
+}
+
+#[cfg(feature = "test-support")]
+pub fn witness_payment_continuations_with_counters(
+    state: &GameState,
+    actions: &[GameAction],
+    counters: &mut PaymentContinuationWitnessCounters,
+) -> PaymentContinuationBatch {
+    witness_payment_continuations_inner(state, actions, SearchPolicy::EveryRoot, Some(counters)).0
+}
+
+/// What one payment search is asked to establish, and what it may spend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchPolicy {
+    /// An AI payment decision: a certificate or a refusal for every root,
+    /// within a slice proportional to the roots inspected and capped by
+    /// [`PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS`].
+    EveryRoot,
+    /// An offer: is there any completion? Exactly `attempts` reducer
+    /// applications; stops at the first finalization and expands children
+    /// depth-first. A branch that leaves the supported carriers, or isn't
+    /// information-safe relative to `origin`, is never certified and makes a
+    /// no-completion claim impossible.
+    AnyRoot { attempts: usize, origin: RngMark },
+}
+
+/// The game generator's position when an offer witness starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RngMark {
+    word_pos: u128,
+    outcome_draws: u64,
+}
+
+impl RngMark {
+    fn of(state: &GameState) -> Self {
+        Self {
+            word_pos: state.rng.get_word_pos(),
+            outcome_draws: state.rng.outcome_draws(),
+        }
+    }
+}
+
+/// CR 601.2h + CR 400.2: an offer certifies only what the caster could know.
+/// A step is information-safe when it neither draws from the game's random
+/// generator (random costs, shuffles, coin flips, die rolls) nor moves or
+/// shows a card from a hidden zone.
+fn step_is_information_safe(origin: RngMark, state: &GameState, events: &[GameEvent]) -> bool {
+    RngMark::of(state) == origin
+        && !events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    from: Some(Zone::Library),
+                    ..
+                } | GameEvent::CardDrawn { .. }
+                    | GameEvent::CardsDrawn { .. }
+                    | GameEvent::Milled { .. }
+                    | GameEvent::CardsRevealed { .. }
+                    | GameEvent::HiddenSearchViewed { .. }
+                    | GameEvent::Clash { .. }
+                    | GameEvent::DieRolled { .. }
+                    | GameEvent::CoinFlipped { .. }
+                    | GameEvent::PlanarDieRolled { .. }
+            )
+        })
+}
+
+/// Ceiling on reducer applications spent certifying one targeted cast offer.
+/// The announcement, the target steps and the payment search share it.
+pub const TARGETED_CAST_OFFER_MAX_REDUCER_ATTEMPTS: usize = 64;
+
+/// What [`witness_targeted_cast_offer`] established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetedCastVerdict {
+    /// A reducer path from the announcement finalized the spell (CR 601.2i).
+    Completed,
+    /// No completion among the engine-issued candidates within the bound, and
+    /// every branch stayed on a supported, information-safe carrier. Not a
+    /// proof that none exists: some candidate domains are truncated.
+    NotFound,
+    /// No claim: the bound ran out, or a branch reached a carrier this witness
+    /// doesn't drive or a step that isn't information-safe.
+    Indeterminate,
+}
+
+/// A verdict and the reducer applications it cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetedCastWitness {
+    pub verdict: TargetedCastVerdict,
+    pub reducer_attempts: usize,
+}
+
+/// CR 601.2a-i: certify that announcing the targeted Auto cast `action` can be
+/// carried to completion, by driving the real reducer on scratch copies of
+/// `state`: announce it as `actor` for `semantic_owner` (the decision slot the
+/// offer names), choose targets with the engine's own target candidates, then
+/// search the payment step with the bounded payment-continuation witness. Only
+/// a real finalization of the same announced spell is `Completed`.
+pub fn witness_targeted_cast_offer(
+    state: &GameState,
+    actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: &GameAction,
+    max_attempts: usize,
+) -> TargetedCastWitness {
+    let mut attempts = 0;
+    let verdict = targeted_cast_verdict(
+        state,
+        actor,
+        semantic_owner,
+        action,
+        max_attempts,
+        &mut attempts,
+    );
+    TargetedCastWitness {
+        verdict,
+        reducer_attempts: attempts,
+    }
+}
+
+fn targeted_cast_verdict(
+    state: &GameState,
+    actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: &GameAction,
+    max_attempts: usize,
+    attempts: &mut usize,
+) -> TargetedCastVerdict {
+    let GameAction::CastSpell { object_id, .. } = action else {
+        return TargetedCastVerdict::Indeterminate;
     };
-    if matches!(action, GameAction::CancelCast) {
-        return None;
+    if max_attempts == 0 {
+        return TargetedCastVerdict::Indeterminate;
+    }
+    let origin = RngMark::of(state);
+    *attempts += 1;
+    let mut current = state.clone();
+    let Ok(announced) =
+        apply_interaction_for_simulation(&mut current, actor, semantic_owner, action.clone())
+    else {
+        return TargetedCastVerdict::Indeterminate;
+    };
+    let WaitingFor::TargetSelection { pending_cast, .. } = &current.waiting_for else {
+        return TargetedCastVerdict::Indeterminate;
+    };
+    if pending_cast.activation_ability_index.is_some() || pending_cast.object_id != *object_id {
+        return TargetedCastVerdict::Indeterminate;
+    }
+    let root = root_from_pending_cast(pending_cast, pending_cast.ability.controller);
+    if !step_is_information_safe(origin, &current, &announced.events) {
+        return TargetedCastVerdict::Indeterminate;
+    }
+    let Some(baseline) = WitnessBaseline::capture(&current, &root) else {
+        return TargetedCastVerdict::Indeterminate;
+    };
+
+    // CR 601.2c: targets are announced before the total cost is paid. The
+    // offer consults this witness only when the mana obligation doesn't depend
+    // on them (CR 601.2f), so the first reducer-accepted target per slot is
+    // taken; a payment that depends on the chosen target may go unwitnessed,
+    // never wrongly witnessed.
+    let mut events = Vec::new();
+    while matches!(
+        &current.waiting_for,
+        WaitingFor::TargetSelection { pending_cast, .. } if pending_matches_root(pending_cast, &root)
+    ) {
+        let mut advanced = false;
+        for action in candidate_actions(&current)
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .filter(|action| !matches!(action, GameAction::CancelCast))
+        {
+            if *attempts == max_attempts {
+                return TargetedCastVerdict::Indeterminate;
+            }
+            *attempts += 1;
+            let mut next = current.clone();
+            if let Ok(result) = apply_as_current_for_simulation(&mut next, action) {
+                if !step_is_information_safe(origin, &next, &result.events) {
+                    return TargetedCastVerdict::Indeterminate;
+                }
+                events.extend(result.events);
+                current = next;
+                advanced = true;
+                break;
+            }
+        }
+        if !advanced {
+            return TargetedCastVerdict::NotFound;
+        }
     }
 
-    let baseline = WitnessBaseline::capture(state, &root)?;
-    let mut successor = state.clone();
-    let first_result = apply_as_current_for_simulation(&mut successor, action.clone()).ok()?;
-    let mut attempts = 1;
-    record_witness_attempts(attempts);
-    let mut events = first_result.events;
+    if !root_present(&current, &root) {
+        return if finalized_root_matches(&current, &root, &baseline, &events) {
+            TargetedCastVerdict::Completed
+        } else {
+            TargetedCastVerdict::Indeterminate
+        };
+    }
+    if !matches!(
+        classify_payment_continuation(&current),
+        PaymentContinuationState::Affiliated(ref current_root) if *current_root == root
+    ) {
+        return TargetedCastVerdict::Indeterminate;
+    }
+    let actions: Vec<_> = candidate_actions(&current)
+        .into_iter()
+        .map(|candidate| candidate.action)
+        .collect();
+    let (batch, used) = witness_payment_continuations_inner(
+        &current,
+        &actions,
+        SearchPolicy::AnyRoot {
+            attempts: max_attempts - *attempts,
+            origin,
+        },
+        None,
+    );
+    *attempts += used;
+    if batch.successors.iter().any(Option::is_some) {
+        return TargetedCastVerdict::Completed;
+    }
+    match batch.status {
+        PaymentContinuationBatchStatus::Complete => TargetedCastVerdict::NotFound,
+        PaymentContinuationBatchStatus::Indeterminate(_)
+        | PaymentContinuationBatchStatus::NotAffiliated
+        | PaymentContinuationBatchStatus::UnsupportedAffiliated(_) => {
+            TargetedCastVerdict::Indeterminate
+        }
+    }
+}
 
-    if witness_completion(&successor, &root, &baseline, &mut events, &mut attempts) {
-        record_witness_attempts(attempts);
-        Some(AcceptedPaymentSuccessor {
-            action: action.clone(),
-            state: successor,
+/// Returns the batch and the reducer applications it spent.
+fn witness_payment_continuations_inner(
+    state: &GameState,
+    actions: &[GameAction],
+    policy: SearchPolicy,
+    #[allow(unused_mut, unused_variables)] mut counters: Option<
+        &mut PaymentContinuationWitnessCounters,
+    >,
+) -> (PaymentContinuationBatch, usize) {
+    let empty = || vec![None; actions.len()];
+    let root = match classify_payment_continuation(state) {
+        PaymentContinuationState::NotAffiliated => {
+            return (
+                PaymentContinuationBatch {
+                    status: PaymentContinuationBatchStatus::NotAffiliated,
+                    successors: empty(),
+                },
+                0,
+            );
+        }
+        PaymentContinuationState::UnsupportedAffiliated(reason) => {
+            return (
+                PaymentContinuationBatch {
+                    status: PaymentContinuationBatchStatus::UnsupportedAffiliated(reason),
+                    successors: empty(),
+                },
+                0,
+            );
+        }
+        PaymentContinuationState::Affiliated(root) => root,
+    };
+    let noncancel_roots = actions
+        .iter()
+        .filter(|action| !matches!(action, GameAction::CancelCast))
+        .count();
+    if noncancel_roots > PAYMENT_CONTINUATION_MAX_ROOTS {
+        return (
+            PaymentContinuationBatch {
+                status: PaymentContinuationBatchStatus::Indeterminate(
+                    PaymentContinuationIndeterminate::OverRootCapacity,
+                ),
+                successors: empty(),
+            },
+            0,
+        );
+    }
+    let Some(baseline) = WitnessBaseline::capture(state, &root) else {
+        return (
+            PaymentContinuationBatch {
+                status: PaymentContinuationBatchStatus::Indeterminate(
+                    PaymentContinuationIndeterminate::MissingFinalizationBaseline,
+                ),
+                successors: empty(),
+            },
+            0,
+        );
+    };
+
+    let mut order: Vec<_> = actions
+        .iter()
+        .enumerate()
+        .filter(|(_, action)| !matches!(action, GameAction::CancelCast))
+        .collect();
+    order.sort_by(|(left_index, left), (right_index, right)| {
+        payment_action_priority(left)
+            .cmp(&payment_action_priority(right))
+            .then_with(|| left.cmp_stable(right))
+            .then_with(|| left_index.cmp(right_index))
+    });
+    let direct_root_count = order
+        .iter()
+        .take_while(|(_, action)| payment_action_priority(action) == 0)
+        .count();
+    let partial_direct_payment_search = direct_root_count > 0;
+    if partial_direct_payment_search {
+        order.truncate(direct_root_count);
+    }
+    let attempt_budget = match policy {
+        SearchPolicy::EveryRoot => (if partial_direct_payment_search {
+            direct_root_count * 4
+        } else {
+            noncancel_roots * 4
         })
+        .clamp(
+            PAYMENT_CONTINUATION_MIN_REDUCER_ATTEMPTS,
+            PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
+        ),
+        SearchPolicy::AnyRoot { attempts, .. } => attempts,
+    };
+    // `AnyRoot` only: a successor this search may not certify or expand.
+    let mut unexplored = false;
+    let information_unsafe = |successor: &GameState, step_events: &[GameEvent]| match policy {
+        SearchPolicy::EveryRoot => false,
+        SearchPolicy::AnyRoot { origin, .. } => {
+            !step_is_information_safe(origin, successor, step_events)
+        }
+    };
+
+    let mut attempts = 0;
+    let mut successors = empty();
+    let mut queue = VecDeque::new();
+    for (index, action) in order {
+        if attempts == attempt_budget {
+            return (
+                indeterminate_batch(
+                    PaymentContinuationIndeterminate::AttemptBudgetExhausted,
+                    empty(),
+                    attempts,
+                    counters,
+                ),
+                attempts,
+            );
+        }
+        attempts += 1;
+        #[cfg(feature = "test-support")]
+        if let Some(counters) = &mut counters {
+            counters.root_applies += 1;
+        }
+        let mut successor = state.clone();
+        let Ok(result) = apply_as_current_for_simulation(&mut successor, action.clone()) else {
+            continue;
+        };
+        if information_unsafe(&successor, &result.events) {
+            unexplored = true;
+            continue;
+        }
+        if !root_present(&successor, &root) {
+            if finalized_root_matches(&successor, &root, &baseline, &result.events) {
+                successors[index] = Some(AcceptedPaymentSuccessor {
+                    action: action.clone(),
+                    state: successor,
+                    step: PaymentContinuationStep::Finalizes,
+                });
+                if let SearchPolicy::AnyRoot { .. } = policy {
+                    return (
+                        indeterminate_batch(
+                            PaymentContinuationIndeterminate::StoppedAtFirstCompletion,
+                            successors,
+                            attempts,
+                            counters,
+                        ),
+                        attempts,
+                    );
+                }
+            } else {
+                unexplored = true;
+            }
+            continue;
+        }
+        if matches!(
+            classify_payment_continuation(&successor),
+            PaymentContinuationState::Affiliated(ref current_root) if current_root == &root
+        ) {
+            queue.push_back(WitnessNode {
+                root_index: index,
+                root_action: action.clone(),
+                root_successor: successor.clone(),
+                state: successor,
+                events: result.events,
+                remaining_actions: None,
+            });
+        } else {
+            unexplored = true;
+        }
+    }
+
+    while let Some(mut node) = queue.pop_front() {
+        let Some(next_action) = node.next_action() else {
+            continue;
+        };
+        if attempts == attempt_budget {
+            return (
+                indeterminate_batch(
+                    PaymentContinuationIndeterminate::AttemptBudgetExhausted,
+                    successors,
+                    attempts,
+                    counters,
+                ),
+                attempts,
+            );
+        }
+        attempts += 1;
+        #[cfg(feature = "test-support")]
+        if let Some(counters) = &mut counters {
+            counters.continuation_applies += 1;
+        }
+        let mut next_state = node.state.clone();
+        let result = apply_as_current_for_simulation(&mut next_state, next_action);
+
+        // One continuation action per dequeue gives every root (and every
+        // forked descendant) a turn before a high-branching lane can spend a
+        // second reducer attempt.
+        if node.has_remaining_actions() {
+            queue.push_back(node.clone());
+        }
+
+        let Ok(result) = result else {
+            continue;
+        };
+        if information_unsafe(&next_state, &result.events) {
+            unexplored = true;
+            continue;
+        }
+        let mut events = node.events.clone();
+        events.extend(result.events);
+        if !root_present(&next_state, &root) {
+            if finalized_root_matches(&next_state, &root, &baseline, &events) {
+                successors[node.root_index] = Some(AcceptedPaymentSuccessor {
+                    action: node.root_action,
+                    state: node.root_successor,
+                    step: PaymentContinuationStep::Continues,
+                });
+                if let SearchPolicy::AnyRoot { .. } = policy {
+                    return (
+                        indeterminate_batch(
+                            PaymentContinuationIndeterminate::StoppedAtFirstCompletion,
+                            successors,
+                            attempts,
+                            counters,
+                        ),
+                        attempts,
+                    );
+                }
+                if partial_direct_payment_search {
+                    #[cfg(feature = "test-support")]
+                    if let Some(counters) = &mut counters {
+                        counters.total_attempts = attempts;
+                    }
+                    return (
+                        PaymentContinuationBatch {
+                            status: PaymentContinuationBatchStatus::Indeterminate(
+                                PaymentContinuationIndeterminate::PartialDirectPaymentSearch,
+                            ),
+                            successors,
+                        },
+                        attempts,
+                    );
+                }
+            } else {
+                unexplored = true;
+            }
+            continue;
+        }
+        if matches!(
+            classify_payment_continuation(&next_state),
+            PaymentContinuationState::Affiliated(ref current_root) if current_root == &root
+        ) {
+            let child = WitnessNode {
+                root_index: node.root_index,
+                root_action: node.root_action,
+                root_successor: node.root_successor,
+                state: next_state,
+                events,
+                remaining_actions: None,
+            };
+            if partial_direct_payment_search || matches!(policy, SearchPolicy::AnyRoot { .. }) {
+                queue.push_front(child);
+            } else {
+                queue.push_back(child);
+            }
+        } else {
+            unexplored = true;
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    if let Some(counters) = &mut counters {
+        counters.total_attempts = attempts;
+    }
+    let status = if partial_direct_payment_search {
+        PaymentContinuationBatchStatus::Indeterminate(
+            PaymentContinuationIndeterminate::PartialDirectPaymentSearch,
+        )
+    } else if unexplored && matches!(policy, SearchPolicy::AnyRoot { .. }) {
+        PaymentContinuationBatchStatus::Indeterminate(
+            PaymentContinuationIndeterminate::UnexploredBranch,
+        )
     } else {
-        record_witness_attempts(attempts);
+        PaymentContinuationBatchStatus::Complete
+    };
+    (PaymentContinuationBatch { status, successors }, attempts)
+}
+
+fn indeterminate_batch(
+    reason: PaymentContinuationIndeterminate,
+    successors: Vec<Option<AcceptedPaymentSuccessor>>,
+    _attempts: usize,
+    #[allow(unused_mut, unused_variables)] mut counters: Option<
+        &mut PaymentContinuationWitnessCounters,
+    >,
+) -> PaymentContinuationBatch {
+    #[cfg(feature = "test-support")]
+    if let Some(counters) = &mut counters {
+        counters.total_attempts = _attempts;
+    }
+    PaymentContinuationBatch {
+        status: PaymentContinuationBatchStatus::Indeterminate(reason),
+        successors,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WitnessNode {
+    root_index: usize,
+    root_action: GameAction,
+    root_successor: GameState,
+    state: GameState,
+    events: Vec<GameEvent>,
+    remaining_actions: Option<(Vec<GameAction>, usize)>,
+}
+
+fn payment_action_priority(action: &GameAction) -> u8 {
+    match action {
+        // Convoke, Improvise, and Delve all use this engine action. It changes
+        // only the announced cost and cannot create a stack object, so explore
+        // it before mana-source activations that may open a priority window.
+        GameAction::TapForConvoke { .. } => 0,
+        _ => 1,
+    }
+}
+
+impl WitnessNode {
+    fn next_action(&mut self) -> Option<GameAction> {
+        if self.remaining_actions.is_none() {
+            // The reducer below remains the legality authority. Reusing the
+            // raw engine candidate domain avoids first simulating every broad
+            // priority candidate in `legal_actions`, only to simulate it again
+            // for the payment-finalization proof.
+            let mut actions: Vec<_> = candidate_actions(&self.state)
+                .into_iter()
+                .map(|candidate| candidate.action)
+                .collect();
+            actions.sort_by(|left, right| {
+                payment_action_priority(left)
+                    .cmp(&payment_action_priority(right))
+                    .then_with(|| left.cmp_stable(right))
+            });
+            self.remaining_actions = Some((actions, 0));
+        }
+        let (actions, next_index) = self.remaining_actions.as_mut().unwrap();
+        while *next_index < actions.len() {
+            let action = actions[*next_index].clone();
+            *next_index += 1;
+            if !matches!(action, GameAction::CancelCast) {
+                return Some(action);
+            }
+        }
         None
+    }
+
+    fn has_remaining_actions(&self) -> bool {
+        self.remaining_actions
+            .as_ref()
+            .is_some_and(|(actions, next_index)| {
+                actions[*next_index..]
+                    .iter()
+                    .any(|action| !matches!(action, GameAction::CancelCast))
+            })
     }
 }
 
@@ -230,51 +873,6 @@ impl WitnessBaseline {
             completion,
         })
     }
-}
-
-fn witness_completion(
-    state: &GameState,
-    root: &PaymentContinuationRoot,
-    baseline: &WitnessBaseline,
-    events: &mut Vec<GameEvent>,
-    attempts: &mut usize,
-) -> bool {
-    if !root_present(state, root) {
-        return finalized_root_matches(state, root, baseline, events);
-    }
-    if *attempts >= PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS {
-        return false;
-    }
-
-    match classify_payment_continuation(state) {
-        PaymentContinuationState::Affiliated(current_root) if current_root == *root => {}
-        PaymentContinuationState::Affiliated(_)
-        | PaymentContinuationState::NotAffiliated
-        | PaymentContinuationState::UnsupportedAffiliated(_) => return false,
-    }
-
-    let mut actions = legal_actions(state);
-    actions.sort_by(|left, right| left.cmp_stable(right));
-    for next_action in actions {
-        if matches!(next_action, GameAction::CancelCast)
-            || *attempts >= PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS
-        {
-            continue;
-        }
-
-        *attempts += 1;
-        let mut next_state = state.clone();
-        let Ok(result) = apply_as_current_for_simulation(&mut next_state, next_action) else {
-            continue;
-        };
-        let event_len = events.len();
-        events.extend(result.events);
-        if witness_completion(&next_state, root, baseline, events, attempts) {
-            return true;
-        }
-        events.truncate(event_len);
-    }
-    false
 }
 
 fn finalized_root_matches(
@@ -350,8 +948,13 @@ fn finalized_root_matches(
                     GameEvent::AbilityActivated {
                         player_id,
                         source_id: event_source_id,
+                        kind,
                         ..
-                    } if *player_id == *payer && *event_source_id == *source_id
+                    } if *player_id == *payer
+                        && *event_source_id == *source_id
+                        // CR 605.3b: a mana activation of the same source is not
+                        // the paid activation landing on the stack.
+                        && *kind != crate::types::events::ActivatedAbilityKind::Mana
                 )
             })
         }
@@ -397,21 +1000,37 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
                 PaymentContinuationState::NotAffiliated
             }
         },
-        PendingCostMoveResume::DelveManaPayment { player, .. } => {
-            classify_global_root(state, *player)
-        }
+        // CR 601.2h: a Delve commit parked mid-exile still owns the cast's payment root.
+        PendingCostMoveResume::Cast {
+            pending: Some(pending),
+            player,
+            completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
+            ..
+        } => PaymentContinuationState::Affiliated(root_from_pending_cast(pending, *player)),
         // CR 602.2b: The parked mill leg retains the announced activation's
         // serialized payment root until the replacement choice completes.
         PendingCostMoveResume::ActivationMillPayment { player, pending } => {
             PaymentContinuationState::Affiliated(root_from_pending_cast(pending, *player))
         }
+        // CR 602.2b + CR 616.1: a counter-cost removal paused on a replacement
+        // choice retains its attached cast or activation's payment root.
+        PendingCostMoveResume::CounterCostRemovalPayment {
+            player,
+            pending: Some(pending),
+            ..
+        } => PaymentContinuationState::Affiliated(root_from_pending_cast(pending, *player)),
         // These are distinct cost/resolution continuations. They intentionally
         // retain their existing policies rather than being misidentified from a
         // coincidental PendingCast elsewhere in state.
+        PendingCostMoveResume::SacrificeForCost { pending: Some(pending), player, .. } => {
+            PaymentContinuationState::Affiliated(root_from_pending_cast(pending, *player))
+        }
         PendingCostMoveResume::Cast { .. }
-        | PendingCostMoveResume::SacrificeForCost { .. }
+        | PendingCostMoveResume::SacrificeForCost { pending: None, .. }
+        | PendingCostMoveResume::CounterCostRemovalPayment { pending: None, .. }
         | PendingCostMoveResume::WardSacrificePayment { .. }
         | PendingCostMoveResume::ReplacementMayCost { .. }
+        | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
         | PendingCostMoveResume::Foretell { .. }
         | PendingCostMoveResume::UnlessBouncePayment { .. }
         | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
@@ -420,7 +1039,8 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
         // input — so like its counter-addition sibling it affiliates with no
         // payment-continuation root.
         | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
-        | PendingCostMoveResume::LoyaltyActivation { .. } => {
+        | PendingCostMoveResume::LoyaltyActivation { .. }
+        | PendingCostMoveResume::TurnFaceUpCostMove { .. } => {
             PaymentContinuationState::NotAffiliated
         }
     }
@@ -460,6 +1080,9 @@ fn classify_deferred_life_root(
                     PaymentContinuationUnsupported::PayerMismatch,
                 )
             }
+            ManaAbilityResume::ManaAbilityManaPayment {
+                pending_mana_ability,
+            } => classify_pending_mana_ability(state, pending_mana_ability),
             ManaAbilityResume::PhyrexianCastPayment { .. }
             | ManaAbilityResume::FinalizePendingManaPayment { .. } => {
                 PaymentContinuationState::UnsupportedAffiliated(
@@ -468,12 +1091,18 @@ fn classify_deferred_life_root(
             }
             ManaAbilityResume::Priority
             | ManaAbilityResume::CompanionToHand { .. }
+            | ManaAbilityResume::PlanarDieRoll { .. }
             | ManaAbilityResume::EndContinuousEffect { .. }
+            | ManaAbilityResume::RoomUnlock { .. }
+            | ManaAbilityResume::Foretell { .. }
             | ManaAbilityResume::TurnFaceUp { .. }
             | ManaAbilityResume::UnlessPayment { .. }
+            | ManaAbilityResume::CombatTaxPayment { .. }
             | ManaAbilityResume::EffectPayCost { .. } => PaymentContinuationState::NotAffiliated,
         },
-        DeferredLifeCostResume::PayAmount { .. } => PaymentContinuationState::NotAffiliated,
+        DeferredLifeCostResume::PayAmount { .. } | DeferredLifeCostResume::TurnFaceUp { .. } => {
+            PaymentContinuationState::NotAffiliated
+        }
     }
 }
 
@@ -560,14 +1189,22 @@ fn record_root_from_resume(
         ManaAbilityResume::FinalizePendingManaPayment { player } => {
             Some(root_from_global(state, *player)?)
         }
+        // The outer mana ability's own root, if it pays a cast.
+        ManaAbilityResume::ManaAbilityManaPayment {
+            pending_mana_ability,
+        } => root_from_pending_mana_ability(state, pending_mana_ability)?,
         // Special actions and effect payments are not a CAST's payment root:
         // they carry their own typed continuation and never resume into a
         // pending cast (CR 116.1 — a special action does not use the stack).
         ManaAbilityResume::Priority
         | ManaAbilityResume::CompanionToHand { .. }
+        | ManaAbilityResume::PlanarDieRoll { .. }
         | ManaAbilityResume::EndContinuousEffect { .. }
+        | ManaAbilityResume::RoomUnlock { .. }
+        | ManaAbilityResume::Foretell { .. }
         | ManaAbilityResume::TurnFaceUp { .. }
         | ManaAbilityResume::UnlessPayment { .. }
+        | ManaAbilityResume::CombatTaxPayment { .. }
         | ManaAbilityResume::EffectPayCost { .. } => None,
     };
     merge_root(root, next)
@@ -614,6 +1251,10 @@ fn waiting_for_contains_root(waiting_for: &WaitingFor, root: &PaymentContinuatio
             pending_mana_ability: mana_ability,
             ..
         }
+        | WaitingFor::ManaAbilityManaPayment {
+            pending_mana_ability: mana_ability,
+            ..
+        }
         | WaitingFor::PayAmountChoice {
             pending_mana_ability: Some(mana_ability),
             ..
@@ -644,7 +1285,7 @@ fn pending_cost_move_contains_root(
             pending: Some(pending),
             ..
         }) => pending_matches_root(pending, root),
-        Some(PendingCostMoveResume::SacrificeForCost { pending, .. }) => {
+        Some(PendingCostMoveResume::SacrificeForCost { pending: Some(pending), .. }) => {
             pending_matches_root(pending, root)
         }
         Some(PendingCostMoveResume::ManaAbilityPayment { pending, cursor }) => {
@@ -653,6 +1294,10 @@ fn pending_cost_move_contains_root(
         Some(PendingCostMoveResume::ActivationMillPayment { pending, .. }) => {
             pending_matches_root(pending, root)
         }
+        Some(PendingCostMoveResume::CounterCostRemovalPayment {
+            pending: Some(pending),
+            ..
+        }) => pending_matches_root(pending, root),
         Some(PendingCostMoveResume::CollectEvidencePayment { resume, .. }) => match resume.as_ref()
         {
             CollectEvidenceResume::Casting { pending_cast, .. } => {
@@ -664,15 +1309,18 @@ fn pending_cost_move_contains_root(
             CollectEvidenceResume::Effect { .. } => false,
         },
         Some(PendingCostMoveResume::Cast { pending: None, .. })
+        | Some(PendingCostMoveResume::SacrificeForCost { pending: None, .. })
+        | Some(PendingCostMoveResume::CounterCostRemovalPayment { pending: None, .. })
         | Some(PendingCostMoveResume::WardSacrificePayment { .. })
         | Some(PendingCostMoveResume::ReplacementMayCost { .. })
+        | Some(PendingCostMoveResume::ReplacementMayCostInnerChoice { .. })
         | Some(PendingCostMoveResume::Foretell { .. })
-        | Some(PendingCostMoveResume::DelveManaPayment { .. })
         | Some(PendingCostMoveResume::UnlessBouncePayment { .. })
         | Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
         // CR 701.9b: holds no pending cast, so it can contain no root.
         | Some(PendingCostMoveResume::RandomDiscardUnlessPayment(..))
         | Some(PendingCostMoveResume::LoyaltyActivation { .. })
+        | Some(PendingCostMoveResume::TurnFaceUpCostMove { .. })
         | None => false,
     }
 }
@@ -728,6 +1376,12 @@ fn mana_resume_matches_root(resume: &ManaAbilityResume, root: &PaymentContinuati
             PaymentContinuationRoot::Spell { payer, .. }
             | PaymentContinuationRoot::Activation { payer, .. },
         ) => player == payer,
+        (
+            ManaAbilityResume::ManaAbilityManaPayment {
+                pending_mana_ability,
+            },
+            root,
+        ) => pending_mana_contains_root(pending_mana_ability, root),
         _ => false,
     }
 }
@@ -761,25 +1415,57 @@ impl PaymentContinuationRoot {
     }
 }
 
-// This counter deliberately records one witness invocation's reducer work;
-// callers may invoke the oracle once per raw action, so it is not a global
-// candidate-list cap. Kept test-only so production hot paths stay allocation-
-// and synchronization-free.
-#[cfg(test)]
-static LAST_WITNESS_REDUCER_ATTEMPTS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-#[cfg(test)]
-fn record_witness_attempts(attempts: usize) {
-    LAST_WITNESS_REDUCER_ATTEMPTS.store(attempts, std::sync::atomic::Ordering::Relaxed);
-}
-
-#[cfg(not(test))]
-fn record_witness_attempts(_: usize) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{Effect, ResolvedAbility};
+    use crate::types::game_state::PendingSacrificeCostCompletion;
+    use crate::types::resolution::OptionalEffectFrame;
+
+    /// CR 601.2h + CR 400.2: an offer step is information-safe only while it
+    /// neither draws from the game's generator nor moves or shows a hidden
+    /// card. Production payment paths reach both: Vexing Puzzlebox's mana
+    /// ability rolls a d20, and a mana ability may reveal the top card of a
+    /// library (CR 701.20b: revealing moves nothing, so CR 605.1a keeps it a
+    /// mana ability). This pins the predicate itself; the integration tests
+    /// drive both through the offer.
+    #[test]
+    fn offer_steps_touching_hidden_information_are_unsafe() {
+        use crate::types::game_state::RandomDraw;
+        let mut state = GameState::new_two_player(1);
+        let origin = RngMark::of(&state);
+        assert!(step_is_information_safe(origin, &state, &[]));
+        assert!(step_is_information_safe(
+            origin,
+            &state,
+            &[GameEvent::DamageCleared {
+                object_id: ObjectId(1),
+            }]
+        ));
+        assert!(!step_is_information_safe(
+            origin,
+            &state,
+            &[GameEvent::Milled {
+                player_id: PlayerId(0),
+                object_id: ObjectId(1),
+                to: Zone::Graveyard,
+            }]
+        ));
+        assert!(!step_is_information_safe(
+            origin,
+            &state,
+            &[GameEvent::CardsRevealed {
+                player: PlayerId(0),
+                card_ids: vec![ObjectId(1)],
+                card_names: vec!["Hidden".to_string()],
+            }]
+        ));
+        let _ = rand::RngCore::next_u32(state.rng.draw(RandomDraw::Placement));
+        assert!(
+            !step_is_information_safe(origin, &state, &[]),
+            "a shuffle or random order moved the generator"
+        );
+    }
 
     #[test]
     fn direct_mana_payment_without_a_live_root_fails_closed() {
@@ -798,17 +1484,53 @@ mod tests {
     }
 
     #[test]
-    fn witness_attempts_remain_bounded_per_proposed_action() {
+    fn unsupported_payment_batch_does_not_apply_actions() {
         let mut state = GameState::new_two_player(1);
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),
             convoke_mode: None,
         };
 
-        assert!(witness_payment_continuation(&state, &GameAction::CancelCast).is_none());
-        assert!(
-            LAST_WITNESS_REDUCER_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed)
-                <= PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS
+        let batch = witness_payment_continuations(&state, &[GameAction::CancelCast]);
+        assert!(matches!(
+            batch.status,
+            PaymentContinuationBatchStatus::UnsupportedAffiliated(
+                PaymentContinuationUnsupported::MissingPendingCast
+            )
+        ));
+        assert!(batch.successors.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn resolution_optional_sacrifice_cursor_is_not_a_cast_root() {
+        let mut state = GameState::new_two_player(1);
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::SacrificeForCost {
+            player: PlayerId(0),
+            pending: None,
+            chosen: Vec::new(),
+            paused_at_index: 0,
+            completion: PendingSacrificeCostCompletion::ResolutionOptionalPayment {
+                frame: Box::new(OptionalEffectFrame {
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::NoOp,
+                        vec![],
+                        ObjectId(7),
+                        PlayerId(0),
+                    )),
+                    trigger_event: None,
+                    trigger_events: Vec::new(),
+                    trigger_match_count: None,
+                    return_result_occurrence: None,
+                }),
+                selected: Vec::new(),
+            },
+            deferred_cost_events: Vec::new(),
+            departure_record_indices: Vec::new(),
+        });
+
+        assert_eq!(
+            classify_payment_continuation(&state),
+            PaymentContinuationState::NotAffiliated
         );
     }
 }

@@ -83,10 +83,8 @@ pub(crate) fn probe_resolution(
     a: &ResolvedAbility,
     budget: &mut ProbeBudget,
 ) -> ResolutionProbe {
-    // CR 732.2a: BUDGET-EXCEEDED ⇒ `Prompted`. Cost is a COVERAGE knob, never a
-    // soundness knob — an unaffordable probe degrades to honest-red (no
-    // certificate, no offer), never to a wrong certificate and never to an
-    // unbounded stall. Same shape as the `is_empty ⇒ Prompted` arm below.
+    // CR 732.2a: BUDGET-EXCEEDED ⇒ `Prompted`, the answer a real prompt gets. Same shape as
+    // the `is_empty ⇒ Prompted` arm below.
     if !budget.try_charge_one() {
         return ResolutionProbe::Prompted;
     }
@@ -120,10 +118,6 @@ pub(crate) fn probe_resolution(
     // a non-priority `waiting_for` on entry is itself a reason to refuse rather than a
     // baseline to compare against. The discriminant test is KEPT alongside, so a board
     // that entered at priority and left at a different variant still refuses.
-    //
-    // Strictly stronger than the struck form on every input, so it can only ever cost
-    // COVERAGE (a missed offer), never soundness — the same direction as the
-    // budget-exceeded and empty-derivation arms around it.
     if !matches!(work.waiting_for, WaitingFor::Priority { .. })
         || std::mem::discriminant(&work.waiting_for) != std::mem::discriminant(&state.waiting_for)
     {
@@ -167,13 +161,25 @@ fn resolution_probe_verdict(
 /// a NEW `QuantityExpr` variant must be classified before it compiles, so an
 /// `UpTo` can never be smuggled in under a newly-added wrapper.
 ///
-/// MEASURED DISCREPANCY, and the reason this guard exists at all:
-/// `game/quantity.rs` resolves `UpTo { max } => recurse(max)` — it SILENTLY
-/// ANSWERS the CR 107.1c / CR 608.2d resolution-time count choice as the maximum
-/// rather than surfacing it. Only the resolvers that call
-/// `QuantityExpr::peel_up_to` honour the flag, and none of the six allow-listed
-/// classes does. So an unguarded arm would probe choice-free on an ability whose
-/// resolution opens a count prompt.
+/// WHY THIS GUARD EXISTS, and why it is right in BOTH directions — which is the
+/// point, because the two allow-listed groups now behave differently:
+///
+/// * `Draw` genuinely prompts. Since #8543 `draw::resolve` peels the wrapper via
+///   `QuantityExpr::peel_up_to` and opens a `ChooseOneOfBranch` count choice, so
+///   the guard AGREES with the probe and merely reaches the same verdict without
+///   paying for a whole-`GameState` clone.
+/// * The remaining allow-listed quantity arms (`GainLife`, `LoseLife`,
+///   `DealDamage`, `PutCounter`, `Token`) do NOT peel. `game/quantity.rs` folds
+///   `UpTo { max } => recurse(max)`, SILENTLY ANSWERING the CR 107.1c /
+///   CR 608.2d resolution-time count choice as the maximum rather than surfacing
+///   it. For those the guard is load-bearing: without it the probe would observe
+///   no prompt and report choice-free on an ability whose resolution is supposed
+///   to open a count choice.
+///
+/// So the guard stays on EVERY quantity-carrying arm regardless of whether that
+/// arm's resolver has been fixed yet. It is fail-closed — it can only turn a
+/// verdict into `MayPrompt`, never the reverse — so a resolver gaining a real
+/// prompt never invalidates it.
 fn quantity_offers_up_to_choice(q: &QuantityExpr) -> bool {
     match q {
         QuantityExpr::UpTo { .. } => true,
@@ -210,6 +216,8 @@ fn effect_offers_choice(e: &Effect) -> bool {
     match e {
         // Engine-set from the activation-payment snapshot, never a player prompt.
         Effect::NoteManaSpent | Effect::CompletePlayerAction { .. } => false,
+        // "note <number>" evaluates its operand silently — no player prompt.
+        Effect::NoteNumber { .. } => false,
         // ---- SCOPE FILTER. DESTRUCTURED WITHOUT `..` on every arm, exactly as
         //      HEAD's three allow arms are, so a new field on any of them forces
         //      a re-audit of whether the class is still in scope.
@@ -218,7 +226,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         //      — it is not a compile error to silence. rustc's own diagnostic
         //      prints a `help:` suggesting `..`, which silently disarms the
         //      guard. Classify the new field against the scope filter, then name
-        //      it `_`. The 14-field `Effect::Token` arm is the one that maximally
+        //      it `_`. The `Effect::Token` arm is the one that maximally
         //      invites the `..`.
         //
         //      CR 107.1c + CR 608.2d: THE `UpTo` GUARD IS ON *EVERY*
@@ -256,6 +264,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
             owner: _,
             attach_to: _,
             enters_attacking: _,
+            attack_destination: _,
             supertypes: _,
             static_abilities: _,
             enter_with_counters: _,
@@ -263,9 +272,18 @@ fn effect_offers_choice(e: &Effect) -> bool {
             quantity_offers_up_to_choice(count)
         }
         // HEAD's own arm shape, kept verbatim (single arm + inner `if`, no match
-        // guard). CR 608.2d: an "up to N" draw is a resolution-time COUNT choice
-        // the probe would ANSWER rather than surface, because the count is read,
-        // not prompted, inside `draw::resolve`.
+        // guard). CR 608.2d: an "up to N" draw is a resolution-time COUNT choice.
+        //
+        // The arm's JUSTIFICATION CHANGED at #8543 while its verdict did not.
+        // It was written because the probe would ANSWER the choice rather than
+        // surface it — the count was read, not prompted, inside `draw::resolve`.
+        // `draw::resolve` now peels the wrapper and opens a real
+        // `ChooseOneOfBranch` count prompt, so the probe WOULD observe it and
+        // reach `MayPrompt` on its own. The arm is kept because it reaches that
+        // verdict from the AST alone, skipping the probe's whole-`GameState`
+        // clone, and because it is fail-closed: it is still the only thing
+        // standing between an `UpTo` and a choice-free verdict should the
+        // prompt ever regress.
         Effect::Draw { count, target: _ } => {
             quantity_offers_up_to_choice(count)
         }
@@ -336,6 +354,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::EndCombatPhase
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
         | Effect::EpicCopy { .. }
@@ -379,6 +398,9 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
+        // CR 400.11 + CR 608.2d: opening a pack prompts the controller to choose
+        // which of the revealed cards to take.
+        | Effect::OpenBoosterPack { .. }
         | Effect::RevealHand { .. }
         | Effect::RevealFromHand { .. }
         | Effect::Reveal { .. }
@@ -402,6 +424,11 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::BecomeBlocked { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
+        // Digital-only Alchemy (no CR entry): installing the boon opens no
+        // prompt itself, but the granted body resolves later as its own
+        // ability and may prompt then (Valiant Batrider's "you may pay") —
+        // probe-worthy like a delayed body.
+        | Effect::CreateBoon { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
@@ -419,15 +446,14 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
-        | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }
-        | Effect::FlipCoinUntilLose { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }
@@ -452,6 +478,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Cascade
@@ -479,11 +506,18 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        // CR 701.71a + CR 608.2d: empower may prompt (EmpowerJaceChoice with 2+
+        // Jace tokens) — fail-closed MayPrompt.
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
+        // A revealed spell with targets/choices prompts (fail-closed: the AST
+        // gate cannot see that Boss libraries are all-token).
+        | Effect::HordePlayCard { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
         | Effect::Bolster { .. }
@@ -529,11 +563,33 @@ fn effect_offers_choice(e: &Effect) -> bool {
 /// choice-bearing). A FUTURE field fails to compile here until classified for the
 /// choice question.
 pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
+    // CR 608.2c: gate-check the whole chain — this node's modifiers and effect,
+    // plus the sub_ability / else_ability branches. Recursion is retained HERE,
+    // where it is a pure AST walk costing nothing, and dropped from the probe below.
+    node_modifiers_offer_choice(a)
+        || effect_offers_choice(&a.effect)
+        || a.coin_branches.is_some()
+        || a.sub_ability.as_deref().is_some_and(chain_offers_choice)
+        || a.else_ability.as_deref().is_some_and(chain_offers_choice)
+}
+
+/// CR 608.2d + CR 118.12: can this one node's executable modifiers (its
+/// optional / unless-pay / chooser / timing / modal / repeat fields) enter a
+/// resolution-time player choice, independent of what its effect does? The
+/// field-level half of [`chain_offers_choice`], shared with the scoped
+/// control-capture admission (`effects::fan_out_head_is_allowlisted`), so both
+/// read one exhaustive classification of every `ResolvedAbility` field.
+///
+/// The `ResolvedAbility` destructure is EXHAUSTIVE with no `..`: a FUTURE field
+/// fails to compile here until classified for the choice question.
+pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
     let ResolvedAbility {
+        // ---- structural: classified by chain_offers_choice ----
+        effect: _,
+        sub_ability: _,
+        else_ability: _,
+        coin_branches: _, // CR 705.1 + CR 601.2c: announced outcome carriers, classified by chain_offers_choice
         // ---- choice-bearing: folded into the verdict below ----
-        effect,
-        sub_ability,
-        else_ability,
         optional,
         optional_player: _, // selects the optional actor; `optional` already records the choice
         optional_for,
@@ -554,22 +610,34 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         multi_target: _, // announce-time variable-count bounds (Resolution case caught by timing)
         target_constraints: _, // announce-time cross-target legality, no resolution prompt
         distribution: _, // CR 601.2d concrete pre-assigned portions (announce-time)
-        distribute: _, // CR 601.2d/603.3d unassigned division is an announce-time choice
+        distribute: _, // CR 601.2d announce-time; CR 608.2d: resolution_time_division
         targets: _,   // concrete announced target refs (already resolved)
+        declares_chosen_group: _, // announce-time identity, no resolution prompt
+        reads_chosen_group: _, // bound selected targets, no new choice
+        declares_return_result: _, // publication itself does not prompt
+        reads_return_result: _, // consumes a settled value without a prompt
         source_id: _, // object id
+        cast_occurrence: _, // finalized-cast provenance, no resolution-time choice
         source_incarnation: _, // self-transform epoch latch, no resolution-time choice
+        announced_source_incarnation: _, // announcement-time source epoch, no resolution-time choice
         noted_mana_payment: _, // concrete activation-payment snapshot, no resolution-time choice
-        trigger_source: _, // exact triggered-source authority, no choice
+        trigger_source: _,     // exact triggered-source authority, no choice
         trigger_definition_ref: _, // exact trigger occurrence, no choice
+        delayed_origin: _,     // delayed-trigger identity, no choice
         force_block_attacker: _, // exact force-block referent, no choice
         target_incarnations: _, // CR 400.7 referent pins, no choice
-        selected_target_incarnations: _, // CR 400.7 selected-target pins, no choice
-        controller: _, // player id
-        original_controller: _, // player id
-        scoped_player: _, // player id (iteration binding)
-        kind: _,      // AbilityKind tag (no payload)
-        context: _,   // SpellContext: cast-time fact snapshot, not a live choice
-        description: _, // display string
+        target_pins: _,        // CR 400.7 selected-target pins, no choice
+        legacy_selected_target_incarnations: _,
+        chosen_target_slots: _,  // CR 115.1 announced-target record, no choice
+        illegal_target_slots: _, // CR 608.2b resolution legality stamp, no choice
+        unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no choice
+        illegal_local_target_slots: _, // CR 608.2b node-local legality stamp, no choice
+        controller: _,           // player id
+        original_controller: _,  // player id
+        scoped_player: _,        // player id (iteration binding)
+        kind: _,                 // AbilityKind tag (no payload)
+        context: _,              // SpellContext: cast-time fact snapshot, not a live choice
+        description: _,          // display string
         selected_mode_labels: _, // display strings, no resolution-time choice
         // CR 700.2 + CR 700.2a: mode-root position marker. The modes were CHOSEN
         // at announcement (`modal` / `mode_abilities`, folded into the verdict
@@ -581,11 +649,12 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         detached_remainder: _,
         min_x_value: _,                  // u32
         cant_be_copied: _,               // bool
+        illegal_targets_disposition: _,  // CR 608.2b resolution disposition, offers no choice
         copy_count_status: _,            // status tag
         forward_result: _,               // bool
         chosen_x: _, // concrete cast-time X (chosen at announcement, not resolution)
         cost_paid_object: _, // concrete captured-object snapshot
-        cost_paid_object_ids: _, // concrete captured-object ids (issue #4948)
+        cost_paid_objects: _, // concrete cost-paid membership records (issue #4948)
         effect_context_object: _, // concrete captured-object snapshot
         amassed_army_object: _, // concrete captured-object snapshot
         ability_index: _, // usize provenance
@@ -594,8 +663,13 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         chosen_players: _, // concrete chosen player ids (already selected)
         replacement_applied: _, // replacement provenance set, no prompt
         sub_link: _, // SubAbilityLink kind tag
+        target_reads: _, // TargetReadOrigin tag (announce-time), no prompt
+        entry_onset: _, // ContinuousEffectOnset tag, no prompt
         sibling_condition: _, // SiblingCondition replication marker, no resolution-time choice
         parent_target_missing_reason: _, // seam flag
+        activation_cost_reduction: _,
+        activation_record: _,
+        control_change_instruction: _,
     } = a;
 
     // CR 603.5 + CR 608.2d: an optional effect / optional targeting /
@@ -609,6 +683,10 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
     }
     // CR 601.2c + CR 603.3d: a resolution-time target chooser announces targets.
     if target_chooser.is_some() {
+        return true;
+    }
+    // CR 608.2d: an untargeted division is chosen while applying the effect.
+    if crate::game::ability_utils::resolution_time_division(a).is_some() {
         return true;
     }
     // CR 608.2d: resolution-timed target selection is a resolution-time choice
@@ -630,8 +708,10 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
     // CR 608.2d + CR 107.1c: an "up to N" REPEAT COUNT is a resolution-time choice
     // exactly like an "up to N" damage/draw/counter count, and it is answered in the
     // same silent way — `game/quantity.rs` resolves `UpTo { max } => recurse(max)`,
-    // taking the maximum, and none of the six allow-listed classes calls
-    // `QuantityExpr::peel_up_to`. This field was previously bound `_` and justified as
+    // taking the maximum, and nothing peels a REPEAT count via
+    // `QuantityExpr::peel_up_to` (unlike `Effect::Draw`'s own count, which
+    // `draw::resolve` peels and prompts on since #8543 — the repeat axis was not
+    // part of that fix). This field was previously bound `_` and justified as
     // "pure quantity eval (game/quantity.rs)", which cites the very mechanism
     // `quantity_offers_up_to_choice`'s own doc comment exists to distrust: the count is
     // READ, not prompted. An allow-listed repeated ability carrying an `UpTo` repeat
@@ -646,12 +726,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         return true;
     }
 
-    // CR 608.2c: gate-check the whole chain — this node's effect, plus the
-    // sub_ability / else_ability branches. Recursion is retained HERE, where it is a
-    // pure AST walk costing nothing, and dropped from the probe below.
-    effect_offers_choice(effect)
-        || sub_ability.as_deref().is_some_and(chain_offers_choice)
-        || else_ability.as_deref().is_some_and(chain_offers_choice)
+    false
 }
 
 /// CR 608.2d + CR 732.2a: the resolution-choice verdict for a whole ability chain.
@@ -712,9 +787,10 @@ mod tests {
         PtValue, QuantityExpr, TapStateChange, TargetFilter, TargetRef, UnlessPayModifier,
     };
     use crate::types::counter::CounterType;
+    use crate::types::game_state::DistributionUnit;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use crate::types::proposed_event::CounterPlacement;
+    use crate::types::proposed_event::{CounterPlacement, DrawEventStage};
     use crate::types::zones::Zone;
     use std::collections::BTreeMap;
 
@@ -756,6 +832,66 @@ mod tests {
         let mut divided = base.clone();
         divided.distribute = Some(crate::types::game_state::DistributionUnit::Damage);
         assert!(!chain_offers_choice(&divided));
+    }
+
+    /// V5p: CR 608.2d — a division among a tracked-set population ("any number of
+    /// those Wolves") is chosen while the effect is applied, so the chain offers a
+    /// resolution choice. Announced-target divisions whose recipient is a context
+    /// ref (`ParentTarget` after an "instead" swap; a Stumpsquall-shaped counters
+    /// division) stay announce-time and choice-free (R2-F1).
+    #[test]
+    fn resolution_time_division_is_a_resolution_choice_only_for_tracked_sets() {
+        let damage = |target: TargetFilter| {
+            ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: fixed(3),
+                    target,
+                    damage_source: None,
+                    excess: None,
+                },
+                Vec::new(),
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let tracked = TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature(),
+            )),
+            caused_by: None,
+        };
+        for base in [damage(tracked.clone()), damage(TargetFilter::ParentTarget)] {
+            assert!(
+                !chain_offers_choice(&base),
+                "reach guard: the undivided base must be choice-free"
+            );
+        }
+
+        let mut tracked_division = damage(tracked);
+        tracked_division.distribute = Some(DistributionUnit::Damage);
+        assert!(chain_offers_choice(&tracked_division));
+
+        let mut parent_target_division = damage(TargetFilter::ParentTarget);
+        parent_target_division.distribute = Some(DistributionUnit::Damage);
+        assert!(!chain_offers_choice(&parent_target_division));
+
+        let mut counters = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: fixed(3),
+                target: TargetFilter::ParentTarget,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert!(
+            !chain_offers_choice(&counters),
+            "reach guard: the undivided counters base must be choice-free"
+        );
+        counters.distribute = Some(DistributionUnit::Counters("P1P1".to_string()));
+        assert!(!chain_offers_choice(&counters));
     }
 
     /// Snapshot every axis the witness reads.
@@ -854,10 +990,20 @@ mod tests {
                 // variant's own axis is the damage ledger.
                 ProposedEvent::Damage { .. } => axes.damage_records += 1,
                 // CR 121.1: the zone write is the companion `ZoneChange`'s; this
-                // variant's own axis is the draw ledger.
+                // variant's own axis is the draw ledger. CR 121.2a: the
+                // instruction writes that ledger only through the individual
+                // draws it is split into, which are recorded separately.
                 ProposedEvent::Draw {
-                    player_id, count, ..
-                } => *axes.cards_drawn.entry(*player_id).or_default() += i64::from(*count),
+                    player_id,
+                    count,
+                    stage,
+                    ..
+                } => match stage {
+                    DrawEventStage::Instruction => {}
+                    DrawEventStage::Individual => {
+                        *axes.cards_drawn.entry(*player_id).or_default() += i64::from(*count)
+                    }
+                },
                 other => unreachable!(
                     "accounted variant with no axis arm — the partition and this witness \
                      have drifted: {other:?}"
@@ -937,6 +1083,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -1037,6 +1184,9 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 2,
             candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
+            remember_identity: None,
         };
         assert!(
             !matches!(base.waiting_for, WaitingFor::ReplacementChoice { .. }),
@@ -1419,6 +1569,7 @@ mod tests {
                 entry_ref: victim,
                 enter_tapped: Default::default(),
                 enter_with_counters: Vec::new(),
+                enter_with_choices: None,
                 applied: Default::default(),
             }
         ));
@@ -1452,6 +1603,7 @@ mod tests {
                 replacement::event_is_accounted(&ProposedEvent::Draw {
                     player_id: PlayerId(0),
                     count,
+                    stage: DrawEventStage::Individual,
                     applied: Default::default(),
                 }),
                 accounted
@@ -1463,11 +1615,13 @@ mod tests {
     /// ARM, not only `Draw`.
     ///
     /// `game/quantity.rs` resolves `UpTo { max }` as the maximum instead of
-    /// prompting, and none of the six allow-listed classes calls
-    /// `QuantityExpr::peel_up_to`. So an unguarded arm reports choice-free on an
-    /// ability whose resolution opens a count choice — a fail-OPEN, not a
-    /// coverage gap. Both directions are asserted per arm so neither can go
-    /// vacuous.
+    /// prompting, and of the allow-listed classes only `Draw` peels it via
+    /// `QuantityExpr::peel_up_to` and prompts (since #8543). For the other five
+    /// an unguarded arm reports choice-free on an ability whose resolution is
+    /// supposed to open a count choice — a fail-OPEN, not a coverage gap. `Draw`
+    /// stays in the case list precisely so the guard is pinned independently of
+    /// whether its resolver happens to prompt today. Both directions are
+    /// asserted per arm so neither can go vacuous.
     #[test]
     fn an_up_to_count_is_may_prompt_on_every_quantity_carrying_arm() {
         let state = probe_board();

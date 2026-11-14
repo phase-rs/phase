@@ -115,6 +115,7 @@ fn assert_controls_the_most(scope: Option<&PlayerFilter>, ty: TypeFilter) {
             QuantityRef::ControlledByEachPlayer {
                 filter: count_filter,
                 aggregate,
+                relation: PlayerRelation::All,
             },
     } = count.as_ref()
     else {

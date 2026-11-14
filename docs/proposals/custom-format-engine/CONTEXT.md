@@ -218,7 +218,7 @@ cited PLAN.md sections for the actual schema/wiring changes.
    within the Combat phase, not a phase-end, even though the engine's own
    `Phase` enum treats every one of those as a variant transition).**
    Verified two things directly this session, not from memory:
-   - `docs/MagicCompRules.txt:8278` (the obsolete-rules glossary): "unspent
+   - The obsolete-rules glossary entry "Mana Burn (Obsolete)": "unspent
      mana caused a player to **lose life**" — life loss, not damage. The
      original PLAN.md/RESEARCH.md draft's "deal that many damage" framing
      was wrong.
@@ -409,22 +409,21 @@ being treated as correct).
   legacy flag is SMALL — but no EC preset uses it.** Fully investigated
   (RESEARCH.md §10). The legend rule (introduced by *Legends* 1994, legal in
   93-94/95) was **global / any-controller** through 2013, then M14 (2013-07-13)
-  made it **per-controller + choice** (current CR 704.5j,
-  `MagicCompRules.txt:5510`). The engine's `check_legend_rule`
-  (`sba.rs:902-956`) is hardcoded to the modern per-controller-with-choice form
-  (loops per player, filters `controller == player_id`, pauses with
-  `WaitingFor::ChooseLegend`). Re-adding the pre-M14 global-choiceless form is
-  SMALL — it mirrors the existing `check_world_rule` (`sba.rs:1348`) shape and
-  reuses the shared SBA departure mover. Modeled as a typed
-  `LegendRuleScope { Modern, PreM14AnyController }` enum on `LegacyRuleSet` (not a
-  bool). **HONEST CAVEAT:** EC's published rulesets do **not** list a legend-rule
-  reversion (their only legacy exceptions are mana burn / damage-on-stack /
-  wish), so all four EC presets default to `Modern`; the scope enum ships as a
-  *general* historical-rules axis (like Block Constructed's `mana_burn`), not an
-  EC-preset behavior. Planeswalker uniqueness needs no flag — the four pools end
-  at Scourge (2003) and planeswalkers postdate that (Lorwyn 2007). The
-  planeswalker-uniqueness → legend-rule fold happened at **Ixalan (2017-09-28)**,
-  not Dominaria 2018.
+  made it **per-controller + choice** (current CR 704.5j). The engine's
+  `check_legend_rule` (`sba.rs:902-956`) is hardcoded to the modern
+  per-controller-with-choice form (loops per player, filters `controller ==
+  player_id`, pauses with `WaitingFor::ChooseLegend`). Re-adding the pre-M14
+  global-choiceless form is SMALL — it mirrors the existing `check_world_rule`
+  (`sba.rs:1348`) shape and reuses the shared SBA departure mover. Modeled as a
+  typed `LegendRuleScope { Modern, PreM14AnyController }` enum on `LegacyRuleSet`
+  (not a bool). **HONEST CAVEAT:** EC's published rulesets do **not** list a
+  legend-rule reversion (their only legacy exceptions are mana burn /
+  damage-on-stack / wish), so all four EC presets default to `Modern`; the scope
+  enum ships as a *general* historical-rules axis (like Block Constructed's
+  `mana_burn`), not an EC-preset behavior. Planeswalker uniqueness needs no flag —
+  the four pools end at Scourge (2003) and planeswalkers postdate that (Lorwyn
+  2007). The planeswalker-uniqueness → legend-rule fold happened at **Ixalan
+  (2017-09-28)**, not Dominaria 2018.
 - **Pre-M10 Wish templating is small and is a REAL functional difference.**
   Fully investigated (RESEARCH.md §9). It reverts the M10 change that made exile
   an in-game zone (CR 400.11/400.11a): pre-M10, Wishes could retrieve an owned
@@ -910,11 +909,51 @@ its resolution directly:
    the custom-format engine itself** and, if ever pursued, belongs to a
    separate, later "tournament/match structure" design, not bundled into
    `CustomFormatDef`/`LegacyRuleSet` here.
-5. **Ante-card handling (new, from the Swedish Old School preset).** "Must be
-   removed before play unless the tournament is specifically played for ante"
-   is a *third* list-shaped rule, distinct from banned (illegal outright) and
-   restricted (legal, max 1) — the schema has no slot for it today. Needs a
-   decision: a third named list on `LegalityRules`, or folding it into
+5. ~~**Ante-card handling**~~ — **RESOLVED, Phase 1d** (neither of the two
+   options originally offered below; both were list-shaped, and the rule
+   isn't). The framing was "a *third* list-shaped rule, distinct from banned
+   (illegal outright) and restricted (legal, max 1)" — but **CR 407.3 does not
+   define the ante cards as a list**: it defines them as the cards bearing the
+   text "Remove this card from your deck before playing if you're not playing
+   for ante", and then says "when not playing for ante, players can't include
+   these cards in their decks or sideboards". The class is the printed text,
+   and the prohibition is already exactly `banned`'s deck-construction
+   semantics. So no new list, and no `banned` entries either.
+
+   **Resolution: `AntePolicy` (`Excluded` | `Enabled`) as a fifth
+   `LegacyRuleSet` axis, enforced by a class predicate, not a roster.**
+   - `Excluded` is the default, so every custom format — including every
+     Axis-A lobby save — gets CR 407.3 enforcement for free, and
+     `swedish_old_school()` needs no ante data of its own.
+   - Enforcement reuses the predicate `deck_validation.rs` already had:
+     `tiny_leaders_category_banned`'s `"playing for ante"` test, extracted as
+     `face_uses_ante` so both callers share one definition of the class.
+     Verified exact — Scryfall's `oracle:"playing for ante"` returns exactly
+     9 cards (Amulet of Quoz, Bronze Tablet, Contract from Below, Darkpact,
+     Demonic Attorney, Jeweled Bird, Rebirth, Tempest Efreet, Timmerian
+     Fiends), the whole class with no false positives. A 7-name list would
+     have been a snapshot of only the subset inside one format's set window.
+   - `DeclaredPool::status` checks it ahead of banned/restricted, because a
+     format may also RESTRICT an ante card — Swedish restricts three of the
+     seven it carves out — and one legal copy is still one copy too many.
+   - The rejected "`ante_enabled` toggle" half is answered by the axis'
+     `Enabled` variant, which is **gated** by `IMPLEMENTED_LEGACY_AXES` like
+     any other declared-but-unbuilt axis: it would promise the CR 407.2 ante
+     zone and CR 407.4 ante action, which no engine code provides. Note the
+     asymmetry — only `Enabled` is a declared axis; `Excluded` is enforced
+     today and so is never gated, or every custom format in existence would
+     be rejected.
+   - Why `LegacyRuleSet` and not `LegalityRules`: CR 407.1 calls ante a rule
+     from "earlier versions of the Magic rules", now "an optional variation on
+     the game" and "strictly forbidden under the Magic: The Gathering
+     Tournament Rules" — the same shape as mana burn. It also gets the
+     existing gate at both call sites (`custom_format_pool` and
+     `FormatConfig::deserialize`) for free rather than needing a parallel one.
+
+   Original framing, kept for its research, not as a live open question: "Must
+   be removed before play unless the tournament is specifically played for
+   ante" is a third list-shaped rule; the schema has no slot for it today.
+   Needs a decision: a third named list on `LegalityRules`, or folding it into
    `banned` gated by a new `ante_enabled: bool`/toggle. Low urgency (only 7
    cards; ante itself has no in-engine support and none is proposed here), but
    should not be silently dropped when the preset ships.

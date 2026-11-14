@@ -1,20 +1,25 @@
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { ObjectId } from "../../adapter/types.ts";
+import type { GameObject, ObjectId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
-import { CARD_BACK_URL } from "../../services/scryfall.ts";
+import { objectImageProps } from "../../services/cardImageLookup.ts";
+import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { CASTABLE_AFFORDANCE_IDLE } from "../../viewmodel/castableAffordance.ts";
 import {
-  playOrCastActionsForObject,
+  isPlayOrCastAction,
   resolveSingleActionDispatch,
+  zoneSurfaceActionsForObject,
 } from "../../viewmodel/cardActionChoice.ts";
-import { isLibraryCardRevealedToViewer } from "../../viewmodel/gameStateView.ts";
+import { isLibraryCardRevealedToViewer, resolvePileSeat } from "../../viewmodel/gameStateView.ts";
+import { CardArtFallback } from "../card/CardArtFallback.tsx";
+import { CardBackFallback } from "../card/CardBackFallback.tsx";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 
 interface LibraryPileProps {
   playerId: number;
@@ -27,55 +32,86 @@ interface LibraryPileProps {
    * graveyard/exile click→view→cast flow. Without this prop the pile falls back
    * to its standalone click-to-play behavior.
    */
-  onView?: () => void;
+  onView?: (launcher: HTMLButtonElement) => void;
 }
 
-function TopCard({ cardName }: { cardName: string }) {
-  const { src } = useCardImage(cardName, { size: "normal" });
+function VisibleTopCard({ object }: { object: GameObject }) {
+  const imageProps = objectImageProps(object);
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(
+    imageProps.cardName,
+    {
+      size: "normal",
+      faceIndex: imageProps.faceIndex,
+      isToken: imageProps.isToken,
+      tokenFilters: imageProps.tokenFilters,
+      tokenImageRef: imageProps.tokenImageRef,
+      oracleId: imageProps.oracleId,
+      faceName: imageProps.faceName,
+      ownerPrinting: imageProps.ownerPrinting,
+    },
+  );
 
-  if (!src) {
+  if (isLoading) {
     return (
-      <div
-        className="h-full w-full rounded-lg bg-gray-700 border border-gray-600"
-      />
+      <div className="h-full w-full animate-pulse rounded-lg border border-gray-600 bg-gray-700" />
     );
+  }
+  if (!src) {
+    return <CardArtFallback name={object.name} className="h-full w-full rounded-lg" />;
   }
 
   return (
     <img
       src={src}
-      alt={cardName}
+      {...getCardImageSrcSetProps(src, rungs)}
+      alt={object.name}
       className="h-full w-full rounded-lg object-cover"
       draggable={false}
+      onError={() => advanceFailedSource?.(src)}
     />
   );
+}
+
+function HiddenTopCard() {
+  return <CardBackFallback className="h-full w-full rounded-lg" />;
 }
 
 export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
   const { t } = useTranslation("game");
   const myId = usePlayerId();
+  const pileSeat = useGameStore((s) => resolvePileSeat(s.gameState, "library", playerId));
+  const myPileSeat = useGameStore((s) => resolvePileSeat(s.gameState, "library", myId));
   const count = useGameStore(
-    (s) => s.gameState?.players[playerId]?.library?.length ?? 0,
+    (s) => s.gameState?.players[pileSeat]?.library?.length ?? 0,
   );
   const topObjectId = useGameStore((s) => {
-    const lib = s.gameState?.players[playerId]?.library;
+    const lib = s.gameState?.players[pileSeat]?.library;
     if (!lib || lib.length === 0) return null;
     // library[0] = top of library (engine convention from zones.rs)
     return lib[0];
   });
+  // A card flight is presenting the top card itself, so the pile shows a back
+  // in its place.
+  const topInFlight = useAnimationStore(
+    (s) => topObjectId != null && s.flightVeiledObjectIds.has(topObjectId),
+  );
   const isRevealed = useGameStore((s) => {
     if (topObjectId == null) return false;
     return s.gameState?.revealed_cards?.includes(topObjectId) ?? false;
   });
-  const topCardName = useGameStore((s) => {
+  const visibleTopObject = useGameStore((s) => {
     if (topObjectId == null) return null;
     // Rust has already resolved public reveals, private looks, and continuous
     // top-card permissions into the per-object display projection.
     const revealedToMe = isLibraryCardRevealedToViewer(s.gameState ?? null, topObjectId, myId);
     if (!revealedToMe) return null;
-    return s.gameState?.objects[topObjectId]?.name ?? null;
+    return s.gameState?.objects[topObjectId] ?? null;
   });
+  const topCardName = visibleTopObject?.name ?? null;
 
+  const topObject = useGameStore((s) =>
+    topObjectId == null ? undefined : s.gameState?.objects[topObjectId],
+  );
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const canActForWaitingState = useCanActForWaitingState();
@@ -86,20 +122,21 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
   const hoverProps = useInspectHoverProps();
   const dispatchAction = useGameDispatch();
 
-  const isMyLibrary = playerId === myId;
+  const isMyLibrary = pileSeat === myPileSeat;
   const hasPriority = waitingFor?.type === "Priority" && canActForWaitingState;
 
-  // CR 401.5 + CR 118.9 + CR 305.9: cast/play-action surfacing is engine-
-  // authoritative — the entry exists in `legalActionsByObject` only when the
-  // engine has already validated the TopOfLibraryCastPermission filter, mana,
-  // timing, and (for `PlayLand`) the land-drop slot. The frontend renders
-  // the reported actions, never computes them. Future Sight / Bolas's
-  // Citadel / Magus of the Future surface `PlayLand` here; Mystic Forge /
-  // Realmwalker surface the `CastSpell` family.
+  // CR 401.5 + CR 118.9 + CR 305.9 + CR 702.170f: top-card action surfacing
+  // is engine-authoritative — the entry exists in `legalActionsByObject` only
+  // when the engine has already validated the permission filter, mana, timing,
+  // and (for `PlayLand`) the land-drop slot. The frontend renders the reported
+  // actions, never computes them. Future Sight / Bolas's Citadel / Magus of
+  // the Future surface `PlayLand` here; Mystic Forge / Realmwalker surface the
+  // `CastSpell` family; Fblthp, Lost on the Range surfaces the plot
+  // `ActivateAbility`.
   const playActions = useMemo(() => {
     if (!isMyLibrary || !hasPriority || topObjectId == null) return [];
-    return playOrCastActionsForObject(legalActionsByObject, topObjectId);
-  }, [isMyLibrary, hasPriority, topObjectId, legalActionsByObject]);
+    return zoneSurfaceActionsForObject(legalActionsByObject, topObject, topObjectId);
+  }, [isMyLibrary, hasPriority, topObject, topObjectId, legalActionsByObject]);
 
   const canPlay = playActions.length > 0;
 
@@ -107,13 +144,10 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
     if (playActions.length === 0 || topObjectId == null) return;
     // #506: one authority for the lone-action decision. Multiple options (e.g.
     // cast normal + alt-cost) defer to the shared ability-choice modal.
-    const auto = resolveSingleActionDispatch(
-      playActions,
-      useGameStore.getState().gameState?.objects[topObjectId],
-    );
+    const auto = resolveSingleActionDispatch(playActions, topObject);
     if (auto) void dispatchAction(auto);
     else setPendingAbilityChoice({ objectId: topObjectId as ObjectId, actions: playActions });
-  }, [playActions, topObjectId, dispatchAction, setPendingAbilityChoice]);
+  }, [playActions, topObject, topObjectId, dispatchAction, setPendingAbilityChoice]);
 
   if (count === 0) return null;
 
@@ -128,7 +162,10 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
   const topHoverProps =
     isPeeking && topObjectId != null ? hoverProps(topObjectId as ObjectId) : undefined;
   const libraryLabel = t("zone.libraryCount", { count });
-  const playLabel = t("zone.playFromTop", { name: topCardName ?? t("zone.topOfLibrary") });
+  const playLabel = t(
+    playActions.every(isPlayOrCastAction) ? "zone.playFromTop" : "zone.activateFromTop",
+    { name: topCardName ?? t("zone.topOfLibrary") },
+  );
   const w = size?.width ?? "var(--card-w)";
   const h = size?.height ?? "var(--card-h)";
 
@@ -136,7 +173,7 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
     <div
       className="relative"
       title={canPlay ? playLabel : libraryLabel}
-      data-library-pile={playerId}
+      data-library-pile={pileSeat}
       style={{ width: w, height: h }}
     >
       {/* Stack layers */}
@@ -156,12 +193,12 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
       {/* Top card */}
       <button
         type="button"
-        onClick={() => {
+        onClick={(event) => {
           // Prefer opening the viewer when the top is visible — the modal is
           // where play-from-top happens (mirrors graveyard/exile). Fall back to
           // direct cast only when no viewer is wired.
           if (canView) {
-            onView();
+            onView(event.currentTarget);
             return;
           }
           if (canPlay) handlePlay();
@@ -169,6 +206,7 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
         disabled={!canView && !canPlay && topCardName == null}
         aria-label={canPlay ? playLabel : libraryLabel}
         data-library-top-cast={canPlay ? "true" : "false"}
+        data-grouped-ids={isPeeking && topObjectId != null ? String(topObjectId) : undefined}
         {...topHoverProps}
         className={`relative block h-full w-full overflow-hidden rounded-lg border shadow-md ${
           canPlay
@@ -180,15 +218,10 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
                 : "border-gray-600 cursor-default"
         }`}
       >
-        {isPeeking ? (
-          <TopCard cardName={topCardName} />
+        {visibleTopObject && !topInFlight ? (
+          <VisibleTopCard object={visibleTopObject} />
         ) : (
-          <img
-            src={CARD_BACK_URL}
-            alt={t("zone.libraryAlt")}
-            className="h-full w-full rounded-lg object-cover"
-            draggable={false}
-          />
+          <HiddenTopCard />
         )}
       </button>
 

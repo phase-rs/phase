@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { isStaleActionMessage, isStaleReorderMessage } from "../types.ts";
+import { actionRejectionError, isStaleReorderMessage } from "../types.ts";
 
-describe("isStaleReorderMessage (issue #5913)", () => {
-  it("matches the engine's ReorderHand count mismatch, whatever the counts", () => {
-    // Verbatim shape from `apply_action`:
+describe("legacy ReorderHand rejection compatibility (issue #5913)", () => {
+  it("matches the legacy ReorderHand count mismatch, whatever the counts", () => {
+    // Verbatim pre-structured shape from `apply_action`:
     //   EngineError::InvalidAction(format!("ReorderHand: expected {} ids, got {}", ..))
     // surfaced by the wasm bridge as `Engine error: <display>`.
     expect(isStaleReorderMessage("Engine error: ReorderHand: expected 6 ids, got 5")).toBe(true);
@@ -37,12 +37,23 @@ describe("isStaleReorderMessage (issue #5913)", () => {
     expect(isStaleReorderMessage("")).toBe(false);
   });
 
-  it("is disjoint from the actor-authorization predicate", () => {
-    // The two matchers classify to the same benign code but must not overlap,
-    // so each keeps its own documented meaning.
-    const reorder = "Engine error: ReorderHand: expected 6 ids, got 5";
-    const authz = "Engine error: Wrong player";
-    expect(isStaleReorderMessage(reorder) && isStaleActionMessage(reorder)).toBe(false);
-    expect(isStaleActionMessage(authz) && isStaleReorderMessage(authz)).toBe(false);
+  it("uses the engine-provided stale disposition for structured rejections", () => {
+    const error = actionRejectionError({
+      code: "stale_action",
+      disposition: "stale",
+      message: "That action is based on outdated game state.",
+      related_object_ids: [],
+    });
+    expect(error.code).toBe("STALE_ACTION");
+    expect(error.recoverable).toBe(false);
+
+    const wrongPlayer = actionRejectionError({
+      code: "wrong_player",
+      disposition: "unauthorized",
+      message: "That action belongs to a different player.",
+      related_object_ids: [],
+    });
+    expect(wrongPlayer.code).toBe("ACTION_REJECTED");
+    expect(wrongPlayer.recoverable).toBe(true);
   });
 });

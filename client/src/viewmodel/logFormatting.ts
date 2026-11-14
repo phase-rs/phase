@@ -14,6 +14,8 @@ export interface LogDivider {
   turn: number;
   phase: GameLogEntry["phase"];
   boundary: Exclude<LogBoundary, "None">;
+  /** Engine-authored TurnStarted segments, retained when a later phase boundary coalesces. */
+  turnSegments: GameLogEntry["segments"] | null;
 }
 
 export type LogTimelineRow =
@@ -62,9 +64,12 @@ export function filterLogByView(
       return false;
     }
     const explicitCategory = categories?.has(entry.category) ?? false;
-    if (categories && !explicitCategory) return false;
-
     const presentation = logPresentation(entry);
+    // A category drill-down still needs engine-authored turn/phase context.
+    // Keep boundaries structurally; timelineRows decides whether a retained
+    // boundary has adjacent content worth rendering.
+    if (categories && !explicitCategory && presentation.boundary !== "None") return true;
+    if (categories && !explicitCategory) return false;
     if (entry.category === "Debug") return view === "diagnostics" || explicitCategory;
     if (explicitCategory) return true;
     if (!entry.presentation) return view !== "timeline";
@@ -90,11 +95,19 @@ export function timelineRows(
       if (retainStandaloneBoundary && pending !== null && pending.turn !== 0) {
         rows.push({ type: "divider", divider: pending });
       }
+      // TypeScript loses the carried loop value's union type at this assignment
+      // site, although a prior boundary can leave a divider pending.
+      const previousPending = pending as LogDivider | null;
       pending = {
         seq: entry.seq,
         turn: entry.turn,
         phase: entry.phase,
         boundary: presentation.boundary,
+        turnSegments: presentation.boundary === "Turn"
+          ? entry.segments
+          : previousPending?.turn === entry.turn
+            ? previousPending.turnSegments
+            : null,
       };
       continue;
     }
@@ -115,14 +128,27 @@ export function timelineRows(
 export function toneClass(tone: LogTone): string {
   switch (tone) {
     case "Positive":
-      return "border-l-emerald-400 text-emerald-300";
+      return "border-l-emerald-400 bg-emerald-950/25";
     case "Negative":
-      return "border-l-red-400 text-red-300";
+      return "border-l-red-400 bg-red-950/25";
     case "Informational":
-      return "border-l-cyan-400 text-cyan-300";
+      return "border-l-cyan-400 bg-cyan-950/25";
     case "Diagnostic":
-      return "border-l-fuchsia-400 text-fuchsia-300";
+      return "border-l-fuchsia-400 bg-fuchsia-950/25";
     case "Neutral":
-      return "border-l-gray-600 text-gray-400";
+      return "border-l-gray-600 bg-gray-800/25";
+  }
+}
+
+export function importanceClass(importance: LogImportance): string {
+  switch (importance) {
+    case "Essential":
+      return "text-gray-100";
+    case "Context":
+      return "text-gray-200";
+    case "Detail":
+      return "text-gray-300";
+    case "Diagnostic":
+      return "text-gray-400";
   }
 }

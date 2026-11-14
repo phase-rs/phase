@@ -2,7 +2,7 @@ import { memo, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
-import type { MultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
+import { type MultiplayerBoardLayout, usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../../hooks/usePlayerId.ts";
@@ -31,16 +31,18 @@ interface GameBoardProps {
   effectiveMultiplayerBoardLayout: MultiplayerBoardLayout;
   oppHud?: React.ReactNode;
   playerHud?: React.ReactNode;
-  showOpponentCards?: boolean;
   onKickPlayer?: (playerId: PlayerId) => void;
-  onViewZone?: (zone: "graveyard" | "exile" | "library", playerId: PlayerId) => void;
+  onViewZone?: (
+    zone: "graveyard" | "exile" | "library",
+    playerId: PlayerId,
+    launcher: HTMLButtonElement,
+  ) => void;
 }
 
 export const GameBoard = memo(function GameBoard({
   effectiveMultiplayerBoardLayout,
   oppHud,
   playerHud,
-  showOpponentCards = false,
   onKickPlayer,
   onViewZone = () => {},
 }: GameBoardProps) {
@@ -48,6 +50,7 @@ export const GameBoard = memo(function GameBoard({
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
+  const showOwnerPrintings = usePreferencesStore((s) => s.showOwnerPrintings);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const localPlayerId = usePlayerId();
   const myId = usePerspectivePlayerId();
@@ -62,21 +65,21 @@ export const GameBoard = memo(function GameBoard({
 
   const focusedId = resolveFocusedOpponent(focusedOpponent, opponents);
   const playerBattlefieldView = useMemo(
-    () => buildPlayerBattlefieldView(gameState, myId),
-    [gameState, myId],
+    () => buildPlayerBattlefieldView(gameState, myId, showOwnerPrintings),
+    [gameState, myId, showOwnerPrintings],
   );
   const focusedBattlefieldView = useMemo(
-    () => (focusedId == null ? null : buildPlayerBattlefieldView(gameState, focusedId)),
-    [gameState, focusedId],
+    () => (focusedId == null ? null : buildPlayerBattlefieldView(gameState, focusedId, showOwnerPrintings)),
+    [gameState, focusedId, showOwnerPrintings],
   );
   const opponentBattlefieldViews = useMemo(() => {
     return new Map(
       opponents.map((opponentId) => [
         opponentId,
-        buildPlayerBattlefieldView(gameState, opponentId),
+        buildPlayerBattlefieldView(gameState, opponentId, showOwnerPrintings),
       ]),
     );
-  }, [gameState, opponents]);
+  }, [gameState, opponents, showOwnerPrintings]);
   const splitBoardActive = isSplitBoardActive(effectiveMultiplayerBoardLayout, getSeatCount(gameState));
 
   const sortedPlayerCreatures = useMemo(() => {
@@ -101,6 +104,7 @@ export const GameBoard = memo(function GameBoard({
     );
     const validTargetObjectIds = new Set<number>();
     const validAttackerIds = new Set<number>();
+    const blockableAttackerIds = new Set<number>();
     const boardChoiceObjectIds = new Set<number>();
     const selectableSacrificeObjectIds = new Set<number>();
     const selectableManaCostCreatureIds = new Set<number>();
@@ -147,6 +151,18 @@ export const GameBoard = memo(function GameBoard({
       }
     }
 
+    // CR 509.1a: combat.rs::get_valid_block_targets_for_player keeps only
+    // attackers this defender's blockers may legally block, so the union of
+    // every value here is already seat-scoped — an attacker aimed at another
+    // opponent never appears in this player's own DeclareBlockers prompt.
+    if (waitingFor?.type === "DeclareBlockers") {
+      for (const attackerIds of Object.values(waitingFor.data.valid_block_targets)) {
+        for (const objectId of attackerIds) {
+          blockableAttackerIds.add(objectId);
+        }
+      }
+    }
+
     for (const objectId of getWaitingForObjectChoiceIds(waitingFor)) {
       validTargetObjectIds.add(objectId);
     }
@@ -158,7 +174,7 @@ export const GameBoard = memo(function GameBoard({
       }
     }
 
-    const boardChoice = getBoardChoiceView(waitingFor, gameState?.objects);
+    const boardChoice = getBoardChoiceView(waitingFor, gameState?.objects, gameState?.allows_cancel_cast);
     if (boardChoice && canActForWaitingState) {
       for (const objectId of boardChoice.objectIds) {
         boardChoiceObjectIds.add(objectId);
@@ -180,6 +196,7 @@ export const GameBoard = memo(function GameBoard({
     if (!gameState?.objects) {
       return {
         ...affordances,
+        blockableAttackerIds,
         boardChoiceObjectIds,
         committedAttackerIds,
         incomingAttackerCounts,
@@ -193,6 +210,7 @@ export const GameBoard = memo(function GameBoard({
 
     return {
       ...affordances,
+      blockableAttackerIds,
       boardChoiceObjectIds,
       committedAttackerIds,
       incomingAttackerCounts,
@@ -252,9 +270,8 @@ export const GameBoard = memo(function GameBoard({
                     playerId={opponentId}
                     battlefieldView={
                       opponentBattlefieldViews.get(opponentId)
-                      ?? buildPlayerBattlefieldView(gameState, opponentId)
+                      ?? buildPlayerBattlefieldView(gameState, opponentId, showOwnerPrintings)
                     }
-                    showCards={showOpponentCards}
                     onKickPlayer={onKickPlayer}
                     onViewZone={onViewZone}
                   />

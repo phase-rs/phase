@@ -16,7 +16,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ai_support::legal_actions_for_viewer;
-use crate::game::engine::{apply_for_simulation, EngineError};
+use crate::game::engine::{
+    action_rejection_for_engine_error, apply_for_simulation, explicit_debug_permission_rejection,
+    preflight_debug_action_with_rejection, EngineError,
+};
+use crate::game::visibility::filter_action_rejection_for_viewer;
+use crate::types::action_rejection::ActionRejection;
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CastPaymentMode, GameState, WaitingFor};
@@ -148,6 +153,43 @@ pub fn compute_preview_diff(before: &GameState, after: &GameState) -> PreviewDif
     }
 }
 
+/// Simulates an ordinary action and returns only its viewer-safe public diff.
+/// The original state is never mutated.
+pub fn preview_action(
+    state: &GameState,
+    actor: PlayerId,
+    action: &GameAction,
+) -> Result<PreviewDiff, EngineError> {
+    let before = crate::game::visibility::filter_state_for_viewer(state, actor);
+    let mut projected = state.clone();
+    apply_for_simulation(&mut projected, actor, action.clone())?;
+    let after = crate::game::visibility::filter_state_for_viewer(&projected, actor);
+    Ok(compute_preview_diff(&before, &after))
+}
+
+/// Viewer-safe form of [`preview_action`] with stable rejection metadata.
+pub fn preview_action_with_rejection(
+    state: &GameState,
+    actor: PlayerId,
+    action: &GameAction,
+) -> Result<PreviewDiff, ActionRejection> {
+    let related_object_ids = action.related_object_ids();
+    if matches!(action, GameAction::Debug(_)) {
+        if let Some(rejection) =
+            explicit_debug_permission_rejection(state, actor, related_object_ids.clone())
+        {
+            return Err(rejection);
+        }
+    }
+    preview_action(state, actor, action).map_err(|error| {
+        filter_action_rejection_for_viewer(
+            state,
+            actor,
+            &action_rejection_for_engine_error(&error, related_object_ids),
+        )
+    })
+}
+
 /// Returns the mana sources the automatic payment path uses for `action`,
 /// without changing the live game state.
 ///
@@ -195,6 +237,27 @@ pub fn preview_auto_payment_sources(
         events.extend(x_result.events);
     }
     Ok(mana_source_ids_before_spell_cast(&events, *object_id))
+}
+
+/// Viewer-safe form of [`preview_auto_payment_sources`] with stable rejection
+/// metadata. It preserves the legacy preview's no-mutation behavior.
+pub fn preview_auto_payment_sources_with_rejection(
+    state: &GameState,
+    actor: PlayerId,
+    action: &GameAction,
+) -> Result<Vec<ObjectId>, ActionRejection> {
+    if let GameAction::Debug(debug_action) = action {
+        preflight_debug_action_with_rejection(state, actor, debug_action)?;
+    }
+
+    let related_object_ids = action.related_object_ids();
+    preview_auto_payment_sources(state, actor, action).map_err(|error| {
+        filter_action_rejection_for_viewer(
+            state,
+            actor,
+            &action_rejection_for_engine_error(&error, related_object_ids),
+        )
+    })
 }
 
 fn mana_source_ids_before_spell_cast(events: &[GameEvent], object_id: ObjectId) -> Vec<ObjectId> {

@@ -11,7 +11,11 @@ vi.mock("../../../services/backup", () => ({
 
 describe("PreferencesModal card preview", () => {
   beforeEach(() => {
-    usePreferencesStore.setState({ showCardPreviewFooter: true });
+    usePreferencesStore.setState({
+      draftCardPreviewMode: "none",
+      draftDoubleClickConfirmPick: true,
+      showCardPreviewFooter: true,
+    });
   });
 
   afterEach(() => cleanup());
@@ -29,14 +33,32 @@ describe("PreferencesModal card preview", () => {
     expect(usePreferencesStore.getState().showCardPreviewFooter).toBe(false);
   });
 
-  it("offers Auto as the viewport-adaptive multiplayer board layout", () => {
-    usePreferencesStore.setState({ multiplayerBoardLayout: "focused" });
+  it("configures the draft-only hover preview beneath the general preview setting", () => {
     render(<PreferencesModal onClose={vi.fn()} initialTab="visual" />);
 
-    const group = screen.getByText("Multiplayer Board Layout").parentElement;
-    expect(group).not.toBeNull();
-    fireEvent.click(within(group!).getByRole("button", { name: "Auto" }));
+    const generalGroup = screen.getByText("Card Hover Preview").parentElement;
+    const draftGroup = screen.getByText("Draft Card Hover Preview").parentElement;
+    expect(generalGroup?.compareDocumentPosition(draftGroup!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(draftGroup).toHaveTextContent("Applies only while drafting and building your draft deck.");
+    expect(within(draftGroup!).getByRole("button", { name: "Off" }))
+      .toHaveClass("bg-sky-500/80");
 
-    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("auto");
+    fireEvent.click(within(draftGroup!).getByRole("button", { name: "Dock to side" }));
+
+    expect(usePreferencesStore.getState().draftCardPreviewMode).toBe("side");
+  });
+
+  it("configures enabled-by-default draft double-click confirmation beneath draft preview", () => {
+    render(<PreferencesModal onClose={vi.fn()} initialTab="visual" />);
+
+    const previewGroup = screen.getByText("Draft Card Hover Preview").parentElement;
+    const doubleClickGroup = screen.getByText("Draft Double-click Confirm Pick").parentElement;
+    expect(previewGroup?.compareDocumentPosition(doubleClickGroup!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(within(doubleClickGroup!).getByRole("button", { name: "Enabled" }))
+      .toHaveClass("bg-sky-500/80");
+
+    fireEvent.click(within(doubleClickGroup!).getByRole("button", { name: "Disabled" }));
+
+    expect(usePreferencesStore.getState().draftDoubleClickConfirmPick).toBe(false);
   });
 });

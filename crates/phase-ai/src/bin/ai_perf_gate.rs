@@ -34,8 +34,8 @@ use std::process::{Command, Stdio};
 use engine::database::CardDatabase;
 use phase_ai::duel_suite::perf::{
     compare, default_scenarios, load_report, median_report, print_markdown, print_repro_margin,
-    repro_margin_report, run_perf_suite, PerfReport, PERF_ACTION_CAP, PERF_BASE_SEED,
-    PERF_SAMPLE_COUNT,
+    render_error_markdown, repro_margin_report, run_perf_suite, PerfReport, PERF_ACTION_CAP,
+    PERF_BASE_SEED, PERF_SAMPLE_COUNT,
 };
 use phase_ai::duel_suite::{find_matchup, resolve_deck_ref};
 
@@ -256,10 +256,16 @@ fn run_parent_gate(args: &Args) {
         return;
     }
 
+    // Both bail-outs print the refusal to STDOUT as well as stderr. The workflow redirects
+    // stdout into `target/ai-perf-gate-report.md` and posts it as a drift issue, and nothing
+    // on the path above this point writes to stdout — so a stderr-only refusal left that file
+    // at zero bytes and the workflow answered it with "failed without a drift report" and no
+    // issue. The exit code and a non-empty body are needed TOGETHER; either alone posts nothing.
     let baseline = match load_report(&args.baseline) {
         Ok(report) => report,
         Err(err) => {
             eprintln!("failed to load baseline {}: {err}", args.baseline.display());
+            print!("{}", render_error_markdown(&err));
             cleanup_temps(&temp_paths);
             std::process::exit(2);
         }
@@ -269,6 +275,7 @@ fn run_parent_gate(args: &Args) {
         Ok(report) => report,
         Err(err) => {
             eprintln!("compare failed: {err}");
+            print!("{}", render_error_markdown(&err));
             cleanup_temps(&temp_paths);
             std::process::exit(2);
         }

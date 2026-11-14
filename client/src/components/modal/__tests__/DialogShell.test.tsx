@@ -23,6 +23,20 @@ describe("DialogShell", () => {
     expect(screen.getByText("body")).toBeInTheDocument();
   });
 
+  it("exposes the title as the dialog's accessible name", () => {
+    render(
+      <DialogShell title="Choose attackers">
+        <div>body</div>
+      </DialogShell>,
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "Choose attackers" });
+    const heading = screen.getByRole("heading", { name: "Choose attackers", level: 2 });
+
+    expect(dialog).toHaveAttribute("aria-labelledby", heading.id);
+    expect(heading.id).not.toBe("");
+  });
+
   it("renders default eyebrow when none is provided", () => {
     render(
       <DialogShell title="t">

@@ -1,7 +1,7 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { GameObject, ObjectCounterDisplay } from "../../../adapter/types.ts";
+import type { AttackTarget, GameObject, ObjectCounterDisplay, PlayerId } from "../../../adapter/types.ts";
 import { useCardImage } from "../../../hooks/useCardImage.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
@@ -111,7 +111,7 @@ describe("CardPreview chosen attributes", () => {
     expect(preview).not.toBeNull();
     expect(preview?.style.bottom).toBe("0px");
     expect(preview?.style.transformOrigin).toBe("50% 100%");
-    expect(screen.getByAltText("Pithing Needle")).toHaveClass(
+    expect(screen.getByAltText("Pithing Needle").parentElement!).toHaveClass(
       "w-[clamp(190px,18vw,300px)]",
     );
     source.remove();
@@ -148,7 +148,7 @@ describe("CardPreview chosen attributes", () => {
     expect(preview).not.toBeNull();
     expect(preview?.style.bottom).toBe("0px");
     expect(preview).toHaveClass("pointer-events-none");
-    expect(screen.getByAltText("Pithing Needle")).toHaveClass(
+    expect(screen.getByAltText("Pithing Needle").parentElement!).toHaveClass(
       "w-[clamp(190px,18vw,300px)]",
     );
     source.remove();
@@ -375,8 +375,8 @@ describe("CardPreview chosen attributes", () => {
 
   it("renders keyword reminder tooltips for battlefield permanents", () => {
     const object = battlefieldObject({
-      keywords: ["Flying", { Ward: { type: "Mana", data: { Cost: { shards: [], generic: 2 } } } }],
-      base_keywords: ["Flying", { Ward: { type: "Mana", data: { Cost: { shards: [], generic: 2 } } } }],
+      keywords: ["Flying", { Ward: { type: "Mana", data: { type: "Cost", shards: [], generic: 2 } } }],
+      base_keywords: ["Flying", { Ward: { type: "Mana", data: { type: "Cost", shards: [], generic: 2 } } }],
     });
     useGameStore.setState({ gameState: gameStateWithObject(object), spellCosts: {} });
     useUiStore.setState({ inspectedObjectId: object.id, altHeld: false });
@@ -742,5 +742,186 @@ describe("CardPreview activate labels", () => {
     // Pre-fix the two raw labels differ => 2 rows, one showing `~`.
     expect(screen.getAllByText(/Activate/)).toHaveLength(1);
     expect(container.textContent).not.toContain("~");
+  });
+});
+
+describe("CardPreview nameless permanent", () => {
+  // CR 709.5: a permanent with a shared type line doesn't have the name of a
+  // half it hasn't unlocked, and CR 709.5d gives a copy of a Room neither
+  // unlocked designation — so it has no name at all. The hover must still
+  // answer with the card. An empty name is a real permanent; only `null`
+  // means "there is nothing to preview".
+  function namelessRoomCopy(overrides: Partial<GameObject> = {}): GameObject {
+    return battlefieldObject({
+      name: "",
+      printed_ref: { oracle_id: "greenhouse-oracle-id", face_name: "Greenhouse" },
+      ...overrides,
+    });
+  }
+
+  it("previews a battlefield permanent whose name is empty", () => {
+    const object = namelessRoomCopy();
+    useGameStore.setState({ gameState: gameStateWithObject(object), spellCosts: {} });
+
+    const { container } = render(
+      <CardPreview cardName="" objectId={object.id} position={{ x: 20, y: 20 }} />,
+    );
+
+    expect(container.querySelector("[data-card-preview]")).not.toBeNull();
+    // The identity the art is resolved FROM is the object's `printed_ref`,
+    // never the name — the empty name reaches the hook untouched beside it.
+    expect(useCardImage).toHaveBeenCalledWith(
+      "",
+      expect.objectContaining({
+        oracleId: "greenhouse-oracle-id",
+        faceName: "Greenhouse",
+      }),
+    );
+    expect(container.querySelector("img")?.getAttribute("src")).toBe(
+      "greenhouse-oracle-id.png",
+    );
+  });
+
+  it("measures a hand origin for a nameless card the same way", () => {
+    // The hand-origin gate asks the same question as the render gate. Left
+    // asking for truthiness it withholds `measuredHandOrigin`, and the preview
+    // never mounts — the same defect on the other branch.
+    const object = namelessRoomCopy({ zone: "Hand" });
+    useGameStore.setState({ gameState: gameStateWithObject(object), spellCosts: {} });
+    const source = document.createElement("div");
+    source.dataset.handCard = "";
+    source.dataset.handRotation = "-4";
+    source.dataset.objectId = String(object.id);
+    Object.defineProperty(source, "offsetWidth", { configurable: true, value: 120 });
+    source.matches = vi.fn((selector) => selector === ":hover");
+    source.getBoundingClientRect = () => ({
+      bottom: 748, height: 168, left: 220, right: 340, top: 580, width: 120,
+      x: 220, y: 580, toJSON: () => ({}),
+    });
+    document.body.appendChild(source);
+
+    const { container } = render(
+      <CardPreview cardName="" objectId={object.id} handSourceObjectId={object.id} />,
+    );
+
+    const preview = container.querySelector<HTMLElement>("[data-card-preview]");
+    expect(preview).not.toBeNull();
+    expect(preview?.style.bottom).toBe("0px");
+    source.remove();
+  });
+});
+
+describe("CardPreview attack target flag", () => {
+  const ATTACKER = 100;
+  const NON_ATTACKER = 300;
+
+  afterEach(() => {
+    // The spectator row sets `gameMode`; a leaked "spectate" would suppress every
+    // second-person assertion in the rows that follow.
+    useGameStore.setState({ gameMode: null });
+  });
+
+  /** `projected` is the engine's `attack_targets` entry; `null` models an ended relation. */
+  function previewAttacker(
+    previewed: number,
+    attackTarget: AttackTarget,
+    defendingPlayer: PlayerId,
+    projected: AttackTarget | null = attackTarget,
+  ) {
+    const objects = [
+      battlefieldObject({ id: ATTACKER, name: "Grizzly Bears" }),
+      battlefieldObject({
+        id: NON_ATTACKER,
+        name: "Pithing Needle",
+        chosen_attributes: [{ type: "CardName", value: "Lightning Bolt" }],
+      }),
+      battlefieldObject({ id: 201, name: "Jace Beleren", controller: 0, owner: 0 }),
+      battlefieldObject({ id: 202, name: "Jace Beleren", controller: 2, owner: 2 }),
+      battlefieldObject({ id: 203, name: "Invasion of Kaldheim", controller: 0, owner: 0 }),
+    ];
+    useGameStore.setState({
+      gameState: buildGameState({
+        objects: buildObjectMap(...objects),
+        battlefield: objects.map((o) => o.id),
+        combat: {
+          attackers: [
+            { object_id: ATTACKER, defending_player: defendingPlayer, attack_target: attackTarget },
+          ],
+          blocker_assignments: {},
+          blocker_to_attacker: {},
+          blockers_declared_by: [],
+          pending_blocker_declaration_events: [],
+          damage_assignments: {},
+          first_strike_done: false,
+          damage_step_index: null,
+          pending_damage: [],
+          regular_damage_done: false,
+        },
+        derived: { attack_targets: projected ? { [ATTACKER]: projected } : {} },
+      }),
+      spellCosts: {},
+    });
+    useUiStore.setState({ inspectedObjectId: previewed, altHeld: false });
+    render(<CardPreview cardName="Grizzly Bears" position={{ x: 20, y: 20 }} />);
+  }
+
+  it("flags an attack on the viewer's planeswalker", () => {
+    previewAttacker(ATTACKER, { type: "Planeswalker", data: 201 }, 0);
+    expect(screen.getByText("⚔ Attacking your planeswalker Jace Beleren")).toBeInTheDocument();
+  });
+
+  it("flags an attack on the viewer", () => {
+    previewAttacker(ATTACKER, { type: "Player", data: 0 }, 0);
+    expect(screen.getByText("⚔ Attacking you")).toBeInTheDocument();
+  });
+
+  it("names another player, and that player's planeswalker", () => {
+    previewAttacker(ATTACKER, { type: "Player", data: 2 }, 2);
+    expect(screen.getByText("⚔ Attacking Opp 3")).toBeInTheDocument();
+    cleanup();
+
+    previewAttacker(ATTACKER, { type: "Planeswalker", data: 202 }, 2);
+    expect(screen.getByText("⚔ Attacking Opp 3's planeswalker Jace Beleren")).toBeInTheDocument();
+  });
+
+  it("addresses a spectator in the third person, though seat 0 is their resolved id", () => {
+    // `usePlayerId()` answers seat 0 in spectate mode, so only the spectator gate keeps the
+    // viewer-relative arms from telling a spectator that seat 0's attackers target them.
+    useGameStore.setState({ gameMode: "spectate" });
+    previewAttacker(ATTACKER, { type: "Player", data: 0 }, 0);
+    expect(screen.getByText("⚔ Attacking Opp 1")).toBeInTheDocument();
+    expect(screen.queryByText("⚔ Attacking you")).toBeNull();
+    cleanup();
+
+    previewAttacker(ATTACKER, { type: "Planeswalker", data: 201 }, 0);
+    expect(screen.getByText("⚔ Attacking Opp 1's planeswalker Jace Beleren")).toBeInTheDocument();
+    expect(screen.queryByText(/your planeswalker/)).toBeNull();
+  });
+
+  it("reads the engine's current target: a planeswalker removed from combat is not named", () => {
+    // CR 506.4c: the declared target still names Jace, but the engine dropped the relation, so the
+    // creature is attacking without attacking any player, planeswalker, or battle.
+    previewAttacker(ATTACKER, { type: "Planeswalker", data: 202 }, 2, null);
+    expect(
+      screen.getByText("⚔ Attacking, but not any player, planeswalker, or battle"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Jace Beleren/)).toBeNull();
+    cleanup();
+
+    // Positive sibling: the same declaration while the relation is live names the planeswalker.
+    previewAttacker(ATTACKER, { type: "Planeswalker", data: 202 }, 2);
+    expect(screen.getByText("⚔ Attacking Opp 3's planeswalker Jace Beleren")).toBeInTheDocument();
+  });
+
+  it("names the battle being attacked", () => {
+    previewAttacker(ATTACKER, { type: "Battle", data: 203 }, 1);
+    expect(screen.getByText("⚔ Attacking battle Invasion of Kaldheim")).toBeInTheDocument();
+  });
+
+  it("shows no flag on a creature that is not attacking", () => {
+    previewAttacker(NON_ATTACKER, { type: "Player", data: 0 }, 0);
+    // Reach guard: the info panel rendered for the previewed object.
+    expect(screen.getByText("Card name: Lightning Bolt")).toBeInTheDocument();
+    expect(screen.queryByText(/Attacking/)).toBeNull();
   });
 });

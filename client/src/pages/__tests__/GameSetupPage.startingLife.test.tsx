@@ -1,0 +1,249 @@
+/**
+ * GameSetupPage — the edited config (starting life, commander damage) must
+ * reach the started game.
+ *
+ * The game URL carries the format NAME only, so `GamePage` re-derives the
+ * config from `FORMAT_DEFAULTS` unless the setup page hands the edited
+ * `FormatConfig` over out-of-band. This suite pins the hand-over: the
+ * active-game record (`ActiveGameMeta.formatConfig`) for the WASM route, and
+ * router state for the native route, which deliberately writes no record.
+ */
+import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
+
+import {
+  ACTIVE_DECK_KEY,
+  ACTIVE_GAME_KEY,
+  STORAGE_KEY_PREFIX,
+} from "../../constants/storage";
+import { FORMAT_DEFAULTS } from "../../stores/multiplayerStore";
+import { GameSetupPage } from "../GameSetupPage";
+
+vi.mock("../../components/menu/MenuParticles", () => ({ MenuParticles: () => null }));
+vi.mock("../../hooks/useCardImage", () => ({
+  useCardImage: () => ({ src: null, isLoading: false }),
+}));
+vi.mock("../../audio/useAudioContext", () => ({ useAudioContext: () => undefined }));
+vi.mock("../../adapter/wasm-adapter", () => ({
+  getSharedAdapter: () => ({ warmCardDatabase: () => Promise.resolve() }),
+}));
+vi.mock("../../components/menu/MyDecks", async () => {
+  const actual = await vi.importActual<typeof import("../../components/menu/MyDecks")>(
+    "../../components/menu/MyDecks",
+  );
+  return { ...actual, MyDecks: () => null };
+});
+vi.mock("../../hooks/useDecks", async () => {
+  const actual = await vi.importActual<typeof import("../../hooks/useDecks")>(
+    "../../hooks/useDecks",
+  );
+  return { ...actual, useDecks: () => ({ decks: null, status: "success" as const }) };
+});
+vi.mock("../../services/deckCompatibility", () => ({
+  evaluateDeckCompatibilityBatch: vi.fn().mockResolvedValue({}),
+}));
+vi.mock("../../hooks/useBracketEstimate", () => ({
+  useBracketEstimate: () => ({ estimate: null, loading: false, unsupported: false }),
+}));
+vi.mock("../../hooks/useSetSymbols", () => ({ useSetSymbol: () => null }));
+vi.mock("../../stores/cardDataStore", () => {
+  const store = (selector: (state: { status: string }) => unknown) => selector({ status: "ready" });
+  store.getState = () => ({ warm: vi.fn().mockResolvedValue(undefined) });
+  return { useCardDataStore: store };
+});
+// The Start button is gated on the AI seats having at least one legal deck.
+// The real component resolves that from the card database; report one so the
+// gate opens without pulling the catalog in.
+vi.mock("../../components/menu/AiOpponentConfig", () => ({
+  AiOpponentConfig: ({
+    onCandidateCountChange,
+  }: {
+    onCandidateCountChange: (count: number) => void;
+  }) => {
+    onCandidateCountChange(1);
+    return null;
+  },
+}));
+
+/** Echoes the router state the setup page navigated with. */
+function GameRouteProbe() {
+  const location = useLocation();
+  return (
+    <div data-testid="nav-state">
+      {JSON.stringify((location.state as Record<string, unknown> | null) ?? null)}
+    </div>
+  );
+}
+
+function renderSetup(path = "/game-setup") {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <Routes>
+        <Route path="/game-setup" element={<GameSetupPage />} />
+        <Route path="/game/:id" element={<GameRouteProbe />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
+beforeEach(() => {
+  localStorage.clear();
+  localStorage.setItem(
+    STORAGE_KEY_PREFIX + "My Deck",
+    JSON.stringify({ main: [{ name: "Island", count: 100 }], sideboard: [] }),
+  );
+  localStorage.setItem(ACTIVE_DECK_KEY, "My Deck");
+});
+
+afterEach(cleanup);
+
+describe("GameSetupPage — starting life", () => {
+  it("hands an edited starting life to the game it starts", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    const lifeInput = await screen.findByLabelText("Starting Life");
+    await user.clear(lifeInput);
+    await user.type(lifeInput, "25");
+
+    await user.click(screen.getByRole("button", { name: /Start Match/i }));
+
+    const navState = JSON.parse(screen.getByTestId("nav-state").textContent!);
+    expect(navState.formatConfig.starting_life).toBe(25);
+
+    const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
+    expect(meta.formatConfig.starting_life).toBe(25);
+  });
+
+  it("keeps the last valid starting life when the field is left empty", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    const lifeInput = await screen.findByLabelText("Starting Life");
+    await user.clear(lifeInput);
+
+    await user.click(screen.getByRole("button", { name: /Start Match/i }));
+
+    const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
+    expect(meta.formatConfig.starting_life).toBe(
+      FORMAT_DEFAULTS.Commander.starting_life,
+    );
+  });
+});
+
+describe("GameSetupPage — commander damage", () => {
+  it("hands an edited commander damage threshold to the game it starts", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    const damageInput = await screen.findByLabelText("Commander Damage");
+    await user.clear(damageInput);
+    await user.type(damageInput, "30");
+
+    await user.click(screen.getByRole("button", { name: /Start Match/i }));
+
+    const navState = JSON.parse(screen.getByTestId("nav-state").textContent!);
+    expect(navState.formatConfig.commander_damage_threshold).toBe(30);
+
+    const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
+    expect(meta.formatConfig.commander_damage_threshold).toBe(30);
+  });
+
+  it("keeps the last valid commander damage threshold when the field is left empty", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    expect(await screen.findByLabelText("Starting Life")).toBeInTheDocument();
+    const damageInput = screen.getByLabelText("Commander Damage");
+    await user.clear(damageInput);
+
+    await user.click(screen.getByRole("button", { name: /Start Match/i }));
+
+    const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
+    expect(meta.formatConfig.commander_damage_threshold).toBe(
+      FORMAT_DEFAULTS.Commander.commander_damage_threshold,
+    );
+  });
+
+  it("offers no commander damage editor in a format without commander damage", async () => {
+    renderSetup("/game-setup?format=Standard");
+
+    expect(await screen.findByLabelText("Starting Life")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Commander Damage")).not.toBeInTheDocument();
+  });
+
+  // Brawl formats have no commander-damage threshold, so the editor is hidden.
+  it.each(["Brawl", "HistoricBrawl"])("offers no commander damage editor in %s", async (format) => {
+    renderSetup(`/game-setup?format=${format}`);
+
+    expect(await screen.findByLabelText("Starting Life")).toHaveValue(25);
+    expect(screen.queryByLabelText("Commander Damage")).not.toBeInTheDocument();
+  });
+});
+
+describe("GameSetupPage — poison counters", () => {
+  it("hands an edited poison-counter threshold to the game it starts", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    const poisonInput = await screen.findByLabelText("Poison Counters");
+    await user.clear(poisonInput);
+    await user.type(poisonInput, "15");
+
+    await user.click(screen.getByRole("button", { name: /Start Match/i }));
+
+    const navState = JSON.parse(screen.getByTestId("nav-state").textContent!);
+    expect(navState.formatConfig.poison_counter_threshold).toBe(15);
+
+    const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
+    expect(meta.formatConfig.poison_counter_threshold).toBe(15);
+  });
+
+  it("keeps the last valid poison-counter threshold when the field is left empty", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    expect(await screen.findByLabelText("Starting Life")).toBeInTheDocument();
+    const poisonInput = screen.getByLabelText("Poison Counters");
+    await user.clear(poisonInput);
+
+    await user.click(screen.getByRole("button", { name: /Start Match/i }));
+
+    const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
+    expect(meta.formatConfig.poison_counter_threshold).toBe(10);
+  });
+
+  // The engine field is a `u8`: 255 is the largest threshold it can hold.
+  it("hands a poison-counter threshold of 255 to the game it starts", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    const poisonInput = await screen.findByLabelText("Poison Counters");
+    await user.clear(poisonInput);
+    await user.type(poisonInput, "255");
+
+    await user.click(screen.getByRole("button", { name: /Start Match/i }));
+
+    const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
+    expect(meta.formatConfig.poison_counter_threshold).toBe(255);
+  });
+
+  it("does not commit a poison-counter threshold past the engine's u8 range", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    const poisonInput = await screen.findByLabelText("Poison Counters");
+    await user.clear(poisonInput);
+    await user.type(poisonInput, "256");
+
+    await user.click(screen.getByRole("button", { name: /Start Match/i }));
+
+    // Reach guard: 25 is the in-range reading committed by the keystroke
+    // before the final "6", so the edit reached the config and only 256 was
+    // refused (an untouched field would still read the default 10).
+    const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
+    expect(meta.formatConfig.poison_counter_threshold).toBe(25);
+  });
+});

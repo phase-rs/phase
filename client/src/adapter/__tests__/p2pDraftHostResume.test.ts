@@ -16,6 +16,7 @@ vi.mock("../draft-adapter", async (importOriginal) => {
 import { P2PDraftHost } from "../p2p-draft-host";
 import { EMPTY_DRAFT_POOL_GROUPS } from "../draft-adapter";
 import type { DraftPlayerView, PairingView } from "../draft-adapter";
+import type { DraftMatchBinding } from "../../network/draftProtocol";
 import type { PersistedDraftHostSession } from "../../services/draftPersistence";
 
 function pairing(round: number, table: number): PairingView {
@@ -43,15 +44,24 @@ function viewFor(
   return {
     status,
     kind: "Premier",
+    launch_capability: "None",
+    distribution: "PickAndPass",
+    commanders_required: 0,
     current_pack_number: 3,
     pick_number: 14,
     pass_direction: "Left",
     current_pack: null,
+    required_pick_count: 0,
+    pick_selection_mode: "Direct",
     pool: [],
     draft_effects: [],
     pool_groups: EMPTY_DRAFT_POOL_GROUPS,
     seats: [],
     cards_per_pack: 14,
+    pack_sizes: [14, 14, 14],
+    pack_set_codes: ["TST", "TST", "TST"],
+    pack_pick_steps: [14, 14, 14],
+    pick_steps_per_pack: 14,
     pack_count: 3,
     min_deck_size: 40,
     addable_cards: [],
@@ -88,7 +98,7 @@ function persistedSession(): PersistedDraftHostSession {
     draftStarted: true,
     draftCode: "draft-12345678",
     draftSessionJson: '{"status":"Pairing"}',
-    poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+    poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
   };
 }
 
@@ -96,7 +106,7 @@ function makeHost(restoredView: DraftPlayerView) {
   const host = new P2PDraftHost(
     { id: "host" } as never,
     () => () => {},
-    { type: "Set", data: { set_pool_json: "{}" } } as never,
+    { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
     "Premier",
     8,
     "Host",
@@ -186,5 +196,53 @@ describe("P2PDraftHost.restoreFromPersisted — pairing-window recovery", () => 
 
     expect(adapter.importSession).toHaveBeenCalled();
     expect(adapter.generatePairings).not.toHaveBeenCalled();
+  });
+
+  it("rotates only an active legacy bot authority to its human participant", async () => {
+    const activePairing = {
+      ...pairing(1, 0),
+      match_id: "bot-active",
+      seat_a: 1,
+      name_a: "Bot",
+      seat_b: 2,
+      name_b: "Human",
+      status: "InProgress" as const,
+    };
+    const restoredView = viewFor("MatchInProgress", 1, [activePairing]);
+    restoredView.seats = [
+      { seat_index: 1, is_bot: true },
+      { seat_index: 2, is_bot: false },
+    ] as DraftPlayerView["seats"];
+    const { host } = makeHost(restoredView);
+    const legacyBinding: DraftMatchBinding = {
+      podId: "draft-12345678",
+      matchId: "bot-active",
+      round: 1,
+      sessionKey: "session",
+      lease: "lease",
+      nonce: "nonce",
+      revision: 0,
+      matchAuthoritySeat: 1,
+    };
+    const futureBinding: DraftMatchBinding = {
+      ...legacyBinding,
+      matchId: "future-match",
+      round: 2,
+      matchAuthoritySeat: 1,
+    };
+
+    await host.restoreFromPersisted({
+      ...persistedSession(),
+      matchBindings: [legacyBinding, futureBinding],
+    });
+
+    const bindings = (host as unknown as {
+      matchBindings: Map<string, DraftMatchBinding>;
+      dispatchMatchLaunch: ReturnType<typeof vi.fn>;
+    }).matchBindings;
+    expect(bindings.get("bot-active")).toEqual({ ...legacyBinding, matchAuthoritySeat: 2 });
+    expect(bindings.get("future-match")).toEqual(futureBinding);
+    expect((host as unknown as { dispatchMatchLaunch: ReturnType<typeof vi.fn> }).dispatchMatchLaunch)
+      .not.toHaveBeenCalled();
   });
 });

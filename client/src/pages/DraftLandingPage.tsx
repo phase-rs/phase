@@ -4,8 +4,10 @@ import type { TFunction } from "i18next";
 import { useNavigate } from "react-router";
 
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import { COMMANDER_DRAFT_ENTRY, WINSTON_DRAFT_ENTRY, draftKindLabels } from "../components/draft/draftKind";
 import { MenuShell } from "../components/menu/MenuShell";
 import { MenuActionTile } from "../components/menu/MenuActionTile";
+import { PodIcon } from "../components/draft/PodIcon";
 import {
   loadActiveQuickDraft,
   type ActiveQuickDraftMeta,
@@ -17,6 +19,7 @@ import {
   type ActiveDraftPodMeta,
 } from "../services/draftPersistence";
 import { loadGame } from "../services/gamePersistence";
+import { useEffectiveOffline } from "../stores/connectivityStore";
 
 const SET_LABELS: Record<string, string> = {
   otj: "Outlaws of Thunder Junction",
@@ -47,6 +50,17 @@ function formatSetLabel(code: string, name?: string): string {
   return name ?? SET_LABELS[code.toLowerCase()] ?? code.toUpperCase();
 }
 
+/**
+ * The set whose icon stands for a draft.
+ *
+ * A multi-set draft's `setCode` joins its distinct sets (`"ISD+DKA+AVR"`,
+ * matching the engine's own `DraftSource::set_code` label), which resolves to
+ * no icon of its own; the first set it opened represents it.
+ */
+function primarySetCode(code: string): string {
+  return code.split("+")[0] ?? code;
+}
+
 function formatRelativeTime(timestamp: number, t: TFunction<"draft">): string {
   const seconds = Math.floor((Date.now() - timestamp) / 1000);
   if (seconds < 60) return t("relativeTime.justNow");
@@ -63,6 +77,7 @@ export function DraftLandingPage() {
   // rather than duplicating the string into draft locales.
   const { t: tMenu } = useTranslation("menu");
   const navigate = useNavigate();
+  const effectiveOffline = useEffectiveOffline();
   const [activeDraft, setActiveDraft] = useState<ActiveQuickDraftMeta | null>(null);
   const [activePod, setActivePod] = useState<ActiveDraftPodMeta | null>(null);
   const [activeGuestPod, setActiveGuestPod] = useState<ActiveDraftGuestMeta | null>(null);
@@ -130,10 +145,37 @@ export function DraftLandingPage() {
                 tone="jade"
                 motif="network"
                 title={t("landing.podDraft.title")}
-                description={t("landing.podDraft.description")}
+                description={effectiveOffline
+                  ? t("offline.startUnavailable")
+                  : t("landing.podDraft.description")}
                 enterLabel={tMenu("home.dashboard.enter")}
                 renderIcon={(cls) => <PodIcon className={cls} />}
                 onClick={() => navigate("/draft-pod")}
+                disabled={effectiveOffline}
+              />
+              <MenuActionTile
+                tone="arcane"
+                motif="network"
+                title={t("landing.commanderDraft.title")}
+                description={effectiveOffline
+                  ? t("offline.startUnavailable")
+                  : t("landing.commanderDraft.description")}
+                enterLabel={tMenu("home.dashboard.enter")}
+                renderIcon={(cls) => <CrownIcon className={cls} />}
+                onClick={() => navigate(`/draft-pod?kind=${COMMANDER_DRAFT_ENTRY}`)}
+                disabled={effectiveOffline}
+              />
+              <MenuActionTile
+                tone="ember"
+                motif="network"
+                title={t("landing.winstonDraft.title")}
+                description={effectiveOffline
+                  ? t("offline.startUnavailable")
+                  : t("landing.winstonDraft.description")}
+                enterLabel={tMenu("home.dashboard.enter")}
+                renderIcon={(cls) => <PilesIcon className={cls} />}
+                onClick={() => navigate(`/draft-pod?kind=${WINSTON_DRAFT_ENTRY}`)}
+                disabled={effectiveOffline}
               />
             </div>
           </div>
@@ -146,11 +188,18 @@ export function DraftLandingPage() {
 function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
   const { t } = useTranslation("draft");
   const navigate = useNavigate();
+  // `landing.podLabel` interpolates the kind into a sentence, so a raw enum reads
+  // "CommanderDraft Pod". `draftKindLabels` is the single authority for that
+  // rendering, shared with the pod lobby header.
+  const kindLabel = draftKindLabels(t);
 
   function getPhaseLabel(): string {
     switch (meta.phase) {
       case "lobby": return t("podPhase.lobby");
       case "drafting": return t("podPhase.drafting");
+      // Review remains on the existing drafting workspace, so use its existing
+      // localized label rather than adding a locale surface here.
+      case "review": return t("podPhase.drafting");
       case "deckbuilding": return t("podPhase.deckbuilding");
       case "pairing": return t("podPhase.pairing");
       case "matchInProgress": return t("podPhase.matchInProgress");
@@ -174,7 +223,7 @@ function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
 
         <div className="min-w-0 flex-1">
           <div className="text-lg font-semibold text-white">
-            {t("landing.podLabel", { kind: meta.kind })}
+            {t("landing.podLabel", { kind: kindLabel[meta.kind] })}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-white/45">
             <span className="rounded-md border border-cyan-300/20 bg-cyan-400/10 px-2 py-0.5 text-xs font-medium text-cyan-100">
@@ -242,7 +291,7 @@ function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
     fetch(__SCRYFALL_SETS_URL__)
       .then((res) => (res.ok ? res.json() : null))
       .then((data: Record<string, { icon_svg_uri?: string }> | null) => {
-        const icon = data?.[meta.setCode.toLowerCase()]?.icon_svg_uri;
+        const icon = data?.[primarySetCode(meta.setCode).toLowerCase()]?.icon_svg_uri;
         if (icon) setSetIcon(icon);
       })
       .catch(() => {});
@@ -350,6 +399,14 @@ function BotIcon({ className = "h-6 w-6" }: { className?: string }) {
   );
 }
 
+function CrownIcon({ className = "h-6 w-6" }: { className?: string }) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
+      <path d="M5 18h14l1.6-9.5-4.6 3.2L12 4.5 7.99 11.7 3.4 8.5 5 18Zm0 1.5h14V21H5v-1.5Z" />
+    </svg>
+  );
+}
+
 function CubeIcon({ className = "h-6 w-6" }: { className?: string }) {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
@@ -358,18 +415,19 @@ function CubeIcon({ className = "h-6 w-6" }: { className?: string }) {
   );
 }
 
-function PackIcon({ className = "h-6 w-6" }: { className?: string }) {
+/** Three piles side by side — the shape of a Winston table. */
+function PilesIcon({ className = "h-6 w-6" }: { className?: string }) {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
-      <path d="M5.25 2.5h13.5l1.75 19H3.5l1.75-19ZM7.1 4.5 5.72 19.5h12.56L16.9 4.5H7.1Zm4.9 2.25 2.75 3.75L12 14.25 9.25 10.5 12 6.75Z" />
+      <path d="M2.5 7.5h5v11h-5v-11Zm1.5 1.5v8h2v-8H4Zm5.5-3.5h5v14.5h-5V5.5ZM11 7v11.5h2V7h-2Zm5.5.5h5v11h-5v-11ZM18 9v8h2V9h-2Z" />
     </svg>
   );
 }
 
-function PodIcon({ className = "h-6 w-6" }: { className?: string }) {
+function PackIcon({ className = "h-6 w-6" }: { className?: string }) {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
-      <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5s-3 1.34-3 3 1.34 3 3 3Zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5 5 6.34 5 8s1.34 3 3 3Zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5Zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5Z" />
+      <path d="M5.25 2.5h13.5l1.75 19H3.5l1.75-19ZM7.1 4.5 5.72 19.5h12.56L16.9 4.5H7.1Zm4.9 2.25 2.75 3.75L12 14.25 9.25 10.5 12 6.75Z" />
     </svg>
   );
 }

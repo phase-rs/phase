@@ -173,11 +173,43 @@ pub enum OpponentModel {
     SampledReply,
 }
 
+/// How the heuristic combat AI gates a marginal attacker (see
+/// [`crate::combat_ai`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CombatEvModel {
+    /// The historical 3-way boolean gate (`free_damage` / `favorable_trade` /
+    /// `lifelink_bonus` per objective). Un-animated man-lands are invisible and
+    /// there is no numeric downside weighting. Used by VeryEasy / Easy.
+    Basic,
+    /// Numeric `expected_damage - P(bad_block) * value_lost` gate that also
+    /// treats an animatable man-land as a latent blocker (CR 509.1a), folds in
+    /// the defender's open-mana combat-trick risk, and raises the bar for
+    /// marginal attacks while ahead and off-clock. Used by Medium and up.
+    DownsideWeighted,
+}
+
 #[derive(Debug, Clone)]
 pub struct AiProfile {
     pub risk_tolerance: f64,
     pub interaction_patience: f64,
     pub stabilize_bias: f64,
+    /// Combat marginal-attacker gate. See [`CombatEvModel`].
+    pub combat_ev_model: CombatEvModel,
+    /// `DownsideWeighted` only: credence that a detected animatable man-land the
+    /// defender has open mana for actually blocks (it costs them mana + the
+    /// land). Scales that block's contribution to `P(bad_block)`. ~0.6.
+    pub latent_blocker_credence: f64,
+    /// `DownsideWeighted` only: multiplier applied to an attacker's value-at-risk
+    /// when the AI has zero untapped mana and therefore cannot protect it after
+    /// blocks. ~1.3.
+    pub no_follow_up_downside_mult: f64,
+    /// `DownsideWeighted` only: EV a `PreserveAdvantage` attack must clear when
+    /// the AI is ahead and under no clock — marginal "because I can" attacks are
+    /// held back below this bar. In creature-value units (~0.75).
+    pub offclock_attack_ev_floor: f64,
+    /// `DownsideWeighted` only: scale on the defender's open-mana combat-trick /
+    /// burn probability before it feeds `P(bad_block)`. 1.0 = as-modeled.
+    pub trick_risk_scale: f64,
 }
 
 impl AiProfile {
@@ -192,6 +224,9 @@ impl AiProfile {
             interaction_patience: (self.interaction_patience * strategy.interaction_patience_mult)
                 .clamp(0.1, 1.0),
             stabilize_bias: (self.stabilize_bias * strategy.stabilize_bias_mult).clamp(0.5, 2.0),
+            // Combat-EV knobs are difficulty-scoped, not archetype-modulated —
+            // carry them through unchanged.
+            ..self.clone()
         }
     }
 }
@@ -202,6 +237,13 @@ impl Default for AiProfile {
             risk_tolerance: 0.6,
             interaction_patience: 0.75,
             stabilize_bias: 1.0,
+            // Preserve the historical gate for the raw wrapper and tests;
+            // difficulty presets opt Medium+ into `DownsideWeighted`.
+            combat_ev_model: CombatEvModel::Basic,
+            latent_blocker_credence: 0.6,
+            no_follow_up_downside_mult: 1.3,
+            offclock_attack_ev_floor: 0.75,
+            trick_risk_scale: 1.0,
         }
     }
 }
@@ -229,6 +271,14 @@ impl Default for SearchConfig {
 /// All values are `f64` for compatibility with the CMA-ES training pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyPenalties {
+    /// Reward for activating a random-creature mana sink (the Momir's Madness
+    /// emblem) on a turn its schedule opens. Without a positive score here the
+    /// activation loses to `PassPriority` outright: the effect's polarity is
+    /// `Contextual`, so no other policy has an opinion on it.
+    pub momir_curve_activation: f64,
+    /// Reward for choosing the scheduled X at the sink's `{X}` prompt, so the
+    /// AI spends its turn's mana rather than taking the search's default.
+    pub momir_curve_x_on_schedule: f64,
     /// Penalty for targeting a creature already doomed by pending stack effects.
     pub redundant_removal_penalty: f64,
     /// Penalty for targeting a creature with pending (but non-lethal) damage.
@@ -329,14 +379,15 @@ pub struct PolicyPenalties {
     /// combo line that is reachable next turn. Consumed by `ComboLinePolicy`.
     #[serde(default = "default_combo_progress_next_turn_bonus")]
     pub combo_progress_next_turn_bonus: f64,
-    /// CR 701.6a: Penalty for casting a spell whose mana value matches the
-    /// charge-counter count on a Chalice-of-the-Void-class permanent the AI
-    /// controls — the spell is countered for free, pure tempo and card loss.
-    /// Consumed by `ChaliceAvoidancePolicy`.
+    /// CR 701.6a: Penalty for casting a spell that a Chalice-class cast trap
+    /// the AI controls would counter — mana value equal to the charge-counter
+    /// count (Chalice of the Void) or no mana spent (Vexing Bauble). The spell
+    /// is countered for free, pure tempo and card loss. Consumed by
+    /// `ChaliceAvoidancePolicy`.
     #[serde(default = "default_own_chalice_counter_penalty")]
     pub own_chalice_counter_penalty: f64,
     /// CR 701.6a: Penalty for casting a spell that an opponent's Chalice-class
-    /// permanent would counter. Lighter than the own-Chalice penalty: the AI
+    /// cast trap (counter-count or no-mana-spent gate) would counter. Lighter than the own-Chalice penalty: the AI
     /// may still want the spell on the stack (e.g. to bait, or when the spell's
     /// value clears the loss), so this demotes rather than vetoes.
     #[serde(default = "default_opponent_chalice_counter_penalty")]
@@ -553,11 +604,78 @@ pub struct PolicyPenalties {
     /// you discard" engine (preference band, per engine).
     #[serde(default = "default_discard_payoff_bonus")]
     pub discard_payoff_bonus: f64,
+    /// CR 205.3m: card-equivalent value of ONE creature-type member the AI
+    /// already has on its battlefield, in its command zone, or in hand when the
+    /// engine asks it to choose a creature type. Half a card per member — a
+    /// lord/anthem creature-type choice pays off once per body it applies to.
+    /// Consumed by `CreatureTypeChoicePolicy`, which caps the counted members.
+    #[serde(default = "default_creature_type_presence_unit")]
+    pub creature_type_presence_unit: f64,
+    /// CR 601.2a + CR 601.2b: card-equivalent cost of a finality counter the announced permission puts on the permanent (Leonardo, Sewer Samurai). Consumed by
+    /// `GraveyardAuthorityPolicy`, which compares announcements of one method.
+    #[serde(default = "default_graveyard_authority_finality_cost")]
+    pub graveyard_authority_finality_cost: f64,
+    /// CR 601.2a + CR 601.2b: card-equivalent cost of each other graveyard card the announced permission's per-turn slot could still admit this turn. Consumed by
+    /// `GraveyardAuthorityPolicy`, which compares announcements of one method.
+    #[serde(default = "default_graveyard_authority_slot_per_demand")]
+    pub graveyard_authority_slot_per_demand: f64,
+    /// CR 601.2a + CR 601.2b: card-equivalent cost of the most a spent per-turn slot costs, however many cards it could admit. Consumed by
+    /// `GraveyardAuthorityPolicy`, which compares announcements of one method.
+    #[serde(default = "default_graveyard_authority_slot_cap")]
+    pub graveyard_authority_slot_cap: f64,
+    /// CR 601.2a + CR 601.2b: card-equivalent cost of a spent per-turn slot that could admit no other graveyard card this turn. Consumed by
+    /// `GraveyardAuthorityPolicy`, which compares announcements of one method.
+    #[serde(default = "default_graveyard_authority_idle_slot")]
+    pub graveyard_authority_idle_slot: f64,
+    /// CR 601.2a + CR 601.2b: card-equivalent cost of a destination rider the announced permission adds (the card goes elsewhere than the graveyard). Consumed by
+    /// `GraveyardAuthorityPolicy`, which compares announcements of one method.
+    #[serde(default = "default_graveyard_authority_destination")]
+    pub graveyard_authority_destination: f64,
+    /// CR 205.3m: tiebreak toward the deck's detected dominant tribe when a
+    /// creature type is chosen. Deliberately STRICTLY less than
+    /// `creature_type_presence_unit`, so a type with one live member always
+    /// outranks the deck's nominal tribe — the dominant tribe only separates
+    /// options with equal presence. Consumed by `CreatureTypeChoicePolicy`.
+    #[serde(default = "default_creature_type_tribe_bonus")]
+    pub creature_type_tribe_bonus: f64,
+    /// Card-equivalent value of ONE colored pip the AI's near-term
+    /// hand demands, that its battlefield lands cannot yet produce, and that the
+    /// land being played does produce. Counted per unmet color and capped by the
+    /// policy, so a dual covering two open colors is worth twice a basic that
+    /// covers one. Consumed by `LandSequencingPolicy`.
+    #[serde(default = "default_land_color_demand_unit")]
+    pub land_color_demand_unit: f64,
+    /// Card-equivalent cost of ONE tempo rider on the
+    /// land being played — an unconditional "enters tapped" replacement, or an
+    /// ETB "sacrifice it unless you pay" trigger — charged only while an
+    /// alternative land with neither rider is also playable this turn. A land
+    /// carrying both riders (Gateway Plaza) is charged twice. Consumed by
+    /// `LandSequencingPolicy`, which subtracts this magnitude.
+    #[serde(default = "default_land_tempo_rider_penalty")]
+    pub land_tempo_rider_penalty: f64,
+    /// Pay-life COUNT at or above which a self-cost activation whose payoff is
+    /// certified trivial is vetoed outright, whatever the priced cost works out
+    /// to. Consumed by `SelfCostValuePolicy`.
+    ///
+    /// A count, not a rate, and deliberately not expressed in the same units as
+    /// `self_cost_pay_life_per_point`: that scalar prices life for the
+    /// *comparison* against a payoff, while this one bounds a branch that has no
+    /// payoff to compare against. See `self_cost_value.rs`'s module docs for why
+    /// the bound has to be stated in the resource the player actually spends.
+    #[serde(default = "default_self_cost_material_life")]
+    pub self_cost_material_life: i32,
 }
 
 impl Default for PolicyPenalties {
     fn default() -> Self {
         Self {
+            // Strong band: the sink is the format's only source of board
+            // presence, so on a scheduled turn it is the play. Sized to clear
+            // `PassPriority` decisively without eclipsing a lethal attack.
+            momir_curve_activation: 3.0,
+            // Strong band: picking the scheduled X is the whole decision — a
+            // smaller creature is a strictly worse use of the same card.
+            momir_curve_x_on_schedule: 2.5,
             redundant_removal_penalty: -6.0,
             redundant_damage_penalty: -4.0,
             gift_card_penalty: -3.0,
@@ -633,6 +751,16 @@ impl Default for PolicyPenalties {
             cost_reduction_deploy_bonus: default_cost_reduction_deploy_bonus(),
             cost_reduction_defer_penalty: default_cost_reduction_defer_penalty(),
             discard_payoff_bonus: default_discard_payoff_bonus(),
+            creature_type_presence_unit: default_creature_type_presence_unit(),
+            graveyard_authority_finality_cost: default_graveyard_authority_finality_cost(),
+            graveyard_authority_slot_per_demand: default_graveyard_authority_slot_per_demand(),
+            graveyard_authority_slot_cap: default_graveyard_authority_slot_cap(),
+            graveyard_authority_idle_slot: default_graveyard_authority_idle_slot(),
+            graveyard_authority_destination: default_graveyard_authority_destination(),
+            creature_type_tribe_bonus: default_creature_type_tribe_bonus(),
+            land_color_demand_unit: default_land_color_demand_unit(),
+            land_tempo_rider_penalty: default_land_tempo_rider_penalty(),
+            self_cost_material_life: default_self_cost_material_life(),
         }
     }
 }
@@ -642,6 +770,86 @@ impl Default for PolicyPenalties {
 /// `policy_penalties` section directly into this struct).
 fn default_graveyard_types_progress() -> f64 {
     2.5
+}
+
+/// CR 601.2a + CR 601.2b. Shared by `Default` and `#[serde(default)]` so a
+/// tuning artifact written before this field existed still deserializes.
+fn default_graveyard_authority_finality_cost() -> f64 {
+    0.6
+}
+
+/// CR 601.2a + CR 601.2b. Shared by `Default` and `#[serde(default)]` so a
+/// tuning artifact written before this field existed still deserializes.
+fn default_graveyard_authority_slot_per_demand() -> f64 {
+    0.4
+}
+
+/// CR 601.2a + CR 601.2b. Shared by `Default` and `#[serde(default)]` so a
+/// tuning artifact written before this field existed still deserializes.
+fn default_graveyard_authority_slot_cap() -> f64 {
+    1.5
+}
+
+/// CR 601.2a + CR 601.2b. Shared by `Default` and `#[serde(default)]` so a
+/// tuning artifact written before this field existed still deserializes.
+fn default_graveyard_authority_idle_slot() -> f64 {
+    0.05
+}
+
+/// CR 601.2a + CR 601.2b. Shared by `Default` and `#[serde(default)]` so a
+/// tuning artifact written before this field existed still deserializes.
+fn default_graveyard_authority_destination() -> f64 {
+    0.3
+}
+
+/// CR 205.3m. Half a card per creature-type member. Shared by `Default` and
+/// `#[serde(default)]` so a tuning artifact written before this field existed
+/// still deserializes (`ai_tune` reads `policy_penalties` directly into this
+/// struct).
+fn default_creature_type_presence_unit() -> f64 {
+    0.5
+}
+
+/// CR 205.3m. Strictly below `default_creature_type_presence_unit`, which is
+/// what makes the dominant tribe a tiebreak rather than an override. Shared by
+/// `Default` and `#[serde(default)]` for the same artifact-compatibility reason.
+fn default_creature_type_tribe_bonus() -> f64 {
+    0.25
+}
+
+/// Half a card per unmet color the land covers, so the capped
+/// two-color maximum (1.0) stays inside the preference band and never outranks
+/// the tempo riders it competes with. Shared by `Default` and
+/// `#[serde(default)]` so a tuning artifact written before this field existed
+/// still deserializes (`ai_tune` reads `policy_penalties` directly into this
+/// struct).
+fn default_land_color_demand_unit() -> f64 {
+    0.5
+}
+
+/// A positive MAGNITUDE the policy subtracts, matching
+/// the module's `BOUNCE_DEPRIORITIZE` convention. Seeded at one card: entering
+/// tapped costs a whole turn of that land's mana, which is worth at least the
+/// capped color-fixing bonus above (so a tapped dual never out-scores an
+/// untapped basic on fixing alone — at the two-color cap the two cancel and the
+/// other terms decide) and strictly less than the bounce-land deprioritization
+/// (1.5), whose downside is a whole land drop. The ordering is pinned by
+/// `land_sequencing::tests::land_play_magnitudes_keep_their_documented_ordering`.
+/// Shared by `Default` and `#[serde(default)]` for the same
+/// artifact-compatibility reason.
+fn default_land_tempo_rider_penalty() -> f64 {
+    1.0
+}
+
+/// Two life. One life is inside the noise a repeatable ability may legitimately
+/// be worth exploring — `cheap_pay_life_trivial_is_marginal` keeps that on the
+/// graduated branch — while two life for a payoff this module has certified
+/// trivial is never right, and Adanto Vanguard's 4 is well clear of it. Shared
+/// by `Default` and `#[serde(default)]` so a tuning artifact written before this
+/// field existed still deserializes (`ai_tune` reads `policy_penalties` directly
+/// into this struct).
+fn default_self_cost_material_life() -> i32 {
+    2
 }
 
 fn default_wasted_cast_penalty() -> f64 {
@@ -742,19 +950,19 @@ fn default_lethality_tapout_penalty() -> f64 {
 /// rather than by this gap, which a CMA-ES run could close at any time; this
 /// number is a within-class weight.
 ///
-/// **CR 305.4 — the rate-limit rationale above is FALSE on one of this
-/// penalty's call sites, and that is a known mispricing, not an oversight.**
-/// CR 305.4 (`docs/MagicCompRules.txt:1700`): "Effects may also allow players to
-/// 'put' lands onto the battlefield. This isn't the same as 'playing a land' and
-/// doesn't count as a land played during the current turn." A fetchland *puts*
-/// its replacement onto the battlefield, so sacrificing it consumes no land
-/// drop and the CR 305.2 rationale does not apply. `self_cost::sacrifice_leaf_cost`
-/// short-circuits on `TargetFilter::SelfRef` and charges this full penalty to a
-/// land that sacrifices itself, so the AI under-activates fetchland-shaped
-/// abilities. Discounting that path is an unmeasured behaviour change and is
-/// deferred, NOT blocked on missing infrastructure: `policies::fetch_land_patience`
-/// (which cites CR 305.4 for the same reason) already carries the predicates —
-/// see the note at `self_cost::sacrifice_leaf_cost`.
+/// **CR 305.4 — the rate-limit rationale above is FALSE on one of this penalty's
+/// call sites, and that is a known mispricing, not an oversight.** CR 305.4:
+/// "Effects may also allow players to 'put' lands onto the battlefield. This isn't
+/// the same as 'playing a land' and doesn't count as a land played during the
+/// current turn." A fetchland *puts* its replacement onto the battlefield, so
+/// sacrificing it consumes no land drop and the CR 305.2 rationale does not apply.
+/// `self_cost::sacrifice_leaf_cost` short-circuits on `TargetFilter::SelfRef` and
+/// charges this full penalty to a land that sacrifices itself, so the AI
+/// under-activates fetchland-shaped abilities. Discounting that path is an
+/// unmeasured behaviour change and is deferred, NOT blocked on missing
+/// infrastructure: `policies::fetch_land_patience` (which cites CR 305.4 for the
+/// same reason) already carries the predicates — see the note at
+/// `self_cost::sacrifice_leaf_cost`.
 fn default_sacrifice_land_penalty() -> f64 {
     4.5
 }
@@ -918,6 +1126,18 @@ pub const ACTIVE_POLICY_PENALTY_FIELDS: &[&str] = &[
 /// vector yet.
 pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
+        "momir_curve_activation",
+        "Momir's Madness schedule — the format has no ai-gate matchup coverage \
+         (ai-duel is Commander-only), so the value is set from the format's own \
+         logic rather than measured play and must not be handed to CMA-ES until \
+         a Momir matchup exists to calibrate against.",
+    ),
+    (
+        "momir_curve_x_on_schedule",
+        "Momir's Madness schedule — same reason as momir_curve_activation: no \
+         Momir matchup exists in the ai-gate suite to calibrate against.",
+    ),
+    (
         "gift_extra_turn_penalty",
         "CR 702.174g extra-turn gift downside — one shipped card (Perch Protection); \
          seeded at the largest value the downside policy's band admits without its \
@@ -1077,6 +1297,46 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
         "loop_shortcut_winning_declare_bonus",
         "LoopShortcutPolicy band selector for a game-deciding CR 104.2a crown; deliberately kept OUT of the CMA-ES penalties vector — win-rate gradients from games that never reach a WaitingFor::LoopShortcut node would tune a win-detector into noise",
     ),
+    (
+        "graveyard_authority_finality_cost",
+        "GraveyardAuthorityPolicy announcement weight; no paired-seed calibration yet: the duel suite rarely raises a multi-permission graveyard menu, so ai-gate carries little gradient for it",
+    ),
+    (
+        "graveyard_authority_slot_per_demand",
+        "GraveyardAuthorityPolicy announcement weight; no paired-seed calibration yet: the duel suite rarely raises a multi-permission graveyard menu, so ai-gate carries little gradient for it",
+    ),
+    (
+        "graveyard_authority_slot_cap",
+        "GraveyardAuthorityPolicy announcement weight; no paired-seed calibration yet: the duel suite rarely raises a multi-permission graveyard menu, so ai-gate carries little gradient for it",
+    ),
+    (
+        "graveyard_authority_idle_slot",
+        "GraveyardAuthorityPolicy announcement weight; no paired-seed calibration yet: the duel suite rarely raises a multi-permission graveyard menu, so ai-gate carries little gradient for it",
+    ),
+    (
+        "graveyard_authority_destination",
+        "GraveyardAuthorityPolicy announcement weight; no paired-seed calibration yet: the duel suite rarely raises a multi-permission graveyard menu, so ai-gate carries little gradient for it",
+    ),
+    (
+        "creature_type_presence_unit",
+        "CreatureTypeChoicePolicy per-member census weight; no paired-seed calibration — the duel suite never raises a creature-type prompt, so ai-gate carries no gradient for it",
+    ),
+    (
+        "creature_type_tribe_bonus",
+        "CreatureTypeChoicePolicy dominant-tribe tiebreak; must stay strictly below creature_type_presence_unit, and no paired-seed calibration exists — the duel suite never raises a creature-type prompt",
+    ),
+    (
+        "land_color_demand_unit",
+        "LandSequencingPolicy per-unmet-color fixing weight; land sequencing moves duel trajectories, so promotion needs a paired-seed ai-gate run read for land-count curves rather than a win-rate delta alone",
+    ),
+    (
+        "land_tempo_rider_penalty",
+        "LandSequencingPolicy enters-tapped / unless-pay rider cost; must stay strictly above land_color_demand_unit's capped maximum and strictly below the module's BOUNCE_DEPRIORITIZE, and no paired-seed ai-gate calibration exists for it yet",
+    ),
+    (
+        "self_cost_material_life",
+        "veto threshold, not a rate — SelfCostValuePolicy's trivial-payoff materiality bound is a life COUNT in i32, so the continuous [-15.0, 15.0] penalties vector CMA-ES optimizes cannot carry it at all; promotion would need a discrete search, not a paired-seed rerun",
+    ),
 ];
 
 /// Full AI configuration combining difficulty, search, and evaluation settings.
@@ -1085,6 +1345,9 @@ pub struct AiConfig {
     pub difficulty: AiDifficulty,
     pub temperature: f64,
     pub profile: AiProfile,
+    /// Whether the AI plans multi-action plays within a turn before scoring
+    /// single candidates — today, the certified lethal burn-line search
+    /// (`crate::reach`). Off only for the near-random `VeryEasy` preset.
     pub play_lookahead: bool,
     pub combat_lookahead: bool,
     pub search: SearchConfig,
@@ -1115,6 +1378,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 risk_tolerance: 0.9,
                 interaction_patience: 0.2,
                 stabilize_bias: 0.8,
+                ..AiProfile::default()
             },
             false,
             false,
@@ -1139,6 +1403,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 risk_tolerance: 0.8,
                 interaction_patience: 0.4,
                 stabilize_bias: 0.9,
+                ..AiProfile::default()
             },
             true,
             false,
@@ -1163,6 +1428,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 risk_tolerance: 0.65,
                 interaction_patience: 0.7,
                 stabilize_bias: 1.0,
+                combat_ev_model: CombatEvModel::DownsideWeighted,
+                ..AiProfile::default()
             },
             true,
             false,
@@ -1192,6 +1459,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 risk_tolerance: 0.55,
                 interaction_patience: 0.9,
                 stabilize_bias: 1.1,
+                combat_ev_model: CombatEvModel::DownsideWeighted,
+                ..AiProfile::default()
             },
             true,
             false,
@@ -1219,8 +1488,15 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
             0.3,
             AiProfile {
                 risk_tolerance: 0.45,
-                interaction_patience: 1.0,
+                // NOT 1.0, and the difference is load-bearing: the wasted-mana
+                // penalty in `policies/mana_efficiency.rs` scales with
+                // `1.0 - interaction_patience`, so a preset that ships exactly
+                // 1.0 switches that policy off for itself. See
+                // `no_preset_disables_the_wasted_mana_penalty`.
+                interaction_patience: 0.7,
                 stabilize_bias: 1.2,
+                combat_ev_model: CombatEvModel::DownsideWeighted,
+                ..AiProfile::default()
             },
             true,
             false,
@@ -1248,8 +1524,11 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
             0.2,
             AiProfile {
                 risk_tolerance: 0.4,
-                interaction_patience: 1.0,
+                // See the note on VeryHard: 1.0 zeroes the wasted-mana penalty.
+                interaction_patience: 0.7,
                 stabilize_bias: 1.2,
+                combat_ev_model: CombatEvModel::DownsideWeighted,
+                ..AiProfile::default()
             },
             true, // play_lookahead
             true, // combat_lookahead — cEDH is the first tier to enable this
@@ -1365,6 +1644,49 @@ pub fn create_config_for_players(
 
 #[cfg(test)]
 mod tests {
+    /// No shipped preset may set `interaction_patience` to 1.0.
+    ///
+    /// The wasted-mana penalty in `policies::mana_efficiency` scales with
+    /// `1.0 - interaction_patience`. That contract is deliberate — a caller that
+    /// asks for maximum patience is asking for the penalty to go away, and
+    /// `high_patience_reduces_penalty` pins it. The problem is a *preset* taking
+    /// that exit: with the factor at zero, passing the turn with every land
+    /// untapped scores exactly the same as passing with none, so nothing in the
+    /// score opposes holding up mana forever. `VeryHard` and `CEDH` shipped 1.0
+    /// and never committed a threat against a removal-dense opponent.
+    ///
+    /// Measured (v0.88.0, `Platform::Wasm`, blue control mirror, 30 paired games
+    /// per cell, `Medium` on the other seat), varying only this field on
+    /// `VeryHard`:
+    ///
+    /// | `interaction_patience` | creatures on board | record |
+    /// |---|---|---|
+    /// | 1.0 (old preset) | 0.3 | 7–23 |
+    /// | 0.7 | 0.6 | 10–20 |
+    /// | 0.4 | 0.6 | 10–20 |
+    /// | 0.2 | 0.6 | 10–20 |
+    ///
+    /// A step, not a curve: the penalty does not need to be large, it needs to
+    /// exist — it only breaks the tie between "cast the threat" and "pass". 0.7
+    /// is therefore the smallest departure that clears zero among the values
+    /// measured. For scale, in that same mirror `Easy` beat the old `VeryHard`
+    /// 25–5.
+    #[test]
+    fn no_preset_disables_the_wasted_mana_penalty() {
+        for difficulty in ACCEPTED_DIFFICULTY_LABELS
+            .iter()
+            .copied()
+            .map(AiDifficulty::from_label)
+        {
+            let config = create_config(difficulty, Platform::Native);
+            assert!(
+                config.profile.interaction_patience < 1.0,
+                "{difficulty:?} ships interaction_patience = {}, which zeroes the wasted-mana penalty",
+                config.profile.interaction_patience
+            );
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -1660,7 +1982,8 @@ mod tests {
         assert_eq!(config.difficulty, AiDifficulty::CEDH);
         assert_eq!(config.temperature, 0.2);
         assert_eq!(config.profile.risk_tolerance, 0.4);
-        assert_eq!(config.profile.interaction_patience, 1.0);
+        // 0.7, not 1.0: see `no_preset_disables_the_wasted_mana_penalty`.
+        assert_eq!(config.profile.interaction_patience, 0.7);
         assert_eq!(config.profile.stabilize_bias, 1.2);
         assert!(config.play_lookahead);
         assert!(config.combat_lookahead);
@@ -1871,6 +2194,32 @@ mod tests {
         assert_eq!(
             PolicyPenalties::default().devotion_pip_progress,
             default_devotion_pip_progress(),
+            "Default and serde must share one source of truth"
+        );
+    }
+
+    #[test]
+    fn policy_penalties_load_pre_self_cost_material_life_artifact() {
+        let mut artifact = serde_json::to_value(PolicyPenalties::default()).unwrap();
+        let object = artifact.as_object_mut().expect("serializes as object");
+        object
+            .remove("self_cost_material_life")
+            .expect("field must be present before removal");
+        // A value CMA-ES could plausibly have tuned, to prove the round-trip
+        // reads the artifact rather than silently falling back to Default.
+        object.insert("wasted_cast_penalty".into(), serde_json::json!(-3.5));
+
+        let loaded: PolicyPenalties = serde_json::from_value(artifact)
+            .expect("a pre-self_cost_material_life artifact must still deserialize");
+        assert_eq!(loaded.wasted_cast_penalty, -3.5, "tuned value preserved");
+        assert_eq!(
+            loaded.self_cost_material_life,
+            default_self_cost_material_life(),
+            "absent field must fall back to the shared default"
+        );
+        assert_eq!(
+            PolicyPenalties::default().self_cost_material_life,
+            default_self_cost_material_life(),
             "Default and serde must share one source of truth"
         );
     }

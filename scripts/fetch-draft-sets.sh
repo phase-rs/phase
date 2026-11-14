@@ -47,8 +47,10 @@ else
     # FCA Through the Ages, PZA Source Material, …) and `eternal` (SPE) hold the
     # printings referenced by supplemental booster sheets, so the pool generator
     # can resolve `specialGuest`/`mysticalArchive`/etc. against them instead of
-    # producing short packs. `extract_set_pool` skips any set without a
-    # `booster.play` config, so an over-broad type here only costs download size.
+    # producing short packs. `extract_set_pool` skips any set with no draftable
+    # booster at all — it takes `booster.play`, else `booster.draft`, else
+    # `booster.default` (the pre-2007 expansions) — so an over-broad type here
+    # only costs download size.
     if command -v jq &>/dev/null; then
         # tr strips Windows jq's trailing \r, which otherwise malforms every
         # per-set download URL (see fetch-token-sets.sh).
@@ -60,7 +62,8 @@ else
             | .code' "$SET_LIST" 2>/dev/null | tr -d '\r')
     else
         # Fallback (jq absent — local dev only): grep/sed can't filter by type,
-        # so this downloads more than needed. `booster.play` is still the gate.
+        # so this downloads more than needed. The draftable-booster check in
+        # `extract_set_pool` is still the gate.
         CODES=()
         while IFS= read -r code; do
             CODES+=("$code")

@@ -46,6 +46,10 @@ export interface CloudSyncProvider {
   readonly id: SyncProviderId;
   /** True only when build-time config is present. False → UI hides cloud sync. */
   isConfigured(): boolean;
+  /** Start provider-owned background transport activity. */
+  resume(): Promise<void>;
+  /** Stop provider-owned background transport activity. */
+  pause(): Promise<void>;
   /** Rehydrate a persisted session silently on boot, if one exists. */
   restoreSession(): Promise<SyncIdentity | null>;
   /** Interactive OAuth sign-in; the SDK handles the redirect/popup dance. */
@@ -79,5 +83,5 @@ export interface CloudSyncProvider {
    * should trigger a sync when `newRevision !== lastSyncedRevision`. Returns
    * an unsubscribe function. May be a no-op for providers without realtime.
    */
-  subscribe(onChange: (newRevision: number) => void): () => void;
+  subscribe(onChange: (newRevision: number) => void): () => Promise<void>;
 }

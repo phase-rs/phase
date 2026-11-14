@@ -1,3 +1,8 @@
+import { canUseLanBridge } from "../lan";
+vi.mock("../lan", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../lan")>(),
+  canUseLanBridge: vi.fn(() => false),
+}));
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -72,14 +77,22 @@ describe("detectServerUrl", () => {
     (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
     const fetchSpy = vi.fn(() => Promise.resolve(new Response("ok", { status: 200 })));
     vi.stubGlobal("fetch", fetchSpy);
-    useMultiplayerStore.setState({ serverAddress: CHOSEN });
+    useMultiplayerStore.setState({ hostingServer: CHOSEN });
 
     await expect(detectServerUrl()).resolves.toBe(CHOSEN);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("falls back to this build's default when no valid address is stored", async () => {
-    useMultiplayerStore.setState({ serverAddress: "" });
+  // "None" in the picker is `hostingServer: null` — there is no chosen
+  // server to fall back to, so the build default answers.
+  it("falls back to this build's default when no hosting server is chosen", async () => {
+    useMultiplayerStore.setState({ hostingServer: null });
+
+    await expect(detectServerUrl()).resolves.toBe(DEFAULT_SERVER);
+  });
+
+  it("falls back to this build's default when the stored address is malformed", async () => {
+    useMultiplayerStore.setState({ hostingServer: "wss:" });
 
     await expect(detectServerUrl()).resolves.toBe(DEFAULT_SERVER);
   });
@@ -222,4 +235,19 @@ describe("mixedContentBlockReason", () => {
     setPageProtocol("https:");
     expect(mixedContentBlockReason("wss://play.example.com/ws")).toBeNull();
   });
+});
+
+
+it("exempts only a confirmed native LAN route from HTTPS mixed content", () => {
+  const originalLocation = window.location;
+  Object.defineProperty(window, "location", { configurable: true, value: { ...originalLocation, protocol: "https:" } });
+  try {
+    vi.mocked(canUseLanBridge).mockReturnValue(true);
+    expect(mixedContentBlockReason("ws://192.168.1.2:9374/ws")).toBeNull();
+    vi.mocked(canUseLanBridge).mockReturnValue(false);
+    expect(mixedContentBlockReason("ws://192.168.1.2:9374/ws")).toMatch(/HTTPS/);
+  } finally {
+    vi.mocked(canUseLanBridge).mockReturnValue(false);
+    Object.defineProperty(window, "location", { configurable: true, value: originalLocation });
+  }
 });

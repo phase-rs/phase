@@ -70,6 +70,147 @@ async function loadScryfallModule() {
   return import("../scryfall.ts");
 }
 
+function jsonResponse(value: unknown, status = 200): Response {
+  return new Response(JSON.stringify(value), { status });
+}
+
+function rejectedJsonResponse(): Response {
+  return Object.assign(new Response("", { status: 200 }), {
+    json: vi.fn().mockRejectedValue(new Error("invalid JSON")),
+  });
+}
+
+function validCardEntry() {
+  return {
+    oracle_id: "lightning-bolt",
+    name: "Lightning Bolt",
+    face_names: ["lightning bolt"],
+    mana_cost: "{R}",
+    cmc: 1,
+    type_line: "Instant",
+    colors: ["R"],
+    color_identity: ["R"],
+    keywords: [],
+    faces: [{ small: null, normal: null, art_crop: null }],
+  };
+}
+
+function validPrintingEntry() {
+  return {
+    id: "lightning-bolt-printing",
+    set: "lea",
+    set_name: "Limited Edition Alpha",
+    collector_number: "161",
+    released_at: "1993-08-05",
+    border_color: "black",
+    frame_effects: [],
+    full_art: false,
+    faces: [{ small: null, normal: null, art_crop: null }],
+  };
+}
+
+describe("local Scryfall data authorities", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("rejects malformed primary payloads, coalesces a valid retry, and preserves text fallback without URLs", async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(rejectedJsonResponse())
+      .mockResolvedValueOnce(jsonResponse({}, 503))
+      .mockResolvedValueOnce(jsonResponse(null))
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse({}))
+      .mockResolvedValueOnce(jsonResponse({ bolt: { ...validCardEntry(), cmc: "1" } }))
+      .mockResolvedValueOnce(jsonResponse({ "lightning bolt": validCardEntry() }));
+    global.fetch = fetchMock;
+    const { buildLocalSearchCard, loadScryfallData, resolveOracleIdSync } = await loadScryfallModule();
+
+    for (let attempt = 0; attempt < 7; attempt++) {
+      await expect(loadScryfallData()).resolves.toBeNull();
+    }
+    expect(resolveOracleIdSync("Lightning Bolt")).toBeNull();
+
+    const first = loadScryfallData();
+    const second = loadScryfallData();
+    expect(second).toBe(first);
+    await expect(first).resolves.toEqual({ "lightning bolt": validCardEntry() });
+    await expect(loadScryfallData()).resolves.toEqual({ "lightning bolt": validCardEntry() });
+    expect(resolveOracleIdSync("Lightning Bolt")).toBe("lightning-bolt");
+    expect(buildLocalSearchCard({
+      name: "Lightning Bolt",
+      cmc: 1,
+      colorIdentity: ["R"],
+      legalities: {},
+    }).image_uris).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(8);
+  });
+
+  it("accepts omitted primary image URLs without publishing image data", async () => {
+    global.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      "lightning bolt": { ...validCardEntry(), faces: [{}] },
+    }));
+    const { buildLocalSearchCard, loadScryfallData } = await loadScryfallModule();
+
+    await expect(loadScryfallData()).resolves.not.toBeNull();
+    expect(buildLocalSearchCard({
+      name: "Lightning Bolt",
+      cmc: 1,
+      colorIdentity: ["R"],
+      legalities: {},
+    }).image_uris).toBeUndefined();
+  });
+
+  it.each([{ orientation: null }, { orientation: "diagonal" }, { orientation: 1 }, { orientation: [] }])("rejects an invalid face orientation $orientation at both data boundaries and accepts a retry", async ({ orientation }) => {
+    const mod = await loadScryfallModule();
+    const card = { ...validCardEntry(), faces: [{ normal: "https://img.example/front.jpg", orientation }] };
+    const printing = { ...validPrintingEntry(), faces: [{ normal: "https://img.example/pin.jpg", orientation }] };
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ "lightning-bolt": card }))
+      .mockResolvedValueOnce(jsonResponse({ "lightning-bolt": { ...card, faces: [{ normal: "https://img.example/front.jpg", orientation: "landscape" }] } }))
+      .mockResolvedValueOnce(jsonResponse({ "lightning-bolt": [printing] }))
+      .mockResolvedValueOnce(jsonResponse({ "lightning-bolt": [{ ...printing, faces: [{ normal: "https://img.example/pin.jpg", orientation: "portrait" }] }] }));
+    await expect(mod.loadScryfallData()).resolves.toBeNull();
+    expect(mod.isCardImageRotatedSync("lightning-bolt", "Lightning Bolt")).toBe(false);
+    await expect(mod.loadScryfallData()).resolves.not.toBeNull();
+    expect(mod.isCardImageRotatedSync("lightning-bolt", "Lightning Bolt")).toBe(true);
+    await expect(mod.loadPrintingsData()).resolves.toBeNull();
+    await expect(mod.loadPrintingsData()).resolves.not.toBeNull();
+    const accepted = await mod.getCardPrintings("lightning-bolt");
+    expect(mod.resolvePrintingImageUrl(accepted[0], 0, "normal")).toBe("https://img.example/pin.jpg");
+  });
+
+  it("rejects malformed printings payloads and keeps a valid retry cached", async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(rejectedJsonResponse())
+      .mockResolvedValueOnce(jsonResponse({}, 503))
+      .mockResolvedValueOnce(jsonResponse(null))
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse({}))
+      .mockResolvedValueOnce(jsonResponse({ "lightning-bolt": [] }))
+      .mockResolvedValueOnce(jsonResponse({
+        "lightning-bolt": [{ ...validPrintingEntry(), full_art: "false" }],
+      }))
+      .mockResolvedValueOnce(jsonResponse({ "lightning-bolt": [validPrintingEntry()] }));
+    global.fetch = fetchMock;
+    const { loadPrintingsData, resolvePrintingImageUrl } = await loadScryfallModule();
+
+    for (let attempt = 0; attempt < 8; attempt++) {
+      await expect(loadPrintingsData()).resolves.toBeNull();
+    }
+
+    const first = loadPrintingsData();
+    const second = loadPrintingsData();
+    expect(second).toBe(first);
+    await expect(first).resolves.toEqual({ "lightning-bolt": [validPrintingEntry()] });
+    expect(resolvePrintingImageUrl(validPrintingEntry(), 0, "normal")).toBeNull();
+    await expect(loadPrintingsData()).resolves.toEqual({ "lightning-bolt": [validPrintingEntry()] });
+    expect(fetchMock).toHaveBeenCalledTimes(9);
+  });
+});
+
 describe("normalizeCardName", () => {
   it("strips set code brackets", async () => {
     const { normalizeCardName } = await loadScryfallModule();
@@ -277,6 +418,22 @@ describe("fetchCardData — combined multi-face names", () => {
         color_identity: ["W", "U"],
         keywords: [],
       },
+      "bonecrusher giant": {
+        oracle_id: "bonecrusher-oracle",
+        face_names: ["bonecrusher giant", "stomp"],
+        faces: [
+          { normal: "https://img.example/bonecrusher.jpg", art_crop: "https://img.example/bonecrusher-art.jpg" },
+          { normal: "https://img.example/bonecrusher.jpg", art_crop: "https://img.example/bonecrusher-art.jpg" },
+        ],
+        layout: "adventure",
+        name: "Bonecrusher Giant // Stomp",
+        mana_cost: "{2}{R}",
+        cmc: 3,
+        type_line: "Creature — Giant",
+        colors: ["R"],
+        color_identity: ["R"],
+        keywords: [],
+      },
     };
     return new Response(JSON.stringify(map), {
       status: 200,
@@ -303,15 +460,139 @@ describe("fetchCardData — combined multi-face names", () => {
     expect(card.name).toBe("Peter Parker // The Amazing Spider-Man");
   });
 
+  it("resolves_an_alternate_face_from_a_cube_front_face_name", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeDfcDataMap());
+
+    const { loadScryfallData, resolveAlternateCardFaceSync } = await loadScryfallModule();
+    expect(resolveAlternateCardFaceSync("Peter Parker")).toBeUndefined();
+    await loadScryfallData();
+
+    expect(resolveAlternateCardFaceSync("Peter Parker")).toEqual({
+      name: "The Amazing Spider-Man",
+      faceIndex: 1,
+      side: "back",
+    });
+  });
+
   it("does not mis-split a single-faced card whose name contains \"//\" (issue #4790)", async () => {
     global.fetch = vi.fn().mockResolvedValueOnce(makeDfcDataMap());
 
-    const { fetchCardData } = await loadScryfallModule();
+    const { fetchCardData, resolveAlternateCardFaceSync } = await loadScryfallModule();
     const card = await fetchCardData("SP//dr, Piloted by Peni");
 
     // Its own name is a primary key, so the exact match wins before any split.
     expect(card.name).toBe("SP//dr, Piloted by Peni");
     expect(card.type_line).toContain("Spider Hero");
+    expect(resolveAlternateCardFaceSync("SP//dr, Piloted by Peni")).toBeNull();
+  });
+
+  it("does_not_treat_adventure_components_as_physical_card_faces", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeDfcDataMap());
+
+    const { loadScryfallData, resolveAlternateCardFaceSync } = await loadScryfallModule();
+    await loadScryfallData();
+
+    expect(resolveAlternateCardFaceSync("Bonecrusher Giant")).toBeNull();
+  });
+});
+
+describe("fetchCardData — names containing a bare slash", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // "Summon: Choco/Mog" is a single-faced card whose printed name contains a
+  // bare "/", keyed the way the export does it: by its own printed name only.
+  // "Revival" is a split card keyed by its front face, whose entry carries the
+  // full composite `name` — the same convention `makeDfcDataMap` uses above.
+  function makeSlashDataMap(): Response {
+    const map: Record<string, unknown> = {
+      "summon: choco/mog": {
+        oracle_id: "choco-oracle",
+        face_names: ["summon: choco/mog"],
+        faces: [
+          { normal: "https://img.example/choco.jpg", art_crop: "https://img.example/choco-art.jpg" },
+        ],
+        name: "Summon: Choco/Mog",
+        mana_cost: "{2}{R}",
+        cmc: 3,
+        type_line: "Enchantment Creature — Saga Bird Moogle",
+        colors: ["R"],
+        color_identity: ["R"],
+        keywords: [],
+      },
+      revival: {
+        oracle_id: "revival-oracle",
+        face_names: ["revival", "revenge"],
+        faces: [
+          { normal: "https://img.example/revival.jpg", art_crop: "https://img.example/revival-art.jpg" },
+          { normal: "https://img.example/revenge.jpg", art_crop: "https://img.example/revenge-art.jpg" },
+        ],
+        layout: "split",
+        name: "Revival // Revenge",
+        mana_cost: "{1}{W}",
+        cmc: 2,
+        type_line: "Sorcery",
+        colors: ["W"],
+        color_identity: ["W"],
+        keywords: [],
+      },
+    };
+    return new Response(JSON.stringify(map), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  it("resolves the legacy spaced spelling of a bare-slash name to the printed name", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSlashDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("Summon: Choco // Mog");
+
+    expect(card.name).toBe("Summon: Choco/Mog");
+  });
+
+  it("resolves a single-slash split-card name via the front face", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSlashDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("Revival/Revenge");
+
+    expect(card.name).toBe("Revival // Revenge");
+  });
+
+  it("resolves the exact bare-slash printed name directly", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSlashDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("Summon: Choco/Mog");
+
+    expect(card.name).toBe("Summon: Choco/Mog");
+  });
+
+  it("rejects a front-segment-only name that is not itself a card", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSlashDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    await expect(fetchCardData("Summon: Choco")).rejects.toThrow(/not in local data/);
+  });
+});
+
+describe("manaSymbolSourceUrl", () => {
+  it.each([
+    ["W/U", "WU"],
+    ["W/U/P", "WUP"],
+    ["2/G", "2G"],
+    ["∞", "INFINITY"],
+    ["½", "HALF"],
+    ["1000000", "1000000"],
+  ])("maps %s to the exact Scryfall filename %s", async (shard, filename) => {
+    const { manaSymbolSourceUrl } = await loadScryfallModule();
+
+    expect(manaSymbolSourceUrl(shard)).toBe(
+      `https://svgs.scryfall.io/card-symbols/${filename}.svg`,
+    );
   });
 });
 
@@ -498,6 +779,275 @@ describe("fetchCardImageAssetByOracleId — reversible cards (issue #2031)", () 
 
     expect(asset.src).toBe("https://img.example/propaganda-front.jpg");
     expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("card image rotation — landscape faces (issue #9502)", () => {
+  const battleOracleId = "invasion-of-alara";
+  const delverOracleId = "delver-of-secrets";
+  const roomOracleId = "unholy-annex-ritual-chamber";
+  const legacyRoomOracleId = "legacy-unholy-annex-ritual-chamber";
+
+  type FixtureFace = { name: string; orientation?: "landscape" | "portrait" };
+
+  /** A multi-face entry shaped exactly as `scripts/gen-scryfall-images.sh` emits it. */
+  function multiFaceEntry(
+    oracleId: string,
+    layout: string,
+    typeLine: string,
+    faces: [FixtureFace, FixtureFace],
+  ) {
+    return {
+      oracle_id: oracleId,
+      name: faces.map((face) => face.name).join(" // "),
+      face_names: faces.map((face) => face.name.toLowerCase()),
+      faces: faces.map((face) => ({
+        normal: `https://img.example/${encodeURIComponent(face.name)}.jpg`,
+        art_crop: `https://img.example/${encodeURIComponent(face.name)}-art.jpg`,
+        ...(face.orientation ? { orientation: face.orientation } : {}),
+      })),
+      layout,
+      mana_cost: "",
+      cmc: 0,
+      type_line: typeLine,
+      colors: [],
+      color_identity: [],
+      keywords: [],
+    };
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    global.fetch = vi.fn().mockResolvedValueOnce(jsonResponse({
+      [battleOracleId]: multiFaceEntry(battleOracleId, "transform", "Battle — Siege // Sorcery", [
+        { name: "Invasion of Alara", orientation: "landscape" },
+        { name: "Awaken the Maelstrom", orientation: "portrait" },
+      ]),
+      [delverOracleId]: multiFaceEntry(
+        delverOracleId,
+        "transform",
+        "Creature — Human Wizard // Creature — Human Insect",
+        [
+          { name: "Delver of Secrets", orientation: "portrait" },
+          { name: "Insectile Aberration", orientation: "portrait" },
+        ],
+      ),
+      [roomOracleId]: multiFaceEntry(roomOracleId, "split", "Enchantment — Room // Enchantment — Room", [
+        { name: "Unholy Annex", orientation: "landscape" },
+        { name: "Ritual Chamber", orientation: "landscape" },
+      ]),
+      // Data generated before per-face `orientation` existed.
+      [legacyRoomOracleId]: multiFaceEntry(
+        legacyRoomOracleId,
+        "split",
+        "Enchantment — Room // Enchantment — Room",
+        [{ name: "Legacy Annex" }, { name: "Legacy Chamber" }],
+      ),
+    }));
+  });
+
+  it("rotates a battle's front face but keeps its portrait back face upright", async () => {
+    const { fetchCardImageAssetByOracleId, isCardImageRotatedSync } = await loadScryfallModule();
+
+    const front = await fetchCardImageAssetByOracleId(battleOracleId, "Invasion of Alara");
+    const back = await fetchCardImageAssetByOracleId(battleOracleId, "Awaken the Maelstrom");
+
+    expect(front.src).toBe("https://img.example/Invasion%20of%20Alara.jpg");
+    expect(front.isRotated).toBe(true);
+    expect(back.src).toBe("https://img.example/Awaken%20the%20Maelstrom.jpg");
+    expect(back.isRotated).toBe(false);
+    expect(isCardImageRotatedSync(battleOracleId, "Invasion of Alara", 0)).toBe(true);
+    expect(isCardImageRotatedSync(battleOracleId, "Awaken the Maelstrom", 1)).toBe(false);
+  });
+
+  it("keeps both faces of an ordinary transform card upright", async () => {
+    const { fetchCardImageAssetByOracleId, isCardImageRotatedSync } = await loadScryfallModule();
+
+    const front = await fetchCardImageAssetByOracleId(delverOracleId, "Delver of Secrets");
+    const back = await fetchCardImageAssetByOracleId(delverOracleId, "Insectile Aberration");
+
+    expect(front.isRotated).toBe(false);
+    expect(back.isRotated).toBe(false);
+    expect(isCardImageRotatedSync(delverOracleId, "Delver of Secrets", 0)).toBe(false);
+    expect(isCardImageRotatedSync(delverOracleId, "Insectile Aberration", 1)).toBe(false);
+  });
+
+  it("rotates every half of a split layout, including a Room's second door", async () => {
+    const { fetchCardImageAssetByOracleId, isCardImageRotatedSync } = await loadScryfallModule();
+
+    const firstDoor = await fetchCardImageAssetByOracleId(roomOracleId, "Unholy Annex");
+    const secondDoor = await fetchCardImageAssetByOracleId(roomOracleId, "Ritual Chamber");
+
+    expect(firstDoor.isRotated).toBe(true);
+    expect(secondDoor.isRotated).toBe(true);
+    expect(isCardImageRotatedSync(roomOracleId, "Ritual Chamber", 1)).toBe(true);
+  });
+
+  it("falls back to the split layout when faces carry no orientation", async () => {
+    const { fetchCardImageAssetByOracleId, isCardImageRotatedSync } = await loadScryfallModule();
+
+    const secondDoor = await fetchCardImageAssetByOracleId(legacyRoomOracleId, "Legacy Chamber");
+
+    expect(secondDoor.isRotated).toBe(true);
+    expect(isCardImageRotatedSync(legacyRoomOracleId, "Legacy Annex", 0)).toBe(true);
+  });
+
+  it("uses the selected face, explicit portrait, and the same face-zero fallback as its URL", async () => {
+    const mod = await loadScryfallModule();
+    const mixed = multiFaceEntry("mixed", "split", "Instant // Sorcery", [
+      { name: "First", orientation: "portrait" }, { name: "Second" },
+    ]);
+    global.fetch = vi.fn().mockResolvedValue(jsonResponse({ mixed, first: mixed }));
+    const first = await mod.fetchCardImageAsset("First", 0);
+    const second = await mod.fetchCardImageAsset("First", 1);
+    const outOfRange = await mod.fetchCardImageAsset("First", 7);
+    expect(first.src).toBe("https://img.example/First.jpg");
+    expect(first.isRotated).toBe(false);
+    expect(second.src).toBe("https://img.example/Second.jpg");
+    expect(second.isRotated).toBe(true);
+    expect(outOfRange.src).toBe(first.src);
+    expect(outOfRange.isRotated).toBe(false);
+    expect(mod.isCardImageRotatedSync("mixed", "First")).toBe(false);
+    expect(mod.isCardImageRotatedSync("mixed", "First", 1)).toBe(true);
+    expect(mod.isCardImageRotatedSync("mixed", "First", 7)).toBe(false);
+    expect(mod.isCardImageRotatedSync("missing", "First", 1)).toBe(true);
+    expect(mod.isCardImageRotatedSync("missing", "Missing", 1)).toBe(false);
+    const unknownFace = await mod.fetchCardImageAssetByOracleId("mixed", "Missing Face");
+    expect(unknownFace.src).toBe(first.src);
+    expect(unknownFace.isRotated).toBe(false);
+  });
+
+  it("leaves an older transform face upright and accepts older printing faces", async () => {
+    const mod = await loadScryfallModule();
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ legacy: multiFaceEntry("legacy", "transform", "Creature // Creature", [{ name: "Legacy Front" }, { name: "Legacy Back" }]) }))
+      .mockResolvedValueOnce(jsonResponse({ legacy: [{ ...validPrintingEntry(), faces: [{ normal: "https://img.example/legacy-pin.jpg" }] }] }));
+    const image = await mod.fetchCardImageAssetByOracleId("legacy", "Legacy Back");
+    expect(image.src).toBe("https://img.example/Legacy%20Back.jpg");
+    expect(image.isRotated).toBe(false);
+    const printings = await mod.getCardPrintings("legacy");
+    expect(printings).toHaveLength(1);
+    expect(mod.resolvePrintingImageUrl(printings[0], 0, "normal")).toBe("https://img.example/legacy-pin.jpg");
+  });
+});
+
+describe("Scryfall generation scripts — face orientation (issue #9502)", () => {
+  function scryfallFace(name: string, typeLine: string, withImages: boolean) {
+    return {
+      name,
+      type_line: typeLine,
+      ...(withImages
+        ? {
+            image_uris: {
+              normal: `https://img.example/${encodeURIComponent(name)}.jpg`,
+              art_crop: `https://img.example/${encodeURIComponent(name)}-art.jpg`,
+            },
+          }
+        : {}),
+    };
+  }
+
+  it("emits a landscape orientation only for battle faces and split layouts", () => {
+    withTempDir((dir) => {
+      const input = path.join(dir, "oracle-cards.json");
+      const output = path.join(dir, "scryfall-data.json");
+      const sharedImages = {
+        image_uris: {
+          normal: "https://img.example/shared.jpg",
+          art_crop: "https://img.example/shared-art.jpg",
+        },
+      };
+      writeFileSync(
+        input,
+        JSON.stringify([
+          {
+            oracle_id: "battle",
+            layout: "transform",
+            name: "Invasion of Alara // Awaken the Maelstrom",
+            type_line: "Battle — Siege // Sorcery",
+            card_faces: [
+              scryfallFace("Invasion of Alara", "Battle — Siege", true),
+              scryfallFace("Awaken the Maelstrom", "Sorcery", true),
+            ],
+          },
+          {
+            oracle_id: "delver",
+            layout: "transform",
+            name: "Delver of Secrets // Insectile Aberration",
+            type_line: "Creature — Human Wizard // Creature — Human Insect",
+            card_faces: [
+              scryfallFace("Delver of Secrets", "Creature — Human Wizard", true),
+              scryfallFace("Insectile Aberration", "Creature — Human Insect", true),
+            ],
+          },
+          {
+            oracle_id: "commit",
+            layout: "split",
+            name: "Commit // Memory",
+            type_line: "Instant // Sorcery",
+            ...sharedImages,
+            card_faces: [
+              scryfallFace("Commit", "Instant", false),
+              scryfallFace("Memory", "Sorcery", false),
+            ],
+          },
+          {
+            oracle_id: "bolt",
+            layout: "normal",
+            name: "Lightning Bolt",
+            type_line: "Instant",
+            ...sharedImages,
+          },
+          {
+            oracle_id: "room", layout: "split", name: "Unholy Annex // Ritual Chamber",
+            type_line: "Enchantment — Room // Enchantment — Room", ...sharedImages,
+            card_faces: [scryfallFace("Unholy Annex", "Enchantment — Room", false), scryfallFace("Ritual Chamber", "Enchantment — Room", false)],
+          },
+          {
+            oracle_id: "mdfc", layout: "modal_dfc", name: "Pinnacle Monk // Mystic Peak",
+            type_line: "Creature — Djinn Monk // Land",
+            card_faces: [scryfallFace("Pinnacle Monk", "Creature — Djinn Monk", true), scryfallFace("Mystic Peak", "Land", true)],
+          },
+          { oracle_id: "battleborn", layout: "normal", name: "Battleborn Fixture", type_line: "Creature — Battleborn", ...sharedImages },
+          { oracle_id: "single-battle", layout: "normal", name: "Synthetic Single Battle", type_line: "Battle — Siege", ...sharedImages },
+          // Explicitly synthetic: real split records use card_faces and root images above.
+          { oracle_id: "synthetic-split", layout: "split", name: "Synthetic Split", type_line: "Instant", ...sharedImages },
+          { oracle_id: "token", layout: "token", name: "Saproling", type_line: "Token Creature — Saproling", ...sharedImages },
+        ]),
+      );
+
+      execFileSync("bash", [path.join(REPO_ROOT, "scripts/gen-scryfall-images.sh")], {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          SCRYFALL_ORACLE_FILE: input,
+          SCRYFALL_IMAGES_OUTPUT: output,
+        },
+        stdio: "pipe",
+      });
+
+      const generated = JSON.parse(readFileSync(output, "utf8"));
+      const orientations = (oracleId: string) =>
+        generated[oracleId].faces.map((face: { orientation: string }) => face.orientation);
+      expect(orientations("battle")).toEqual(["landscape", "portrait"]);
+      expect(orientations("delver")).toEqual(["portrait", "portrait"]);
+      expect(orientations("commit")).toEqual(["landscape", "landscape"]);
+      expect(orientations("bolt")).toEqual(["portrait"]);
+      expect(orientations("room")).toEqual(["landscape", "landscape"]);
+      expect(orientations("mdfc")).toEqual(["portrait", "portrait"]);
+      expect(orientations("battleborn")).toEqual(["portrait"]);
+      expect(orientations("single-battle")).toEqual(["landscape"]);
+      expect(orientations("synthetic-split")).toEqual(["landscape"]);
+      expect(orientations("token:saproling")).toEqual(["portrait"]);
+      for (const id of ["commit", "room"]) {
+        expect(generated[id].faces.map((face: { normal: string }) => face.normal)).toEqual([sharedImages.image_uris.normal, sharedImages.image_uris.normal]);
+      }
+      expect(generated.room.face_names).toEqual(["unholy annex", "ritual chamber"]);
+      expect(generated["unholy annex"]).toEqual(generated.room);
+      expect(generated["unholy annex // ritual chamber"]).toEqual(generated.room);
+      expect(generated.battle.face_names).toEqual(["invasion of alara", "awaken the maelstrom"]);
+      expect(generated["invasion of alara"]).toEqual(generated.battle);
+    });
   });
 });
 
@@ -781,6 +1331,203 @@ describe("fetchTokenImageUrl — ability-aware printing selection (issue #502)",
     });
 
     expect(url).toBe("https://img.example/vanilla-human.jpg");
+  });
+});
+
+describe("fetchTokenImageUrl - printed-shape art selection", () => {
+  const LOCAL_ART = "https://img.example/local-goblin.jpg";
+  const REMOTE_ART = "https://img.example/remote-goblin.jpg";
+
+  function makeTokenLocalMap(entry: Record<string, unknown>): Response {
+    return new Response(
+      JSON.stringify({
+        "token:goblin": {
+          oracle_id: "goblin-token",
+          face_names: ["goblin"],
+          faces: [{ normal: LOCAL_ART, art_crop: LOCAL_ART }],
+          layout: "token",
+          name: "Goblin",
+          mana_cost: "",
+          cmc: 0,
+          type_line: "Token Creature — Goblin",
+          oracle_text: null,
+          colors: [],
+          color_identity: [],
+          keywords: [],
+          power: null,
+          toughness: null,
+          ...entry,
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  function makeRemoteTokenHit(): Response {
+    return new Response(
+      JSON.stringify({
+        data: [{
+          name: "Goblin Token",
+          image_uris: { normal: REMOTE_ART },
+        }],
+        total_cards: 1,
+        has_more: false,
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  function make404(): Response {
+    return new Response("", { status: 404 });
+  }
+
+  function capturedQueries(fetchMock: ReturnType<typeof vi.fn>): string[] {
+    return fetchMock.mock.calls
+      .map((c) => String(c[0]))
+      .filter((u) => u.includes("/cards/search?"))
+      .map((u) => decodeURIComponent(new URL(u).searchParams.get("q") ?? ""));
+  }
+
+  it("serves the local hit when every filtered axis matches", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      makeTokenLocalMap({
+        colors: ["R"],
+        power: "1",
+        toughness: "1",
+      }),
+    );
+
+    const { fetchTokenImageUrl } = await loadScryfallModule();
+    const url = await fetchTokenImageUrl("Goblin", "normal", {
+      power: 1,
+      toughness: 1,
+      colors: ["Red"],
+      subtypes: ["Goblin"],
+      hasAbilities: false,
+    });
+
+    expect(url).toBe(LOCAL_ART);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    {
+      label: "P/T mismatch (stored 2/1 haste Goblin vs requested 1/1)",
+      entry: { colors: ["R"], power: "2", toughness: "1", keywords: ["Haste"], oracle_text: "Haste" },
+      filters: { power: 1, toughness: 1, colors: ["Red"], subtypes: ["Goblin"], hasAbilities: false },
+    },
+    {
+      label: "color mismatch (stored blue Spirit vs requested white)",
+      entry: { colors: ["U"], power: "1", toughness: "1", keywords: ["Flying"], oracle_text: "Flying", type_line: "Token Creature — Spirit" },
+      filters: { power: 1, toughness: 1, colors: ["White"], subtypes: ["Spirit"], hasAbilities: true, keywords: ["flying"] },
+    },
+    {
+      label: "vanilla requested but stored printing has abilities",
+      entry: { colors: ["W"], power: "2", toughness: "2", keywords: ["Protection"], oracle_text: "Protection from red", type_line: "Token Creature — Knight" },
+      filters: { power: 2, toughness: 2, colors: ["White"], subtypes: ["Knight"], hasAbilities: false },
+    },
+    {
+      label: "keyword mismatch (stored flying vs requested vigilance)",
+      entry: { colors: ["W"], power: "1", toughness: "1", keywords: ["Flying"], oracle_text: "Flying", type_line: "Token Creature — Spirit" },
+      filters: { power: 1, toughness: 1, colors: ["White"], subtypes: ["Spirit"], hasAbilities: true, keywords: ["vigilance"] },
+    },
+    {
+      label: "subtype mismatch (stored Goblin vs requested Goblin Warrior)",
+      entry: { colors: ["R"], power: "1", toughness: "1" },
+      filters: { power: 1, toughness: 1, colors: ["Red"], subtypes: ["Goblin", "Warrior"], hasAbilities: false },
+    },
+    {
+      label: "star P/T never serves a numeric request",
+      entry: { colors: ["B"], power: "*", toughness: "*", type_line: "Token Creature — Zombie" },
+      filters: { power: 2, toughness: 2, colors: ["Black"], subtypes: ["Zombie"], hasAbilities: false },
+    },
+  ])("falls through to the API on $label", async ({ entry, filters }) => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(makeTokenLocalMap(entry))
+      .mockResolvedValue(makeRemoteTokenHit());
+    global.fetch = fetchMock;
+
+    const { fetchTokenImageUrl } = await loadScryfallModule();
+    const url = await fetchTokenImageUrl("Goblin", "normal", filters);
+
+    expect(url).toBe(REMOTE_ART);
+    expect(capturedQueries(fetchMock).length).toBeGreaterThan(0);
+  });
+
+  it("serves the local hit when its keywords cover the requested set", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      makeTokenLocalMap({
+        colors: ["W"],
+        power: "1",
+        toughness: "1",
+        keywords: ["Flying", "First strike"],
+        oracle_text: "Flying, first strike",
+        type_line: "Token Creature — Spirit",
+      }),
+    );
+
+    const { fetchTokenImageUrl } = await loadScryfallModule();
+    const url = await fetchTokenImageUrl("Goblin", "normal", {
+      power: 1,
+      toughness: 1,
+      colors: ["White"],
+      subtypes: ["Spirit"],
+      hasAbilities: true,
+      keywords: ["flying"],
+    });
+
+    expect(url).toBe(LOCAL_ART);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("leads the remote ladder with a kw-narrowed rung when keywords are present", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(makeEmptyCardDataMap())
+      .mockResolvedValue(makeRemoteTokenHit());
+    global.fetch = fetchMock;
+
+    const { fetchTokenImageUrl } = await loadScryfallModule();
+    await fetchTokenImageUrl("Spirit", "normal", {
+      power: 1,
+      toughness: 1,
+      colors: ["White"],
+      subtypes: ["Spirit"],
+      hasAbilities: true,
+      keywords: ["flying", "first strike"],
+    });
+
+    const queries = capturedQueries(fetchMock);
+    // Exactly one query fires (the mock always hits), and it carries the
+    // keywords — proving the kw rung leads the ladder.
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain('kw:"flying"');
+    expect(queries[0]).toContain('kw:"first strike"');
+  });
+
+  it("a 404 on the kw rung degrades to the wider ladder, never to no image", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(makeEmptyCardDataMap())
+      .mockResolvedValueOnce(make404())
+      .mockResolvedValue(makeRemoteTokenHit());
+    global.fetch = fetchMock;
+
+    const { fetchTokenImageUrl } = await loadScryfallModule();
+    const url = await fetchTokenImageUrl("Spirit", "normal", {
+      power: 1,
+      toughness: 1,
+      colors: ["White"],
+      subtypes: ["Spirit"],
+      hasAbilities: true,
+      keywords: ["flying"],
+    });
+
+    expect(url).toBe(REMOTE_ART);
+    const queries = capturedQueries(fetchMock);
+    expect(queries[0]).toContain('kw:"flying"');
+    expect(queries[1]).not.toContain("kw:");
   });
 });
 
@@ -1357,12 +2104,38 @@ describe("localized card art", () => {
     frame_effects: [],
     full_art: false,
     faces: [
-      { normal: cardUrl(id, "normal", "front", query), art_crop: cardUrl(id, "art_crop") },
-      { normal: cardUrl(id, "normal", "back", query), art_crop: cardUrl(id, "art_crop", "back") },
+      {
+        small: cardUrl(id, "small", "front", query),
+        normal: cardUrl(id, "normal", "front", query),
+        art_crop: cardUrl(id, "art_crop"),
+      },
+      {
+        small: cardUrl(id, "small", "back", query),
+        normal: cardUrl(id, "normal", "back", query),
+        art_crop: cardUrl(id, "art_crop", "back"),
+      },
     ],
   });
 
-  function stubLocaleArt(map: Record<string, string>) {
+  function localizedArt(id: string) {
+    return {
+      id,
+      faces: [
+        {
+          small: cardUrl(id, "small", "front", "?exact-small"),
+          normal: cardUrl(id),
+          art_crop: cardUrl(id, "art_crop"),
+        },
+        {
+          small: cardUrl(id, "small", "back", "?exact-small"),
+          normal: cardUrl(id, "normal", "back"),
+          art_crop: cardUrl(id, "art_crop", "back"),
+        },
+      ],
+    };
+  }
+
+  function stubLocaleArt(map: Record<string, ReturnType<typeof localizedArt>>) {
     global.fetch = vi.fn().mockResolvedValue(
       new Response(JSON.stringify(map), {
         status: 200,
@@ -1377,7 +2150,7 @@ describe("localized card art", () => {
 
   it("swaps the image to the localized printing, keeping the chosen printing", async () => {
     const mod = await loadScryfallModule();
-    stubLocaleArt({ [EN_ID]: DE_ID });
+    stubLocaleArt({ [EN_ID]: localizedArt(DE_ID) });
     await mod.loadLocaleArt("de");
 
     const resolved = mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal");
@@ -1387,9 +2160,22 @@ describe("localized card art", () => {
     expect(resolved).not.toBe(cardUrl(EN_ID));
   });
 
+  it("falls back to English art when a v2 locale entry is invalid", async () => {
+    const mod = await loadScryfallModule();
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ [EN_ID]: DE_ID }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    await mod.loadLocaleArt("de");
+
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(EN_ID));
+  });
+
   it("keeps English art when the printing has no localized sibling", async () => {
     const mod = await loadScryfallModule();
-    stubLocaleArt({ [EN_ID]: DE_ID });
+    stubLocaleArt({ [EN_ID]: localizedArt(DE_ID) });
     await mod.loadLocaleArt("de");
 
     // Reach guard FIRST: prove the map actually loaded and the lookup runs.
@@ -1404,7 +2190,7 @@ describe("localized card art", () => {
 
   it("localizes the back face and the art crop", async () => {
     const mod = await loadScryfallModule();
-    stubLocaleArt({ [EN_ID]: DE_ID });
+    stubLocaleArt({ [EN_ID]: localizedArt(DE_ID) });
     await mod.loadLocaleArt("de");
 
     // A localized Scryfall id addresses the whole printing; front/back is a path
@@ -1415,11 +2201,14 @@ describe("localized card art", () => {
     expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "art_crop")).toBe(
       cardUrl(DE_ID, "art_crop"),
     );
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "small")).toBe(
+      cardUrl(DE_ID, "small", "front", "?exact-small"),
+    );
   });
 
   it("is a no-op for English", async () => {
     const mod = await loadScryfallModule();
-    stubLocaleArt({ [EN_ID]: DE_ID });
+    stubLocaleArt({ [EN_ID]: localizedArt(DE_ID) });
     await mod.loadLocaleArt("de");
     expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(DE_ID));
 
@@ -1439,7 +2228,11 @@ describe("localized card art", () => {
     const mod = await loadScryfallModule();
     // Map the placeholder's and card back's own ids too, so the guard is doing
     // the work rather than a lookup simply missing.
-    stubLocaleArt({ [EN_ID]: DE_ID, soon: DE_ID, "0aeebaf5-8c7d-4636-9e82-8c27447861f7": DE_ID });
+    stubLocaleArt({
+      [EN_ID]: localizedArt(DE_ID),
+      soon: localizedArt(DE_ID),
+      "0aeebaf5-8c7d-4636-9e82-8c27447861f7": localizedArt(DE_ID),
+    });
     await mod.loadLocaleArt("de");
     expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(DE_ID));
 
@@ -1485,7 +2278,7 @@ describe("localized card art", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     settle!(
-      new Response(JSON.stringify({ [EN_ID]: DE_ID }), {
+      new Response(JSON.stringify({ [EN_ID]: localizedArt(DE_ID) }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }),
@@ -1495,7 +2288,7 @@ describe("localized card art", () => {
     // Same Map instance, so the body was parsed once and both callers observe
     // one shared map rather than two equal copies.
     expect(mapA).toBe(mapB);
-    expect(mapA.get(EN_ID)).toBe(DE_ID);
+    expect(mapA.get(EN_ID)).toEqual(localizedArt(DE_ID));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     // Reach guard: the deduped map is the one that actually got installed, so
     // the identity assertions above are not describing a map nobody uses.

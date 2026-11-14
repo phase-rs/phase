@@ -4,7 +4,7 @@ This guide is the **first thing any agent working on `crates/manabrew-compat/` s
 
 ## What this crate does
 
-Translates between phase's engine types and the **ManaBrew wire protocol** (external MTG engine↔client JSON protocol, currently 3.0.0). It is a bidirectional adapter:
+Translates between phase's engine types and the **ManaBrew wire protocol** (external MTG engine↔client JSON protocol, currently 5.2.0). It is a bidirectional adapter:
 
 - **Outbound:** `WaitingFor` (engine decision point) → `PromptInput` (protocol prompt), plus `GameAction` → `AvailableActionKind`.
 - **Inbound:** `PromptOutput` (client answer) → `GameAction`.
@@ -57,7 +57,7 @@ rg -o '"(local|upstream)\.[a-z0-9-]+"' crates/manabrew-compat/src/lib.rs | sort 
 
 Compare emitted codes against declared entries. Divergence is a defect, not a backlog item.
 
-The registry is now **exhaustive** over emitted codes (87 declared; 70 emitted at live call sites, plus 17 documentary entries that describe a gap or deliberate divergence without a code path). `local.serum-powder-mulligan-vendor-extension` is the intentional paired-client extension: `MulliganOutput::MulliganUseSerumPowder { card_id }` and `MulliganPutBackInput::excluded_card_id`. It replaces the former upstream-gap entry one-for-one, so the 87 / 70 / 17 totals remain correct. `no_emitted_capability_code_is_undeclared` scans the production half of `lib.rs` and fails on any new undeclared code, so this no longer needs a manual audit — but re-run the command above if you doubt the test.
+The registry is now **exhaustive** over emitted codes (91 declared; 73 emitted at live call sites, plus 18 documentary entries that describe a gap or deliberate divergence without a code path). `local.serum-powder-mulligan-vendor-extension` is the intentional paired-client extension: `MulliganOutput::MulliganUseSerumPowder { card_id }` and `MulliganPutBackInput::excluded_card_id`. It replaces the former upstream-gap entry one-for-one, so the 91 / 73 / 18 totals remain correct. `no_emitted_capability_code_is_undeclared` scans the production half of `lib.rs` and fails on any new undeclared code, so this no longer needs a manual audit — but re-run the command above if you doubt the test.
 
 ### 4. A mapping claim must be exhibited by a test, not asserted in prose.
 
@@ -155,7 +155,7 @@ Orientation snapshot (2026-07-26, will drift — recompute): 127 `WaitingFor` va
 Confirmed by reading the upstream crate; re-verify when bumping protocol versions.
 
 - **The wire is strictly closed.** No `#[non_exhaustive]`, no `#[serde(other)]` fallback on any tagged enum, and `deny_unknown_fields` on the transport envelope. Version skew is a hard deserialize failure, not a graceful degrade — and even adding an *optional* field is breaking for older readers.
-- **`PROTOCOL_VERSION` is a single integer** derived from the crate's major version. There is no per-family capability negotiation.
+- **`PROTOCOL_VERSION` is a single integer**, and it is the major of `manabrew-relay-protocol` — the crate that owns the relay handshake — NOT of the `manabrew-protocol` dependency pinned in `Cargo.toml`. Both sit at major 5 today, so the distinction is easy to miss; they version independently. There is no per-family capability negotiation.
 - **Prompts carry no machine-readable discriminator.** `PromptPresentation` is `{title, description, text, targets}` — all free text. When many engine decisions funnel into one generic family, only the human-readable title distinguishes them. Consumers that reason programmatically (AI agents) must therefore parse prose. If you propose one upstream change, propose an optional namespaced `kind` field here — parameterize, don't proliferate.
 
 ## Known adapter-side blockers — both now closed

@@ -28,8 +28,8 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::EffectKind;
 use engine::types::ability::{
-    ControllerRef, Effect, ManaContribution, ManaProduction, ManaTargetRole, QuantityExpr,
-    QuantityRef, TargetFilter, TargetRef, TypedFilter, ZoneRef,
+    ControllerRef, CountBinding, Effect, ManaContribution, ManaProduction, ManaTargetRole,
+    QuantityExpr, QuantityRef, TargetFilter, TargetRef, TypedFilter, ZoneRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -101,6 +101,8 @@ fn mana_recipient_and_count_source_resolve_from_their_own_slots() {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Hand,
+                        scope: ControllerRef::TargetOpponent,
+                        binding: CountBinding::Explicit,
                     },
                 },
             },
@@ -223,6 +225,8 @@ fn mana_color_prompt_keeps_recipient_context_separate_from_count_context() {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Hand,
+                        scope: ControllerRef::TargetOpponent,
+                        binding: CountBinding::Explicit,
                     },
                 },
                 filter: TargetFilter::Typed(
@@ -345,6 +349,8 @@ fn count_source_only_deposits_into_the_controller_and_surfaces_one_slot() {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Hand,
+                        scope: ControllerRef::TargetOpponent,
+                        binding: CountBinding::Explicit,
                     },
                 },
             },
@@ -454,6 +460,8 @@ fn illegal_count_source_fails_to_determine_instead_of_counting_the_recipient() {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Hand,
+                        scope: ControllerRef::TargetOpponent,
+                        binding: CountBinding::Explicit,
                     },
                 },
             },
@@ -509,6 +517,38 @@ fn illegal_count_source_fails_to_determine_instead_of_counting_the_recipient() {
         !runner.state().players[p1_index].is_eliminated,
         "reach guard: the recipient must remain LEGAL so the effect still resolves"
     );
+
+    // CR 608.2b occurrence verdicts: the illegal count source is RETAINED in
+    // storage at its own position (so it cannot slide into the recipient
+    // slot) but is stamped illegal — a hole in the declared view — while the
+    // legal recipient is not stamped.
+    let announced = runner
+        .state()
+        .stack
+        .back()
+        .and_then(|entry| entry.ability())
+        .cloned()
+        .expect("the ritual is on the stack");
+    let validated =
+        engine::game::ability_utils::validate_targets_in_chain(runner.state(), &announced);
+    assert_eq!(
+        validated.targets,
+        vec![TargetRef::Player(P1), TargetRef::Player(P2)],
+        "the illegal count-source occurrence keeps its stored position"
+    );
+    assert_eq!(
+        validated.illegal_local_target_slots,
+        vec![1],
+        "only the count-source occurrence is stamped illegal"
+    );
+    // Legal-role positive control: with both roles legal nothing is stamped
+    // and storage is unchanged.
+    runner.state_mut().players[p2_index].is_eliminated = false;
+    let all_legal =
+        engine::game::ability_utils::validate_targets_in_chain(runner.state(), &announced);
+    assert_eq!(all_legal.targets, announced.targets);
+    assert!(all_legal.illegal_local_target_slots.is_empty());
+    runner.state_mut().players[p2_index].is_eliminated = true;
 
     let mut resolution_events: Vec<GameEvent> = Vec::new();
     let mut guard = 0;

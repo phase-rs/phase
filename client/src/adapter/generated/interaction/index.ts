@@ -45,7 +45,7 @@ export type InteractionManaAbilityActivationScope = "ofSpellType" | "any";
 
 export type InteractionManaZoneSpendPolarity = "from" | "notFrom";
 
-export type InteractionManaSpecialAction = "companionToHand" | "unlockDoor" | "plot" | "turnFaceUp" | "rollPlanarDie" | "endContinuousEffect";
+export type InteractionManaSpecialAction = "companionToHand" | "unlockDoor" | "plot" | "turnFaceUp" | "rollPlanarDie" | "endContinuousEffect" | "foretell";
 
 export type InteractionManaSpellCostCriterion = { "type": "manaValue", "data": { comparator: InteractionManaComparator, value: number, } } | { "type": "hasXInCost" };
 
@@ -57,7 +57,7 @@ export type SelectionConstraint = { "type": "count", "data": { min: number, max:
 
 export type ConfirmSemantics = "immediate" | "explicit";
 
-export type InteractionActionCode = "passPriority" | "chooseMeldPair" | "chooseEntryAttackTarget" | "playLand" | "castSpell" | "foretell" | "activateAbility" | "declareAttackers" | "declareBlockers" | "chooseUntap" | "chooseExert" | "chooseEnlist" | "chooseClashOpponent" | "chooseZoneOpponentChooser" | "choosePileOpponent" | "chooseAnnouncingOpponent" | "chooseGiftRecipient" | "chooseAssistPlayer" | "commitAssistPayment" | "mulliganDecision" | "reorderHand" | "tapLandForMana" | "activateManaSource" | "backToManaPayment" | "untapLandForMana" | "spendPoolMana" | "unspendPoolMana" | "selectCards" | "chooseRemoveCounterCostDistribution" | "selectCoinFlips" | "chooseOutsideGameCards" | "selectTargets" | "chooseTarget" | "chooseReplacement" | "chooseEntryController" | "orderTriggers" | "cancelCast" | "equip" | "crewVehicle" | "activateStation" | "saddleMount" | "transform" | "playFaceDown" | "turnFaceUp" | "submitSideboard" | "choosePlayDraw" | "chooseOption" | "submitVoteCandidate" | "submitSpellbookDraft" | "submitPilePartition" | "choosePile" | "chooseBranch" | "submitLifeRedistribution" | "chooseDamageSource" | "selectModes" | "decideOptionalCost" | "chooseAdventureFace" | "chooseModalFace" | "chooseAlternativeCast" | "chooseCastingVariant" | "keepAllCopyTargets" | "choosePermanentTypeSlot" | "activateNinjutsu" | "castSpellAsSneak" | "castSpellAsWebSlinging" | "castSpellForFree" | "castSpellAsMiracle" | "castSpellAsMadness" | "decideOptionalEffect" | "respondToSpliceOffer" | "decideOptionalEffectAndRemember" | "payUnlessCost" | "chooseUnlessCostBranch" | "chooseActivationCostBranch" | "payCombatTax" | "chooseRingBearer" | "choosePair" | "chooseDungeon" | "chooseDungeonRoom" | "unlockRoomDoor" | "rollPlanarDie" | "chooseRoomDoor" | "tapForConvoke" | "harmonizeTap" | "declareCompanion" | "companionToHand" | "discoverChoice" | "graveyardPaidCastChoice" | "cascadeChoice" | "rippleChoice" | "freeCastWindowChoice" | "chooseTopOrBottom" | "chooseMutateMergeSide" | "cipherEncode" | "chooseLegend" | "chooseBattleProtector" | "setAutoPass" | "cancelAutoPass" | "setPhaseStops" | "setPriorityPassingMode" | "setPriorityYield" | "setMayTriggerAutoChoice" | "setTriggerOrderTemplate" | "assignCombatDamage" | "assignBlockerDamage" | "distributeAmong" | "chooseCounterMoveDistribution" | "chooseCountersToRemove" | "submitPayAmount" | "retargetSpell" | "learnDecision" | "selectCategoryPermanents" | "chooseKeptCreatures" | "chooseKeptPermanents" | "chooseX" | "submitPhyrexianChoices" | "chooseManaColor" | "payManaAbilityMana" | "castPreparedCopy" | "chooseSpecializeColor" | "castParadigmCopy" | "passParadigmOffer" | "grantDebugPermission" | "revokeDebugPermission" | "concede" | "declareShortcut" | "respondToShortcut" | "declineShortcut" | "precastCopyShortcut" | "endContinuousEffect" | "debug";
+export type InteractionActionCode = "passPriority" | "chooseMeldPair" | "chooseEntryAttackTarget" | "playLand" | "castSpell" | "foretell" | "activateAbility" | "declareAttackers" | "declareBlockers" | "chooseUntap" | "chooseExert" | "chooseEnlist" | "chooseClashOpponent" | "chooseZoneOpponentChooser" | "choosePileOpponent" | "chooseAnnouncingOpponent" | "chooseGiftRecipient" | "chooseAssistPlayer" | "commitAssistPayment" | "mulliganDecision" | "reorderHand" | "tapLandForMana" | "activateManaSource" | "backToManaPayment" | "untapLandForMana" | "spendPoolMana" | "unspendPoolMana" | "selectCards" | "chooseRemoveCounterCostDistribution" | "selectCoinFlips" | "selectDieRolls" | "chooseOutsideGameCards" | "selectTargets" | "chooseTarget" | "chooseReplacement" | "chooseReplacementAndRemember" | "setReplacementAutoChoice" | "chooseEntryController" | "orderTriggers" | "orderCostReductions" | "cancelCast" | "equip" | "crewVehicle" | "activateStation" | "saddleMount" | "transform" | "playFaceDown" | "turnFaceUp" | "submitSideboard" | "choosePlayDraw" | "chooseStartingPlayer" | "chooseOption" | "submitVoteCandidate" | "submitSpellbookDraft" | "submitPilePartition" | "choosePile" | "chooseBranch" | "submitLifeRedistribution" | "chooseDamageSource" | "selectModes" | "decideOptionalCost" | "chooseAdventureFace" | "chooseModalFace" | "chooseAlternativeCast" | "chooseCastingVariant" | "keepAllCopyTargets" | "choosePermanentTypeSlot" | "activateNinjutsu" | "castSpellAsSneak" | "castSpellAsWebSlinging" | "castSpellForFree" | "castSpellAsMiracle" | "castSpellAsMadness" | "decideOptionalEffect" | "chooseResolutionOptionalPaymentBranch" | "respondToSpliceOffer" | "decideOptionalEffectAndRemember" | "payUnlessCost" | "chooseUnlessCostBranch" | "chooseActivationCostBranch" | "payCombatTax" | "chooseRingBearer" | "choosePair" | "chooseDungeon" | "chooseDungeonRoom" | "unlockRoomDoor" | "rollPlanarDie" | "chooseRoomDoor" | "tapForConvoke" | "harmonizeTap" | "chooseSecretAgendaNames" | "declareCompanion" | "companionToHand" | "discoverChoice" | "graveyardPaidCastChoice" | "cascadeChoice" | "rippleChoice" | "freeCastWindowChoice" | "chooseTopOrBottom" | "chooseMutateMergeSide" | "cipherEncode" | "chooseLegend" | "chooseBattleProtector" | "setAutoPass" | "cancelAutoPass" | "setPhaseStops" | "setPriorityPassingMode" | "setPriorityYield" | "setMayTriggerAutoChoice" | "setTriggerOrderTemplate" | "assignCombatDamage" | "assignBlockerDamage" | "distributeAmong" | "chooseCounterMoveDistribution" | "chooseCountersToRemove" | "submitPayAmount" | "retargetSpell" | "learnDecision" | "selectCategoryPermanents" | "chooseKeptCreatures" | "chooseKeptPermanents" | "chooseX" | "submitPhyrexianChoices" | "chooseManaColor" | "payManaAbilityMana" | "castPreparedCopy" | "chooseSpecializeColor" | "castParadigmCopy" | "passParadigmOffer" | "grantDebugPermission" | "revokeDebugPermission" | "concede" | "declareShortcut" | "respondToShortcut" | "declineShortcut" | "precastCopyShortcut" | "endContinuousEffect" | "unAction" | "debug";
 
 export type InteractionRoleCode = "source" | "candidate" | "partner" | "attackTarget" | "target" | "paymentMode" | "abilityIndex" | "attacker" | "bandCount" | "blocker" | "blocked" | "untap" | "exert" | "enlistTarget" | "enlist" | "opponent" | "assistPlayer" | "assist" | "genericMana" | "mulligan" | "serumPowder" | "handCard" | "selected" | "counterSource" | "counterType" | "amount" | "coinFlipIndex" | "sideboardIndex" | "faceUpExile" | "optionIndex" | "triggerIndex" | "crewMember" | "stationCrew" | "x" | "mainCard" | "sideboardCard" | "playFirst" | "option" | "candidateIndex" | "cardName" | "pileA" | "pile" | "modeIndex" | "pay" | "face" | "castCost" | "permanentType" | "returnCreature" | "permissionSource" | "accept" | "spliceCard" | "splice" | "choice" | "costBranch" | "costBranchIndex" | "pair" | "dungeon" | "roomIndex" | "door" | "operation" | "convokeMana" | "harmonizeCreature" | "harmonize" | "companion" | "castChoice" | "castCard" | "placement" | "mergeSide" | "encodeCreature" | "encode" | "defender" | "protector" | "assignmentMode" | "damageTarget" | "damageAmount" | "trampleDamage" | "controllerDamage" | "destination" | "discardCard" | "learn" | "category" | "kept" | "phyrexianPayment" | "manaChoice" | "count" | "manaPayment" | "producedMana" | "color" | "player" | "castingVariant" | "mode" | "modeCost" | "castingCost" | "voteOption" | "voteCandidate";
 
@@ -81,25 +81,96 @@ export type InteractionRelationSourceConstraint = "atMostOne" | "engineValidated
 
 export type InteractionDamageAssignmentMode = "normal" | "asThoughUnblocked";
 
-export type InteractionShortcutCountSpec = { "type": "fixed", "data": { min: number, max: number, suggested: number, } } | { "type": "untilLethal" };
+export type InteractionShortcutCountSpec = { "type": "fixed", "data": { min: number, max: number, suggested: number, } } | { "type": "untilLethal" } | { "type": "withoutEnd" };
 
 export type InteractionShortcutPreviewFamily = "mana" | "life" | "damage" | "mill" | "counters" | "tokens" | "cards" | "casts" | "combats" | "turns" | "triggers";
 
 export type InteractionShortcutPreviewEntry = { family: InteractionShortcutPreviewFamily, player: number | null, amount: number, };
 
-export type InteractionShortcutPreview = { count: number, entries: Array<InteractionShortcutPreviewEntry>, };
+export type InteractionShortcutPreview = { count: number, entries: Array<InteractionShortcutPreviewEntry>, 
+/**
+ * CR 732.2a + CR 601.2c: the DECLARATION's shape over this element's `count` — which
+ * announced choices the count is spread across, and how many repetitions each takes.
+ * It is not a magnitude claim about any axis.
+ *
+ * The `choice_id`s are the offer's own published candidate ids, taken from the first
+ * `Targets` point in published order. A later `Targets` point holding candidates does not
+ * fill that domain: it is the first point or nothing, because silently moving it to a
+ * second point would state the split over choices the reader cannot identify.
+ *
+ * The amounts come from whichever producer minted the element. In the offer's published list
+ * (`loop_shortcut_preview`) they are the offer's suggested declaration cut at `count` when
+ * the offer publishes one, else the canonical even split of `count`, remainder on the
+ * earliest ids; empty exactly when that first point holds no candidate. In a preview of a
+ * player's own declaration (`declared_shortcut_preview`) they are the amounts that player
+ * authored — positive parts summing to `count` over a duplicate-free subset of those ids,
+ * enforced by the declaration ingress rather than by this type — and never empty: that
+ * producer states no element at all rather than one carrying an empty split. In the
+ * responder's view of a declaration (`declared_sequence_preview`) they are the segment
+ * LENGTHS the declared count partitions into over the iterations that decision's
+ * announcements start at: successive differences summing to `count`, one per published id,
+ * never empty and each positive, because a step starting at or past the count is never
+ * reached and is not stated.
+ *
+ * CR 119.3: `entries` follow this allocation ONLY when the period's life map names
+ * exactly one losing seat that this allocation itself announces and the slot's announced
+ * magnitude is the whole of that seat's per-period loss, which is what makes it positive —
+ * per-seat life magnitudes are then each seat's RESOLVING announcements multiplied by that
+ * rate (CR 603.3d: its part, plus the trigger already in flight when that aims at it, less
+ * the last announcement, which never resolves), and they still total the period. On every
+ * other offer a non-empty allocation still ships beside entries folded from the raw period,
+ * because the allocation states the declaration and the entries state what the engine can
+ * attribute. On the RESPOND side that separation goes one step further: a declaration whose
+ * partition is stated and whose magnitudes are not ships this allocation beside an EMPTY
+ * `entries`, rather than withholding the whole element
+ * (`game::interaction::declared_sequence_preview`).
+ */
+allocation?: Array<AmountAssignment>, };
 
 export type InteractionShortcutPointKind = "targets" | "convokeTaps" | "mode" | "mayChoice" | "unlessBreak" | "manaColor";
 
 export type InteractionShortcutPoint = { group: number, kind: InteractionShortcutPointKind, min: number, max: number, unique: boolean, ordered: boolean, readOnly: boolean, candidateIds: Array<InteractionChoiceId>, };
 
-export type InteractionShortcutPin = { group: number, choiceIds: Array<InteractionChoiceId>, };
+export type InteractionShortcutPin = { group: number, choiceIds: Array<InteractionChoiceId>, 
+/**
+ * CR 732.2a + CR 601.2c: the SEGMENT LENGTHS of the announcement sequence
+ * `choice_ids` names, positionally and one-for-one — how many repetitions each
+ * announced subject takes. Empty on every pin that answers its point per
+ * position.
+ *
+ * The lengths are a DECLARATION of how the count is spread, not a claim about what
+ * each subject realizes. On a drive whose first cycle resolves a target announced
+ * before the drive begins, the realized split is shifted one cycle late at each
+ * boundary while the total stays exact — so a segment starting at the last index is
+ * admitted and stays announced, yet realizes no repetition at all.
+ *
+ * CR 732.2a + CR 732.2c: a proposal describes the choices acceptance then takes,
+ * so a sequence is admissible only where the count it partitions is already known.
+ * A pin is SEQUENCED on either limb — it carries `amounts`, or its `choice_ids`
+ * outnumber the point's published `max` — and both limbs bind the same partition,
+ * which only an `IterationCount::Fixed` can fill. Under a fixed count that
+ * partition is `amounts`: one part per announced subject, in the sequence's own
+ * order, every part at least 1, summing to the DECLARED count. An until-lethal
+ * count has nothing to partition and refuses BOTH limbs — an empty `amounts` does
+ * not rescue a longer `choice_ids` list — so no announcement order past the head
+ * is declarable through this ingress.
+ *
+ * A sequenced pin is admissible only on a `Targets` point whose published `max`
+ * is 1: a multi-position slot needs a per-position carrier a flat list cannot
+ * express, so it is refused rather than mis-read.
+ *
+ * `#[serde(default)]` keeps the field additive on the wire; `skip_serializing_if`
+ * keeps a pin carrying none byte-identical to the pre-field shape. Neither makes
+ * it additive at CONSTRUCTION — every struct literal must still name it, and
+ * nothing here uses `..Default::default()`.
+ */
+amounts?: Array<AmountAssignment>, };
 
 export type InteractionShortcutDecision = { "type": "decline" } | { "type": "acceptSuggested" } | { "type": "fixed", "data": { iterations: number, } };
 
 export type InteractionShortcutReply = { "type": "accept" } | { "type": "shorten", "data": { atIteration: number, } };
 
-export type InteractionResponseSpec = { "type": "select", "data": { constraint: SelectionConstraint, confirm: ConfirmSemantics, } } | { "type": "assignAmounts", "data": { minTotal: number, maxTotal: number, exactTotal: number | null, } } | { "type": "assignDamage", "data": { total: number, modes: Array<InteractionDamageAssignmentMode>, confirm: ConfirmSemantics, } } | { "type": "sequence", "data": { min: number, max: number, unique: boolean, includeAll: boolean, engineValidated: boolean, escape: InteractionChoiceId | null, confirm: ConfirmSemantics, } } | { "type": "groupedSequence", "data": { groups: Array<InteractionGroupConstraint>, unique: boolean, confirm: ConfirmSemantics, } } | { "type": "manaGroups", "data": { groups: Array<InteractionGroupConstraint>, maxBatch: number, escape: InteractionChoiceId | null, confirm: ConfirmSemantics, } } | { "type": "text", "data": { allowArbitrary: boolean, maxLen: number, confirm: ConfirmSemantics, } } | { "type": "deckPartition", "data": { minMainTotal: number, maxMainTotal: number, confirm: ConfirmSemantics, } } | { "type": "relations", "data": { edges: Array<InteractionRelationConstraint>, min: number, max: number, sourceConstraint: InteractionRelationSourceConstraint, allowGroups: boolean, confirm: ConfirmSemantics, } } | { "type": "number", "data": { min: number, max: number, confirm: ConfirmSemantics, } } | { "type": "shortcut", "data": { count: InteractionShortcutCountSpec, points: Array<InteractionShortcutPoint>, allowDecline: boolean, preview: InteractionShortcutPreview | null, confirm: ConfirmSemantics, } } | { "type": "shortcutReply", "data": { minIteration: number, maxIteration: number, confirm: ConfirmSemantics, } };
+export type InteractionResponseSpec = { "type": "select", "data": { constraint: SelectionConstraint, confirm: ConfirmSemantics, } } | { "type": "assignAmounts", "data": { minTotal: number, maxTotal: number, exactTotal: number | null, } } | { "type": "assignDamage", "data": { total: number, modes: Array<InteractionDamageAssignmentMode>, confirm: ConfirmSemantics, } } | { "type": "sequence", "data": { min: number, max: number, unique: boolean, includeAll: boolean, engineValidated: boolean, escape: InteractionChoiceId | null, confirm: ConfirmSemantics, } } | { "type": "groupedSequence", "data": { groups: Array<InteractionGroupConstraint>, unique: boolean, confirm: ConfirmSemantics, } } | { "type": "manaGroups", "data": { groups: Array<InteractionGroupConstraint>, maxBatch: number, escape: InteractionChoiceId | null, confirm: ConfirmSemantics, } } | { "type": "text", "data": { allowArbitrary: boolean, count: number, maxLen: number, confirm: ConfirmSemantics, } } | { "type": "deckPartition", "data": { minMainTotal: number, maxMainTotal: number, confirm: ConfirmSemantics, } } | { "type": "relations", "data": { edges: Array<InteractionRelationConstraint>, min: number, max: number, sourceConstraint: InteractionRelationSourceConstraint, allowGroups: boolean, confirm: ConfirmSemantics, } } | { "type": "number", "data": { min: number, max: number, confirm: ConfirmSemantics, } } | { "type": "shortcut", "data": { count: InteractionShortcutCountSpec, points: Array<InteractionShortcutPoint>, allowDecline: boolean, preview?: Array<InteractionShortcutPreview>, confirm: ConfirmSemantics, } } | { "type": "shortcutReply", "data": { minIteration: number, maxIteration: number, points?: Array<InteractionShortcutPoint>, declared?: InteractionShortcutPreview | null, allocationGroup?: number | null, confirm: ConfirmSemantics, } };
 
 export type InteractionOpportunityResponse = { "type": "exactChoices", "data": { choices: Array<InteractionChoice>, } } | { "type": "schema", "data": { spec: InteractionResponseSpec, candidates: Array<InteractionChoice>, } };
 
@@ -128,7 +199,7 @@ export type AmountAssignment = { choiceId: InteractionChoiceId, amount: number, 
 
 export type InteractionRelation = { sourceId: InteractionChoiceId, targetId: InteractionChoiceId, group: number | null, };
 
-export type InteractionResponse = { "type": "choose", "data": { choiceId: InteractionChoiceId, } } | { "type": "select", "data": { choiceIds: Array<InteractionChoiceId>, } } | { "type": "assignAmounts", "data": { assignments: Array<AmountAssignment>, } } | { "type": "assignDamage", "data": { mode: InteractionDamageAssignmentMode, assignments: Array<AmountAssignment>, } } | { "type": "sequence", "data": { choiceIds: Array<InteractionChoiceId>, } } | { "type": "relations", "data": { relations: Array<InteractionRelation>, } } | { "type": "manaGroups", "data": { choiceIds: Array<InteractionChoiceId>, count: number, } } | { "type": "text", "data": { value: string, } } | { "type": "deckPartition", "data": { main: Array<AmountAssignment>, } } | { "type": "number", "data": { value: number, } } | { "type": "shortcut", "data": { decision: InteractionShortcutDecision, pins: Array<InteractionShortcutPin>, } } | { "type": "shortcutReply", "data": { reply: InteractionShortcutReply, } };
+export type InteractionResponse = { "type": "choose", "data": { choiceId: InteractionChoiceId, } } | { "type": "select", "data": { choiceIds: Array<InteractionChoiceId>, } } | { "type": "assignAmounts", "data": { assignments: Array<AmountAssignment>, } } | { "type": "assignDamage", "data": { mode: InteractionDamageAssignmentMode, assignments: Array<AmountAssignment>, } } | { "type": "sequence", "data": { choiceIds: Array<InteractionChoiceId>, } } | { "type": "relations", "data": { relations: Array<InteractionRelation>, } } | { "type": "manaGroups", "data": { choiceIds: Array<InteractionChoiceId>, count: number, } } | { "type": "text", "data": { values: Array<string>, } } | { "type": "deckPartition", "data": { main: Array<AmountAssignment>, } } | { "type": "number", "data": { value: number, } } | { "type": "shortcut", "data": { decision: InteractionShortcutDecision, pins: Array<InteractionShortcutPin>, } } | { "type": "shortcutReply", "data": { reply: InteractionShortcutReply, } };
 
 export type InteractionSubmission = { interactionId: InteractionId, response: InteractionResponse, };
 
@@ -136,4 +207,10 @@ export type InteractionPreviewRequest = { requestId: PreviewRequestId, interacti
 
 export type InteractionPreviewStatus = { "type": "confirmable" } | { "type": "rejected", "data": { reason: InteractionReasonCode, } };
 
-export type InteractionPreview = { requestId: PreviewRequestId, interactionId: InteractionId, status: InteractionPreviewStatus, progress: InteractionProgress, outcome: InteractionOutcomeCode, summaries: Array<InteractionSummaryCode>, };
+export type InteractionPreview = { requestId: PreviewRequestId, interactionId: InteractionId, status: InteractionPreviewStatus, progress: InteractionProgress, outcome: InteractionOutcomeCode, summaries: Array<InteractionSummaryCode>, 
+/**
+ * CR 732.2a: the engine-computed consequence of the DECLARATION this request carries — one
+ * previewed element in the same shape and vocabulary as an element of the offer's published
+ * list, minted by the same producer. Absent unless the request declares a shortcut split.
+ */
+shortcutPreview?: InteractionShortcutPreview | null, };

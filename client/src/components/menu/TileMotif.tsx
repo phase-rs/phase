@@ -69,16 +69,15 @@ function Particle({ i, n, color, style }: { i: number; n: number; color: string;
 }
 
 /**
- * The hover particle field for a tile's art window — a tone-colored ring of
- * motes that emanate around the (unchanged) section icon. The caller renders it
- * in front of the icon so the motes sparkle over it. `color` is the tile tone
- * as an `rgb(...)` string. Animates purely by inheriting the parent
- * motion.button's `whileHover="hover"` label, so it carries no state of its own.
+ * The hover particle field for a tile watermark — a tone-colored ring of motes
+ * that emanates around the unchanged section icon. `color` is the tile tone as
+ * an `rgb(...)` string. Animation inherits the parent motion.button's
+ * `whileHover="hover"` label, so it carries no state of its own.
  */
-export function TileMotifLayer({ motif, color }: { motif: TileMotif; color: string }) {
+export function TileMotifLayer({ motif, color, className }: { motif: TileMotif; color: string; className?: string }) {
   const spec = MOTIFS[motif];
   return (
-    <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+    <div className={`pointer-events-none absolute flex items-center justify-center ${className ?? "inset-0"}`}>
       {Array.from({ length: spec.count }, (_, i) => (
         <Particle key={i} i={i} n={spec.count} color={color} style={spec.particle} />
       ))}

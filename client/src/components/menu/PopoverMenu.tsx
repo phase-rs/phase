@@ -18,6 +18,7 @@ interface PopoverMenuStyle {
   top: number | "auto";
   bottom: number | "auto";
   left: number;
+  width: number;
   maxHeight: number;
 }
 
@@ -31,6 +32,8 @@ interface PopoverMenuTriggerArgs {
 
 interface PopoverMenuProps {
   ariaLabel: string;
+  /** The default menu preserves existing action-menu semantics. */
+  variant?: "menu" | "dialog";
   /** Menu panel width in px — the menu is wider than the kebab trigger. */
   menuWidthPx?: number;
   /** Extra classes on the default kebab trigger button (ignored when
@@ -43,8 +46,9 @@ interface PopoverMenuProps {
   /** Notified when the menu opens/closes — e.g. to dismiss a hover preview
    *  that would otherwise sit behind the portaled menu. */
   onOpenChange?: (open: boolean) => void;
-  /** Render the menu items; call `close` after an action runs. */
-  children: (close: () => void) => ReactNode;
+  /** Render the menu items; call `close` after an action runs. `focusTrigger`
+   *  provides a stable return target before an action opens another surface. */
+  children: (close: () => void, focusTrigger: () => void) => ReactNode;
 }
 
 /**
@@ -56,6 +60,7 @@ interface PopoverMenuProps {
  */
 export function PopoverMenu({
   ariaLabel,
+  variant = "menu",
   menuWidthPx = 224,
   triggerClassName,
   renderTrigger,
@@ -65,10 +70,12 @@ export function PopoverMenu({
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const restoreFocusAfterCloseRef = useRef(false);
   const [style, setStyle] = useState<PopoverMenuStyle>({
     top: 0,
     bottom: "auto",
     left: 0,
+    width: menuWidthPx,
     maxHeight: 320,
   });
 
@@ -81,24 +88,35 @@ export function PopoverMenu({
     },
     [onOpenChange],
   );
-  const close = useCallback(() => changeOpen(false), [changeOpen]);
+  const close = useCallback(() => {
+    if (variant === "dialog") restoreFocusAfterCloseRef.current = true;
+    changeOpen(false);
+  }, [changeOpen, variant]);
+  const focusTrigger = useCallback(() => {
+    if (triggerRef.current?.isConnected) triggerRef.current.focus();
+  }, []);
   const toggle = useCallback(
     (event: MouseEvent) => {
       event.stopPropagation();
-      changeOpen(!open);
+      if (open) close();
+      else changeOpen(true);
     },
-    [changeOpen, open],
+    [changeOpen, close, open],
   );
 
   const position = useCallback(() => {
     const trigger = triggerRef.current;
     if (!trigger) return;
     const rect = trigger.getBoundingClientRect();
+    const width = Math.min(
+      menuWidthPx,
+      Math.max(0, window.innerWidth - MENU_VIEWPORT_PADDING_PX * 2),
+    );
     const left = Math.max(
       MENU_VIEWPORT_PADDING_PX,
       Math.min(
-        rect.right - menuWidthPx,
-        window.innerWidth - menuWidthPx - MENU_VIEWPORT_PADDING_PX,
+        rect.right - width,
+        window.innerWidth - width - MENU_VIEWPORT_PADDING_PX,
       ),
     );
     const spaceBelow = window.innerHeight - rect.bottom - MENU_GAP_PX - MENU_VIEWPORT_PADDING_PX;
@@ -108,6 +126,7 @@ export function PopoverMenu({
       top: openUp ? "auto" : rect.bottom + MENU_GAP_PX,
       bottom: openUp ? window.innerHeight - rect.top + MENU_GAP_PX : "auto",
       left,
+      width,
       maxHeight: Math.max(120, openUp ? spaceAbove : spaceBelow),
     });
   }, [menuWidthPx]);
@@ -115,6 +134,17 @@ export function PopoverMenu({
   useLayoutEffect(() => {
     if (open) position();
   }, [open, position]);
+
+  useLayoutEffect(() => {
+    if (open && variant === "dialog") {
+      menuRef.current?.focus();
+      return;
+    }
+    if (!open && restoreFocusAfterCloseRef.current) {
+      restoreFocusAfterCloseRef.current = false;
+      focusTrigger();
+    }
+  }, [focusTrigger, open, variant]);
 
   useEffect(() => {
     if (!open) return;
@@ -126,7 +156,7 @@ export function PopoverMenu({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         close();
-        triggerRef.current?.focus();
+        if (variant === "menu") focusTrigger();
       }
     };
     window.addEventListener("pointerdown", onPointerDown, true);
@@ -139,7 +169,7 @@ export function PopoverMenu({
       window.removeEventListener("resize", position);
       window.removeEventListener("scroll", position, true);
     };
-  }, [open, close, position]);
+  }, [open, close, focusTrigger, position, variant]);
 
   return (
     <>
@@ -168,8 +198,9 @@ export function PopoverMenu({
         createPortal(
           <div
             ref={menuRef}
-            role="menu"
+            role={variant}
             aria-label={ariaLabel}
+            tabIndex={variant === "dialog" ? -1 : undefined}
             // Seal the whole pointer/click family so a menu interaction never
             // leaks through the React tree to whatever ancestor rendered this
             // menu. The portal escapes the DOM subtree, but React synthetic
@@ -180,16 +211,21 @@ export function PopoverMenu({
             // dismissal listens in the capture phase, so it is unaffected.
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
+            onKeyDown={variant === "dialog" ? (event) => {
+              // Keep dialog controls' native defaults without invoking game shortcuts.
+              event.stopPropagation();
+              if (event.key === "Escape") close();
+            } : undefined}
             style={{
               top: style.top,
               bottom: style.bottom,
               left: style.left,
-              width: menuWidthPx,
+              width: style.width,
               maxHeight: style.maxHeight,
             }}
             className="fixed z-[120] flex flex-col overflow-y-auto overscroll-contain rounded-xl border border-white/10 bg-[#0a0f1b]/98 py-1 shadow-xl backdrop-blur-md thin-scrollbar"
           >
-            {children(close)}
+            {children(close, focusTrigger)}
           </div>,
           document.body,
         )}

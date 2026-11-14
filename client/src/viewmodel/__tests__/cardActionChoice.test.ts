@@ -10,6 +10,7 @@ import {
   resolveDirectPlayOrCastAction,
   resolveObjectActivation,
   resolveSingleActionDispatch,
+  zoneSurfaceActionsForObject,
 } from "../cardActionChoice.ts";
 import { abilityChoiceLabel } from "../costLabel.ts";
 
@@ -291,6 +292,53 @@ describe("resolveSingleActionDispatch", () => {
   });
 });
 
+describe("zoneSurfaceActionsForObject", () => {
+  const castAction: GameAction = {
+    type: "CastSpell",
+    data: { object_id: 1, card_id: 100, targets: [] },
+  };
+  const playLandAction: GameAction = {
+    type: "PlayLand",
+    data: { object_id: 1, card_id: 100 },
+  };
+  // CR 702.170f: a runtime-granted ability (plot from the top of the library)
+  // has an index past the serialized `abilities`, so the object carries no
+  // entry for it.
+  const runtimeGrantedAbility: GameAction = {
+    type: "ActivateAbility",
+    data: { source_id: 1, ability_index: 0 },
+  };
+
+  it("offers cast, play, and non-mana activated abilities", () => {
+    const actions = [castAction, playLandAction, runtimeGrantedAbility];
+    expect(
+      zoneSurfaceActionsForObject({ "1": actions }, makeGameObject({ abilities: [] }), 1),
+    ).toEqual(actions);
+  });
+
+  it("drops mana payments, which the delve/convoke flow handles", () => {
+    const object = makeGameObject({
+      abilities: [{ is_mana_ability: true, effect: { type: "Mana" } }],
+    });
+    const manaAbility: GameAction = {
+      type: "ActivateAbility",
+      data: { source_id: 1, ability_index: 0 },
+    };
+    const convoke: GameAction = {
+      type: "TapForConvoke",
+      data: { object_id: 1, mana_type: "Green" },
+    };
+    expect(
+      zoneSurfaceActionsForObject(
+        { "1": [manaAbility, convoke, tapLandAction(1), castAction] },
+        object,
+        1,
+      ),
+    ).toEqual([castAction]);
+    expect(zoneSurfaceActionsForObject({ "1": [castAction] }, object, 999)).toEqual([]);
+  });
+});
+
 describe("resolveDirectPlayOrCastAction", () => {
   const playLandAction: GameAction = {
     type: "PlayLand",
@@ -347,6 +395,65 @@ describe("abilityChoiceLabel", () => {
         object,
       ).label,
     ).toBe("Tap for {1}");
+  });
+
+  // CR 709.5e + CR 709.5b: the unlock special action pays the mana cost of a
+  // LOCKED half, so the offer must name that half and show its cost. For a
+  // permanent that is a COPY of a Room both come from the COPIED halves the
+  // engine publishes — the recipient's own printed card has neither.
+  //
+  // Revert-failing assertion: both labels. Without an `UnlockRoomDoor` arm the
+  // chain falls through to its `"Tap for Mana"` catch-all and the two offers
+  // are indistinguishable.
+  it("labels a Room door unlock with the half's name and its unlock cost", () => {
+    const copy = makeGameObject({
+      id: 7,
+      name: "",
+      zone: "Battlefield",
+      card_types: { supertypes: [], core_types: ["Enchantment"], subtypes: ["Room"] },
+      back_face: undefined,
+    });
+    const halves = {
+      "7": {
+        left: { name: "Greenhouse", mana_cost: { type: "Cost", shards: ["Green"], generic: 2 } },
+        right: {
+          name: "Rickety Gazebo",
+          mana_cost: { type: "Cost", shards: ["Green"], generic: 3 },
+        },
+      },
+    } as const;
+
+    expect(
+      abilityChoiceLabel(
+        { type: "UnlockRoomDoor", data: { object_id: 7, door: "Left" } },
+        copy,
+        undefined,
+        undefined,
+        halves as never,
+      ).label,
+    ).toBe("Unlock Greenhouse ({2}{G})");
+
+    expect(
+      abilityChoiceLabel(
+        { type: "UnlockRoomDoor", data: { object_id: 7, door: "Right" } },
+        copy,
+        undefined,
+        undefined,
+        halves as never,
+      ).label,
+    ).toBe("Unlock Rickety Gazebo ({3}{G})");
+  });
+
+  // CR 708.2a: a face-down permanent publishes no halves, so the engine sends
+  // none and the label must stay honest rather than invent a name.
+  it("falls back without inventing a name when no halves are published", () => {
+    const copy = makeGameObject({ id: 7, name: "", zone: "Battlefield" });
+    expect(
+      abilityChoiceLabel(
+        { type: "UnlockRoomDoor", data: { object_id: 7, door: "Left" } },
+        copy,
+      ).label,
+    ).toBe("Unlock this door");
   });
 
   it("labels TapLandForMana with the engine-selected mana", () => {

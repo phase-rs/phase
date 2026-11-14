@@ -26,7 +26,7 @@ commands.allow = ["mark_remote_load_ok"]
 [[permission]]
 identifier = "allow-ensure-native-engine"
 description = "Allows first-party remote content to prepare a signed native engine for a typed channel key."
-commands.allow = ["ensure_native_engine"]
+commands.allow = ["ensure_native_engine", "native_engine_capabilities"]
 
 [[permission]]
 identifier = "allow-native-engine-progress"

@@ -1,9 +1,8 @@
-import { cleanup, render } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject } from "../../../adapter/types.ts";
 import { useCardImage } from "../../../hooks/useCardImage.ts";
-import { CARD_BACK_URL } from "../../../services/scryfall.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
@@ -15,18 +14,8 @@ import { CardPreview } from "../CardPreview.tsx";
 // lookup stamps the name. The hidden-information assertions below read that
 // stamp back — a leaked `printed_ref` becomes a visible "secret-oracle" src.
 vi.mock("../../../hooks/useCardImage.ts", () => ({
-  useCardImage: vi.fn((
-    cardName: string,
-    options?: {
-      oracleId?: string;
-      tokenImageRef?: { scryfall_oracle_id?: string | null } | null;
-    },
-  ) => ({
-    src: `${options?.oracleId ?? (options?.tokenImageRef ? `ref:${options.tokenImageRef.scryfall_oracle_id}` : cardName)}.png`,
-    isLoading: false,
-    isRotated: false,
-    isFlip: false,
-  })),
+  useCardBackImage: vi.fn(() => ({ src: "card-back.png", isLoading: false })),
+  useCardImage: vi.fn(),
 }));
 
 vi.mock("../../../hooks/useEngineCardData.ts", () => ({
@@ -41,6 +30,21 @@ vi.mock("../../../hooks/useIsMobile.ts", () => ({
 }));
 
 const SECRET_ORACLE = "secret-oracle-id";
+
+function defaultCardImageResult(
+  cardName: string,
+  options?: {
+    oracleId?: string;
+    tokenImageRef?: { scryfall_oracle_id?: string | null } | null;
+  },
+) {
+  return {
+    src: `${options?.oracleId ?? (options?.tokenImageRef ? `ref:${options.tokenImageRef.scryfall_oracle_id}` : cardName)}.png`,
+    isLoading: false,
+    isRotated: false,
+    isFlip: false,
+  };
+}
 
 function hiddenFaceDown(overrides: Partial<GameObject> = {}): GameObject {
   return buildGameObject({
@@ -69,6 +73,10 @@ function inspect(object: GameObject): void {
   });
   useUiStore.setState({ inspectedObjectId: object.id });
 }
+
+beforeEach(() => {
+  vi.mocked(useCardImage).mockImplementation(defaultCardImageResult);
+});
 
 afterEach(() => {
   cleanup();
@@ -100,12 +108,75 @@ describe("CardPreview mobile face-down (hidden information, #7551 review)", () =
     const { container } = render(<CardPreview cardName="Face-down card" objectId={101} />);
 
     const srcs = [...container.querySelectorAll("img")].map((img) => img.getAttribute("src"));
-    expect(srcs).toContain(CARD_BACK_URL);
+    expect(srcs).toContain("card-back.png");
     expect(srcs.some((src) => src?.includes(SECRET_ORACLE))).toBe(false);
     // The generic label must never become a card-name search either.
     expect(srcs.some((src) => src?.includes("Face-down card.png"))).toBe(false);
     for (const call of vi.mocked(useCardImage).mock.calls) {
       expect(call[1]?.oracleId).not.toBe(SECRET_ORACLE);
     }
+  });
+
+  it("advances the exact failed visible mobile source and ends at the named fallback", () => {
+    const advanceFirst = vi.fn();
+    const advanceSecond = vi.fn();
+    let activeResult: {
+      src: string | null;
+      isLoading: boolean;
+      isRotated: boolean;
+      isFlip: boolean;
+      rungs?: { small: string; normal: string };
+      advanceFailedSource(failedSrc: string): void;
+    } = {
+      src: "mobile-normal-1.png" as string | null,
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+      rungs: { small: "mobile-small-1.png", normal: "mobile-normal-1.png" },
+      advanceFailedSource: advanceFirst,
+    };
+    vi.mocked(useCardImage).mockImplementation((cardName) => cardName === "Visible Mobile"
+      ? activeResult
+      : { src: null, isLoading: false, isRotated: false, isFlip: false });
+
+    const { rerender } = render(<CardPreview cardName="Visible Mobile" objectId={null} />);
+    const first = screen.getByAltText("Visible Mobile");
+    expect(first).toHaveAttribute(
+      "srcset",
+      "mobile-small-1.png 146w, mobile-normal-1.png 488w",
+    );
+    fireEvent.error(first);
+    expect(advanceFirst).toHaveBeenCalledWith("mobile-normal-1.png");
+
+    activeResult = {
+      src: "mobile-normal-2.png",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+      rungs: { small: "mobile-small-2.png", normal: "mobile-normal-2.png" },
+      advanceFailedSource: advanceSecond,
+    };
+    rerender(<CardPreview cardName="Visible Mobile" objectId={null} />);
+    const second = screen.getByAltText("Visible Mobile");
+    expect(second).toHaveAttribute("src", "mobile-normal-2.png");
+    expect(second).toHaveAttribute(
+      "srcset",
+      "mobile-small-2.png 146w, mobile-normal-2.png 488w",
+    );
+    fireEvent.error(second);
+    expect(advanceSecond).toHaveBeenCalledWith("mobile-normal-2.png");
+
+    activeResult = {
+      src: null,
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+      rungs: undefined,
+      advanceFailedSource: vi.fn(),
+    };
+    rerender(<CardPreview cardName="Visible Mobile" objectId={null} />);
+    expect(screen.getByRole("img", { name: "Visible Mobile" })).toHaveTextContent(
+      "Visible Mobile",
+    );
   });
 });

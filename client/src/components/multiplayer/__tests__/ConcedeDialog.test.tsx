@@ -1,4 +1,5 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ConcedeDialog } from "../ConcedeDialog";
@@ -51,5 +52,43 @@ describe("ConcedeDialog", () => {
 
     expect(screen.getByText("Your opponent wins this game.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Concede entire match" })).not.toBeInTheDocument();
+  });
+
+  it("contains focus, closes on Escape, and restores the opener", async () => {
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>
+            Open concede
+          </button>
+          <ConcedeDialog
+            isOpen={open}
+            gameAction={{
+              kind: "game",
+              consequence: "ordinary-game",
+              onConfirm: vi.fn(),
+            }}
+            onCancel={() => setOpen(false)}
+          />
+        </>
+      );
+    }
+
+    render(<Harness />);
+    const opener = screen.getByRole("button", { name: "Open concede" });
+    opener.focus();
+    fireEvent.click(opener);
+    const dialog = await screen.findByRole("alertdialog", { name: "Concede Game?" });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus(),
+    );
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    await waitFor(() =>
+      expect(screen.queryByRole("alertdialog", { name: "Concede Game?" })).not.toBeInTheDocument(),
+    );
+    expect(opener).toHaveFocus();
   });
 });

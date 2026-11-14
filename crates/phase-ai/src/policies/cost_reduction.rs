@@ -29,7 +29,7 @@ use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
-use crate::cast_facts::CastFacts;
+use crate::cast_facts::{CastCostMode, CastFacts};
 use crate::features::cost_reduction::{
     live_your_spell_discounts, LiveDiscount, COST_REDUCTION_FLOOR,
 };
@@ -75,8 +75,9 @@ impl TacticalPolicy for CostReductionPolicy {
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
         let Some(facts) = ctx.cast_facts() else {
-            // CR 601.2 cast-shaped siblings (madness, miracle, foretell, copies)
-            // do not populate `cast_facts`, so there is no AST to classify.
+            // CR 601.2 cast-shaped siblings outside the cast family (foretell,
+            // face-down plays, stack copies) do not populate `cast_facts`, so
+            // there is no AST to classify.
             return PolicyVerdict::neutral(PolicyReason::new("cost_reduction_na"));
         };
 
@@ -190,6 +191,15 @@ fn discountable_cards_in_hand(
 /// cheaper than this spell AND would actually discount it — i.e. the engine
 /// could have been deployed first, to this very spell's benefit.
 fn hand_holds_cheaper_reducer(ctx: &PolicyContext<'_>, facts: &CastFacts<'_>) -> bool {
+    // CR 118.9: the comparison below is against `facts.mana_value` — the PRINTED
+    // mana value. An alternative or free cast does not pay that cost at all
+    // (CR 107.3b even fixes an undefined X at 0 for a free cast), so "a cheaper
+    // reducer would have discounted THIS spell" is not a claim this gate can
+    // make: it would compare a reducer's cost against a number nobody pays.
+    // Deploy-first sequencing advice is withheld rather than guessed.
+    if !matches!(facts.cost_mode, CastCostMode::Printed) {
+        return false;
+    }
     let Some(player) = ctx.state.players.get(ctx.ai_player.0 as usize) else {
         return false;
     };

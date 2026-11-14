@@ -287,6 +287,7 @@ fn assert_replacement_choice_between_vorinclex_and_doc_samson(
         player,
         candidate_count,
         ref candidates,
+        ..
     } = runner.state().waiting_for
     else {
         panic!("{context}, got {:?}", runner.state().waiting_for);

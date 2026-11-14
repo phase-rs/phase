@@ -348,7 +348,9 @@ fn chain_of_smog_discard_choice_resumes_selected_tail_after_library_of_leng() {
     );
     let restored: PersistedGameState = serde_json::from_str(&saved)
         .expect("paused selected discard restores through the authoritative persistence envelope");
-    let restored = restored.into_game_state();
+    let restored = restored
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
     assert!(matches!(
         restored.pending_discard_batch.as_deref(),
         Some(engine::types::game_state::PendingDiscardBatch {

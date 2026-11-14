@@ -21,12 +21,14 @@
 //! covered.
 
 use engine::types::ability::{
-    AbilityDefinition, ContinuousModification, Effect, FilterProp, QuantityExpr, QuantityRef,
-    ReplacementDefinition, StaticDefinition, TargetFilter, TriggerDefinition,
+    AbilityDefinition, ContinuousModification, Effect, FilterProp, PtValue, QuantityExpr,
+    QuantityRef, ReplacementDefinition, StaticDefinition, TargetFilter, TriggerDefinition,
 };
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::statics::{HandSizeModification, StaticMode};
+
+use crate::ability_chain::AbilityWalk;
 
 /// True when the spell-object-on-stack's printed triggers or replacement
 /// effects reference X. Covers X-cost creature spells whose X is consumed by
@@ -222,6 +224,7 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
+        | ContinuousModification::SubstituteTextWord { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
@@ -282,6 +285,17 @@ pub(crate) fn effect_references_x(effect: &Effect) -> bool {
             enter_with_counters,
             ..
         } => count.contains_x() || enter_with_counters.iter().any(|(_, qty)| qty.contains_x()),
+        // A pump's magnitude is a `PtValue`, the one effect payload that can
+        // carry X outside a `QuantityExpr` — the parser encodes the sign in the
+        // variable NAME, so "-X/-X" (Slice from the Shadows) arrives as
+        // `Variable("-X")`. Without this arm the ramp policy scored every X the
+        // same and the fallback announced X = 0, casting the spell for nothing.
+        Effect::Pump {
+            power, toughness, ..
+        }
+        | Effect::PumpAll {
+            power, toughness, ..
+        } => pt_value_references_x(power) || pt_value_references_x(toughness),
         // RC1: `GenericEffect` carries its X payoff inside granted static
         // definitions (Mirror Entity's dynamic P/T via `CostXPaid`; Day of
         // Black Sun's `RemoveAllAbilities` over an `X`-filtered subject) or in a
@@ -295,6 +309,47 @@ pub(crate) fn effect_references_x(effect: &Effect) -> bool {
                 || target.as_ref().is_some_and(target_filter_references_x)
         }
         _ => false,
+    }
+}
+
+/// CR 107.3 + CR 608.2c: a `Token` whose own chain later puts counters on it
+/// (a created-token placement) is sized by that placement, exactly as
+/// [`effect_references_x`] / [`effect_references_previous_amount`] read
+/// `Token { enter_with_counters }`. True iff `pred(effect)`, or `effect` is the
+/// `Token` of one of the walk's created-token pairs whose placement satisfies
+/// `pred`.
+///
+/// `pred` is one of this module's per-effect X predicates; the walk supplies
+/// the ability whose branch chains the pairing is read from
+/// ([`AbilityWalk::created_token_pairs`], shared with the filtering view), so a
+/// `Token` in an `else_ability` or mode branch is sized by its own branch's
+/// placement and never by another chain's.
+pub(crate) fn effect_matches_in_walk(
+    walk: &AbilityWalk<'_>,
+    effect: &Effect,
+    pred: fn(&Effect) -> bool,
+) -> bool {
+    if pred(effect) {
+        return true;
+    }
+    if !matches!(effect, Effect::Token { .. }) {
+        return false;
+    }
+    walk.created_token_pairs()
+        .iter()
+        .any(|pair| std::ptr::eq(pair.token, effect) && pred(pair.placement))
+}
+
+/// True when a `Pump` power/toughness modifier scales with the chosen X.
+/// `PtValue::Quantity` delegates to the engine's `contains_x` authority like
+/// every other detector in this module; `PtValue::Variable` is the one
+/// non-`QuantityExpr` carrier, and its name embeds the sign ("X" for a buff,
+/// "-X" for a shrink), so the sign is stripped before the comparison.
+fn pt_value_references_x(value: &PtValue) -> bool {
+    match value {
+        PtValue::Fixed(_) => false,
+        PtValue::Variable(name) => name.strip_prefix('-').unwrap_or(name) == "X",
+        PtValue::Quantity(expr) => expr.contains_x(),
     }
 }
 
@@ -417,6 +472,104 @@ fn filter_prop_references_x(prop: &FilterProp) -> bool {
 }
 
 #[cfg(test)]
+mod pump_x_tests {
+    use super::*;
+    use engine::parser::oracle::parse_oracle_text;
+    use engine::types::ability::AbilityKind;
+
+    fn pump(power: PtValue, toughness: PtValue) -> Effect {
+        Effect::Pump {
+            power,
+            toughness,
+            target: TargetFilter::Any,
+        }
+    }
+
+    /// Slice from the Shadows: without a `Pump` arm every X scored identically
+    /// and `XValuePolicy`'s fallback announced X = 0, casting a `-0/-0` spell.
+    #[test]
+    fn pump_with_negative_x_references_x() {
+        let parsed = parse_oracle_text(
+            "Target creature gets -X/-X until end of turn.",
+            "Slice from the Shadows",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let spell = parsed
+            .abilities
+            .iter()
+            .find(|a| a.kind == AbilityKind::Spell)
+            .expect("Slice from the Shadows parses to a spell ability");
+        assert!(effect_references_x(&spell.effect));
+        // The whole-ability walker mirrors `XValuePolicy`'s own `ability_references_x`.
+        assert!(ability_definition_references_x(spell));
+    }
+
+    /// The unsigned variable is the same carrier, so the sign strip must not be
+    /// what makes the detector fire.
+    #[test]
+    fn pump_with_positive_x_references_x() {
+        assert!(effect_references_x(&pump(
+            PtValue::Variable("X".to_string()),
+            PtValue::Variable("X".to_string()),
+        )));
+    }
+
+    /// Discriminator: a variable that is not X (a `*` characteristic-defining
+    /// P/T, "-1" style names) must not be mistaken for the announced X.
+    #[test]
+    fn pump_with_non_x_variable_does_not_reference_x() {
+        assert!(!effect_references_x(&pump(
+            PtValue::Variable("*".to_string()),
+            PtValue::Fixed(0),
+        )));
+        assert!(!effect_references_x(&pump(
+            PtValue::Fixed(1),
+            PtValue::Fixed(1),
+        )));
+    }
+
+    /// The `QuantityExpr` carrier still routes through the engine's
+    /// `contains_x` authority, including under the negating `Multiply`.
+    #[test]
+    fn pump_with_negated_quantity_x_references_x() {
+        let negated = PtValue::Quantity(QuantityExpr::Multiply {
+            factor: -1,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            }),
+        });
+        assert!(effect_references_x(&pump(negated, PtValue::Fixed(0))));
+        // Boundary: this detector keeps the module's discipline of delegating
+        // to the engine's `contains_x`, so the post-announcement `CostXPaid`
+        // form is NOT in class here (it is `expr_references_chosen_x`'s job on
+        // granted statics).
+        assert!(!effect_references_x(&pump(
+            PtValue::Quantity(QuantityExpr::Multiply {
+                factor: -1,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid,
+                }),
+            }),
+            PtValue::Fixed(0),
+        )));
+    }
+
+    /// `PumpAll` shares the P/T slots, so the mass form scales with X too.
+    #[test]
+    fn pump_all_references_x() {
+        assert!(effect_references_x(&Effect::PumpAll {
+            power: PtValue::Variable("-X".to_string()),
+            toughness: PtValue::Variable("-X".to_string()),
+            target: TargetFilter::Any,
+        }));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     /// The `CR 120.10` strike on `is_previous_amount` is load-bearing, so it is
     /// asserted rather than left to review. Read in full, CR 120.10 governs
@@ -456,5 +609,137 @@ mod tests {
                 .any(|line| line.trim_start().starts_with("// CR 120.10")),
             "an AI scoring heuristic implements no game rule, so it carries no CR annotation"
         );
+    }
+
+    use super::*;
+    use crate::cast_facts::collect_definition_effects;
+    use crate::policies::tests::created_token_placement_parity::{
+        effect_chain, last_created_placement, token_effect, x_quantity,
+    };
+    use engine::types::ability::{
+        AbilityKind, AggregateFunction, DamageChannel, SubAbilityLink, TypedFilter,
+    };
+    use engine::types::counter::CounterType;
+
+    fn chain_of(effects: Vec<Effect>) -> AbilityDefinition {
+        effect_chain(
+            AbilityKind::Spell,
+            SubAbilityLink::ContinuationStep,
+            effects,
+        )
+    }
+
+    /// Whether the chain entry at `index` is X-scaled, read in its own walk.
+    fn x_scaled_at(ability: &AbilityDefinition, index: usize, pred: fn(&Effect) -> bool) -> bool {
+        let walk = AbilityWalk::unconditional(ability);
+        let effect = walk.effects()[index];
+        effect_matches_in_walk(&walk, effect, pred)
+    }
+
+    /// CR 107.3 + CR 608.2c: a `Token` whose created-token placement is
+    /// X-scaled is X-scaled itself, as `Token { enter_with_counters: X }` is.
+    #[test]
+    fn token_is_sized_by_its_x_scaled_placement() {
+        let ability = chain_of(vec![
+            token_effect(0, 0, vec![]),
+            last_created_placement(CounterType::Plus1Plus1, x_quantity()),
+        ]);
+        // Reach guard: the bare `Token` is not X-scaled on its own.
+        assert!(!effect_references_x(&ability.effect));
+        assert!(x_scaled_at(&ability, 0, effect_references_x));
+        // The declarative twin reads the same through the plain predicate.
+        let declarative = token_effect(0, 0, vec![(CounterType::Plus1Plus1, x_quantity())]);
+        assert!(effect_references_x(&declarative));
+    }
+
+    /// Only the nearest preceding `Token` is sized, and only by a placement on
+    /// the token it created whose count satisfies the predicate.
+    #[test]
+    fn only_the_paired_token_is_sized() {
+        let nearest = chain_of(vec![
+            token_effect(0, 0, vec![]),
+            token_effect(0, 0, vec![]),
+            last_created_placement(CounterType::Plus1Plus1, x_quantity()),
+        ]);
+        assert!(!x_scaled_at(&nearest, 0, effect_references_x));
+        assert!(x_scaled_at(&nearest, 1, effect_references_x));
+
+        let fixed = chain_of(vec![
+            token_effect(0, 0, vec![]),
+            last_created_placement(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 2 }),
+        ]);
+        assert!(!x_scaled_at(&fixed, 0, effect_references_x));
+
+        let typed = chain_of(vec![
+            token_effect(0, 0, vec![]),
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: x_quantity(),
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        ]);
+        assert!(!x_scaled_at(&typed, 0, effect_references_x));
+
+        // A walk with no ability behind it never pairs.
+        let walk = AbilityWalk::unpaired(vec![&*nearest.effect]);
+        assert!(!effect_matches_in_walk(
+            &walk,
+            &nearest.effect,
+            effect_references_x
+        ));
+    }
+
+    /// N3 (CR 700.2): a mode's own `[Token, P(X)]` sizes that mode's `Token`
+    /// under the definition walk; a `Token` in one mode is never sized by a
+    /// placement in another, and a bare `Token` is not X-scaled.
+    #[test]
+    fn branch_token_is_sized_by_its_branch_placement() {
+        let mut modal = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+        modal.mode_abilities = vec![chain_of(vec![
+            token_effect(0, 0, vec![]),
+            last_created_placement(CounterType::Plus1Plus1, x_quantity()),
+        ])];
+        let walk = AbilityWalk::of(&modal, collect_definition_effects(&modal));
+        let mode_token = &modal.mode_abilities[0].effect;
+        assert!(!effect_references_x(mode_token), "reach guard: bare Token");
+        assert!(effect_matches_in_walk(
+            &walk,
+            mode_token,
+            effect_references_x
+        ));
+
+        let mut split = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+        split.mode_abilities = vec![
+            chain_of(vec![token_effect(0, 0, vec![])]),
+            chain_of(vec![last_created_placement(
+                CounterType::Plus1Plus1,
+                x_quantity(),
+            )]),
+        ];
+        let walk = AbilityWalk::of(&split, collect_definition_effects(&split));
+        assert!(!effect_matches_in_walk(
+            &walk,
+            &split.mode_abilities[0].effect,
+            effect_references_x
+        ));
+    }
+
+    /// The companion is parameterized: the gate's chain-relative
+    /// `PreviousEffectAmount` reading pairs the same way.
+    #[test]
+    fn token_is_sized_by_a_previous_amount_placement() {
+        let previous = QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount {
+                channel: DamageChannel::Total,
+                aggregate: AggregateFunction::Sum,
+            },
+        };
+        let ability = chain_of(vec![
+            token_effect(0, 0, vec![]),
+            last_created_placement(CounterType::Plus1Plus1, previous),
+        ]);
+        assert!(!effect_references_previous_amount(&ability.effect));
+        assert!(x_scaled_at(&ability, 0, effect_references_previous_amount));
+        assert!(!x_scaled_at(&ability, 0, effect_references_x));
     }
 }

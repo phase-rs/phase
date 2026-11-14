@@ -27,6 +27,8 @@ use crate::policies::effect_classify::{effect_polarity, EffectPolarity};
 
 fn change_zone(destination: Zone) -> Effect {
     Effect::ChangeZone {
+        actor: engine::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: None,
         destination,
         target: TargetFilter::Any,
@@ -172,6 +174,14 @@ fn contextual_classifications_unchanged() {
         effect_polarity(&Effect::Amass {
             subtype: "Zombie".to_string(),
             count: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        }),
+        EffectPolarity::Contextual
+    );
+    // CR 701.71a: empower Jace — classified beside Amass.
+    assert_eq!(
+        effect_polarity(&Effect::EmpowerJace {
+            count: QuantityExpr::Fixed { value: 2 },
         }),
         EffectPolarity::Contextual
     );
@@ -202,6 +212,9 @@ fn contextual_classifications_unchanged() {
         Effect::SolveCase,
         Effect::HeistExile,
         Effect::ProcessRadCounters,
+        // CR 701.33: abandoning a scheme is Contextual (ongoing pressure vs.
+        // cycling to the next scheme is card-specific).
+        Effect::AbandonScheme,
     ] {
         assert_eq!(
             effect_polarity(&effect),

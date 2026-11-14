@@ -4,8 +4,10 @@ import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
+import { usePlayerAvatarImage } from "../../hooks/usePlayerAvatarImage.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
+import { useHordeDeckMeta } from "../../hooks/useHordeDeckMeta.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { getWaitingForPlayerChoiceIds } from "../../viewmodel/gameStateView.ts";
@@ -16,9 +18,11 @@ import {
   CounterBadge,
   DungeonBadge,
   EnduringStoryBadge,
+  HordeRulesBadge,
   InitiativeBadge,
   MonarchBadge,
   PendingSpellBadge,
+  PoisonCounterBadge,
   StatusBadge,
   UnboundedBadge,
 } from "../hud/HudBadges.tsx";
@@ -26,6 +30,7 @@ import { AvatarHoverPreview } from "../hud/AvatarHoverPreview.tsx";
 import { EnchantmentsBadge } from "../hud/EnchantmentsBadge.tsx";
 import { KickConfirmDialog } from "../hud/KickConfirmDialog.tsx";
 import { NextUpBadge } from "../hud/NextUpBadge.tsx";
+import { PlayerLatency } from "../hud/PlayerLatency.tsx";
 
 interface OpponentSeatHeaderProps {
   playerId: PlayerId;
@@ -40,12 +45,16 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
   const seatColor = getSeatColor(playerId, gameState?.seat_order);
-  const avatarUrl = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
+  const avatarIdentity = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
+  const avatar = usePlayerAvatarImage(avatarIdentity);
   const disconnected = useMultiplayerStore((s) => s.disconnectedPlayers.has(playerId));
   const isOnline = useMultiplayerStore((s) => s.connectionStatus) !== "disconnected";
   const designations = usePlayerDesignations(playerId);
   const player = gameState?.players[playerId];
   const label = getOpponentDisplayName(playerId);
+  // The Horde deck's engine-authored rules summary (undefined outside Horde).
+  const hordeMeta = useHordeDeckMeta();
+  const activeAvatarSrc = avatar.src;
 
   const canActForWaitingState = useCanActForWaitingState();
   // Same authority + actor gate as PlayerHud / OpponentHud — this header is the
@@ -107,13 +116,13 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
         />
       ) : null}
       <div className={`pointer-events-none absolute left-1/2 top-1/2 z-10 flex min-w-0 ${identityWidth} -translate-x-1/2 -translate-y-1/2 items-center justify-center ${compact ? "gap-1" : "gap-1.5"}`}>
-        {avatarUrl ? (
+        {activeAvatarSrc ? (
           // Portrait-preview on hover, matching the 1v1 OpponentHud avatar. The
           // enclosing identity block is pointer-events-none, so the tile must
           // re-enable pointer events to receive hover — except while this seat is
           // a legal target, where the header's full-area target button must win.
           <AvatarHoverPreview
-            avatarUrl={avatarUrl}
+            avatarUrl={activeAvatarSrc}
             label={label}
             seatColor={seatColor}
             title={isValidPlayerTarget ? t("opponentHud.clickToTarget", { name: label }) : label}
@@ -121,8 +130,14 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
               isValidPlayerTarget ? "pointer-events-none ring-2 ring-cyan-300/70" : "pointer-events-auto"
             }`}
             style={{ borderColor: `${seatColor}cc`, backgroundColor: `${seatColor}44` }}
+            onAvatarError={avatar.advanceFailedSource}
           >
-            <img src={avatarUrl} alt={label} className="h-full w-full object-cover" />
+            <img
+              src={activeAvatarSrc}
+              alt={label}
+              className="h-full w-full object-cover"
+              onError={() => avatar.advanceFailedSource(activeAvatarSrc)}
+            />
             {isUnderAttack && <span className="absolute inset-0 rounded-md ring-2 ring-red-400/70" />}
           </AvatarHoverPreview>
         ) : (
@@ -133,7 +148,7 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
             style={{ borderColor: `${seatColor}cc`, backgroundColor: `${seatColor}44` }}
             title={label}
           >
-            {label.charAt(0).toUpperCase()}
+            {avatarIdentity && avatar.isLoading ? null : label.charAt(0).toUpperCase()}
             {isUnderAttack && <span className="absolute inset-0 rounded-md ring-2 ring-red-400/70" />}
           </div>
         )}
@@ -152,6 +167,7 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
             />
           )}
           <LifeTotal playerId={playerId} size="sm" hideLabel />
+          <PlayerLatency playerId={playerId} />
           {/* The enclosing identity block is pointer-events-none (so the
               header's full-area target button owns clicks while this seat is a
               legal target). Re-enable pointer events on the badge cluster so the
@@ -163,6 +179,9 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
                 with `Enchant player`). Reads the engine's `auras_attached_to_player`
                 projection; brings the split seat header to parity with the
                 legacy 1v1/tab HUDs, which already surface curses. */}
+            {player.has_no_life_total && hordeMeta ? (
+              <HordeRulesBadge deckLabel={hordeMeta.label} rules={hordeMeta.rules} />
+            ) : null}
             <EnchantmentsBadge playerId={playerId} />
             {designations.isMonarch ? <MonarchBadge /> : null}
             {designations.hasInitiative ? <InitiativeBadge /> : null}
@@ -179,7 +198,7 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
               />
             ) : null}
             {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
-            {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
+            {poisonCounters > 0 ? <PoisonCounterBadge playerId={playerId} value={poisonCounters} /> : null}
             {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
             {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
             {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}

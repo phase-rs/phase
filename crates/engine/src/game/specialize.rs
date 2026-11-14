@@ -100,6 +100,8 @@ pub(crate) fn empty_back_face() -> BackFaceData {
         casting_options: vec![],
         parse_warnings: vec![],
         layout_kind: None,
+        is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
     }
 }
 
@@ -193,7 +195,9 @@ mod tests {
             counters: Default::default(),
             tapped: false,
             is_suspected: false,
+            was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         }
     }
 

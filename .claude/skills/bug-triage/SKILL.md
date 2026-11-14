@@ -458,7 +458,7 @@ A misparse fix can flip the AST to *look* right while the runtime driver ignores
 
 ### Mandatory Post-Fix Review Gate — Isolated Reviewer Required
 
-Every code fix made during bug triage must pass an **isolated reviewer agent's** application of `$review-impl` before the fix is committed, marked fixed, or described as complete.
+Every code fix made during bug triage must pass an **isolated reviewer agent's** application of `$review-engine-impl` before the fix is committed, marked fixed, or described as complete.
 
 **Self-review by the implementing agent is NOT sufficient.** Multiple commits during the 2026-05-11 bug-triage rounds passed implementer self-review but had real issues caught only by a fresh-context reviewer (CR hallucinations, tests bypassing the pipeline they claim to exercise, predicate-narrowness latent bugs, missing CR sub-parts that don't exist). Implementers rationalize their own choices; fresh-context reviewers do not.
 
@@ -470,11 +470,11 @@ git log --oneline -1   # capture the SHA
 
 # Spawn an isolated code-quality-reviewer agent (NOT the implementer) with:
 #   - the commit SHA
-#   - the review charter from $review-impl
+#   - the review charter from $review-engine-impl
 #   - explicit "you have not seen the implementation" framing
 ```
 
-The reviewer must read the diff (`git show <sha>`) with fresh context and apply the `$review-impl` checklist. Required focus areas:
+The reviewer must read the diff (`git show <sha>`) with fresh context and apply the `$review-engine-impl` checklist. Required focus areas:
 
 - Missing sibling coverage / parameterization smells
 - Overly broad parser or runtime semantics

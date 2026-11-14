@@ -6,8 +6,21 @@ import { useUiStore } from "../../../stores/uiStore.ts";
 import { HoverCardPreview } from "../HoverCardPreview.tsx";
 
 vi.mock("../CardPreview.tsx", () => ({
-  CardPreview: ({ cardName, dockSide }: { cardName: string | null; dockSide?: boolean }) => (
-    <div data-dock-side={dockSide} data-testid="preview">
+  CardPreview: ({
+    cardName,
+    dockSide,
+    dockPosition,
+  }: {
+    cardName: string | null;
+    dockSide?: boolean;
+    dockPosition?: string;
+  }) => (
+    <div
+      data-card-preview=""
+      data-dock-position={dockPosition}
+      data-dock-side={dockSide}
+      data-testid="preview"
+    >
       {cardName}
     </div>
   ),
@@ -38,6 +51,33 @@ describe("HoverCardPreview", () => {
     expect(screen.getByTestId("preview")).toHaveAttribute("data-dock-side", "true");
   });
 
+  it("can keep a workspace preview docked without changing the game-board preference", () => {
+    render(<HoverCardPreview card={CARD} forceDockSide dockPosition="middle-right" />);
+
+    expect(screen.getByTestId("preview")).toHaveAttribute("data-dock-side", "true");
+    expect(screen.getByTestId("preview")).toHaveAttribute("data-dock-position", "middle-right");
+  });
+
+  it("dismisses a deck-owned preview when its hover source is removed", () => {
+    const onDismiss = vi.fn();
+    render(<HoverCardPreview card={CARD} onDismiss={onDismiss} />);
+    const querySelector = vi.spyOn(document, "querySelector").mockReturnValue(null);
+
+    fireEvent.pointerMove(window, { pointerType: "mouse" });
+
+    expect(onDismiss).toHaveBeenCalledOnce();
+    querySelector.mockRestore();
+  });
+
+  it("keeps a deck preview open while the pointer is over its interactive panel", () => {
+    const onDismiss = vi.fn();
+    render(<HoverCardPreview card={CARD} onDismiss={onDismiss} />);
+
+    fireEvent.pointerMove(screen.getByTestId("preview"), { pointerType: "mouse" });
+
+    expect(onDismiss).not.toHaveBeenCalled();
+  });
+
   it("shows a hovered card only while Shift is held in shift mode", () => {
     usePreferencesStore.setState({ cardPreviewMode: "shift" });
     render(<HoverCardPreview card={CARD} />);
@@ -60,5 +100,38 @@ describe("HoverCardPreview", () => {
 
     act(() => vi.advanceTimersByTime(250));
     expect(screen.getByTestId("preview")).toHaveTextContent(CARD.name);
+  });
+
+  it("lets explicit mode and delay override hostile global preferences", () => {
+    usePreferencesStore.setState({ cardPreviewMode: "shift", cardPreviewHoverDelayMs: 500 });
+    const { rerender } = render(
+      <HoverCardPreview card={CARD} mode="follow" hoverDelayMs={0} />,
+    );
+
+    expect(screen.getByTestId("preview")).toHaveTextContent(CARD.name);
+    rerender(<HoverCardPreview card={CARD} mode="side" hoverDelayMs={0} />);
+    expect(screen.getByTestId("preview")).toHaveAttribute("data-dock-side", "true");
+
+    usePreferencesStore.setState({ cardPreviewMode: "follow" });
+    rerender(<HoverCardPreview card={CARD} mode="shift" hoverDelayMs={0} />);
+    expect(screen.getByTestId("preview")).toBeEmptyDOMElement();
+    fireEvent.keyDown(window, { key: "Shift" });
+    expect(screen.getByTestId("preview")).toHaveTextContent(CARD.name);
+  });
+
+  it("suppresses and clears an explicit none preview despite hostile globals", () => {
+    const { rerender } = render(
+      <HoverCardPreview card={CARD} mode="follow" hoverDelayMs={0} />,
+    );
+    expect(screen.getByTestId("preview")).toHaveTextContent(CARD.name);
+
+    rerender(<HoverCardPreview card={CARD} mode="none" hoverDelayMs={0} />);
+    expect(screen.getByTestId("preview")).toBeEmptyDOMElement();
+
+    usePreferencesStore.setState({ cardPreviewHoverDelayMs: 250 });
+    rerender(<HoverCardPreview card={CARD} mode="follow" />);
+    rerender(<HoverCardPreview card={CARD} mode="none" />);
+    act(() => vi.advanceTimersByTime(250));
+    expect(screen.getByTestId("preview")).toBeEmptyDOMElement();
   });
 });

@@ -177,7 +177,10 @@ fn translate_draw(
     resolver: &mut SvarResolver,
 ) -> Result<Effect, ForgeTranslateError> {
     let count = resolve_quantity(params, "NumCards", resolver);
-    Ok(Effect::Draw { count })
+    Ok(Effect::Draw {
+        count,
+        target: TargetFilter::Controller,
+    })
 }
 
 // CR 119.1: Gain life.
@@ -317,6 +320,7 @@ fn translate_token(
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
     })
 }
 
@@ -371,6 +375,8 @@ fn translate_change_zone(params: &ForgeParams) -> Result<Effect, ForgeTranslateE
         resolve_target(params, "ValidTgts").or_filter(resolve_target(params, "ChangeType"));
 
     Ok(Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin,
         destination,
         target,
@@ -519,6 +525,8 @@ fn translate_counter(params: &ForgeParams) -> Result<Effect, ForgeTranslateError
 fn translate_bounce(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
     let target = resolve_target(params, "ValidTgts");
     Ok(Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Battlefield),
         destination: Zone::Hand,
         target,
@@ -605,8 +613,9 @@ mod tests {
         let mut resolver = make_resolver();
         let effect = translate_effect(&params, &mut resolver).unwrap();
         match effect {
-            Effect::Draw { count } => {
+            Effect::Draw { count, target } => {
                 assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+                assert_eq!(target, TargetFilter::Controller);
             }
             other => panic!("expected Draw, got {other:?}"),
         }

@@ -39,7 +39,7 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones;
-use engine::types::ability::{CastingPermission, ManaSpendPermission, TargetRef};
+use engine::types::ability::{CardPlayMode, CastingPermission, ManaSpendPermission, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, CastingPermissionIndex, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
@@ -327,7 +327,8 @@ fn fireball_distribution_resume_preserves_elected_exile_permission() {
     const X: u32 = 2;
     let (mut runner, spell, card_id, creatures) = fireball_scenario(3);
     zones::move_to_zone(runner.state_mut(), spell, Zone::Exile, &mut Vec::new());
-    runner.state_mut().players[0].mana_pool.mana = blue_pool(3);
+    runner.state_mut().players[0].mana_pool =
+        engine::types::mana::ManaPool::from_units(blue_pool(3));
     runner
         .state_mut()
         .objects
@@ -335,8 +336,10 @@ fn fireball_distribution_resume_preserves_elected_exile_permission() {
         .unwrap()
         .casting_permissions = vec![
         CastingPermission::PlayFromExile {
+            provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
             duration: Duration::Permanent,
             granted_to: P1,
+            mode: CardPlayMode::Play,
             frequency: CastFrequency::Unlimited,
             source_id: None,
             invalidation: None,
@@ -345,12 +348,16 @@ fn fireball_distribution_resume_preserves_elected_exile_permission() {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: EtbTapState::Unspecified,
         },
         CastingPermission::PlayFromExile {
+            provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
             duration: Duration::Permanent,
             granted_to: P0,
+            mode: CardPlayMode::Play,
             frequency: CastFrequency::Unlimited,
             source_id: None,
             invalidation: None,
@@ -359,7 +366,9 @@ fn fireball_distribution_resume_preserves_elected_exile_permission() {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: EtbTapState::Unspecified,
         },
     ];

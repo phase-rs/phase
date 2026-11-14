@@ -12,7 +12,8 @@ import { MenuSelect } from "../ui/MenuSelect";
 
 import type { CubeDraftSettings } from "../../adapter/draft-adapter";
 import { menuButtonClass } from "../menu/buttonStyles";
-import { fetchCubeList } from "../../services/cubeCobra";
+import { CUBE_IMPORT_ERROR_KEYS, fetchCubeList } from "../../services/cubeCobra";
+import { useEffectiveOffline } from "../../stores/connectivityStore";
 
 export const DEFAULT_CUBE_SETTINGS: CubeDraftSettings = {
   pod_size: 8,
@@ -37,6 +38,8 @@ export interface CubeSetupPanelProps {
   }) => void | Promise<void>;
   /** Custom button label; defaults to the solo cube draft localized string. */
   startLabel?: string;
+  /** Engine-published floor for the current procedure. Defaults to positive. */
+  minimumDeckSize?: number;
   /**
    * External disabled signal (e.g. the parent is busy fetching pool data).
    * Composed with the panel's internal loading state via OR.
@@ -44,8 +47,14 @@ export interface CubeSetupPanelProps {
   disabled?: boolean;
 }
 
-export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanelProps) {
+export function CubeSetupPanel({
+  onStart,
+  startLabel,
+  minimumDeckSize,
+  disabled,
+}: CubeSetupPanelProps) {
   const { t } = useTranslation("draft");
+  const effectiveOffline = useEffectiveOffline();
   const [cubeName, setCubeName] = useState(t("cubeSetup.defaultCubeName"));
   const [cubeText, setCubeText] = useState("");
   const [cubeUrl, setCubeUrl] = useState("");
@@ -79,7 +88,8 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
     try {
       setCubeText(await fetchCubeList(cubeUrl));
     } catch (err) {
-      setError(errorMessage(err, t("cubeSetup.fetchError")));
+      const message = errorMessage(err, t("cubeSetup.fetchError"));
+      setError(message === CUBE_IMPORT_ERROR_KEYS.offline ? t(message) : message);
     } finally {
       setLoading(false);
     }
@@ -89,7 +99,11 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
     setLoading(true);
     setError(null);
     try {
-      await onStart({ cubeName, cubeListText: cubeText, settings });
+      await onStart({
+        cubeName,
+        cubeListText: cubeText,
+        settings,
+      });
     } catch (err) {
       setError(errorMessage(err, t("cubeSetup.startError")));
     } finally {
@@ -99,6 +113,10 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
 
   const busy = loading || disabled === true;
   const canStart = cubeText.trim().length > 0 && !busy;
+  const displayedMinimumDeckSize = Math.max(
+    settings.min_deck_size,
+    minimumDeckSize ?? 1,
+  );
 
   const addablesPolicyItems = useMemo(
     () => [
@@ -129,7 +147,7 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
       </div>
 
       <div className="grid gap-3 md:grid-cols-[220px_1fr_auto]">
-        <NumberField label={t("cubeSetup.minDeck")} value={settings.min_deck_size} min={1} max={100} onChange={(v) => updateSetting("min_deck_size", v)} />
+        <NumberField label={t("cubeSetup.minDeck")} value={displayedMinimumDeckSize} min={minimumDeckSize ?? 1} max={100} onChange={(v) => updateSetting("min_deck_size", v)} />
         <label className="flex flex-col gap-1">
           <span className="text-xs uppercase tracking-[0.16em] text-white/35">{t("cubeSetup.exportUrl")}</span>
           <input
@@ -142,12 +160,16 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
         <button
           type="button"
           onClick={handleFetchUrl}
-          disabled={busy || !cubeUrl.trim()}
-          className={menuButtonClass({ tone: "neutral", size: "md", disabled: busy || !cubeUrl.trim(), className: "self-end" })}
+          disabled={busy || effectiveOffline || !cubeUrl.trim()}
+          className={menuButtonClass({ tone: "neutral", size: "md", disabled: busy || effectiveOffline || !cubeUrl.trim(), className: "self-end" })}
         >
           {t("cubeSetup.loadUrl")}
         </button>
       </div>
+
+      {effectiveOffline && (
+        <p className="text-sm text-white/55">{t("cubeSetup.offlineUrlUnavailable")}</p>
+      )}
 
       <div className="grid gap-3 md:grid-cols-[260px_1fr]">
         <div className="flex flex-col gap-1">

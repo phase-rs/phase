@@ -1,11 +1,11 @@
-use engine::ai_support::AiDecisionContract;
+use engine::ai_support::{candidate_actions, legal_actions_for_viewer, AiDecisionContract};
 use engine::game::engine::{apply_as_current, EngineError};
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
-    AdditionalCostRepeatability, Effect, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter,
-    TargetRef, TypeFilter, TypedFilter,
+    AdditionalCostRepeatability, ControllerRef, Effect, EffectKind, QuantityExpr, ResolvedAbility,
+    TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -19,6 +19,78 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 use std::sync::Arc;
+
+#[test]
+fn commander_zone_choice_exposes_both_rule_legal_answers_and_settles_either_branch() {
+    for arrival_zone in [Zone::Graveyard, Zone::Exile] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let commander = scenario
+            .add_creature_to_graveyard(P0, "AI Commander Choice Contract", 2, 2)
+            .id();
+        scenario.with_commander(commander);
+        let mut runner = scenario.build();
+        runner.state_mut().format_config.command_zone = true;
+        let mut events = Vec::new();
+        engine::game::zones::move_to_zone(runner.state_mut(), commander, arrival_zone, &mut events);
+        engine::game::sba::check_state_based_actions(runner.state_mut(), &mut events);
+
+        let state = runner.state();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::CommanderZoneChoice {
+                player: P0,
+                commander_id,
+                current_zone,
+            } if commander_id == commander && current_zone == arrival_zone
+        ));
+        let contract = AiDecisionContract::issue(state, P0);
+        let accept = GameAction::DecideOptionalEffect { accept: true };
+        let decline = GameAction::DecideOptionalEffect { accept: false };
+        assert!(contract.contains_action(state, &accept));
+        assert!(contract.contains_action(state, &decline));
+        assert!(contract.permits(state, P0, &accept));
+        assert!(contract.permits(state, P0, &decline));
+        let candidates = candidate_actions(state);
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|candidate| matches!(
+                    candidate.action,
+                    GameAction::DecideOptionalEffect { .. }
+                ))
+                .count(),
+            2,
+            "the engine domain must issue both commander answers"
+        );
+        assert_eq!(
+            legal_actions_for_viewer(state, P0)
+                .0
+                .into_iter()
+                .filter(|action| matches!(action, GameAction::DecideOptionalEffect { .. }))
+                .count(),
+            2
+        );
+        assert!(legal_actions_for_viewer(state, P1).0.is_empty());
+
+        let mut declined = state.clone();
+        apply_as_current(&mut declined, decline).expect("decline must remain reducer-legal");
+        assert_eq!(declined.objects[&commander].zone, arrival_zone);
+        assert!(declined.commander_declined_zone_return.contains(&commander));
+        assert!(matches!(
+            declined.waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+
+        let mut accepted = state.clone();
+        apply_as_current(&mut accepted, accept).expect("accept must remain reducer-legal");
+        assert_eq!(accepted.objects[&commander].zone, Zone::Command);
+        assert!(matches!(
+            accepted.waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+    }
+}
 
 const ROUSING_REFRAIN_ORACLE: &str = "Add {R} for each card in target opponent's hand. Until end of turn, you don't lose this mana as steps and phases end. Exile Rousing Refrain with three time counters on it.";
 
@@ -94,6 +166,108 @@ fn rousing_refrain_final_target_state(payable: bool) -> (GameState, Vec<TargetRe
     (state, targets)
 }
 
+/// CR 601.2h: manual payment preserves the announced spell on the stack until
+/// the caster either pays its locked total cost or cancels the cast.
+fn manual_mana_payment_state(payable: bool) -> GameState {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Manual Payment Contract Spell", true)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    if payable {
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )],
+        );
+    }
+
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id: CardId(spell.0),
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("manual cast must enter its mana-payment step");
+
+    let state = runner.state().clone();
+    assert!(
+        matches!(
+            &state.waiting_for,
+            WaitingFor::ManaPayment {
+                player: P0,
+                convoke_mode: None,
+            }
+        ),
+        "reach guard: a manual cast with a nonzero cost must pause for mana payment"
+    );
+    assert!(
+        state
+            .pending_cast
+            .as_ref()
+            .is_some_and(|pending| pending.object_id == spell),
+        "reach guard: the real cast must retain its pending payment authority"
+    );
+    assert!(
+        state
+            .stack
+            .iter()
+            .any(|entry| entry.id == spell && entry.source_id == spell),
+        "reach guard: the announced spell must have a live stack entry during payment"
+    );
+    state
+}
+
+/// CR 601.2h: a cast cannot be finalized with a partial payment, while a
+/// payable manual cast may finalize from the same `WaitingFor::ManaPayment` prompt.
+#[test]
+fn decision_contract_validates_manual_mana_payment_finalization() {
+    let unpayable = manual_mana_payment_state(false);
+    let mut rejected_finalization = unpayable.clone();
+    assert!(matches!(
+        apply_as_current(&mut rejected_finalization, GameAction::PassPriority),
+        Err(EngineError::ActionNotAllowed(message)) if message == "Cannot pay mana cost"
+    ));
+
+    let contract = AiDecisionContract::issue(&unpayable, P0);
+    assert!(
+        !contract.contains_action(&unpayable, &GameAction::PassPriority),
+        "a ManaPayment pass must be issued only when the reducer can finalize payment"
+    );
+    assert!(
+        contract.contains_action(&unpayable, &GameAction::CancelCast),
+        "an unpaid cast must retain the reducer-approved cancellation escape"
+    );
+    assert!(
+        contract.permits(&unpayable, P0, &GameAction::CancelCast),
+        "the issued cancellation escape must be accepted at the contract boundary"
+    );
+    let mut canceled = unpayable.clone();
+    apply_as_current(&mut canceled, GameAction::CancelCast)
+        .expect("the reducer must accept cancellation of the live unpaid cast");
+
+    let payable = manual_mana_payment_state(true);
+    let payable_contract = AiDecisionContract::issue(&payable, P0);
+    assert!(
+        payable_contract.contains_action(&payable, &GameAction::PassPriority),
+        "a payable manual cast must retain its reducer-completable payment pass"
+    );
+    assert!(
+        payable_contract.permits(&payable, P0, &GameAction::PassPriority),
+        "the payable finalization pass must be accepted at the contract boundary"
+    );
+    let mut finalized = payable.clone();
+    apply_as_current(&mut finalized, GameAction::PassPriority)
+        .expect("the reducer must accept finalization of the payable live cast");
+}
+
 #[test]
 fn decision_contract_filters_final_targets_that_cannot_complete_payment() {
     let p3 = PlayerId(3);
@@ -158,7 +332,10 @@ fn decision_contract_validates_a_target_before_a_dynamically_empty_optional_tail
     pending_cast.target_constraints = vec![TargetSelectionConstraint::DifferentTargetPlayers];
     let mut trailing_ability = ResolvedAbility::new(
         Effect::TargetOnly {
-            target: TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            target: TargetFilter::Typed(
+                TypedFilter::default()
+                    .controller(ControllerRef::SpecificPlayer { id: PlayerId(0) }),
+            ),
         },
         Vec::new(),
         pending_cast.ability.source_id,
@@ -257,6 +434,7 @@ fn decision_contract_keeps_reducer_completable_final_activation_targets() {
             GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("activation must reach its final target prompt");

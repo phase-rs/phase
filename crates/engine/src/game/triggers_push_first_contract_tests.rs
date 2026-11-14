@@ -3,7 +3,8 @@ use crate::game::effects::resolve_ability_chain;
 use crate::game::zones::create_object;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect,
-    QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
+    ModalChoice, PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    TargetSelectionMode, TriggerDefinition, TypedFilter,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
@@ -56,6 +57,8 @@ fn build_exile_target_opponent_creature_trigger() -> TriggerDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Database,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 enters_modified_if: None,
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
@@ -580,6 +583,97 @@ fn random_modal_trigger_resolves_without_prompting() {
     );
 }
 
+/// CR 603.3c + CR 700.2b: a random modal trigger whose "up to" draw chooses no
+/// mode is removed from the stack, the same as a controller choosing none. With
+/// `max_choices` 0 the draw can only choose zero modes, so the outcome is fixed.
+#[test]
+fn random_up_to_modal_trigger_choosing_no_mode_is_removed() {
+    let mut state = setup();
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+
+    let source_id = ObjectId(state.next_object_id);
+    let mode = || {
+        AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+    };
+    let modal = ModalChoice {
+        min_choices: 0,
+        max_choices: 0,
+        mode_count: 2,
+        mode_descriptions: vec!["A".to_string(), "B".to_string()],
+        allow_repeat_modes: false,
+        constraints: vec![],
+        mode_costs: vec![],
+        mode_pawprints: vec![],
+        entwine_cost: None,
+        chooser: PlayerFilter::Controller,
+        selection: TargetSelectionMode::Random,
+        dynamic_max_choices: None,
+    };
+    let modal_ability = AbilityDefinition::new(
+        AbilityKind::Database,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 0 },
+            player: TargetFilter::Controller,
+        },
+    )
+    .with_modal(modal, vec![mode(), mode()]);
+
+    let trigger = super::PendingTrigger {
+        source_id,
+        controller: PlayerId(0),
+        condition: None,
+        ability: Box::new(super::super::ability_utils::build_resolved_from_def(
+            &modal_ability,
+            source_id,
+            PlayerId(0),
+        )),
+        timestamp: state.turn_number,
+        target_constraints: Vec::new(),
+        distribute: None,
+        trigger_event: None,
+        modal: modal_ability.modal.clone(),
+        mode_abilities: modal_ability.mode_abilities.clone(),
+        description: None,
+        may_trigger_origin: None,
+        subject_match_count: None,
+        die_result: None,
+        provenance: None,
+    };
+
+    let stack_before = state.stack.len();
+    let mut events = Vec::new();
+    let paused = super::dispatch_pending_trigger_context(
+        &mut state,
+        super::PendingTriggerContext::single(trigger),
+        &mut events,
+    )
+    .paused();
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, GameEvent::StackPushed { .. })),
+        "reach: the random modal trigger was pushed before its modes were drawn",
+    );
+    assert!(!paused, "a random modal trigger never pauses for its mode");
+    assert_eq!(
+        state.stack.len(),
+        stack_before,
+        "with no mode chosen the trigger is removed from the stack",
+    );
+    assert!(
+        state.pending_trigger.is_none() && state.pending_trigger_entry.is_none(),
+        "no construction cursor survives the removal",
+    );
+}
+
 /// SHAPE-level regression (manual surgery): drives the real dispatch pipeline to
 /// a genuine mid-construction pause, then manually removes the in-construction
 /// entry to model an unexpected dangling `pending_trigger_entry`. The real
@@ -587,11 +681,12 @@ fn random_modal_trigger_resolves_without_prompting() {
 /// rules-legal causes were both proven unreachable (a controller leaving is
 /// handled upstream by `elimination::do_eliminate`; countering/removal
 /// mid-construction is impossible because modes/targets are chosen before anyone
-/// has priority, CR 603.3d) — so this test surgically injects the corrupt state
-/// rather than reproducing the producer. See the follow-up issue for the hunt.
+/// has priority, CR 603.3c + CR 603.3d) — so this test surgically injects the
+/// corrupt state rather than reproducing the producer. See the follow-up issue
+/// for the hunt.
 ///
-/// The recovery (`triggers::abandon_ceased_pending_trigger`, CR 608.2b / CR
-/// 800.4a recovery semantics) must NOT panic in
+/// The recovery (`triggers::abandon_ceased_pending_trigger`, CR 608.1 recovery
+/// semantics) must NOT panic in
 /// `assign_pending_trigger_entry_ability`; it must record a distinguishable
 /// diagnostic, clean the vanished entry's side tables, clear all pending-trigger
 /// state, and hand control back to the game via `Priority`.

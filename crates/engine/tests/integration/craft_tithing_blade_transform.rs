@@ -77,6 +77,8 @@ fn craft_ability(cost: ManaCost) -> AbilityDefinition {
     AbilityDefinition::new(
         AbilityKind::Activated,
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
             target: TargetFilter::SelfRef,
@@ -160,6 +162,7 @@ fn craft_activation_offers_materials_detour_and_exiles_source_plus_material() {
         .act(GameAction::ActivateAbility {
             source_id: blade_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating craft at sorcery speed is allowed");
 
@@ -231,6 +234,7 @@ fn craft_cannot_be_activated_at_instant_speed() {
     let err = runner.act(GameAction::ActivateAbility {
         source_id: blade_id,
         ability_index: 0,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         err.is_err(),
@@ -263,6 +267,7 @@ fn craft_rejected_with_zero_eligible_materials() {
     let err = runner.act(GameAction::ActivateAbility {
         source_id: blade_id,
         ability_index: 0,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         err.is_err(),
@@ -317,6 +322,7 @@ fn tithing_blade_crafts_into_transformed_sepulcher() {
         .act(GameAction::ActivateAbility {
             source_id: blade,
             ability_index: craft_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate craft");
 
@@ -363,6 +369,8 @@ fn tithing_blade_crafts_into_transformed_sepulcher() {
 /// idiom in `game/transform.rs` tests and `integration_bending.rs`).
 fn consuming_sepulcher_back_face() -> BackFaceData {
     BackFaceData {
+        is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Consuming Sepulcher".to_string(),
         power: None,
         toughness: None,
@@ -482,6 +490,7 @@ fn craft_returns_blade_transformed_and_front_etb_does_not_refire() {
         .act(GameAction::ActivateAbility {
             source_id: blade_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating craft at sorcery speed is allowed");
 

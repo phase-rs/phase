@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   claimP2PHostLease,
+  hasExactP2PAuthority,
+  isP2PAuthorityStamp,
   ownsP2PHostLease,
   releaseP2PHostLease,
 } from "../p2pSession";
@@ -34,6 +36,22 @@ afterEach(() => {
 });
 
 describe("P2P host leases", () => {
+  it("requires both stable-session and incarnation values to match", () => {
+    const authority = { sessionKey: "session", hostIncarnation: "current" };
+
+    expect(hasExactP2PAuthority(authority, authority)).toBe(true);
+    expect(hasExactP2PAuthority({ ...authority, hostIncarnation: "stale" }, authority)).toBe(false);
+    expect(hasExactP2PAuthority({ ...authority, sessionKey: "other" }, authority)).toBe(false);
+    expect(hasExactP2PAuthority(undefined, authority)).toBe(false);
+  });
+
+  it("accepts only the exact authority object shape", () => {
+    expect(isP2PAuthorityStamp({ sessionKey: "session", hostIncarnation: "current" })).toBe(true);
+    expect(isP2PAuthorityStamp({ sessionKey: "session", hostIncarnation: "current", extra: true })).toBe(false);
+    expect(isP2PAuthorityStamp({ sessionKey: "session", hostIncarnation: 1 })).toBe(false);
+    expect(isP2PAuthorityStamp(null)).toBe(false);
+  });
+
   it("fences a stale host and does not revive it when the current host cleans up", () => {
     const stale = claimP2PHostLease("shared-session-key");
     const current = claimP2PHostLease("shared-session-key");

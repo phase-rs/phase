@@ -1,9 +1,8 @@
 //! Serialization adapter between this repo's MTG engine (`GameState` /
 //! `GameAction`) and the external ManaBrew wire protocol.
 //!
-//! Pinned upstream: `manabrew-protocol` **3.0.0** (crates.io, 2026-07-28).
-//! [`PROTOCOL_VERSION`] is the crate major, which is how upstream defines the
-//! wire version.
+//! Pinned upstream: `manabrew-protocol` **5.2.0** (crates.io, 2026-08-24).
+//! [`PROTOCOL_VERSION`] is a separate number — see its own docs.
 //!
 //! This crate is a pure serialization boundary: it never computes, derives, or
 //! re-interprets game state. Anything the engine does not supply is recorded in
@@ -15,13 +14,15 @@ use engine::ai_support::legal_actions_for_viewer;
 use engine::database::CardDatabase;
 use engine::game::combat::AttackTarget;
 use engine::game::derived::derive_display_state;
-use engine::game::derived_views::{derive_views, DerivedViews};
+use engine::game::derived_views::{derive_filtered_views, DerivedViews};
 use engine::game::filter_state_for_viewer;
 use engine::game::game_object::{AttachTarget, GameObject};
 use engine::game::interaction::{derive_viewer_interaction, resolve_interaction_response};
 use engine::game::turn_control;
 use engine::types::ability::TargetRef;
 use engine::types::card::CardFace;
+use engine::types::casting_costs::{CostReductionEntry, CostReductionOutcome};
+use engine::types::format::SharedZones;
 use engine::types::game_state::{
     GameState, ManaChoice, ManaChoicePrompt, MulliganDecisionPhase, PendingMulliganAction,
     ShardChoice, StackEntryKind, WaitingFor,
@@ -83,7 +84,7 @@ use serde::{Deserialize, Serialize};
 
 /// Deliberate local extension of upstream's mulligan answer.
 ///
-/// `MulliganUseSerumPowder` is absent from `manabrew-protocol` 3.0.0, but
+/// `MulliganUseSerumPowder` is absent from `manabrew-protocol` 5.2.0, but
 /// Phase models `MulliganChoice::UseSerumPowder` and needs the committed object
 /// id. It is safe because this client-to-engine answer is exchanged only
 /// between this adapter and its paired client; third-party clients are not
@@ -471,9 +472,18 @@ pub enum ClientToServerMessage {
     },
 }
 
-/// Wire version of the pinned upstream protocol. Upstream defines the wire
-/// version as the `manabrew-protocol` crate major, so 3.0.0 => 3.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// Handshake wire version a client reports to a ManaBrew relay.
+///
+/// This is **not** the `manabrew-protocol` major, despite the two being equal
+/// today. Upstream defines it as the major of `manabrew-relay-protocol`, the
+/// separate crate that owns the relay envelopes and the handshake
+/// (`PROTOCOL_VERSION: u32 = major_of(env!("CARGO_PKG_VERSION_MAJOR"))` there),
+/// so it moves only on a breaking *wire* change. `manabrew-protocol` 5.2.0 and
+/// `manabrew-relay-protocol` 5.4.1 both sit at major 5, which is why the
+/// distinction is easy to miss; the two crates version independently and can
+/// diverge. Bump this from the relay crate's major, never from the dependency
+/// pinned in `Cargo.toml`.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 pub type Result<T> = std::result::Result<T, AdapterError>;
 
@@ -626,6 +636,13 @@ pub fn prepare_snapshot_with_prompt_id(
             count: raw_state.players.len(),
         });
     }
+    // `ZoneDto` is one entry per (zone, owner) pair, so a library or graveyard
+    // shared by every seat has no owner to be reported under.
+    if raw_state.format_config.format.shared_zones() != SharedZones::NONE {
+        return Err(AdapterError::UnsupportedProtocolFeature {
+            code: "upstream.shared-zone-ownership-missing",
+        });
+    }
 
     let (actions, spell_costs, legal_actions_by_object) =
         legal_actions_for_viewer(raw_state, viewer);
@@ -639,7 +656,9 @@ pub fn prepare_snapshot_with_prompt_id(
     // the adapter sees exactly what every other interaction consumer sees.
     let interaction = derive_viewer_interaction(raw_state, &state, viewer);
     derive_display_state(&mut state);
-    let derived = derive_views(&state, Some(viewer));
+    // The stage of a repeated payment is read from its parked owner, which the
+    // viewer projection drops.
+    let derived = derive_filtered_views(raw_state, &state, Some(viewer));
 
     Ok(PreparedManabrewSnapshot {
         game_id: game_id.into(),
@@ -668,13 +687,13 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
     &UNSUPPORTED_PROTOCOL_CAPABILITIES
 }
 
-/// Gaps and deliberate local wire divergences from protocol 3.0.0,
+/// Gaps and deliberate local wire divergences from protocol 5.2.0,
 /// machine-readable.
 ///
 /// `upstream.` = the protocol has no primitive for something the engine can do.
 /// `local.` = the protocol has the primitive but this engine cannot source it,
 /// or a documented adapter-local extension is intentionally in use.
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 89] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 96] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
         area: "prompts",
@@ -740,6 +759,12 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 89] = [
         area: "prompts",
         reason: "Corrected after auditing each named prompt against the protocol rather than against this list. Surveil, discard, optional triggers (CR 603.12), and unless-costs (CR 118.12) DID have exact upstream shapes — Scry+zones, ChooseCards, and ChooseBoolean respectively — and are now mapped. What genuinely lacks a shape is selection over battlefield permanents by an aggregate constraint (keep-with-total-power, keep-exact-permanents) and pay-combat-cost, because ChooseBoardTargets carries only min/max counts, not a summed-attribute bound.",
         suggested_protocol_extension: "Give ChooseBoardTargets an optional aggregate constraint (attribute + comparator + value) so 'keep creatures with total power N or less' is expressible without a new family.",
+    },
+    UnsupportedCapability {
+        code: "local.resolution-optional-payment-selection-unsupported",
+        area: "prompts",
+        reason: "Phase exposes one decline plus server-indexed heterogeneous cost branches. Manabrew protocol 3 has no prompt that can carry those typed payment alternatives without flattening their semantics.",
+        suggested_protocol_extension: "Add a typed choose-payment-branch prompt whose response carries only the server-authored branch id.",
     },
     UnsupportedCapability {
         code: "local.blocker-damage-banding-unsupported",
@@ -829,14 +854,14 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 89] = [
     UnsupportedCapability {
         code: "local.harmonize-tap-unsupported",
         area: "mana",
-        reason: "Scope note: this covers only the TAP, not harmonize as a whole. The harmonize CAST (CR 702.180a, Phase's CastingVariant::Harmonize) has an exact counterpart in AlternativeCostKind::Harmonize and needs nothing added. What has no home is HarmonizeTap (CR 702.180b), a cost-reduction tap during payment structurally analogous to convoke, where PaymentResourceKind is exactly Convoke | Improvise | Delve.",
+        reason: "Scope note: this covers only the TAP, not harmonize as a whole. The harmonize CAST (CR 702.180a, Phase's CastingVariant::Harmonize) has an exact counterpart in AlternativeCostKind::Harmonize and needs nothing added. What has no home is HarmonizeTap (CR 702.180b), a cost-reduction tap during payment structurally analogous to convoke. PaymentResourceKind gained a fourth member in 5.2.0 (Convoke | Improvise | Delve | Waterbend) but still has no Harmonize, so the gap is unchanged in kind and one member narrower in scope.",
         suggested_protocol_extension: "Add PaymentResourceKind::Harmonize for the tap. The cast side needs no extension.",
     },
     UnsupportedCapability {
         code: "local.payment-resource-actions-missing",
         area: "mana",
-        reason: "Of PaymentResourceKind's three resources only Convoke has an engine action (TapForConvoke). There is no GameAction for Delve or Improvise, and no release/undo action for any of the three, so UseResource{delve|improvise} and every ReleaseResource form are defined for wire completeness and never advertised.",
-        suggested_protocol_extension: "None needed upstream — closing this requires Phase to add delve, improvise, and release actions.",
+        reason: "Of PaymentResourceKind's four resources only Convoke has an engine action (TapForConvoke). Waterbend, added in 5.2.0, joins Delve and Improvise here: Phase models it as AbilityCost::Waterbend (types/ability.rs) with no GameAction for the tap, so it cannot be advertised for the same reason they cannot. There is no release/undo action for any of the four, so UseResource{delve|improvise|waterbend} and every ReleaseResource form are defined for wire completeness and never advertised.",
+        suggested_protocol_extension: "None needed upstream — closing this requires Phase to add delve, improvise, waterbend-tap, and release actions.",
     },
     UnsupportedCapability {
         code: "local.dungeon-room-unsupported",
@@ -968,7 +993,19 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 89] = [
         code: "local.cancel-mana-payment-unavailable",
         area: "mana",
         reason: "Emitted when a client sends PayManaCostOutput::Cancel but the engine's current legal-action set contains no GameAction::CancelCast — i.e. the cast is past the point where CR 601.2 rollback is offered. The adapter refuses rather than synthesizing a cancel the engine would reject. The protocol models cancel unconditionally; whether it is legal is engine state.",
-        suggested_protocol_extension: "Let PayManaCostInput advertise whether cancel is currently available (a `canCancel` sibling to the existing canConfirmFromPool), so a conforming client never offers an illegal cancel.",
+        suggested_protocol_extension: "Still open for PayManaCostInput: let it advertise whether cancel is currently available (a `canCancel` sibling to the existing canConfirmFromPool), so a conforming client never offers an illegal cancel. 5.0.0 granted exactly this shape for target selection as ChooseBoardTargetsInput.cancellable; the mana-payment prompt is now the only cancel this adapter cannot pre-declare.",
+    },
+    UnsupportedCapability {
+        code: "local.cancel-target-selection-unavailable",
+        area: "responses",
+        reason: "Emitted when a client sends ChooseBoardTargetsOutput::Cancel but the engine's current legal-action set contains no GameAction::CancelCast, the same CR 601.2 rollback boundary as the mana-payment cancel. Unlike that one, this should not be reachable by a conforming client: ChooseBoardTargetsInput.cancellable (new in 5.0.0) is built from the same action-table predicate that resolves the answer, so a client that respects the advertisement never sends a cancel the engine would reject. The arm exists because the wire cannot enforce it.",
+        suggested_protocol_extension: "None needed — 5.0.0's cancellable field is the extension. This entry records a client-conformance boundary, not an engine or protocol gap.",
+    },
+    UnsupportedCapability {
+        code: "local.cancel-cost-reduction-order-unavailable",
+        area: "responses",
+        reason: "Emitted when a client picks the trailing 'Cancel the cast' option of the CR 601.2b/CR 601.2f cost-determination prompt but the engine's current legal-action set contains no GameAction::CancelCast — the same CR 601.2 rollback boundary as the mana-payment and target-selection cancels. Unlike ChooseBoardTargets, ChooseFromSelectionOutput has no Cancel variant and ChooseFromSelectionInput has no `cancellable` field, so the rollback has to travel as a labelled option; the option is only appended when the action table already offers CancelCast, so a client that answers the prompt it was actually sent never reaches this arm.",
+        suggested_protocol_extension: "Give ChooseFromSelectionInput the `cancellable` flag ChooseBoardTargetsInput gained in 5.0.0, plus a matching ChooseFromSelectionOutput::Cancel, so a pick-one prompt can advertise rollback as a control rather than smuggling it in as an option.",
     },
     UnsupportedCapability {
         code: "local.stack-target-ref-unsupported",
@@ -1043,6 +1080,12 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 89] = [
         suggested_protocol_extension: "None needed upstream — ChooseFromSelection fits. Adapter work.",
     },
     UnsupportedCapability {
+        code: "local.die-roll-unsupported",
+        area: "prompts",
+        reason: "CR 706.6 + CR 614.1a: Phase models the die-roll ignore decision (GameAction::SelectDieRolls, WaitingFor::DieKeepChoice { results, ignorable_indices, ignore_count }). It looks like the coin-flip sibling above — a bounded subset selection over abstract items — and it shares that entry's label-only discriminator problem, since results are bare u8 naturals that a client could only tell apart by prose. But it does NOT reduce to ChooseFromSelection, and the difference is legality rather than presentation. CR 706.6's second sentence lets the player choose only among the rolls TIED for the lowest natural result, so `ignorable_indices` is a strict subset of `results`, engine-computed (roll_die.rs sets it from DieRollIgnoreOutcome::tied) and engine-enforced: engine_resolution_choices.rs rejects any submitted index outside it with EngineError::InvalidAction. ChooseFromSelectionInput carries only `options: Vec<SelectionOption>` plus `min_total`/`max_total`, and SelectionOption is { label, weight, can_repeat } — there is no per-option selectable/disabled flag. Emitting every roll under a count bound would therefore advertise as legal a selection the engine rejects (ignoring a non-lowest roll), which is the same advertise-illegal-as-legal failure refused under local.aggregate-selection-constraint-unmapped. The engine already draws this line internally: CoinFlipProjection::selectable_indices is None for CR 705.1 flips and Some(set) for CR 706.6 rolls. Coin flips need no such field and are genuinely just unwritten adapter work; die rolls are not.",
+        suggested_protocol_extension: "Give SelectionOption an optional `selectable: bool` (or ChooseFromSelectionInput an optional legal-index set), so a prompt can offer an option for display while marking it unpickable. That is the minimum needed here, and it generalizes: any prompt whose legal picks are a computed subset of what the player must SEE to understand the choice needs it — the roller has to see every roll to grasp why only the tied ones may be ignored. The label-only discriminator half remains adapter work under upstream.display-sequencing-missing.",
+    },
+    UnsupportedCapability {
         code: "local.outside-game-selection-unsupported",
         area: "prompts",
         reason: "Half of this is a real id gap and half is not, so it is stated per branch. CR 400.11 / CR 701.23j: Phase models the choice as WaitingFor::OutsideGameChoice { choices: Vec<OutsideGameChoiceEntry>, count, up_to, destination }, and OutsideGameChoiceSource is exactly two variants. FaceUpExile { object_id } already carries an ObjectId and is encodable as a `card-` id today — for that branch ChooseCards fits with nothing missing. Sideboard { sideboard_index, card: CardFace } carries no ObjectId, and every card-carrying family (ChooseCards, ChooseBoardTargets, Scry, Reorder) is keyed on the `card-` id space, so only the sideboard branch is blocked. Related: local.deck-dto-not-implemented.",
@@ -1109,6 +1152,12 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 89] = [
         suggested_protocol_extension: "None needed upstream — ChooseBoolean with explicit labels. Adapter work.",
     },
     UnsupportedCapability {
+        code: "local.starting-player-unsupported",
+        area: "actions",
+        reason: "CR 103.1: the player chosen to decide who takes the first turn names the starting player. Phase models the answer (GameAction::ChooseStartingPlayer { player }). Naming one seat among the candidates is a player choice, which is ChooseBoardTargets with TargetKind::Player — the same shape local.clash-unsupported and the other opponent-picker codes describe. Unmapped, not unrepresentable.",
+        suggested_protocol_extension: "None needed upstream — ChooseBoardTargets carries player candidates. This is adapter work.",
+    },
+    UnsupportedCapability {
         code: "local.planar-die-unsupported",
         area: "actions",
         reason: "CR 901.9: rolling the planar die is a special action the active player may take at priority with an empty stack during their main phase. It is therefore a priority-window play, and filtering it out means Planechase cannot be played through this adapter. The obstacle is that AvailableActionKind has no 'special action' kind — the three variants are Cast, ActivateAbility, and UndoMana, and the roll is neither a cast nor an ability activation (CR 901.9d explicitly distinguishes the roll from abilities that trigger on it).",
@@ -1119,6 +1168,12 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 89] = [
         area: "actions",
         reason: "CR 702.139: Phase models both halves (GameAction::DeclareCompanion at the start of the game, GameAction::CompanionToHand for the {3} special action). CompanionToHand is a priority-window special action and hits the same hole as the planar die: no special-action kind exists in AvailableActionKind's three variants. DeclareCompanion is a pre-game declaration and has no prompt family either.",
         suggested_protocol_extension: "Covered by the special-action kind proposed on local.planar-die-unsupported; the pre-game declaration additionally needs a prompt point before the first turn.",
+    },
+    UnsupportedCapability {
+        code: "local.secret-agenda-unsupported",
+        area: "actions",
+        reason: "CR 702.106a: an agenda may name any card, and the protocol has no text-answer family, so WaitingFor::SecretAgendaChoice is served as a ChooseFromSelection over GameState::all_card_names. Two cases remain refused under this code. A host that never loaded the card database has an empty name universe, so the prompt would have no legal answer and fails closed instead. GameAction::ChooseSecretAgendaNames carries the names themselves and is answered only through that prompt, so it has no ChooseAction entry.",
+        suggested_protocol_extension: "The text-answer family proposed on local.named-choice-unsupported would replace the card-name universe on the wire with a typed answer.",
     },
     UnsupportedCapability {
         code: "local.end-continuous-effect-unsupported",
@@ -1213,7 +1268,7 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 89] = [
     UnsupportedCapability {
         code: "local.serum-powder-mulligan-vendor-extension",
         area: "mulligan",
-        reason: "Deliberate adapter-local divergence from manabrew-protocol 3.0.0, not an unsupported capability. MulliganOutput::MulliganUseSerumPowder carries the committed Serum Powder card id from client to engine, and MulliganPutBackInput::excluded_card_id prevents that committed card from appearing in the following bottom-cards picker. The first is safe only for the paired client and adapter; the second is an additive field that older peers may drop.",
+        reason: "Deliberate adapter-local divergence from manabrew-protocol 5.2.0, not an unsupported capability. MulliganOutput::MulliganUseSerumPowder carries the committed Serum Powder card id from client to engine, and MulliganPutBackInput::excluded_card_id prevents that committed card from appearing in the following bottom-cards picker. The first is safe only for the paired client and adapter; the second is an additive field that older peers may drop.",
         suggested_protocol_extension: "None required for this paired deployment. Keep both member names under review whenever the upstream protocol version changes.",
     },
     UnsupportedCapability {
@@ -1233,6 +1288,12 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 89] = [
         area: "actions",
         reason: "ActivatableAbilityInfo::is_class_level_up has no direct engine source. GameAction::ActivateAbility carries only source_id and ability_index; classifying an activation by inspecting its lowered ability definition would re-interpret engine state in this adapter. The field is therefore left None.",
         suggested_protocol_extension: "No protocol change: have the engine include an explicit class-level-up presentation flag with each activatable ability.",
+    },
+    UnsupportedCapability {
+        code: "upstream.shared-zone-ownership-missing",
+        area: "formats",
+        reason: "Searched manabrew-protocol 5.2.0 for a table-level or ownerless zone and found none: the ZoneDto layout is documented as \"One entry per (zone, owner) pair\" and build_zones reads player.library, player.graveyard and player.hand once per seat, so a library or graveyard shared by every seat cannot be reported under any one owner without misstating the other seat's zone. MulliganOutput in 5.2.0 has the single variant MulliganDecision { keep: bool } (plus this adapter's local Serum Powder extension), so a free mulligan taken by revealing a hand has no output either. GameFormat::shared_zones() is the engine answer, and Dandan is the only built-in format whose answer is not SharedZones::NONE; prepare_snapshot refuses such a state.",
+        suggested_protocol_extension: "Add a table-level owner for a shared ZoneDto, and a reveal-hand free-mulligan output beside MulliganOutput::MulliganDecision.",
     },
 ];
 
@@ -1492,6 +1553,16 @@ fn build_prompt_input(
                 min_targets: if slot.optional { 0 } else { 1 },
                 max_targets: 1,
                 chosen_targets: 0,
+                // 5.0.0 granted, for target selection, the advertisement this
+                // adapter asked for on mana payment (see
+                // `local.cancel-mana-payment-unavailable`): whether cancel is
+                // legal is engine state, so read it off the action table
+                // rather than claiming it unconditionally. CR 601.2 rollback
+                // is offered only while the cast is still rewindable.
+                cancellable: prepared
+                    .actions
+                    .iter()
+                    .any(|action| matches!(action, GameAction::CancelCast)),
             }))
         }
         WaitingFor::ManaPayment { .. } => {
@@ -1629,6 +1700,10 @@ fn build_prompt_input(
                 deny_label: "No".to_string(),
             }))
         }
+        WaitingFor::ResolutionOptionalPaymentChoice { .. } => unsupported_prompt(
+            waiting_for,
+            "local.resolution-optional-payment-selection-unsupported",
+        ),
         // CR 702.94a + CR 603.11: The miracle offer is a yes/no on casting the
         // revealed card for its miracle cost. The cast itself is already
         // advertised as an `AvailableAction`; without this prompt the offer was
@@ -1654,6 +1729,17 @@ fn build_prompt_input(
         // happen — a yes/no. `UnlessPaymentChooseCost` is deliberately NOT
         // folded in: it picks *among several costs*, which is a selection, not
         // a boolean, and mapping it here would misreport the question.
+        // CR 702.24a: a repeated payment that was accepted and paused at a
+        // work slice is not offered again; continuing is its only answer, so
+        // it is served as the engine's one-of list rather than as a yes/no
+        // whose "Decline" the engine would refuse.
+        WaitingFor::UnlessPayment { .. }
+            if !prepared
+                .actions
+                .contains(&GameAction::PayUnlessCost { pay: false }) =>
+        {
+            interaction_prompt(prepared, card_lookup)
+        }
         WaitingFor::UnlessPayment {
             effect_description, ..
         } => Ok(PromptInput::ChooseBoolean(ChooseBooleanInput {
@@ -1693,11 +1779,94 @@ fn build_prompt_input(
                     .collect(),
             }))
         }
+        // CR 601.2b + CR 601.2f: the caster's cost-determination election.
+        //
+        // NOT `Reorder`, for two independent reasons. The decision is no longer
+        // one-dimensional: CR 601.2b's hybrid announcement rides the same
+        // answer, and `ReorderOutput` carries a single `ordered_ids` list that
+        // cannot express which half of `{G/W}` the caster announced. And
+        // `ReorderItem::card` is a required `CardDto`, while
+        // `ReductionProvenance::Defiler` carries no object id at all (the
+        // variant is bare — at most one Defiler reduction applies per cast, so
+        // it needs no discriminator), so half the reachable entries have no
+        // card to render and this adapter does not fabricate DTOs.
+        //
+        // `ChooseFromSelection` is the honest shape: the engine has already
+        // proved that `outcomes` is exactly the set of distinct locked total
+        // costs, one representative election each, so the question is a pick-one
+        // over a finite labelled list. Every reduction the caster was shown is
+        // named in the label it belongs to, and the answer maps straight back to
+        // that outcome's `order` + `hybrid_announcement`.
+        //
+        // The three non-renderable provenances cannot reach this prompt at all:
+        // Affinity (CR 702.41a), Undaunted (CR 702.125a) and the one-shot
+        // `pending_spell_cost_reductions` entries are collected into
+        // `CollectedCostModifiers::generic_only_units` as bare `{1}` multipliers
+        // and never become snapshot entries, and `order_relevant_reductions`
+        // additionally keeps only shard-bearing amounts. So every entry here is
+        // a `Static`, a `Defiler` or the reduction an Emerge or Offering
+        // sacrifice earned (`SacrificedForCost`), and each carries a
+        // `display_name`.
+        WaitingFor::OrderCostReductions {
+            reductions,
+            hybrid_symbols,
+            outcomes,
+            ..
+        } => {
+            let mut options: Vec<SelectionOption> = outcomes
+                .iter()
+                .map(|outcome| {
+                    selection_option(cost_reduction_outcome_label(
+                        outcome,
+                        reductions,
+                        hybrid_symbols,
+                    ))
+                })
+                .collect();
+            // CR 601.2 rollback. The engine accepts `CancelCast` at this prompt,
+            // but `ChooseFromSelectionOutput` has no `Cancel` variant the way
+            // `ChooseBoardTargetsOutput` does, so the cancel travels as a
+            // trailing labelled option — advertised only while the action table
+            // actually offers it, the same engine-state read `cancellable`
+            // performs for target selection.
+            if prepared
+                .actions
+                .iter()
+                .any(|action| matches!(action, GameAction::CancelCast))
+            {
+                options.push(selection_option(CANCEL_CAST_OPTION_LABEL.to_string()));
+            }
+            Ok(PromptInput::ChooseFromSelection(ChooseFromSelectionInput {
+                presentation: presentation("Choose the total cost to lock in"),
+                options,
+                min_total: 1,
+                max_total: 1,
+            }))
+        }
         WaitingFor::AssignBlockerDamage { .. } => {
             unsupported_prompt(waiting_for, "local.blocker-damage-banding-unsupported")
         }
         WaitingFor::CombatTaxPayment { .. } => {
             unsupported_prompt(waiting_for, "local.pay-combat-cost-unsupported")
+        }
+        // CR 702.106a + CR 702.106f: the interaction projection publishes this
+        // choice as typed text, a shape no prompt family carries. The legal
+        // answers are still a finite list — the reducer accepts only a known card
+        // name — so the whole list is the option set. Double agenda's "two
+        // different cards" stays with the reducer, which also treats two
+        // spellings of one name as the same card.
+        WaitingFor::SecretAgendaChoice { name_count, .. } => {
+            let names = &prepared.state.all_card_names;
+            if names.is_empty() {
+                return unsupported_prompt(waiting_for, "local.secret-agenda-unsupported");
+            }
+            let name_count = usize::from(*name_count);
+            Ok(PromptInput::ChooseFromSelection(ChooseFromSelectionInput {
+                presentation: presentation("Secretly choose a card name for your agenda"),
+                options: names.iter().cloned().map(selection_option).collect(),
+                min_total: name_count,
+                max_total: name_count,
+            }))
         }
         _ => interaction_prompt(prepared, card_lookup),
     }
@@ -2192,6 +2361,10 @@ pub fn protocol_error_for_violation(
             ProtocolErrorCode::UnknownActionId,
             format!("action id `{action_id}` was not advertised"),
         ),
+        ResponseViolation::CancelNotAllowed => (
+            ProtocolErrorCode::CancelNotAllowed,
+            "the open prompt did not advertise cancel".to_string(),
+        ),
     };
     ProtocolError {
         code,
@@ -2321,6 +2494,16 @@ pub fn translate_response(
                 .map(target_ref_from_dto)
                 .collect::<Result<Vec<_>>>()?,
         }),
+        // Same rollback as PayManaCostOutput::Cancel, and refused the same
+        // way: `cancellable` advertises the engine's answer, so a client that
+        // respects it never reaches the error arm.
+        UpstreamPromptOutput::ChooseBoardTargets(ChooseBoardTargetsOutput::Cancel) => {
+            prompt_level_action(
+                context,
+                |action| matches!(action, GameAction::CancelCast),
+                "local.cancel-target-selection-unavailable",
+            )
+        }
         UpstreamPromptOutput::ChooseNumber(ChooseNumberOutput::NumberDecision {
             chosen_number,
         }) => {
@@ -2354,6 +2537,48 @@ pub fn translate_response(
                     indices: chosen_indices,
                 })
             }
+            // CR 601.2b + CR 601.2f: the cost-determination election. The
+            // prompt's options are the engine's own `outcomes`, in order, so the
+            // chosen index names one outright — no re-derivation, and the
+            // representative election it carries is submitted verbatim. The
+            // trailing index, present only while the engine's action table
+            // offers it, is the CR 601.2 rollback.
+            WaitingFor::OrderCostReductions { outcomes, .. } => {
+                let [index] = chosen_indices.as_slice() else {
+                    return Err(AdapterError::IllegalResponseForPrompt {
+                        response_kind: "chooseFromSelection",
+                    });
+                };
+                match outcomes.get(*index) {
+                    Some(outcome) => Ok(GameAction::OrderCostReductions {
+                        order: outcome.order.clone(),
+                        hybrid_announcement: outcome.hybrid_announcement.clone(),
+                    }),
+                    None if *index == outcomes.len() => prompt_level_action(
+                        context,
+                        |action| matches!(action, GameAction::CancelCast),
+                        "local.cancel-cost-reduction-order-unavailable",
+                    ),
+                    None => Err(AdapterError::IllegalResponseForPrompt {
+                        response_kind: "chooseFromSelection",
+                    }),
+                }
+            }
+            // CR 702.106a: the prompt's options are `all_card_names`, in order, so
+            // each index names a card outright. The count and the distinct-names
+            // rule are the reducer's, as they are for every other submission.
+            WaitingFor::SecretAgendaChoice { .. } => Ok(GameAction::ChooseSecretAgendaNames {
+                names: chosen_indices
+                    .iter()
+                    .map(|index| {
+                        state.all_card_names.get(*index).cloned().ok_or(
+                            AdapterError::IllegalResponseForPrompt {
+                                response_kind: "chooseFromSelection",
+                            },
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            }),
             _ => interaction_selection_action(state, context.deciding_player, &chosen_indices),
         },
         UpstreamPromptOutput::ChooseColor(ChooseColorOutput::ColorDecision { chosen_colors }) => {
@@ -2545,6 +2770,7 @@ pub fn convert_available_action(
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => AvailableActionConversion::Available(AvailableAction {
             id,
             kind: AvailableActionKind::ActivateAbility(ActivatableAbilityInfo {
@@ -2647,17 +2873,27 @@ pub fn convert_available_action(
         GameAction::SelectCoinFlips { .. } => {
             AvailableActionConversion::Unsupported("local.coin-flip-unsupported")
         }
+        // CR 706.6: the die-roll ignore choice has the same shape as the coin
+        // flip keep choice above, and the same gap — options carry only a label,
+        // so the rolls cannot be distinguished except by prose.
+        GameAction::SelectDieRolls { .. } => {
+            AvailableActionConversion::Unsupported("local.die-roll-unsupported")
+        }
         GameAction::ChooseOutsideGameCards { .. } => {
             AvailableActionConversion::Unsupported("local.outside-game-selection-unsupported")
         }
         GameAction::SelectTargets { .. } | GameAction::ChooseTarget { .. } => {
             AvailableActionConversion::Skip
         }
-        GameAction::ChooseReplacement { .. } => {
+        GameAction::ChooseReplacement { .. } | GameAction::ChooseReplacementAndRemember { .. } => {
             AvailableActionConversion::Unsupported("local.replacement-choice-unsupported")
         }
         // Answered through the Reorder prompt for `WaitingFor::OrderTriggers`.
         GameAction::OrderTriggers { .. } => AvailableActionConversion::Skip,
+        // CR 601.2b + CR 601.2f: answered through the `ChooseFromSelection`
+        // prompt for `WaitingFor::OrderCostReductions`, where each option is one
+        // of the engine's distinct locked totals — not by echoing an action id.
+        GameAction::OrderCostReductions { .. } => AvailableActionConversion::Skip,
         GameAction::Equip { .. }
         | GameAction::CrewVehicle { .. }
         | GameAction::ActivateStation { .. }
@@ -2671,6 +2907,9 @@ pub fn convert_available_action(
         }
         GameAction::ChoosePlayDraw { .. } => {
             AvailableActionConversion::Unsupported("local.play-draw-unsupported")
+        }
+        GameAction::ChooseStartingPlayer { .. } => {
+            AvailableActionConversion::Unsupported("local.starting-player-unsupported")
         }
         GameAction::ChooseOption { .. }
         | GameAction::SubmitVoteCandidate { .. }
@@ -2688,6 +2927,11 @@ pub fn convert_available_action(
         // `DecideOptionalEffect` answers the ChooseBoolean prompt emitted for
         // `WaitingFor::OptionalEffectChoice` / `OpponentMayChoice` / `MiracleReveal`.
         GameAction::DecideOptionalEffect { .. } => AvailableActionConversion::Skip,
+        GameAction::ChooseResolutionOptionalPaymentBranch { .. } => {
+            AvailableActionConversion::Unsupported(
+                "local.resolution-optional-payment-selection-unsupported",
+            )
+        }
         GameAction::DecideOptionalCost { .. }
         | GameAction::DecideOptionalEffectAndRemember { .. } => {
             AvailableActionConversion::Unsupported("local.optional-trigger-unsupported")
@@ -2778,13 +3022,18 @@ pub fn convert_available_action(
         GameAction::TapForConvoke { .. } => AvailableActionConversion::Skip,
         // CR 702.180: harmonize is structurally the analogue of convoke — a
         // cost-reduction tap during payment, carrying the creature being tapped
-        // rather than a card being cast — but `PaymentResourceKind` is exactly
-        // `Convoke | Improvise | Delve`, so it has no counterpart either way.
+        // rather than a card being cast — but `PaymentResourceKind` is
+        // `Convoke | Improvise | Delve | Waterbend` (5.2.0 added the last), so
+        // it still has no counterpart either way.
         GameAction::HarmonizeTap { .. } => {
             AvailableActionConversion::Unsupported("local.harmonize-tap-unsupported")
         }
         GameAction::DeclareCompanion { .. } | GameAction::CompanionToHand => {
             AvailableActionConversion::Unsupported("local.companion-unsupported")
+        }
+        // CR 702.106a: answered only through the agenda's own selection prompt.
+        GameAction::ChooseSecretAgendaNames { .. } => {
+            AvailableActionConversion::Unsupported("local.secret-agenda-unsupported")
         }
         // CR 116.2c: the pay-to-end special action has no Manabrew counterpart.
         GameAction::EndContinuousEffect { .. } => {
@@ -2812,6 +3061,8 @@ pub fn convert_available_action(
         | GameAction::SetPriorityPassingMode { .. }
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
+        | GameAction::SetReplacementAutoChoice { .. }
+        | GameAction::UnAction { .. }
         | GameAction::SetTriggerOrderTemplate { .. } => {
             AvailableActionConversion::Unsupported("local.autopass-settings-unsupported")
         }
@@ -2996,8 +3247,13 @@ fn object_vec_from_slice<L: CardTextLookup>(
 /// `filter_state_for_viewer` conceals by rewriting the object in place — name
 /// becomes `"Hidden Card"` and `face_down` is set — rather than by removing it,
 /// which is what lets `ZoneDto::count` stay truthful.
+///
+/// CR 702.106a: a face-down conspiracy in the command zone is the one case where
+/// `face_down` says nothing about the viewer. Its controller may look at it, so
+/// the filter projects its identity for them and renames it only for everyone
+/// else, which leaves the name as the sole verdict for that zone.
 fn is_concealed(object: &GameObject) -> bool {
-    object.name == HIDDEN_CARD_NAME || object.face_down
+    object.name == HIDDEN_CARD_NAME || (object.face_down && object.zone != Zone::Command)
 }
 
 const HIDDEN_CARD_NAME: &str = "Hidden Card";
@@ -3176,6 +3432,7 @@ fn build_card_dto<L: CardTextLookup>(
             set_code: String::new(),
             card_number: String::new(),
             is_token: identity_visible && object.is_token,
+            token_script: None,
         },
         color: if identity_visible {
             colors_string(&object.color)
@@ -3385,9 +3642,10 @@ fn build_player_dto(
         is_human: player.id == viewer,
         life: player.life,
         counters,
-        mana_pool: mana_pool_counts(&player.mana_pool.mana),
+        mana_pool: mana_pool_counts(&player.mana_pool),
         commander_damage,
         has_city_blessing: state.city_blessing.contains(&player_id),
+        has_enduring_story: state.enduring_story.contains(&player_id),
         ring_level: state.ring_level.get(&player_id).copied().unwrap_or(0) as i32,
         speed: player.speed.unwrap_or(0) as i32,
     })
@@ -3404,6 +3662,20 @@ fn build_stack(state: &GameState, derived: &DerivedViews) -> Vec<StackObjectDto>
                 id: encode_stack_id(entry.id),
                 source_id: encode_object_id(entry.source_id),
                 controller_id: encode_player_id(entry.controller),
+                // Owner and controller diverge under CR 109.4 / stolen spells,
+                // so this reads the source object rather than reusing
+                // `controller`. A source outside the viewer's state leaves it
+                // empty, which is upstream's own default for the field.
+                owner_id: source
+                    .map(|object| encode_player_id(object.owner))
+                    .unwrap_or_default(),
+                // CR 712.1 + CR 710.1b: the engine owns "is this double-faced",
+                // and `back_face.is_some()` is not that predicate — a flip,
+                // Adventure or Omen card parks its other half in the same slot.
+                // Same classifier `build_card_dto` uses, for the same reason.
+                is_double_faced: source
+                    .is_some_and(engine::game::transform::is_double_faced_permanent),
+                face_index: source.map_or(0, |object| u8::from(object.transformed)),
                 identity: CardIdentity {
                     name: details
                         .map(|details| details.source_name.clone())
@@ -3412,6 +3684,7 @@ fn build_stack(state: &GameState, derived: &DerivedViews) -> Vec<StackObjectDto>
                     set_code: String::new(),
                     card_number: String::new(),
                     is_token: source.is_some_and(|object| object.is_token),
+                    token_script: None,
                 },
                 text: details
                     .and_then(|details| details.ability_description.clone())
@@ -3812,6 +4085,7 @@ pub fn convert_payment_action(action: &GameAction, id: String) -> PaymentActionC
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => PaymentActionConversion::Available(PaymentAction {
             id,
             kind: PaymentActionKind::ActivateManaAbility(ActivatableAbilityInfo {
@@ -4315,6 +4589,57 @@ fn selection_option(label: String) -> SelectionOption {
     }
 }
 
+/// CR 601.2: the label the cost-reduction election's rollback option travels
+/// under, and the value the response translation recognizes it by position.
+const CANCEL_CAST_OPTION_LABEL: &str = "Cancel the cast";
+
+/// CR 601.2b + CR 601.2f: render one election outcome as a prompt label.
+///
+/// Pure presentation over values the engine authored — the locked total, the
+/// snapshot entries' own `display_name`s in the elected order, and the announced
+/// nonhybrid equivalents. Nothing here decides, orders, or computes a cost.
+fn cost_reduction_outcome_label(
+    outcome: &CostReductionOutcome,
+    reductions: &[CostReductionEntry],
+    hybrid_symbols: &[ManaCostShard],
+) -> String {
+    let total = mana_cost_string(&outcome.locked_cost);
+    let applied: Vec<String> = outcome
+        .order
+        .iter()
+        .filter_map(|index| reductions.get(*index))
+        .map(|entry| match entry.minimum_mana {
+            // CR 601.2f: a floored reduction names its floor, which is what
+            // makes the order matter for an activation.
+            0 => entry.display_name.clone(),
+            floor => format!("{} (can't go below {floor} mana)", entry.display_name),
+        })
+        .collect();
+    let mut label = if total.is_empty() {
+        "Pay nothing".to_string()
+    } else {
+        format!("Pay {total}")
+    };
+    if !applied.is_empty() {
+        label.push_str(&format!(" — apply {}", applied.join(", then ")));
+    }
+    if !outcome.hybrid_announcement.is_empty() {
+        let announced: Vec<String> = hybrid_symbols
+            .iter()
+            .zip(&outcome.hybrid_announcement)
+            .map(|(symbol, announced)| {
+                format!(
+                    "{{{}}} as {{{}}}",
+                    mana_shard_symbol(symbol),
+                    mana_shard_symbol(announced)
+                )
+            })
+            .collect();
+        label.push_str(&format!("; announce {}", announced.join(", ")));
+    }
+    label
+}
+
 fn attack_target_ref_id(target: &AttackTarget) -> String {
     match target {
         AttackTarget::Player(player) => encode_player_id(*player),
@@ -4351,10 +4676,10 @@ fn parse_attack_target_id(value: &str) -> Result<AttackTarget> {
 }
 
 /// CR 106.4: the viewer's floating mana, one entry per color actually held.
-fn mana_pool_counts(units: &[engine::types::mana::ManaUnit]) -> BTreeMap<ManaColorDto, u32> {
+fn mana_pool_counts(pool: &engine::types::mana::ManaPool) -> BTreeMap<ManaColorDto, u32> {
     let mut counts = BTreeMap::new();
-    for unit in units {
-        *counts.entry(mana_color_dto(unit.color)).or_insert(0) += 1;
+    for (shape, count) in pool.shapes() {
+        *counts.entry(mana_color_dto(shape.color)).or_insert(0) += count as u32;
     }
     counts
 }
@@ -4589,7 +4914,8 @@ fn source_object_id(waiting_for: &WaitingFor) -> Option<ObjectId> {
         | WaitingFor::CostTypeChoice { pending_cast, .. } => Some(pending_cast.object_id),
         WaitingFor::TriggerTargetSelection { source_id, .. } => *source_id,
         WaitingFor::OptionalEffectChoice { source_id, .. }
-        | WaitingFor::OpponentMayChoice { source_id, .. } => Some(*source_id),
+        | WaitingFor::OpponentMayChoice { source_id, .. }
+        | WaitingFor::ResolutionOptionalPaymentChoice { source_id, .. } => Some(*source_id),
         _ => None,
     }
 }
@@ -4612,6 +4938,7 @@ fn waiting_for_type(waiting_for: &WaitingFor) -> &'static str {
         WaitingFor::ModeChoice { .. } => "ModeChoice",
         WaitingFor::AbilityModeChoice { .. } => "AbilityModeChoice",
         WaitingFor::OptionalEffectChoice { .. } => "OptionalEffectChoice",
+        WaitingFor::ResolutionOptionalPaymentChoice { .. } => "ResolutionOptionalPaymentChoice",
         WaitingFor::OpponentMayChoice { .. } => "OpponentMayChoice",
         WaitingFor::UnlessPayment { .. } => "UnlessPayment",
         WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
@@ -4622,6 +4949,7 @@ fn waiting_for_type(waiting_for: &WaitingFor) -> &'static str {
         WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",
         WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
         WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
+        WaitingFor::ManaAbilityManaPayment { .. } => "ManaAbilityManaPayment",
         WaitingFor::GameOver { .. } => "GameOver",
         _ => "Unsupported",
     }
@@ -4632,16 +4960,21 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    use engine::game::conspiracy::{pending_agenda_choice, start_with_conspiracy};
+    use engine::game::engine::apply_as_current;
+    use engine::game::game_object::BackFaceData;
     use engine::game::interaction::bind_interaction_authority;
     use engine::game::zones::create_object;
     use engine::types::ability::{
         CounterTriggerFilter, Effect, EffectKind, ResolvedAbility, TargetFilter, TriggerDefinition,
     };
+    use engine::types::card::LayoutKind;
+    use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
     use engine::types::game_state::{
         MulliganDecisionEntry, MulliganDecisionPhase, OutsideGameChoiceEntry,
         OutsideGameChoiceSource, PayableResource, PendingCast, PendingMulliganAction, PtDirection,
-        TargetEffectDetail, TargetSelectionProgress, TargetSelectionSlot,
+        StackEntry, TargetEffectDetail, TargetSelectionProgress, TargetSelectionSlot,
     };
     use engine::types::identifiers::CardId;
     use engine::types::interaction::InteractionSessionId;
@@ -4750,8 +5083,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_the_pinned_crate_major() {
-        assert_eq!(PROTOCOL_VERSION, 3);
+    fn protocol_version_is_the_relay_crate_major() {
+        assert_eq!(PROTOCOL_VERSION, 5);
     }
 
     // -------------------------------------------------------------- state ---
@@ -4785,6 +5118,154 @@ mod tests {
         assert_eq!(battlefield["cards"][0]["identity"]["name"], "Test Creature");
         assert_eq!(battlefield["cards"][0]["visibility"], "visible");
         assert_eq!(battlefield["count"], 1);
+    }
+
+    /// 5.2.0 widened the game view in three places the engine can already
+    /// answer, so none of them is a gap:
+    ///
+    /// - `PlayerDto.has_enduring_story`, tracked exactly like the city's
+    ///   blessing (`GameState::enduring_story`).
+    /// - `StackObjectDto.owner_id`, which is NOT `controller_id`: CR 109.4
+    ///   keeps ownership with the card while control can move.
+    /// - `StackObjectDto.is_double_faced` / `face_index`, matching upstream's
+    ///   own projection — a back face exists, and the stack shows face 1 once
+    ///   the object is transformed.
+    #[test]
+    fn the_view_carries_the_five_two_state_additions() {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Borrowed Spell".to_string(),
+            Zone::Stack,
+        );
+        state.enduring_story.insert(PlayerId(0));
+        state.stack.push_back(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            // Cast by its owner, then taken over — owner and controller differ.
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+
+        let prepared = prepare_snapshot(&state, PlayerId(0), "game-a").unwrap();
+        let json = serde_json::to_value(build_state_update(&prepared, &lookup).unwrap()).unwrap();
+        let view = &json["gameView"];
+
+        let player = view["players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|player| player["id"] == "player-0")
+            .expect("player 0");
+        assert_eq!(player["hasEnduringStory"], true);
+        assert_eq!(
+            view["players"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|player| player["id"] == "player-1")
+                .expect("player 1")["hasEnduringStory"],
+            false
+        );
+
+        let stack_object = &view["stack"][0];
+        assert_eq!(stack_object["controllerId"], "player-0");
+        assert_eq!(
+            stack_object["ownerId"], "player-1",
+            "ownership stays with the card even when control does not"
+        );
+        assert_eq!(stack_object["isDoubleFaced"], false);
+        assert_eq!(stack_object["faceIndex"], 0);
+    }
+
+    /// The `is_double_faced` half of the above, on a card that discriminates.
+    ///
+    /// `back_face.is_some()` is NOT the DFC predicate: CR 710 flip cards and
+    /// Adventure / Omen cards park their other half in the same slot. Only a
+    /// `Transform`/`Modal`/`Meld` back face (or a melded or already-transformed
+    /// object) is a DFC, which is what
+    /// `engine::game::transform::is_double_faced_permanent` decides. A plain
+    /// card passes either predicate, so it proves nothing here — an Adventure
+    /// creature on the stack is the case that separates them.
+    #[test]
+    fn an_adventure_spell_on_the_stack_is_not_double_faced() {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Adventurer".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&source).unwrap().back_face = Some(BackFaceData {
+            name: "The Adventure".to_string(),
+            layout_kind: Some(LayoutKind::Adventure),
+            ..Default::default()
+        });
+        state.stack.push_back(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+
+        let prepared = prepare_snapshot(&state, PlayerId(0), "game-a").unwrap();
+        let json = serde_json::to_value(build_state_update(&prepared, &lookup).unwrap()).unwrap();
+
+        let object = state.objects.get(&source).unwrap();
+        assert!(
+            object.back_face.is_some(),
+            "the reach guard: the raw check this replaced would report true here"
+        );
+        assert_eq!(json["gameView"]["stack"][0]["isDoubleFaced"], false);
+    }
+
+    #[test]
+    fn a_transformed_double_faced_spell_on_the_stack_reports_its_back_face() {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Werewolf Back".to_string(),
+            Zone::Stack,
+        );
+        let object = state.objects.get_mut(&source).unwrap();
+        object.back_face = Some(BackFaceData {
+            name: "Werewolf Front".to_string(),
+            layout_kind: Some(LayoutKind::Transform),
+            ..Default::default()
+        });
+        object.transformed = true;
+        state.stack.push_back(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+
+        let prepared = prepare_snapshot(&state, PlayerId(0), "game-a").unwrap();
+        let json = serde_json::to_value(build_state_update(&prepared, &lookup).unwrap()).unwrap();
+
+        assert_eq!(json["gameView"]["stack"][0]["isDoubleFaced"], true);
+        assert_eq!(json["gameView"]["stack"][0]["faceIndex"], 1);
     }
 
     /// Player counters moved from five flat `*Counters` fields into one
@@ -5067,6 +5548,44 @@ mod tests {
         assert_eq!(entry["isFaceDown"], true);
     }
 
+    /// CR 702.106a: the controller may look at their face-down conspiracy, so
+    /// only the opponent's entry is a card back. `face_down` is true on both.
+    #[test]
+    fn face_down_conspiracy_is_identified_only_for_its_controller() {
+        let mut state = GameState::new_two_player(7);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Brago's Favor".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Conspiracy);
+        state.exile.retain(|object| *object != id);
+        start_with_conspiracy(&mut state, id, true);
+
+        let controller_view = zones_of(&state, PlayerId(0));
+        let controller_entry = &find_zone(&controller_view, "command", "player-0")["cards"][0];
+        assert_eq!(controller_entry["visibility"], "visible");
+        assert_eq!(controller_entry["identity"]["name"], "Brago's Favor");
+        assert_eq!(controller_entry["types"][0], "Conspiracy");
+        assert_eq!(controller_entry["isFaceDown"], true);
+
+        let opponent_view = zones_of(&state, PlayerId(1));
+        let opponent_entry = &find_zone(&opponent_view, "command", "player-0")["cards"][0];
+        assert_eq!(opponent_entry["visibility"], "visible");
+        assert_eq!(opponent_entry["identity"]["name"], "");
+        assert_eq!(opponent_entry["text"], "");
+        assert_eq!(opponent_entry["types"], serde_json::json!([]));
+        assert_eq!(opponent_entry["isFaceDown"], true);
+    }
+
     /// Counter keys are the engine's serialization form ("P1P1"), not the
     /// player-facing prose form ("+1/+1") that `display_phrase()` renders.
     #[test]
@@ -5275,6 +5794,127 @@ mod tests {
         // v2 removed the flat `label` in favour of `presentation`.
         assert!(json["input"].get("label").is_none());
         assert_eq!(json["input"]["presentation"]["title"], "Choose target");
+    }
+
+    fn target_selection_waiting_for() -> WaitingFor {
+        WaitingFor::TargetSelection {
+            player: PlayerId(0),
+            pending_cast: dummy_pending_cast(),
+            target_slots: vec![TargetSelectionSlot {
+                legal_targets: vec![TargetRef::Object(ObjectId(1))],
+                optional: false,
+                chooser: None,
+                effect_kind: EffectKind::DealDamage,
+                effect_detail: TargetEffectDetail::None,
+            }],
+            mode_labels: Vec::new(),
+            selection: TargetSelectionProgress::default(),
+        }
+    }
+
+    /// 5.0.0 added `ChooseBoardTargetsInput.cancellable` — for target selection,
+    /// the advertisement this adapter had asked upstream for on mana payment
+    /// (see `local.cancel-mana-payment-unavailable`).
+    ///
+    /// It must report engine state rather than a constant. CR 601.2 offers
+    /// rollback only while the cast is still rewindable, so the field is read
+    /// off the same legal-action set that decides whether the answering
+    /// `Cancel` resolves. Asserted in both directions so a hardcoded `true`
+    /// or `false` fails.
+    #[test]
+    fn board_target_cancellable_reports_the_engine_action_set() {
+        let mut prepared = prepared_for(target_selection_waiting_for());
+
+        prepared
+            .actions
+            .retain(|action| !matches!(action, GameAction::CancelCast));
+        let json = serde_json::to_value(build_prompt(&prepared, &lookup).unwrap()).unwrap();
+        assert_eq!(
+            json["input"]["cancellable"], false,
+            "no CancelCast in the action set means the cast is past rollback"
+        );
+
+        prepared.actions.push(GameAction::CancelCast);
+        let json = serde_json::to_value(build_prompt(&prepared, &lookup).unwrap()).unwrap();
+        assert_eq!(
+            json["input"]["cancellable"], true,
+            "the engine still offers CR 601.2 rollback, so the client may offer it too"
+        );
+    }
+
+    /// Sibling of the above. `ChooseBoardTargets` is built from two engine
+    /// states, and only one of them can be cancelled: CR 601.2i rollback
+    /// withdraws a pending *cast*, and a triggered ability has none
+    /// (`WaitingFor::TriggerTargetSelection` carries no `PendingCast`, so
+    /// `allows_cancel_cast` is false and no `CancelCast` candidate is
+    /// generated). Reading the action set rather than the prompt family is
+    /// what gets this right for free.
+    #[test]
+    fn a_trigger_target_prompt_is_never_cancellable() {
+        let prepared = prepared_for(WaitingFor::TriggerTargetSelection {
+            player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
+            target_slots: vec![TargetSelectionSlot {
+                legal_targets: vec![TargetRef::Object(ObjectId(1))],
+                optional: false,
+                chooser: None,
+                effect_kind: EffectKind::DealDamage,
+                effect_detail: TargetEffectDetail::None,
+            }],
+            mode_labels: Vec::new(),
+            target_constraints: Vec::new(),
+            selection: TargetSelectionProgress::default(),
+            source_id: None,
+            description: None,
+        });
+
+        assert!(
+            !prepared
+                .actions
+                .iter()
+                .any(|action| matches!(action, GameAction::CancelCast)),
+            "a trigger has no pending cast to withdraw"
+        );
+
+        let json = serde_json::to_value(build_prompt(&prepared, &lookup).unwrap()).unwrap();
+        assert_eq!(json["input"]["type"], "chooseBoardTargets");
+        assert_eq!(json["input"]["cancellable"], false);
+    }
+
+    /// 5.0.0 added `ChooseBoardTargetsOutput::Cancel`. It means the same
+    /// `GameAction::CancelCast` rollback the mana-payment cancel already
+    /// resolves to, and is refused the same way when the engine no longer
+    /// offers it — a client that respects `cancellable` never reaches the
+    /// refusal, but the wire cannot enforce that.
+    #[test]
+    fn a_board_target_cancel_resolves_to_the_cast_rollback() {
+        let mut state = GameState::new_two_player(7);
+        state.waiting_for = target_selection_waiting_for();
+
+        assert_eq!(
+            translate_response(
+                7,
+                PromptOutput::ChooseBoardTargets(ChooseBoardTargetsOutput::Cancel),
+                &context_with(vec![GameAction::CancelCast]),
+                &state,
+            )
+            .unwrap(),
+            GameAction::CancelCast
+        );
+
+        assert!(matches!(
+            translate_response(
+                7,
+                PromptOutput::ChooseBoardTargets(ChooseBoardTargetsOutput::Cancel),
+                &context_with(vec![GameAction::PassPriority]),
+                &state,
+            ),
+            Err(AdapterError::UnsupportedProtocolFeature {
+                code: "local.cancel-target-selection-unavailable"
+            })
+        ));
     }
 
     /// Build an earlier `TargetSelection` board-target prompt whose active slot carries
@@ -5507,6 +6147,7 @@ mod tests {
         let prepared = prepared_for(WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(1),
+            decision_subject_id: None,
             description: Some("Draw a card?".to_string()),
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -5537,6 +6178,13 @@ mod tests {
         let exert = prepared_for(WaitingFor::ExertChoice {
             player: PlayerId(0),
             attacker: ObjectId(1),
+            permission: engine::types::ability::TriggerDefinitionRef {
+                source: engine::types::identifiers::ObjectIncarnationRef::of(ObjectId(1), 0),
+                occurrence: engine::types::ability::TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: engine::types::ability::TriggerBaseSetInstanceRef::INITIAL,
+                    printed_index: 0,
+                },
+            },
             remaining: vec![],
         });
         assert_eq!(
@@ -5580,17 +6228,20 @@ mod tests {
                 "mulligan",
                 WaitingFor::MulliganDecision {
                     pending: vec![MulliganDecisionEntry {
+                        free_reveals_taken: 0,
                         player: PlayerId(0),
                         mulligan_count: 1,
                         phase: MulliganDecisionPhase::Declare,
                     }],
                     free_first_mulligan: false,
+                    declared: Vec::new(),
                 },
             ),
             (
                 "mulliganPutBack",
                 WaitingFor::MulliganDecision {
                     pending: vec![MulliganDecisionEntry {
+                        free_reveals_taken: 0,
                         player: PlayerId(0),
                         mulligan_count: 1,
                         phase: MulliganDecisionPhase::BottomCards {
@@ -5599,6 +6250,7 @@ mod tests {
                         },
                     }],
                     free_first_mulligan: false,
+                    declared: Vec::new(),
                 },
             ),
             (
@@ -5619,6 +6271,8 @@ mod tests {
                     valid_block_targets: HashMap::from([(ObjectId(2), vec![ObjectId(1)])]),
                     block_requirements: HashMap::new(),
                     blocker_constraints: Default::default(),
+                    must_be_blocked_targets: Default::default(),
+                    block_capacities: Default::default(),
                 },
             ),
             (
@@ -5740,6 +6394,305 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn resolution_optional_payment_prompt_is_explicitly_unsupported() {
+        let result = build_prompt(
+            &prepared_for(WaitingFor::ResolutionOptionalPaymentChoice {
+                player: PlayerId(0),
+                source_id: ObjectId(1),
+                costs: vec![],
+            }),
+            &lookup,
+        );
+        assert!(matches!(
+            result,
+            Err(AdapterError::UnsupportedPrompt {
+                code: "local.resolution-optional-payment-selection-unsupported",
+                ..
+            })
+        ));
+    }
+
+    const AGENDA_CARD_NAMES: [&str; 3] = ["Grizzly Bears", "Lightning Bolt", "Opt"];
+
+    /// A two-player game paused on `name_count` secret names for a face-down
+    /// conspiracy `PlayerId(0)` owns, with the card database's names loaded.
+    fn agenda_state(name_count: u8) -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(7);
+        state.all_card_names = AGENDA_CARD_NAMES
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>()
+            .into();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Brago's Favor".to_string(),
+            Zone::Exile,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.card_types.core_types.push(CoreType::Conspiracy);
+        object.agenda_name_count = name_count;
+        state.exile.retain(|object| *object != id);
+        start_with_conspiracy(&mut state, id, true);
+        state.waiting_for = pending_agenda_choice(&state).expect("the agenda is unnamed");
+        (state, id)
+    }
+
+    /// CR 702.24a: Psychic Vortex with 1,025 age counters under an opponent's
+    /// Hullbreacher (verbatim Oracle texts). The upkeep offer is a yes/no; once
+    /// accepted, the payment pauses after one work slice and the adapter serves
+    /// the engine's single answer, which round-trips to the action the engine
+    /// accepts.
+    #[test]
+    fn a_continued_repeated_payment_is_served_as_its_single_answer() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Untap);
+        let vortex = scenario
+            .add_enchantment_from_oracle(
+                P0,
+                "Psychic Vortex",
+                "Cumulative upkeep\u{2014}Draw a card. (At the beginning of your upkeep, put \
+                 an age counter on this permanent, then sacrifice it unless you pay its upkeep \
+                 cost for each age counter on it.)\nAt the beginning of your end step, \
+                 sacrifice a land and discard your hand.",
+            )
+            .id();
+        scenario.add_creature_from_oracle(
+            P1,
+            "Hullbreacher",
+            3,
+            2,
+            "Flash\nIf an opponent would draw a card except the first one they draw in each \
+             of their draw steps, instead you create a Treasure token. (It's an artifact with \
+             \"{T}, Sacrifice this token: Add one mana of any color.\")",
+        );
+        let mut runner = scenario.build();
+        // The one-of list is the engine's interaction projection, which is
+        // served only for a bound session.
+        bind_interaction_authority(
+            runner.state_mut(),
+            InteractionSessionId("continuation".to_string()),
+        )
+        .expect("valid interaction authority binding");
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&vortex)
+            .expect("Psychic Vortex exists")
+            .counters
+            .insert(CounterType::Age, 1_024);
+        runner.auto_advance_to_main_phase();
+        runner.advance_until_stack_empty();
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::UnlessPayment {
+                    repeat: Some(1_025),
+                    ..
+                }
+            ),
+            "reach: the upkeep offers 1,025 draws, got {:?}",
+            runner.state().waiting_for
+        );
+
+        let offer = prepare_snapshot_with_prompt_id(runner.state(), P0, "game-a", 41).unwrap();
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseBoolean(offer_prompt)) =
+            build_prompt(&offer, &lookup).unwrap().input
+        else {
+            panic!("the initial offer is a yes/no");
+        };
+        assert_eq!(
+            (
+                offer_prompt.confirm_label.as_str(),
+                offer_prompt.deny_label.as_str()
+            ),
+            ("Pay", "Decline"),
+        );
+        for value in [true, false] {
+            assert_eq!(
+                translate_response(
+                    41,
+                    PromptOutput::ChooseBoolean(ChooseBooleanOutput::Decision { value }),
+                    &offer.prompt_context(),
+                    runner.state(),
+                )
+                .unwrap(),
+                GameAction::PayUnlessCost { pay: value },
+            );
+        }
+
+        runner
+            .act(GameAction::PayUnlessCost { pay: true })
+            .expect("paying is never refused");
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. })
+                && runner.state().pending_cost_move_resume.is_some(),
+            "reach: the first slice ended at the continuation, got {:?}",
+            runner.state().waiting_for
+        );
+
+        let continuation =
+            prepare_snapshot_with_prompt_id(runner.state(), P0, "game-a", 42).unwrap();
+        assert_eq!(
+            continuation
+                .derived
+                .unless_draw_cost
+                .as_ref()
+                .map(|draw| draw.stage),
+            Some(engine::game::derived_views::UnlessDrawPaymentStage::Continuing),
+            "the snapshot's views read the stage from the authoritative state"
+        );
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) =
+            build_prompt(&continuation, &lookup).unwrap().input
+        else {
+            panic!("the continuation is a one-of list, not a yes/no");
+        };
+        assert_eq!(input.options.len(), 1, "continuing is the only answer");
+        assert_eq!((input.min_total, input.max_total), (1, 1));
+        let action = translate_response(
+            42,
+            PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
+                chosen_indices: vec![0],
+            }),
+            &continuation.prompt_context(),
+            runner.state(),
+        )
+        .unwrap();
+        assert_eq!(action, GameAction::PayUnlessCost { pay: true });
+        runner.act(action).expect("the served answer is accepted");
+        assert!(
+            runner.state().pending_cost_move_resume.is_none(),
+            "the payment completed"
+        );
+    }
+
+    fn agenda_selection(state: &GameState, chosen_indices: Vec<usize>) -> Result<GameAction> {
+        let prepared = prepare_snapshot_with_prompt_id(state, PlayerId(0), "game-a", 42).unwrap();
+        translate_response(
+            42,
+            PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
+                chosen_indices,
+            }),
+            &prepared.prompt_context(),
+            state,
+        )
+    }
+
+    #[test]
+    fn secret_agenda_prompt_offers_every_card_name_for_the_required_count() {
+        for name_count in [1u8, 2] {
+            let (state, _) = agenda_state(name_count);
+            let prepared =
+                prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+            let prompt = build_prompt(&prepared, &lookup).unwrap();
+            let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) =
+                prompt.input
+            else {
+                panic!("an agenda is a selection over card names");
+            };
+
+            assert_eq!(
+                input
+                    .options
+                    .iter()
+                    .map(|option| option.label.as_str())
+                    .collect::<Vec<_>>(),
+                AGENDA_CARD_NAMES,
+            );
+            assert!(input.options.iter().all(|option| !option.can_repeat));
+            assert_eq!(
+                (input.min_total, input.max_total),
+                (usize::from(name_count), usize::from(name_count)),
+            );
+        }
+    }
+
+    /// The prompt is the chooser's alone: the opponent has no prompt to read the
+    /// name universe or the count from.
+    #[test]
+    fn secret_agenda_prompt_is_served_only_to_the_chooser() {
+        let (state, _) = agenda_state(1);
+        let opponent = prepare_snapshot_with_prompt_id(&state, PlayerId(1), "game-a", 42).unwrap();
+
+        assert!(matches!(
+            build_prompt(&opponent, &lookup),
+            Err(AdapterError::NoAuthorizedPrompt { .. })
+        ));
+    }
+
+    /// With no name universe the prompt could not be answered, so it is refused
+    /// rather than served with no legal selection.
+    #[test]
+    fn secret_agenda_prompt_without_card_names_fails_closed() {
+        let (mut state, _) = agenda_state(1);
+        state.all_card_names = Vec::new().into();
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+
+        assert!(matches!(
+            build_prompt(&prepared, &lookup),
+            Err(AdapterError::UnsupportedPrompt {
+                code: "local.secret-agenda-unsupported",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn secret_agenda_selection_records_the_chosen_names_through_the_engine() {
+        let (mut state, id) = agenda_state(2);
+
+        let action = agenda_selection(&state, vec![2, 0]).unwrap();
+        assert_eq!(
+            action,
+            GameAction::ChooseSecretAgendaNames {
+                names: vec!["Opt".to_string(), "Grizzly Bears".to_string()],
+            }
+        );
+
+        apply_as_current(&mut state, action).unwrap();
+        assert_eq!(
+            state.objects[&id].secret_chosen_names,
+            vec!["Opt".to_string(), "Grizzly Bears".to_string()],
+        );
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::SecretAgendaChoice { .. }
+        ));
+    }
+
+    #[test]
+    fn secret_agenda_selection_outside_the_options_is_illegal() {
+        let (state, _) = agenda_state(1);
+
+        assert!(matches!(
+            agenda_selection(&state, vec![AGENDA_CARD_NAMES.len()]),
+            Err(AdapterError::IllegalResponseForPrompt {
+                response_kind: "chooseFromSelection"
+            })
+        ));
+    }
+
+    /// CR 702.106f: the adapter leaves "two different cards" and the name count to
+    /// the reducer, which is what refuses each of these.
+    #[test]
+    fn secret_agenda_reducer_rejects_a_repeated_name_and_a_short_answer() {
+        for chosen_indices in [vec![1, 1], vec![1]] {
+            let (mut state, id) = agenda_state(2);
+
+            let action = agenda_selection(&state, chosen_indices).unwrap();
+            assert!(apply_as_current(&mut state, action).is_err());
+            assert!(state.objects[&id].secret_chosen_names.is_empty());
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::SecretAgendaChoice { .. }
+            ));
+        }
+    }
+
     /// The generic path: a waiting state with no bespoke arm is now prompted
     /// from the engine's own projection instead of being refused.
     ///
@@ -5765,6 +6718,7 @@ mod tests {
         state.waiting_for = WaitingFor::TopOrBottomChoice {
             player: PlayerId(0),
             object_id,
+            top_position: Default::default(),
         };
         bind_interaction_authority(&mut state, InteractionSessionId("generic-path".to_string()))
             .expect("valid interaction authority binding");
@@ -5798,6 +6752,39 @@ mod tests {
         )
         .expect("the echoed index resolves back through the engine");
         assert_eq!(action, GameAction::ChooseTopOrBottom { top: true });
+    }
+
+    /// CR 401.7: for "second from the top or on the bottom" the projected "top"
+    /// label must name the slot instead of reading as plain "top".
+    #[test]
+    fn nth_from_top_choice_is_labelled_with_its_position() {
+        let mut state = GameState::new_two_player(7);
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tucked Card".to_string(),
+            Zone::Library,
+        );
+        state.waiting_for = WaitingFor::TopOrBottomChoice {
+            player: PlayerId(0),
+            object_id,
+            top_position: engine::types::ability::LibraryPosition::NthFromTop { n: 2 },
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("nth-top".to_string()))
+            .expect("valid interaction authority binding");
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup).expect("projection prompt");
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
+            panic!("expected ChooseFromSelection, got {prompt:?}");
+        };
+        let labels: Vec<_> = input.options.iter().map(|o| o.label.clone()).collect();
+        assert!(
+            labels.iter().any(|l| l == "position 2 from the top")
+                && labels.iter().any(|l| l == "bottom")
+                && !labels.iter().any(|l| l == "top"),
+            "got {labels:?}"
+        );
     }
 
     /// The `Select` half of the generic path: a subset choice, not a one-of.
@@ -6241,6 +7228,7 @@ mod tests {
         state.waiting_for = WaitingFor::TopOrBottomChoice {
             player: PlayerId(0),
             object_id,
+            top_position: Default::default(),
         };
 
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
@@ -6889,6 +7877,7 @@ mod tests {
                     min_targets: 1,
                     max_targets: 1,
                     chosen_targets: 0,
+                    cancellable: false,
                 }),
             ),
             (
@@ -7052,6 +8041,7 @@ mod tests {
                 min_targets: 1,
                 max_targets: 2,
                 chosen_targets: 0,
+                cancellable: false,
             }))
             .unwrap();
         assert_eq!(targets["minTargets"], 1);
@@ -7146,6 +8136,7 @@ mod tests {
                 &ResponseViolation::UnknownActionId("action-9".to_string()),
                 Some(1),
             ),
+            protocol_error_for_violation(&ResponseViolation::CancelNotAllowed, Some(1)),
             protocol_error_for(
                 &AdapterError::MalformedId {
                     expected_prefix: "card-",
@@ -7160,8 +8151,8 @@ mod tests {
 
         assert_eq!(
             produced.len(),
-            5,
-            "each of the five conformance failures must map to a distinct code"
+            6,
+            "each of the six conformance failures must map to a distinct code"
         );
         assert!(
             produced
@@ -7170,11 +8161,28 @@ mod tests {
                 .all(|(index, code)| !produced[..index].contains(code)),
             "each conformance failure must map to a distinct code"
         );
+        // Exhaustive, wildcard-free: when upstream adds a code this stops
+        // compiling, which is the only thing that makes the list below a real
+        // completeness check. A hand-written list cannot fail on its own —
+        // `CancelNotAllowed` arrived in 5.0.0 and this test kept passing.
+        fn every_code_is_listed_below(code: ProtocolErrorCode) {
+            match code {
+                ProtocolErrorCode::StalePrompt
+                | ProtocolErrorCode::WrongPlayer
+                | ProtocolErrorCode::WrongPromptType
+                | ProtocolErrorCode::UnknownActionId
+                | ProtocolErrorCode::CancelNotAllowed
+                | ProtocolErrorCode::InvalidShape => {}
+            }
+        }
+        every_code_is_listed_below(ProtocolErrorCode::StalePrompt);
+
         for code in [
             ProtocolErrorCode::StalePrompt,
             ProtocolErrorCode::WrongPlayer,
             ProtocolErrorCode::WrongPromptType,
             ProtocolErrorCode::UnknownActionId,
+            ProtocolErrorCode::CancelNotAllowed,
             ProtocolErrorCode::InvalidShape,
         ] {
             assert!(produced.contains(&code), "no producer for {code:?}");
@@ -7352,11 +8360,13 @@ mod tests {
         let mut state = GameState::new_two_player(7);
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: PlayerId(0),
                 mulligan_count: 0,
                 phase: MulliganDecisionPhase::Declare,
             }],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
 
         assert!(matches!(
@@ -7406,11 +8416,13 @@ mod tests {
         );
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: PlayerId(0),
                 mulligan_count: 0,
                 phase: MulliganDecisionPhase::Declare,
             }],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
 
         assert!(matches!(
@@ -7430,6 +8442,7 @@ mod tests {
 
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: PlayerId(0),
                 mulligan_count: 1,
                 phase: MulliganDecisionPhase::BottomCards {
@@ -7438,6 +8451,7 @@ mod tests {
                 },
             }],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 7).unwrap();
         let PromptInput::MulliganPutBack(input) = build_prompt_input(&prepared, &lookup).unwrap()
@@ -7894,9 +8908,9 @@ mod tests {
     }
 
     /// CR 702.180b: the harmonize TAP is a cost-reduction tap during payment,
-    /// structurally convoke's analogue, and `PaymentResourceKind` is exactly
-    /// `Convoke | Improvise | Delve`. It stays unsupported rather than being
-    /// mapped to a near-miss variant. (Ninjutsu used to be pinned here on the
+    /// structurally convoke's analogue, and `PaymentResourceKind` is
+    /// `Convoke | Improvise | Delve | Waterbend`. It stays unsupported rather
+    /// than being mapped to a near-miss variant. (Ninjutsu used to be pinned here on the
     /// false premise that it needed an `AlternativeCostKind`; CR 702.49a makes
     /// it an activated ability, and it is now advertised — see
     /// `ninjutsu_is_advertised_as_an_activated_ability`.)
@@ -8171,13 +9185,13 @@ mod tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 89);
+        assert_eq!(capabilities.len(), 96);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 89, "capability codes must be unique");
+        assert_eq!(codes.len(), 96, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(
@@ -8413,6 +9427,32 @@ mod tests {
         ));
     }
 
+    /// A format whose library and graveyard are shared by every seat cannot be
+    /// reported by the one-owner-per-zone protocol, so preparation refuses it
+    /// with a code the registry declares.
+    #[test]
+    fn prepare_snapshot_refuses_a_format_with_shared_zones() {
+        // Reach-guard: the same two-player state prepares under the stock
+        // format, so the refusal below is the shared-zone guard and not the
+        // player-count guard.
+        let stock = GameState::new_two_player(7);
+        assert!(prepare_snapshot(&stock, PlayerId(0), "game-x").is_ok());
+
+        let mut shared = GameState::new_two_player(7);
+        shared.format_config = engine::types::format::FormatConfig::dandan();
+        assert_eq!(shared.players.len(), 2);
+        let refusal = prepare_snapshot(&shared, PlayerId(0), "game-x").unwrap_err();
+        assert_eq!(
+            refusal,
+            AdapterError::UnsupportedProtocolFeature {
+                code: "upstream.shared-zone-ownership-missing"
+            }
+        );
+        assert!(unsupported_protocol_capabilities()
+            .iter()
+            .any(|capability| capability.code == "upstream.shared-zone-ownership-missing"));
+    }
+
     /// Both vendor extensions are deliberate, but their safety arguments differ.
     ///
     /// `excludedCardId` is genuinely additive: `MulliganPutBackInput` has no
@@ -8469,6 +9509,360 @@ mod tests {
             })
             .unwrap(),
             r#"{"type":"mulliganUseSerumPowder","cardId":"card-1"}"#
+        );
+    }
+
+    /// A live board parked on the CR 601.2b + CR 601.2f cost-determination
+    /// prompt, driven through the production cast pipeline rather than assembled
+    /// by hand.
+    ///
+    /// Rigo, Streetwise Mentor's printed `{G/W}{W}{W/U}` under a Morophon-style
+    /// `{W}{U}{B}{R}{G}` reduction carrying the colored-only rider. Announcing
+    /// nothing leaves `{W}` (the reduction's `{W}` unit takes `{G/W}` — CR 107.4e
+    /// makes a hybrid symbol a symbol of both its colours — and its `{U}` unit
+    /// takes `{W/U}`); announcing `{G}` and `{U}` leaves `{G}{W}{U}`, which the
+    /// same reduction cancels outright. Two distinct legal locked totals, one of
+    /// them reached only through a NON-EMPTY `hybrid_announcement` — which is
+    /// what makes this board prove the announcement survives the round trip
+    /// rather than defaulting to empty at both ends.
+    ///
+    /// Built live, not from a fabricated `WaitingFor`, because the prompt's
+    /// trailing rollback option is gated on the engine's real legal-action set
+    /// offering `GameAction::CancelCast`.
+    fn cost_reduction_election_state() -> GameState {
+        use engine::game::scenario::{GameScenario, P0};
+        use engine::types::ability::StaticDefinition;
+        use engine::types::game_state::CastPaymentMode;
+        use engine::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for _ in 0..3 {
+            scenario.add_basic_land(P0, EngineManaColor::White);
+        }
+        scenario
+            .add_creature(P0, "Morophon, the Boundless", 6, 6)
+            .with_static_definition(StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::Cost {
+                    shards: vec![
+                        ManaCostShard::White,
+                        ManaCostShard::Blue,
+                        ManaCostShard::Black,
+                        ManaCostShard::Red,
+                        ManaCostShard::Green,
+                    ],
+                    generic: 0,
+                },
+                spell_filter: None,
+                dynamic_count: None,
+                reach: CostReductionReach::ColoredManaOnly,
+            }));
+        let spell = scenario
+            .add_creature_to_hand(P0, "Rigo, Streetwise Mentor", 2, 2)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::GreenWhite,
+                    ManaCostShard::White,
+                    ManaCostShard::WhiteBlue,
+                ],
+                generic: 0,
+            })
+            .id();
+
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("the cast must begin");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OrderCostReductions { .. }
+            ),
+            "the board must reach the cost-determination election, got {:?}",
+            runner.state().waiting_for
+        );
+        runner.state().clone()
+    }
+
+    /// CR 601.2f + CR 602.2b: an ACTIVATION's election projects through the same
+    /// `ChooseFromSelection` as a spell's, its labels name the floor that makes
+    /// the order matter, and each index answers with that outcome's own order.
+    #[test]
+    fn an_activation_cost_election_round_trips_through_choose_from_selection() {
+        use engine::game::scenario::{GameScenario, P0};
+        use engine::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr,
+            StaticDefinition, TargetFilter, TypedFilter,
+        };
+        use engine::types::mana::{ManaType, ManaUnit};
+        use engine::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
+
+        let reducer = |amount: u32, minimum_mana: Option<u32>| {
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
+                keyword: "activated".to_string(),
+                amount,
+                minimum_mana,
+                dynamic_count: None,
+                exemption: ActivationExemption::None,
+                activator: None,
+                targets: None,
+                frequency: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+        };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario
+            .add_creature(P0, "Training Grounds", 1, 1)
+            .with_static_definition(reducer(2, Some(1)));
+        scenario
+            .add_creature(P0, "Unfloored reducer", 1, 1)
+            .with_static_definition(reducer(2, None));
+        let source = scenario
+            .add_creature(P0, "Activator", 2, 2)
+            .with_ability_definition(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )
+                .cost(AbilityCost::Mana {
+                    cost: ManaCost::generic(3),
+                }),
+            )
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            (0..3)
+                .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            })
+            .expect("the activation reaches its election");
+        let state = runner.state().clone();
+        let WaitingFor::OrderCostReductions { outcomes, .. } = &state.waiting_for else {
+            panic!("expected the election, got {:?}", state.waiting_for);
+        };
+        let outcomes = outcomes.clone();
+        assert_eq!(outcomes.len(), 2);
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 7).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup).expect("a real prompt");
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
+            panic!("an activation election is ChooseFromSelection, got {prompt:?}");
+        };
+        assert!(
+            input.options[..outcomes.len()]
+                .iter()
+                .all(|option| option.label.contains("(can't go below 1 mana)")),
+            "each outcome's label must name the floor, got {:?}",
+            input.options
+        );
+
+        let context = prepared.prompt_context();
+        for (index, outcome) in outcomes.iter().enumerate() {
+            assert_eq!(
+                translate_response(
+                    7,
+                    PromptOutput::ChooseFromSelection(
+                        ChooseFromSelectionOutput::SelectionDecision {
+                            chosen_indices: vec![index],
+                        }
+                    ),
+                    &context,
+                    &state,
+                )
+                .expect("an offered index translates"),
+                GameAction::OrderCostReductions {
+                    order: outcome.order.clone(),
+                    hybrid_announcement: Vec::new(),
+                }
+            );
+        }
+    }
+
+    /// CR 601.2b + CR 601.2f: the cost-determination election round-trips.
+    ///
+    /// The prompt is a `ChooseFromSelection` whose options ARE the engine's
+    /// `outcomes` — one per distinct locked total, in engine order — plus the
+    /// CR 601.2 rollback as a trailing labelled option, because
+    /// `ChooseFromSelectionOutput` has no `Cancel` variant to carry it.
+    ///
+    /// The round trip asserts the whole contract in one pass:
+    ///   * index *i* answers with outcome *i*'s `order` AND its
+    ///     `hybrid_announcement`, verbatim — nothing is re-derived adapter-side,
+    ///     which is the failure mode that would silently lock a total the caster
+    ///     never picked;
+    ///   * the trailing index is `GameAction::CancelCast`;
+    ///   * anything past it is refused rather than coerced.
+    ///
+    /// Revert guard: restore the `unsupported_prompt` arm and the projection
+    /// yields an unsupported prompt instead of a selection, so the family
+    /// assertion reds before any index is answered.
+    #[test]
+    fn the_cost_reduction_election_round_trips_through_choose_from_selection() {
+        let state = cost_reduction_election_state();
+        let WaitingFor::OrderCostReductions {
+            outcomes,
+            hybrid_symbols,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("the board must be parked on the election");
+        };
+        let outcomes = outcomes.clone();
+        assert_eq!(
+            hybrid_symbols,
+            &vec![ManaCostShard::GreenWhite, ManaCostShard::WhiteBlue],
+            "CR 601.2b: both of Rigo's hybrid symbols are announceable here"
+        );
+        assert_eq!(
+            outcomes.len(),
+            2,
+            "two distinct locked totals must be on offer, got {:?}",
+            outcomes
+                .iter()
+                .map(|outcome| outcome.locked_cost.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            outcomes
+                .iter()
+                .any(|outcome| !outcome.hybrid_announcement.is_empty()),
+            "at least one outcome must carry a real announcement, or this test \
+             would prove nothing about the announcement surviving the wire"
+        );
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup)
+            .expect("the election projects as a real prompt, not an unsupported one");
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
+            panic!(
+                "a pick-one over the engine's own outcomes is ChooseFromSelection, got {prompt:?}"
+            );
+        };
+        assert_eq!(
+            (input.min_total, input.max_total),
+            (1, 1),
+            "the caster locks exactly one total"
+        );
+        let labels: Vec<String> = input
+            .options
+            .iter()
+            .map(|option| option.label.clone())
+            .collect();
+        assert_eq!(
+            labels.len(),
+            outcomes.len() + 1,
+            "one option per outcome plus the CR 601.2 rollback, got {labels:?}"
+        );
+        assert_eq!(
+            labels.last().map(String::as_str),
+            Some("Cancel the cast"),
+            "the rollback must be the TRAILING option — the response mapping \
+             recognizes it by position"
+        );
+        assert!(
+            labels[0].contains("announce"),
+            "the announced outcome's label must say what is announced, got {:?}",
+            labels[0]
+        );
+
+        let context = prepared.prompt_context();
+        for (index, outcome) in outcomes.iter().enumerate() {
+            let action = translate_response(
+                42,
+                PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
+                    chosen_indices: vec![index],
+                }),
+                &context,
+                &state,
+            )
+            .expect("an index the prompt offered must translate");
+            assert_eq!(
+                action,
+                GameAction::OrderCostReductions {
+                    order: outcome.order.clone(),
+                    hybrid_announcement: outcome.hybrid_announcement.clone(),
+                },
+                "index {index} must answer with outcome {index}'s own election, \
+                 verbatim — a re-derived order or a dropped announcement locks a \
+                 total the caster did not pick"
+            );
+        }
+
+        assert_eq!(
+            translate_response(
+                42,
+                PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
+                    chosen_indices: vec![outcomes.len()],
+                }),
+                &context,
+                &state,
+            )
+            .expect("the rollback option must translate while the engine offers it"),
+            GameAction::CancelCast,
+            "CR 601.2: the trailing option is the cast rollback"
+        );
+
+        assert!(
+            matches!(
+                translate_response(
+                    42,
+                    PromptOutput::ChooseFromSelection(
+                        ChooseFromSelectionOutput::SelectionDecision {
+                            chosen_indices: vec![outcomes.len() + 1],
+                        }
+                    ),
+                    &context,
+                    &state,
+                ),
+                Err(AdapterError::IllegalResponseForPrompt { .. })
+            ),
+            "an index past the rollback names no option and must be refused, not \
+             coerced onto an outcome"
+        );
+
+        // The capability guard: the same trailing index with no `CancelCast` in
+        // the engine's action table is the documented adapter-local boundary,
+        // not a silent no-op. (`context_with` mints its own prompt id, which
+        // `translate_response` checks before it reaches the arm under test.)
+        let empty_table = context_with(vec![]);
+        assert!(
+            matches!(
+                translate_response(
+                    empty_table.prompt_id,
+                    PromptOutput::ChooseFromSelection(
+                        ChooseFromSelectionOutput::SelectionDecision {
+                            chosen_indices: vec![outcomes.len()],
+                        }
+                    ),
+                    &empty_table,
+                    &state,
+                ),
+                Err(AdapterError::UnsupportedProtocolFeature {
+                    code: "local.cancel-cost-reduction-order-unavailable"
+                })
+            ),
+            "the rollback is only answerable while the engine offers it"
         );
     }
 

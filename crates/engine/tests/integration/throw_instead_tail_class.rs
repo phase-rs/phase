@@ -40,7 +40,6 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{AbilityDefinition, DamageSource, Effect, ObjectScope, QuantityRef};
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -274,11 +273,11 @@ fn throw_mount_swap_path_applies_counter_and_deals_power() {
 /// turn). The trailing `SequentialSibling` tail — "Untap that creature. It gains
 /// haste until end of turn." — must run in this not-swap branch.
 ///
-/// DISCRIMINATING (resolver fix): the gained creature ends UNTAPPED, and a haste
-/// `AddKeyword` continuous effect is created (proving the WHOLE tail chain —
-/// untap THEN the chained haste sub — executes). Revert the resolver `else if`
-/// branch -> the tail is dropped: the creature stays tapped and no haste effect
-/// is created.
+/// DISCRIMINATING (resolver fix): the gained creature ends UNTAPPED, and the
+/// haste `GenericEffect` resolves (proving the WHOLE tail chain — untap THEN
+/// the chained haste sub — executes). Revert the resolver `else if` branch ->
+/// the tail is dropped: the creature stays tapped and no haste effect
+/// resolves.
 ///
 /// PRE-EXISTING LIMITATION (out of scope, documented in the report and the plan's
 /// class-completeness boundary): Evil's Thrall's haste does NOT reach the creature
@@ -291,8 +290,10 @@ fn throw_mount_swap_path_applies_counter_and_deals_power() {
 /// FIX-A'-class SelfRef→creature rebind that would also alter the swap branch and
 /// Reptilian Recruiter, outside this change's 4-card blast radius. The resolver
 /// fix's job is only to RUN the tail, which it does. We therefore assert the
-/// haste EFFECT is created (tail ran) rather than `victim.has_keyword(Haste)`
-/// (which the pre-existing mis-binding makes false in both branches).
+/// haste effect RESOLVED (tail ran) rather than `victim.has_keyword(Haste)`
+/// (which the pre-existing mis-binding makes false in both branches) — read
+/// from the resolution's events, since the mis-bound grant ends with the
+/// spell when it leaves the stack (CR 400.7, issue #8795).
 #[test]
 fn evil_thrall_non_villain_untaps_and_runs_haste_tail() {
     let mut scenario = GameScenario::new_n_player(2, 42);
@@ -318,27 +319,26 @@ fn evil_thrall_non_villain_untaps_and_runs_haste_tail() {
          creature must be UNTAPPED. Still tapped means the resolver tail-runner was reverted."
     );
     // The chained haste sub of the Untap tail must also execute (CR 608.2c — the
-    // whole tail runs). Its continuous effect is created even though the
-    // pre-existing SelfRef binding aims it at the spell rather than the creature.
-    let haste_effect_created = outcome
-        .state()
-        .transient_continuous_effects
-        .iter()
-        .any(|ce| {
-            ce.source_id == spell
-                && ce.modifications.iter().any(|m| {
-                    matches!(
-                        m,
-                        engine::types::ability::ContinuousModification::AddKeyword {
-                            keyword: Keyword::Haste
-                        }
-                    )
-                })
-        });
+    // whole tail runs): its `GenericEffect` resolves, sourced from the spell.
+    // Read from the resolution's events rather than the effect pool: the
+    // pre-existing SelfRef binding aims the grant at the spell, and a grant
+    // bound to an object ends when that object changes zones (CR 400.7 — the
+    // resolved spell is in the graveyard by the time the outcome is read;
+    // issue #8795), so the pool no longer holds it.
+    let haste_effect_resolved = outcome.events().iter().any(|event| {
+        matches!(
+            event,
+            engine::types::events::GameEvent::EffectResolved {
+                kind: engine::types::ability::EffectKind::GenericEffect,
+                source_id,
+                ..
+            } if *source_id == spell
+        )
+    });
     assert!(
-        haste_effect_created,
+        haste_effect_resolved,
         "non-Villain: the chained 'It gains haste' sub of the Untap tail must execute \
-         (a Haste AddKeyword continuous effect sourced from the spell must exist). \
+         (a GenericEffect sourced from the spell must resolve). \
          Absent means the resolver tail-runner stopped after — or before — the untap."
     );
 }

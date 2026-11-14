@@ -7,6 +7,7 @@ import { effectiveStackPressure } from "../../utils/stackThroughput";
 import { shouldAutoPass } from "../autoPass";
 import { dispatchAction } from "../dispatch";
 import { createAIController, type AISeatBinding } from "./aiController";
+import { createStaleStateWatchdog } from "../staleStateWatchdog";
 import type { OpponentController } from "./types";
 
 const AUTO_PASS_BEAT_MS = 200;
@@ -46,6 +47,9 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
 
   let active = false;
   let opponentController: OpponentController | null = null;
+  // Heals a screen that missed a state delivery (all modes: the adapter is
+  // always the newest state this client holds, so the check is uniform).
+  const staleStateWatchdog = createStaleStateWatchdog();
   let unsubscribe: (() => void) | null = null;
   let autoPassTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -103,7 +107,13 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
       ) {
         return;
       }
-      dispatchAction({ type: "PassPriority" });
+      // The auto-pass beat has no caller to propagate to, and `dispatchAction`
+      // already surfaces the failure itself through `reportActionError`. Every
+      // rejecting submission path therefore has to be absorbed here or it
+      // escapes as an unhandled rejection: a P2P guest sitting in auto-pass now
+      // rejects on `action_rejected` / `action_failed` / host disconnect AND on
+      // the guest adapter's submission timeout (`SUBMISSION_TIMEOUT_MS`).
+      void dispatchAction({ type: "PassPriority" }, getPlayerId(), { automated: true }).catch(() => undefined);
     }, beat);
   }
 
@@ -121,6 +131,10 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
         return {
           playerId,
           difficulty: config.aiSeats?.[i]?.difficulty ?? fallbackDifficulty,
+          // `i` is this seat's index in `preferencesStore.aiSeats`, which is the
+          // same index `llmStore.seatBindings` is keyed by. Passing it keeps one
+          // seat-numbering authority across both stores.
+          llmSeatIndex: i,
         };
       });
       opponentController = createAIController({ seats });
@@ -134,11 +148,14 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
 
     // Process current state immediately
     onWaitingForChanged();
+
+    staleStateWatchdog.start();
   }
 
   function stop(): void {
     active = false;
 
+    staleStateWatchdog.stop();
     clearAutoPassTimeout();
 
     if (opponentController) {

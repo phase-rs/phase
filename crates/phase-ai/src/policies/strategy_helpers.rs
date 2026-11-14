@@ -581,16 +581,15 @@ pub(crate) fn permanent_board_value(
         return 0.0;
     };
     if sacrifice_tier_of(obj) == SacrificeTier::Land {
-        // CR 305.9 (`docs/MagicCompRules.txt:1711`): "If an object is both a
-        // land and another card type, it can be played only as a land." The
-        // rule presupposes such objects and settles that the LAND nature
-        // governs deployment — so a creature-land really does occupy the land
-        // drop (CR 305.1) and the land valuation can never simply be skipped.
-        // CR 305.7 (`:1707`): "Setting a land's subtype doesn't add or remove
-        // any card types (such as creature)" — land-ness and creature-ness are
-        // independent axes, so neither classification erases the other.
-        // CR 208.1 (`:1509`): a creature has real power and toughness, so the
-        // body is a real thing to lose too.
+        // CR 305.9: "If an object is both a land and another card type, it can
+        // be played only as a land." The rule presupposes such objects and
+        // settles that the LAND nature governs deployment — so a creature-land
+        // really does occupy the land drop (CR 305.1) and the land valuation
+        // can never simply be skipped. CR 305.7: "Setting a land's subtype
+        // doesn't add or remove any card types (such as creature)" — land-ness
+        // and creature-ness are independent axes, so neither classification
+        // erases the other. CR 208.1: a creature has real power and toughness,
+        // so the body is a real thing to lose too.
         //
         // A creature-land (Dryad Arbor; an animated Treetop Village or a
         // Nissa-animated land) is therefore BOTH, simultaneously, by rule.
@@ -718,10 +717,11 @@ pub(crate) fn available_mana_after_spell(ctx: &PolicyContext<'_>) -> u32 {
         // sources count only if they have a mana ability and — for creatures —
         // aren't summoning-sick (CR 302.6).
         let is_pure_land = obj.card_types.core_types.contains(&CoreType::Land) && !is_creature;
+        // CR 701.10f: a pool doubling is a mana ability but adds no mana by itself.
         let is_usable_dork = obj
             .abilities
             .iter()
-            .any(engine::game::mana_abilities::is_mana_ability)
+            .any(engine::game::mana_abilities::is_mana_source_ability)
             && !(is_creature && engine::game::combat::has_summoning_sickness(obj));
         if is_pure_land || is_usable_dork {
             sources += 1;
@@ -829,12 +829,30 @@ pub(crate) fn can_pay_ward_cost(
         WardCost::PayLifeEqualToPower => {
             ctx.state.players[ctx.ai_player.0 as usize].life > warded.power.unwrap_or(0).max(0)
         }
-        WardCost::DiscardCard => {
+        // CR 702.21a + CR 701.9a + CR 118.3: the cost can be paid only if the
+        // hand holds `count` cards (other than the spell being cast, which is on
+        // the stack when the ward trigger resolves — CR 601.2a) that match the
+        // card-type filter, evaluated from the ward source as the engine's
+        // payment-time eligibility does. Random selection (CR 701.9b) changes
+        // which eligible card goes, not how many must exist.
+        WardCost::Discard {
+            count,
+            filter,
+            selection: _,
+        } => {
             let source_id = ctx.source_object().map(|source| source.id);
-            ctx.state.players[ctx.ai_player.0 as usize]
+            let fctx = FilterContext::from_source(ctx.state, warded.id);
+            let eligible = ctx.state.players[ctx.ai_player.0 as usize]
                 .hand
                 .iter()
-                .any(|&id| Some(id) != source_id)
+                .filter(|&&id| Some(id) != source_id)
+                .filter(|&&id| {
+                    filter
+                        .as_ref()
+                        .is_none_or(|f| matches_target_filter(ctx.state, id, f, &fctx))
+                })
+                .count();
+            eligible as u32 >= *count
         }
         WardCost::Sacrifice { count, filter } => {
             let Some(source) = ctx.source_object() else {
@@ -884,6 +902,21 @@ pub(crate) fn can_pay_ward_cost(
             .iter()
             .all(|cost| can_pay_ward_cost(ctx, cost, warded)),
     }
+}
+
+/// CR 702.21a + CR 102.3: The ward cost the AI's spell or ability faces when it
+/// targets `warded` — none unless an opponent controls it.
+pub(crate) fn ward_cost_against_ai<'a>(
+    ctx: &PolicyContext<'_>,
+    warded: &'a GameObject,
+) -> Option<&'a WardCost> {
+    if !players::is_opponent(ctx.state, warded.controller, ctx.ai_player) {
+        return None;
+    }
+    warded.keywords.iter().find_map(|keyword| match keyword {
+        Keyword::Ward(ward) => Some(ward),
+        _ => None,
+    })
 }
 
 fn keyword_pressure(object: &GameObject) -> f64 {

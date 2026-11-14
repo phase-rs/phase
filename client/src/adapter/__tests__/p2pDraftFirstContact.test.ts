@@ -57,7 +57,7 @@ describe("P2P draft first-contact gate", () => {
     });
   });
 
-  it("rejects an old first frame before it can allocate a seat", async () => {
+  it("rejects a v25 peer before it can allocate a seat because v26 requires commanders_required", async () => {
     sessionState.firstContact = null;
     sessionState.send.mockClear();
     sessionState.close.mockClear();
@@ -68,7 +68,7 @@ describe("P2P draft first-contact gate", () => {
     const host = new P2PDraftHost(
       { id: "phase2-ABCDE" } as never,
       () => () => {},
-      { type: "Set", data: { set_pool_json: "{}" } } as never,
+      { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
       "Premier",
       8,
       "Host",
@@ -83,6 +83,10 @@ describe("P2P draft first-contact gate", () => {
     const rejected = sessionState.firstContact!({
       type: "draft_join",
       displayName: "Alice",
+      // v25 is the launch-capability contract. It lacks this client's exact
+      // procedure-owned commander count and must not complete first contact
+      // under the same version number.
+      draftProtocolVersion: 25,
     } as never);
 
     expect(allocate).not.toHaveBeenCalled();

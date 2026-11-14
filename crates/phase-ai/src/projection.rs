@@ -12,12 +12,13 @@
 use std::collections::HashMap;
 
 use engine::ai_support::{
-    classify_payment_continuation, legal_actions, witness_payment_continuation,
-    PaymentContinuationState,
+    classify_payment_continuation, legal_actions, witness_payment_continuations,
+    PaymentContinuationBatchStatus, PaymentContinuationState,
 };
 use engine::game::combat::AttackTarget;
-use engine::game::engine::{apply_for_simulation, EngineError};
+use engine::game::engine::{apply_interaction_for_simulation, EngineError};
 use engine::game::priority;
+use engine::game::turn_control;
 use engine::types::game_state::{ManaChoice, ManaChoicePrompt};
 use engine::types::{
     CoreType, GameAction, GameState, ObjectId, PayCostKind, Phase, PlayerId, WaitingFor,
@@ -48,6 +49,7 @@ pub enum BailReason {
     MulliganOrSideboardEncountered,
     NoLegalAction { waiting_for: String },
     NoLegalManaPayment,
+    IncompleteManaPaymentWitness,
     EngineRejected(EngineError),
 }
 
@@ -204,7 +206,7 @@ pub fn project_to(
             });
         }
 
-        let (actor, action, is_policy_choice, witnessed_successor) =
+        let (seat, action, is_policy_choice, witnessed_successor) =
             resolve_choice(&state, ai_player, target_opponent)?;
         if is_policy_choice {
             choice_count += 1;
@@ -213,7 +215,16 @@ pub fn project_to(
         if let Some(successor) = witnessed_successor {
             state = successor;
         } else {
-            apply_for_simulation(&mut state, actor, action).map_err(BailReason::EngineRejected)?;
+            // CR 723.5: while controlling another player, the controller makes
+            // that player's choices, so the seat holding the decision and the
+            // player authorized to submit it are different players. Dispatch as
+            // the submitter, but keep the seat as the decision owner: CR 723.3
+            // leaves the seat's objects its own, and `semantic_owner` is what
+            // the reducer keys them to. Same split
+            // `auto_play::run_ai_actions_with_limit` applies to live play.
+            let submitter = turn_control::authorized_submitter_for_player(&state, seat);
+            apply_interaction_for_simulation(&mut state, submitter, seat, action)
+                .map_err(BailReason::EngineRejected)?;
         }
 
         if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
@@ -329,8 +340,13 @@ fn capture_snapshots(
 }
 
 /// Pick a legal action for the currently-waiting player based on projection
-/// policy. Returns `(actor, action, is_policy_choice)` where `is_policy_choice`
-/// flags non-trivial policy decisions that increment `choice_count`.
+/// policy. Returns `(seat, action, is_policy_choice, witnessed_successor)`.
+/// `seat` is the semantic decision owner and NOT the authorized submitter —
+/// under CR 723.5 turn control they differ, and this function's attacker-policy
+/// branch compares it against `target_opponent` in its seat role. The caller
+/// derives the submitter at its dispatch. `is_policy_choice` flags non-trivial
+/// policy decisions that increment `choice_count`; `witnessed_successor` is a
+/// pre-applied payment-continuation state that bypasses that dispatch.
 fn resolve_choice(
     state: &GameState,
     ai_player: PlayerId,
@@ -341,7 +357,8 @@ fn resolve_choice(
         WaitingFor::MulliganDecision { .. }
         | WaitingFor::OpeningHandBottomCards { .. }
         | WaitingFor::BetweenGamesSideboard { .. }
-        | WaitingFor::BetweenGamesChoosePlayDraw { .. } => {
+        | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. } => {
             return Err(BailReason::MulliganOrSideboardEncountered);
         }
         WaitingFor::GameOver { .. } => {
@@ -405,11 +422,29 @@ fn resolve_choice(
         PaymentContinuationState::Affiliated(_) => {
             let mut actions = actions;
             actions.sort_by(|left, right| left.cmp_stable(right));
+            let batch = witness_payment_continuations(state, &actions);
+            let status = batch.status;
             let accepted = actions
                 .into_iter()
-                .find_map(|action| witness_payment_continuation(state, &action))
-                .ok_or(BailReason::NoLegalManaPayment)?;
-            return Ok((acting, accepted.action, true, Some(accepted.state)));
+                .zip(batch.successors)
+                .find_map(|(action, successor)| successor.map(|successor| (action, successor)));
+            let accepted = match (status, accepted) {
+                (_, Some(accepted)) => accepted,
+                (PaymentContinuationBatchStatus::Complete, None) => {
+                    return Err(BailReason::NoLegalManaPayment);
+                }
+                (PaymentContinuationBatchStatus::Indeterminate(_), None) => {
+                    return Err(BailReason::IncompleteManaPaymentWitness);
+                }
+                (
+                    PaymentContinuationBatchStatus::NotAffiliated
+                    | PaymentContinuationBatchStatus::UnsupportedAffiliated(_),
+                    None,
+                ) => {
+                    return Err(BailReason::NoLegalManaPayment);
+                }
+            };
+            return Ok((acting, accepted.0, true, Some(accepted.1.state)));
         }
     }
 
@@ -515,10 +550,12 @@ fn resolve_choice(
             .cloned()
             .ok_or(BailReason::NoLegalManaPayment)?,
 
-        WaitingFor::OptionalEffectChoice { .. }
+        WaitingFor::ResolutionOptionalPaymentChoice { .. }
+        | WaitingFor::OptionalEffectChoice { .. }
         | WaitingFor::OpponentMayChoice { .. }
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::TributeChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. } => {
             // For the actor: pick the "no" option (decline) unless it's the
             // opponent and there's a clearly growth-maximizing yes.
@@ -715,7 +752,7 @@ pub fn threat_velocity(
 /// horizon*, so `project_to` short-circuits at the `Confidence::Exact` branch
 /// above and never enters its loop. The states built here are deliberately the
 /// opposite class: they are NOT at a horizon on entry, so the loop runs real
-/// `apply_for_simulation` dispatches and returns
+/// `apply_interaction_for_simulation` dispatches and returns
 /// `Confidence::Approximated { choice_count >= 1 }` — the witness that the loop
 /// ran rather than the short-circuit.
 ///
@@ -973,6 +1010,9 @@ pub(crate) mod projection_fixtures {
     const BEGIN_COMBAT_GROWTH_ORACLE: &str =
         "At the beginning of combat on your turn, put a +1/+1 counter on this creature.";
 
+    /// Inert permanents added to each board by [`seed_opponent_begin_combat_horizon`].
+    const BYSTANDERS_PER_BOARD: usize = 25;
+
     /// Seed `scenario` so that a state built from it TRAVERSES `project_to`'s
     /// loop to `ProjectionHorizon::OpponentBeginCombat` for
     /// `(ai_player, target_opponent)`. Returns the growing permanent's id, which
@@ -1023,6 +1063,16 @@ pub(crate) mod projection_fixtures {
             )
             .id();
         scenario.add_creature(ai_player, "Projection Bear", 2, 2);
+        // Inert bystanders on both boards. A traversal clones and re-evaluates the whole
+        // game every step, so its cost grows with the permanents on the battlefield;
+        // this keeps the traversal comfortably above the 15 ms interactive cap on a fast
+        // host, which is the margin T7b's wall-clock arm needs to discriminate. They
+        // have no abilities, so they change neither the horizon's reachability nor which
+        // choices the traversal dispatches.
+        for index in 0..BYSTANDERS_PER_BOARD {
+            scenario.add_creature(ai_player, &format!("AI Bystander {index}"), 1, 1);
+            scenario.add_creature(target_opponent, &format!("Opp Bystander {index}"), 1, 1);
+        }
         scenario.with_library_top(
             ai_player,
             &[
@@ -1212,13 +1262,18 @@ mod tests {
             predicted_winner: Some(PlayerId(1)),
             certificate: engine::analysis::loop_check::LoopCertificate {
                 unbounded: vec![],
-                win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+                rising: vec![],
+                win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
+                win_kind_at: None,
                 mandatory: false,
                 residual_board_delta: engine::analysis::resource::BoardDelta::default(),
                 per_cycle: None,
             },
             schema: engine::analysis::decision_template::ShortcutDecisionSchema::default(),
             declaration: None,
+            road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
+            period: Default::default(),
         };
 
         let (_actor, action, is_policy_choice, _successor) =
@@ -1228,6 +1283,64 @@ mod tests {
             is_policy_choice,
             "declining a shortcut is a policy decision"
         );
+    }
+
+    #[test]
+    fn resolution_optional_payment_projection_roundtrips_issued_action() {
+        use engine::game::effects::resolve_ability_chain;
+        use engine::types::ability::{
+            AbilityCost, CardSelectionMode, DiscardSelfScope, Effect, QuantityExpr,
+            ResolvedAbility, TargetFilter,
+        };
+
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_creature(P0, "Payment Source", 1, 1).id();
+        scenario.add_card_to_hand(P0, "Payment Card");
+        let mut runner = scenario.build();
+        let mut ability = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::OneOf {
+                    costs: vec![AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: None,
+                        selection: CardSelectionMode::Chosen,
+                        self_scope: DiscardSelfScope::FromHand,
+                    }],
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            P0,
+        );
+        ability.optional = true;
+        resolve_ability_chain(runner.state_mut(), &ability, &mut Vec::new(), 0).unwrap();
+
+        let original = runner.state().clone();
+        let (actor, action, is_policy_choice, _successor) =
+            resolve_choice(&original, P0, PlayerId(1))
+                .expect("projection consumes the issued domain");
+        assert_eq!(
+            action,
+            GameAction::ChooseResolutionOptionalPaymentBranch {
+                choice: engine::types::ResolutionOptionalPaymentChoice::Decline,
+            }
+        );
+        let json = serde_json::to_value(&action).unwrap();
+        assert_eq!(serde_json::from_value::<GameAction>(json).unwrap(), action);
+        assert_eq!(
+            crate::decision_kind::classify(&original.waiting_for, &action),
+            crate::policies::DecisionKind::ActivateAbility
+        );
+        assert!(is_policy_choice);
+        let mut projected = original.clone();
+        engine::game::engine::apply(&mut projected, actor, action)
+            .expect("projection action re-applies through the production reducer");
+        assert!(!matches!(
+            projected.waiting_for,
+            WaitingFor::ResolutionOptionalPaymentChoice { .. }
+        ));
     }
 
     fn precast_offer_state() -> GameState {
@@ -1395,6 +1508,7 @@ mod tests {
             player: PlayerId(0),
             total: 0,
             resume_at_resolution_depth: 0,
+            pending_entry: None,
         });
         assert_eq!(
             classify_payment_continuation(&state),
@@ -1480,7 +1594,7 @@ mod tests {
                     "an affiliated payment window must return a witnessed successor, got {action:?}"
                 );
             }
-            Err(BailReason::NoLegalManaPayment) => {}
+            Err(BailReason::NoLegalManaPayment | BailReason::IncompleteManaPaymentWitness) => {}
             other => panic!("expected the payment-witness branch, got {other:?}"),
         }
     }

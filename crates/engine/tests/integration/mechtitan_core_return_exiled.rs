@@ -53,6 +53,7 @@ use engine::types::zones::{EtbTapState, Zone};
 fn install_mechtitan_return_trigger(state: &mut GameState, core: ObjectId, token: ObjectId) {
     let ability = ResolvedAbility::new(
         Effect::ChangeZoneAll {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
             target: TargetFilter::ExiledBySource,
@@ -62,6 +63,7 @@ fn install_mechtitan_return_trigger(state: &mut GameState, core: ObjectId, token
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
+            library_shuffle: Default::default(),
             random_order: false,
         },
         vec![],

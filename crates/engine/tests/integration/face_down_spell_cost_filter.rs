@@ -70,7 +70,7 @@ fn a_face_down_creature_spell_gets_kadenas_reduction() {
     scenario.add_creature_from_oracle(P0, "Snake Sorcerer", 3, 3, KADENA_TEXT);
     let morph = scenario
         .add_creature_to_hand(P0, "Secret Beast", 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4)))
+        .with_keyword(Keyword::morph(ManaCost::generic(4)))
         .with_mana_cost(ManaCost::generic(5))
         .id();
     scenario.with_mana_pool(P0, colorless(3));
@@ -101,7 +101,7 @@ fn dream_chisels_unconditional_reduction_reaches_a_face_down_spell() {
     scenario.add_creature_from_oracle(P0, "Chisel Bearer", 2, 2, DREAM_CHISEL_TEXT);
     let morph = scenario
         .add_creature_to_hand(P0, "Secret Beast", 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4)))
+        .with_keyword(Keyword::morph(ManaCost::generic(4)))
         .with_mana_cost(ManaCost::generic(5))
         .id();
     scenario.with_mana_pool(P0, colorless(3));
@@ -135,12 +135,12 @@ fn only_the_first_face_down_spell_each_turn_is_reduced() {
     scenario.add_creature_from_oracle(P0, "Snake Sorcerer", 3, 3, KADENA_TEXT);
     let first = scenario
         .add_creature_to_hand(P0, "Secret Beast", 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4)))
+        .with_keyword(Keyword::morph(ManaCost::generic(4)))
         .with_mana_cost(ManaCost::generic(5))
         .id();
     let second = scenario
         .add_creature_to_hand(P0, "Second Beast", 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4)))
+        .with_keyword(Keyword::morph(ManaCost::generic(4)))
         .with_mana_cost(ManaCost::generic(5))
         .id();
     // Exactly enough for a reduced first cast ({0}) plus a full second one ({3}).
@@ -187,7 +187,7 @@ fn kadena_lets_a_face_down_creature_be_cast_with_an_empty_pool() {
     scenario.add_creature_from_oracle(P0, "Snake Sorcerer", 3, 3, KADENA_TEXT);
     let morph = scenario
         .add_creature_to_hand(P0, "Secret Beast", 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4)))
+        .with_keyword(Keyword::morph(ManaCost::generic(4)))
         .with_mana_cost(ManaCost::generic(5))
         .id();
     // No mana at all.
@@ -219,7 +219,7 @@ fn the_face_down_offer_shows_the_reduced_cost() {
     scenario.add_creature_from_oracle(P0, "Snake Sorcerer", 3, 3, KADENA_TEXT);
     let morph = scenario
         .add_creature_to_hand(P0, "Secret Beast", 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4)))
+        .with_keyword(Keyword::morph(ManaCost::generic(4)))
         .with_mana_cost(ManaCost::generic(5))
         .id();
     // Enough for the printed {5} too, so the player is given the CHOICE menu
@@ -253,7 +253,7 @@ fn off_color_mana_pays_the_generic_face_down_cost() {
     scenario.at_phase(Phase::PreCombatMain);
     let morph = scenario
         .add_creature_to_hand(P0, "Ainok Survivalist", 2, 1)
-        .with_keyword(Keyword::Morph(ManaCost::Cost {
+        .with_keyword(Keyword::morph(ManaCost::Cost {
             shards: vec![ManaCostShard::Green],
             generic: 1,
         }))
@@ -313,13 +313,13 @@ fn a_face_up_creature_spell_is_not_reduced() {
 
 /// Helper for the exile-parity pair below: a morph creature in EXILE that is
 /// both foretold (castable face up for {1}) and granted `PlayFromExile` with a
-/// {2} `cast_cost_raise`. The explicit face-down election routes through
+/// {2} `cast_cost_modifier`. The explicit face-down election routes through
 /// `PlayFromExile` (CR 601.2a-b), so the real face-down cast pays {3}+{2}={5};
 /// a variant-less projection infers Foretell first and would price {3}.
 fn exile_morph_with_competing_permissions(
     pool: usize,
 ) -> (engine::game::scenario::GameRunner, ObjectId) {
-    use engine::types::ability::{CastingPermission, Duration};
+    use engine::types::ability::{CardPlayMode, CastCostModifier, CastingPermission, Duration};
     use engine::types::statics::CastFrequency;
     use engine::types::zones::EtbTapState;
 
@@ -327,7 +327,7 @@ fn exile_morph_with_competing_permissions(
     scenario.at_phase(Phase::PreCombatMain);
     let morph = scenario
         .add_creature_to_exile(P0, "Foretold Beast", 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4)))
+        .with_keyword(Keyword::morph(ManaCost::generic(4)))
         .with_mana_cost(ManaCost::generic(4))
         .id();
     scenario.with_mana_pool(P0, colorless(pool));
@@ -339,8 +339,10 @@ fn exile_morph_with_competing_permissions(
     });
     obj.casting_permissions
         .push(CastingPermission::PlayFromExile {
+            provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
             duration: Duration::UntilEndOfTurn,
             granted_to: P0,
+            mode: CardPlayMode::Cast,
             frequency: CastFrequency::Unlimited,
             source_id: None,
             invalidation: None,
@@ -349,7 +351,9 @@ fn exile_morph_with_competing_permissions(
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: Some(ManaCost::generic(2)),
+            cast_cost_modifier: Some(CastCostModifier::raise(ManaCost::generic(2))),
+            alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: EtbTapState::Unspecified,
         });
     (runner, morph)
@@ -363,28 +367,33 @@ fn exile_morph_with_competing_permissions(
 /// (no raise) and displays {3} while the payment takes {5}.
 #[test]
 fn the_face_down_offer_from_exile_prices_the_play_from_exile_raise() {
-    use engine::types::actions::AlternativeCastDecision;
-    use engine::types::game_state::{AlternativeCastKeyword, WaitingFor};
+    use engine::types::game_state::WaitingFor;
 
     let (mut runner, morph) = exile_morph_with_competing_permissions(5);
 
     assert!(cast(&mut runner, morph), "the cast must be accepted");
-    match &runner.state().waiting_for {
-        WaitingFor::AlternativeCastChoice {
-            keyword: AlternativeCastKeyword::FaceDown,
-            alternative_cost: Some(cost),
-            ..
-        } => assert_eq!(
-            cost.mana_value(),
-            5,
-            "the offer must price the PlayFromExile raise: {{3}}+{{2}}, got {cost:?}"
-        ),
-        other => panic!("expected the face-down AlternativeCastChoice, got {other:?}"),
-    }
+    // #7948: with the face-down cast now a first-class exile CANDIDATE, the
+    // method election surfaces as a `CastingVariantChoice` (FaceDown beside
+    // Foretell) instead of the old normal-vs-face-down offer — the priced
+    // option must still show the `PlayFromExile` raise: {3}+{2}={5}.
+    let index = match &runner.state().waiting_for {
+        WaitingFor::CastingVariantChoice { options, .. } => {
+            let index = options
+                .iter()
+                .position(|o| o.variant == engine::types::game_state::CastingVariant::FaceDown)
+                .expect("the face-down variant must be offered");
+            assert_eq!(
+                options[index].mana_cost.mana_value(),
+                5,
+                "the offer must price the PlayFromExile raise: {{3}}+{{2}}, got {:?}",
+                options[index].mana_cost
+            );
+            index
+        }
+        other => panic!("expected the casting-variant choice, got {other:?}"),
+    };
     runner
-        .act(GameAction::ChooseAlternativeCast {
-            choice: AlternativeCastDecision::Alternative,
-        })
+        .act(GameAction::ChooseCastingVariant { index })
         .expect("the priced face-down cast must complete");
     assert!(
         runner.state().objects[&morph].face_down

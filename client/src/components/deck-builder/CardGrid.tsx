@@ -1,6 +1,7 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import { scryfallLegalityKey, type ScryfallCard } from "../../services/scryfall";
+import { useCardImage } from "../../hooks/useCardImage";
 import { useLongPress } from "../../hooks/useLongPress";
 import type { BrowserLegalityFilter } from "./CardSearch";
 import { LegalityBadge } from "./LegalityBadge";
@@ -12,14 +13,6 @@ interface CardGridProps {
   onCardHover?: CardHoverHandler;
   cardCounts?: Map<string, number>;
   legalityFormat?: BrowserLegalityFilter;
-}
-
-function getArtCropUrl(card: ScryfallCard): string {
-  return (
-    card.image_uris?.art_crop ??
-    card.card_faces?.[0]?.image_uris?.art_crop ??
-    ""
-  );
 }
 
 function isFormatLegal(card: ScryfallCard, format: BrowserLegalityFilter): boolean {
@@ -73,7 +66,11 @@ function CardGridTile({
   onCardHover,
 }: CardGridTileProps) {
   const { t } = useTranslation("deck-builder");
-  const imageUrl = getArtCropUrl(card);
+  const { src, isLoading, advanceFailedSource } = useCardImage(card.name, {
+    oracleId: card.oracle_id,
+    scryfallId: card.id,
+    size: "art_crop",
+  });
   const formatLabel = legalityFormat === "all"
     ? t("grid.allFormats")
     : legalityFormat.charAt(0).toUpperCase() + legalityFormat.slice(1);
@@ -112,15 +109,16 @@ function CardGridTile({
           : "cursor-not-allowed opacity-60 ring-2 ring-red-600"
       }`}
     >
-      {imageUrl ? (
+      {src ? (
         <img
-          src={imageUrl}
+          src={src}
           alt={card.name}
           className="aspect-[4/3] w-full rounded-lg object-cover"
           loading="lazy"
+          onError={() => advanceFailedSource?.(src)}
         />
       ) : (
-        <div className="flex aspect-[4/3] w-full items-center justify-center rounded-lg bg-gray-800 text-xs text-gray-400">
+        <div className={`flex aspect-[4/3] w-full items-center justify-center rounded-lg bg-gray-800 text-xs text-gray-400 ${isLoading ? "animate-pulse" : ""}`}>
           {card.name}
         </div>
       )}

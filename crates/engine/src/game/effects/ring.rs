@@ -312,6 +312,7 @@ mod tests {
                 attacker_ids: vec![bearer],
                 defending_player: PlayerId(1),
                 attacks: Vec::new(),
+                declaration_records: Vec::new(),
             }],
         );
 
@@ -390,6 +391,7 @@ mod tests {
                 player_id: PlayerId(1),
                 source_amounts: vec![(bearer, 3)],
                 total_damage: 3,
+                source_incarnations: vec![],
             }],
         );
 

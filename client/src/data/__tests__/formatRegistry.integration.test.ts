@@ -2,7 +2,11 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, it, expect, beforeAll } from "vitest";
 
-import init, { getFormatRegistry } from "@wasm/engine";
+import init, {
+  getFormatRegistry,
+  maxDeckCopies,
+  sideboardPolicyForFormat,
+} from "@wasm/engine";
 import { FORMAT_REGISTRY } from "../formatRegistry";
 import type { FormatMetadata } from "../../adapter/types";
 
@@ -39,5 +43,27 @@ describe("FORMAT_REGISTRY (engine drift check)", () => {
     for (let i = 0; i < FORMAT_REGISTRY.length; i++) {
       expect(fromEngine[i]).toEqual(FORMAT_REGISTRY[i]);
     }
+  });
+
+  it("sideboardPolicyForFormat resolves from a full FormatConfig, not a bare GameFormat", () => {
+    const standard = FORMAT_REGISTRY.find((m) => m.format === "Standard")!;
+    const commander = FORMAT_REGISTRY.find((m) => m.format === "Commander")!;
+    const tinyLeaders = FORMAT_REGISTRY.find((m) => m.format === "TinyLeaders")!;
+
+    expect(sideboardPolicyForFormat(standard.default_config)).toEqual({
+      type: "Limited",
+      data: 15,
+    });
+    expect(sideboardPolicyForFormat(commander.default_config)).toEqual({
+      type: "Forbidden",
+    });
+    expect(sideboardPolicyForFormat(tinyLeaders.default_config)).toEqual({
+      type: "Limited",
+      data: 10,
+    });
+
+    expect(() => sideboardPolicyForFormat("Standard" as never)).toThrow();
+
+    expect(() => maxDeckCopies("Anything", commander.default_config)).not.toThrow();
   });
 });

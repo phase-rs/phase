@@ -1,51 +1,60 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_full as engine_legal_actions_full};
 use engine::database::legality::{validate_cedh_bracket, CedhBracketError};
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{
-    apply, pending_resolve_all_ready_requester, recover_orphaned_resolve_all,
-    resolve_all_ready_access, resolve_all_ready_prefix, start_game, ResolveAllReadyAccess,
+    apply_with_rejection,
+    resume_restored_stack_automation as resume_engine_restored_stack_automation, start_game,
+    EngineError, RestoredStackAutomationOutcome, RestoredStackAutomationPresentation,
 };
-use engine::game::interaction::{bind_interaction_authority, submit_interaction};
-use engine::game::layers::flush_layers;
+use engine::game::interaction::{bind_interaction_authority, submit_interaction_with_rejection};
 use engine::game::match_flow::apply_trusted_match_forfeit;
-use engine::game::preview::preview_auto_payment_sources;
 use engine::game::public_state::{
     bump_state_revision, finalize_public_state, mark_public_state_all_dirty,
 };
 use engine::game::{
-    create_debug_cards, debug_card_entry_source, load_and_hydrate_decks, preflight_debug_action,
-    rehydrate_game_from_card_db, DebugCardCreateRequest,
+    create_debug_cards_with_rejection, debug_card_entry_source, load_and_hydrate_decks,
+    rehydrate_game_from_card_db_with_finalization, CardDbRehydrationFinalization,
+    DebugCardCreateRequest,
 };
+use engine::types::action_rejection::ActionRejection;
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::events::GameEvent;
-use engine::types::format::FormatConfig;
-use engine::types::game_state::{GameState, PersistedGameState, WaitingFor};
+use engine::types::format::{validate_starting_life_bounds, FormatConfig, GameFormat};
+use engine::types::game_state::{GameState, PersistedGameState, PlayerDeckPool};
 use engine::types::identifiers::ObjectId;
-use engine::types::interaction::{InteractionSessionId, InteractionSubmission};
+use engine::types::interaction::{
+    InteractionPreview, InteractionPreviewRequest, InteractionSessionId, InteractionSubmission,
+};
 use engine::types::log::GameLogEntry;
 use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
 use engine::types::match_config::MatchForfeitCause;
 use engine::types::player::PlayerId;
-use phase_ai::auto_play::AiActionsStop;
+use lobby_broker::protocol::code_in_use_message;
 use phase_ai::config::{AiConfig, AiDifficulty, Platform};
 use phase_ai::session::AiSession;
-use rand::{Rng, SeedableRng};
+use rand::Rng;
 use seat_reducer::types::{seat_team_info, DeckChoice, SeatDelta, SeatKind, SeatState};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tokio::sync::{Mutex, MutexGuard};
+use tracing::{info, warn};
 
 use crate::filter::filter_state_for_player;
-use crate::game_state_snapshot_wire_guard::bounded_resolve_all_log_tail;
+use crate::game_log::GameFileCache;
 use crate::persist::{PersistedLobbyMeta, PersistedSession};
-use crate::protocol::PlayerSlotInfo;
+use crate::protocol::{PlayerSlotInfo, ServerErrorCode, ServerMessage};
 use crate::reconnect::ReconnectManager;
-use crate::takeback::PendingTakeback;
+use crate::takeback::{takeback_ledger_for, TakebackLedger, TakebackResolution};
+
+mod ai_run;
+pub use ai_run::AiRunCursor;
+
+const TAKEBACK_INTERACTION_SESSION_PREFIX: &str = "rewind-";
 
 /// Bind the engine's interaction authority to a freshly created or restored state.
 ///
@@ -58,16 +67,43 @@ use crate::takeback::PendingTakeback;
 ///
 /// The game code is a sound session id: non-empty and far under the 128-byte limit.
 /// Uniqueness only has to hold *within* a state — the id namespaces that state's
-/// interaction ids and detects stale ones — so `generate_game_code`'s lack of a
-/// collision check (6 random chars) is not a concern here. Nor is guessability:
-/// `slot_for_submission` authorizes against the authenticated actor, never this id.
+/// interaction ids and detects stale ones. The session registry separately rejects
+/// reuse of a live game code before inserting a new game. Nor is guessability a
+/// concern here: `slot_for_submission` authorizes against the authenticated actor,
+/// never this id.
 ///
 /// Always re-bind on restore rather than trusting an id carried in a persisted blob,
 /// matching how this module re-stamps `hosting` and revokes unentitled debug capability.
 fn bind_interaction_session(state: &mut GameState, game_code: &str) {
-    if let Err(error) =
-        bind_interaction_authority(state, InteractionSessionId(game_code.to_string()))
-    {
+    bind_interaction_session_id(
+        state,
+        InteractionSessionId(game_code.to_string()),
+        game_code,
+    );
+}
+
+/// Rotate the interaction namespace after an approved takeback. The target
+/// snapshot belongs to the abandoned timeline and may carry a rewound serial;
+/// preserving its session id could therefore reissue a capability previously
+/// handed to a client on that discarded branch.
+pub(crate) fn bind_fresh_interaction_session(state: &mut GameState, game_code: &str) {
+    let session = InteractionSessionId(format!(
+        "{TAKEBACK_INTERACTION_SESSION_PREFIX}{:016x}",
+        rand::rng().random::<u64>()
+    ));
+    bind_interaction_session_id(state, session, game_code);
+}
+
+fn is_takeback_interaction_session(session: &InteractionSessionId) -> bool {
+    session.0.starts_with(TAKEBACK_INTERACTION_SESSION_PREFIX)
+}
+
+fn bind_interaction_session_id(
+    state: &mut GameState,
+    session: InteractionSessionId,
+    game_code: &str,
+) {
+    if let Err(error) = bind_interaction_authority(state, session) {
         // Reachable only on decimal-serial exhaustion, so failing the game would be
         // disproportionate — but degrading silently is the very defect this fixes.
         warn!(
@@ -99,26 +135,133 @@ pub type ActionResult = (
 /// pairing intact when it fans a snapshot out to multiple viewers.
 pub type RevisionedActionResult = (u64, ActionResult);
 
+/// One applied human action, and how it ended an open takeback vote if it did.
+#[derive(Debug)]
+pub struct HandledAction {
+    pub result: ActionResult,
+    pub takeback: Option<TakebackResolution>,
+}
+
+/// The atomic decision fields derived from one authoritative state.
+#[derive(Debug, Clone)]
+pub struct DecisionSnapshot {
+    pub legal_actions: Vec<GameAction>,
+    pub auto_pass_recommended: bool,
+    pub spell_costs: HashMap<ObjectId, ManaCost>,
+    pub legal_actions_by_object: HashMap<ObjectId, Vec<GameAction>>,
+}
+
+impl DecisionSnapshot {
+    pub fn from_state(state: &GameState) -> Self {
+        let (legal_actions, spell_costs, legal_actions_by_object) =
+            engine_legal_actions_full(state);
+        let auto_pass_recommended = auto_pass_recommended(state, &legal_actions);
+        Self {
+            legal_actions,
+            auto_pass_recommended,
+            spell_costs,
+            legal_actions_by_object,
+        }
+    }
+}
+
+/// An AI transition retains presentation and rewind history even when no
+/// decision is offered. Only the final transition in a batch has a decision.
+#[derive(Debug, Clone)]
+pub struct AiTransition {
+    pub state_revision: u64,
+    pub state: GameState,
+    pub events: Vec<GameEvent>,
+    pub log_entries: Vec<GameLogEntry>,
+    pub decision: Option<DecisionSnapshot>,
+}
+
+impl AiTransition {
+    /// Extract a decision-bearing transition for a single-snapshot recipient.
+    pub fn into_action_result(self) -> Option<RevisionedActionResult> {
+        let decision = self.decision?;
+        Some((
+            self.state_revision,
+            (
+                self.state,
+                self.events,
+                decision.legal_actions,
+                self.log_entries,
+                decision.auto_pass_recommended,
+                decision.spell_costs,
+                decision.legal_actions_by_object,
+            ),
+        ))
+    }
+}
+
+/// Distinguishes an engine-owned, viewer-safe action refusal from an
+/// operational session failure. Only the former is eligible for a structured
+/// `ActionRejected` frame at the WebSocket boundary.
+#[derive(Debug)]
+pub enum SessionActionError {
+    Operational(String),
+    /// A request-only lifecycle operation cannot proceed. Game-action-shaped
+    /// attempts use [`Self::Rejected`] so their pending client promises settle
+    /// on correlated action-response frames.
+    RequestRejected(String),
+    Rejected(ActionRejection),
+}
+
+impl From<String> for SessionActionError {
+    fn from(value: String) -> Self {
+        Self::Operational(value)
+    }
+}
+
+impl SessionActionError {
+    fn into_legacy_reason(self) -> String {
+        match self {
+            Self::Operational(reason) | Self::RequestRejected(reason) => reason,
+            Self::Rejected(rejection) => rejection.message,
+        }
+    }
+}
+
+/// The refusals a read-only preview can produce.
+///
+/// Deliberately narrower than [`SessionActionError`]: a preview is answered on
+/// its own request-correlated channel, and every refusal here carries a message
+/// the transport attaches to that request. There is no request-level variant, so
+/// the uncorrelated `RequestRejected` answer — which settles no pending preview
+/// promise — cannot be written at a preview transport arm.
+#[derive(Debug)]
+pub enum PreviewRefusal {
+    Operational(String),
+    Rejected(ActionRejection),
+}
+
+impl From<String> for PreviewRefusal {
+    fn from(value: String) -> Self {
+        Self::Operational(value)
+    }
+}
+
+impl PreviewRefusal {
+    fn into_legacy_reason(self) -> String {
+        match self {
+            Self::Operational(reason) => reason,
+            Self::Rejected(rejection) => rejection.message,
+        }
+    }
+}
+
 /// The server-visible result of driving the native AI after an authoritative
 /// transition. A non-empty `failure` is terminal for the AI driver, but does
 /// not discard transitions that were already committed before that failure.
 #[derive(Debug)]
 pub struct AiRunOutcome {
-    pub transitions: Vec<RevisionedActionResult>,
+    pub transitions: Vec<AiTransition>,
     pub failure: Option<AiDriverFailure>,
     /// The durable terminal record, when this invocation observed or created
     /// an AI driver failure. Transports must send the final state frames before
     /// publishing this record.
     pub fault: Option<AiDriverFault>,
-}
-
-/// Internal result of one uninterrupted AI decision batch. Keeping the exact
-/// stop reason until [`GameSession::run_ai`] has consumed a possible
-/// AI-produced Resolve All latch is necessary: a safety cap is terminal only
-/// when an AI submitter is still eligible in the resulting state.
-struct AiActionBatch {
-    transitions: Vec<RevisionedActionResult>,
-    stop: AiActionsStop,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,7 +270,6 @@ pub enum AiDriverFailure {
     ChooseActionNone { player: PlayerId },
     ApplyFailed { player: PlayerId, error: String },
     ActionSafetyCapReached { limit: usize },
-    ResolveAllHandoffSafetyCapReached { limit: usize },
 }
 
 /// Durable, server-authored terminal state for the native AI driver.
@@ -171,33 +313,9 @@ impl AiDriverFailure {
             Self::ActionSafetyCapReached { limit } => {
                 format!("Native AI stopped after its {limit}-action safety limit.")
             }
-            Self::ResolveAllHandoffSafetyCapReached { limit } => {
-                format!("Native AI Resolve All hand-off stopped after {limit} iterations.")
-            }
         }
     }
 }
-
-/// Maximum server-authorized stack entries in one remote Resolve All request.
-/// The wire request is untrusted, but `0` remains the engine-defined uncapped
-/// sentinel; the active consent run, not this transport value, owns the cap.
-pub const MAX_RESOLVE_ALL_RESOLUTIONS: u32 = 5_000;
-
-/// Backstop on `run_ai`'s AI-play → collapse-latch → AI-play hand-off loop.
-/// `BeginResolveAll` is not an AI candidate action, so AI play alone cannot
-/// mint a second consent epoch and the loop terminates on its own; this only
-/// bounds the damage if that ever stops being true.
-const MAX_AI_RESOLVE_ALL_HANDOFFS: usize = 8;
-
-#[derive(Debug, Clone)]
-pub struct ResolveAllSummary {
-    pub items_resolved: u32,
-    pub total: u32,
-}
-
-/// The optional state transition and typed batch acknowledgement from one
-/// authenticated Resolve All request.
-pub type ResolveAllActionResult = (Option<RevisionedActionResult>, ResolveAllSummary);
 
 /// Stable identity for one lifetime of a Full authoritative session.
 ///
@@ -219,6 +337,10 @@ pub struct FullPersistSnapshot {
     pub mutation_revision: u64,
     pub activation_epoch: Option<u64>,
     pub persisted: PersistedSession,
+    /// The encoded form of this snapshot's pools, written to and read from
+    /// `deck_pools_json`. Separate from `persisted`'s payload, which a
+    /// mutation-time persist rewrites on every action.
+    pub deck_pools_json: Arc<str>,
 }
 
 /// Runtime-only persistence authority for one lifetime of a Full session.
@@ -251,7 +373,28 @@ pub type BroadcastSnapshot = (
     HashMap<ObjectId, Vec<GameAction>>,
 );
 
+/// Server-owned result of explicitly resuming persisted stack automation.
+///
+/// Persistence reconstruction remains pure: callers invoke this only after the
+/// restored session has been hydrated, finalized, bound to fresh interaction
+/// authority, and stamped with this process's hosting policy. The engine keeps
+/// the complete event batch for server bookkeeping; the transport receives
+/// only its bounded presentation plus a freshly-derived snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RestoredStackAutomationResume {
+    /// Allocated exactly once when the engine progressed or repaired a saved
+    /// automation session. A no-op leaves the restored revision unchanged.
+    pub state_revision: Option<u64>,
+    /// Engine-authored, bounded transport presentation of the resume outcome.
+    pub presentation: RestoredStackAutomationPresentation,
+    /// Recomputed only for a state-changing resume. Its state and legal-action
+    /// projections are the authoritative payload for the subsequent broadcast.
+    pub broadcast: Option<BroadcastSnapshot>,
+}
+
 pub const PUBLIC_SEAT_RESERVATION_MS: u64 = 120_000;
+
+pub const HOST_AWAY_REFUSAL: &str = "The host is away; try again when they return";
 
 #[derive(Debug, Clone)]
 pub struct SeatReservation {
@@ -313,8 +456,80 @@ pub enum HostingMode {
     SingleUser,
 }
 
+/// One AI seat's complete installation, as the shell resolved it. A 3-tuple
+/// structurally cannot carry the choice beside the payload, which is how the
+/// two installers came to record a deck no provenance described.
+#[derive(Debug, Clone)]
+pub struct AiSeatSetup {
+    pub seat_index: u8,
+    pub difficulty: AiDifficulty,
+    /// What the host asked for; echoed back on every slot broadcast.
+    pub choice: DeckChoice,
+    pub resolved: PlayerDeckPayload,
+}
+
+/// Why a table refused to start.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StartGameError {
+    Bracket(CedhBracketError),
+    /// A seat reached the start with no deck — a restored seat whose choice
+    /// could not be re-resolved, or an AI seat whose deck failed resolution.
+    /// Dealing it an empty library would eliminate that player on their first
+    /// draw (CR 704.5b).
+    ///
+    /// The message names the seat but prescribes no remedy, because whether one
+    /// exists depends on the seat: the host can re-set an AI seat, and can kick a
+    /// joined human's seat back to open for someone who brings a deck. Seat 0 is
+    /// `SeatImmutable` and its deck is written only at create, so a re-resolution
+    /// failure there is the one that leaves a room nobody can start.
+    SeatDeckMissing {
+        seat_index: u8,
+    },
+    /// Horde Magic: the whole Horde roster (primary + co-Horde seats) must
+    /// land on one contiguous run of AI seats — a human seat given the
+    /// challenge library would be unplayable, and silently reassigning one
+    /// is worse than refusing to start. The host must rearrange the seats
+    /// (or add AI seats) so such a run exists.
+    HordeSeatsNotAi {
+        horde_seat_count: u8,
+        player_count: u8,
+    },
+}
+
+impl From<CedhBracketError> for StartGameError {
+    fn from(inner: CedhBracketError) -> Self {
+        StartGameError::Bracket(inner)
+    }
+}
+
+impl std::fmt::Display for StartGameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StartGameError::Bracket(inner) => write!(f, "Cannot start cEDH game: {inner}"),
+            StartGameError::SeatDeckMissing { seat_index } => write!(
+                f,
+                "Seat {seat_index} has no deck; the game cannot start until it does"
+            ),
+            StartGameError::HordeSeatsNotAi {
+                horde_seat_count,
+                player_count,
+            } => write!(
+                f,
+                "Horde needs {horde_seat_count} contiguous AI seats and this {player_count}-player table has no such run; the Horde roster cannot take a human seat"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for StartGameError {}
+
 pub struct GameSession {
     pub game_code: String,
+    /// Per-game JSON debug log sink (issue #7978), copied from the owning
+    /// `SessionManager` at creation and re-stamped, never deserialized, at
+    /// `SessionManager::restore_session` — same lifecycle as `hosting`
+    /// below, for the same reason: a runtime handle, not session state.
+    pub game_log: Arc<GameFileCache>,
     /// Server-issued durable identity for a Full session lifetime. This is
     /// stamped by phase-server after persistence binds the newly-created
     /// session; it is not trusted from the serialized game blob.
@@ -333,7 +548,17 @@ pub struct GameSession {
     /// Player tokens indexed by seat (0..player_count). Empty string = seat not yet claimed.
     pub player_tokens: Vec<String>,
     pub connected: Vec<bool>,
-    pub decks: Vec<Option<PlayerDeckPayload>>,
+    /// Private so every write is confined to this module. Production writes
+    /// both arrays in lockstep: the initializer that creates them empty, the
+    /// two per-seat writers, the seat renumbering that replaces both in one
+    /// loop, and the restore that rebuilds them together. Privacy is what
+    /// makes that a compiler check.
+    decks: Vec<Option<PlayerDeckPayload>>,
+    /// The unresolved form each `decks` entry was resolved from: an AI seat's
+    /// `DeckChoice` as the host picked it, a human seat's submitted list.
+    /// Snapshotted with the payload it describes, never live. `None` means no
+    /// provenance was recorded, which leaves that seat unrestorable.
+    deck_choices: Vec<Option<DeckChoice>>,
     pub display_names: Vec<String>,
     /// Pre-deck seat reservations keyed by reservation token. Reservations
     /// are in-memory only; stale public reservations expire, and private-room
@@ -353,28 +578,27 @@ pub struct GameSession {
     /// server — `GameSession::revoke_unentitled_debug_capability`, called
     /// immediately after the stamp, is what does that.
     ///
-    /// **Read fence.** This field has exactly three readers:
+    /// **Read fence.** Private, so its readers are this module's and the
+    /// [`GameSession::hosting`] accessor's:
     ///
-    /// 1. `seed_debug_capability`, reachable only via `rebuild_pregame_state`,
-    ///    which is called only from `start_game` and from `apply_seat_delta`.
-    /// 2. `takeback::record_turn_rewind_point`, via
-    ///    [`GameSession::observe_transition`] — reached only from the
-    ///    authoritative transition handlers, all of which require a started
-    ///    game. Deliberately not a count: the tally here has been wrong before,
-    ///    and the property that matters is "every caller is post-start", which
-    ///    no number states. `recover_orphaned_resolve_all` is NOT one of them —
-    ///    it runs inside `from_persisted`, the placeholder window this fence
-    ///    warns about, and never calls `observe_transition`.
-    /// 3. `takeback::offers_turn_rewind`, via `GameSession::rewind_options`
-    ///    and `GameSession::request_takeback` — likewise post-start.
+    /// - `seed_debug_capability`, reachable only via `rebuild_pregame_state`,
+    ///   which is called only from `start_game` and from `apply_seat_delta`.
+    /// - `revoke_unentitled_debug_capability`, right after the restore stamp.
+    /// - `takeback::takeback_ledger_for`, at creation and in
+    ///   [`GameSession::set_hosting`], so the ledger's turn ring always matches
+    ///   this field.
+    /// - phase-server's authoritative-state export, through
+    ///   [`GameSession::hosting`], reached only through a registered session,
+    ///   which `restore_session` has already stamped.
     ///
     /// None of them runs during the lobby re-registration window in which a
     /// restored session still holds the `from_persisted` placeholder
     /// (`HostingMode::Shared`), and that placeholder can only *under*-grant:
-    /// readers 2 and 3 would decline to capture or publish, never over-offer.
+    /// a ledger built under it has no turn ring, so it declines to capture or
+    /// publish, never over-offers.
     /// **Any new read must either sit behind `rebuild_pregame_state` or be
     /// reachable only after the restore stamp.**
-    pub hosting: HostingMode,
+    hosting: HostingMode,
     /// Number of human player seats in this game.
     pub player_count: u8,
     /// Seats controlled by AI (not occupied by a human player).
@@ -397,38 +621,58 @@ pub struct GameSession {
     pub start_when_full: bool,
     /// Ranked rooms apply rating updates when a match completes.
     pub ranked: bool,
+    /// Host-private Cube source supplied only by native Full-server creation.
+    pub booster_pack_pool: Option<Vec<String>>,
     /// Engine events produced by `start_game` (the d20 first-player contest's
     /// `StartingPlayerContest` event). Captured here so the INITIAL post-start
     /// broadcast can surface them to clients; cleared after that broadcast so
     /// late joiners and reconnects do not re-receive the contest. Empty when the
     /// game has not started or the events have already been broadcast.
     pub start_events: Vec<GameEvent>,
-    /// A "request takeback" awaiting unanimous human approval, if any. See
-    /// `crate::takeback` for the GH #1507 multiplayer-safe undo flow.
-    pub pending_takeback: Option<PendingTakeback>,
-    /// Rolling buffer of (actor, state) pairs — the authoritative state
-    /// immediately preceding each state-mutating action, tagged with which
-    /// player took that action. Tagged by actor so a takeback request can
-    /// find the requester's *own* last action even when other players have
-    /// acted since (see `crate::takeback::GameSession::request_takeback`).
-    pub takeback_history: VecDeque<(PlayerId, GameState)>,
-    /// Rolling buffer of authoritative states, each one the post-state of a
-    /// transition that came to rest at the start of the turn it announced.
-    /// Strictly increasing in `turn_number` **within a game**, capped at
-    /// `MAX_TURN_REWIND_HISTORY`, and only ever populated on a
-    /// `HostingMode::SingleUser` sidecar (`takeback::offers_turn_rewind`).
-    /// Deliberately not persisted, matching `takeback_history`.
-    pub turn_rewind_history: VecDeque<GameState>,
-    /// The `game_number` the rewind rings above were last observed at. A Bo3
-    /// match assigns `turn_number = 1` again at each game's start, so both
-    /// rings are retired when this stops matching the post-state's own
-    /// `game_number` — see `crate::takeback::GameSession::observe_transition`.
-    pub rewind_game_number: u8,
+    /// The GH #1507 takeback authority: rollback history and the open vote.
+    /// Deliberately not persisted: a rollback offer is a live-session
+    /// affordance, not durable state. Built by `takeback::takeback_ledger_for`
+    /// from `hosting`.
+    pub takeback: TakebackLedger,
+    /// The pools this session last serialized, paired with their encoding.
+    ///
+    /// Holding the pools keeps every field `Arc` inside them shared, so an
+    /// engine-side `Arc::make_mut` must copy-on-write and cannot mutate a pool
+    /// in place behind this cache. The comparison is then a pointer check per
+    /// field; correctness rests on content equality, only speed rests on
+    /// pointer identity. Starts `None`; a restored session is seeded from the
+    /// `deck_pools_json` column it was rebuilt from
+    /// ([`GameSession::seed_deck_pools_encoding`]), so the first persist after
+    /// a restart re-serializes nothing either.
+    deck_pools_cache: Option<(Vec<PlayerDeckPool>, Arc<str>)>,
+    /// Runtime state for the online sustained-clicking contests (Eye to Eye,
+    /// Mouth to Mouth). Never persisted; see `crate::contest`.
+    pub contest: crate::contest::ContestRuntime,
 }
 
 impl GameSession {
     pub fn ai_driver_fault(&self) -> Option<&AiDriverFault> {
         self.ai_driver_fault.as_ref()
+    }
+
+    pub fn hosting(&self) -> HostingMode {
+        self.hosting
+    }
+
+    /// The only writer of `hosting` after construction. Rebuilds the takeback
+    /// ledger so its turn ring matches the hosting mode.
+    pub fn set_hosting(&mut self, hosting: HostingMode) {
+        self.hosting = hosting;
+        self.takeback = takeback_ledger_for(hosting, self.takeback.game_number());
+    }
+
+    /// A pregame room issues no seat while seat 0 is away.
+    fn reject_if_host_away(&self) -> Result<(), String> {
+        if self.is_pregame() && !self.connected[0] {
+            Err(HOST_AWAY_REFUSAL.to_string())
+        } else {
+            Ok(())
+        }
     }
 
     pub(crate) fn reject_if_ai_driver_faulted(&self) -> Result<(), String> {
@@ -468,17 +712,115 @@ impl GameSession {
         self.state_revision
     }
 
+    /// Installs a seat's deck and the provenance that describes it.
+    ///
+    /// `choice` is `None` only where no unresolved form was available; that
+    /// seat then has nothing to restore from and `start_game` refuses it.
+    fn set_seat_deck(
+        &mut self,
+        seat: usize,
+        resolved: PlayerDeckPayload,
+        choice: Option<DeckChoice>,
+    ) {
+        self.decks[seat] = Some(resolved);
+        self.deck_choices[seat] = choice;
+    }
+
+    /// Empties both arrays together: a seat with no deck has no provenance.
+    fn clear_seat_deck(&mut self, seat: usize) {
+        self.decks[seat] = None;
+        self.deck_choices[seat] = None;
+    }
+
+    /// What an AI seat is playing, for the two projections. Read only from
+    /// their `Ai` arms — the human `SeatKind` variants have no deck field, so
+    /// a human seat's recorded list structurally cannot reach the wire.
+    fn ai_deck_choice(&self, pid: PlayerId) -> DeckChoice {
+        self.deck_choices
+            .get(pid.0 as usize)
+            .cloned()
+            .flatten()
+            .unwrap_or(DeckChoice::Random)
+    }
+
+    /// The single authority for seating an AI: display name, connection,
+    /// difficulty config and deck all land together, so no caller can install
+    /// a deck the recorded choice does not describe.
+    pub fn seat_ai(&mut self, setup: AiSeatSetup) {
+        let AiSeatSetup {
+            seat_index,
+            difficulty,
+            choice,
+            resolved,
+        } = setup;
+        let seat = seat_index as usize;
+        let pid = PlayerId(seat_index);
+        self.display_names[seat] = format!("AI ({difficulty:?})");
+        self.connected[seat] = true;
+        self.ai_seats.insert(pid);
+        let config = phase_ai::config::create_config_for_players(
+            difficulty,
+            Platform::Native,
+            self.player_count,
+        );
+        self.ai_configs.insert(pid, config);
+        self.set_seat_deck(seat, resolved, Some(choice));
+    }
+
     /// Builds the only persistence payload for an active Full runtime.
     /// Snapshot generation and revision therefore cannot be supplied by a
     /// transport caller independently of the authoritative session.
-    pub fn full_persist_snapshot(&self) -> Option<FullPersistSnapshot> {
-        let runtime = self.full_runtime.as_ref()?;
+    pub fn full_persist_snapshot(&mut self) -> Option<FullPersistSnapshot> {
+        // Resolve the runtime into owned locals first: the immutable borrow of
+        // `self.full_runtime` has to end before the cache is borrowed mutably.
+        let (key, activation_epoch) = {
+            let runtime = self.full_runtime.as_ref()?;
+            (runtime.key.clone(), runtime.activation_epoch)
+        };
+        let persisted = self.to_persisted();
+        let deck_pools_json = self.encoded_deck_pools(&persisted.deck_pools);
         Some(FullPersistSnapshot {
-            key: runtime.key.clone(),
+            key,
             mutation_revision: self.state_revision,
-            activation_epoch: runtime.activation_epoch,
-            persisted: self.to_persisted(),
+            activation_epoch,
+            persisted,
+            deck_pools_json,
         })
+    }
+
+    /// The encoded pools for this snapshot, reusing the cached string when the
+    /// pools are unchanged. See [`GameSession::deck_pools_cache`] for why the
+    /// comparison is cheap.
+    fn encoded_deck_pools(&mut self, pools: &[PlayerDeckPool]) -> Arc<str> {
+        if let Some((cached, json)) = &self.deck_pools_cache {
+            if cached.as_slice() == pools {
+                return Arc::clone(json);
+            }
+        }
+        let json: Arc<str> = serde_json::to_string(pools)
+            .expect("deck pools serialize")
+            .into();
+        self.deck_pools_cache = Some((pools.to_vec(), Arc::clone(&json)));
+        json
+    }
+
+    /// Seat the encoding a restore already has in hand — the `deck_pools_json`
+    /// column this session was rebuilt from — beside the pools it decoded to.
+    ///
+    /// The restore owner calls this right after [`Self::from_persisted`], which
+    /// cannot: it receives the payload alone, not the snapshot the column
+    /// travels in. Without it the first persist after a restart re-serializes
+    /// pools it just finished decoding.
+    ///
+    /// Pairs the string with the session's live pools, which requires that the
+    /// restore hand back the pools the string encodes rather than altering them
+    /// on the way in. That is a property of the restore path, not of this
+    /// function, so it is asserted directly — see
+    /// `a_restore_seeds_the_pool_encoding_it_was_rebuilt_from`. Every later
+    /// persist is decided by the ordinary content comparison, so a pool edit
+    /// invalidates this seed exactly as it invalidates a live encoding.
+    pub fn seed_deck_pools_encoding(&mut self, json: Arc<str>) {
+        self.deck_pools_cache = Some((self.state.deck_pools.clone(), json));
     }
 
     /// Returns the player index for the given token, if valid.
@@ -560,7 +902,7 @@ impl GameSession {
                         .unwrap_or(AiDifficulty::Medium);
                     SeatKind::Ai {
                         difficulty,
-                        deck: DeckChoice::Random,
+                        deck: self.ai_deck_choice(pid),
                     }
                 } else if claimed {
                     SeatKind::JoinedHuman
@@ -586,6 +928,32 @@ impl GameSession {
             .collect()
     }
 
+    /// The wire view a given recipient may see. An AI seat's recorded deck is
+    /// the host's working state — the host matches it against its local catalog
+    /// to decide whether the seat still needs a real list — and no other client
+    /// surface reads it, so every other recipient sees `Random`.
+    pub fn slots_for_recipient(
+        slots: &[PlayerSlotInfo],
+        recipient: PlayerId,
+    ) -> Vec<PlayerSlotInfo> {
+        let host_recipient = slots
+            .iter()
+            .any(|slot| slot.player_id == recipient.0 && matches!(slot.kind, SeatKind::HostHuman));
+        if host_recipient {
+            return slots.to_vec();
+        }
+        slots
+            .iter()
+            .cloned()
+            .map(|mut slot| {
+                if let SeatKind::Ai { deck, .. } = &mut slot.kind {
+                    *deck = DeckChoice::Random;
+                }
+                slot
+            })
+            .collect()
+    }
+
     pub fn seat_state(&self) -> SeatState {
         SeatState {
             seats: (0..self.player_count as usize)
@@ -601,7 +969,7 @@ impl GameSession {
                             .unwrap_or(AiDifficulty::Medium);
                         SeatKind::Ai {
                             difficulty,
-                            deck: DeckChoice::Random,
+                            deck: self.ai_deck_choice(pid),
                         }
                     } else if !self.player_tokens[i].is_empty() {
                         SeatKind::JoinedHuman
@@ -616,8 +984,53 @@ impl GameSession {
         }
     }
 
+    /// Horde Magic: the lowest seat anchoring one contiguous run of AI
+    /// seats covering the whole Horde roster — `None` when the layout has
+    /// no such run. `GameState::new` designates seats
+    /// `archenemy..archenemy+N` as the Horde (N = the number of Horde
+    /// libraries; 1 for a single-Horde deck, 2 for the LOTR "Two Towers"
+    /// pairing), and those seats must ALL be AI: the survivors are the
+    /// humans. There is deliberately no lowest-AI-seat fallback — anchoring
+    /// a partial run would load the challenge library onto a human seat.
+    /// The same rule runs on the P2P path (client-side start); both reject
+    /// the layout instead of reassigning a human seat.
+    fn horde_anchor(&self, player_count: u8) -> Option<PlayerId> {
+        let horde_seat_count = self
+            .state
+            .format_config
+            .horde_ruleset
+            .as_ref()
+            .map_or(1, |r| r.horde_decks().len()) as u8;
+        (0..player_count)
+            .find(|&s| {
+                (0..horde_seat_count)
+                    .all(|offset| self.ai_seats.contains(&PlayerId(s.saturating_add(offset))))
+            })
+            .map(PlayerId)
+    }
+
     fn rebuild_pregame_state(&mut self, player_count: u8) {
-        let format_config = self.state.format_config.clone();
+        let mut format_config = self.state.format_config.clone();
+        // Horde Magic: the Horde is the self-piloting deck, which is played by an
+        // AI seat — not the host (seat 0), who is a survivor. The default
+        // `FormatConfig::horde()` points `archenemy_player` at seat 0; remap it to
+        // the anchor of the lowest contiguous AI run covering the roster so the
+        // engine designates those seats as the Horde — loading the challenge-deck
+        // libraries there, seating the humans as the survivor team, and giving
+        // the survivors the first turn.
+        if format_config.format == GameFormat::Horde {
+            match self.horde_anchor(player_count) {
+                Some(anchor) => {
+                    format_config.archenemy_player = Some(anchor);
+                }
+                // No AI run covers the roster: clear the default anchor so the
+                // pregame state designates nothing, and let `start_game` reject
+                // the layout — never silently take a human seat.
+                None => {
+                    format_config.archenemy_player = None;
+                }
+            }
+        }
         let match_config = self.state.match_config;
         self.state = GameState::new(format_config, player_count, rand::rng().random());
         // CR 732.2a: re-read the immutable match config (incl. the combo-detector
@@ -685,7 +1098,7 @@ impl GameSession {
             // `debug_mode` unconditionally for single-player. The sandbox
             // *format* flag stays false, so own-library name exposure
             // (`engine::game::visibility`) and the host grant/revoke flow
-            // (rejected above with "Sandbox mode is not enabled") remain
+            // (rejected above as ActionNotAllowed) remain
             // closed — this grants the debug panel, not a shared sandbox.
             //
             // Human seats only. An AI seat has no client and never submits a
@@ -755,6 +1168,7 @@ impl GameSession {
         let mut next_tokens = vec![String::new(); new_player_count as usize];
         let mut next_connected = vec![false; new_player_count as usize];
         let mut next_decks = vec![None; new_player_count as usize];
+        let mut next_deck_choices = vec![None; new_player_count as usize];
         let mut next_names = vec![String::new(); new_player_count as usize];
         let mut next_reservations = HashMap::new();
 
@@ -769,6 +1183,9 @@ impl GameSession {
             next_tokens[new_idx] = self.player_tokens[old_idx].clone();
             next_connected[new_idx] = self.connected[old_idx];
             next_decks[new_idx] = self.decks[old_idx].clone();
+            // Same loop, so a `Remove` renumbers deck and provenance
+            // identically and a surviving seat cannot inherit a neighbour's.
+            next_deck_choices[new_idx] = self.deck_choices[old_idx].clone();
             next_names[new_idx] = self.display_names[old_idx].clone();
         }
 
@@ -788,6 +1205,7 @@ impl GameSession {
         self.player_tokens = next_tokens;
         self.connected = next_connected;
         self.decks = next_decks;
+        self.deck_choices = next_deck_choices;
         self.display_names = next_names;
         self.reservations = next_reservations;
         self.ai_seats.clear();
@@ -799,7 +1217,7 @@ impl GameSession {
                 SeatKind::WaitingHuman => {
                     self.player_tokens[seat_idx].clear();
                     self.connected[seat_idx] = false;
-                    self.decks[seat_idx] = None;
+                    self.clear_seat_deck(seat_idx);
                     self.reservations
                         .retain(|_, reservation| reservation.seat_index != seat_idx);
                     if seat_idx != 0 {
@@ -828,67 +1246,100 @@ impl GameSession {
         // server-core's `self.decks` stores the fully-resolved `PlayerDeckPayload`
         // because `start_game` and the broadcast paths consume that shape.
         // Resolve at the boundary using the live `CardDatabase`. `resolve_deck`
-        // takes a `DeckData` which has the same shape as `PlayerDeckList`.
+        // takes a `DeckData` which has the same shape as `PlayerDeckList`; the
+        // engine's conversion carries every field (sticker sheets, bracket tier
+        // and the printings sidecar included).
         for (seat_idx, _, ref deck) in &delta.new_ai {
-            let deck_data = crate::starter_decks::DeckData {
-                main_deck: deck.main_deck.clone(),
-                sideboard: deck.sideboard.clone(),
-                commander: deck.commander.clone(),
-                companion: deck.companion.clone(),
-                planar_deck: deck.planar_deck.clone(),
-                scheme_deck: deck.scheme_deck.clone(),
-                attraction_deck: deck.attraction_deck.clone(),
-                contraption_deck: deck.contraption_deck.clone(),
-                sticker_sheets: deck.sticker_sheets.clone(),
-                signature_spell: deck.signature_spell.clone(),
-                bracket_tier: deck.bracket_tier,
-            };
+            let deck_data = crate::starter_decks::DeckData::from(deck.clone());
             // The resolver (`ServerDeckResolver::resolve` in phase-server)
             // has already validated these names against the same `db`, so
             // this should never error in practice. The `Err` arm exists as
-            // defense-in-depth — if it does fire, log loudly: `start_game`
-            // below would otherwise substitute an empty deck and silently
-            // eliminate the player on their first draw step (CR 704.5b).
-            self.decks[*seat_idx as usize] = match crate::resolve_deck(db, &deck_data) {
-                Ok(payload) => Some(payload),
+            // defense-in-depth — if it does fire, log loudly: the seat keeps no
+            // deck, and `start_game` below then refuses the whole table with
+            // `SeatDeckMissing`, naming this seat rather than the deck that
+            // caused it.
+            // The reducer compared its `SetKind` against this seat's stored
+            // choice, so store back exactly what it wrote — a `Random` request
+            // recorded as the resolved list would never short-circuit again.
+            let choice = match new_state.seats.get(*seat_idx as usize) {
+                Some(SeatKind::Ai { deck, .. }) => deck.clone(),
+                _ => DeckChoice::Random,
+            };
+            match crate::resolve_deck(db, &deck_data) {
+                Ok(payload) => self.set_seat_deck(*seat_idx as usize, payload, Some(choice)),
                 Err(err) => {
                     warn!(
                         seat = *seat_idx,
                         error = %err,
                         "AI deck failed re-resolution at apply_seat_delta despite \
-                         passing the resolver gate; seat will start with an empty \
-                         library — investigate the resolver/DB mismatch",
+                         passing the resolver gate; seat has no deck and \
+                         `start_game` will refuse the table — investigate the \
+                         resolver/DB mismatch",
                     );
-                    None
+                    self.clear_seat_deck(*seat_idx as usize);
                 }
-            };
+            }
         }
+        // `removed_ai` carries pre-renumbering indices while the arrays above
+        // are already renumbered, so the raw index has to be mapped before it
+        // is cleared — clearing it directly wipes whichever seat shifted down
+        // into the vacated slot. A `Remove` maps its own seat to `None`, and
+        // the renumbering has already dropped that entry, so there is nothing
+        // left to clear; the in-place transitions (an AI seat turned back into
+        // a waiting one, or swapped for another AI) map to themselves.
         for &seat_idx in &delta.removed_ai {
-            if seat_idx as usize >= self.decks.len() {
+            let Some(new_idx) = old_to_new.get(seat_idx as usize).copied().flatten() else {
+                continue;
+            };
+            if new_idx >= self.decks.len() {
                 continue;
             }
             if !delta
                 .new_ai
                 .iter()
-                .any(|(new_idx, _, _)| *new_idx == seat_idx)
+                .any(|(new_ai_idx, _, _)| *new_ai_idx as usize == new_idx)
             {
-                self.decks[seat_idx as usize] = None;
+                self.clear_seat_deck(new_idx);
             }
         }
 
         self.ai_configs = next_ai_configs;
-        self.game_started = new_state.game_started;
+        // `new_state.game_started` is deliberately not copied back. The reducer
+        // sets it as soon as it accepts a `Start`, but only a successful
+        // `start_game` may commit it: a room the start guard refuses would
+        // otherwise be left flagged as started, and the reducer refuses every
+        // mutation on a started room, so the host could neither repair the seat
+        // nor start. For every other mutation the copy was a no-op.
 
         if old_player_count != new_player_count {
             self.rebuild_pregame_state(new_player_count);
         }
+
+        // This method writes the session's own durable fields, so the snapshot
+        // that follows needs a revision of its own or `save_full_session`'s
+        // fence rejects it. Unconditional, including for a no-op delta:
+        // `record_ai_driver_fault` already allocates for durability without a
+        // state transition to render.
+        self.advance_state_revision();
     }
 
-    pub fn start_game(&mut self, db: &CardDatabase) -> Result<(), CedhBracketError> {
+    pub fn start_game(&mut self, db: &Arc<CardDatabase>) -> Result<(), StartGameError> {
         // A faulted game is never restarted in place: doing so would create a
-        // new playable state behind the durable terminal fault record.
+        // new playable state behind the durable terminal fault record. This
+        // stays first: the fault is terminal and dominant, and the no-op
+        // contract is what the start arms are written against.
         if self.ai_driver_fault.is_some() {
             return Ok(());
+        }
+        // CR 704.5b: a seat with no recorded deck would be dealt an empty
+        // library and lose on its first draw. The subject is the absent record,
+        // not deck contents: a submitted list that is empty still records a deck
+        // and passes here. Ahead of the cEDH gate, which filters `decks` to its
+        // `Some` entries and would otherwise validate a short table.
+        if let Some(seat_index) = self.decks.iter().position(Option::is_none) {
+            return Err(StartGameError::SeatDeckMissing {
+                seat_index: seat_index as u8,
+            });
         }
         // Gate: if any AI seat is configured for cEDH difficulty, validate that
         // every submitted deck is declared at the cEDH bracket tier before
@@ -905,6 +1356,25 @@ impl GameSession {
                 .filter_map(|slot| slot.as_ref())
                 .collect::<Vec<_>>();
             validate_cedh_bracket(&deck_refs)?;
+        }
+        // Horde Magic: every designated Horde seat must be an AI seat. A
+        // layout with no contiguous AI run covering the roster (e.g. Two
+        // Towers at [human, AI, human]) is rejected here, before the rebuild
+        // — designating it would load the challenge library onto a human
+        // seat. Same rule as the P2P path's client-side start.
+        if self.state.format_config.format == GameFormat::Horde
+            && self.horde_anchor(self.player_count).is_none()
+        {
+            let horde_seat_count = self
+                .state
+                .format_config
+                .horde_ruleset
+                .as_ref()
+                .map_or(1, |r| r.horde_decks().len()) as u8;
+            return Err(StartGameError::HordeSeatsNotAi {
+                horde_seat_count,
+                player_count: self.player_count,
+            });
         }
 
         let player_deck = self.decks[0].clone().unwrap_or_default();
@@ -924,6 +1394,7 @@ impl GameSession {
         load_and_hydrate_decks(
             &mut self.state,
             &DeckPayload {
+                booster_pack_pool: self.booster_pack_pool.clone(),
                 player: player_deck,
                 opponent: opponent_deck,
                 ai_decks,
@@ -933,18 +1404,34 @@ impl GameSession {
                 // deserialize safely.
                 ai_difficulties: vec![],
             },
-            Some(db),
+            Some(&**db),
         );
+        // CR 707.2 + CR 202.3: resolvers that draw from the whole creature
+        // corpus (the Momir Basic emblem) read the database through this
+        // handle. Installed here, inside the canonical init, so no transport
+        // can build a game without it.
+        engine::game::install_card_db(&mut self.state, Arc::clone(db));
         self.state.log_player_names = self.display_names.clone();
         // Capture the d20 first-player contest events so the initial broadcast
         // can surface them; the broadcaster clears `start_events` afterward so
         // joiners/reconnects do not re-see the dice.
         let result = start_game(&mut self.state);
+        // `start_game` advances `waiting_for` from the pregame Priority state
+        // to the first real interaction (the CR 103.1 choice, or the mulligan
+        // for a fixed-starter format).
+        // Rebind the same trusted session after that transition so the
+        // authority slots match the newly active semantic owners before the
+        // first public projection.
+        bind_interaction_session(&mut self.state, &self.game_code);
+        // Per-game JSON debug log (issue #7978): "Game started"/"Turn 1" rows
+        // — otherwise every game's events.jsonl would start mid-game.
+        self.game_log
+            .write_game_log_entries(&self.game_code, &result.log_entries);
         // Deliberately NOT a turn-rewind capture site, unlike the four
-        // transition handlers. These events never reach a transition handler,
-        // and turn 1's opening state sits adjacent to the mulligan flow —
-        // rewinding to it would land a player somewhere the rollback machine
-        // was never designed to resume from. An exclusion, not an omission.
+        // transition handlers. The batch is the CR 103.1 contest alone and
+        // announces no turn: turn 1 begins in the chooser's answer, which runs
+        // through `handle_action` and is captured there, as game two's
+        // `ChoosePlayDraw` is.
         self.start_events = result.events;
         self.game_started = true;
         self.advance_state_revision();
@@ -955,13 +1442,11 @@ impl GameSession {
 
     /// Run AI actions and return per-action broadcast data.
     ///
-    /// Most entries are one AI action: raw state snapshot, events, legal actions,
-    /// and log entries. An entry may instead be a Resolve All collapse frame,
-    /// which carries no events and a bounded log tail — see
-    /// [`Self::consume_ai_granted_resolve_all`] for why the wire form differs
-    /// from what the session observes.
+    /// Each entry retains its raw state, events, log entries and revision.
+    /// Only the final entry carries a decision snapshot. Stack automation remains
+    /// in that ordinary transition stream rather than a separate Resolve All frame.
     /// The caller is responsible for filtering the state per-player before sending.
-    /// Returns an empty vec if the session has no AI seats.
+    /// Returns an empty transition stream if the session has no AI seats.
     ///
     /// GH #1507: also a no-op while a takeback request is pending. AI moves
     /// mutate `self.state` directly (not through `handle_action`'s pending-
@@ -971,280 +1456,20 @@ impl GameSession {
     /// to. Every call site (join-fills-the-room, reconnect, fresh AI-game
     /// creation) is gated here once rather than at each caller.
     pub fn run_ai(&mut self) -> AiRunOutcome {
-        if let Some(fault) = self.ai_driver_fault.clone() {
-            return AiRunOutcome {
-                transitions: Vec::new(),
-                failure: None,
-                fault: Some(fault),
-            };
-        }
-        if self.ai_seats.is_empty() || self.pending_takeback.is_some() {
-            return AiRunOutcome {
-                transitions: Vec::new(),
-                failure: None,
-                fault: None,
-            };
-        }
-
-        let mut transitions = Vec::new();
-        let mut handoffs = 0usize;
-        let mut action_safety_cap = None;
-        // One pass per Resolve All latch our own AI seats complete. Collapsing
-        // that batch hands priority back — possibly to another AI seat — so the
-        // ordinary hand-off has to run again, exactly as `handle_resolve_all`
-        // re-runs it after a client-requested batch. `BeginResolveAll` is not an
-        // AI candidate action, so only a human action can mint a further epoch
-        // and the loop cannot be re-entered by AI play alone; the iteration cap
-        // is a backstop, not the terminating argument.
-        for _ in 0..MAX_AI_RESOLVE_ALL_HANDOFFS {
-            let batch = self.run_ai_action_batch();
-            let batch_empty = batch.transitions.is_empty();
-            // POSITIVE evidence that the final Grant was ours: one of the
-            // actions we just applied left the game at Ready. Each entry's
-            // state is the post-action clone, so a latch minted by this batch
-            // is visible in the batch itself.
-            //
-            // This deliberately replaces the earlier proxy, "we acted at all".
-            // That proxy was correct only because no AI seat can act while a
-            // latch is standing, which in turn held only because
-            // `WaitingFor::acting_players()` is empty for `ResolveAllReady` —
-            // an invariant this module neither owns nor can enforce, and one
-            // there is active interest in changing.
-            //
-            // The residual assumption, stated rather than claimed away: a
-            // post-state of Ready means WE minted it only while no action can
-            // be applied AT Ready and leave the state AT Ready. That holds
-            // today because the sole reducer arm accepting an action at Ready
-            // is `RevokeResolveAllConsent`, which always restores the frozen
-            // priority snapshot and therefore always exits Ready. This is a
-            // strictly weaker dependency than the old one — it is a local,
-            // reducer-visible fact rather than a property of a foreign type —
-            // but it is not none. A Ready-preserving action (a confirm, a
-            // no-op, a preference action admitted here) would let an AI acting
-            // at a HUMAN's standing latch set this flag. If one is ever added,
-            // compare each entry against its predecessor instead: entry `i`
-            // minted the latch iff its post-state is Ready and the state before
-            // it was not Ready at that epoch.
-            let minted_here = batch.transitions.iter().any(|(_, (post_state, ..))| {
-                matches!(post_state.waiting_for, WaitingFor::ResolveAllReady { .. })
-            });
-            transitions.extend(batch.transitions);
-            match batch.stop {
-                AiActionsStop::NoEligibleAiActor | AiActionsStop::ActionBudgetReached { .. } => {}
-                AiActionsStop::MissingAiConfig { player } => {
-                    let failure = AiDriverFailure::MissingAiConfig { player };
-                    let fault = self.record_ai_driver_fault(failure.clone());
-                    return AiRunOutcome {
-                        transitions,
-                        failure: Some(failure),
-                        fault: Some(fault),
-                    };
-                }
-                AiActionsStop::ChooseActionNone { player } => {
-                    let failure = AiDriverFailure::ChooseActionNone { player };
-                    let fault = self.record_ai_driver_fault(failure.clone());
-                    return AiRunOutcome {
-                        transitions,
-                        failure: Some(failure),
-                        fault: Some(fault),
-                    };
-                }
-                AiActionsStop::ApplyFailed { player, error, .. } => {
-                    let failure = AiDriverFailure::ApplyFailed {
-                        player,
-                        error: error.to_string(),
-                    };
-                    let fault = self.record_ai_driver_fault(failure.clone());
-                    return AiRunOutcome {
-                        transitions,
-                        failure: Some(failure),
-                        fault: Some(fault),
-                    };
-                }
-                AiActionsStop::ActionSafetyCapReached { limit } => {
-                    action_safety_cap = Some(limit);
-                }
-            }
-            if batch_empty {
-                break;
-            }
-            if !minted_here {
-                break;
-            }
-            match self.consume_ai_granted_resolve_all() {
-                Some(collapsed) => transitions.push(collapsed),
-                None => break,
-            }
-            handoffs += 1;
-        }
-        // Reaching the cap means the terminating argument above is wrong: AI
-        // play alone minted more epochs than it can. `run_ai` returns with
-        // seats that may still be able to act and nothing left to re-drive
-        // them, which is the hang class this hand-off exists to prevent, so it
-        // must be diagnosable rather than silent.
-        let failure = if handoffs == MAX_AI_RESOLVE_ALL_HANDOFFS && self.ai_seat_can_act() {
-            warn!(
-                game = %self.game_code,
-                cap = MAX_AI_RESOLVE_ALL_HANDOFFS,
-                "AI Resolve All hand-off hit its iteration cap"
-            );
-            Some(AiDriverFailure::ResolveAllHandoffSafetyCapReached {
-                limit: MAX_AI_RESOLVE_ALL_HANDOFFS,
-            })
-        } else {
-            action_safety_cap
-                .filter(|_| self.ai_seat_can_act())
-                .map(|limit| AiDriverFailure::ActionSafetyCapReached { limit })
+        let mut cursor = match self.begin_ai_run() {
+            std::ops::ControlFlow::Break(outcome) => return outcome,
+            std::ops::ControlFlow::Continue(cursor) => cursor,
         };
-        let fault = failure
-            .clone()
-            .map(|failure| self.record_ai_driver_fault(failure));
-        AiRunOutcome {
-            transitions,
-            failure,
-            fault,
+        loop {
+            match self.advance_ai_run(cursor) {
+                std::ops::ControlFlow::Break(outcome) => return outcome,
+                std::ops::ControlFlow::Continue(next) => cursor = next,
+            }
         }
-    }
-
-    /// One uninterrupted run of AI decisions from the current state.
-    fn run_ai_action_batch(&mut self) -> AiActionBatch {
-        let mut rng = rand::rng();
-        let ai_session = self
-            .ai_session
-            .get_or_insert_with(|| AiSession::arc_from_game(&self.state));
-        let ai_results = phase_ai::auto_play::run_ai_actions(
-            &mut self.state,
-            &self.ai_seats,
-            &self.ai_configs,
-            &mut rng,
-            ai_session,
-        );
-
-        if !ai_results.is_empty() {
-            debug!(game = %self.game_code, ai_actions = ai_results.len(), "AI actions computed");
-        }
-
-        let stop = ai_results.stop;
-
-        let transitions = ai_results
-            .results
-            .into_iter()
-            .map(|r| {
-                let (legal, spell_costs, by_object) = engine_legal_actions_full(&r.state);
-                let auto_pass = auto_pass_recommended(&r.state, &legal);
-                let revision = self.advance_state_revision();
-                // Per AI result, which is exactly the granularity
-                // `run_ai_actions` reports. This is what makes a turn that
-                // elapses entirely inside AI play still produce a rewind
-                // point; a rule that promoted entries out of
-                // `takeback_history` could not, because `run_ai` pushes none.
-                self.observe_transition(&r.events, &r.state);
-                (
-                    revision,
-                    (
-                        r.state,
-                        r.events,
-                        legal,
-                        r.log_entries,
-                        auto_pass,
-                        spell_costs,
-                        by_object,
-                    ),
-                )
-            })
-            .collect();
-
-        AiActionBatch { transitions, stop }
     }
 
     fn ai_seat_can_act(&self) -> bool {
-        acting_players(&self.state)
-            .into_iter()
-            .any(|player| self.ai_seats.contains(&player))
-    }
-
-    /// Consumes a `WaitingFor::ResolveAllReady` latch this session's own AI
-    /// seats just completed.
-    ///
-    /// `ResolveAllReady` has no acting player (`WaitingFor::acting_player` is
-    /// `None`), so `run_ai_actions` stops the moment the last AI representative
-    /// grants, no seat is offered a legal action, and no client is prompted to
-    /// send `ClientMessage::ResolveAll`. Whoever submits the final Grant owes
-    /// the consumption: a human's client does it from its consent modal, and
-    /// the browser's local AI controller does it for a browser-driven seat.
-    /// A server-driven AI seat had no such owner, which parked solo-vs-AI
-    /// tables forever with an unresolvable stack.
-    ///
-    /// TWO gates, and only one of them is here. The caller requires positive
-    /// evidence that one of the AI actions it just applied minted the latch —
-    /// see [`Self::run_ai`]. This function adds only the presence of the latch
-    /// at the moment it runs.
-    ///
-    /// Ownership is what both gates are about. A latch belongs to whoever cast
-    /// its final Grant, because that submitter's own client is the thing that
-    /// will send `ResolveAll` for it. Consuming a human's latch here races that
-    /// client and returns their request as an error; declining our own strands
-    /// the game, since nothing renders `ResolveAllReady`.
-    ///
-    /// Worth recording what this gate is deliberately NOT built on.
-    /// `candidate_actions` does offer every grantor a
-    /// `RevokeResolveAllConsent` at Ready, so the candidate set is not empty;
-    /// the AI simply never sees it, because `run_ai_actions_bounded` selects
-    /// its actor from `WaitingFor::acting_players()`, which is empty for this
-    /// variant. That is a true fact about today's engine and a bad thing to
-    /// depend on — it belongs to a type this module does not own, and giving
-    /// `ResolveAllReady` an acting set is an actively discussed change. The
-    /// caller therefore reads its own batch rather than inferring ownership
-    /// from the driver's silence.
-    ///
-    /// It deliberately does NOT gate on the run still being coherent. That was
-    /// the shape of the original defect: `ready_consent_run` requires an empty
-    /// `auto_pass` and an exact priority-snapshot match, so any seat holding an
-    /// End Turn auto-pass makes every latch that turn incoherent — and an
-    /// incoherent latch is precisely the one with no other exit, since no
-    /// client renders anything at `ResolveAllReady`. Declining it here would
-    /// leave the hang this seam exists to close.
-    ///
-    /// Admit-and-repair instead, matching every other consumer
-    /// ([`Self::resolve_all_for_player`], wasm `resolve_all`, and
-    /// [`recover_orphaned_resolve_all`]): the resolver collapses a coherent
-    /// run and repairs an incoherent one back to ordinary priority.
-    fn consume_ai_granted_resolve_all(&mut self) -> Option<RevisionedActionResult> {
-        if !matches!(self.state.waiting_for, WaitingFor::ResolveAllReady { .. }) {
-            return None;
-        }
-        // Prefer the frozen run's own requester — `ResolveAllConsentRun` exists
-        // so a live turn-control change cannot rebind an already-issued
-        // authorization. When no requester can succeed, ANY seat reaches the
-        // repair branch by construction, which is the only exit left.
-        let requester =
-            pending_resolve_all_ready_requester(&self.state).unwrap_or(self.state.priority_player);
-        let batch = resolve_all_ready_prefix(&mut self.state, requester);
-        let (legal, spell_costs, by_object) = engine_legal_actions_full(&self.state);
-        let auto_pass = auto_pass_recommended(&self.state, &legal);
-        let revision = self.advance_state_revision();
-        let post_state = self.state.clone();
-        // Bookkeeping sees the batch whole; the wire frame does not. A collapse
-        // can author thousands of events and log lines, and
-        // `guard_state_snapshot_broadcast` rejects an over-budget frame instead
-        // of trimming it — shipping them unbounded would drop the very update
-        // that carries the post-batch state. Events go entirely: the Resolve All
-        // UI does not animate a batch on any transport (see
-        // `ResolveAllFastForwardResult`, and `handle_resolve_all`'s equivalent
-        // handling of a client-requested batch).
-        self.observe_transition(&batch.events, &post_state);
-        Some((
-            revision,
-            (
-                post_state,
-                Vec::new(),
-                legal,
-                bounded_resolve_all_log_tail(batch.log_entries),
-                auto_pass,
-                spell_costs,
-                by_object,
-            ),
-        ))
+        phase_ai::auto_play::eligible_ai_decision(&self.state, &self.ai_seats).is_some()
     }
 
     /// Recomputes the broadcast-ready fields (legal actions, auto-pass,
@@ -1272,13 +1497,31 @@ impl GameSession {
             .map(|(pid, config)| (pid.0, config.difficulty))
             .collect();
 
+        // The deck pools travel in their own field, and so in their own
+        // column, rather than inside the dynamic payload a mutation-time
+        // persist rewrites. `from_persisted` puts them back.
+        let mut captured = self.state.clone();
+        let deck_pools = std::mem::take(&mut captured.deck_pools);
+
         PersistedSession {
             game_code: self.game_code.clone(),
             state_revision: self.state_revision,
             ai_driver_fault: self.ai_driver_fault.clone(),
             next_ai_driver_fault_id: self.next_ai_driver_fault_id,
-            state: PersistedGameState::capture(self.state.clone()),
+            state: PersistedGameState::capture(captured),
             player_tokens: self.player_tokens.clone(),
+            // A started session's choices are never consulted again: the
+            // renumbering that copies them sits behind a reducer that refuses
+            // every mutation on a started room, and the seat projections fall
+            // back to `Random` for a seat with no recorded choice, which is
+            // what every recipient saw before the field existed. This snapshot
+            // is rewritten after every action, so keeping each seat's card-name
+            // list in it is write amplification.
+            deck_choices: if self.game_started {
+                Vec::new()
+            } else {
+                self.deck_choices.clone()
+            },
             display_names: self.display_names.clone(),
             timer_seconds: self.timer_seconds,
             player_count: self.player_count,
@@ -1287,7 +1530,9 @@ impl GameSession {
             game_started: self.game_started,
             start_when_full: self.start_when_full,
             ranked: self.ranked,
+            booster_pack_pool: self.booster_pack_pool.clone(),
             lobby_meta: self.lobby_meta.clone(),
+            deck_pools,
         }
     }
 
@@ -1302,38 +1547,68 @@ impl GameSession {
     /// The fresh seed also resets `rng_word_pos` — a `#[serde(default)]` field, not a skipped
     /// one. It is the saved high-water of the stream the old seed generated, and has no
     /// meaning against the new one.
-    pub fn from_persisted(ps: PersistedSession, db: &CardDatabase) -> Result<Self, String> {
-        let mut state = ps.state.into_game_state();
-        state
-            .format_config
-            .validate_for_player_count(ps.player_count)?;
-        state
-            .format_config
-            .reject_unimplemented_range_of_influence()?;
+    pub fn from_persisted(ps: PersistedSession, db: &Arc<CardDatabase>) -> Result<Self, String> {
+        let mut state = ps
+            .state
+            .prepare_for_restore(
+                engine::types::game_state::PersistedRestoreFinalization::DeferUntilRehydrated,
+            )
+            .map_err(|error| error.to_string())?
+            .finalize_after_rehydration(|state| {
+                // FIRST, ahead of the rehydrate below: `rehydrate_card_db_metadata`
+                // rebuilds `card_face_registry` and `booster_shelf` from
+                // `state.deck_pools`, and both are `#[serde(skip)]` so both
+                // rebuild gates are open after every decode. Reinstated later,
+                // a pool entry with no `state.objects` member loses its
+                // conjured face and the shelf can restore unstocked.
+                state.deck_pools = ps.deck_pools.clone();
+                state
+                    .format_config
+                    .validate_for_player_count(ps.player_count)?;
+                state
+                    .format_config
+                    .reject_unimplemented_range_of_influence()?;
 
-        // Restore #[serde(skip)] fields
-        state.all_card_names = db.card_names().into();
-        state.log_player_names = ps.display_names.clone();
-        rehydrate_game_from_card_db(&mut state, db);
+                // Restore #[serde(skip)] fields before the engine computes the
+                // first externally visible state from this snapshot.
+                state.all_card_names = db.card_names().into();
+                state.log_player_names = ps.display_names.clone();
+                rehydrate_game_from_card_db_with_finalization(
+                    state,
+                    db,
+                    CardDbRehydrationFinalization::Defer,
+                );
+                // `card_db` is `#[serde(skip)]`, so a restored snapshot has no
+                // draw source until it is reinstalled.
+                engine::game::install_card_db(state, Arc::clone(db));
 
-        // Re-seed RNG with fresh randomness (stale rng_seed would produce
-        // deterministic sequences identical across all restored games)
-        let fresh_seed: u64 = rand::rng().random();
-        state.rng_seed = fresh_seed;
-        state.rng = rand_chacha::ChaCha20Rng::seed_from_u64(fresh_seed);
-        // A fresh stream starts at word 0, so the saved high-water — which indexes into the
-        // OLD keystream and is meaningless against this one — has to go with the old seed.
-        // Leaving it behind is what broke restore: the chokepoint's `rehydrate_rng` had put
-        // live and high-water in agreement, the re-seed above rewound live to 0, and the next
-        // `capture_rng_word_pos` (`game::library::resolve_and_apply_library_shuffle` performs
-        // one before every shuffle) `.expect`-panicked `HighWaterRegression`. Same three-
-        // statement resume policy as `engine-wasm`'s `resume_multiplayer_host_state`.
-        state.rng_word_pos = 0;
-        finalize_public_state(&mut state);
+                // Re-seed RNG with fresh randomness (stale rng_seed would produce
+                // deterministic sequences identical across all restored games)
+                let fresh_seed: u64 = rand::rng().random();
+                state.rng_seed = fresh_seed;
+                state.rng = engine::types::game_state::GameRng::seed_from_u64(fresh_seed);
+                // A fresh stream starts at word 0, so the saved high-water — which indexes into the
+                // OLD keystream and is meaningless against this one — has to go with the old seed.
+                state.rng_word_pos = 0;
+                Ok(())
+            })
+            .map_err(|error| error.to_string())?;
         // Re-bind rather than trusting any id the blob carries, on the same
         // principle that `restore_session` re-stamps `hosting` and revokes an
         // unentitled debug capability: a persisted blob never drives authority.
-        bind_interaction_session(&mut state, &ps.game_code);
+        // A post-takeback snapshot is marked by the server-owned namespace
+        // prefix. Reusing the ordinary game-code namespace here would reset
+        // generation/serial to the IDs from the abandoned branch, so rotate a
+        // fresh namespace again across the restart boundary.
+        if state
+            .interaction_session_id
+            .as_ref()
+            .is_some_and(is_takeback_interaction_session)
+        {
+            bind_fresh_interaction_session(&mut state, &ps.game_code);
+        } else {
+            bind_interaction_session(&mut state, &ps.game_code);
+        }
 
         let ai_seats: HashSet<PlayerId> = ps.ai_seats.iter().map(|&s| PlayerId(s)).collect();
 
@@ -1352,15 +1627,70 @@ impl GameSession {
             .collect();
 
         let pc = ps.player_count as usize;
+        // One loop over the persisted provenance, both seat kinds. Normalized
+        // to `player_count` so a pre-field snapshot yields all-`None`.
+        let mut deck_choices: Vec<Option<DeckChoice>> = ps.deck_choices;
+        deck_choices.resize(pc, None);
+        // A started session never reaches `start_game` again — the seat
+        // reducer refuses every mutation once `game_started` — and `decks`
+        // has no other reader, so re-resolving here is dead work whose only
+        // visible effect is a warning about a seat the running game never
+        // consults.
+        let decks: Vec<Option<PlayerDeckPayload>> = if ps.game_started {
+            vec![None; pc]
+        } else {
+            deck_choices
+                .iter()
+                .enumerate()
+                .map(|(seat, choice)| {
+                    let data = match choice.as_ref()? {
+                        DeckChoice::DeckList(data) => (**data).clone(),
+                        // A static table under a case-folded name match — the same
+                        // function the create path resolves `Named` through. A
+                        // build that renamed or dropped the deck leaves the seat
+                        // empty, so log it: otherwise `start_game`'s refusal names
+                        // a seat with nothing tying it to the vanished name.
+                        DeckChoice::Named(name) => {
+                            match crate::starter_decks::find_starter_deck(name) {
+                                Some(data) => data,
+                                None => {
+                                    warn!(
+                                        seat,
+                                        deck = %name,
+                                        "restored seat names a starter deck this build no longer has; seat left empty"
+                                    );
+                                    return None;
+                                }
+                            }
+                        }
+                        // Re-drawing would hand the seat a different deck, so the
+                        // seat stays empty and `start_game` refuses the table.
+                        DeckChoice::Random => return None,
+                    };
+                    match crate::resolve_deck(db, &data) {
+                        Ok(payload) => Some(payload),
+                        Err(error) => {
+                            warn!(
+                                seat,
+                                error = %error,
+                                "restored seat deck failed to re-resolve; seat left empty"
+                            );
+                            None
+                        }
+                    }
+                })
+                .collect()
+        };
         let ai_session = if ps.game_started {
             Some(AiSession::arc_from_game(&state))
         } else {
             None
         };
 
-        let rewind_game_number = state.game_number;
+        // Built under the placeholder `hosting` below; `set_hosting` rebuilds it.
+        let takeback = takeback_ledger_for(HostingMode::Shared, state.game_number);
 
-        let mut session = GameSession {
+        Ok(GameSession {
             game_code: ps.game_code,
             full_runtime: None,
             state_revision: ps.state_revision,
@@ -1369,10 +1699,17 @@ impl GameSession {
             state,
             player_tokens: ps.player_tokens,
             connected: vec![false; pc],
-            decks: vec![None; pc],
+            decks,
+            deck_choices,
             display_names: ps.display_names,
             reservations: HashMap::new(),
             timer_seconds: ps.timer_seconds,
+            // Placeholder, same rationale as `hosting` below: a runtime
+            // handle, not persisted state, re-stamped by
+            // `SessionManager::restore_session`. `Arc::default()` is a
+            // disabled (no-op) sink, so nothing is under- or over-logged
+            // between here and that stamp.
+            game_log: Arc::default(),
             // Least-privilege placeholder. `hosting` is a property of THIS
             // process, not of the persisted blob, and is re-stamped by
             // `SessionManager::restore_session`. Between here and that stamp
@@ -1386,53 +1723,722 @@ impl GameSession {
             game_started: ps.game_started,
             start_when_full: ps.start_when_full,
             ranked: ps.ranked,
+            booster_pack_pool: ps.booster_pack_pool,
             start_events: Vec::new(),
-            pending_takeback: None,
-            // Neither ring is persisted: a rollback offer is a live-session
-            // affordance, not durable state.
-            takeback_history: VecDeque::new(),
-            turn_rewind_history: VecDeque::new(),
-            rewind_game_number,
-        };
-        session.recover_orphaned_resolve_all();
-        Ok(session)
+            takeback,
+            deck_pools_cache: None,
+            contest: Default::default(),
+        })
     }
 
-    /// Discharges a `WaitingFor::ResolveAllReady` latch whose consumer did not
-    /// survive the process.
+    /// Explicitly resumes a persisted stack automation session after the
+    /// restore owner has finished attaching runtime authority.
     ///
-    /// The latch is consumed by whoever submitted its final Grant — a client
-    /// from its consent modal, or this session's own AI hand-off. Neither
-    /// outlives a restart, and the state itself offers no way out: it has no
-    /// acting player, every seat's legal-action set is empty, and no client
-    /// will volunteer `ClientMessage::ResolveAll` for a batch it never started.
-    /// A session restored into that state would be permanently unadvanceable.
+    /// Generic [`Self::from_persisted`] intentionally does not call this: a
+    /// decode is not an implicit priority pass. The restore owner invokes this
+    /// once after it has supplied process-owned hosting policy, then broadcasts
+    /// the returned bounded presentation with the recomputed snapshot.
+    pub fn resume_restored_stack_automation(
+        &mut self,
+    ) -> Result<RestoredStackAutomationResume, EngineError> {
+        let resumed = resume_engine_restored_stack_automation(&mut self.state)?;
+        let presentation = resumed.presentation.clone();
+        if presentation.outcome == RestoredStackAutomationOutcome::Noop {
+            return Ok(RestoredStackAutomationResume {
+                state_revision: None,
+                presentation,
+                broadcast: None,
+            });
+        }
+
+        // The engine's complete event batch stays server-internal. In
+        // particular, a collapsed session can contain far more lifecycle
+        // events than a transport frame may carry, while rewind bookkeeping
+        // still needs to observe every one of them.
+        let post_state = self.state.clone();
+        self.observe_transition(&resumed.action_result().events, &post_state);
+        // Per-game JSON debug log (issue #7978): stack automation replayed
+        // after a server restart is exactly the post-crash scenario this log
+        // exists to make debuggable — it must not be invisible here.
+        self.game_log
+            .write_game_log_entries(&self.game_code, &resumed.action_result().log_entries);
+        let revision = self.advance_state_revision();
+        let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&self.state);
+        let auto_pass = auto_pass_recommended(&self.state, &legal_actions);
+
+        Ok(RestoredStackAutomationResume {
+            state_revision: Some(revision),
+            presentation,
+            broadcast: Some((post_state, legal_actions, auto_pass, spell_costs, by_object)),
+        })
+    }
+
+    // ---- Relocated from `impl SessionManager` -------------------------------
+    // Operations that need only this session. Each lost its registry-lookup
+    // preamble and its `game_code` parameter; the lookup is now the caller's,
+    // through `SessionManager::session`/`try_session`. Bodies are otherwise
+    // unchanged.
+
+    /// Returns the exact mana sources automatic payment would use without
+    /// changing the authenticated game session.
+    pub fn preview_mana_payment(
+        &self,
+        player_token: &str,
+        action: &GameAction,
+    ) -> Result<Vec<ObjectId>, String> {
+        self.preview_mana_payment_with_rejection(player_token, action)
+            .map_err(PreviewRefusal::into_legacy_reason)
+    }
+
+    /// Viewer-safe preview form for the Full transport.
+    pub fn preview_mana_payment_with_rejection(
+        &self,
+        player_token: &str,
+        action: &GameAction,
+    ) -> Result<Vec<ObjectId>, PreviewRefusal> {
+        self.reject_if_ai_driver_faulted()?;
+        let player = self
+            .player_for_token(player_token)
+            .ok_or_else(|| "Invalid player token".to_string())?;
+
+        engine::game::preview::preview_auto_payment_sources_with_rejection(
+            &self.state,
+            player,
+            action,
+        )
+        .map_err(PreviewRefusal::Rejected)
+    }
+
+    /// Answers the preview a player authored without moving the authenticated
+    /// session. Sibling of `handle_interaction_with_rejection` minus everything
+    /// that mutates: no `session.state` write, no `push_takeback_state`, no
+    /// `log_player_names` write, no `observe_transition`, no game-log write and
+    /// no broadcast. `&self`, not `&mut self`, so that subtraction is enforced
+    /// by the borrow checker before any test runs.
     ///
-    /// Running engine work at load time is deliberate and bounded: the consent
-    /// was already unanimous and its cap was frozen at `BeginResolveAll`, so
-    /// this discharges an authorization the players already gave rather than
-    /// making a new decision. Nothing can race it — no socket is attached yet.
-    fn recover_orphaned_resolve_all(&mut self) {
-        let Some(batch) = recover_orphaned_resolve_all(&mut self.state) else {
-            return;
+    /// `preview_interaction` — not `preview_interaction_with_rejection` — is
+    /// the callee on purpose: it is the function `preview_interaction_js`
+    /// already calls, so a networked seat's answer is byte-identical to the
+    /// local seat's for the same request, and every engine-level refusal rides
+    /// inside `InteractionPreviewStatus::Rejected` rather than needing a
+    /// rejection channel of its own.
+    pub fn preview_interaction_with_rejection(
+        &self,
+        player_token: &str,
+        request: &InteractionPreviewRequest,
+    ) -> Result<InteractionPreview, PreviewRefusal> {
+        self.reject_if_ai_driver_faulted()?;
+        let player = self
+            .player_for_token(player_token)
+            .ok_or_else(|| "Invalid player token".to_string())?;
+
+        // GH #1507: the authoritative state must not move while the table is
+        // voting on a rollback. Copied from `handle_interaction_with_rejection`
+        // rather than from `preview_mana_payment_with_rejection`, which carries
+        // no such interlock — a divergence from the traced sibling, taken
+        // because a preview answered mid-vote describes a board the vote is
+        // about to discard.
+        self.takeback
+            .refuse_while_pending()
+            .map_err(PreviewRefusal::Rejected)?;
+
+        Ok(engine::game::interaction::preview_interaction(
+            &self.state,
+            player,
+            request,
+        ))
+    }
+
+    /// Handle a game action from a player.
+    /// Returns (filtered_states_per_player, events, legal_actions_for_next_actor) on success.
+    #[allow(clippy::type_complexity)]
+    pub fn handle_action(
+        &mut self,
+        player_token: &str,
+        action: GameAction,
+    ) -> Result<ActionResult, String> {
+        self.handle_action_with_card_db(player_token, action, None)
+    }
+
+    /// Handle a game action whose transport can resolve debug card names through
+    /// its live card database. The engine owns materialization and entry; this
+    /// boundary only resolves the player-entered card name into a card face.
+    #[allow(clippy::type_complexity)]
+    pub fn handle_action_with_card_db(
+        &mut self,
+        player_token: &str,
+        action: GameAction,
+        card_db: Option<&CardDatabase>,
+    ) -> Result<ActionResult, String> {
+        self.handle_action_with_card_db_outcome(player_token, action, card_db)
+            .map(|handled| handled.result)
+            .map_err(SessionActionError::into_legacy_reason)
+    }
+
+    /// Rich form used by the Full WebSocket transport. Engine rejection DTOs
+    /// remain distinct from session/database failures so the transport never
+    /// has to infer meaning from a diagnostic string.
+    #[allow(clippy::type_complexity)]
+    pub fn handle_action_with_card_db_outcome(
+        &mut self,
+        player_token: &str,
+        action: GameAction,
+        card_db: Option<&CardDatabase>,
+    ) -> Result<HandledAction, SessionActionError> {
+        self.reject_if_ai_driver_faulted()?;
+
+        let player = self
+            .player_for_token(player_token)
+            .ok_or_else(|| "Invalid player token".to_string())?;
+
+        // GH #1507: while a takeback request is awaiting approval, the
+        // authoritative state must not move out from under it — a new
+        // action here would either invalidate the snapshot the table is
+        // voting on or silently discard the action once the rollback lands.
+        self.takeback
+            .admit_action(&action)
+            .map_err(SessionActionError::Rejected)?;
+
+        // Debug capability gate. `debug_permitted` is the single authority:
+        // a `Debug(_)` is accepted iff the submitting player is in the set.
+        // `seed_debug_capability` fills it from one of two sources — every
+        // seat when the game is sandbox-flagged, or the human seats when this
+        // process is a `HostingMode::SingleUser` desktop instance — and the
+        // host adjusts it afterwards via `GrantDebugPermission` /
+        // `RevokeDebugPermission` (sandbox games only). Naming a mode in the
+        // refusal would be wrong for the single-user source, so the message
+        // stays on the seat, which is what was actually checked.
+        if let GameAction::Debug(debug_action) = &action {
+            engine::game::preflight_debug_action_with_rejection(&self.state, player, debug_action)
+                .map_err(SessionActionError::Rejected)?;
+        }
+
+        // Grant/Revoke debug permission: host-only, and only meaningful in a
+        // sandbox session. The host is always PlayerId(0). The host cannot
+        // revoke their own permission (would leave nobody able to debug).
+        const HOST_PLAYER: PlayerId = PlayerId(0);
+        match &action {
+            GameAction::GrantDebugPermission { .. } | GameAction::RevokeDebugPermission { .. } => {
+                if !self.state.format_config.allow_debug_actions {
+                    return Err(SessionActionError::Rejected(ActionRejection::new(
+                        engine::types::action_rejection::ActionRejectionCode::ActionNotAllowed,
+                    )));
+                }
+                if player != HOST_PLAYER {
+                    return Err(SessionActionError::Rejected(ActionRejection::new(
+                        engine::types::action_rejection::ActionRejectionCode::ActionNotAllowed,
+                    )));
+                }
+                if let GameAction::RevokeDebugPermission {
+                    player_id: target, ..
+                } = &action
+                {
+                    if *target == HOST_PLAYER {
+                        return Err(SessionActionError::Rejected(ActionRejection::new(
+                            engine::types::action_rejection::ActionRejectionCode::ActionNotAllowed,
+                        )));
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // The engine is the sole admission authority for game actions. Session
+        // policy above authenticates the actor and controls takeback/debug
+        // access; the engine validates actor authorization and action shape.
+        // Candidate enumeration is advisory for clients and AI, not a second
+        // legality gate: several legal action classes are combinatorial.
+        if matches!(&action, GameAction::Debug(debug_action) if debug_action.is_zero_count_create())
+        {
+            let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&self.state);
+            let auto_pass = auto_pass_recommended(&self.state, &legal_actions);
+            return Ok(HandledAction {
+                result: (
+                    self.state.clone(),
+                    Vec::new(),
+                    legal_actions,
+                    Vec::new(),
+                    auto_pass,
+                    spell_costs,
+                    by_object,
+                ),
+                takeback: None,
+            });
+        }
+        let debug_card_source = match &action {
+            GameAction::Debug(DebugAction::CreateCard { card_name, .. }) => {
+                let card_db = card_db.ok_or_else(|| {
+                    "Debug::CreateCard requires a card database at the transport boundary"
+                        .to_string()
+                })?;
+                let face = card_db
+                    .get_face_by_name(card_name)
+                    .ok_or_else(|| "Engine error: card not found in database".to_string())?;
+                Some(debug_card_entry_source(card_db, face))
+            }
+            _ => None,
         };
-        warn!(
+
+        let capture = TakebackLedger::capture(&self.state, Some(&action));
+
+        // Set player names for log resolution.
+        self.state.log_player_names = self.display_names.clone();
+
+        // Apply action. `player` is the PlayerId authenticated from the
+        // WebSocket session (resolved from the join token) — never from the
+        // action payload. The engine's guard in `apply` enforces
+        // `player == authorized_submitter(state)`, so a spoofed action at the
+        // wire is rejected inside the engine as well as here.
+        let action_type = action.variant_name();
+        let mut result = match &action {
+            GameAction::Debug(DebugAction::CreateCard {
+                owner,
+                zone,
+                count,
+                attach_to,
+                run_etb,
+                nonlegendary,
+                creation_kind,
+                ..
+            }) => {
+                let result = create_debug_cards_with_rejection(
+                    &mut self.state,
+                    DebugCardCreateRequest {
+                        actor: player,
+                        source: debug_card_source
+                            .expect("nonzero debug CreateCard source was bound before mutation"),
+                        owner: *owner,
+                        zone: *zone,
+                        count: *count,
+                        attach_to: *attach_to,
+                        run_etb: *run_etb,
+                        nonlegendary: *nonlegendary,
+                        creation_kind: *creation_kind,
+                    },
+                )
+                .map_err(SessionActionError::Rejected)?;
+                bump_state_revision(&mut self.state);
+                mark_public_state_all_dirty(&mut self.state);
+                finalize_public_state(&mut self.state);
+                result
+            }
+            _ => apply_with_rejection(&mut self.state, player, action.clone())
+                .map_err(SessionActionError::Rejected)?,
+        };
+
+        info!(
             game = %self.game_code,
-            items_resolved = batch.items_resolved,
-            "discharged an orphaned Resolve All latch on session restore"
+            player = ?player,
+            action_type,
+            event_count = result.events.len(),
+            "action applied"
         );
+
+        let ai_seats = self.ai_seat_list();
+        let takeback = self.takeback.record_human_action(
+            &mut self.state,
+            player,
+            capture,
+            &action,
+            &result,
+            &ai_seats,
+        );
+        if takeback == Some(TakebackResolution::Approved) {
+            self.after_takeback_approved();
+            // The batches describe the discarded branch, not the restored state.
+            result.events.clear();
+            result.log_entries.clear();
+        }
+
+        // Computed after the takeback bookkeeping: an approved rollback
+        // returns the restored state with its own decision inputs.
+        let (new_legal_actions, spell_costs, by_object) = engine_legal_actions_full(&self.state);
+        let auto_pass = auto_pass_recommended(&self.state, &new_legal_actions);
+        let post_state = self.state.clone();
+
+        // Per-game JSON debug log (issue #7978): written here, at the point
+        // the engine's `GameLogEntry` rows are minted, not by each transport
+        // call site — so every path that reaches this function (and
+        // `handle_interaction_with_rejection`, and AI transitions via
+        // `run_ai_action_batch`) is covered without remembering a hook per
+        // caller.
+        self.game_log
+            .write_game_log_entries(&self.game_code, &result.log_entries);
+
+        Ok(HandledAction {
+            result: (
+                post_state,
+                result.events,
+                new_legal_actions,
+                result.log_entries,
+                auto_pass,
+                spell_costs,
+                by_object,
+            ),
+            takeback,
+        })
+    }
+
+    /// Apply one engine-authored interaction submission from a player.
+    ///
+    /// Deliberately shaped as the exact sibling of [`Self::handle_action`]: it
+    /// returns the same [`ActionResult`], so the transport's broadcast path is
+    /// shared rather than duplicated.
+    ///
+    /// The acting `PlayerId` is resolved from the join-token-authenticated
+    /// session, never from the payload — the wire frame carries no actor field
+    /// at all (`protocol.rs`: "The authenticated session, rather than the
+    /// client, determines the actor"). `submit_interaction` then re-authorizes
+    /// the actor against the interaction slot inside the engine, so a forged
+    /// `interaction_id` belonging to another seat is rejected twice.
+    ///
+    /// There is deliberately no debug-capability gate here, unlike
+    /// `handle_action`. `materialize_response` dispatches on
+    /// `human_response_model`, and its `Choose` fallthrough sources actions from
+    /// `actor_candidates` ->
+    /// `ai_support::validated_candidate_actions_for_semantic_owner`. An
+    /// engine-wide grep shows no production constructor of
+    /// `GameAction::Debug`, `GrantDebugPermission`, or `RevokeDebugPermission`
+    /// anywhere in that chain — only classification and ordering matches — so
+    /// guarding here would be validation for a case that cannot occur. The
+    /// engine test
+    /// `published_interaction_choices_never_offer_a_debug_action_in_a_sandbox_game`
+    /// (`crates/engine/tests/integration/interaction_contract.rs`) fails the day
+    /// that stops being true.
+    pub fn handle_interaction(
+        &mut self,
+        player_token: &str,
+        submission: InteractionSubmission,
+    ) -> Result<ActionResult, String> {
+        self.handle_interaction_with_rejection(player_token, submission)
+            .map_err(SessionActionError::into_legacy_reason)
+    }
+
+    /// Rich interaction form for the authenticated Full transport.
+    #[allow(clippy::type_complexity)]
+    pub fn handle_interaction_with_rejection(
+        &mut self,
+        player_token: &str,
+        submission: InteractionSubmission,
+    ) -> Result<ActionResult, SessionActionError> {
+        self.reject_if_ai_driver_faulted()?;
+
+        let player = self
+            .player_for_token(player_token)
+            .ok_or_else(|| "Invalid player token".to_string())?;
+
+        // GH #1507: the authoritative state must not move while the table is
+        // voting on a rollback. Same interlock, same reason, as `handle_action`.
+        self.takeback
+            .refuse_while_pending()
+            .map_err(SessionActionError::Rejected)?;
+
+        // Captured BEFORE `log_player_names` is written, matching
+        // `handle_action`'s order exactly. The two handlers are siblings; the
+        // ordering is part of that. The action is not known until
+        // `submit_interaction` returns, so the capture always snapshots and
+        // the ledger applies the preference rule afterwards.
+        let capture = TakebackLedger::capture(&self.state, None);
+
+        // Set player names for log resolution.
+        self.state.log_player_names = self.display_names.clone();
+
+        let applied = submit_interaction_with_rejection(&mut self.state, player, submission)
+            .map_err(SessionActionError::Rejected)?;
+
+        info!(
+            game = %self.game_code,
+            player = ?player,
+            action_type = applied.action.variant_name(),
+            event_count = applied.result.events.len(),
+            "interaction applied"
+        );
+
+        let ai_seats = self.ai_seat_list();
+        // No vote is open here (refused above), so no resolution can result.
+        let _ = self.takeback.record_human_action(
+            &mut self.state,
+            player,
+            capture,
+            &applied.action,
+            &applied.result,
+            &ai_seats,
+        );
+
+        let (new_legal_actions, spell_costs, by_object) = engine_legal_actions_full(&self.state);
+        let auto_pass = auto_pass_recommended(&self.state, &new_legal_actions);
+        let post_state = self.state.clone();
+
+        // Per-game JSON debug log (issue #7978) — see `handle_action`'s
+        // sibling comment above; this is the interaction-path mint point.
+        self.game_log
+            .write_game_log_entries(&self.game_code, &applied.result.log_entries);
+
+        Ok((
+            post_state,
+            applied.result.events,
+            new_legal_actions,
+            applied.result.log_entries,
+            auto_pass,
+            spell_costs,
+            by_object,
+        ))
+    }
+
+    /// Applies the payload-free match-concede intent after binding its
+    /// requester to an authenticated player token. The closed cause is chosen
+    /// here, never by the wire payload or a game action.
+    pub fn handle_match_concede(
+        &mut self,
+        player_token: &str,
+    ) -> Result<RevisionedActionResult, String> {
+        self.handle_match_concede_outcome(player_token)
+            .map(|(revision, handled)| (revision, handled.result))
+            .map_err(SessionActionError::into_legacy_reason)
+    }
+
+    /// Three-way result for the transport-owned match-concede request.
+    ///
+    /// Authentication/session availability remains operational. A request that
+    /// is validly authenticated but cannot forfeit the current match is a
+    /// requester-visible lifecycle refusal instead.
+    pub fn handle_match_concede_outcome(
+        &mut self,
+        player_token: &str,
+    ) -> Result<(u64, HandledAction), SessionActionError> {
+        let player = self
+            .player_for_token(player_token)
+            .ok_or_else(|| "Invalid player token".to_string())?;
+        self.reject_if_ai_driver_faulted()?;
+
+        let events =
+            apply_trusted_match_forfeit(&mut self.state, player, MatchForfeitCause::MatchConcede)
+                .map_err(SessionActionError::RequestRejected)?;
+        let takeback = self.takeback.observe_match_forfeit();
+        let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&self.state);
+        let auto_pass = auto_pass_recommended(&self.state, &legal_actions);
+        let revision = self.advance_state_revision();
+        // Included rather than skipped: the guard is the event scan itself, so
+        // "can conceding a match start a turn?" never has to be proved.
+        let post_state = self.state.clone();
+        self.observe_transition(&events, &post_state);
+        Ok((
+            revision,
+            HandledAction {
+                result: (
+                    post_state,
+                    events,
+                    legal_actions,
+                    Vec::new(),
+                    auto_pass,
+                    spell_costs,
+                    by_object,
+                ),
+                takeback,
+            },
+        ))
+    }
+
+    /// Mark a seat disconnected. The registry half — recording the grace-period
+    /// entry — is `SessionManager::record_disconnect`, called by the same
+    /// caller under the same held session guard.
+    pub fn mark_disconnected(&mut self, player: PlayerId) {
+        self.mark_disconnected_at(player, std::time::Instant::now());
+    }
+
+    /// Preserve transport detection time across cleanup and session-lease waits.
+    pub fn mark_disconnected_at(&mut self, player: PlayerId, observed_at: std::time::Instant) {
+        if !self.connected[player.0 as usize] {
+            return;
+        }
+        self.connected[player.0 as usize] = false;
+        // Queue host-stamped presence; the admitted contest driver applies it.
+        self.queue_contest_connection_at(
+            player,
+            crate::contest::ContestPresence::Disconnected,
+            observed_at,
+        );
+    }
+
+    /// Mark a seat connected again, after the registry half
+    /// (`SessionManager::attempt_reconnect`) has decided the grace period
+    /// allows it.
+    pub fn mark_connected(&mut self, player: PlayerId) {
+        self.mark_connected_at(player, std::time::Instant::now());
+    }
+
+    /// Use the same receipt time that the registry accepted for reconnect grace.
+    pub fn mark_connected_at(&mut self, player: PlayerId, observed_at: std::time::Instant) {
+        if self.connected[player.0 as usize] {
+            return;
+        }
+        self.connected[player.0 as usize] = true;
+        self.queue_contest_connection_at(
+            player,
+            crate::contest::ContestPresence::Connected,
+            observed_at,
+        );
+    }
+
+    pub fn reserve_seat(&mut self, display_name: String) -> Result<SeatReservation, String> {
+        self.reject_if_ai_driver_faulted()?;
+        self.reject_if_host_away()?;
+        self.cleanup_expired_reservations();
+        if self.game_started {
+            return Err("Game has already started".to_string());
+        }
+
+        let seat = self
+            .first_open_seat()
+            .ok_or_else(|| "Game is already full".to_string())?;
+        let token = generate_player_token();
+        let expires_at_ms = Some(now_ms() + PUBLIC_SEAT_RESERVATION_MS);
+        let reservation = SeatReservation {
+            token: token.clone(),
+            display_name,
+            seat_index: seat,
+            expires_at_ms,
+        };
+        self.reservations.insert(token, reservation.clone());
+        Ok(reservation)
+    }
+
+    pub fn release_reservation(&mut self, reservation_token: &str) -> bool {
+        self.reservations.remove(reservation_token).is_some()
+    }
+
+    pub fn has_active_reservation(&mut self, reservation_token: &str) -> bool {
+        self.cleanup_expired_reservations();
+        self.reservations.contains_key(reservation_token)
+    }
+
+    /// Claim a seat in this game, honouring a prior reservation when its token
+    /// is supplied. Returns the issued player token and the joiner's filtered
+    /// state; [`SessionManager::index_token`] is the registry half, called by
+    /// the same caller under the same held session guard.
+    ///
+    /// `deck_choice` is the joining seat's provenance, carrying the same
+    /// obligation as on `create_game`: `None` leaves that seat unrestorable.
+    pub fn join_with_reservation(
+        &mut self,
+        deck: PlayerDeckPayload,
+        deck_choice: Option<DeckChoice>,
+        display_name: String,
+        reservation_token: Option<String>,
+    ) -> Result<(String, GameState), String> {
+        self.reject_if_host_away()?;
+        self.cleanup_expired_reservations();
+        let reservation = match reservation_token.as_deref() {
+            Some(token) => Some(
+                self.reservations
+                    .remove(token)
+                    .ok_or_else(|| "Seat reservation expired or was released".to_string())?,
+            ),
+            None => None,
+        };
+        let seat = if let Some(reservation) = &reservation {
+            reservation.seat_index
+        } else {
+            self.first_open_seat()
+                .ok_or_else(|| "Game is already full".to_string())?
+        };
+
+        let player_token = generate_player_token();
+        let player_id = PlayerId(seat as u8);
+        self.player_tokens[seat] = player_token.clone();
+        self.connected[seat] = true;
+        self.set_seat_deck(seat, deck, deck_choice);
+        self.display_names[seat] = if display_name.is_empty() {
+            reservation
+                .as_ref()
+                .map(|reservation| reservation.display_name.clone())
+                .unwrap_or_default()
+        } else {
+            display_name
+        };
+        // Writes `player_tokens`, `display_names` and `deck_choices` — all
+        // persisted, so the following snapshot needs its own revision to clear
+        // the fence.
         self.advance_state_revision();
+
+        info!(game = %self.game_code, player = ?player_id, seat, "player joined session");
+
+        let filtered = filter_state_for_player(&self.state, player_id);
+        Ok((player_token, filtered))
+    }
+
+    /// Set the full list of card names on this session for "name a card" validation.
+    pub fn set_card_names(&mut self, names: Vec<String>) {
+        self.state.all_card_names = names.into();
+    }
+}
+
+/// The refusal every registry lookup that cannot find a game answers with.
+///
+/// Single authority for the message the relocated `ok_or_else` preambles used
+/// to build inline in two `format!` styles that render identically. A caller
+/// whose base answer to an absent game is something else — a default value, a
+/// different message, or no message — does not use this.
+pub fn game_not_found(game_code: &str) -> String {
+    format!("Game not found: {game_code}")
+}
+
+/// Why a Full-mode create was refused.
+///
+/// A typed split so a held requested code reaches the wire as
+/// [`ServerErrorCode::CodeInUse`] without any caller matching message text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateGameError {
+    /// A client-requested code is already held — by a live session, a draft
+    /// or one of its matches, an active persisted row, or (for a ranked
+    /// create) ranked history.
+    CodeInUse { game_code: String },
+    /// Any other refusal, as the prose the client is shown.
+    Rejected(String),
+}
+
+impl From<String> for CreateGameError {
+    fn from(message: String) -> Self {
+        Self::Rejected(message)
+    }
+}
+
+impl std::fmt::Display for CreateGameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CodeInUse { game_code } => f.write_str(&code_in_use_message(game_code)),
+            Self::Rejected(message) => f.write_str(message),
+        }
+    }
+}
+
+impl From<CreateGameError> for ServerMessage {
+    fn from(error: CreateGameError) -> Self {
+        match error {
+            CreateGameError::CodeInUse { .. } => {
+                ServerMessage::error_with_code(ServerErrorCode::CodeInUse, error.to_string())
+            }
+            CreateGameError::Rejected(message) => ServerMessage::error(message),
+        }
     }
 }
 
 pub struct SessionManager {
-    pub sessions: HashMap<String, GameSession>,
+    /// Private: every handle comes from an accessor, so the accessor list is
+    /// the complete audit list of registry->session crossings. Each game owns
+    /// its own lock, so one game's transition no longer excludes another's.
+    sessions: HashMap<String, Arc<Mutex<GameSession>>>,
     pub reconnect: ReconnectManager,
     /// Deployment shape of this process, stamped onto every session this
     /// manager creates or restores. See `HostingMode`.
     pub hosting: HostingMode,
     /// Maps player_token -> game_code for token-based lookups.
     token_to_game: HashMap<String, String>,
+    /// Per-game JSON debug log sink (issue #7978), stamped onto every session
+    /// this manager creates or restores — same lifecycle as `hosting`.
+    /// Disabled (no-op writes) unless the transport wires a real one in
+    /// (`phase-server` does this once at startup, from `PHASE_LOG_DIR`).
+    pub game_log: Arc<GameFileCache>,
 }
 
 impl SessionManager {
@@ -1443,6 +2449,7 @@ impl SessionManager {
             reconnect: ReconnectManager::default(),
             hosting: HostingMode::Shared,
             token_to_game: HashMap::new(),
+            game_log: Arc::default(),
         }
     }
 
@@ -1455,42 +2462,202 @@ impl SessionManager {
             reconnect: ReconnectManager::new(grace_period),
             hosting: HostingMode::SingleUser,
             token_to_game: HashMap::new(),
+            game_log: Arc::default(),
+        }
+    }
+
+    /// Clone this game's lock handle out of the registry. The only way to
+    /// obtain one, so the registry guard can be released before the session
+    /// guard is awaited — see the lock order declared on
+    /// `phase-server`'s `lock_session`.
+    pub fn session(&self, game_code: &str) -> Option<Arc<Mutex<GameSession>>> {
+        self.sessions.get(game_code).cloned()
+    }
+
+    /// Exclusive access while the manager is provably the sole owner of the
+    /// handle — the creation/restore window and nothing else.
+    ///
+    /// `None` is not an error path: it is the type system saying a handle is
+    /// outstanding, so take the lock like everyone else. A sync bypass that
+    /// could silently race is structurally unrepresentable.
+    pub fn session_exclusive(&mut self, game_code: &str) -> Option<&mut GameSession> {
+        Arc::get_mut(self.sessions.get_mut(game_code)?).map(Mutex::get_mut)
+    }
+
+    /// Observe a session without suspending. Synchronous, so a registry-level
+    /// sweep can make a decision while holding the registry guard without an
+    /// ordering hazard — a `try_lock` never waits and so cannot close a cycle.
+    ///
+    /// `None` means a transition is in flight; the caller defers rather than
+    /// waits. This is also the accessor the in-crate tests use, which is what
+    /// keeps `server-core` free of `.await`.
+    pub fn try_session(&self, game_code: &str) -> Option<MutexGuard<'_, GameSession>> {
+        self.sessions.get(game_code)?.try_lock().ok()
+    }
+
+    pub fn game_codes(&self) -> impl Iterator<Item = &String> {
+        self.sessions.keys()
+    }
+
+    pub fn game_count(&self) -> usize {
+        self.sessions.len()
+    }
+
+    pub fn contains_game(&self, game_code: &str) -> bool {
+        self.sessions.contains_key(game_code)
+    }
+
+    fn generate_available_game_code<F>(&self, mut generate: F) -> String
+    where
+        F: FnMut() -> String,
+    {
+        loop {
+            let game_code = generate();
+            if !self.sessions.contains_key(&game_code) {
+                return game_code;
+            }
+        }
+    }
+
+    /// The registry half of the Full-mode code claim: a requested code is
+    /// honored only if no live session holds it, and `None` mints a free one.
+    /// Runs inside the create that inserts, under the same `&mut self` borrow
+    /// (the caller's registry lock), so the check and the insert are atomic.
+    fn claim_game_code<F>(
+        &self,
+        requested: Option<String>,
+        generate: F,
+    ) -> Result<String, CreateGameError>
+    where
+        F: FnMut() -> String,
+    {
+        match requested {
+            Some(game_code) if self.contains_game(&game_code) => {
+                Err(CreateGameError::CodeInUse { game_code })
+            }
+            Some(game_code) => Ok(game_code),
+            None => Ok(self.generate_available_game_code(generate)),
         }
     }
 
     /// Create a new game session (2-player default). Returns (game_code, player_token).
-    pub fn create_game(&mut self, deck: PlayerDeckPayload) -> (String, String) {
-        self.create_game_n_players(deck, String::new(), None, 2, MatchConfig::default(), None)
-            .expect("the standard format must be supported")
-    }
-
-    /// Create a new game session with lobby settings (2-player default). Returns (game_code, player_token).
-    pub fn create_game_with_settings(
+    ///
+    /// `deck_choice` is seat 0's provenance, forwarded verbatim to
+    /// `create_game_n_players`. It is a parameter rather than a hardcoded
+    /// `None` so a caller has to state that intent: a seat installed without
+    /// provenance cannot be rebuilt after a restart, and seat 0 is
+    /// `SeatImmutable`, so no later reseat can repair it.
+    pub fn create_game(
         &mut self,
         deck: PlayerDeckPayload,
-        display_name: String,
-        timer_seconds: Option<u32>,
-        match_config: MatchConfig,
+        deck_choice: Option<DeckChoice>,
     ) -> (String, String) {
-        self.create_game_n_players(deck, display_name, timer_seconds, 2, match_config, None)
-            .expect("the standard format must be supported")
+        self.create_game_n_players(
+            deck,
+            deck_choice,
+            String::new(),
+            None,
+            2,
+            MatchConfig::default(),
+            None,
+        )
+        .expect("the standard format must be supported")
     }
 
     /// Create a new N-player game session. Returns (game_code, player_token).
+    ///
+    /// `deck_choice` is the unresolved form `deck` was resolved from, recorded
+    /// as seat 0's provenance so a restart can rebuild it. `None` leaves the
+    /// host seat unrestorable and is only for callers with no such form.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_game_n_players(
         &mut self,
         deck: PlayerDeckPayload,
+        deck_choice: Option<DeckChoice>,
         display_name: String,
         timer_seconds: Option<u32>,
         player_count: u8,
         match_config: MatchConfig,
         format_config: Option<FormatConfig>,
     ) -> Result<(String, String), String> {
-        let format_config = format_config.unwrap_or_else(FormatConfig::standard);
+        self.create_game_n_players_with_code(
+            deck,
+            deck_choice,
+            display_name,
+            timer_seconds,
+            player_count,
+            match_config,
+            format_config,
+            None,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// [`Self::create_game_n_players`], claiming `requested_code` instead of
+    /// minting when it is `Some`. A code a live session already holds is
+    /// refused with [`CreateGameError::CodeInUse`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_game_n_players_with_code(
+        &mut self,
+        deck: PlayerDeckPayload,
+        deck_choice: Option<DeckChoice>,
+        display_name: String,
+        timer_seconds: Option<u32>,
+        player_count: u8,
+        match_config: MatchConfig,
+        format_config: Option<FormatConfig>,
+        requested_code: Option<String>,
+    ) -> Result<(String, String), CreateGameError> {
+        self.create_game_n_players_with_generator(
+            deck,
+            deck_choice,
+            display_name,
+            timer_seconds,
+            player_count,
+            match_config,
+            format_config,
+            requested_code,
+            generate_game_code,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_game_n_players_with_generator<F>(
+        &mut self,
+        deck: PlayerDeckPayload,
+        deck_choice: Option<DeckChoice>,
+        display_name: String,
+        timer_seconds: Option<u32>,
+        player_count: u8,
+        match_config: MatchConfig,
+        format_config: Option<FormatConfig>,
+        requested_code: Option<String>,
+        generate: F,
+    ) -> Result<(String, String), CreateGameError>
+    where
+        F: FnMut() -> String,
+    {
+        // A defaulted config is not a declaration: when the caller does not
+        // specify a format, use the engine's single shared authority for
+        // picking a registry-compatible default for the REQUESTED seat
+        // count (also used by the WASM `initialize_game_impl` ingress, so
+        // the two never drift) — see `FormatConfig::default_for_player_count`
+        // for the full rationale.
+        let format_config =
+            format_config.unwrap_or_else(|| FormatConfig::default_for_player_count(player_count));
         format_config.validate_for_player_count(player_count)?;
         format_config.reject_unimplemented_range_of_influence()?;
+        // Defense in depth alongside the two checks above: every production
+        // caller of this `pub` constructor already passes a config that went
+        // through `FormatConfig::deserialize` (which calls this same bound
+        // via both `built_in_axes_no_looser_than_rules` and the Custom arm)
+        // or through the engine's own registry builders, but this function's
+        // visibility does not guarantee that — see
+        // `validate_starting_life_bounds`'s own doc comment for the other
+        // two callers that close this same gap.
+        validate_starting_life_bounds(&format_config)?;
 
-        let game_code = generate_game_code();
+        let game_code = self.claim_game_code(requested_code, generate)?;
         let player_token = generate_player_token();
         let pc = player_count as usize;
 
@@ -1498,8 +2665,6 @@ impl SessionManager {
         player_tokens[0] = player_token.clone();
         let mut connected = vec![false; pc];
         connected[0] = true;
-        let mut decks = vec![None; pc];
-        decks[0] = Some(deck);
         let mut display_names = vec![String::new(); pc];
         display_names[0] = display_name;
 
@@ -1534,8 +2699,8 @@ impl SessionManager {
 
         bind_interaction_session(&mut state, &game_code);
 
-        let rewind_game_number = state.game_number;
-        let session = GameSession {
+        let takeback = takeback_ledger_for(self.hosting, state.game_number);
+        let mut session = GameSession {
             game_code: game_code.clone(),
             full_runtime: None,
             state_revision: 0,
@@ -1544,11 +2709,13 @@ impl SessionManager {
             state,
             player_tokens,
             connected,
-            decks,
+            decks: vec![None; pc],
+            deck_choices: vec![None; pc],
             display_names,
             reservations: HashMap::new(),
             timer_seconds,
             hosting: self.hosting,
+            game_log: Arc::clone(&self.game_log),
             player_count,
             ai_seats: HashSet::new(),
             ai_configs: HashMap::new(),
@@ -1557,731 +2724,148 @@ impl SessionManager {
             game_started: false,
             start_when_full: true,
             ranked: false,
+            booster_pack_pool: None,
             start_events: Vec::new(),
-            pending_takeback: None,
-            takeback_history: VecDeque::new(),
-            turn_rewind_history: VecDeque::new(),
-            rewind_game_number,
+            takeback,
+            deck_pools_cache: None,
+            contest: Default::default(),
         };
+        // Seat 0 is installed the way every other seat is, through the
+        // per-seat setter, rather than seeded into the struct literal.
+        session.set_seat_deck(0, deck, deck_choice);
 
         self.token_to_game
             .insert(player_token.clone(), game_code.clone());
-        self.sessions.insert(game_code.clone(), session);
+        self.sessions
+            .insert(game_code.clone(), Arc::new(Mutex::new(session)));
 
         info!(game = %game_code, player_count, "game session created");
 
         Ok((game_code, player_token))
     }
 
-    /// Join an existing game. Returns (player_id, player_token, initial_state_for_joiner) on success.
-    pub fn join_game(
-        &mut self,
-        game_code: &str,
-        deck: PlayerDeckPayload,
-    ) -> Result<(String, GameState), String> {
-        self.join_game_with_name(game_code, deck, String::new())
-    }
-
-    /// Join an existing game with a display name. Returns (player_token, initial_state_for_joiner) on success.
-    /// Assigns the first open seat and starts the game when the last seat is filled.
-    pub fn join_game_with_name(
-        &mut self,
-        game_code: &str,
-        deck: PlayerDeckPayload,
-        display_name: String,
-    ) -> Result<(String, GameState), String> {
-        self.join_game_with_name_and_reservation(game_code, deck, display_name, None)
-    }
-
-    pub fn reserve_seat(
-        &mut self,
-        game_code: &str,
-        display_name: String,
-    ) -> Result<SeatReservation, String> {
-        let session = self
-            .sessions
-            .get_mut(game_code)
-            .ok_or_else(|| format!("Game not found: {}", game_code))?;
-
-        session.reject_if_ai_driver_faulted()?;
-        session.cleanup_expired_reservations();
-        if session.game_started {
-            return Err("Game has already started".to_string());
-        }
-
-        let seat = session
-            .first_open_seat()
-            .ok_or_else(|| "Game is already full".to_string())?;
-        let token = generate_player_token();
-        let expires_at_ms = Some(now_ms() + PUBLIC_SEAT_RESERVATION_MS);
-        let reservation = SeatReservation {
-            token: token.clone(),
-            display_name,
-            seat_index: seat,
-            expires_at_ms,
-        };
-        session.reservations.insert(token, reservation.clone());
-        Ok(reservation)
-    }
-
-    pub fn release_reservation(&mut self, game_code: &str, reservation_token: &str) -> bool {
-        self.sessions
-            .get_mut(game_code)
-            .and_then(|session| session.reservations.remove(reservation_token))
-            .is_some()
-    }
-
-    pub fn has_active_reservation(&mut self, game_code: &str, reservation_token: &str) -> bool {
-        let Some(session) = self.sessions.get_mut(game_code) else {
-            return false;
-        };
-        session.cleanup_expired_reservations();
-        session.reservations.contains_key(reservation_token)
-    }
-
-    pub fn release_reservations(&mut self, reservations: &[(String, String)]) -> bool {
-        let mut changed = false;
-        for (game_code, token) in reservations {
-            changed |= self.release_reservation(game_code, token);
-        }
-        changed
-    }
-
-    pub fn join_game_with_name_and_reservation(
-        &mut self,
-        game_code: &str,
-        deck: PlayerDeckPayload,
-        display_name: String,
-        reservation_token: Option<String>,
-    ) -> Result<(String, GameState), String> {
-        let session = self
-            .sessions
-            .get_mut(game_code)
-            .ok_or_else(|| format!("Game not found: {}", game_code))?;
-
-        session.cleanup_expired_reservations();
-        let reservation = match reservation_token.as_deref() {
-            Some(token) => Some(
-                session
-                    .reservations
-                    .remove(token)
-                    .ok_or_else(|| "Seat reservation expired or was released".to_string())?,
-            ),
-            None => None,
-        };
-        let seat = if let Some(reservation) = &reservation {
-            reservation.seat_index
-        } else {
-            session
-                .first_open_seat()
-                .ok_or_else(|| "Game is already full".to_string())?
-        };
-
-        let player_token = generate_player_token();
-        let player_id = PlayerId(seat as u8);
-        session.player_tokens[seat] = player_token.clone();
-        session.connected[seat] = true;
-        session.decks[seat] = Some(deck);
-        session.display_names[seat] = if display_name.is_empty() {
-            reservation
-                .as_ref()
-                .map(|reservation| reservation.display_name.clone())
-                .unwrap_or_default()
-        } else {
-            display_name
-        };
-
+    /// Index a freshly issued player token against its game.
+    ///
+    /// The map half of a join: [`GameSession::join_with_reservation`] issues the
+    /// token, this records it. A caller holds the session guard across both.
+    pub fn index_token(&mut self, player_token: String, game_code: &str) {
         self.token_to_game
-            .insert(player_token.clone(), game_code.to_string());
-
-        info!(game = %game_code, player = ?player_id, seat, "player joined session");
-
-        let filtered = filter_state_for_player(&session.state, player_id);
-        Ok((player_token, filtered))
-    }
-
-    /// Set the full list of card names on a game session for "name a card" validation.
-    pub fn set_card_names(&mut self, game_code: &str, names: Vec<String>) {
-        if let Some(session) = self.sessions.get_mut(game_code) {
-            session.state.all_card_names = names.into();
-        }
+            .insert(player_token, game_code.to_string());
     }
 
     /// Create a game with AI opponents. Returns (game_code, player_token) for the host.
     ///
     /// The host occupies seat 0. AI players are placed in the requested seats with
     /// their decks, configs, and display names. The game starts immediately.
+    ///
+    /// `host_choice` is seat 0's provenance as the caller received it. Seat 0 is
+    /// `SeatImmutable`, so a restart rebuilds it from this value alone.
     #[allow(clippy::too_many_arguments)]
     pub fn create_game_with_ai(
         &mut self,
         host_deck: PlayerDeckPayload,
+        host_choice: DeckChoice,
         display_name: String,
         timer_seconds: Option<u32>,
         match_config: MatchConfig,
-        ai_requests: Vec<(u8, AiDifficulty, PlayerDeckPayload)>,
+        ai_requests: Vec<AiSeatSetup>,
         card_names: Vec<String>,
         format_config: Option<FormatConfig>,
-        db: &CardDatabase,
+        db: &Arc<CardDatabase>,
     ) -> Result<(String, String), String> {
-        let total_players = 1 + ai_requests.len() as u8;
-        let (game_code, player_token) = self.create_game_n_players(
+        self.create_game_with_ai_with_booster_pack_pool(
             host_deck,
+            host_choice,
+            display_name,
+            timer_seconds,
+            match_config,
+            ai_requests,
+            card_names,
+            format_config,
+            None,
+            None,
+            db,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// Creates and immediately starts an AI game, retaining the native Cube
+    /// source privately until `start_game` can pass it to the engine.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_game_with_ai_with_booster_pack_pool(
+        &mut self,
+        host_deck: PlayerDeckPayload,
+        host_choice: DeckChoice,
+        display_name: String,
+        timer_seconds: Option<u32>,
+        match_config: MatchConfig,
+        ai_requests: Vec<AiSeatSetup>,
+        card_names: Vec<String>,
+        format_config: Option<FormatConfig>,
+        booster_pack_pool: Option<Vec<String>>,
+        requested_code: Option<String>,
+        db: &Arc<CardDatabase>,
+    ) -> Result<(String, String), CreateGameError> {
+        let total_players = 1 + ai_requests.len() as u8;
+        let (game_code, player_token) = self.create_game_n_players_with_code(
+            host_deck,
+            Some(host_choice),
             display_name,
             timer_seconds,
             total_players,
             match_config,
             format_config,
+            requested_code,
         )?;
 
-        let session = self.sessions.get_mut(&game_code).unwrap();
-        for (seat_index, difficulty, deck) in &ai_requests {
-            let seat = *seat_index as usize;
-            session.display_names[seat] = format!("AI ({difficulty:?})");
-            session.connected[seat] = true;
-            session.decks[seat] = Some(deck.clone());
-            let pid = PlayerId(*seat_index);
-            session.ai_seats.insert(pid);
-            let config = phase_ai::config::create_config_for_players(
-                *difficulty,
-                Platform::Native,
-                total_players,
-            );
-            session.ai_configs.insert(pid, config);
+        let session = self
+            .session_exclusive(&game_code)
+            .expect("a freshly created session has no outstanding handle");
+        session.booster_pack_pool = booster_pack_pool;
+        for setup in ai_requests {
+            session.seat_ai(setup);
         }
 
         session.state.all_card_names = card_names.into();
-        session
-            .start_game(db)
-            .expect("start_game in tests should not hit cEDH validation");
+        // Both arms are reachable from `CreateGameWithSettings`: a cEDH AI seat
+        // with a non-cEDH deck, and a seat left deckless. Refuse the create
+        // rather than panicking the connection task.
+        if let Err(error) = session.start_game(db) {
+            self.remove_game(&game_code);
+            return Err(CreateGameError::Rejected(error.to_string()));
+        }
 
         Ok((game_code, player_token))
     }
 
-    /// Returns the exact mana sources automatic payment would use without
-    /// changing the authenticated game session.
-    pub fn preview_mana_payment(
-        &self,
-        game_code: &str,
-        player_token: &str,
-        action: &GameAction,
-    ) -> Result<Vec<ObjectId>, String> {
-        let session = self
-            .sessions
-            .get(game_code)
-            .ok_or_else(|| format!("Game not found: {game_code}"))?;
-        session.reject_if_ai_driver_faulted()?;
-        let player = session
-            .player_for_token(player_token)
-            .ok_or_else(|| "Invalid player token".to_string())?;
-
-        preview_auto_payment_sources(&session.state, player, action)
-            .map_err(|error| format!("Engine error: {error}"))
-    }
-
-    /// Handle a game action from a player.
-    /// Returns (filtered_states_per_player, events, legal_actions_for_next_actor) on success.
-    #[allow(clippy::type_complexity)]
-    pub fn handle_action(
-        &mut self,
-        game_code: &str,
-        player_token: &str,
-        action: GameAction,
-    ) -> Result<ActionResult, String> {
-        self.handle_action_with_card_db(game_code, player_token, action, None)
-    }
-
-    /// Handle a game action whose transport can resolve debug card names through
-    /// its live card database. The engine owns materialization and entry; this
-    /// boundary only resolves the player-entered card name into a card face.
-    #[allow(clippy::type_complexity)]
-    pub fn handle_action_with_card_db(
-        &mut self,
-        game_code: &str,
-        player_token: &str,
-        action: GameAction,
-        card_db: Option<&CardDatabase>,
-    ) -> Result<ActionResult, String> {
-        let session = self
-            .sessions
-            .get_mut(game_code)
-            .ok_or_else(|| format!("Game not found: {}", game_code))?;
-
-        session.reject_if_ai_driver_faulted()?;
-
-        let player = session
-            .player_for_token(player_token)
-            .ok_or_else(|| "Invalid player token".to_string())?;
-
-        // GH #1507: while a takeback request is awaiting approval, the
-        // authoritative state must not move out from under it — a new
-        // action here would either invalidate the snapshot the table is
-        // voting on or silently discard the action once the rollback lands.
-        // Require the table to resolve (approve/decline/cancel) first.
-        if session.pending_takeback.is_some() {
-            return Err(
-                "A takeback request is pending — resolve it before taking further actions"
-                    .to_string(),
-            );
-        }
-
-        // Debug capability gate. `debug_permitted` is the single authority:
-        // a `Debug(_)` is accepted iff the submitting player is in the set.
-        // `seed_debug_capability` fills it from one of two sources — every
-        // seat when the game is sandbox-flagged, or the human seats when this
-        // process is a `HostingMode::SingleUser` desktop instance — and the
-        // host adjusts it afterwards via `GrantDebugPermission` /
-        // `RevokeDebugPermission` (sandbox games only). Naming a mode in the
-        // refusal would be wrong for the single-user source, so the message
-        // stays on the seat, which is what was actually checked.
-        if matches!(action, GameAction::Debug(_))
-            && !session.state.debug_permitted.contains(&player)
-        {
-            return Err("Debug actions are not permitted for this seat".to_string());
-        }
-
-        // Grant/Revoke debug permission: host-only, and only meaningful in a
-        // sandbox session. The host is always PlayerId(0). The host cannot
-        // revoke their own permission (would leave nobody able to debug).
-        const HOST_PLAYER: PlayerId = PlayerId(0);
-        match &action {
-            GameAction::GrantDebugPermission { .. } | GameAction::RevokeDebugPermission { .. } => {
-                if !session.state.format_config.allow_debug_actions {
-                    return Err("Sandbox mode is not enabled for this game".to_string());
-                }
-                if player != HOST_PLAYER {
-                    return Err("Only the host can grant or revoke debug permission".to_string());
-                }
-                if let GameAction::RevokeDebugPermission {
-                    player_id: target, ..
-                } = &action
-                {
-                    if *target == HOST_PLAYER {
-                        return Err("The host cannot revoke their own debug permission".to_string());
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        // The engine is the sole admission authority for game actions. Session
-        // policy above authenticates the actor and controls takeback/debug
-        // access; the engine validates actor authorization and action shape.
-        // Candidate enumeration is advisory for clients and AI, not a second
-        // legality gate: several legal action classes are combinatorial.
-        if let GameAction::Debug(debug_action) = &action {
-            preflight_debug_action(&session.state, player, debug_action)
-                .map_err(|error| format!("Engine error: {error}"))?;
-        }
-        if matches!(&action, GameAction::Debug(debug_action) if debug_action.is_zero_count_create())
-        {
-            let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&session.state);
-            let auto_pass = auto_pass_recommended(&session.state, &legal_actions);
-            return Ok((
-                session.state.clone(),
-                Vec::new(),
-                legal_actions,
-                Vec::new(),
-                auto_pass,
-                spell_costs,
-                by_object,
-            ));
-        }
-        let debug_card_source = match &action {
-            GameAction::Debug(DebugAction::CreateCard { card_name, .. }) => {
-                let card_db = card_db.ok_or_else(|| {
-                    "Debug::CreateCard requires a card database at the transport boundary"
-                        .to_string()
-                })?;
-                let face = card_db
-                    .get_face_by_name(card_name)
-                    .ok_or_else(|| "Engine error: card not found in database".to_string())?;
-                Some(debug_card_entry_source(card_db, face))
-            }
-            _ => None,
-        };
-
-        let records_takeback = !action.is_actor_scoped_preference();
-        let pre_action_state = records_takeback.then(|| session.state.clone());
-
-        // Set player names for log resolution.
-        session.state.log_player_names = session.display_names.clone();
-
-        // Apply action. `player` is the PlayerId authenticated from the
-        // WebSocket session (resolved from the join token) — never from the
-        // action payload. The engine's guard in `apply` enforces
-        // `player == authorized_submitter(state)`, so a spoofed action at the
-        // wire is rejected inside the engine as well as here.
-        let action_type = action.variant_name();
-        let result = match action {
-            GameAction::Debug(DebugAction::CreateCard {
-                owner,
-                zone,
-                count,
-                attach_to,
-                run_etb,
-                nonlegendary,
-                ..
-            }) => {
-                let result = create_debug_cards(
-                    &mut session.state,
-                    DebugCardCreateRequest {
-                        actor: player,
-                        source: debug_card_source
-                            .expect("nonzero debug CreateCard source was bound before mutation"),
-                        owner,
-                        zone,
-                        count,
-                        attach_to,
-                        run_etb,
-                        nonlegendary,
-                    },
-                )
-                .map_err(|error| format!("Engine error: {error}"))?;
-                bump_state_revision(&mut session.state);
-                mark_public_state_all_dirty(&mut session.state);
-                finalize_public_state(&mut session.state);
-                result
-            }
-            action => apply(&mut session.state, player, action).map_err(|e| {
-                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
-                format!("Engine error: {}", e)
-            })?,
-        };
-        if let Some(snapshot) = pre_action_state {
-            session.push_takeback_state(player, snapshot);
-        }
-
-        info!(
-            game = %game_code,
-            player = ?player,
-            action_type,
-            event_count = result.events.len(),
-            "action applied"
-        );
-
-        let (new_legal_actions, spell_costs, by_object) = engine_legal_actions_full(&session.state);
-        let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
-
-        // Turn-rewind bookkeeping, deliberately OUTSIDE the `pre_action_state`
-        // block above: an `is_actor_scoped_preference` action records no
-        // takeback snapshot but still goes through `apply` and can auto-advance
-        // into a new turn. The two rings are independent; coupling them would
-        // lose exactly those boundaries. The post-state clone the broadcast
-        // already needs is hoisted here so capture reads a local and cannot be
-        // reordered into a use-after-move.
-        let post_state = session.state.clone();
-        session.observe_transition(&result.events, &post_state);
-
-        Ok((
-            post_state,
-            result.events,
-            new_legal_actions,
-            result.log_entries,
-            auto_pass,
-            spell_costs,
-            by_object,
-        ))
-    }
-
-    /// Consumes an engine-issued unanimous Resolve All consent run for an
-    /// authenticated player. AI seats do not authorize future priority passes;
-    /// each representative grants through the engine's consent protocol first.
-    /// `max_resolutions` remains range-checked for wire compatibility, while
-    /// the already-issued consent run owns the resolution cap.
-    pub fn resolve_all_for_player(
-        &mut self,
-        game_code: &str,
-        player_token: &str,
-        max_resolutions: u32,
-    ) -> Result<ResolveAllActionResult, String> {
-        if max_resolutions > MAX_RESOLVE_ALL_RESOLUTIONS {
-            return Err(format!(
-                "Resolve All maximum must not exceed {MAX_RESOLVE_ALL_RESOLUTIONS}"
-            ));
-        }
-
-        let session = self
-            .sessions
-            .get_mut(game_code)
-            .ok_or_else(|| format!("Game not found: {game_code}"))?;
-        session.reject_if_ai_driver_faulted()?;
-        let requester = session
-            .player_for_token(player_token)
-            .ok_or_else(|| "Invalid player token".to_string())?;
-
-        if session.pending_takeback.is_some() {
-            return Err(
-                "A takeback request is pending — resolve it before taking further actions"
-                    .to_string(),
-            );
-        }
-
-        // Reject only an unentitled caller. A latch whose frozen run has gone
-        // stale is still routed into the resolver, whose fail-closed
-        // invalidation restores ordinary priority — rejecting it here instead
-        // would leave the game parked with no acting player and, in practice,
-        // nothing any client offers the player to press.
-        // Exhaustive rather than an equality test: a future variant must be
-        // classified here instead of silently defaulting to allowed.
-        match resolve_all_ready_access(&session.state, requester) {
-            ResolveAllReadyAccess::Refused => {
-                return Err("Resolve All consent is not ready".to_string());
-            }
-            ResolveAllReadyAccess::Admitted => {}
-        }
-
-        session.state.log_player_names = session.display_names.clone();
-        flush_layers(&mut session.state);
-        let pre_action_state = session.state.clone();
-        // The cap is frozen into the consent run by BeginResolveAll. The wire
-        // argument remains range-checked above for transport compatibility but
-        // cannot enlarge or replace that explicit authorization.
-        let _ = max_resolutions;
-        let batch = resolve_all_ready_prefix(&mut session.state, requester);
-        let summary = ResolveAllSummary {
-            items_resolved: batch.items_resolved,
-            total: batch.total,
-        };
-
-        session.push_takeback_state(requester, pre_action_state);
-        let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&session.state);
-        let auto_pass = auto_pass_recommended(&session.state, &legal_actions);
-        let post_state = session.state.clone();
-        session.observe_transition(&batch.events, &post_state);
-        let revision = session.advance_state_revision();
-
-        Ok((
-            Some((
-                revision,
-                (
-                    post_state,
-                    batch.events,
-                    legal_actions,
-                    batch.log_entries,
-                    auto_pass,
-                    spell_costs,
-                    by_object,
-                ),
-            )),
-            summary,
-        ))
-    }
-
-    /// Apply one engine-authored interaction submission from a player.
+    /// Record a seat's disconnect against this manager's default grace period.
     ///
-    /// Deliberately shaped as the exact sibling of [`Self::handle_action`]: it
-    /// returns the same [`ActionResult`], so the transport's broadcast path is
-    /// shared rather than duplicated.
-    ///
-    /// The acting `PlayerId` is resolved from the join-token-authenticated
-    /// session, never from the payload — the wire frame carries no actor field
-    /// at all (`protocol.rs`: "The authenticated session, rather than the
-    /// client, determines the actor"). `submit_interaction` then re-authorizes
-    /// the actor against the interaction slot inside the engine, so a forged
-    /// `interaction_id` belonging to another seat is rejected twice.
-    ///
-    /// There is deliberately no debug-capability gate here, unlike
-    /// `handle_action`. `materialize_response` dispatches on
-    /// `human_response_model`, and its `Choose` fallthrough sources actions from
-    /// `actor_candidates` ->
-    /// `ai_support::validated_candidate_actions_for_semantic_owner`. An
-    /// engine-wide grep shows no production constructor of
-    /// `GameAction::Debug`, `GrantDebugPermission`, or `RevokeDebugPermission`
-    /// anywhere in that chain — only classification and ordering matches — so
-    /// guarding here would be validation for a case that cannot occur. The
-    /// engine test
-    /// `published_interaction_choices_never_offer_a_debug_action_in_a_sandbox_game`
-    /// (`crates/engine/tests/integration/interaction_contract.rs`) fails the day
-    /// that stops being true.
-    pub fn handle_interaction(
+    /// The registry half of a disconnect; `GameSession::mark_disconnected` is
+    /// the session half. Both run under one held session guard, so the presence
+    /// gate the single `handle_disconnect` used to get from its registry lookup
+    /// is supplied by the guard plus this call in the same critical section.
+    pub fn record_disconnect(
         &mut self,
         game_code: &str,
-        player_token: &str,
-        submission: InteractionSubmission,
-    ) -> Result<ActionResult, String> {
-        let session = self
-            .sessions
-            .get_mut(game_code)
-            .ok_or_else(|| format!("Game not found: {game_code}"))?;
-
-        session.reject_if_ai_driver_faulted()?;
-
-        let player = session
-            .player_for_token(player_token)
-            .ok_or_else(|| "Invalid player token".to_string())?;
-
-        // GH #1507: the authoritative state must not move while the table is
-        // voting on a rollback. Same interlock, same reason, as `handle_action`.
-        if session.pending_takeback.is_some() {
-            return Err(
-                "A takeback request is pending — resolve it before taking further actions"
-                    .to_string(),
-            );
-        }
-
-        // Snapshot BEFORE `log_player_names` is written, matching
-        // `handle_action`'s order exactly. The two handlers are siblings; the
-        // ordering is part of that.
-        //
-        // The clone is unconditional here where `handle_action`'s is
-        // conditional on `!action.is_actor_scoped_preference()`, because the
-        // action is not known until `submit_interaction` returns. That is
-        // equivalent, not a regression: the seven actions that predicate
-        // matches are UI preferences that no candidate enumerator or
-        // `materialize_*` function ever produces, so the predicate is always
-        // false on this path. The guard below is kept anyway so the two
-        // handlers stay structurally identical if that ever changes.
-        let pre_action_state = session.state.clone();
-
-        // Set player names for log resolution.
-        session.state.log_player_names = session.display_names.clone();
-
-        let applied =
-            submit_interaction(&mut session.state, player, submission).map_err(|error| {
-                warn!(
-                    game = %game_code,
-                    player = ?player,
-                    code = ?error.code,
-                    reason = "interaction_rejected",
-                    "interaction rejected"
-                );
-                // Byte-identical to the WASM transport
-                // (`engine-wasm/src/lib.rs`) and to
-                // `interaction_payload_guard`, so every layer that reports an
-                // engine reason code, on both transports, classifies the same
-                // rejection identically.
-                format!("Engine error: {:?}", error.code)
-            })?;
-
-        if !applied.action.is_actor_scoped_preference() {
-            session.push_takeback_state(player, pre_action_state);
-        }
-
-        info!(
-            game = %game_code,
-            player = ?player,
-            action_type = applied.action.variant_name(),
-            event_count = applied.result.events.len(),
-            "interaction applied"
-        );
-
-        let (new_legal_actions, spell_costs, by_object) = engine_legal_actions_full(&session.state);
-        let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
-
-        // Same capture, same placement rationale, as `handle_action`.
-        let post_state = session.state.clone();
-        session.observe_transition(&applied.result.events, &post_state);
-
-        Ok((
-            post_state,
-            applied.result.events,
-            new_legal_actions,
-            applied.result.log_entries,
-            auto_pass,
-            spell_costs,
-            by_object,
-        ))
+        player: PlayerId,
+        disconnected_at: Instant,
+    ) {
+        let default_grace = self.reconnect.grace_period;
+        self.reconnect
+            .record_disconnect(game_code, player, default_grace, disconnected_at);
+        info!(game = %game_code, player = ?player, "player disconnected");
     }
 
-    /// Applies the payload-free match-concede intent after binding its
-    /// requester to an authenticated player token. The closed cause is chosen
-    /// here, never by the wire payload or a game action.
-    pub fn handle_match_concede(
+    /// The grace-period half of a reconnect. `GameSession::mark_connected` and
+    /// `filter_state_for_player` are the session half.
+    pub fn attempt_reconnect(
         &mut self,
         game_code: &str,
-        player_token: &str,
-    ) -> Result<RevisionedActionResult, String> {
-        let session = self
-            .sessions
-            .get_mut(game_code)
-            .ok_or_else(|| format!("Game not found: {game_code}"))?;
-        let player = session
-            .player_for_token(player_token)
-            .ok_or_else(|| "Invalid player token".to_string())?;
-        session.reject_if_ai_driver_faulted()?;
-        if session.pending_takeback.is_some() {
-            return Err(
-                "A takeback request is pending — resolve it before conceding the match".to_string(),
-            );
-        }
-
-        let events = apply_trusted_match_forfeit(
-            &mut session.state,
-            player,
-            MatchForfeitCause::MatchConcede,
-        )?;
-        let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&session.state);
-        let auto_pass = auto_pass_recommended(&session.state, &legal_actions);
-        let revision = session.advance_state_revision();
-        // Included rather than skipped: the guard is the event scan itself, so
-        // "can conceding a match start a turn?" never has to be proved.
-        let post_state = session.state.clone();
-        session.observe_transition(&events, &post_state);
-        Ok((
-            revision,
-            (
-                post_state,
-                events,
-                legal_actions,
-                Vec::new(),
-                auto_pass,
-                spell_costs,
-                by_object,
-            ),
-        ))
-    }
-
-    /// Mark a player as disconnected.
-    pub fn handle_disconnect(&mut self, game_code: &str, player: PlayerId) {
-        if let Some(session) = self.sessions.get_mut(game_code) {
-            session.connected[player.0 as usize] = false;
-            let default_grace = self.reconnect.grace_period;
-            self.reconnect
-                .record_disconnect(game_code, player, default_grace);
-            info!(game = %game_code, player = ?player, "player disconnected");
-        }
-    }
-
-    /// Attempt to reconnect a player. Returns their filtered state on success.
-    pub fn handle_reconnect(
-        &mut self,
-        game_code: &str,
-        player_token: &str,
-    ) -> Result<GameState, String> {
-        let session = self
-            .sessions
-            .get_mut(game_code)
-            .ok_or_else(|| format!("Game not found: {}", game_code))?;
-
-        let player = session
-            .player_for_token(player_token)
-            .ok_or_else(|| "Invalid player token".to_string())?;
-
-        // Check reconnect grace period
-        let result = self.reconnect.attempt_reconnect(game_code, player);
-        match result {
-            crate::reconnect::ReconnectResult::Ok { .. } => {
-                session.connected[player.0 as usize] = true;
-                Ok(filter_state_for_player(&session.state, player))
-            }
-            crate::reconnect::ReconnectResult::Expired => {
-                Err("Reconnect grace period expired".to_string())
-            }
-            crate::reconnect::ReconnectResult::NotFound => {
-                // Player wasn't marked as disconnected -- allow reconnect anyway
-                session.connected[player.0 as usize] = true;
-                Ok(filter_state_for_player(&session.state, player))
-            }
-        }
-    }
-
-    /// Returns game codes waiting for more players (for lobby).
-    pub fn open_games(&self) -> Vec<String> {
-        self.sessions
-            .values()
-            .filter(|s| s.first_open_seat().is_some())
-            .map(|s| s.game_code.clone())
-            .collect()
+        player: PlayerId,
+        received_at: Instant,
+    ) -> crate::reconnect::ReconnectResult {
+        self.reconnect
+            .attempt_reconnect(game_code, player, received_at)
     }
 
     /// Look up game_code by player_token.
@@ -2307,14 +2891,41 @@ impl SessionManager {
         }
     }
 
-    /// Remove a game session entirely, cleaning up the token-to-game index.
-    /// Returns the removed session if it existed.
-    pub fn remove_game(&mut self, game_code: &str) -> Option<GameSession> {
-        let session = self.sessions.remove(game_code)?;
-        for token in &session.player_tokens {
-            self.unindex_token(token);
+    /// Drop a game from the registry and erase everything the registry indexes
+    /// under its code. Destructive and unconditional: the returned `bool` is
+    /// "the map had an entry", the only question the map can answer exactly.
+    /// Nothing here asks whether a handle is outstanding. A handle obtained
+    /// before this call keeps working on a session nothing can reach again; its
+    /// persist is refused by the row's generation/`retired = 0` guard.
+    ///
+    /// The two index erases are `retain` over a stored field, not a keyed
+    /// `remove`, because neither map is keyed by game code alone:
+    /// `token_to_game` is keyed by token and `ReconnectManager::disconnected`
+    /// by `(game, seat)`. Taking the tokens from the registry's own inverse
+    /// index rather than from `session.player_tokens` erases exactly the
+    /// entries naming this game.
+    ///
+    /// Also releases this game's cached per-game log writers (issue #7978
+    /// follow-up): every removal path — normal game-over cleanup, restored-
+    /// terminal cleanup, and reconnect-grace expiry — funnels through here,
+    /// and some of those (restored-terminal, expiry) run before any
+    /// `game_session` tracing span exists, so `GameFileLayer::on_close`
+    /// never fires for them. Closing here, once, covers all of them instead
+    /// of requiring every removal call site to remember it.
+    ///
+    /// `game_log.close` stays here because the cache is the registry's, keyed
+    /// by game code, and closing it needs no session. It is not a lifetime
+    /// guarantee: `logging.rs`'s `GameFileLayer` holds a second `Arc` to the
+    /// same cache and can re-open this entry with the next tracing event in
+    /// the socket's span, exactly as it can today.
+    pub fn remove_game(&mut self, game_code: &str) -> bool {
+        if self.sessions.remove(game_code).is_none() {
+            return false;
         }
-        Some(session)
+        self.token_to_game.retain(|_, code| code != game_code);
+        self.reconnect.remove_game(game_code);
+        self.game_log.close(game_code);
+        true
     }
 
     fn unindex_token(&mut self, token: &str) {
@@ -2330,20 +2941,24 @@ impl SessionManager {
         // persisted blob. Re-stamped here, never deserialized. This is the
         // sole entry for a restored session into a manager (`sessions.insert`
         // has exactly two call sites: create, and this one).
-        session.hosting = self.hosting;
+        session.set_hosting(self.hosting);
+        session.game_log = Arc::clone(&self.game_log);
         // The stamp above only stops the blob from driving a future
         // *derivation*. `debug_mode` / `debug_permitted` are serialized state
         // and arrive already set, so a sidecar's capability would otherwise
         // walk straight into a shared server. Order matters: this reads the
         // `hosting` just stamped.
         session.revoke_unentitled_debug_capability();
+        // A contest's clock epoch did not survive the restart.
+        session.cancel_contest_after_restore();
         let game_code = session.game_code.clone();
         for token in &session.player_tokens {
             if !token.is_empty() {
                 self.token_to_game.insert(token.clone(), game_code.clone());
             }
         }
-        self.sessions.insert(game_code, session);
+        self.sessions
+            .insert(game_code, Arc::new(Mutex::new(session)));
     }
 }
 
@@ -2371,30 +2986,112 @@ pub fn generate_player_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
+    use engine::ai_support::legal_actions_for_viewer;
     use engine::database::card_db::CardDatabase;
     use engine::game::deck_loading::DeckEntry;
     use engine::game::engine::apply;
     use engine::game::interaction::derive_viewer_interaction;
     use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
     use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::game::zones::{add_to_zone, remove_from_zone};
     use engine::types::ability::{Effect, ResolvedAbility, TargetRef};
-    use engine::types::actions::{PrecastCopyShortcutResponse, ResolveAllConsentDecision};
+    use engine::types::actions::{
+        DebugCardCreationKind, MulliganChoice, PrecastCopyShortcutResponse,
+        ResolveAllConsentDecision, ResolveAllScope,
+    };
     use engine::types::card::CardFace;
-    use engine::types::card_type::CardType;
+    use engine::types::card_type::{CardType, CoreType};
+    use engine::types::format::ChallengeDeck;
     use engine::types::game_state::{
         AutoPassMode, CastPaymentMode, PersistedGameState, StackEntry, StackEntryKind,
-        TurnBoundary, WaitingFor,
+        StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
+        StackResolutionPolicy, StackResolutionSession, WaitingFor,
     };
     use engine::types::interaction::{
         InteractionAvailability, InteractionChoiceId, InteractionReasonCode, InteractionResponse,
-        MAX_INTERACTION_LIST_LEN,
+        InteractionSlotKind, MAX_INTERACTION_LIST_LEN,
     };
     use engine::types::mana::ManaCost;
     use engine::types::phase::{Phase, PhaseStop, PhaseStopScope};
     use engine::types::zones::Zone;
     use seat_reducer::types::SeatMutation;
+
+    /// The two production statements a join is now made of: the session issues
+    /// the token, the registry indexes it. Every test that used to call the
+    /// one-statement `SessionManager::join_game` goes through here, so the
+    /// pair cannot drift from what the transport does.
+    fn join_game(
+        mgr: &mut SessionManager,
+        game_code: &str,
+        deck: PlayerDeckPayload,
+        deck_choice: Option<DeckChoice>,
+    ) -> Result<(String, GameState), String> {
+        join_game_with_name(mgr, game_code, deck, deck_choice, String::new())
+    }
+
+    fn join_game_with_name(
+        mgr: &mut SessionManager,
+        game_code: &str,
+        deck: PlayerDeckPayload,
+        deck_choice: Option<DeckChoice>,
+        display_name: String,
+    ) -> Result<(String, GameState), String> {
+        let (player_token, filtered) = {
+            let mut session = mgr
+                .try_session(game_code)
+                .ok_or_else(|| game_not_found(game_code))?;
+            session.join_with_reservation(deck, deck_choice, display_name, None)?
+        };
+        mgr.index_token(player_token.clone(), game_code);
+        Ok((player_token, filtered))
+    }
+
+    /// Session half then registry half, the pair `handle_disconnect` used to
+    /// be. An absent game is a no-op, as it was.
+    fn handle_disconnect(mgr: &mut SessionManager, game_code: &str, player: PlayerId) {
+        {
+            let Some(mut session) = mgr.try_session(game_code) else {
+                return;
+            };
+            session.mark_disconnected(player);
+        }
+        mgr.record_disconnect(game_code, player, std::time::Instant::now());
+    }
+
+    /// The pair `handle_reconnect` used to be: the session resolves the token,
+    /// the registry decides the grace period, the session records the result.
+    fn handle_reconnect(
+        mgr: &mut SessionManager,
+        game_code: &str,
+        player_token: &str,
+    ) -> Result<GameState, String> {
+        let player = {
+            let session = mgr
+                .try_session(game_code)
+                .ok_or_else(|| game_not_found(game_code))?;
+            session
+                .player_for_token(player_token)
+                .ok_or_else(|| "Invalid player token".to_string())?
+        };
+        let outcome = mgr.attempt_reconnect(game_code, player, std::time::Instant::now());
+        let mut session = mgr
+            .try_session(game_code)
+            .ok_or_else(|| game_not_found(game_code))?;
+        match outcome {
+            // `NotFound` means the player was never marked disconnected, which
+            // has always been allowed to reconnect anyway.
+            crate::reconnect::ReconnectResult::Ok { .. }
+            | crate::reconnect::ReconnectResult::NotFound => {
+                session.mark_connected(player);
+                Ok(filter_state_for_player(&session.state, player))
+            }
+            crate::reconnect::ReconnectResult::Expired => {
+                Err("Reconnect grace period expired".to_string())
+            }
+        }
+    }
 
     fn make_deck() -> PlayerDeckPayload {
         PlayerDeckPayload {
@@ -2446,10 +3143,28 @@ mod tests {
         }
     }
 
+    /// An AI seat whose recorded choice re-resolves to the payload it is
+    /// installed with, so a test that round-trips it gets the same cards.
+    fn ai_setup(
+        seat_index: u8,
+        difficulty: AiDifficulty,
+        resolved: PlayerDeckPayload,
+    ) -> AiSeatSetup {
+        AiSeatSetup {
+            seat_index,
+            difficulty,
+            choice: DeckChoice::DeckList(Box::new(crate::deck_resolve::deck_data_from_payload(
+                &CardDatabase::default(),
+                &resolved,
+            ))),
+            resolved,
+        }
+    }
+
     #[test]
     fn create_game_returns_code_and_token() {
         let mut mgr = SessionManager::new();
-        let (code, token) = mgr.create_game(make_deck());
+        let (code, token) = mgr.create_game(make_deck(), None);
         assert_eq!(code.len(), 6);
         assert_eq!(token.len(), 32);
     }
@@ -2457,7 +3172,8 @@ mod tests {
     #[test]
     fn full_persist_snapshot_roundtrips_exact_generation_and_revision() {
         let mut manager = SessionManager::new();
-        let (game_code, _) = manager.create_game(make_deck());
+        let (game_code, _) = manager.create_game(make_deck(), None);
+        let persisted = manager.try_session(&game_code).unwrap().to_persisted();
         let snapshot = FullPersistSnapshot {
             key: FullSessionKey {
                 game_code,
@@ -2465,7 +3181,8 @@ mod tests {
             },
             mutation_revision: 11,
             activation_epoch: Some(3),
-            persisted: manager.sessions.values().next().unwrap().to_persisted(),
+            persisted,
+            deck_pools_json: "[]".into(),
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         let restored: FullPersistSnapshot = serde_json::from_str(&json).unwrap();
@@ -2475,10 +3192,57 @@ mod tests {
     }
 
     #[test]
+    fn a_pregame_room_issues_no_seat_while_its_host_is_away() {
+        let mut mgr = SessionManager::new();
+        let (code, _host) = mgr.create_game(make_deck(), None);
+        let held = mgr
+            .try_session(&code)
+            .unwrap()
+            .reserve_seat("G".to_string())
+            .expect("reserve while the host is present");
+        let mut session = mgr.try_session(&code).unwrap();
+        session.mark_disconnected(PlayerId(0));
+        let tokens_before = session.player_tokens.clone();
+
+        assert_eq!(
+            session.reserve_seat("H".to_string()).err().as_deref(),
+            Some(HOST_AWAY_REFUSAL)
+        );
+        assert_eq!(
+            session
+                .join_with_reservation(make_deck(), None, String::new(), Some(held.token.clone()))
+                .err()
+                .as_deref(),
+            Some(HOST_AWAY_REFUSAL)
+        );
+        assert_eq!(session.reservations.len(), 1);
+        assert!(session.reservations.contains_key(&held.token));
+        assert_eq!(session.player_tokens, tokens_before);
+
+        session.mark_connected(PlayerId(0));
+        session
+            .join_with_reservation(make_deck(), None, String::new(), Some(held.token))
+            .expect("the held reservation is honoured once the host returns");
+    }
+
+    #[test]
+    fn a_started_game_is_not_refused_as_host_away() {
+        let mut mgr = SessionManager::new();
+        let (code, _host) = mgr.create_game(make_deck(), None);
+        let mut session = mgr.try_session(&code).unwrap();
+        session.mark_disconnected(PlayerId(0));
+        session.game_started = true;
+        assert_eq!(
+            session.reserve_seat("G".to_string()).err().as_deref(),
+            Some("Game has already started")
+        );
+    }
+
+    #[test]
     fn create_then_join_works() {
         let mut mgr = SessionManager::new();
-        let (code, _token1) = mgr.create_game(make_deck());
-        let result = mgr.join_game(&code, make_deck());
+        let (code, _token1) = mgr.create_game(make_deck(), None);
+        let result = join_game(&mut mgr, &code, make_deck(), None);
         assert!(result.is_ok());
         let (token2, _state) = result.unwrap();
         assert_eq!(token2.len(), 32);
@@ -2491,14 +3255,10 @@ mod tests {
     #[test]
     fn created_session_binds_interaction_authority() {
         let mut mgr = SessionManager::new();
-        let (code, _token) = mgr.create_game(make_deck());
+        let (code, _token) = mgr.create_game(make_deck(), None);
 
         assert_eq!(
-            mgr.sessions
-                .get(&code)
-                .unwrap()
-                .state
-                .interaction_session_id,
+            mgr.try_session(&code).unwrap().state.interaction_session_id,
             Some(InteractionSessionId(code.clone())),
             "a created session must carry interaction authority"
         );
@@ -2513,11 +3273,10 @@ mod tests {
     #[test]
     fn bound_session_does_not_report_authority_unbound() {
         let mut mgr = SessionManager::new();
-        let (code, _token) = mgr.create_game(make_deck());
-        mgr.join_game(&code, make_deck())
-            .expect("second seat joins");
+        let (code, _token) = mgr.create_game(make_deck(), None);
+        join_game(&mut mgr, &code, make_deck(), None).expect("second seat joins");
 
-        let state = mgr.sessions.get(&code).unwrap().state.clone();
+        let state = mgr.try_session(&code).unwrap().state.clone();
         let filtered = filter_state_for_player(&state, PlayerId(0));
 
         let unbound_reason = InteractionAvailability::Unsupported {
@@ -2557,15 +3316,12 @@ mod tests {
     #[test]
     fn restored_session_rebinds_interaction_authority() {
         let mut mgr = SessionManager::new();
-        let (code, _token) = mgr.create_game(make_deck());
-        mgr.sessions
-            .get_mut(&code)
-            .unwrap()
-            .state
-            .interaction_session_id = Some(InteractionSessionId("some-other-game".to_string()));
-        let persisted = mgr.sessions.get(&code).unwrap().to_persisted();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+        mgr.try_session(&code).unwrap().state.interaction_session_id =
+            Some(InteractionSessionId("some-other-game".to_string()));
+        let persisted = mgr.try_session(&code).unwrap().to_persisted();
 
-        let db = CardDatabase::default();
+        let db = Arc::new(CardDatabase::default());
         let restored =
             GameSession::from_persisted(persisted, &db).expect("supported persisted format config");
 
@@ -2577,12 +3333,40 @@ mod tests {
         );
     }
 
+    /// `from_persisted` is the one call site checked against a PERSISTED
+    /// `player_count` rather than one just supplied on an inbound request
+    /// (see `FormatConfig::validate_for_player_count`'s own doc comment),
+    /// which makes its rejection irreversible: a session already saved with
+    /// a `player_count` outside its format's registry range can never be
+    /// restored again. `create_game` builds a Standard (registry range 2-2)
+    /// session; the persisted blob's own `player_count` field (what
+    /// `from_persisted` actually validates, independent of
+    /// `state.players.len()`) is mutated to 5 here to land squarely outside
+    /// that range.
+    #[test]
+    fn from_persisted_rejects_a_persisted_player_count_outside_the_format_registry_range() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+        let mut persisted = mgr.try_session(&code).unwrap().to_persisted();
+        persisted.player_count = 5;
+
+        let error = GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
+            .err()
+            .expect(
+                "a persisted player_count outside the format's registry range must be rejected",
+            );
+        assert!(error.contains("player_count"));
+    }
+
     #[test]
     fn persisted_session_with_limited_range_is_rejected() {
         let mut mgr = SessionManager::new();
-        let (code, _token) = mgr.create_game(make_deck());
-        let mut persisted = mgr.sessions.get(&code).unwrap().to_persisted();
-        let mut state = persisted.state.into_game_state();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+        let mut persisted = mgr.try_session(&code).unwrap().to_persisted();
+        let mut state = persisted
+            .state
+            .into_game_state()
+            .expect("test snapshot satisfies the checked restore contract");
         state.format_config.range_of_influence =
             Some(Box::new(engine::types::format::RangeOfInfluenceConfig {
                 default_range: 0,
@@ -2590,7 +3374,7 @@ mod tests {
             }));
         persisted.state = PersistedGameState::capture(state);
 
-        let error = GameSession::from_persisted(persisted, &CardDatabase::default())
+        let error = GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
             .err()
             .expect("limited range must remain disabled at the restore boundary");
 
@@ -2604,6 +3388,7 @@ mod tests {
             let (code, _) = mgr
                 .create_game_n_players(
                     make_deck(),
+                    None,
                     "Host".to_string(),
                     None,
                     2,
@@ -2612,7 +3397,7 @@ mod tests {
                 )
                 .expect("supported format config");
 
-            let slots = mgr.sessions.get(&code).unwrap().player_slot_info();
+            let slots = mgr.try_session(&code).unwrap().player_slot_info();
             assert_eq!(slots.len(), 2);
             assert!(slots.iter().all(|slot| slot.team_info.is_none()));
 
@@ -2627,6 +3412,7 @@ mod tests {
         let (code, _) = mgr
             .create_game_n_players(
                 make_deck(),
+                None,
                 "Host".to_string(),
                 None,
                 4,
@@ -2635,7 +3421,7 @@ mod tests {
             )
             .expect("supported format config");
 
-        let slots = mgr.sessions.get(&code).unwrap().player_slot_info();
+        let slots = mgr.try_session(&code).unwrap().player_slot_info();
         let team_indices: Vec<u8> = slots
             .iter()
             .map(|slot| slot.team_info.unwrap().team_index)
@@ -2662,6 +3448,7 @@ mod tests {
         assert!(mgr
             .create_game_n_players(
                 make_deck(),
+                None,
                 "Host".to_string(),
                 None,
                 2,
@@ -2670,7 +3457,206 @@ mod tests {
             )
             .expect_err("limited range must remain disabled at the session boundary")
             .contains("not supported"));
-        assert!(mgr.sessions.is_empty());
+        assert!(mgr.game_count() == 0);
+    }
+
+    /// Phase 1d production seam: `create_game_n_players` is the only inbound
+    /// gate `format_config.validate_for_player_count` runs behind on the
+    /// native session-creation path — a deleted `?` here would let a
+    /// `player_count` outside the format's own registry range through to
+    /// `GameState::new`, which seats exactly that many players regardless of
+    /// format legality. Standard's registry range is 2..=2, so 3 seats must
+    /// be rejected.
+    #[test]
+    fn create_game_rejects_player_count_outside_format_registry_range() {
+        let mut mgr = SessionManager::new();
+
+        let err = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                3,
+                MatchConfig::default(),
+                Some(FormatConfig::standard()),
+            )
+            .expect_err("Standard's registry range (2..=2) must reject a 3-seat session");
+        assert!(err.contains("player_count"));
+        assert!(mgr.game_count() == 0);
+    }
+
+    /// A defaulted config is not a declaration: an undeclared `format_config`
+    /// above two seats must not silently keep Standard (registry range
+    /// 2..=2), which `validate_for_player_count` would then refuse. Asserts
+    /// on the resulting format, not just on success — a regression that
+    /// defaults to Standard regardless of seat count would still succeed for
+    /// `player_count <= 2` elsewhere, so this must check which format was
+    /// actually chosen.
+    #[test]
+    fn create_game_defaults_undeclared_config_to_a_seat_compatible_format() {
+        let mut mgr = SessionManager::new();
+
+        let (code, _) = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                4,
+                MatchConfig::default(),
+                None,
+            )
+            .expect("an undeclared config at 4 seats must resolve to a format that admits them");
+
+        let session = mgr.try_session(&code).unwrap();
+        assert_eq!(
+            session.state.format_config.format,
+            engine::types::format::GameFormat::FreeForAll,
+            "4 seats exceed Standard's registry range (2..=2); the default must be a format \
+             whose own range admits 4, not a struct-literal widening of Standard"
+        );
+        assert_eq!(session.state.players.len(), 4);
+    }
+
+    /// Companion to the above: an undeclared config at 2 seats must keep
+    /// today's Standard default rather than jumping to Free-for-All
+    /// unconditionally.
+    #[test]
+    fn create_game_defaults_undeclared_config_to_standard_at_two_seats() {
+        let mut mgr = SessionManager::new();
+
+        let (code, _) = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                2,
+                MatchConfig::default(),
+                None,
+            )
+            .expect("an undeclared config at 2 seats must resolve to Standard");
+
+        let session = mgr.try_session(&code).unwrap();
+        assert_eq!(
+            session.state.format_config.format,
+            engine::types::format::GameFormat::Standard,
+        );
+    }
+
+    /// The property that makes the seat-compatible default correct rather
+    /// than merely convenient: a session created undeclared at 4 seats must
+    /// survive a `to_persisted` -> `from_persisted` round-trip. A defaulted
+    /// Standard config (registry range 2..=2) would fail exactly here, since
+    /// `from_persisted`'s rejection of an out-of-range persisted
+    /// `player_count` is irreversible (see
+    /// `from_persisted_rejects_a_persisted_player_count_outside_the_format_registry_range`).
+    #[test]
+    fn undeclared_config_session_at_four_seats_survives_persist_round_trip() {
+        let mut mgr = SessionManager::new();
+        let (code, _) = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                4,
+                MatchConfig::default(),
+                None,
+            )
+            .expect("an undeclared config at 4 seats must resolve to a format that admits them");
+
+        let persisted = mgr.try_session(&code).unwrap().to_persisted();
+        let restored = GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
+            .expect(
+                "a session created undeclared at 4 seats must restore cleanly: its resolved \
+                 format's own registry range already admits 4 players",
+            );
+        assert_eq!(
+            restored.state.format_config.format,
+            engine::types::format::GameFormat::FreeForAll
+        );
+        assert_eq!(restored.state.players.len(), 4);
+    }
+
+    /// Round-6 finding: `create_game_n_players` is `pub` and validated seat
+    /// count and range-of-influence but not `starting_life`, so a caller that
+    /// builds its own `FormatConfig` (rather than deserializing one) could
+    /// seat a game whose life total loses every seat at the very first
+    /// state-based-action check (CR 704.5a). All three config-supplying
+    /// production callers today happen to pass a deserialized or
+    /// registry-built config, but this function's own visibility does not
+    /// guarantee that.
+    #[test]
+    fn create_game_rejects_starting_life_outside_bounds() {
+        let mut mgr = SessionManager::new();
+        let mut format_config = FormatConfig::standard();
+        format_config.starting_life = 0;
+
+        let err = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                2,
+                MatchConfig::default(),
+                Some(format_config),
+            )
+            .expect_err("0 starting life loses every seat at the first SBA check (CR 704.5a)");
+        assert!(err.contains("starting_life"));
+        assert!(mgr.game_count() == 0);
+    }
+
+    /// CR 103.4: each player begins with a starting life total of 20, and some
+    /// variant games use a different one — so a host-configured `starting_life`
+    /// is the authority, not the format's default.
+    ///
+    /// This is the server-side half of the desktop (Tauri) solo/host route: the
+    /// native engine is this phase-server running as a sidecar, and the client
+    /// hands it the edited `FormatConfig` in `CreateGameWithSettings`. Dropping
+    /// it here would silently seat every player at the format default.
+    ///
+    /// REVERT-FAIL: make `create_game_n_players` ignore its `format_config`
+    /// argument (or re-derive one from `format_config.format`) ⇒ life is 40.
+    #[test]
+    fn create_game_honors_a_configured_starting_life() {
+        let mut mgr = SessionManager::new();
+        let mut format_config = FormatConfig::commander();
+        format_config.starting_life = 25;
+
+        let (code, _) = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                2,
+                MatchConfig::default(),
+                Some(format_config),
+            )
+            .expect("a custom starting life is a supported configuration");
+
+        let session = mgr.try_session(&code).unwrap();
+        assert_eq!(session.state.format_config.starting_life, 25);
+        for player in &session.state.players {
+            assert_eq!(
+                player.life, 25,
+                "every seat must start on the configured life total, not Commander's 40"
+            );
+        }
+
+        // The between-games rebuild re-reads the session's own format config, so
+        // game 2 of a match must not silently revert to the format default.
+        drop(session);
+        mgr.try_session(&code).unwrap().rebuild_pregame_state(2);
+        for player in &mgr.try_session(&code).unwrap().state.players {
+            assert_eq!(
+                player.life, 25,
+                "the rebuild must preserve the configured life total"
+            );
+        }
     }
 
     /// CR 732.2a (#4603 opt-in, Best-of-N): the combo-detector opt-in lives on the
@@ -2691,6 +3677,7 @@ mod tests {
         let (code, _) = mgr
             .create_game_n_players(
                 make_deck(),
+                None,
                 "Host".to_string(),
                 None,
                 2,
@@ -2704,23 +3691,15 @@ mod tests {
 
         // Game 1: the creation site projects the opt-in onto the runtime flag.
         assert!(
-            mgr.sessions
-                .get(&code)
-                .unwrap()
-                .state
-                .loop_detection
-                .is_on(),
+            mgr.try_session(&code).unwrap().state.loop_detection.is_on(),
             "the MatchConfig opt-in must enable the detector at game-1 creation"
         );
 
         // Between-games rebuild (game 2): the immutable config is re-read, so the
         // detector stays consistent across the whole Bo3 match.
-        mgr.sessions
-            .get_mut(&code)
-            .unwrap()
-            .rebuild_pregame_state(2);
+        mgr.try_session(&code).unwrap().rebuild_pregame_state(2);
         assert!(
-            mgr.sessions.get(&code).unwrap().state.loop_detection.is_on(),
+            mgr.try_session(&code).unwrap().state.loop_detection.is_on(),
             "the Bo3 between-games rebuild must re-derive the detector from the immutable MatchConfig"
         );
     }
@@ -2728,24 +3707,24 @@ mod tests {
     #[test]
     fn join_nonexistent_game_fails() {
         let mut mgr = SessionManager::new();
-        let result = mgr.join_game("NOPE00", make_deck());
+        let result = join_game(&mut mgr, "NOPE00", make_deck(), None);
         assert!(result.is_err());
     }
 
     #[test]
     fn join_full_game_fails() {
         let mut mgr = SessionManager::new();
-        let (code, _) = mgr.create_game(make_deck());
-        let _ = mgr.join_game(&code, make_deck());
-        let result = mgr.join_game(&code, make_deck());
+        let (code, _) = mgr.create_game(make_deck(), None);
+        let _ = join_game(&mut mgr, &code, make_deck(), None);
+        let result = join_game(&mut mgr, &code, make_deck(), None);
         assert!(result.is_err());
     }
 
     #[test]
     fn unindex_tokens_removes_only_named_tokens() {
         let mut mgr = SessionManager::new();
-        let (code, token1) = mgr.create_game(make_deck());
-        let (token2, _) = mgr.join_game(&code, make_deck()).unwrap();
+        let (code, token1) = mgr.create_game(make_deck(), None);
+        let (token2, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
 
         assert_eq!(mgr.game_for_token(&token1), Some(code.as_str()));
         assert_eq!(mgr.game_for_token(&token2), Some(code.as_str()));
@@ -2773,27 +3752,27 @@ mod tests {
         }
 
         let mut mgr = SessionManager::new();
-        let (code, token1) = mgr.create_game(make_deck());
-        let (token2, _) = mgr.join_game(&code, make_deck()).unwrap();
-        let db = engine::database::CardDatabase::default();
+        let (code, token1) = mgr.create_game(make_deck(), None);
+        let (token2, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let resolver = UnusedResolver;
         let ctx = seat_reducer::types::ReducerCtx {
             platform: Platform::Native,
             deck_resolver: &resolver,
         };
 
-        let mut seat_state = mgr.sessions.get(&code).unwrap().seat_state();
+        let mut seat_state = mgr.try_session(&code).unwrap().seat_state();
         let delta = seat_reducer::apply(
             &mut seat_state,
             SeatMutation::SetKind {
                 seat_index: 1,
+                expected_kind: None,
                 kind: SeatKind::WaitingHuman,
             },
             &ctx,
         )
         .unwrap();
-        mgr.sessions
-            .get_mut(&code)
+        mgr.try_session(&code)
             .unwrap()
             .apply_seat_delta(seat_state, &delta, &db);
         mgr.unindex_tokens(&delta.invalidated_tokens);
@@ -2803,40 +3782,102 @@ mod tests {
         assert_eq!(mgr.game_for_token(&token1), Some(code.as_str()));
     }
 
+    /// Two seats of the removed game and one seat of a second game: the second
+    /// seat is what discriminates an erase that stops at the first match, the
+    /// second game what discriminates a whole-map `clear`.
     #[test]
-    fn remove_game_clears_token_index() {
+    fn remove_game_clears_token_index_and_reconnect_entries() {
         let mut mgr = SessionManager::new();
-        let (code, token1) = mgr.create_game(make_deck());
-        let (token2, _state) = mgr.join_game(&code, make_deck()).unwrap();
+        let (code, token1) = mgr.create_game(make_deck(), None);
+        let (token2, _state) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        let (other_code, other_token) = mgr.create_game(make_deck(), None);
 
-        // While the game exists, both players' tokens resolve to it.
+        mgr.record_disconnect(&code, PlayerId(0), std::time::Instant::now());
+        mgr.record_disconnect(&code, PlayerId(1), std::time::Instant::now());
+        mgr.record_disconnect(&other_code, PlayerId(0), std::time::Instant::now());
+
+        // While the game exists, both players' tokens resolve to it and both
+        // seats hold a disconnect record.
         assert_eq!(mgr.game_for_token(&token1), Some(code.as_str()));
         assert_eq!(mgr.game_for_token(&token2), Some(code.as_str()));
+        assert!(mgr.reconnect.is_disconnected(&code, PlayerId(0)));
+        assert!(mgr.reconnect.is_disconnected(&code, PlayerId(1)));
 
-        let removed = mgr.remove_game(&code);
-        assert!(removed.is_some());
+        assert!(mgr.remove_game(&code));
 
-        // After removal, the session and both token-index entries are gone —
-        // no orphaned mappings linger in token_to_game.
-        assert!(!mgr.sessions.contains_key(&code));
+        // After removal, the session, both token-index entries and both
+        // per-seat reconnect entries are gone — no orphaned mappings linger.
+        assert!(!mgr.contains_game(&code));
         assert_eq!(mgr.game_for_token(&token1), None);
         assert_eq!(mgr.game_for_token(&token2), None);
+        assert!(!mgr.reconnect.is_disconnected(&code, PlayerId(0)));
+        assert!(!mgr.reconnect.is_disconnected(&code, PlayerId(1)));
+
+        // The untouched second game keeps everything the erase must not reach.
+        assert!(mgr.contains_game(&other_code));
+        assert_eq!(mgr.game_for_token(&other_token), Some(other_code.as_str()));
+        assert!(mgr.reconnect.is_disconnected(&other_code, PlayerId(0)));
     }
 
     #[test]
-    fn remove_nonexistent_game_returns_none() {
+    fn remove_nonexistent_game_reports_no_entry() {
         let mut mgr = SessionManager::new();
-        assert!(mgr.remove_game("NOPE00").is_none());
+        assert!(!mgr.remove_game("NOPE00"));
+    }
+
+    /// The creation-window bypass answers `Some` only while the manager is the
+    /// sole owner; the `None` leg is the direction production must never reach.
+    #[test]
+    fn session_exclusive_refuses_while_a_handle_is_outstanding() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+
+        assert!(mgr.session_exclusive(&code).is_some());
+
+        let handle = mgr.session(&code).expect("the game exists");
+        assert!(mgr.session_exclusive(&code).is_none());
+        drop(handle);
+        assert!(mgr.session_exclusive(&code).is_some());
+    }
+
+    #[test]
+    fn try_session_is_none_while_contended_and_some_when_idle() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+
+        assert!(mgr.try_session(&code).is_some());
+        assert!(mgr.try_session("NOPE00").is_none());
+
+        let handle = mgr.session(&code).expect("the game exists");
+        let held = handle.try_lock().expect("uncontended");
+        assert!(mgr.try_session(&code).is_none());
+        drop(held);
+        assert!(mgr.try_session(&code).is_some());
+    }
+
+    /// One game's held guard does not exclude another game, which is the whole
+    /// point of the retype.
+    #[test]
+    fn two_games_lock_independently() {
+        let mut mgr = SessionManager::new();
+        let (code_a, _) = mgr.create_game(make_deck(), None);
+        let (code_b, _) = mgr.create_game(make_deck(), None);
+
+        let handle_a = mgr.session(&code_a).expect("game a exists");
+        let held_a = handle_a.try_lock().expect("uncontended");
+        assert!(mgr.try_session(&code_b).is_some());
+        assert!(mgr.try_session(&code_a).is_none());
+        drop(held_a);
     }
 
     #[test]
     fn action_from_wrong_player_rejected() {
         let mut mgr = SessionManager::new();
-        let (code, token1) = mgr.create_game(make_deck());
-        let (token2, _) = mgr.join_game(&code, make_deck()).unwrap();
+        let (code, token1) = mgr.create_game(make_deck(), None);
+        let (token2, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
 
         // Determine which player has priority
-        let session = mgr.sessions.get(&code).unwrap();
+        let session = mgr.try_session(&code).unwrap();
         let acting = match &session.state.waiting_for {
             WaitingFor::Priority { player } => *player,
             // CR 103.5: simultaneous mulligan — pick the first pending player
@@ -2852,40 +3893,32 @@ mod tests {
             &token1
         };
 
-        let result = mgr.handle_action(&code, wrong_token, GameAction::PassPriority);
+        drop(session);
+        let result = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action(wrong_token, GameAction::PassPriority);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn open_games_lists_waiting_sessions() {
-        let mut mgr = SessionManager::new();
-        let (code1, _) = mgr.create_game(make_deck());
-        let (code2, _) = mgr.create_game(make_deck());
-        let _ = mgr.join_game(&code1, make_deck());
-
-        let open = mgr.open_games();
-        assert_eq!(open.len(), 1);
-        assert!(open.contains(&code2));
     }
 
     #[test]
     fn disconnect_and_reconnect_works() {
         let mut mgr = SessionManager::new();
-        let (code, token1) = mgr.create_game(make_deck());
-        let _ = mgr.join_game(&code, make_deck()).unwrap();
+        let (code, token1) = mgr.create_game(make_deck(), None);
+        let _ = join_game(&mut mgr, &code, make_deck(), None).unwrap();
 
-        mgr.handle_disconnect(&code, PlayerId(0));
-        let result = mgr.handle_reconnect(&code, &token1);
+        handle_disconnect(&mut mgr, &code, PlayerId(0));
+        let result = handle_reconnect(&mut mgr, &code, &token1);
         assert!(result.is_ok());
     }
 
     #[test]
     fn reconnect_restores_between_games_waiting_state() {
         let mut mgr = SessionManager::new();
-        let (code, token0) = mgr.create_game(make_deck());
-        let _ = mgr.join_game(&code, make_deck()).unwrap();
+        let (code, token0) = mgr.create_game(make_deck(), None);
+        let _ = join_game(&mut mgr, &code, make_deck(), None).unwrap();
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         session.state.match_phase = engine::types::match_config::MatchPhase::BetweenGames;
         session.state.waiting_for = WaitingFor::BetweenGamesSideboard {
             player: PlayerId(0),
@@ -2899,8 +3932,9 @@ mod tests {
             max_sideboard_size: None,
         };
 
-        mgr.handle_disconnect(&code, PlayerId(0));
-        let filtered = mgr.handle_reconnect(&code, &token0).unwrap();
+        drop(session);
+        handle_disconnect(&mut mgr, &code, PlayerId(0));
+        let filtered = handle_reconnect(&mut mgr, &code, &token0).unwrap();
         assert!(matches!(
             filtered.waiting_for,
             WaitingFor::BetweenGamesSideboard {
@@ -2919,6 +3953,71 @@ mod tests {
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
     }
 
+    /// The minted shape and the requestable shape are one shape: a minted code
+    /// always passes the guard a requested one must pass.
+    #[test]
+    fn every_generated_code_is_a_valid_requested_code() {
+        for _ in 0..256 {
+            let code = generate_game_code();
+            assert_eq!(
+                lobby_broker::validation::validate_requested_game_code(&code),
+                Ok(()),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn game_code_generation_skips_a_live_session_code() {
+        let mut mgr = SessionManager::new();
+        let (occupied_code, _) = mgr.create_game(make_deck(), None);
+        let mut attempts = [occupied_code.clone(), "ZZZZZZ".to_string()].into_iter();
+
+        let generated = mgr.generate_available_game_code(|| {
+            attempts
+                .next()
+                .expect("test generator should provide a free code")
+        });
+
+        assert_eq!(generated, "ZZZZZZ");
+        assert!(mgr.sessions.contains_key(&occupied_code));
+    }
+
+    #[test]
+    fn create_game_path_skips_occupied_code_before_inserting_session() {
+        let mut mgr = SessionManager::new();
+        let (occupied_code, original_token) = mgr.create_game(make_deck(), None);
+        let mut attempts = [occupied_code.clone(), "ZZZZZZ".to_string()].into_iter();
+
+        let (new_code, new_token) = mgr
+            .create_game_n_players_with_generator(
+                make_deck(),
+                None,
+                String::new(),
+                None,
+                2,
+                MatchConfig::default(),
+                None,
+                None,
+                || {
+                    attempts
+                        .next()
+                        .expect("test generator should provide a free code")
+                },
+            )
+            .expect("the production creation path should retry an occupied code");
+
+        assert_eq!(new_code, "ZZZZZZ");
+        assert_ne!(new_code, occupied_code);
+        assert!(mgr.sessions.contains_key(&occupied_code));
+        assert!(mgr.sessions.contains_key(&new_code));
+        assert_eq!(
+            mgr.game_for_token(&original_token),
+            Some(occupied_code.as_str())
+        );
+        assert_eq!(mgr.game_for_token(&new_token), Some(new_code.as_str()));
+    }
+
     #[test]
     fn player_token_is_hex() {
         let token = generate_player_token();
@@ -2929,15 +4028,61 @@ mod tests {
     // have Priority-phase waiting state. Returns (mgr, code, token0, token1).
     fn setup_two_player_game() -> (SessionManager, String, String, String) {
         let mut mgr = SessionManager::new();
-        let (code, token0) = mgr.create_game(make_deck());
-        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
-        // Advance through mulligan decisions until both players have kept hands.
-        // We loop at most 20 times to avoid infinite loops in unexpected states.
+        let (code, token0) = mgr.create_game(make_deck(), None);
+        let (token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        keep_opening_hands(&mgr, &code, &[token0.clone(), token1.clone()]);
+        (mgr, code, token0, token1)
+    }
+
+    /// Advance through mulligan decisions until every player has kept a hand.
+    /// `tokens` is indexed by seat. We loop at most 20 times to avoid infinite
+    /// loops in unexpected states.
+    fn keep_opening_hands(mgr: &SessionManager, code: &str, tokens: &[String]) {
         for _ in 0..20 {
-            let session = mgr.sessions.get(&code).unwrap();
+            let session = mgr.try_session(code).unwrap();
             match &session.state.waiting_for.clone() {
                 // CR 103.5: simultaneous mulligan — submit a Keep for each
                 // pending player using their own token.
+                WaitingFor::MulliganDecision { pending, .. } => {
+                    drop(session);
+                    for entry in pending {
+                        let _ = mgr.try_session(code).unwrap().handle_action(
+                            &tokens[usize::from(entry.player.0)],
+                            GameAction::MulliganDecision {
+                                choice: engine::types::actions::MulliganChoice::Keep,
+                            },
+                        );
+                    }
+                }
+                WaitingFor::Priority { .. } => break,
+                _ => break,
+            }
+        }
+    }
+
+    /// Proves a production mint point (`handle_action` ->
+    /// `handle_action_with_card_db_outcome`'s write hook) actually reaches a
+    /// real `GameFileCache`, not just that `write_game_log_entries` works in
+    /// isolation. Attaching the cache post-hoc on `setup_two_player_game`'s
+    /// manager would not do this: `GameSession.game_log` is copied from
+    /// `SessionManager.game_log` at session-creation time, so the cache must
+    /// be installed before `create_game`. This is also the exact wiring gap
+    /// (`GameCodeVisitor::record_debug` never captured the span field) that
+    /// the second review round caught — a test reaching the real hook is what
+    /// would have caught it directly.
+    #[test]
+    fn handle_action_hook_writes_real_events_stream_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let games_dir = dir.path().join("games");
+        std::fs::create_dir_all(&games_dir).unwrap();
+
+        let mut mgr = SessionManager::new();
+        mgr.game_log = std::sync::Arc::new(GameFileCache::new(games_dir.clone()));
+        let (code, token0) = mgr.create_game(make_deck(), None);
+        let (token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        for _ in 0..20 {
+            let session = mgr.try_session(&code).unwrap();
+            match &session.state.waiting_for.clone() {
                 WaitingFor::MulliganDecision { pending, .. } => {
                     for entry in pending {
                         let tok = if entry.player == PlayerId(0) {
@@ -2945,8 +4090,7 @@ mod tests {
                         } else {
                             token1.clone()
                         };
-                        let _ = mgr.handle_action(
-                            &code,
+                        let _ = mgr.try_session(&code).unwrap().handle_action(
                             &tok,
                             GameAction::MulliganDecision {
                                 choice: engine::types::actions::MulliganChoice::Keep,
@@ -2958,7 +4102,120 @@ mod tests {
                 _ => break,
             }
         }
-        (mgr, code, token0, token1)
+
+        let priority_player = match &mgr.try_session(&code).unwrap().state.waiting_for {
+            WaitingFor::Priority { player } => *player,
+            other => panic!("expected Priority, got {other:?}"),
+        };
+        let acting_token = if priority_player == PlayerId(0) {
+            &token0
+        } else {
+            &token1
+        };
+        let result = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action(acting_token, GameAction::PassPriority);
+        assert!(result.is_ok(), "PassPriority should succeed: {result:?}");
+
+        let events_path = games_dir.join(format!("{code}.events.jsonl"));
+        let content = std::fs::read_to_string(&events_path)
+            .expect("a real production action hook must have written the events stream file");
+        assert!(
+            !content.trim().is_empty(),
+            "events stream file exists but is empty"
+        );
+        let row: serde_json::Value = serde_json::from_str(content.lines().next().unwrap())
+            .expect("each row must be valid JSON");
+        assert!(
+            row.get("category").is_some(),
+            "row must carry the engine's LogCategory field: {row}"
+        );
+        assert!(row.get("ts").is_some(), "row must carry a ts field: {row}");
+    }
+
+    /// Proves `GameSession::start_game`'s write hook is reachable, not just
+    /// present in source — `create_game_n_players`/`join_game` never call
+    /// `start_game` (see `handle_action_hook_writes_real_events_stream_file`'s
+    /// doc comment), so `create_game_with_ai` is the only `SessionManager`
+    /// path that reaches it, mirroring `takeback_auto_approves_for_sole_human_seat`'s setup.
+    #[test]
+    fn start_game_hook_writes_real_events_stream_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let games_dir = dir.path().join("games");
+        std::fs::create_dir_all(&games_dir).unwrap();
+
+        let mut mgr = SessionManager::new();
+        mgr.game_log = std::sync::Arc::new(GameFileCache::new(games_dir.clone()));
+        let db = Arc::new(engine::database::CardDatabase::default());
+        let (code, _token) = mgr
+            .create_game_with_ai(
+                make_deck(),
+                DeckChoice::Random,
+                "Host".to_string(),
+                None,
+                MatchConfig::default(),
+                vec![ai_setup(1, AiDifficulty::Easy, make_deck())],
+                Vec::new(),
+                None,
+                &db,
+            )
+            .expect("supported format config");
+
+        let events_path = games_dir.join(format!("{code}.events.jsonl"));
+        let content = std::fs::read_to_string(&events_path)
+            .expect("start_game's write hook must have written the events stream file");
+        assert!(
+            !content.trim().is_empty(),
+            "events stream file exists but is empty"
+        );
+    }
+
+    /// Maintainer review finding on PR #8245: `GameFileCache` cached a
+    /// writer for every game it ever logged and never released it —
+    /// `GameFileCache::close` existed, but nothing called it from
+    /// `SessionManager::remove_game`, so every removal path (game-over,
+    /// restored-terminal cleanup, reconnect-grace expiry) leaked the cached
+    /// `BufWriter`/file handle for the process lifetime. This setup has no
+    /// tracing span at all (server-core doesn't do tracing) — deliberately
+    /// exercising the "no active `game_session` span" removal shape the
+    /// finding named, where `GameFileLayer::on_close` (the OTHER eviction
+    /// path, span-teardown-triggered) never fires.
+    #[test]
+    fn remove_game_evicts_cached_log_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let games_dir = dir.path().join("games");
+        std::fs::create_dir_all(&games_dir).unwrap();
+
+        let mut mgr = SessionManager::new();
+        mgr.game_log = std::sync::Arc::new(GameFileCache::new(games_dir));
+        let db = Arc::new(engine::database::CardDatabase::default());
+        let (code, _token) = mgr
+            .create_game_with_ai(
+                make_deck(),
+                DeckChoice::Random,
+                "Host".to_string(),
+                None,
+                MatchConfig::default(),
+                vec![ai_setup(1, AiDifficulty::Easy, make_deck())],
+                Vec::new(),
+                None,
+                &db,
+            )
+            .expect("supported format config");
+
+        assert!(
+            mgr.game_log.cached_entry_count() > 0,
+            "start_game's write hook should have opened and cached a writer"
+        );
+
+        mgr.remove_game(&code);
+
+        assert_eq!(
+            mgr.game_log.cached_entry_count(),
+            0,
+            "remove_game must evict this game's cached writers, not just the session"
+        );
     }
 
     /// `SetPhaseStops` is keyed to the authenticated player and delegated to the
@@ -2967,9 +4224,9 @@ mod tests {
     /// `SetPriorityYield` delegate precedent.
     #[test]
     fn set_phase_stops_lands_on_authenticated_players_entry() {
-        let (mut mgr, code, token0, token1) = setup_two_player_game();
+        let (mgr, code, token0, token1) = setup_two_player_game();
 
-        let priority_player = match &mgr.sessions.get(&code).unwrap().state.waiting_for {
+        let priority_player = match &mgr.try_session(&code).unwrap().state.waiting_for {
             WaitingFor::Priority { player } => *player,
             other => panic!("expected Priority, got {:?}", other),
         };
@@ -2984,8 +4241,7 @@ mod tests {
             phase: Phase::DeclareBlockers,
             scope: PhaseStopScope::OpponentsTurns,
         }];
-        let result = mgr.handle_action(
-            &code,
+        let result = mgr.try_session(&code).unwrap().handle_action(
             &non_priority_token,
             GameAction::SetPhaseStops {
                 stops: stops.clone(),
@@ -2997,7 +4253,7 @@ mod tests {
             result.err()
         );
 
-        let state = &mgr.sessions.get(&code).unwrap().state;
+        let state = &mgr.try_session(&code).unwrap().state;
         assert_eq!(
             state.phase_stops.get(&non_priority_player),
             Some(&stops),
@@ -3020,8 +4276,8 @@ mod tests {
         use engine::types::game_state::PriorityPassingMode;
         use engine::types::identifiers::CardId;
 
-        let (mut mgr, code, token0, _token1) = setup_two_player_game();
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let (mgr, code, token0, _token1) = setup_two_player_game();
+        let mut session = mgr.try_session(&code).unwrap();
         session.state.active_player = PlayerId(0);
         session.state.priority_player = PlayerId(0);
         session.state.phase = Phase::End;
@@ -3047,11 +4303,13 @@ mod tests {
         let waiting_before = session.state.waiting_for.clone();
         let stack_before = session.state.stack.clone();
         let pass_before = session.state.priority_passes.clone();
-        let history_before = session.takeback_history.len();
+        let history_before = session.takeback.history().len();
 
+        drop(session);
         let (_, events, _, logs, standard, _, _) = mgr
+            .try_session(&code)
+            .unwrap()
             .handle_action(
-                &code,
                 &token0,
                 GameAction::SetPriorityPassingMode {
                     mode: PriorityPassingMode::Standard,
@@ -3062,8 +4320,9 @@ mod tests {
         assert!(events.is_empty() && logs.is_empty());
 
         let (_, events, _, logs, skips_low_use_window, _, _) = mgr
+            .try_session(&code)
+            .unwrap()
             .handle_action(
-                &code,
                 &token0,
                 GameAction::SetPriorityPassingMode {
                     mode: PriorityPassingMode::SkipLowUseWindows,
@@ -3076,17 +4335,14 @@ mod tests {
         );
         assert!(events.is_empty() && logs.is_empty());
         assert_eq!(
-            mgr.sessions
-                .get(&code)
-                .unwrap()
-                .state
-                .priority_passing_modes,
+            mgr.try_session(&code).unwrap().state.priority_passing_modes,
             HashMap::from([(PlayerId(0), PriorityPassingMode::SkipLowUseWindows)])
         );
 
         let (_, _, _, _, standard_again, _, _) = mgr
+            .try_session(&code)
+            .unwrap()
             .handle_action(
-                &code,
                 &token0,
                 GameAction::SetPriorityPassingMode {
                     mode: PriorityPassingMode::Standard,
@@ -3094,25 +4350,25 @@ mod tests {
             )
             .expect("return to sparse Standard");
         assert!(!standard_again);
-        let session = mgr.sessions.get(&code).unwrap();
+        let session = mgr.try_session(&code).unwrap();
         assert!(session.state.priority_passing_modes.is_empty());
         assert_eq!(session.state.waiting_for, waiting_before);
         assert_eq!(session.state.stack, stack_before);
         assert_eq!(session.state.priority_passes, pass_before);
-        assert_eq!(session.takeback_history.len(), history_before);
+        assert_eq!(session.takeback.history().len(), history_before);
     }
 
     /// `ReorderHand` succeeds even when the sender is not the priority holder.
     /// The hand is reordered to the requested permutation.
     #[test]
     fn reorder_hand_succeeds_while_opponent_has_priority() {
-        let (mut mgr, code, token0, token1) = setup_two_player_game();
-        let history_before = mgr.sessions.get(&code).unwrap().takeback_history.len();
+        let (mgr, code, token0, token1) = setup_two_player_game();
+        let history_before = mgr.try_session(&code).unwrap().takeback.history().len();
 
         // Determine which player has priority; inject two ObjectIds into the
         // *other* player's hand so we can test off-priority reordering.
         let (priority_player, off_priority_token, off_priority_id) = {
-            let session = mgr.sessions.get(&code).unwrap();
+            let session = mgr.try_session(&code).unwrap();
             match &session.state.waiting_for {
                 WaitingFor::Priority { player } if *player == PlayerId(0) => {
                     (PlayerId(0), token1.clone(), 1usize)
@@ -3126,13 +4382,12 @@ mod tests {
         let id_a = ObjectId(900);
         let id_b = ObjectId(901);
         {
-            let session = mgr.sessions.get_mut(&code).unwrap();
+            let mut session = mgr.try_session(&code).unwrap();
             session.state.players[off_priority_id].hand = engine::im::vector![id_a, id_b];
         }
 
         // Request reverse order [b, a].
-        let result = mgr.handle_action(
-            &code,
+        let result = mgr.try_session(&code).unwrap().handle_action(
             &off_priority_token,
             GameAction::ReorderHand {
                 order: vec![id_b, id_a],
@@ -3144,7 +4399,7 @@ mod tests {
             result.err()
         );
 
-        let session = mgr.sessions.get(&code).unwrap();
+        let session = mgr.try_session(&code).unwrap();
         let hand: Vec<ObjectId> = session.state.players[off_priority_id]
             .hand
             .iter()
@@ -3152,7 +4407,7 @@ mod tests {
             .collect();
         assert_eq!(hand, vec![id_b, id_a]);
         assert_eq!(
-            session.takeback_history.len(),
+            session.takeback.history().len(),
             history_before,
             "a cosmetic hand reorder must not create a takeback checkpoint"
         );
@@ -3162,10 +4417,10 @@ mod tests {
     /// engine-owned validation path and leaves the hand unchanged.
     #[test]
     fn reorder_hand_invalid_permutation_is_rejected() {
-        let (mut mgr, code, token0, token1) = setup_two_player_game();
+        let (mgr, code, token0, token1) = setup_two_player_game();
 
         let (off_priority_token, off_priority_id) = {
-            let session = mgr.sessions.get(&code).unwrap();
+            let session = mgr.try_session(&code).unwrap();
             match &session.state.waiting_for {
                 WaitingFor::Priority { player } if *player == PlayerId(0) => {
                     (token1.clone(), 1usize)
@@ -3178,14 +4433,13 @@ mod tests {
         let id_b = ObjectId(903);
         let id_bogus = ObjectId(999);
         {
-            let session = mgr.sessions.get_mut(&code).unwrap();
+            let mut session = mgr.try_session(&code).unwrap();
             session.state.players[off_priority_id].hand = engine::im::vector![id_a, id_b];
         }
-        let history_before = mgr.sessions.get(&code).unwrap().takeback_history.len();
+        let history_before = mgr.try_session(&code).unwrap().takeback.history().len();
 
         // Send [a, bogus] — not a permutation of [a, b].
-        let result = mgr.handle_action(
-            &code,
+        let result = mgr.try_session(&code).unwrap().handle_action(
             &off_priority_token,
             GameAction::ReorderHand {
                 order: vec![id_a, id_bogus],
@@ -3193,7 +4447,7 @@ mod tests {
         );
         // Should return an error from the engine-owned permutation validator.
         assert!(result.is_err(), "Invalid ReorderHand should be rejected");
-        let session = mgr.sessions.get(&code).unwrap();
+        let session = mgr.try_session(&code).unwrap();
         let hand: Vec<ObjectId> = session.state.players[off_priority_id]
             .hand
             .iter()
@@ -3205,7 +4459,7 @@ mod tests {
             "Hand should be unchanged after invalid reorder"
         );
         assert_eq!(
-            session.takeback_history.len(),
+            session.takeback.history().len(),
             history_before,
             "a rejected engine action must not create a takeback checkpoint"
         );
@@ -3214,7 +4468,7 @@ mod tests {
     /// Manual payment remains accepted and reaches the engine unchanged.
     #[test]
     fn engine_apply_accepts_manual_payment_mode_casts() {
-        let (mut mgr, code, token0, _token1) = setup_two_player_game();
+        let (mgr, code, token0, _token1) = setup_two_player_game();
 
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
@@ -3225,11 +4479,11 @@ mod tests {
         let runner = scenario.build();
         let card_id = runner.state().objects[&spell].card_id;
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         session.state = runner.state().clone();
 
-        let result = mgr.handle_action(
-            &code,
+        drop(session);
+        let result = mgr.try_session(&code).unwrap().handle_action(
             &token0,
             GameAction::CastSpell {
                 object_id: spell,
@@ -3244,8 +4498,7 @@ mod tests {
             result.err()
         );
         assert_eq!(
-            mgr.sessions
-                .get(&code)
+            mgr.try_session(&code)
                 .unwrap()
                 .state
                 .pending_cast
@@ -3258,15 +4511,19 @@ mod tests {
 
     // ── Takeback tests (GH #1507) ────────────────────────────────────────
 
-    use crate::takeback::{RewindOption, RewindTarget, TakebackOutcome, MAX_TAKEBACK_HISTORY};
+    use crate::takeback::{
+        RewindOption, RewindTarget, TakebackOutcome, TakebackResolution, MAX_TAKEBACK_HISTORY,
+    };
 
     fn precast_offer_runner() -> (GameRunner, u64) {
         const CHAIN_OF_SMOG: &str = "Target player discards two cards. That player may copy this spell and may choose a new target for that copy.";
-        let db = CardDatabase::from_mtgjson(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../data/mtgjson/test_fixture.json"),
-        )
-        .expect("parser fixture must contain Witherbloom Apprentice");
+        let db = Arc::new(
+            CardDatabase::from_mtgjson(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../data/mtgjson/test_fixture.json"),
+            )
+            .expect("parser fixture must contain Witherbloom Apprentice"),
+        );
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         scenario.add_real_card(P0, "Witherbloom Apprentice", Zone::Battlefield, &db);
@@ -3299,9 +4556,9 @@ mod tests {
     /// approves, then the rolled-back state matches the pre-action snapshot.
     #[test]
     fn takeback_requires_unanimous_human_approval() {
-        let (mut mgr, code, token0, token1) = setup_two_player_game();
+        let (mgr, code, token0, token1) = setup_two_player_game();
 
-        let priority_player = match &mgr.sessions.get(&code).unwrap().state.waiting_for {
+        let priority_player = match &mgr.try_session(&code).unwrap().state.waiting_for {
             WaitingFor::Priority { player } => *player,
             other => panic!("expected Priority, got {:?}", other),
         };
@@ -3311,20 +4568,25 @@ mod tests {
             (token1.clone(), PlayerId(0))
         };
 
-        let state_before = mgr.sessions.get(&code).unwrap().state.clone();
-        let result = mgr.handle_action(&code, &acting_token, GameAction::PassPriority);
+        let state_before = mgr.try_session(&code).unwrap().state.clone();
+        let result = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action(&acting_token, GameAction::PassPriority);
         assert!(
             result.is_ok(),
             "PassPriority should succeed: {:?}",
             result.err()
         );
         assert_ne!(
-            mgr.sessions.get(&code).unwrap().state.waiting_for,
+            mgr.try_session(&code).unwrap().state.waiting_for,
             state_before.waiting_for,
             "sanity: the action should have actually changed turn state"
         );
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
+        let replaced_revision = session.state.state_revision;
+        assert!(state_before.state_revision < replaced_revision);
         let outcome = session
             .request_takeback(priority_player, RewindTarget::LastAction)
             .unwrap();
@@ -3336,12 +4598,264 @@ mod tests {
             .is_err());
 
         let outcome = session.respond_takeback(other_player, true).unwrap();
-        assert_eq!(outcome, TakebackOutcome::Approved);
+        assert_eq!(
+            outcome,
+            TakebackOutcome::Resolved(TakebackResolution::Approved)
+        );
+        assert!(session.state.state_revision > replaced_revision);
         assert_eq!(
             session.state.waiting_for, state_before.waiting_for,
             "approved takeback should restore the pre-action waiting_for"
         );
-        assert!(session.pending_takeback.is_none());
+        assert!(!session.takeback.is_pending());
+    }
+
+    /// CR 602.2b + CR 601.2h: an activation reversed at its cost election is not
+    /// a takeback point. The session's newest takeback entry stays the state
+    /// from before the activation — which the reversal restored — so "undo my
+    /// last action" can never jump back into the dead prompt.
+    #[test]
+    fn a_reversed_activation_records_no_takeback_point() {
+        use engine::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr,
+            StaticDefinition, TargetFilter, TypedFilter,
+        };
+        use engine::types::mana::{ManaType, ManaUnit};
+        use engine::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
+
+        let reducer = |amount: u32, minimum_mana: Option<u32>| {
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
+                keyword: "activated".to_string(),
+                amount,
+                minimum_mana,
+                dynamic_count: None,
+                exemption: ActivationExemption::None,
+                activator: None,
+                targets: None,
+                frequency: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+        };
+        // −2 (floor two) then −3 on {5} locks {0}; the reverse locks {2}, which
+        // one floating mana cannot pay.
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario
+            .add_creature(P0, "Floored reducer", 1, 1)
+            .with_static_definition(reducer(2, Some(2)));
+        scenario
+            .add_creature(P0, "Unfloored reducer", 1, 1)
+            .with_static_definition(reducer(3, None));
+        let source = scenario
+            .add_creature(P0, "Activator", 2, 2)
+            .with_ability_definition(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )
+                .cost(AbilityCost::Mana {
+                    cost: ManaCost::generic(5),
+                }),
+            )
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )],
+        );
+        let runner = scenario.build();
+
+        let (mgr, code, token0, _token1) = setup_two_player_game();
+        let mut session = mgr.try_session(&code).unwrap();
+        session.state = runner.state().clone();
+        let ability_index = session.state.objects[&source]
+            .abilities
+            .iter()
+            .position(|a| matches!(a.kind, AbilityKind::Activated))
+            .unwrap();
+
+        session
+            .handle_action(
+                &token0,
+                GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index,
+                    payment_mode: CastPaymentMode::Auto,
+                },
+            )
+            .expect("the activation reaches its election");
+        let costly = match &session.state.waiting_for {
+            WaitingFor::OrderCostReductions { outcomes, .. } => {
+                assert_eq!(outcomes.len(), 2, "the order must be observable");
+                outcomes[1].order.clone()
+            }
+            other => panic!("expected the cost election, got {other:?}"),
+        };
+        let depth_at_prompt = session.takeback.history().len();
+        let pre_activation = session
+            .takeback
+            .history()
+            .next_back()
+            .map(|(_, state)| state.clone())
+            .expect("the activation itself is a takeback point");
+
+        session
+            .handle_action(
+                &token0,
+                GameAction::OrderCostReductions {
+                    order: costly,
+                    hybrid_announcement: Vec::new(),
+                },
+            )
+            .expect("a legal election is not an error");
+        assert!(
+            matches!(session.state.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "the unpayable election reversed the activation, got {:?}",
+            session.state.waiting_for
+        );
+        assert!(session.state.stack.is_empty(), "nothing reached the stack");
+        assert_eq!(
+            session.takeback.history().len(),
+            depth_at_prompt,
+            "a reversal must not add a takeback point"
+        );
+        assert_eq!(
+            session
+                .takeback
+                .history()
+                .next_back()
+                .map(|(_, state)| state),
+            Some(&pre_activation),
+            "the newest takeback point is still the pre-activation state"
+        );
+    }
+
+    /// A contest's identity must survive a takeback of a COMPLETED contest: a click frame
+    /// stamped for the discarded branch's contest must not count in the replayed one.
+    /// A takeback continues the state revision, so the replay already differs by revision;
+    /// the session term the identity also hashes is pinned on its own, at an equal revision,
+    /// by `contest_identity_separates_equal_revisions_by_interaction_session` (V13).
+    /// The restore rotates the
+    /// interaction session, and the identity is bound to it.
+    #[test]
+    fn a_contest_replayed_after_a_takeback_has_a_new_identity_and_rejects_the_old_frame() {
+        use engine::game::contest::{cancel_contest, contest_click, start_contest};
+        use engine::types::contest::{
+            ClickDisposition, ClickRejection, ContestCancelReason, ContestConfig,
+        };
+
+        const EYE_TO_EYE: &str = "You and target creature's controller have a staring contest. If you win, destroy that creature.";
+        let (mgr, code, _token0, _token1) = setup_two_player_game();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario.add_vanilla(P1, 2, 2);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Eye to Eye", true, EYE_TO_EYE)
+            .id();
+        let mut session = mgr.try_session(&code).unwrap();
+        session.state = scenario.build().state().clone();
+        bind_fresh_interaction_session(&mut session.state, &code);
+        session.push_takeback_snapshot(P0);
+
+        let cast_into_contest = |session: &mut GameSession| {
+            let mut runner = GameRunner::from_state(session.state.clone());
+            runner.cast(spell).target_objects(&[victim]).resolve();
+            session.state = runner.state().clone();
+            match &session.state.waiting_for {
+                WaitingFor::PhysicalContest { contest, .. } => contest.id,
+                other => panic!("the cast must park the game on the contest, got {other:?}"),
+            }
+        };
+        let first = cast_into_contest(&mut session);
+        // A running contest refuses a takeback, so the contest completes first (the case
+        // this guards is undoing one that already has).
+        let mut events = Vec::new();
+        cancel_contest(
+            &mut session.state,
+            ContestCancelReason::HostAborted,
+            0,
+            &mut events,
+        );
+        assert!(
+            !matches!(
+                session.state.waiting_for,
+                WaitingFor::PhysicalContest { .. }
+            ),
+            "reach guard: the contest completed"
+        );
+
+        assert_eq!(
+            session.request_takeback(P0, RewindTarget::LastAction),
+            Ok(TakebackOutcome::Pending)
+        );
+        assert_eq!(
+            session.respond_takeback(P1, true),
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
+        );
+        assert!(
+            !matches!(
+                session.state.waiting_for,
+                WaitingFor::PhysicalContest { .. }
+            ),
+            "reach guard: the takeback undid the cast that started the contest"
+        );
+        let second = cast_into_contest(&mut session);
+
+        assert_ne!(
+            first, second,
+            "a replayed contest must not reuse the old identity"
+        );
+        start_contest(&mut session.state, ContestConfig::default(), 0, &mut events);
+        // Past the countdown the contest is Active, and only the new identity counts.
+        let go = ContestConfig::default().countdown_ms;
+        let (stale, _) = contest_click(&mut session.state, first, P0, 1, go + 10, &mut events);
+        assert_eq!(
+            stale,
+            ClickDisposition::Rejected(ClickRejection::WrongContest),
+            "the frame stamped for the discarded branch's contest must not count"
+        );
+        let (current, _) = contest_click(&mut session.state, second, P0, 1, go + 20, &mut events);
+        assert_eq!(current, ClickDisposition::Counted);
+    }
+
+    #[test]
+    fn contest_identity_separates_equal_revisions_by_interaction_session() {
+        const EYE_TO_EYE: &str = "You and target creature's controller have a staring contest. If you win, destroy that creature.";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario.add_vanilla(P1, 2, 2);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Eye to Eye", true, EYE_TO_EYE)
+            .id();
+        let base = scenario.build().state().clone();
+        let mut first = base.clone();
+        let mut second = base;
+        bind_fresh_interaction_session(&mut first, "equal-revision");
+        bind_fresh_interaction_session(&mut second, "equal-revision");
+        assert_ne!(first.interaction_session_id, second.interaction_session_id);
+        assert_eq!(first.state_revision, second.state_revision);
+        let same_session = first.clone();
+        let cast_into_contest = |state| {
+            let mut runner = GameRunner::from_state(state);
+            runner.cast(spell).target_objects(&[victim]).resolve();
+            match &runner.state().waiting_for {
+                WaitingFor::PhysicalContest { contest, .. } => contest.id,
+                other => panic!("the cast must park the game on the contest, got {other:?}"),
+            }
+        };
+        let first_id = cast_into_contest(first);
+        assert_ne!(first_id, cast_into_contest(second));
+        assert_eq!(first_id, cast_into_contest(same_session));
     }
 
     /// A takeback restores a live shortcut offer through the same rekeying
@@ -3349,9 +4863,9 @@ mod tests {
     /// usable after the approved rollback.
     #[test]
     fn approved_takeback_rekeys_precast_shortcut_capabilities() {
-        let (mut mgr, code, _token0, _token1) = setup_two_player_game();
+        let (mgr, code, _token0, _token1) = setup_two_player_game();
         let (runner, stale_epoch) = precast_offer_runner();
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         session.state = runner.state().clone();
         session.push_takeback_snapshot(P0);
         apply(
@@ -3370,7 +4884,7 @@ mod tests {
         );
         assert_eq!(
             session.respond_takeback(P1, true),
-            Ok(TakebackOutcome::Approved)
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
         );
         let fresh_epoch = match &session.state.waiting_for {
             WaitingFor::PrecastCopyShortcutOffer { epoch, .. } => *epoch,
@@ -3388,6 +4902,158 @@ mod tests {
         .is_err());
     }
 
+    /// An approved rollback must rotate the interaction namespace as well as
+    /// the precast epoch. Replaying the same action after rollback must mint a
+    /// fresh successor id, so a response captured from the abandoned branch is
+    /// rejected instead of being accepted on the new timeline.
+    #[test]
+    fn approved_takeback_rekeys_all_interaction_capabilities() {
+        let (mgr, code, token0, token1) = started_two_seat_game();
+        let (first_player, first_token, _, first_submission) =
+            live_witness(&mgr, &code, &token0, &token1);
+        let original_session = mgr
+            .try_session(&code)
+            .unwrap()
+            .state
+            .interaction_session_id
+            .clone();
+
+        mgr.try_session(&code)
+            .unwrap()
+            .handle_interaction(first_token, first_submission)
+            .expect("the first live capability must be accepted");
+        let (second_player, second_token, _, stale_submission) =
+            live_witness(&mgr, &code, &token0, &token1);
+        let stale_id = stale_submission.interaction_id.clone();
+        let approving_player = if first_player == P0 { P1 } else { P0 };
+
+        let mut session = mgr.try_session(&code).unwrap();
+        assert_eq!(
+            session.request_takeback(first_player, RewindTarget::LastAction),
+            Ok(TakebackOutcome::Pending)
+        );
+        assert_eq!(
+            session.respond_takeback(approving_player, true),
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
+        );
+        assert_ne!(
+            session.state.interaction_session_id, original_session,
+            "approved takeback must leave the abandoned interaction namespace"
+        );
+        drop(session);
+
+        let (fresh_first_player, fresh_first_token, _, fresh_first_submission) =
+            live_witness(&mgr, &code, &token0, &token1);
+        assert_eq!(
+            fresh_first_player, first_player,
+            "rollback must restore the same semantic first decision"
+        );
+        mgr.try_session(&code)
+            .unwrap()
+            .handle_interaction(fresh_first_token, fresh_first_submission)
+            .expect("the replayed decision must accept its fresh capability");
+
+        let (fresh_second_player, _, _, fresh_second_submission) =
+            live_witness(&mgr, &code, &token0, &token1);
+        assert_eq!(
+            fresh_second_player, second_player,
+            "replaying the decision must reach the same semantic successor"
+        );
+        assert_ne!(
+            fresh_second_submission.interaction_id, stale_id,
+            "the replayed successor must not reuse an abandoned capability id"
+        );
+
+        let stale_error = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_interaction(second_token, stale_submission)
+            .expect_err("an abandoned-branch capability must be rejected");
+        assert_eq!(stale_error, "That interaction has already changed.");
+        mgr.try_session(&code)
+            .unwrap()
+            .handle_interaction(
+                if fresh_second_player == P0 {
+                    &token0
+                } else {
+                    &token1
+                },
+                fresh_second_submission,
+            )
+            .expect("the fresh successor capability must remain usable");
+    }
+
+    /// A persisted post-takeback state must keep the abandoned branch's
+    /// interaction namespace out of the restart path. Rebinding it to the
+    /// ordinary game code would reset generation/serial and recreate the
+    /// original capability captured before the rollback.
+    #[test]
+    fn persisted_takeback_restore_rekeys_abandoned_interaction_capabilities() {
+        let (mgr, code, token0, token1) = started_two_seat_game();
+        let (first_player, first_token, _, abandoned_submission) =
+            live_witness(&mgr, &code, &token0, &token1);
+        let abandoned_id = abandoned_submission.interaction_id.clone();
+        let approving_player = if first_player == P0 { P1 } else { P0 };
+
+        mgr.try_session(&code)
+            .unwrap()
+            .handle_interaction(first_token, abandoned_submission.clone())
+            .expect("the pre-takeback capability must be accepted once");
+
+        let mut session = mgr.try_session(&code).unwrap();
+        assert_eq!(
+            session.request_takeback(first_player, RewindTarget::LastAction),
+            Ok(TakebackOutcome::Pending)
+        );
+        assert_eq!(
+            session.respond_takeback(approving_player, true),
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
+        );
+        let takeback_session = session.state.interaction_session_id.clone();
+        assert!(
+            takeback_session
+                .as_ref()
+                .is_some_and(is_takeback_interaction_session),
+            "approved takeback must carry the server-owned lineage marker"
+        );
+        let persisted = session.to_persisted();
+        drop(session);
+
+        let db = Arc::new(CardDatabase::default());
+        let mut restored = GameSession::from_persisted(persisted, &db)
+            .expect("a started post-takeback snapshot must restore");
+        assert_ne!(
+            restored.state.interaction_session_id,
+            Some(InteractionSessionId(code.clone())),
+            "a takeback restore must not fall back to the ordinary game-code namespace"
+        );
+        assert_ne!(
+            restored.state.interaction_session_id, takeback_session,
+            "a restart must rotate the takeback namespace again"
+        );
+
+        let stale_error = restored
+            .handle_interaction(first_token, abandoned_submission)
+            .expect_err("the pre-takeback capability must stay stale after restart");
+        assert_eq!(stale_error, "That interaction has already changed.");
+
+        let filtered = filter_state_for_player(&restored.state, first_player);
+        let fresh_submission = match derive_viewer_interaction(
+            &restored.state,
+            &filtered,
+            first_player,
+        )
+        .availability
+        {
+            InteractionAvailability::ProgressAvailable { witness } => witness,
+            other => panic!("restored takeback state must publish a fresh witness, got {other:?}"),
+        };
+        assert_ne!(fresh_submission.interaction_id, abandoned_id);
+        restored
+            .handle_interaction(first_token, fresh_submission)
+            .expect("the fresh post-restart capability must remain usable");
+    }
+
     /// Existing server snapshots wrote a raw `GameState` at `state`. That
     /// untrusted representation has no private shortcut transcript, so it
     /// must deserialize and resume at ordinary priority rather than preserving
@@ -3396,7 +5062,7 @@ mod tests {
     fn persisted_session_restores_legacy_raw_state_and_current_trusted_envelope() {
         let (mgr, code, _token0, _token1) = setup_two_player_game();
         let (runner, stale_epoch) = precast_offer_runner();
-        let mut persisted = mgr.sessions[&code].to_persisted();
+        let mut persisted = mgr.try_session(&code).unwrap().to_persisted();
 
         let mut legacy_json = serde_json::to_value(&persisted)
             .expect("current persisted session serializes before compatibility rewrite");
@@ -3406,11 +5072,13 @@ mod tests {
             .expect("legacy raw persisted session remains decodable");
         assert!(matches!(&legacy.state, PersistedGameState::Raw(_)));
 
-        let db = CardDatabase::from_mtgjson(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../data/mtgjson/test_fixture.json"),
-        )
-        .expect("parser fixture must contain Witherbloom Apprentice");
+        let db = Arc::new(
+            CardDatabase::from_mtgjson(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../data/mtgjson/test_fixture.json"),
+            )
+            .expect("parser fixture must contain Witherbloom Apprentice"),
+        );
         let legacy_restored =
             GameSession::from_persisted(legacy, &db).expect("supported persisted format config");
         assert!(matches!(
@@ -3440,9 +5108,9 @@ mod tests {
     /// checkpoint and always restored the single most recent global entry.
     #[test]
     fn takeback_restores_requesters_own_action_not_latest_global_action() {
-        let (mut mgr, code, token0, token1) = setup_two_player_game();
+        let (mgr, code, token0, token1) = setup_two_player_game();
 
-        let priority_player = match &mgr.sessions.get(&code).unwrap().state.waiting_for {
+        let priority_player = match &mgr.try_session(&code).unwrap().state.waiting_for {
             WaitingFor::Priority { player } => *player,
             other => panic!("expected Priority, got {:?}", other),
         };
@@ -3452,27 +5120,33 @@ mod tests {
             (PlayerId(1), token1.clone(), PlayerId(0), token0.clone())
         };
 
-        let state_before_a = mgr.sessions.get(&code).unwrap().state.clone();
+        let state_before_a = mgr.try_session(&code).unwrap().state.clone();
 
-        let result = mgr.handle_action(&code, &token_a, GameAction::PassPriority);
+        let result = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action(&token_a, GameAction::PassPriority);
         assert!(
             result.is_ok(),
             "A's PassPriority should succeed: {:?}",
             result.err()
         );
-        let state_after_a = mgr.sessions.get(&code).unwrap().state.clone();
+        let state_after_a = mgr.try_session(&code).unwrap().state.clone();
         assert_ne!(
             state_after_a.waiting_for, state_before_a.waiting_for,
             "sanity: A's action should have changed turn state"
         );
 
-        let result = mgr.handle_action(&code, &token_b, GameAction::PassPriority);
+        let result = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action(&token_b, GameAction::PassPriority);
         assert!(
             result.is_ok(),
             "B's PassPriority should succeed: {:?}",
             result.err()
         );
-        let state_after_b = mgr.sessions.get(&code).unwrap().state.clone();
+        let state_after_b = mgr.try_session(&code).unwrap().state.clone();
         assert_ne!(
             state_after_b.waiting_for, state_after_a.waiting_for,
             "sanity: B's action should have changed turn state further"
@@ -3480,13 +5154,16 @@ mod tests {
 
         // A requests a takeback — must target the checkpoint before A's own
         // action, not the checkpoint before B's (more recent) action.
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         let outcome = session
             .request_takeback(player_a, RewindTarget::LastAction)
             .unwrap();
         assert_eq!(outcome, TakebackOutcome::Pending);
         let outcome = session.respond_takeback(player_b, true).unwrap();
-        assert_eq!(outcome, TakebackOutcome::Approved);
+        assert_eq!(
+            outcome,
+            TakebackOutcome::Resolved(TakebackResolution::Approved)
+        );
 
         assert_eq!(
             session.state.waiting_for, state_before_a.waiting_for,
@@ -3501,8 +5178,8 @@ mod tests {
     /// A single decline withdraws the request and leaves state untouched.
     #[test]
     fn takeback_decline_leaves_state_untouched() {
-        let (mut mgr, code, token0, token1) = setup_two_player_game();
-        let priority_player = match &mgr.sessions.get(&code).unwrap().state.waiting_for {
+        let (mgr, code, token0, token1) = setup_two_player_game();
+        let priority_player = match &mgr.try_session(&code).unwrap().state.waiting_for {
             WaitingFor::Priority { player } => *player,
             other => panic!("expected Priority, got {:?}", other),
         };
@@ -3512,16 +5189,22 @@ mod tests {
             (token1.clone(), PlayerId(0))
         };
 
-        let _ = mgr.handle_action(&code, &acting_token, GameAction::PassPriority);
-        let state_after_pass = mgr.sessions.get(&code).unwrap().state.clone();
+        let _ = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action(&acting_token, GameAction::PassPriority);
+        let state_after_pass = mgr.try_session(&code).unwrap().state.clone();
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         session
             .request_takeback(priority_player, RewindTarget::LastAction)
             .unwrap();
         let outcome = session.respond_takeback(other_player, false).unwrap();
-        assert_eq!(outcome, TakebackOutcome::Rejected);
-        assert!(session.pending_takeback.is_none());
+        assert_eq!(
+            outcome,
+            TakebackOutcome::Resolved(TakebackResolution::Declined)
+        );
+        assert!(!session.takeback.is_pending());
         assert_eq!(session.state.waiting_for, state_after_pass.waiting_for);
     }
 
@@ -3529,8 +5212,8 @@ mod tests {
     /// nobody else may cancel it.
     #[test]
     fn takeback_cancel_is_requester_only() {
-        let (mut mgr, code, token0, token1) = setup_two_player_game();
-        let priority_player = match &mgr.sessions.get(&code).unwrap().state.waiting_for {
+        let (mgr, code, token0, token1) = setup_two_player_game();
+        let priority_player = match &mgr.try_session(&code).unwrap().state.waiting_for {
             WaitingFor::Priority { player } => *player,
             other => panic!("expected Priority, got {:?}", other),
         };
@@ -3540,25 +5223,28 @@ mod tests {
             (token1.clone(), PlayerId(0))
         };
 
-        let _ = mgr.handle_action(&code, &acting_token, GameAction::PassPriority);
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let _ = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action(&acting_token, GameAction::PassPriority);
+        let mut session = mgr.try_session(&code).unwrap();
         session
             .request_takeback(priority_player, RewindTarget::LastAction)
             .unwrap();
 
         assert!(session.cancel_takeback(other_player).is_err());
-        assert!(session.pending_takeback.is_some());
+        assert!(session.takeback.is_pending());
 
         assert!(session.cancel_takeback(priority_player).is_ok());
-        assert!(session.pending_takeback.is_none());
+        assert!(!session.takeback.is_pending());
     }
 
     /// With no prior action, there is nothing to take back.
     #[test]
     fn takeback_with_no_history_is_rejected() {
-        let (mut mgr, code, token0, _token1) = setup_two_player_game();
+        let (mgr, code, token0, _token1) = setup_two_player_game();
         let _ = token0;
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         let player = match &session.state.waiting_for {
             WaitingFor::Priority { player } => *player,
             other => panic!("expected Priority, got {:?}", other),
@@ -3572,8 +5258,8 @@ mod tests {
     /// table can't race the vote.
     #[test]
     fn action_rejected_while_takeback_pending() {
-        let (mut mgr, code, token0, token1) = setup_two_player_game();
-        let priority_player = match &mgr.sessions.get(&code).unwrap().state.waiting_for {
+        let (mgr, code, token0, token1) = setup_two_player_game();
+        let priority_player = match &mgr.try_session(&code).unwrap().state.waiting_for {
             WaitingFor::Priority { player } => *player,
             other => panic!("expected Priority, got {:?}", other),
         };
@@ -3583,17 +5269,27 @@ mod tests {
             (token1.clone(), token0.clone())
         };
 
-        let _ = mgr.handle_action(&code, &acting_token, GameAction::PassPriority);
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let _ = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action(&acting_token, GameAction::PassPriority);
+        let mut session = mgr.try_session(&code).unwrap();
         session
             .request_takeback(priority_player, RewindTarget::LastAction)
             .unwrap();
 
-        let result = mgr.handle_action(&code, &other_token, GameAction::PassPriority);
-        assert!(
-            result.is_err(),
-            "action should be rejected while a takeback is pending"
-        );
+        drop(session);
+        let result = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(&other_token, GameAction::PassPriority, None)
+            .expect_err("action should be rejected while a takeback is pending");
+        assert!(matches!(
+            result,
+            SessionActionError::Rejected(rejection)
+                if rejection.code
+                    == engine::types::action_rejection::ActionRejectionCode::ActionNotAllowed
+        ));
     }
 
     /// A solo human vs. AI seats auto-resolves their own takeback request —
@@ -3601,28 +5297,32 @@ mod tests {
     #[test]
     fn takeback_auto_approves_for_sole_human_seat() {
         let mut mgr = SessionManager::new();
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let (code, _token) = mgr
             .create_game_with_ai(
                 make_deck(),
+                DeckChoice::Random,
                 "Host".to_string(),
                 None,
                 MatchConfig::default(),
-                vec![(1, AiDifficulty::Easy, make_deck())],
+                vec![ai_setup(1, AiDifficulty::Easy, make_deck())],
                 Vec::new(),
                 None,
                 &db,
             )
             .expect("supported format config");
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         // Force a known checkpoint to take back to, since the AI may have
         // already acted past mulligans by the time the game starts.
         session.push_takeback_snapshot(PlayerId(0));
         let outcome = session
             .request_takeback(PlayerId(0), RewindTarget::LastAction)
             .unwrap();
-        assert_eq!(outcome, TakebackOutcome::Approved);
+        assert_eq!(
+            outcome,
+            TakebackOutcome::Resolved(TakebackResolution::Approved)
+        );
     }
 
     /// `pending_takeback_message` is what a reconnecting socket replays to
@@ -3630,8 +5330,8 @@ mod tests {
     /// the requester's identity once a request exists.
     #[test]
     fn pending_takeback_message_reflects_request_state() {
-        let (mut mgr, code, token0, token1) = setup_two_player_game();
-        let priority_player = match &mgr.sessions.get(&code).unwrap().state.waiting_for {
+        let (mgr, code, token0, token1) = setup_two_player_game();
+        let priority_player = match &mgr.try_session(&code).unwrap().state.waiting_for {
             WaitingFor::Priority { player } => *player,
             other => panic!("expected Priority, got {:?}", other),
         };
@@ -3642,21 +5342,26 @@ mod tests {
         };
 
         assert!(mgr
-            .sessions
-            .get(&code)
+            .try_session(&code)
             .unwrap()
             .pending_takeback_message()
             .is_none());
 
-        let _ = mgr.handle_action(&code, acting_token, GameAction::PassPriority);
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let _ = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action(acting_token, GameAction::PassPriority);
+        let mut session = mgr.try_session(&code).unwrap();
         session
             .request_takeback(priority_player, RewindTarget::LastAction)
             .unwrap();
 
         match session.pending_takeback_message() {
-            Some(crate::protocol::ServerMessage::TakebackRequested { requester, .. }) => {
+            Some(crate::protocol::ServerMessage::TakebackRequested {
+                requester, voters, ..
+            }) => {
                 assert_eq!(requester, priority_player);
+                assert_eq!(voters, vec![PlayerId(1 - priority_player.0)]);
             }
             other => panic!("expected TakebackRequested, got {:?}", other),
         }
@@ -3669,7 +5374,7 @@ mod tests {
     #[test]
     fn pending_takeback_survives_disconnect_and_reconnect() {
         let (mut mgr, code, token0, token1) = setup_two_player_game();
-        let priority_player = match &mgr.sessions.get(&code).unwrap().state.waiting_for {
+        let priority_player = match &mgr.try_session(&code).unwrap().state.waiting_for {
             WaitingFor::Priority { player } => *player,
             other => panic!("expected Priority, got {:?}", other),
         };
@@ -3679,26 +5384,35 @@ mod tests {
             (token1.clone(), PlayerId(0), token0.clone())
         };
 
-        let _ = mgr.handle_action(&code, &acting_token, GameAction::PassPriority);
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let _ = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action(&acting_token, GameAction::PassPriority);
+        let mut session = mgr.try_session(&code).unwrap();
         session
             .request_takeback(priority_player, RewindTarget::LastAction)
             .unwrap();
 
-        mgr.handle_disconnect(&code, approver);
-        let reconnected_state = mgr.handle_reconnect(&code, &approver_token);
+        drop(session);
+        handle_disconnect(&mut mgr, &code, approver);
+        let reconnected_state = handle_reconnect(&mut mgr, &code, &approver_token);
         assert!(
             reconnected_state.is_ok(),
             "reconnect should succeed: {:?}",
             reconnected_state.err()
         );
 
-        let session = mgr.sessions.get(&code).unwrap();
+        let session = mgr.try_session(&code).unwrap();
         assert!(
-            session.pending_takeback.is_some(),
+            session.takeback.is_pending(),
             "the pending takeback must still be there for the reconnecting socket to be told about"
         );
-        assert!(session.pending_takeback_message().is_some());
+        match session.pending_takeback_message() {
+            Some(crate::protocol::ServerMessage::TakebackRequested { voters, .. }) => {
+                assert_eq!(voters, vec![approver]);
+            }
+            other => panic!("expected TakebackRequested, got {:?}", other),
+        }
     }
 
     /// GH #1507 follow-up: `run_ai` must not advance the authoritative state
@@ -3713,6 +5427,7 @@ mod tests {
         let (code, _token0) = mgr
             .create_game_n_players(
                 make_deck(),
+                None,
                 "Host".to_string(),
                 None,
                 3,
@@ -3720,15 +5435,15 @@ mod tests {
                 None,
             )
             .expect("supported format config");
-        let (_token1, _) = mgr.join_game(&code, make_deck()).unwrap();
-        let (_token2, _) = mgr.join_game(&code, make_deck()).unwrap();
+        let (_token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        let (_token2, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
 
         // Retroactively mark seat 2 as AI-controlled (server-side bookkeeping
         // only — the engine state itself has no notion of AI seats), and
         // hand it a known legal action: an undecided mulligan. This is
         // exactly the kind of action `run_ai` would otherwise resolve.
         let ai_pid = PlayerId(2);
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         session.ai_seats.insert(ai_pid);
         session.ai_configs.insert(
             ai_pid,
@@ -3736,11 +5451,13 @@ mod tests {
         );
         session.state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![engine::types::game_state::MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: ai_pid,
                 mulligan_count: 0,
                 phase: engine::types::game_state::MulliganDecisionPhase::Declare,
             }],
             free_first_mulligan: true,
+            declared: Vec::new(),
         };
 
         // Player 0 requests a takeback; with two human seats (0 and 1) it
@@ -3763,6 +5480,411 @@ mod tests {
         );
     }
 
+    // ── Concessions during a takeback vote ───────────────────────────────
+
+    /// P0's open takeback vote, with P1 as its voter.
+    fn open_vote_by_p0(mgr: &SessionManager, code: &str) {
+        let mut session = mgr.try_session(code).unwrap();
+        session.push_takeback_snapshot(PlayerId(0));
+        assert_eq!(
+            session.request_takeback(PlayerId(0), RewindTarget::LastAction),
+            Ok(TakebackOutcome::Pending)
+        );
+    }
+
+    /// CR 104.3a: "A player who concedes leaves the game immediately." The
+    /// concession commits at the engine's action boundary; when its follow-up
+    /// auto-pass resolves an unrepresentable life gain, that follow-up is
+    /// discarded and the session still publishes the departure and its events.
+    /// The next ordinary action starts without any concession state and is
+    /// rejected by the same failing tail.
+    #[test]
+    fn a_concession_with_a_failing_follow_up_is_published_by_the_session() {
+        use engine::types::ability::{QuantityExpr, TargetFilter};
+        use engine::types::game_state::{AutoPassMode, StackEntry, StackEntryKind};
+
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                3,
+                MatchConfig::default(),
+                None,
+            )
+            .expect("a three-player game");
+        let (token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        let (token2, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        let tokens = [token0, token1, token2];
+        keep_opening_hands(&mgr, &code, &tokens);
+
+        let (holder, conceder) = {
+            let mut session = mgr.try_session(&code).unwrap();
+            let state = &mut session.state;
+            let holder = state.active_player;
+            let conceder = state
+                .players
+                .iter()
+                .map(|player| player.id)
+                .find(|id| *id != holder)
+                .expect("another seat");
+            state.waiting_for = WaitingFor::Priority { player: holder };
+            state.priority_player = holder;
+            state.players[usize::from(holder.0)].life = i32::MAX - 1;
+            state.stack = vec![StackEntry {
+                id: ObjectId(9_001),
+                source_id: ObjectId(9_001),
+                controller: holder,
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: ObjectId(9_001),
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 2 },
+                            player: TargetFilter::Controller,
+                        },
+                        vec![],
+                        ObjectId(9_001),
+                        holder,
+                    )),
+                },
+            }]
+            .into();
+            let living: Vec<_> = state
+                .players
+                .iter()
+                .map(|player| player.id)
+                .filter(|id| *id != conceder)
+                .collect();
+            for player in living {
+                state.auto_pass.insert(
+                    player,
+                    AutoPassMode::UntilStackEmpty {
+                        initial_stack_len: 1,
+                        policy: Default::default(),
+                    },
+                );
+            }
+            (holder, conceder)
+        };
+
+        let handled = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(
+                &tokens[usize::from(conceder.0)],
+                GameAction::Concede {
+                    player_id: conceder,
+                },
+                None,
+            )
+            .expect("CR 104.3a: the concession is published");
+        assert!(
+            handled.result.1.iter().any(|event| matches!(
+                event,
+                GameEvent::PlayerEliminated { player_id } if *player_id == conceder
+            )),
+            "the departure event is in the published event batch"
+        );
+        {
+            let session = mgr.try_session(&code).unwrap();
+            assert!(session.state.players[usize::from(conceder.0)].is_eliminated);
+            assert_eq!(
+                session.state.stack.len(),
+                1,
+                "the failed tail is discarded whole"
+            );
+            assert_eq!(
+                session.state.players[usize::from(holder.0)].life,
+                i32::MAX - 1
+            );
+        }
+
+        mgr.try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(
+                &tokens[usize::from(holder.0)],
+                GameAction::PassPriority,
+                None,
+            )
+            .expect_err("the next ordinary action owns no concession and is rejected");
+        let session = mgr.try_session(&code).unwrap();
+        assert_eq!(
+            session.state.stack.len(),
+            1,
+            "the rejected action is restored"
+        );
+        assert!(!session.state.players[usize::from(holder.0)].is_eliminated);
+    }
+
+    /// S1. A game concession is admitted during a vote and reports the
+    /// withdrawal; every other action stays frozen.
+    #[test]
+    fn a_game_concession_during_a_vote_is_accepted_and_withdraws_it() {
+        let (mgr, code, _token0, token1) = setup_two_player_game();
+        open_vote_by_p0(&mgr, &code);
+
+        let frozen = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(&token1, GameAction::PassPriority, None)
+            .expect_err("the vote freezes every other action");
+        assert!(matches!(
+            frozen,
+            SessionActionError::Rejected(rejection)
+                if rejection.code
+                    == engine::types::action_rejection::ActionRejectionCode::ActionNotAllowed
+        ));
+
+        let handled = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(
+                &token1,
+                GameAction::Concede {
+                    player_id: PlayerId(1),
+                },
+                None,
+            )
+            .expect("a concession is admitted during a vote");
+        assert_eq!(handled.takeback, Some(TakebackResolution::Withdrawn));
+        assert!(!mgr.try_session(&code).unwrap().takeback.is_pending());
+    }
+
+    fn started_bo3_duel() -> (SessionManager, String, String, String) {
+        use engine::types::match_config::MatchType;
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                2,
+                MatchConfig {
+                    match_type: MatchType::Bo3,
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("supported format config");
+        let (token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        keep_opening_hands(&mgr, &code, &[token0.clone(), token1.clone()]);
+        (mgr, code, token0, token1)
+    }
+
+    /// S2. A match concession is admitted during a vote and reports the
+    /// withdrawal.
+    #[test]
+    fn a_match_concession_during_a_vote_is_accepted_and_withdraws_it() {
+        let (mgr, code, _token0, token1) = started_bo3_duel();
+        open_vote_by_p0(&mgr, &code);
+        let (_, handled) = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_match_concede_outcome(&token1)
+            .expect("a match concession is admitted during a vote");
+        assert_eq!(handled.takeback, Some(TakebackResolution::Withdrawn));
+        assert!(!mgr.try_session(&code).unwrap().takeback.is_pending());
+
+        let (mgr, code, _token0, token1) = started_bo3_duel();
+        let (_, handled) = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_match_concede_outcome(&token1)
+            .expect("a match concession with no vote");
+        assert_eq!(handled.takeback, None);
+    }
+
+    /// Bolt-AI: three seats at P0's precombat main. P0 (human) holds a Mountain
+    /// on the battlefield and one in hand, and has cast Lightning Bolt at P2
+    /// (human, 3 life); P1 is an AI seat. The Bolt is on the stack and P0 holds
+    /// priority.
+    fn bolt_ai_session() -> (SessionManager, String, [String; 3]) {
+        const LIGHTNING_BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                3,
+                MatchConfig::default(),
+                Some(FormatConfig::free_for_all()),
+            )
+            .expect("supported format config");
+        let (token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        let (token2, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+
+        let mut scenario = GameScenario::new_n_player(3, 23);
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(PlayerId(2), 3);
+        scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
+        scenario.add_land_to_hand(P0, "Mountain");
+        let bolt = scenario
+            .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, LIGHTNING_BOLT)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![engine::types::mana::ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&bolt].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: bolt,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("Lightning Bolt is castable");
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(2))),
+            })
+            .expect("P2 is a legal target");
+        assert_eq!(runner.state().stack.len(), 1);
+
+        {
+            let mut session = mgr.try_session(&code).unwrap();
+            session.state = runner.state().clone();
+            session.ai_session = None;
+            session.ai_seats.insert(P1);
+            session.ai_configs.insert(
+                P1,
+                phase_ai::config::create_config_for_players(
+                    AiDifficulty::Easy,
+                    Platform::Native,
+                    3,
+                ),
+            );
+        }
+        (mgr, code, [token0, token1, token2])
+    }
+
+    fn holds_play_land(actions: &[GameAction]) -> bool {
+        actions
+            .iter()
+            .any(|action| matches!(action, GameAction::PlayLand { .. }))
+    }
+
+    /// Bolt-AI after the Bolt killed P2, with a takeback requested by P0 pending.
+    fn bolt_vote_pending() -> (SessionManager, String, [String; 3]) {
+        let (mgr, code, [token0, token1, token2]) = bolt_ai_session();
+        bolt_kills_p2(&mgr, &code, &token0, &token2);
+        assert_eq!(
+            mgr.try_session(&code)
+                .unwrap()
+                .request_takeback(P0, RewindTarget::LastAction),
+            Ok(TakebackOutcome::Pending)
+        );
+        (mgr, code, [token0, token1, token2])
+    }
+
+    fn bolt_kills_p2(mgr: &SessionManager, code: &str, token0: &str, token2: &str) {
+        mgr.try_session(code)
+            .unwrap()
+            .handle_action(token0, GameAction::PassPriority)
+            .expect("P0 passes");
+        let ai = mgr.try_session(code).unwrap().run_ai();
+        assert!(ai.failure.is_none(), "{:?}", ai.failure);
+        mgr.try_session(code)
+            .unwrap()
+            .handle_action(token2, GameAction::PassPriority)
+            .expect("P2's pass resolves the Bolt");
+        let session = mgr.try_session(code).unwrap();
+        assert_eq!(session.state.eliminated_players, vec![PlayerId(2)]);
+        assert!(session.state.stack.is_empty());
+        assert!(holds_play_land(
+            &engine_legal_actions_full(&session.state).0
+        ));
+    }
+
+    /// S3. A target-branch voter's no-op concession approves the vote through
+    /// the action handler, which returns the restored state with the
+    /// requester's decision inputs and no batch from the discarded branch.
+    #[test]
+    fn a_voters_noop_concession_returns_the_restored_state_and_its_decision() {
+        let (mgr, code, [_token0, _token1, token2]) = bolt_vote_pending();
+        let handled = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(
+                &token2,
+                GameAction::Concede {
+                    player_id: PlayerId(2),
+                },
+                None,
+            )
+            .expect("a concession is admitted during a vote");
+        assert_eq!(handled.takeback, Some(TakebackResolution::Approved));
+        let (state, events, legal_actions, log_entries, ..) = handled.result;
+        assert_eq!(state.waiting_for, WaitingFor::Priority { player: P0 });
+        assert_eq!(state.stack.len(), 1, "the Bolt is back on the stack");
+        assert!(state.eliminated_players.is_empty());
+        assert_eq!(state.players[2].life, 3);
+        assert!(events.is_empty(), "{events:?}");
+        assert!(log_entries.is_empty(), "{log_entries:?}");
+        let session = mgr.try_session(&code).unwrap();
+        assert_eq!(legal_actions, engine_legal_actions_full(&session.state).0);
+        assert!(!holds_play_land(&legal_actions));
+    }
+
+    /// S3b. An auto-pass armed for P0 runs on P2's no-op concession. Without a
+    /// vote its passes reach the result and the game log; when the concession
+    /// approves the vote, the handler returns and logs none of them.
+    #[test]
+    fn an_approving_concession_drops_the_batches_of_the_branch_it_discards() {
+        let concede_with_armed_auto_pass = |mgr: &SessionManager, code: &str, token2: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            {
+                let mut session = mgr.try_session(code).unwrap();
+                session.game_log = Arc::new(GameFileCache::new(dir.path().to_path_buf()));
+                session.state.auto_pass.insert(
+                    P0,
+                    AutoPassMode::UntilTurnBoundary {
+                        until: engine::types::game_state::TurnBoundary::EndOfCurrentTurn,
+                    },
+                );
+            }
+            let handled = mgr
+                .try_session(code)
+                .unwrap()
+                .handle_action_with_card_db_outcome(
+                    token2,
+                    GameAction::Concede {
+                        player_id: PlayerId(2),
+                    },
+                    None,
+                )
+                .expect("P2's concession is admitted");
+            let logged = std::fs::read_to_string(dir.path().join(format!("{code}.events.jsonl")))
+                .unwrap_or_default();
+            (handled, logged)
+        };
+
+        let (mgr, code, [token0, _token1, token2]) = bolt_ai_session();
+        bolt_kills_p2(&mgr, &code, &token0, &token2);
+        let (handled, logged) = concede_with_armed_auto_pass(&mgr, &code, &token2);
+        assert_eq!(handled.takeback, None);
+        let (state, events, _, log_entries, ..) = handled.result;
+        assert_ne!(state.waiting_for, WaitingFor::Priority { player: P0 });
+        assert!(!events.is_empty());
+        assert!(!log_entries.is_empty());
+        assert!(!logged.is_empty());
+
+        let (mgr, code, [_token0, _token1, token2]) = bolt_vote_pending();
+        let (handled, logged) = concede_with_armed_auto_pass(&mgr, &code, &token2);
+        assert_eq!(handled.takeback, Some(TakebackResolution::Approved));
+        let (state, events, _, log_entries, ..) = handled.result;
+        assert_eq!(state.stack.len(), 1, "the Bolt is back on the stack");
+        assert!(events.is_empty(), "{events:?}");
+        assert!(log_entries.is_empty(), "{log_entries:?}");
+        assert!(logged.is_empty(), "{logged}");
+    }
+
     // ── Turn-boundary rewind tests ───────────────────────────────────────
 
     /// `make_deck` is ten cards, so a fixture that drives several turns decks a
@@ -3770,18 +5892,20 @@ mod tests {
     /// Padding the libraries keeps the *rewind* behaviour the thing being
     /// measured rather than CR 104.3c.
     fn padded_game(hosting: HostingMode) -> (SessionManager, String, String, String) {
-        let (mut mgr, code, token0, token1) = setup_two_player_game();
-        let session = mgr.sessions.get_mut(&code).unwrap();
-        session.hosting = hosting;
-        for seat in 0..session.player_count {
-            for _ in 0..80 {
-                engine::game::zones::create_object(
-                    &mut session.state,
-                    engine::types::identifiers::CardId(9000),
-                    PlayerId(seat),
-                    "Library Filler".to_string(),
-                    Zone::Library,
-                );
+        let (mgr, code, token0, token1) = setup_two_player_game();
+        {
+            let mut session = mgr.try_session(&code).unwrap();
+            session.set_hosting(hosting);
+            for seat in 0..session.player_count {
+                for _ in 0..80 {
+                    engine::game::zones::create_object(
+                        &mut session.state,
+                        engine::types::identifiers::CardId(9000),
+                        PlayerId(seat),
+                        "Library Filler".to_string(),
+                        Zone::Library,
+                    );
+                }
             }
         }
         (mgr, code, token0, token1)
@@ -3794,7 +5918,7 @@ mod tests {
     }
 
     fn priority_token(mgr: &SessionManager, code: &str, token0: &str, token1: &str) -> String {
-        match &mgr.sessions[code].state.waiting_for {
+        match &mgr.try_session(code).unwrap().state.waiting_for {
             WaitingFor::Priority { player } if *player == PlayerId(0) => token0.to_string(),
             WaitingFor::Priority { .. } => token1.to_string(),
             other => panic!("expected Priority, got {other:?}"),
@@ -3804,22 +5928,24 @@ mod tests {
     /// Passes priority (through the real `handle_action` path, so every capture
     /// site runs) until `turn_number` advances. Returns the new turn number.
     fn advance_one_turn(mgr: &mut SessionManager, code: &str, token0: &str, token1: &str) -> u32 {
-        let start = mgr.sessions[code].state.turn_number;
+        let start = mgr.try_session(code).unwrap().state.turn_number;
         for _ in 0..400 {
-            if mgr.sessions[code].state.turn_number > start {
-                return mgr.sessions[code].state.turn_number;
+            if mgr.try_session(code).unwrap().state.turn_number > start {
+                return mgr.try_session(code).unwrap().state.turn_number;
             }
             if !matches!(
-                mgr.sessions[code].state.waiting_for,
+                mgr.try_session(code).unwrap().state.waiting_for,
                 WaitingFor::Priority { .. }
             ) {
                 panic!(
                     "fixture stalled outside Priority: {:?}",
-                    mgr.sessions[code].state.waiting_for
+                    mgr.try_session(code).unwrap().state.waiting_for
                 );
             }
             let token = priority_token(mgr, code, token0, token1);
-            mgr.handle_action(code, &token, GameAction::PassPriority)
+            mgr.try_session(code)
+                .unwrap()
+                .handle_action(&token, GameAction::PassPriority)
                 .expect("PassPriority through the real transition handler");
         }
         panic!("fixture never reached the next turn");
@@ -3840,13 +5966,18 @@ mod tests {
         advance_one_turn(&mut mgr, &code, &token0, &token1);
         advance_one_turn(&mut mgr, &code, &token0, &token1);
 
-        let game_one_options = mgr.sessions[&code].rewind_options();
+        let game_one_options = mgr.try_session(&code).unwrap().rewind_options();
         assert!(
             game_one_options.iter().any(|o| o.turn_number == 2),
             "reach guard: game 1 must actually have published turn 2 — got {game_one_options:?}"
         );
         assert!(
-            !mgr.sessions[&code].takeback_history.is_empty(),
+            mgr.try_session(&code)
+                .unwrap()
+                .takeback
+                .history()
+                .next()
+                .is_some(),
             "reach guard: the action ring must be non-empty before the boundary"
         );
 
@@ -3855,7 +5986,7 @@ mod tests {
         // `handle_action`.
         let chooser = PlayerId(1);
         {
-            let session = mgr.sessions.get_mut(&code).unwrap();
+            let mut session = mgr.try_session(&code).unwrap();
             // The between-games rebuild sources game 2's decks from
             // `state.deck_pools`, which the production `GameSession::start_game`
             // path fills via `load_and_hydrate_decks`. This fixture reaches a
@@ -3883,17 +6014,15 @@ mod tests {
                 score: session.state.match_score,
             };
         }
-        mgr.handle_action(
-            &code,
-            &token1,
-            GameAction::ChoosePlayDraw { play_first: true },
-        )
-        .expect("the between-games choice is a normal authoritative transition");
+        mgr.try_session(&code)
+            .unwrap()
+            .handle_action(&token1, GameAction::ChoosePlayDraw { play_first: true })
+            .expect("the between-games choice is a normal authoritative transition");
 
-        let session = &mgr.sessions[&code];
+        let session = mgr.try_session(&code).unwrap();
         assert_eq!(session.state.game_number, 2, "sanity: game 2 is live");
         assert!(
-            session.takeback_history.is_empty(),
+            session.takeback.history().next().is_none(),
             "the action ring belongs to the finished game and must be retired"
         );
 
@@ -3911,11 +6040,11 @@ mod tests {
         let before_dedup = seen.len();
         seen.dedup();
         assert_eq!(before_dedup, seen.len(), "no two options may share a turn");
+        drop(session);
 
         // The severest consequence, asserted directly: a turn number that
         // belonged to the FINISHED game must no longer be resolvable at all.
-        let mut mgr = mgr;
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         let refusal = session
             .request_takeback(PlayerId(0), RewindTarget::TurnStart { turn_number: 2 })
             .expect_err("game 1's turn 2 must not be reachable from game 2");
@@ -3935,15 +6064,11 @@ mod tests {
     #[test]
     fn single_user_turn_rewind_auto_approves_and_stays_reselectable() {
         let (mut mgr, code, token0, token1) = single_user_game();
-        mgr.sessions
-            .get_mut(&code)
-            .unwrap()
-            .ai_seats
-            .insert(PlayerId(1));
+        mgr.try_session(&code).unwrap().ai_seats.insert(PlayerId(1));
         let turn_two = advance_one_turn(&mut mgr, &code, &token0, &token1);
         let turn_three = advance_one_turn(&mut mgr, &code, &token0, &token1);
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         assert_eq!(
             session.request_takeback(
                 PlayerId(0),
@@ -3951,11 +6076,11 @@ mod tests {
                     turn_number: turn_two
                 }
             ),
-            Ok(TakebackOutcome::Approved),
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved)),
             "a sole human seat has nobody to ask"
         );
         assert_eq!(session.state.turn_number, turn_two);
-        assert!(session.pending_takeback.is_none(), "interlock released");
+        assert!(!session.takeback.is_pending(), "interlock released");
 
         let options = session.rewind_options();
         assert!(
@@ -3975,7 +6100,7 @@ mod tests {
                     turn_number: turn_two
                 }
             ),
-            Ok(TakebackOutcome::Approved)
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
         );
         assert_eq!(session.state.turn_number, turn_two);
     }
@@ -3985,16 +6110,12 @@ mod tests {
     #[test]
     fn approved_rewind_prunes_only_the_discarded_branch() {
         let (mut mgr, code, token0, token1) = single_user_game();
-        mgr.sessions
-            .get_mut(&code)
-            .unwrap()
-            .ai_seats
-            .insert(PlayerId(1));
+        mgr.try_session(&code).unwrap().ai_seats.insert(PlayerId(1));
         let turn_two = advance_one_turn(&mut mgr, &code, &token0, &token1);
         let turn_three = advance_one_turn(&mut mgr, &code, &token0, &token1);
         let turn_four = advance_one_turn(&mut mgr, &code, &token0, &token1);
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         assert_eq!(
             session.request_takeback(
                 PlayerId(0),
@@ -4002,7 +6123,7 @@ mod tests {
                     turn_number: turn_three
                 }
             ),
-            Ok(TakebackOutcome::Approved)
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
         );
         let turns: Vec<u32> = session
             .rewind_options()
@@ -4031,18 +6152,14 @@ mod tests {
     #[test]
     fn an_online_session_publishes_no_rewind_targets_and_refuses_a_turn_start() {
         let (mut mgr, code, token0, token1) = padded_game(HostingMode::Shared);
-        mgr.sessions
-            .get_mut(&code)
-            .unwrap()
-            .ai_seats
-            .insert(PlayerId(1));
+        mgr.try_session(&code).unwrap().ai_seats.insert(PlayerId(1));
         let turn_two = advance_one_turn(&mut mgr, &code, &token0, &token1);
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         assert_eq!(session.hosting, HostingMode::Shared, "sanity");
         assert!(session.rewind_options().is_empty());
         assert!(
-            session.turn_rewind_history.is_empty(),
+            session.takeback.turn_history_len() == 0,
             "capture is gated too"
         );
 
@@ -4064,14 +6181,14 @@ mod tests {
         // Over-scoping guard.
         assert_eq!(
             session.request_takeback(PlayerId(0), RewindTarget::LastAction),
-            Ok(TakebackOutcome::Approved),
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved)),
             "the shipped action-granular takeback must be untouched"
         );
 
         // Paired positive: the identical fixture on a sidecar DOES publish.
         let (mut mgr, code, token0, token1) = single_user_game();
         advance_one_turn(&mut mgr, &code, &token0, &token1);
-        assert!(!mgr.sessions[&code].rewind_options().is_empty());
+        assert!(!mgr.try_session(&code).unwrap().rewind_options().is_empty());
     }
 
     /// **R10 — G3/M6.** Undo is repeatable with nothing in between. At BASE_SHA
@@ -4079,27 +6196,27 @@ mod tests {
     /// returned `Err`.
     #[test]
     fn undo_is_repeatable_without_an_intervening_action() {
-        let (mut mgr, code, token0, token1) = padded_game(HostingMode::Shared);
-        mgr.sessions
-            .get_mut(&code)
-            .unwrap()
-            .ai_seats
-            .insert(PlayerId(1));
+        let (mgr, code, token0, token1) = padded_game(HostingMode::Shared);
+        mgr.try_session(&code).unwrap().ai_seats.insert(PlayerId(1));
 
         for _ in 0..3 {
             let token = priority_token(&mgr, &code, &token0, &token1);
             if token != token0 {
                 // Only the human seat's own actions are takeback-able.
-                mgr.handle_action(&code, &token, GameAction::PassPriority)
+                mgr.try_session(&code)
+                    .unwrap()
+                    .handle_action(&token, GameAction::PassPriority)
                     .expect("advance to the human seat's priority");
                 continue;
             }
-            mgr.handle_action(&code, &token0, GameAction::PassPriority)
+            mgr.try_session(&code)
+                .unwrap()
+                .handle_action(&token0, GameAction::PassPriority)
                 .expect("human action");
         }
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
-        let depth_before = session.takeback_history.len();
+        let mut session = mgr.try_session(&code).unwrap();
+        let depth_before = session.takeback.history().len();
         assert!(
             depth_before >= 2,
             "reach guard: need at least two ancestors"
@@ -4107,11 +6224,11 @@ mod tests {
 
         assert_eq!(
             session.request_takeback(PlayerId(0), RewindTarget::LastAction),
-            Ok(TakebackOutcome::Approved)
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
         );
         assert_eq!(
             session.request_takeback(PlayerId(0), RewindTarget::LastAction),
-            Ok(TakebackOutcome::Approved),
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved)),
             "the second consecutive undo is what fails at BASE_SHA"
         );
 
@@ -4133,14 +6250,16 @@ mod tests {
     /// walk-back is still its own unanimity vote.
     #[test]
     fn repeated_walk_back_still_requires_unanimity_at_each_step() {
-        let (mut mgr, code, token0, token1) = padded_game(HostingMode::Shared);
+        let (mgr, code, token0, token1) = padded_game(HostingMode::Shared);
         for _ in 0..4 {
             let token = priority_token(&mgr, &code, &token0, &token1);
-            mgr.handle_action(&code, &token, GameAction::PassPriority)
+            mgr.try_session(&code)
+                .unwrap()
+                .handle_action(&token, GameAction::PassPriority)
                 .expect("drive a few actions from both seats");
         }
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         assert_eq!(
             session.request_takeback(PlayerId(0), RewindTarget::LastAction),
             Ok(TakebackOutcome::Pending),
@@ -4148,7 +6267,7 @@ mod tests {
         );
         assert_eq!(
             session.respond_takeback(PlayerId(1), true),
-            Ok(TakebackOutcome::Approved)
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
         );
 
         // Immediately again — `truncate` left ancestors reachable, but that must
@@ -4161,7 +6280,7 @@ mod tests {
         let state_before = session.state.clone();
         assert_eq!(
             session.respond_takeback(PlayerId(1), false),
-            Ok(TakebackOutcome::Rejected)
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Declined))
         );
         assert_eq!(
             session.state.waiting_for, state_before.waiting_for,
@@ -4178,7 +6297,7 @@ mod tests {
         let turn_two = advance_one_turn(&mut mgr, &code, &token0, &token1);
         advance_one_turn(&mut mgr, &code, &token0, &token1);
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         let turn_before = session.state.turn_number;
         let objects_before = session.state.objects.len();
         let options_before = session.rewind_options();
@@ -4201,7 +6320,7 @@ mod tests {
         // Multi-authority hostile: a decline must not prune.
         assert_eq!(
             session.respond_takeback(PlayerId(1), false),
-            Ok(TakebackOutcome::Rejected)
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Declined))
         );
         assert_eq!(session.state.turn_number, turn_before);
         assert_eq!(
@@ -4222,7 +6341,7 @@ mod tests {
         );
         assert_eq!(
             session.respond_takeback(PlayerId(1), true),
-            Ok(TakebackOutcome::Approved)
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
         );
         assert_eq!(session.state.turn_number, turn_two);
     }
@@ -4233,11 +6352,7 @@ mod tests {
     #[test]
     fn turn_rewind_reaches_a_boundary_the_action_ring_cannot() {
         let (mut mgr, code, token0, token1) = single_user_game();
-        mgr.sessions
-            .get_mut(&code)
-            .unwrap()
-            .ai_seats
-            .insert(PlayerId(1));
+        mgr.try_session(&code).unwrap().ai_seats.insert(PlayerId(1));
         let target_turn = advance_one_turn(&mut mgr, &code, &token0, &token1);
         // Keep playing until the twelve-slot action ring has scrolled entirely
         // past the target boundary. That is the whole point of the second ring:
@@ -4246,10 +6361,10 @@ mod tests {
         let mut turns_played = 0;
         while turns_played < 8 {
             let saturated = {
-                let s = &mgr.sessions[&code];
-                s.takeback_history.len() == MAX_TAKEBACK_HISTORY
-                    && s.takeback_history
-                        .iter()
+                let s = &mgr.try_session(&code).unwrap();
+                s.takeback.history().len() == MAX_TAKEBACK_HISTORY
+                    && s.takeback
+                        .history()
                         .all(|(_, st)| st.turn_number > target_turn)
             };
             if saturated {
@@ -4259,13 +6374,13 @@ mod tests {
             turns_played += 1;
         }
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         // Reach guard: the action ring is full AND can no longer see the target.
-        assert_eq!(session.takeback_history.len(), MAX_TAKEBACK_HISTORY);
+        assert_eq!(session.takeback.history().len(), MAX_TAKEBACK_HISTORY);
         assert!(
             session
-                .takeback_history
-                .iter()
+                .takeback
+                .history()
                 .all(|(_, s)| s.turn_number > target_turn),
             "reach guard: no action-ring entry may still sit in turn {target_turn}"
         );
@@ -4278,7 +6393,7 @@ mod tests {
                     turn_number: turn_two
                 }
             ),
-            Ok(TakebackOutcome::Approved)
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
         );
         assert_eq!(session.state.turn_number, turn_two);
 
@@ -4298,15 +6413,11 @@ mod tests {
     #[test]
     fn an_approved_rollback_rebuilds_the_ai_session() {
         let (mut mgr, code, token0, token1) = single_user_game();
-        mgr.sessions
-            .get_mut(&code)
-            .unwrap()
-            .ai_seats
-            .insert(PlayerId(1));
+        mgr.try_session(&code).unwrap().ai_seats.insert(PlayerId(1));
         advance_one_turn(&mut mgr, &code, &token0, &token1);
-        let turn_two = mgr.sessions[&code].state.turn_number;
+        let turn_two = mgr.try_session(&code).unwrap().state.turn_number;
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         session.ai_session = Some(AiSession::arc_from_game(&session.state));
         let before = session
             .ai_session
@@ -4320,7 +6431,7 @@ mod tests {
                     turn_number: turn_two
                 }
             ),
-            Ok(TakebackOutcome::Approved)
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
         );
         let after = session
             .ai_session
@@ -4334,8 +6445,8 @@ mod tests {
         // Paired negative: a session with no AI must not gain one.
         let (mut mgr, code, token0, token1) = single_user_game();
         advance_one_turn(&mut mgr, &code, &token0, &token1);
-        let turn_two = mgr.sessions[&code].state.turn_number;
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let turn_two = mgr.try_session(&code).unwrap().state.turn_number;
+        let mut session = mgr.try_session(&code).unwrap();
         session.ai_session = None;
         assert_eq!(
             session.request_takeback(
@@ -4348,7 +6459,7 @@ mod tests {
         );
         assert_eq!(
             session.respond_takeback(PlayerId(1), true),
-            Ok(TakebackOutcome::Approved)
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
         );
         assert!(session.ai_session.is_none(), "`None` must stay `None`");
     }
@@ -4361,21 +6472,69 @@ mod tests {
     /// `single_user_game` supplies the `HostingMode::SingleUser` stamp and the
     /// padded libraries.
     fn single_user_game_vs_ai() -> (SessionManager, String, String, PlayerId) {
-        let (mut mgr, code, token0, _token1) = single_user_game();
+        let (mgr, code, token0, _token1) = single_user_game();
         let ai_seat = PlayerId(1);
-        let session = mgr.sessions.get_mut(&code).unwrap();
-        session.ai_seats.insert(ai_seat);
-        session.ai_configs.insert(
-            ai_seat,
-            phase_ai::config::create_config_for_players(AiDifficulty::Easy, Platform::Native, 2),
-        );
+        {
+            let mut session = mgr.try_session(&code).unwrap();
+            session.ai_seats.insert(ai_seat);
+            session.ai_configs.insert(
+                ai_seat,
+                phase_ai::config::create_config_for_players(
+                    AiDifficulty::Easy,
+                    Platform::Native,
+                    2,
+                ),
+            );
+        }
         (mgr, code, token0, ai_seat)
     }
 
     #[test]
+    fn run_ai_only_final_transition_offers_a_current_decision() {
+        let (mgr, code, token0, _ai_seat) = single_user_game_vs_ai();
+        for _ in 0..80 {
+            let mut session = mgr.try_session(&code).unwrap();
+            let before_revision = session.state_revision;
+            let outcome = session.run_ai();
+            assert!(outcome.failure.is_none(), "{:?}", outcome.failure);
+            if let Some((last, intermediate)) = outcome.transitions.split_last() {
+                for (index, transition) in outcome.transitions.iter().enumerate() {
+                    assert_eq!(
+                        transition.state_revision,
+                        before_revision + index as u64 + 1
+                    );
+                }
+                assert!(intermediate
+                    .iter()
+                    .all(|transition| transition.decision.is_none()));
+                let decision = last
+                    .decision
+                    .as_ref()
+                    .expect("final state offers its decision");
+                let (legal, costs, by_object) = engine_legal_actions_full(&session.state);
+                assert_eq!(decision.legal_actions, legal);
+                assert_eq!(
+                    decision.auto_pass_recommended,
+                    auto_pass_recommended(&session.state, &legal)
+                );
+                assert_eq!(decision.spell_costs, costs);
+                assert_eq!(decision.legal_actions_by_object, by_object);
+                assert_eq!(last.state.waiting_for, session.state.waiting_for);
+                if !intermediate.is_empty() {
+                    return;
+                }
+            }
+            session
+                .handle_action(&token0, GameAction::PassPriority)
+                .expect("human passes to advance the driven game");
+        }
+        panic!("fixture never produced an intermediate AI transition");
+    }
+
+    #[test]
     fn ai_driver_failure_gate_requires_an_authorized_ai_submitter() {
-        let (mut mgr, code, _token0, ai_seat) = single_user_game_vs_ai();
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let (mgr, code, _token0, ai_seat) = single_user_game_vs_ai();
+        let mut session = mgr.try_session(&code).unwrap();
 
         session.state.waiting_for = WaitingFor::Priority { player: ai_seat };
         assert!(
@@ -4402,8 +6561,8 @@ mod tests {
 
     #[test]
     fn ai_driver_fault_fences_persistence_without_synthetic_state_transition() {
-        let (mut mgr, code, _token0, ai_seat) = single_user_game_vs_ai();
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let (mgr, code, _token0, ai_seat) = single_user_game_vs_ai();
+        let mut session = mgr.try_session(&code).unwrap();
         session.ai_configs.remove(&ai_seat);
         session.state.waiting_for = WaitingFor::Priority { player: ai_seat };
         let before = session.state_revision;
@@ -4429,8 +6588,8 @@ mod tests {
 
     #[test]
     fn ai_driver_fault_blocks_takebacks_and_match_concede() {
-        let (mut mgr, code, token0, _ai_seat) = single_user_game_vs_ai();
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let (mgr, code, token0, _ai_seat) = single_user_game_vs_ai();
+        let mut session = mgr.try_session(&code).unwrap();
         session.record_ai_driver_fault(AiDriverFailure::ActionSafetyCapReached { limit: 1 });
 
         for result in [
@@ -4445,10 +6604,39 @@ mod tests {
                 .contains("Native AI driver fault"));
         }
 
+        drop(session);
         let err = mgr
-            .handle_match_concede(&code, &token0)
+            .try_session(&code)
+            .unwrap()
+            .handle_match_concede(&token0)
             .expect_err("a terminal AI driver fault blocks match concede");
         assert!(err.contains("Native AI driver fault"));
+    }
+
+    #[test]
+    fn match_concede_distinguishes_lifecycle_refusal_from_operational_failure() {
+        let (mgr, code, token0, _token1) = setup_two_player_game();
+
+        let lifecycle = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_match_concede_outcome(&token0)
+            .expect_err("a non-Bo3 match cannot be conceded as a match");
+        assert!(matches!(
+            lifecycle,
+            SessionActionError::RequestRejected(reason)
+                if reason == "Match forfeits require a best-of-three match"
+        ));
+
+        // The absent-game half is the caller's now: the registry lookup
+        // refuses with `game_not_found`, which converts into the same
+        // operational error the relocated method used to produce itself.
+        let operational = mgr
+            .try_session("missing")
+            .ok_or_else(|| SessionActionError::from(game_not_found("missing")))
+            .and_then(|mut session| session.handle_match_concede_outcome(&token0))
+            .expect_err("an absent session is operational");
+        assert!(matches!(operational, SessionActionError::Operational(_)));
     }
 
     /// Drives the fixture until **`run_ai` itself** publishes a turn boundary
@@ -4472,7 +6660,7 @@ mod tests {
         ai_seat: PlayerId,
     ) -> u32 {
         for _ in 0..40 {
-            let session = mgr.sessions.get_mut(code).unwrap();
+            let mut session = mgr.try_session(code).unwrap();
             let before: Vec<u32> = session
                 .rewind_options()
                 .iter()
@@ -4499,7 +6687,10 @@ mod tests {
                 WaitingFor::Priority { .. } => {}
                 other => panic!("fixture stalled outside Priority: {other:?}"),
             }
-            mgr.handle_action(code, token0, GameAction::PassPriority)
+            drop(session);
+            mgr.try_session(code)
+                .unwrap()
+                .handle_action(token0, GameAction::PassPriority)
                 .expect("the human seat passes through the real transition handler");
         }
         panic!("`run_ai` never opened an AI-active turn boundary");
@@ -4528,7 +6719,7 @@ mod tests {
         let (mut mgr, code, token0, ai_seat) = single_user_game_vs_ai();
         let ai_turn = drive_until_run_ai_opens_an_ai_turn(&mut mgr, &code, &token0, ai_seat);
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         // **The discriminating guard.** `run_ai` pushes no `takeback_history`
         // entries — only `handle_action` does. So if this turn's boundary had
         // come from the hand-driven path rather than from `run_ai`'s own
@@ -4537,14 +6728,14 @@ mod tests {
         // the AI's turn, `handle_action` pushes one legitimately.
         assert!(
             session
-                .takeback_history
-                .iter()
+                .takeback
+                .history()
                 .all(|(_, snapshot)| snapshot.turn_number != ai_turn),
             "no action-ring entry may sit in turn {ai_turn} — the boundary must have come \
              from `run_ai`'s own results, not from the `handle_action` capture site"
         );
         assert!(
-            !session.takeback_history.is_empty(),
+            session.takeback.history().next().is_some(),
             "reach guard: the action ring is populated, so the assertion above is a \
              statement about this turn and not about an empty collection"
         );
@@ -4565,7 +6756,7 @@ mod tests {
                     turn_number: ai_turn
                 }
             ),
-            Ok(TakebackOutcome::Approved),
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved)),
             "seat 0 is the sole human — nobody to ask"
         );
         assert_eq!(session.state.turn_number, ai_turn);
@@ -4593,10 +6784,10 @@ mod tests {
         // rewind landed, not something the approved path does unconditionally.
         let (mut mgr, code, token0, ai_seat) = single_user_game_vs_ai();
         drive_until_run_ai_opens_an_ai_turn(&mut mgr, &code, &token0, ai_seat);
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         assert_eq!(
             session.request_takeback(PlayerId(0), RewindTarget::LastAction),
-            Ok(TakebackOutcome::Approved)
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
         );
         assert!(
             matches!(session.state.waiting_for, WaitingFor::Priority { player } if player == PlayerId(0)),
@@ -4620,6 +6811,7 @@ mod tests {
         let sandbox_config = FormatConfig::commander().with_sandbox();
         mgr.create_game_n_players(
             make_deck(),
+            None,
             "Host".to_string(),
             None,
             2,
@@ -4633,8 +6825,9 @@ mod tests {
     fn server_card_database_resolves_debug_card_batches() {
         let mut mgr = SessionManager::new();
         let (code, token) = create_sandbox_game(&mut mgr);
-        let db = CardDatabase::from_json_str(
-            r#"{
+        let db = Arc::new(
+            CardDatabase::from_json_str(
+                r#"{
                 "server debug creature": {
                     "name": "Server Debug Creature",
                     "mana_cost": { "type": "NoCost" },
@@ -4651,12 +6844,14 @@ mod tests {
                     "keywords": []
                 }
             }"#,
-        )
-        .expect("debug-card fixture database parses");
+            )
+            .expect("debug-card fixture database parses"),
+        );
 
         let result = mgr
+            .try_session(&code)
+            .unwrap()
             .handle_action_with_card_db(
-                &code,
                 &token,
                 GameAction::Debug(engine::types::actions::DebugAction::CreateCard {
                     card_name: "Server Debug Creature".into(),
@@ -4666,8 +6861,9 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
+                    creation_kind: DebugCardCreationKind::Token,
                 }),
-                Some(&db),
+                Some(&*db),
             )
             .expect("server transport resolves a debug CreateCard batch through its card database");
 
@@ -4694,7 +6890,8 @@ mod tests {
         );
 
         assert_eq!(
-            mgr.sessions[&code]
+            mgr.try_session(&code)
+                .unwrap()
                 .state
                 .objects
                 .values()
@@ -4702,6 +6899,7 @@ mod tests {
                     object.name == "Server Debug Creature"
                         && object.owner == PlayerId(1)
                         && object.zone == Zone::Battlefield
+                        && object.is_token
                 })
                 .count(),
             2
@@ -4712,14 +6910,27 @@ mod tests {
     fn server_debug_create_zeroes_skip_lifecycle_and_takeback_side_effects() {
         let mut mgr = SessionManager::new();
         let (code, token) = create_sandbox_game(&mut mgr);
-        let session = &mgr.sessions[&code];
-        let history_depth = session.takeback_history.len();
-        let turn_history_depth = session.turn_rewind_history.len();
-        let rewind_game_number = session.rewind_game_number;
-        let session_revision = session.state_revision;
-        let revision = session.state.state_revision;
-        let object_count = session.state.objects.len();
-        let log_player_names = session.state.log_player_names.clone();
+        let (
+            history_depth,
+            turn_history_depth,
+            rewind_game_number,
+            session_revision,
+            revision,
+            object_count,
+            log_player_names,
+        ) = {
+            let session = mgr.try_session(&code).unwrap();
+            let history_depth = session.takeback.history().len();
+            (
+                history_depth,
+                session.takeback.turn_history_len(),
+                session.takeback.game_number(),
+                session.state_revision,
+                session.state.state_revision,
+                session.state.objects.len(),
+                session.state.log_player_names.clone(),
+            )
+        };
 
         let actions = [
             (
@@ -4732,6 +6943,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
+                    creation_kind: DebugCardCreationKind::Card,
                 }),
             ),
             (
@@ -4761,16 +6973,18 @@ mod tests {
 
         for (label, action) in actions {
             let result = mgr
-                .handle_action(&code, &token, action)
+                .try_session(&code)
+                .unwrap()
+                .handle_action(&token, action)
                 .unwrap_or_else(|error| panic!("authorized zero {label} must be a no-op: {error}"));
 
             assert!(result.1.is_empty(), "zero {label} emitted events");
             assert!(result.3.is_empty(), "zero {label} emitted log entries");
         }
-        let session = &mgr.sessions[&code];
-        assert_eq!(session.takeback_history.len(), history_depth);
-        assert_eq!(session.turn_rewind_history.len(), turn_history_depth);
-        assert_eq!(session.rewind_game_number, rewind_game_number);
+        let session = &mgr.try_session(&code).unwrap();
+        assert_eq!(session.takeback.history().len(), history_depth);
+        assert_eq!(session.takeback.turn_history_len(), turn_history_depth);
+        assert_eq!(session.takeback.game_number(), rewind_game_number);
         assert_eq!(session.state_revision, session_revision);
         assert_eq!(session.state.state_revision, revision);
         assert_eq!(session.state.objects.len(), object_count);
@@ -4783,8 +6997,9 @@ mod tests {
         let (code, token) = create_sandbox_game(&mut mgr);
 
         let owner_error = mgr
+            .try_session(&code)
+            .unwrap()
             .handle_action(
-                &code,
                 &token,
                 GameAction::Debug(DebugAction::CreateCard {
                     card_name: "database deliberately absent".into(),
@@ -4794,20 +7009,30 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
+                    creation_kind: DebugCardCreationKind::Card,
                 }),
             )
             .expect_err("an invalid owner must fail before database lookup");
-        assert!(owner_error.contains("invalid owner player id"));
+        assert_eq!(
+            owner_error,
+            "That action is not valid in the current game state."
+        );
         assert!(!owner_error.contains("card database"));
 
-        let session = &mgr.sessions[&code];
-        let history_depth = session.takeback_history.len();
-        let revision = session.state.state_revision;
-        let public_state_dirty = session.state.public_state_dirty.clone();
-        let log_player_names = session.state.log_player_names.clone();
+        let (history_depth, revision, public_state_dirty, log_player_names) = {
+            let session = mgr.try_session(&code).unwrap();
+            let history_depth = session.takeback.history().len();
+            (
+                history_depth,
+                session.state.state_revision,
+                session.state.public_state_dirty.clone(),
+                session.state.log_player_names.clone(),
+            )
+        };
         let lookup_error = mgr
+            .try_session(&code)
+            .unwrap()
             .handle_action(
-                &code,
                 &token,
                 GameAction::Debug(DebugAction::CreateCard {
                     card_name: "database deliberately absent".into(),
@@ -4817,24 +7042,27 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
+                    creation_kind: DebugCardCreationKind::Card,
                 }),
             )
             .expect_err("a valid nonzero request requires a database");
         assert!(lookup_error.contains("requires a card database"));
-        let session = &mgr.sessions[&code];
-        assert_eq!(session.takeback_history.len(), history_depth);
-        assert_eq!(session.state.state_revision, revision);
-        assert_eq!(session.state.public_state_dirty, public_state_dirty);
-        assert_eq!(session.state.log_player_names, log_player_names);
+        {
+            let session = mgr.try_session(&code).unwrap();
+            assert_eq!(session.takeback.history().len(), history_depth);
+            assert_eq!(session.state.state_revision, revision);
+            assert_eq!(session.state.public_state_dirty, public_state_dirty);
+            assert_eq!(session.state.log_player_names, log_player_names);
+        }
 
-        mgr.sessions
-            .get_mut(&code)
+        mgr.try_session(&code)
             .expect("sandbox session exists")
             .state
             .waiting_for = WaitingFor::GameOver { winner: None };
         let priority_error = mgr
+            .try_session(&code)
+            .unwrap()
             .handle_action(
-                &code,
                 &token,
                 GameAction::Debug(DebugAction::CreateCard {
                     card_name: "database deliberately absent".into(),
@@ -4844,10 +7072,14 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
+                    creation_kind: DebugCardCreationKind::Card,
                 }),
             )
             .expect_err("a real entry off Priority must fail before database lookup");
-        assert!(priority_error.contains("Priority window"));
+        assert_eq!(
+            priority_error,
+            "That action is not valid in the current game state."
+        );
         assert!(!priority_error.contains("card database"));
     }
 
@@ -4874,7 +7106,7 @@ mod tests {
         // so any participant can drive debug tools without an admin gate.
         let mut mgr = SessionManager::new();
         let (code, _token) = create_sandbox_game(&mut mgr);
-        let session = mgr.sessions.get(&code).unwrap();
+        let session = mgr.try_session(&code).unwrap();
         assert!(session.state.format_config.allow_debug_actions);
         assert!(session.state.debug_mode);
         assert!(session.state.debug_permitted.contains(&PlayerId(0)));
@@ -4885,8 +7117,8 @@ mod tests {
     #[test]
     fn non_sandbox_game_has_empty_debug_permitted() {
         let mut mgr = SessionManager::new();
-        let (code, _token) = mgr.create_game(make_deck());
-        let session = mgr.sessions.get(&code).unwrap();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+        let session = mgr.try_session(&code).unwrap();
         assert!(!session.state.format_config.allow_debug_actions);
         assert!(!session.state.debug_mode);
         assert!(session.state.debug_permitted.is_empty());
@@ -4895,9 +7127,8 @@ mod tests {
     #[test]
     fn non_sandbox_rejects_debug_action() {
         let mut mgr = SessionManager::new();
-        let (code, token) = mgr.create_game(make_deck());
-        let result = mgr.handle_action(
-            &code,
+        let (code, token) = mgr.create_game(make_deck(), None);
+        let result = mgr.try_session(&code).unwrap().handle_action(
             &token,
             GameAction::Debug(engine::types::actions::DebugAction::ShuffleLibrary {
                 player_id: PlayerId(0),
@@ -4905,10 +7136,7 @@ mod tests {
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(
-            err.contains("not permitted") || err.contains("permission"),
-            "{err}"
-        );
+        assert_eq!(err, "That action is not valid in the current game state.");
     }
 
     /// Fixture shape for the `HostingMode` tests below, matching the existing
@@ -4921,14 +7149,15 @@ mod tests {
     /// which is what makes the capability assertions load-bearing rather
     /// than a restatement of the sandbox flag.
     fn single_ai_opponent_game(mgr: &mut SessionManager) -> String {
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let (code, _token) = mgr
             .create_game_with_ai(
                 make_deck(),
+                DeckChoice::Random,
                 "Host".to_string(),
                 None,
                 MatchConfig::default(),
-                vec![(1, AiDifficulty::Easy, make_deck())],
+                vec![ai_setup(1, AiDifficulty::Easy, make_deck())],
                 Vec::new(),
                 None,
                 &db,
@@ -4947,7 +7176,7 @@ mod tests {
         // pre-existing debug tests use) would pass against the wrong seam.
         let mut mgr = SessionManager::single_user(Duration::from_secs(60));
         let code = single_ai_opponent_game(&mut mgr);
-        let session = mgr.sessions.get(&code).unwrap();
+        let session = mgr.try_session(&code).unwrap();
 
         // The capability came from the hosting mode, NOT from a sandbox
         // format flag: this assertion fails if someone reaches for
@@ -4972,7 +7201,7 @@ mod tests {
         // online server.
         let mut mgr = SessionManager::new();
         let code = single_ai_opponent_game(&mut mgr);
-        let session = mgr.sessions.get(&code).unwrap();
+        let session = mgr.try_session(&code).unwrap();
 
         assert!(!session.state.debug_mode);
         assert!(session.state.debug_permitted.is_empty());
@@ -4983,14 +7212,15 @@ mod tests {
         // Two authorities in one fixture, positive then negative, against the
         // SAME `session.state`.
         let mut mgr = SessionManager::single_user(Duration::from_secs(60));
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let (code, host_token) = mgr
             .create_game_with_ai(
                 make_deck(),
+                DeckChoice::Random,
                 "Host".to_string(),
                 None,
                 MatchConfig::default(),
-                vec![(1, AiDifficulty::Easy, make_deck())],
+                vec![ai_setup(1, AiDifficulty::Easy, make_deck())],
                 Vec::new(),
                 None,
                 &db,
@@ -5004,8 +7234,7 @@ mod tests {
         // totally broken gate. `ShuffleLibrary` is state-only and actually
         // applied, so `Ok` is reachable only past the strict wire gate in
         // `handle_action` AND both engine gates.
-        let ok = mgr.handle_action(
-            &code,
+        let ok = mgr.try_session(&code).unwrap().handle_action(
             &host_token,
             GameAction::Debug(engine::types::actions::DebugAction::ShuffleLibrary {
                 player_id: PlayerId(0),
@@ -5022,7 +7251,7 @@ mod tests {
         // bare `assert!(result.is_err())` IDENTICALLY against a totally broken
         // debug gate. Drive the per-seat gate where an AI seat is addressable:
         // the engine.
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         assert_eq!(
             session.state.debug_permitted,
             BTreeSet::from([PlayerId(0)]),
@@ -5062,11 +7291,12 @@ mod tests {
             }
         }
 
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let mut mgr = SessionManager::single_user(Duration::from_secs(60));
         let (code, _host) = mgr
             .create_game_n_players(
                 make_deck(),
+                None,
                 "Host".to_string(),
                 None,
                 3,
@@ -5076,13 +7306,12 @@ mod tests {
             .expect("supported format config");
         // Seat 1 joins; seat 2 is left waiting, because the reducer rejects
         // removing a claimed seat (`SeatClaimed`).
-        mgr.join_game(&code, make_deck()).unwrap();
+        join_game(&mut mgr, &code, make_deck(), None).unwrap();
 
         // Premise: nothing is seeded before the rebuild, so the assertion
         // below cannot be satisfied by leftovers from game creation.
         assert!(
-            mgr.sessions
-                .get(&code)
+            mgr.try_session(&code)
                 .unwrap()
                 .state
                 .debug_permitted
@@ -5095,14 +7324,14 @@ mod tests {
             platform: Platform::Native,
             deck_resolver: &resolver,
         };
-        let mut seat_state = mgr.sessions.get(&code).unwrap().seat_state();
+        let mut seat_state = mgr.try_session(&code).unwrap().seat_state();
         let delta = seat_reducer::apply(
             &mut seat_state,
             SeatMutation::Remove { seat_index: 2 },
             &ctx,
         )
         .unwrap();
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         session.apply_seat_delta(seat_state, &delta, &db);
 
         // Re-derived at the NEW seat count, not carried stale from 3 seats.
@@ -5128,10 +7357,10 @@ mod tests {
         //
         // It is also the production direction: the desktop sidecar restores
         // its own suspended game and must regain the capability.
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let mut origin = SessionManager::new();
         let code = single_ai_opponent_game(&mut origin);
-        let persisted = origin.sessions.get(&code).unwrap().to_persisted();
+        let persisted = origin.try_session(&code).unwrap().to_persisted();
         let restored =
             GameSession::from_persisted(persisted, &db).expect("supported persisted format config");
         assert_eq!(
@@ -5143,7 +7372,7 @@ mod tests {
 
         let mut sidecar = SessionManager::single_user(Duration::from_secs(60));
         sidecar.restore_session(restored);
-        let session = sidecar.sessions.get_mut(&code).unwrap();
+        let mut session = sidecar.try_session(&code).unwrap();
         assert_eq!(session.hosting, HostingMode::SingleUser);
 
         // And the stamp is load-bearing, not decorative: a rebuild on the
@@ -5162,10 +7391,166 @@ mod tests {
     /// Serialize through JSON exactly as `persist.rs` writes to disk, so the
     /// "the capability rides in the blob" premise is measured rather than
     /// asserted from the `#[serde(default)]` attributes.
-    fn round_trip_through_disk(session: &GameSession, db: &CardDatabase) -> GameSession {
-        let json = serde_json::to_string(&session.to_persisted()).unwrap();
-        let persisted: crate::persist::PersistedSession = serde_json::from_str(&json).unwrap();
+    /// Seed the two seats' deck pools the way `start_game`'s
+    /// `load_and_hydrate_decks` does, so a fixture that never reaches a
+    /// `CardDatabase` still has pools to persist.
+    fn seed_deck_pools(session: &mut GameSession) {
+        session.state.deck_pools = (0..2)
+            .map(|seat| PlayerDeckPool {
+                player: PlayerId(seat),
+                registered_main: Arc::new(make_deck().main_deck),
+                current_main: Arc::new(make_deck().main_deck),
+                ..Default::default()
+            })
+            .collect();
+    }
+
+    /// Row 12: the pools are serialized once, not once per mutation — and an
+    /// in-place `Arc::make_mut` edit is still seen, because the cache holds a
+    /// clone and so forces the copy-on-write.
+    #[test]
+    fn deck_pools_are_encoded_once_until_their_content_changes() {
+        let mut mgr = SessionManager::new();
+        let (code, _) = mgr.create_game(make_deck(), None);
+        let mut session = mgr.try_session(&code).unwrap();
+        session.full_runtime = Some(FullRuntime {
+            key: FullSessionKey {
+                game_code: code.clone(),
+                generation: 1,
+            },
+            activation_epoch: None,
+        });
+        seed_deck_pools(&mut session);
+        assert!(
+            !session.state.deck_pools.is_empty(),
+            "reach guard: the fixture must have pools to encode"
+        );
+
+        let first = session
+            .full_persist_snapshot()
+            .expect("a runtime-bound session has a snapshot")
+            .deck_pools_json;
+        let second = session
+            .full_persist_snapshot()
+            .expect("a runtime-bound session has a snapshot")
+            .deck_pools_json;
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "an unchanged pool must not be re-serialized per mutation"
+        );
+
+        // The hostile write shape: an in-place edit through `Arc::make_mut`.
+        // The cache holds a clone, so the refcount is >= 2 and this must
+        // reallocate rather than mutate behind the cache.
+        Arc::make_mut(&mut session.state.deck_pools[0].current_main).clear();
+        let third = session
+            .full_persist_snapshot()
+            .expect("a runtime-bound session has a snapshot")
+            .deck_pools_json;
+        assert!(
+            !Arc::ptr_eq(&second, &third),
+            "an in-place pool edit must invalidate the cache"
+        );
+        assert_ne!(
+            second.as_ref(),
+            third.as_ref(),
+            "the refreshed encoding must differ in content, not only in identity"
+        );
+    }
+
+    /// The restore's own `deck_pools_json` seeds the rebuilt session's cache,
+    /// so the first persist after a restart re-serializes nothing — and the
+    /// string it reuses really does describe the pools the restore produced.
+    /// That second half is a property of the restore path, which is why it is
+    /// asserted here rather than argued at `seed_deck_pools_encoding`.
+    #[test]
+    fn a_restore_seeds_the_pool_encoding_it_was_rebuilt_from() {
+        let db = Arc::new(CardDatabase::default());
+        let mut mgr = SessionManager::new();
+        let (code, _) = mgr.create_game(make_deck(), None);
+        let mut session = mgr.try_session(&code).unwrap();
+        seed_deck_pools(&mut session);
+        assert!(
+            !session.state.deck_pools.is_empty(),
+            "reach guard: the fixture must have pools to encode"
+        );
+
+        // What `load_active_full_sessions` reads out of the column and carries
+        // beside the payload.
+        let carried: Arc<str> = serde_json::to_string(&session.to_persisted().deck_pools)
+            .unwrap()
+            .into();
+        let mut restored = round_trip_through_disk(&session, &db);
+        restored.full_runtime = Some(FullRuntime {
+            key: FullSessionKey {
+                game_code: code.clone(),
+                generation: 1,
+            },
+            activation_epoch: None,
+        });
+        assert_eq!(
+            serde_json::to_string(&restored.state.deck_pools).unwrap(),
+            carried.as_ref(),
+            "the restore must rebuild exactly the pools the carried encoding describes"
+        );
+
+        restored.seed_deck_pools_encoding(Arc::clone(&carried));
+        let first = restored
+            .full_persist_snapshot()
+            .expect("a runtime-bound session has a snapshot")
+            .deck_pools_json;
+        assert!(
+            Arc::ptr_eq(&first, &carried),
+            "the first persist after a restart must reuse the column's own string"
+        );
+
+        // Hostile sibling: the seed is a cache, not a pin. An edit after the
+        // restore must still re-encode.
+        Arc::make_mut(&mut restored.state.deck_pools[0].current_main).clear();
+        let second = restored
+            .full_persist_snapshot()
+            .expect("a runtime-bound session has a snapshot")
+            .deck_pools_json;
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "an edit after the restore must invalidate the seeded encoding"
+        );
+    }
+
+    /// The test-side twin of the production read path: the pools travel in
+    /// their own encoded string beside the payload, exactly as
+    /// `load_active_full_sessions` carries `deck_pools_json` beside
+    /// `session_state_json`. Carrying them inside the JSON would exercise a
+    /// shape no writer produces, since the field is `skip_serializing`. Both
+    /// strings are decoded by the production row decoder, `decode_row`.
+    fn round_trip_through_disk(session: &GameSession, db: &Arc<CardDatabase>) -> GameSession {
+        let snapshot = session.to_persisted();
+        let pools_json = serde_json::to_string(&snapshot.deck_pools).unwrap();
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let persisted = crate::persist::PersistedSession::decode_row(&json, &pools_json).unwrap();
         GameSession::from_persisted(persisted, db).expect("supported persisted format config")
+    }
+
+    #[test]
+    fn native_cube_pool_survives_start_and_disk_recovery_without_deduplication() {
+        let db = Arc::new(CardDatabase::default());
+        let mut mgr = SessionManager::new();
+        let (code, _) = mgr.create_game(make_deck(), None);
+        let pool = vec![
+            "Cube Card".to_string(),
+            "Cube Card".to_string(),
+            "Undealt sentinel".to_string(),
+        ];
+        mgr.try_session(&code).unwrap().booster_pack_pool = Some(pool.clone());
+        join_game(&mut mgr, &code, make_deck(), None).expect("second seat joins");
+
+        let restored = round_trip_through_disk(&mgr.try_session(&code).unwrap(), &db);
+        assert_eq!(restored.booster_pack_pool, Some(pool.clone()));
+
+        let (ordinary_code, _) = mgr.create_game(make_deck(), None);
+        join_game(&mut mgr, &ordinary_code, make_deck(), None).expect("ordinary game joins");
+        let ordinary = round_trip_through_disk(&mgr.try_session(&ordinary_code).unwrap(), &db);
+        assert!(ordinary.booster_pack_pool.is_none());
     }
 
     #[test]
@@ -5175,11 +7560,11 @@ mod tests {
         // `to_persisted` captures the whole `GameState`, so they arrive
         // already set and `rebuild_pregame_state` never runs on the restore
         // path to re-examine them.
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let mut sidecar = SessionManager::single_user(Duration::from_secs(60));
         let code = single_ai_opponent_game(&mut sidecar);
 
-        let origin = sidecar.sessions.get(&code).unwrap();
+        let origin = sidecar.try_session(&code).unwrap();
         // Premise 1: the sidecar really granted it, so a cleared result below
         // cannot come from the blob never having had the capability.
         assert!(origin.state.debug_mode);
@@ -5189,7 +7574,7 @@ mod tests {
         // and if it were set here the session would stay entitled.
         assert!(!origin.state.format_config.allow_debug_actions);
 
-        let restored = round_trip_through_disk(origin, &db);
+        let restored = round_trip_through_disk(&origin, &db);
         // Premise 3: both fields genuinely survive a disk round trip. If this
         // ever goes false the assertions below become vacuous.
         assert!(restored.state.debug_mode);
@@ -5200,7 +7585,7 @@ mod tests {
 
         let mut shared = SessionManager::new();
         shared.restore_session(restored);
-        let session = shared.sessions.get(&code).unwrap();
+        let session = shared.try_session(&code).unwrap();
         assert_eq!(session.hosting, HostingMode::Shared);
         assert!(
             !session.state.debug_mode,
@@ -5220,10 +7605,10 @@ mod tests {
         // Values are kept VERBATIM rather than re-seeded — an explicit
         // `RevokeDebugPermission` is game state, and re-deriving would
         // silently reinstate the revoked seat.
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let mut origin_mgr = SessionManager::new();
         let (code, _token) = create_sandbox_game(&mut origin_mgr);
-        let origin = origin_mgr.sessions.get_mut(&code).unwrap();
+        let mut origin = origin_mgr.try_session(&code).unwrap();
         assert_eq!(
             origin.state.debug_permitted,
             BTreeSet::from([PlayerId(0), PlayerId(1)]),
@@ -5231,10 +7616,10 @@ mod tests {
         );
         origin.state.debug_permitted.remove(&PlayerId(1));
 
-        let restored = round_trip_through_disk(origin, &db);
+        let restored = round_trip_through_disk(&origin, &db);
         let mut shared = SessionManager::new();
         shared.restore_session(restored);
-        let session = shared.sessions.get(&code).unwrap();
+        let session = shared.try_session(&code).unwrap();
         assert!(session.state.debug_mode);
         assert_eq!(
             session.state.debug_permitted,
@@ -5249,14 +7634,14 @@ mod tests {
         // suspended game. `HostingMode::SingleUser` is the second entitlement,
         // so nothing is dropped here. Fails against a restore that clears
         // whenever `allow_debug_actions` is false.
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let mut origin_mgr = SessionManager::single_user(Duration::from_secs(60));
         let code = single_ai_opponent_game(&mut origin_mgr);
-        let restored = round_trip_through_disk(origin_mgr.sessions.get(&code).unwrap(), &db);
+        let restored = round_trip_through_disk(&origin_mgr.try_session(&code).unwrap(), &db);
 
         let mut sidecar = SessionManager::single_user(Duration::from_secs(60));
         sidecar.restore_session(restored);
-        let session = sidecar.sessions.get(&code).unwrap();
+        let session = sidecar.try_session(&code).unwrap();
         assert!(session.state.debug_mode);
         assert_eq!(session.state.debug_permitted, BTreeSet::from([PlayerId(0)]));
     }
@@ -5280,11 +7665,11 @@ mod tests {
     /// `291 != 0` and panics the shuffle underneath it.
     #[test]
     fn restore_reseeds_the_rng_and_drops_the_saved_stream_position() {
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let mut mgr = SessionManager::new();
         let code = single_ai_opponent_game(&mut mgr);
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         // Guard, not an assumption: if setup ever consumes past the planted position the
         // capture below would panic in the fixture rather than in the code under test.
         assert!(
@@ -5301,11 +7686,16 @@ mod tests {
             "fixture premise: a NON-ZERO saved high-water, or this row measures nothing",
         );
 
-        let json = serde_json::to_string(&mgr.sessions.get(&code).unwrap().to_persisted()).unwrap();
+        drop(session);
+        let json = serde_json::to_string(&mgr.try_session(&code).unwrap().to_persisted()).unwrap();
         let blob: crate::persist::PersistedSession = serde_json::from_str(&json).unwrap();
 
         // Premise 2, measured: the position survives disk AND the chokepoint resumes it.
-        let chokepoint_only = blob.state.clone().into_game_state();
+        let chokepoint_only = blob
+            .state
+            .clone()
+            .into_game_state()
+            .expect("test snapshot satisfies the checked restore contract");
         assert_eq!(
             chokepoint_only.rng_word_pos, SAVED_WORD_POS,
             "premise: the persisted blob carries the position across disk",
@@ -5353,10 +7743,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "HighWaterRegression")]
     fn a_restored_session_that_kept_the_saved_stream_position_panics_on_its_next_shuffle() {
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let mut mgr = SessionManager::new();
         let code = single_ai_opponent_game(&mut mgr);
-        let mut restored = round_trip_through_disk(mgr.sessions.get(&code).unwrap(), &db);
+        let mut restored = round_trip_through_disk(&mgr.try_session(&code).unwrap(), &db);
 
         // Re-create the pre-fix pairing on a RESTORED state: a fresh word-0 stream under a
         // surviving high-water. Exactly what `from_persisted` used to hand back.
@@ -5383,7 +7773,7 @@ mod tests {
         use engine::types::zones::Zone;
 
         let mut mgr = SessionManager::new();
-        let (code, token) = mgr.create_game(make_deck());
+        let (code, token) = mgr.create_game(make_deck(), None);
 
         let mut state = GameState::new_two_player(7);
         let bearer = engine::game::zones::create_object(
@@ -5415,9 +7805,10 @@ mod tests {
             source_id: bearer,
             counter_type: None,
             available: vec![(CounterType::Plus1Plus1, 3)],
+            max_total: None,
             pending_effect: Box::new(pending),
         };
-        mgr.sessions.get_mut(&code).unwrap().state = state;
+        mgr.try_session(&code).unwrap().state = state;
 
         // Discriminating: this "remove 2 of 3" submit is absent from the coarse
         // candidate set ({[], remove-all}) but is legal under the engine's
@@ -5428,19 +7819,23 @@ mod tests {
                 count: 2,
             }],
         };
-        let session = mgr.sessions.get(&code).unwrap();
+        let session = mgr.try_session(&code).unwrap();
         let (candidates, _, _) = engine_legal_actions_full(&session.state);
         assert!(
             !candidates.contains(&intermediate_removal),
             "the intermediate removal must be absent from coarse candidates"
         );
-        let result = mgr.handle_action(&code, &token, intermediate_removal);
+        drop(session);
+        let result = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action(&token, intermediate_removal);
 
         assert!(
             result.is_ok(),
             "intermediate removal must be accepted, not rejected as illegal: {result:?}"
         );
-        let removed_to = mgr.sessions.get(&code).unwrap().state.objects[&bearer]
+        let removed_to = mgr.try_session(&code).unwrap().state.objects[&bearer]
             .counters
             .get(&CounterType::Plus1Plus1)
             .copied()
@@ -5458,8 +7853,7 @@ mod tests {
         // least accepts the action — engine validation may still reject if
         // pregame state lacks the player, but the *server gate* must not be
         // the rejecter.
-        let result = mgr.handle_action(
-            &code,
+        let result = mgr.try_session(&code).unwrap().handle_action(
             &token,
             GameAction::Debug(engine::types::actions::DebugAction::ShuffleLibrary {
                 player_id: PlayerId(0),
@@ -5493,13 +7887,12 @@ mod tests {
         // an explicit revoke. This exercises the revoke escape hatch.
         let mut mgr = SessionManager::new();
         let (code, host_token) = create_sandbox_game(&mut mgr);
-        let (guest_token, _state) = mgr
-            .join_game_with_name(&code, make_deck(), "Guest".to_string())
-            .expect("guest joins");
+        let (guest_token, _state) =
+            join_game_with_name(&mut mgr, &code, make_deck(), None, "Guest".to_string())
+                .expect("guest joins");
 
         // Host revokes the guest's default permission.
-        let revoke = mgr.handle_action(
-            &code,
+        let revoke = mgr.try_session(&code).unwrap().handle_action(
             &host_token,
             GameAction::RevokeDebugPermission {
                 player_id: PlayerId(1),
@@ -5507,8 +7900,7 @@ mod tests {
         );
         assert!(revoke.is_ok(), "revoke must succeed: {:?}", revoke.err());
 
-        let result = mgr.handle_action(
-            &code,
+        let result = mgr.try_session(&code).unwrap().handle_action(
             &guest_token,
             GameAction::Debug(engine::types::actions::DebugAction::ShuffleLibrary {
                 player_id: PlayerId(1),
@@ -5521,24 +7913,26 @@ mod tests {
     fn revoked_seat_cannot_create_debug_cards_through_server_card_database() {
         let mut mgr = SessionManager::new();
         let (code, host_token) = create_sandbox_game(&mut mgr);
-        let (guest_token, _state) = mgr
-            .join_game_with_name(&code, make_deck(), "Guest".to_string())
-            .expect("guest joins");
+        let (guest_token, _state) =
+            join_game_with_name(&mut mgr, &code, make_deck(), None, "Guest".to_string())
+                .expect("guest joins");
 
-        mgr.handle_action(
-            &code,
-            &host_token,
-            GameAction::RevokeDebugPermission {
-                player_id: PlayerId(1),
-            },
-        )
-        .expect("host revokes the guest's debug permission");
+        mgr.try_session(&code)
+            .unwrap()
+            .handle_action(
+                &host_token,
+                GameAction::RevokeDebugPermission {
+                    player_id: PlayerId(1),
+                },
+            )
+            .expect("host revokes the guest's debug permission");
 
         // The server's source-bound CreateCard path must not skip the shared
         // Debug(_) admission gate before attempting card-database resolution.
         let err = mgr
+            .try_session(&code)
+            .unwrap()
             .handle_action_with_card_db(
-                &code,
                 &guest_token,
                 GameAction::Debug(DebugAction::CreateCard {
                     card_name: "Any Card".to_string(),
@@ -5548,36 +7942,36 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
+                    creation_kind: DebugCardCreationKind::Card,
                 }),
                 None,
             )
             .expect_err("revoked guests cannot reach the server CreateCard path");
-        assert_eq!(err, "Debug actions are not permitted for this seat");
+        assert_eq!(err, "You are not authorized to use debug actions.");
     }
 
     #[test]
     fn host_can_grant_debug_to_guest() {
         let mut mgr = SessionManager::new();
         let (code, host_token) = create_sandbox_game(&mut mgr);
-        let (guest_token, _state) = mgr
-            .join_game_with_name(&code, make_deck(), "Guest".to_string())
-            .expect("guest joins");
+        let (guest_token, _state) =
+            join_game_with_name(&mut mgr, &code, make_deck(), None, "Guest".to_string())
+                .expect("guest joins");
 
         // Host grants debug permission to seat 1.
-        let result = mgr.handle_action(
-            &code,
+        let result = mgr.try_session(&code).unwrap().handle_action(
             &host_token,
             GameAction::GrantDebugPermission {
                 player_id: PlayerId(1),
             },
         );
         assert!(result.is_ok(), "grant must succeed: {:?}", result.err());
-        let session = mgr.sessions.get(&code).unwrap();
+        let session = mgr.try_session(&code).unwrap();
         assert!(session.state.debug_permitted.contains(&PlayerId(1)));
 
         // Guest can now submit a debug action.
-        let result = mgr.handle_action(
-            &code,
+        drop(session);
+        let result = mgr.try_session(&code).unwrap().handle_action(
             &guest_token,
             GameAction::Debug(engine::types::actions::DebugAction::ShuffleLibrary {
                 player_id: PlayerId(1),
@@ -5591,14 +7985,13 @@ mod tests {
         }
 
         // Host revokes — guest is no longer permitted.
-        let _ = mgr.handle_action(
-            &code,
+        let _ = mgr.try_session(&code).unwrap().handle_action(
             &host_token,
             GameAction::RevokeDebugPermission {
                 player_id: PlayerId(1),
             },
         );
-        let session = mgr.sessions.get(&code).unwrap();
+        let session = mgr.try_session(&code).unwrap();
         assert!(!session.state.debug_permitted.contains(&PlayerId(1)));
         assert!(session.state.debug_permitted.contains(&PlayerId(0)));
     }
@@ -5607,12 +8000,11 @@ mod tests {
     fn non_host_cannot_grant_debug() {
         let mut mgr = SessionManager::new();
         let (code, _host_token) = create_sandbox_game(&mut mgr);
-        let (guest_token, _state) = mgr
-            .join_game_with_name(&code, make_deck(), "Guest".to_string())
-            .expect("guest joins");
+        let (guest_token, _state) =
+            join_game_with_name(&mut mgr, &code, make_deck(), None, "Guest".to_string())
+                .expect("guest joins");
 
-        let result = mgr.handle_action(
-            &code,
+        let result = mgr.try_session(&code).unwrap().handle_action(
             &guest_token,
             GameAction::GrantDebugPermission {
                 player_id: PlayerId(1),
@@ -5620,15 +8012,14 @@ mod tests {
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("host"), "{err}");
+        assert_eq!(err, "That action is not allowed right now.");
     }
 
     #[test]
     fn host_cannot_self_revoke() {
         let mut mgr = SessionManager::new();
         let (code, host_token) = create_sandbox_game(&mut mgr);
-        let result = mgr.handle_action(
-            &code,
+        let result = mgr.try_session(&code).unwrap().handle_action(
             &host_token,
             GameAction::RevokeDebugPermission {
                 player_id: PlayerId(0),
@@ -5636,15 +8027,14 @@ mod tests {
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("own"), "{err}");
+        assert_eq!(err, "That action is not allowed right now.");
     }
 
     #[test]
     fn grant_outside_sandbox_is_rejected() {
         let mut mgr = SessionManager::new();
-        let (code, token) = mgr.create_game(make_deck());
-        let result = mgr.handle_action(
-            &code,
+        let (code, token) = mgr.create_game(make_deck(), None);
+        let result = mgr.try_session(&code).unwrap().handle_action(
             &token,
             GameAction::GrantDebugPermission {
                 player_id: PlayerId(1),
@@ -5652,7 +8042,7 @@ mod tests {
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("Sandbox"), "{err}");
+        assert_eq!(err, "That action is not allowed right now.");
     }
 
     #[test]
@@ -5662,7 +8052,7 @@ mod tests {
 
         // Build an empty CardDatabase (no real card data needed — the cEDH
         // bracket gate fires before any deck loading).
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
 
         // Construct a two-seat session manually: host (seat 0) + AI (seat 1).
         let pc = 2usize;
@@ -5680,6 +8070,7 @@ mod tests {
 
         let mut session = GameSession {
             game_code: "TEST01".to_string(),
+            game_log: Arc::default(),
             full_runtime: None,
             state_revision: 0,
             ai_driver_fault: None,
@@ -5698,6 +8089,7 @@ mod tests {
                     ..Default::default()
                 }),
             ],
+            deck_choices: vec![None, None],
             display_names: vec!["Host".to_string(), "AI (CEDH)".to_string()],
             reservations: HashMap::new(),
             timer_seconds: None,
@@ -5711,11 +8103,11 @@ mod tests {
             game_started: false,
             start_when_full: true,
             ranked: false,
+            booster_pack_pool: None,
             start_events: Vec::new(),
-            pending_takeback: None,
-            takeback_history: VecDeque::new(),
-            turn_rewind_history: VecDeque::new(),
-            rewind_game_number: 1,
+            takeback: TakebackLedger::new(1),
+            deck_pools_cache: None,
+            contest: Default::default(),
         };
 
         let game_started_before = session.game_started;
@@ -5723,13 +8115,99 @@ mod tests {
 
         // The gate must reject with DeckNotCedh.
         assert!(
-            matches!(result, Err(CedhBracketError::DeckNotCedh { .. })),
+            matches!(
+                result,
+                Err(StartGameError::Bracket(
+                    CedhBracketError::DeckNotCedh { .. }
+                ))
+            ),
             "expected DeckNotCedh, got: {:?}",
             result
         );
         // No session state should have been mutated — game_started stays false.
         assert_eq!(session.game_started, game_started_before);
         assert!(!session.game_started);
+    }
+
+    /// R2-#4: Two Towers at [human, AI, human] has no contiguous AI run for
+    /// the 2-seat Horde roster, so `start_game` rejects the layout instead
+    /// of designating seat 2 — a human — as a Horde seat carrying the
+    /// challenge library.
+    #[test]
+    fn horde_two_towers_split_layout_is_rejected_at_start() {
+        let db = Arc::new(CardDatabase::default());
+        let mut mgr = SessionManager::new();
+        let two_towers = FormatConfig::horde(ChallengeDeck::LotrTwoTowersHorde.default_ruleset());
+        let (code, _token0) = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                3,
+                MatchConfig::default(),
+                Some(two_towers),
+            )
+            .expect("3-player Horde room creates");
+        let (_token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        let (_token2, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+
+        // Seat 1 is the lone AI seat between two humans.
+        let mut session = mgr.try_session(&code).unwrap();
+        session.ai_seats.insert(PlayerId(1));
+
+        let result = session.start_game(&db);
+        assert!(
+            matches!(
+                result,
+                Err(StartGameError::HordeSeatsNotAi {
+                    horde_seat_count: 2,
+                    player_count: 3,
+                })
+            ),
+            "split layout must be rejected, got: {result:?}",
+        );
+        assert!(!session.game_started);
+    }
+
+    /// R2-#4: the Horde anchor is the lowest seat starting a full-AI run
+    /// covering the roster; without one the rebuild clears the default
+    /// anchor so the pregame state designates nothing (and `start_game`
+    /// rejects — see the test above).
+    #[test]
+    fn horde_anchor_requires_a_full_ai_run() {
+        let mut mgr = SessionManager::new();
+        let two_towers = FormatConfig::horde(ChallengeDeck::LotrTwoTowersHorde.default_ruleset());
+        let (code, _token0) = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                3,
+                MatchConfig::default(),
+                Some(two_towers),
+            )
+            .expect("3-player Horde room creates");
+        let (_token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        let (_token2, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+
+        let mut session = mgr.try_session(&code).unwrap();
+        // Contiguous AI run on seats 1+2: anchor 1, both Horde libraries
+        // land on AI seats.
+        session.ai_seats.insert(PlayerId(1));
+        session.ai_seats.insert(PlayerId(2));
+        session.rebuild_pregame_state(3);
+        assert_eq!(
+            session.state.format_config.archenemy_player,
+            Some(PlayerId(1))
+        );
+
+        // Lone AI seat between two humans: no anchor, and the default
+        // seat-0 anchor is cleared rather than left pointing at the host.
+        session.ai_seats.remove(&PlayerId(2));
+        session.rebuild_pregame_state(3);
+        assert_eq!(session.state.format_config.archenemy_player, None);
     }
 
     /// CR 701.22a / CR 701.25a: a reordered (and partial-2+) scry keep-on-top
@@ -5744,10 +8222,10 @@ mod tests {
         use engine::types::zones::Zone;
 
         let mut mgr = SessionManager::new();
-        let (code, token0) = mgr.create_game(make_deck());
-        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+        let (code, token0) = mgr.create_game(make_deck(), None);
+        let (token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         // Make the scry the responsibility of the NON-active player so that
         // `authorized_submitter_for_player` is the identity (no turn-decision
         // re-routing) and authorization is unambiguous.
@@ -5787,15 +8265,18 @@ mod tests {
         // Reordered, partial-2 keep: [c, a] (drop b to the bottom). This is NOT
         // an enumerated candidate, so it would be rejected by the legality gate.
         let token = token.to_string();
-        let result =
-            mgr.handle_action(&code, &token, GameAction::SelectCards { cards: vec![c, a] });
+        drop(session);
+        let result = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action(&token, GameAction::SelectCards { cards: vec![c, a] });
         assert!(
             result.is_ok(),
             "reordered scry selection should be accepted, got: {result:?}"
         );
 
         // The selection was applied: c then a rest on top.
-        let session = mgr.sessions.get(&code).unwrap();
+        let session = mgr.try_session(&code).unwrap();
         let player_idx = scry_player.0 as usize;
         let library: Vec<ObjectId> = session.state.players[player_idx]
             .library
@@ -5817,10 +8298,10 @@ mod tests {
         use engine::types::zones::Zone;
 
         let mut mgr = SessionManager::new();
-        let (code, token0) = mgr.create_game(make_deck());
-        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+        let (code, token0) = mgr.create_game(make_deck(), None);
+        let (token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         let dig_player = PlayerId(if session.state.active_player == PlayerId(0) {
             1
         } else {
@@ -5854,6 +8335,8 @@ mod tests {
             selectable_cards: top_three.clone(),
             kept_destination: Some(Zone::Library),
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
             rest_order: engine::types::ability::DigRestOrder::Preserve,
             source_id: None,
             enter_tapped: false,
@@ -5862,8 +8345,8 @@ mod tests {
 
         // Non-canonical permutation [c, a, b] — not an enumerated candidate.
         let token = token.to_string();
-        let result = mgr.handle_action(
-            &code,
+        drop(session);
+        let result = mgr.try_session(&code).unwrap().handle_action(
             &token,
             GameAction::SelectCards {
                 cards: vec![c, a, b],
@@ -5874,7 +8357,7 @@ mod tests {
             "reordered dig selection should be accepted, got: {result:?}"
         );
 
-        let session = mgr.sessions.get(&code).unwrap();
+        let session = mgr.try_session(&code).unwrap();
         let library: Vec<ObjectId> = session.state.players[dig_player.0 as usize]
             .library
             .iter()
@@ -5896,10 +8379,10 @@ mod tests {
         use engine::types::zones::Zone;
 
         let mut mgr = SessionManager::new();
-        let (code, token0) = mgr.create_game(make_deck());
-        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+        let (code, token0) = mgr.create_game(make_deck(), None);
+        let (token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         let bottom_player = PlayerId(if session.state.active_player == PlayerId(0) {
             1
         } else {
@@ -5925,6 +8408,7 @@ mod tests {
         let (a, b): (ObjectId, ObjectId) = (hand[0], hand[1]);
         session.state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: bottom_player,
                 mulligan_count: 1,
                 phase: MulliganDecisionPhase::BottomCards {
@@ -5933,17 +8417,21 @@ mod tests {
                 },
             }],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
 
         let token = token.to_string();
-        let result =
-            mgr.handle_action(&code, &token, GameAction::SelectCards { cards: vec![b, a] });
+        drop(session);
+        let result = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action(&token, GameAction::SelectCards { cards: vec![b, a] });
         assert!(
             result.is_ok(),
             "reordered mulligan bottom selection should be accepted, got: {result:?}"
         );
 
-        let session = mgr.sessions.get(&code).unwrap();
+        let session = mgr.try_session(&code).unwrap();
         let player_idx = bottom_player.0 as usize;
         let hand_after: Vec<ObjectId> = session.state.players[player_idx]
             .hand
@@ -5976,10 +8464,10 @@ mod tests {
         use engine::types::zones::Zone;
 
         let mut mgr = SessionManager::new();
-        let (code, token0) = mgr.create_game(make_deck());
-        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+        let (code, token0) = mgr.create_game(make_deck(), None);
+        let (token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         let bottom_player = PlayerId(if session.state.active_player == PlayerId(0) {
             1
         } else {
@@ -6004,6 +8492,7 @@ mod tests {
         }
         let (a, b): (ObjectId, ObjectId) = (hand[0], hand[1]);
         let pending_before = vec![MulliganDecisionEntry {
+            free_reveals_taken: 0,
             player: bottom_player,
             mulligan_count: 1,
             phase: MulliganDecisionPhase::BottomCards {
@@ -6014,22 +8503,27 @@ mod tests {
         session.state.waiting_for = WaitingFor::MulliganDecision {
             pending: pending_before.clone(),
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
 
         let token = token.to_string();
-        let result =
-            mgr.handle_action(&code, &token, GameAction::SelectCards { cards: vec![b, b] });
+        drop(session);
+        let result = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action(&token, GameAction::SelectCards { cards: vec![b, b] });
         assert!(
             result.is_err(),
             "duplicate mulligan bottom selection must be rejected, got: {result:?}"
         );
 
-        let session = mgr.sessions.get(&code).unwrap();
+        let session = mgr.try_session(&code).unwrap();
         assert_eq!(
             session.state.waiting_for,
             WaitingFor::MulliganDecision {
                 pending: pending_before,
                 free_first_mulligan: false,
+                declared: Vec::new(),
             },
             "pending obligation must be unchanged after a rejected selection"
         );
@@ -6061,10 +8555,10 @@ mod tests {
         use engine::types::zones::Zone;
 
         let mut mgr = SessionManager::new();
-        let (code, token0) = mgr.create_game(make_deck());
-        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+        let (code, token0) = mgr.create_game(make_deck(), None);
+        let (token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         let bottom_player = PlayerId(if session.state.active_player == PlayerId(0) {
             1
         } else {
@@ -6097,14 +8591,17 @@ mod tests {
         };
 
         let token = token.to_string();
-        let result =
-            mgr.handle_action(&code, &token, GameAction::SelectCards { cards: vec![b, a] });
+        drop(session);
+        let result = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action(&token, GameAction::SelectCards { cards: vec![b, a] });
         assert!(
             result.is_ok(),
             "reordered opening-hand bottom selection should be accepted, got: {result:?}"
         );
 
-        let session = mgr.sessions.get(&code).unwrap();
+        let session = mgr.try_session(&code).unwrap();
         let player_idx = bottom_player.0 as usize;
         let hand_after: Vec<ObjectId> = session.state.players[player_idx]
             .hand
@@ -6133,10 +8630,10 @@ mod tests {
         use engine::types::zones::Zone;
 
         let mut mgr = SessionManager::new();
-        let (code, token0) = mgr.create_game(make_deck());
-        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+        let (code, token0) = mgr.create_game(make_deck(), None);
+        let (token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         let bottom_player = PlayerId(if session.state.active_player == PlayerId(0) {
             1
         } else {
@@ -6170,14 +8667,17 @@ mod tests {
         };
 
         let token = token.to_string();
-        let result =
-            mgr.handle_action(&code, &token, GameAction::SelectCards { cards: vec![b, b] });
+        drop(session);
+        let result = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action(&token, GameAction::SelectCards { cards: vec![b, b] });
         assert!(
             result.is_err(),
             "duplicate opening-hand bottom selection must be rejected, got: {result:?}"
         );
 
-        let session = mgr.sessions.get(&code).unwrap();
+        let session = mgr.try_session(&code).unwrap();
         assert_eq!(
             session.state.waiting_for,
             WaitingFor::OpeningHandBottomCards {
@@ -6220,10 +8720,10 @@ mod tests {
         use engine::types::zones::Zone;
 
         let mut mgr = SessionManager::new();
-        let (code, token0) = mgr.create_game(make_deck());
-        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+        let (code, token0) = mgr.create_game(make_deck(), None);
+        let (token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
 
-        let session = mgr.sessions.get_mut(&code).unwrap();
+        let mut session = mgr.try_session(&code).unwrap();
         // The attacker's controller assigns combat damage. Make that the
         // active player; route the action through whichever token owns them.
         let assigning_player = session.state.active_player;
@@ -6295,37 +8795,48 @@ mod tests {
             !candidates.contains(&legal_non_candidate),
             "the legal keep-on-blocker split must be absent from the greedy candidates"
         );
-        let history_before_illegal = session.takeback_history.len();
+        let history_before_illegal = session.takeback.history().len();
 
         // Illegal division first: wrong total (4 != 5). It reaches apply() and
         // is rejected by the engine, proving candidate removal does not weaken
         // structural validation.
-        let illegal = mgr.handle_action(
-            &code,
-            &token,
-            GameAction::AssignCombatDamage {
-                mode: CombatDamageAssignmentMode::Normal,
-                assignments: vec![(blocker, 4)],
-                trample_damage: 0,
-                controller_damage: 0,
-            },
-        );
+        drop(session);
+        let illegal = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(
+                &token,
+                GameAction::AssignCombatDamage {
+                    mode: CombatDamageAssignmentMode::Normal,
+                    assignments: vec![(blocker, 4)],
+                    trample_damage: 0,
+                    controller_damage: 0,
+                },
+                None,
+            );
         match illegal {
-            Err(e) => assert!(
-                e.starts_with("Engine error:"),
-                "wrong-total division must be rejected by apply(), not the gate, got: {e}"
+            Err(SessionActionError::Rejected(rejection)) => assert_eq!(
+                rejection.code,
+                engine::types::action_rejection::ActionRejectionCode::InvalidAction,
+                "wrong-total division must be rejected by apply(), not the gate"
+            ),
+            Err(error) => panic!(
+                "wrong-total division must be rejected by apply(), not the gate, got: {error:?}"
             ),
             Ok(_) => panic!("wrong-total combat damage division must be rejected"),
         }
         assert_eq!(
-            mgr.sessions.get(&code).unwrap().takeback_history.len(),
+            mgr.try_session(&code).unwrap().takeback.history().len(),
             history_before_illegal,
             "rejected engine action must not add a takeback snapshot"
         );
 
         // Legal-but-non-enumerated division: keep all 5 on the blocker, trample
         // nothing through (CR 702.19b). Pre-fix this was rejected as illegal.
-        let legal = mgr.handle_action(&code, &token, legal_non_candidate);
+        let legal = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action(&token, legal_non_candidate);
         assert!(
             legal.is_ok(),
             "keep-on-blocker combat damage division (CR 702.19b) should be accepted, got: {legal:?}"
@@ -6333,7 +8844,7 @@ mod tests {
 
         // The defending player took no trample damage — proof the controller's
         // declined-excess division resolved as submitted (life unchanged at 20).
-        let session = mgr.sessions.get(&code).unwrap();
+        let session = mgr.try_session(&code).unwrap();
         assert_eq!(session.state.players[defending_player.0 as usize].life, 20);
     }
 
@@ -6355,18 +8866,19 @@ mod tests {
         let (code, token0) = mgr
             .create_game_n_players(
                 make_deck(),
+                None,
                 "Host".to_string(),
                 None,
                 3,
                 MatchConfig::default(),
-                Some(FormatConfig::standard()),
+                None,
             )
             .expect("supported format config");
-        let _ = mgr.join_game(&code, make_deck()).unwrap();
-        let _ = mgr.join_game(&code, make_deck()).unwrap();
+        let _ = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        let _ = join_game(&mut mgr, &code, make_deck(), None).unwrap();
 
         let attacks = {
-            let session = mgr.sessions.get_mut(&code).unwrap();
+            let mut session = mgr.try_session(&code).unwrap();
             let first = create_object(
                 &mut session.state,
                 CardId(4000),
@@ -6416,7 +8928,7 @@ mod tests {
             bands: vec![],
         };
 
-        let enumerated = engine::ai_support::legal_actions(&mgr.sessions[&code].state);
+        let enumerated = engine::ai_support::legal_actions(&mgr.try_session(&code).unwrap().state);
         assert!(
             !enumerated.contains(&action),
             "the finite candidate set intentionally omits this split attack: {enumerated:?}"
@@ -6424,28 +8936,40 @@ mod tests {
 
         // The bypass must not weaken validation: a malformed freeform declaration
         // reaches the engine and is rejected there rather than by candidate lookup.
-        let duplicate = mgr.handle_action(
-            &code,
-            &token0,
-            GameAction::DeclareAttackers {
-                attacks: vec![
-                    attacks[0],
-                    (attacks[0].0, AttackTarget::Player(PlayerId(2))),
-                ],
-                bands: vec![],
-            },
-        );
+        let duplicate = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(
+                &token0,
+                GameAction::DeclareAttackers {
+                    attacks: vec![
+                        attacks[0],
+                        (attacks[0].0, AttackTarget::Player(PlayerId(2))),
+                    ],
+                    bands: vec![],
+                },
+                None,
+            );
         assert!(
-            matches!(duplicate, Err(ref error) if error.starts_with("Engine error:")),
+            matches!(
+                duplicate,
+                Err(SessionActionError::Rejected(ref rejection))
+                    if rejection.code
+                        == engine::types::action_rejection::ActionRejectionCode::InvalidAction
+            ),
             "a duplicate attacker must be rejected by the engine, got: {duplicate:?}"
         );
 
-        let result = mgr.handle_action(&code, &token0, action);
+        let result = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action(&token0, action);
         assert!(
             result.is_ok(),
             "a legal split attack must be validated by apply(), got: {result:?}"
         );
-        let attackers = &mgr.sessions[&code].state.combat.as_ref().unwrap().attackers;
+        let session = mgr.try_session(&code).unwrap();
+        let attackers = &session.state.combat.as_ref().unwrap().attackers;
         assert_eq!(attackers.len(), 2);
         assert!(attackers.iter().any(|attacker| {
             attacker.object_id == attacks[0].0
@@ -6470,7 +8994,7 @@ mod tests {
         token0: &'a str,
         token1: &'a str,
     ) -> (PlayerId, &'a str, &'a str, InteractionSubmission) {
-        let state = &mgr.sessions.get(code).expect("session").state;
+        let state = &mgr.try_session(code).expect("session").state;
         for (player, token, other) in [(PlayerId(0), token0, token1), (PlayerId(1), token1, token0)]
         {
             let filtered = filter_state_for_player(state, player);
@@ -6484,10 +9008,8 @@ mod tests {
 
     fn started_two_seat_game() -> (SessionManager, String, String, String) {
         let mut mgr = SessionManager::new();
-        let (code, token0) = mgr.create_game(make_deck());
-        let (token1, _) = mgr
-            .join_game(&code, make_deck())
-            .expect("second seat joins");
+        let (code, token0) = mgr.create_game(make_deck(), None);
+        let (token1, _) = join_game(&mut mgr, &code, make_deck(), None).expect("second seat joins");
         (mgr, code, token0, token1)
     }
 
@@ -6496,49 +9018,77 @@ mod tests {
     /// same game must not be able to spend seat A's `interaction_id`.
     #[test]
     fn handle_interaction_binds_the_actor_to_the_authenticated_token() {
-        let (mut mgr, code, token0, token1) = started_two_seat_game();
+        let (mgr, code, token0, token1) = started_two_seat_game();
         let (_acting, acting_token, other_token, witness) =
             live_witness(&mgr, &code, &token0, &token1);
 
-        let before = mgr.sessions[&code].state.active_interaction_slots.clone();
+        let before = mgr
+            .try_session(&code)
+            .unwrap()
+            .state
+            .active_interaction_slots
+            .clone();
 
-        let forged = mgr.handle_interaction(&code, other_token, witness.clone());
+        let forged = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_interaction(other_token, witness.clone());
         let error = forged.expect_err("a valid token for another seat must not spend this slot");
-        assert!(
-            error.contains("NotAuthorized"),
-            "unexpected reason: {error}"
-        );
+        assert_eq!(error, "You are not authorized to answer that interaction.");
         assert_eq!(
-            mgr.sessions[&code].state.active_interaction_slots, before,
+            mgr.try_session(&code)
+                .unwrap()
+                .state
+                .active_interaction_slots,
+            before,
             "a refused submission must not consume the capability"
         );
 
         // The success half is the reach guard: without it the `Err` above could
         // have come from staleness rather than from authorization.
-        mgr.handle_interaction(&code, acting_token, witness)
+        mgr.try_session(&code)
+            .unwrap()
+            .handle_interaction(acting_token, witness)
             .expect("the authenticated owner of the slot may spend it");
         assert_ne!(
-            mgr.sessions[&code].state.active_interaction_slots, before,
+            mgr.try_session(&code)
+                .unwrap()
+                .state
+                .active_interaction_slots,
+            before,
             "an accepted submission re-mints the interaction slots"
         );
     }
 
     #[test]
     fn handle_interaction_rejects_an_unknown_token() {
-        let (mut mgr, code, token0, token1) = started_two_seat_game();
+        let (mgr, code, token0, token1) = started_two_seat_game();
         let (_acting, _acting_token, _other, witness) = live_witness(&mgr, &code, &token0, &token1);
 
-        let before_waiting = mgr.sessions[&code].state.waiting_for.clone();
-        let before_slots = mgr.sessions[&code].state.active_interaction_slots.clone();
+        let before_waiting = mgr.try_session(&code).unwrap().state.waiting_for.clone();
+        let before_slots = mgr
+            .try_session(&code)
+            .unwrap()
+            .state
+            .active_interaction_slots
+            .clone();
 
         let error = mgr
-            .handle_interaction(&code, "not-a-real-token", witness)
+            .try_session(&code)
+            .unwrap()
+            .handle_interaction("not-a-real-token", witness)
             .expect_err("an unknown token is not a seat");
         assert_eq!(error, "Invalid player token");
 
-        assert_eq!(mgr.sessions[&code].state.waiting_for, before_waiting);
         assert_eq!(
-            mgr.sessions[&code].state.active_interaction_slots,
+            mgr.try_session(&code).unwrap().state.waiting_for,
+            before_waiting
+        );
+        assert_eq!(
+            mgr.try_session(&code)
+                .unwrap()
+                .state
+                .active_interaction_slots,
             before_slots
         );
     }
@@ -6547,21 +9097,25 @@ mod tests {
     /// rejection channel exists for: a double-click produces exactly this.
     #[test]
     fn handle_interaction_rejects_a_stale_submission_benignly() {
-        let (mut mgr, code, token0, token1) = started_two_seat_game();
+        let (mgr, code, token0, token1) = started_two_seat_game();
         let (_acting, acting_token, _other, witness) = live_witness(&mgr, &code, &token0, &token1);
 
-        mgr.handle_interaction(&code, acting_token, witness.clone())
+        mgr.try_session(&code)
+            .unwrap()
+            .handle_interaction(acting_token, witness.clone())
             .expect("the first submission spends a live capability");
 
         let error = mgr
-            .handle_interaction(&code, acting_token, witness)
+            .try_session(&code)
+            .unwrap()
+            .handle_interaction(acting_token, witness)
             .expect_err("an interaction id is single-use");
-        assert!(error.contains("StaleInteraction"), "unexpected: {error}");
+        assert_eq!(error, "That interaction has already changed.");
     }
 
     #[test]
     fn handle_interaction_rejects_an_oversized_response_before_the_reducer() {
-        let (mut mgr, code, token0, token1) = started_two_seat_game();
+        let (mgr, code, token0, token1) = started_two_seat_game();
         let (_acting, acting_token, _other, witness) = live_witness(&mgr, &code, &token0, &token1);
 
         let choice = InteractionChoiceId("a".to_string());
@@ -6573,9 +9127,11 @@ mod tests {
         };
 
         let error = mgr
-            .handle_interaction(&code, acting_token, oversized)
+            .try_session(&code)
+            .unwrap()
+            .handle_interaction(acting_token, oversized)
             .expect_err("an oversized response is refused");
-        assert_eq!(error, "Engine error: PayloadTooLarge");
+        assert_eq!(error, "That interaction response is too large.");
 
         // Negative sibling: the boundary sits at the constant, not at "any
         // large list". The same shape at exactly the limit is still refused,
@@ -6587,45 +9143,377 @@ mod tests {
             },
         };
         let error = mgr
-            .handle_interaction(&code, acting_token, at_limit)
+            .try_session(&code)
+            .unwrap()
+            .handle_interaction(acting_token, at_limit)
             .expect_err("unknown choices are still refused");
         assert!(
-            !error.contains("PayloadTooLarge"),
+            error != "That interaction response is too large.",
             "the bound must be the constant, not list size in general: {error}"
         );
     }
 
     #[test]
     fn handle_interaction_defers_to_a_pending_takeback() {
-        let (mut mgr, code, token0, token1) = started_two_seat_game();
+        let (mgr, code, token0, token1) = started_two_seat_game();
         let (acting, acting_token, _other, witness) = live_witness(&mgr, &code, &token0, &token1);
 
-        let target_state = mgr.sessions[&code].state.clone();
-        mgr.sessions.get_mut(&code).unwrap().pending_takeback = Some(PendingTakeback {
-            requested_by: acting,
-            target_state,
-            approvals: HashSet::new(),
-            history_truncate_len: 0,
-        });
+        {
+            let mut session = mgr.try_session(&code).unwrap();
+            session.push_takeback_snapshot(acting);
+            assert_eq!(
+                session.request_takeback(acting, RewindTarget::LastAction),
+                Ok(TakebackOutcome::Pending)
+            );
+        }
 
-        let before_slots = mgr.sessions[&code].state.active_interaction_slots.clone();
+        let before_slots = mgr
+            .try_session(&code)
+            .unwrap()
+            .state
+            .active_interaction_slots
+            .clone();
         let error = mgr
-            .handle_interaction(&code, acting_token, witness.clone())
+            .try_session(&code)
+            .unwrap()
+            .handle_interaction(acting_token, witness.clone())
             .expect_err("the table is voting; the state must not move");
-        assert!(
-            error.contains("takeback request is pending"),
-            "unexpected: {error}"
-        );
+        assert_eq!(error, "That action is not allowed right now.");
         assert_eq!(
-            mgr.sessions[&code].state.active_interaction_slots,
+            mgr.try_session(&code)
+                .unwrap()
+                .state
+                .active_interaction_slots,
             before_slots
         );
 
         // Reach guard: the very same submission succeeds once the interlock is
         // cleared, so the refusal above is attributable to the takeback.
-        mgr.sessions.get_mut(&code).unwrap().pending_takeback = None;
-        mgr.handle_interaction(&code, acting_token, witness)
+        mgr.try_session(&code)
+            .unwrap()
+            .cancel_takeback(acting)
+            .expect("the requester closes its own vote");
+        mgr.try_session(&code)
+            .unwrap()
+            .handle_interaction(acting_token, witness)
             .expect("with no pending takeback the same submission applies");
+    }
+
+    fn preview_request(
+        id: &str,
+        witness: &InteractionSubmission,
+    ) -> engine::types::interaction::InteractionPreviewRequest {
+        engine::types::interaction::InteractionPreviewRequest {
+            request_id: engine::types::interaction::PreviewRequestId(id.to_string()),
+            interaction_id: witness.interaction_id.clone(),
+            response: witness.response.clone(),
+        }
+    }
+
+    /// Three pins whose `amounts` are each under `MAX_INTERACTION_LIST_LEN` and
+    /// whose sum is not — the cumulative branch a naive per-field guard misses.
+    fn oversized_preview_request(
+        id: &str,
+        witness: &InteractionSubmission,
+    ) -> engine::types::interaction::InteractionPreviewRequest {
+        use engine::types::interaction::{
+            AmountAssignment, InteractionShortcutDecision, InteractionShortcutPin,
+        };
+        let per_pin = MAX_INTERACTION_LIST_LEN / 2;
+        let pins: Vec<InteractionShortcutPin> = (0..3)
+            .map(|group| InteractionShortcutPin {
+                group,
+                choice_ids: vec![InteractionChoiceId("a".to_string())],
+                amounts: vec![
+                    AmountAssignment {
+                        choice_id: InteractionChoiceId("a".to_string()),
+                        amount: 1,
+                    };
+                    per_pin
+                ],
+            })
+            .collect();
+        for pin in &pins {
+            assert!(pin.amounts.len() <= MAX_INTERACTION_LIST_LEN);
+        }
+        engine::types::interaction::InteractionPreviewRequest {
+            request_id: engine::types::interaction::PreviewRequestId(id.to_string()),
+            interaction_id: witness.interaction_id.clone(),
+            response: engine::types::interaction::InteractionResponse::Shortcut {
+                decision: InteractionShortcutDecision::AcceptSuggested,
+                pins,
+            },
+        }
+    }
+
+    /// Row 2. `&self` already forbids a write; this asserts the whole
+    /// authoritative session is byte-identical across a run of previews that
+    /// includes an accepted one, a refused one and an over-budget one — a
+    /// mutation on any of those paths moves the serialization.
+    #[test]
+    fn preview_interaction_commits_nothing() {
+        use engine::types::interaction::InteractionPreviewStatus;
+        let (mgr, code, token0, token1) = started_two_seat_game();
+        let (_acting, acting_token, other_token, witness) =
+            live_witness(&mgr, &code, &token0, &token1);
+
+        let before_json =
+            serde_json::to_string(&mgr.try_session(&code).unwrap().state).expect("serializes");
+        let before_slots = mgr
+            .try_session(&code)
+            .unwrap()
+            .state
+            .active_interaction_slots
+            .clone();
+        let before_waiting = mgr.try_session(&code).unwrap().state.waiting_for.clone();
+        let before_life: Vec<i32> = mgr
+            .try_session(&code)
+            .unwrap()
+            .state
+            .players
+            .iter()
+            .map(|player| player.life)
+            .collect();
+        let before_battlefield = mgr.try_session(&code).unwrap().state.battlefield.clone();
+        let before_takeback_depth = mgr.try_session(&code).unwrap().takeback.history().len();
+        // The field `handle_interaction_with_rejection` writes before applying,
+        // for log resolution — the preview route must not reach it.
+        let before_log_names = mgr
+            .try_session(&code)
+            .unwrap()
+            .state
+            .log_player_names
+            .clone();
+
+        let accepted = mgr
+            .try_session(&code)
+            .unwrap()
+            .preview_interaction_with_rejection(acting_token, &preview_request("a", &witness))
+            .expect("the owning seat's preview is answered");
+        assert!(
+            matches!(accepted.status, InteractionPreviewStatus::Confirmable),
+            "the accepted leg must actually reach the reducer simulation: {:?}",
+            accepted.status
+        );
+
+        let foreign = mgr
+            .try_session(&code)
+            .unwrap()
+            .preview_interaction_with_rejection(other_token, &preview_request("b", &witness))
+            .expect("a valid foreign token is answered, not errored");
+        assert!(matches!(
+            foreign.status,
+            InteractionPreviewStatus::Rejected {
+                reason: InteractionReasonCode::NotAuthorized
+            }
+        ));
+
+        let over_budget = mgr
+            .try_session(&code)
+            .unwrap()
+            .preview_interaction_with_rejection(
+                acting_token,
+                &oversized_preview_request("c", &witness),
+            )
+            .expect("an over-budget preview is a status, not an error");
+        assert!(matches!(
+            over_budget.status,
+            InteractionPreviewStatus::Rejected {
+                reason: InteractionReasonCode::PayloadTooLarge
+            }
+        ));
+
+        assert_eq!(
+            mgr.try_session(&code)
+                .unwrap()
+                .state
+                .active_interaction_slots,
+            before_slots
+        );
+        assert_eq!(
+            mgr.try_session(&code).unwrap().state.waiting_for,
+            before_waiting
+        );
+        assert_eq!(
+            mgr.try_session(&code)
+                .unwrap()
+                .state
+                .players
+                .iter()
+                .map(|player| player.life)
+                .collect::<Vec<_>>(),
+            before_life
+        );
+        assert_eq!(
+            mgr.try_session(&code).unwrap().state.battlefield,
+            before_battlefield
+        );
+        assert_eq!(
+            mgr.try_session(&code).unwrap().takeback.history().len(),
+            before_takeback_depth
+        );
+        assert_eq!(
+            mgr.try_session(&code).unwrap().state.log_player_names,
+            before_log_names
+        );
+        assert_eq!(
+            serde_json::to_string(&mgr.try_session(&code).unwrap().state).expect("serializes"),
+            before_json,
+            "no field of the authoritative state may move on the preview route"
+        );
+
+        // Reach guard: the identity above is over a state a submission of the
+        // SAME witness demonstrably moves, so it is not the identity of a
+        // session nothing can change.
+        mgr.try_session(&code)
+            .unwrap()
+            .handle_interaction(acting_token, witness)
+            .expect("the same witness submitted does apply");
+        assert_ne!(
+            mgr.try_session(&code)
+                .unwrap()
+                .state
+                .active_interaction_slots,
+            before_slots,
+            "the submission route moves what the preview route left alone"
+        );
+        assert_ne!(
+            serde_json::to_string(&mgr.try_session(&code).unwrap().state).expect("serializes"),
+            before_json
+        );
+    }
+
+    /// Row 3. The multi-authority hostile fixture, on the preview route: two
+    /// legitimately authenticated seats, one live capability. Sibling of
+    /// `handle_interaction_binds_the_actor_to_the_authenticated_token`.
+    #[test]
+    fn preview_interaction_binds_the_actor_to_the_authenticated_token() {
+        use engine::types::interaction::InteractionPreviewStatus;
+        let (mgr, code, token0, token1) = started_two_seat_game();
+        let (_acting, acting_token, other_token, witness) =
+            live_witness(&mgr, &code, &token0, &token1);
+        let request = preview_request("req-1", &witness);
+
+        let forged = mgr
+            .try_session(&code)
+            .unwrap()
+            .preview_interaction_with_rejection(other_token, &request)
+            .expect("a validly authenticated foreign seat gets a status, not an Err");
+        assert!(
+            matches!(
+                forged.status,
+                InteractionPreviewStatus::Rejected {
+                    reason: InteractionReasonCode::NotAuthorized
+                }
+            ),
+            "the reason code, not merely 'not Confirmable' — a stale or malformed \
+             id answers with a different one: {:?}",
+            forged.status
+        );
+        assert_eq!(
+            forged.request_id, request.request_id,
+            "the answer is correlated"
+        );
+
+        // Reach guard: the identical request from the owning token IS answered,
+        // so the refusal above is attributable to authorization and not to a
+        // stale witness or a broken session.
+        let owned = mgr
+            .try_session(&code)
+            .unwrap()
+            .preview_interaction_with_rejection(acting_token, &request)
+            .expect("the owning seat's preview is answered");
+        assert!(matches!(
+            owned.status,
+            InteractionPreviewStatus::Confirmable
+        ));
+        assert_eq!(owned.request_id, request.request_id);
+        assert_eq!(owned.interaction_id, witness.interaction_id);
+
+        // A token that is no seat at all is a different channel entirely.
+        let unknown = mgr
+            .try_session(&code)
+            .unwrap()
+            .preview_interaction_with_rejection("not-a-real-token", &request)
+            .expect_err("an unknown token is not a seat");
+        assert!(matches!(
+            unknown,
+            PreviewRefusal::Operational(ref reason) if reason == "Invalid player token"
+        ));
+    }
+
+    /// Row 11. Both interlocks, each with the paired positive that the
+    /// identical request is answered once the interlock is cleared, and each
+    /// asserting the CHANNEL and the code — a pending takeback must not be
+    /// reported as an operational failure, nor a driver fault as a rejection.
+    #[test]
+    fn preview_interaction_refuses_while_either_interlock_holds() {
+        use engine::types::interaction::InteractionPreviewStatus;
+        let (mgr, code, token0, token1) = started_two_seat_game();
+        let (acting, acting_token, _other, witness) = live_witness(&mgr, &code, &token0, &token1);
+        let request = preview_request("req-1", &witness);
+
+        {
+            let mut session = mgr.try_session(&code).unwrap();
+            session.push_takeback_snapshot(acting);
+            assert_eq!(
+                session.request_takeback(acting, RewindTarget::LastAction),
+                Ok(TakebackOutcome::Pending)
+            );
+        }
+        let refused = mgr
+            .try_session(&code)
+            .unwrap()
+            .preview_interaction_with_rejection(acting_token, &request)
+            .expect_err("the table is voting; the preview waits");
+        match refused {
+            PreviewRefusal::Rejected(rejection) => assert_eq!(
+                rejection.code,
+                engine::types::action_rejection::ActionRejectionCode::ActionNotAllowed
+            ),
+            other => panic!("a pending takeback is a game rejection, not {other:?}"),
+        }
+
+        mgr.try_session(&code)
+            .unwrap()
+            .cancel_takeback(acting)
+            .expect("the requester closes its own vote");
+        let cleared = mgr
+            .try_session(&code)
+            .unwrap()
+            .preview_interaction_with_rejection(acting_token, &request)
+            .expect("with no pending takeback the identical request is answered");
+        assert!(matches!(
+            cleared.status,
+            InteractionPreviewStatus::Confirmable
+        ));
+
+        mgr.try_session(&code)
+            .unwrap()
+            .record_ai_driver_fault(AiDriverFailure::ActionSafetyCapReached { limit: 1 });
+        let faulted = mgr
+            .try_session(&code)
+            .unwrap()
+            .preview_interaction_with_rejection(acting_token, &request)
+            .expect_err("a faulted driver fences the whole session");
+        match faulted {
+            PreviewRefusal::Operational(reason) => assert!(
+                reason.contains("Native AI driver fault"),
+                "the fault's own message must ride the operational channel: {reason}"
+            ),
+            other => panic!("a driver fault is operational, not {other:?}"),
+        }
+
+        mgr.try_session(&code).unwrap().ai_driver_fault = None;
+        let recovered = mgr
+            .try_session(&code)
+            .unwrap()
+            .preview_interaction_with_rejection(acting_token, &request)
+            .expect("with the fault cleared the identical request is answered");
+        assert!(matches!(
+            recovered.status,
+            InteractionPreviewStatus::Confirmable
+        ));
     }
 
     /// Parks a one-entry stack in front of a human seat that has already been
@@ -6633,155 +9521,111 @@ mod tests {
     /// the human's Resolve All has exactly one representative left to ask.
     fn ai_table_awaiting_one_consent() -> (SessionManager, String, PlayerId) {
         let mut mgr = SessionManager::new();
-        let (game_code, _token) = mgr.create_game(make_deck());
+        let (game_code, _token) = mgr.create_game(make_deck(), None);
         let ai_player = PlayerId(1);
-        let session = mgr
-            .sessions
-            .get_mut(&game_code)
-            .expect("a new game retains its session");
-        session.ai_seats.insert(ai_player);
-        session.ai_configs.insert(
-            ai_player,
-            phase_ai::config::create_config_for_players(AiDifficulty::Easy, Platform::Native, 2),
-        );
-        let stack_object = ObjectId(1);
-        session.state.active_player = ai_player;
-        session.state.priority_player = PlayerId(0);
-        session.state.waiting_for = WaitingFor::Priority {
-            player: PlayerId(0),
-        };
-        session.state.priority_passes.insert(ai_player);
-        session.state.stack.push_back(StackEntry {
-            id: stack_object,
-            source_id: stack_object,
-            controller: PlayerId(0),
-            kind: StackEntryKind::ActivatedAbility {
+        {
+            let mut session = mgr
+                .try_session(&game_code)
+                .expect("a new game retains its session");
+            session.ai_seats.insert(ai_player);
+            session.ai_configs.insert(
+                ai_player,
+                phase_ai::config::create_config_for_players(
+                    AiDifficulty::Easy,
+                    Platform::Native,
+                    2,
+                ),
+            );
+            let stack_object = ObjectId(1);
+            session.state.active_player = ai_player;
+            session.state.priority_player = PlayerId(0);
+            session.state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+            session.state.priority_passes.insert(ai_player);
+            session.state.stack.push_back(StackEntry {
+                id: stack_object,
                 source_id: stack_object,
-                ability: Box::new(ResolvedAbility::new(
-                    Effect::NoOp,
-                    Vec::new(),
-                    stack_object,
-                    PlayerId(0),
-                )),
-            },
-        });
+                controller: PlayerId(0),
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: stack_object,
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::NoOp,
+                        Vec::new(),
+                        stack_object,
+                        PlayerId(0),
+                    )),
+                },
+            });
+        }
         (mgr, game_code, ai_player)
     }
 
-    /// An AI-granted latch whose run is INCOHERENT is the one with no exit at
-    /// all, so it is the one the hand-off must not decline.
-    ///
-    /// `ready_consent_run` requires `auto_pass.is_empty()`, so a single seat
-    /// holding an End Turn auto-pass makes every latch minted that turn
-    /// incoherent. The hand-off previously read its requester through
-    /// `pending_resolve_all_ready_requester`, whose `?` propagates exactly that
-    /// coherence test — so it returned `None` here and left the latch standing:
-    /// no acting player, and no client that renders `ResolveAllReady`. This is
-    /// the reported hang, reachable from the ordinary End Turn button.
+    /// CR 117.3d: a human Resolve All at a table with AI seats enters the same
+    /// fenced session used by direct `UntilStackEmpty` without asking the AI for
+    /// anything. The AI seat owing a response is exactly what used to park the
+    /// human on a consent prompt they could not clear.
     #[test]
-    fn run_ai_repairs_its_own_grant_when_the_frozen_run_is_incoherent() {
-        let (mut mgr, game_code, _ai_player) = ai_table_awaiting_one_consent();
-        let session = mgr
-            .sessions
-            .get_mut(&game_code)
+    fn resolve_all_at_an_ai_table_needs_no_ai_consent() {
+        let (mgr, game_code, _ai_player) = ai_table_awaiting_one_consent();
+        let mut session = mgr
+            .try_session(&game_code)
             .expect("the game retains its session");
 
         apply(
             &mut session.state,
             PlayerId(0),
-            GameAction::BeginResolveAll { max_resolutions: 1 },
-        )
-        .expect("the priority holder may start Resolve All consent");
-        // Freeze the run first, THEN make the live game disagree with the
-        // snapshot it froze. `BeginResolveAll` has no auto-pass precondition,
-        // and `apply` exempts consent actions from clearing the actor's entry,
-        // so this is the ordinary End Turn shape and not a contrived state.
-        session.state.auto_pass.insert(
-            PlayerId(0),
-            AutoPassMode::UntilTurnBoundary {
-                until: TurnBoundary::EndOfCurrentTurn,
+            GameAction::BeginResolveAll {
+                max_resolutions: 1,
+                scope: ResolveAllScope::Own,
             },
-        );
-        assert!(
-            matches!(
-                session.state.waiting_for,
-                WaitingFor::ResolveAllConsent { .. }
-            ),
-            "the AI representative must still owe a consent response, got {:?}",
-            session.state.waiting_for
-        );
-
-        let transitions = session.run_ai();
-
-        // Non-vacuity, and the control this test genuinely needs: every
-        // assertion below is equally true of an AI that DECLINED and never
-        // minted a latch at all. This pins that a Ready latch was actually
-        // reached, by reading the grant's own broadcast frame.
-        assert!(
-            transitions
-                .transitions
-                .iter()
-                .any(|(_, (broadcast_state, ..))| matches!(
-                    broadcast_state.waiting_for,
-                    WaitingFor::ResolveAllReady { .. }
-                )),
-            "no broadcast frame shows the AI's grant reaching a Ready latch"
-        );
+        )
+        .expect("the priority holder may start Resolve All");
         assert!(
             !matches!(
                 session.state.waiting_for,
-                WaitingFor::ResolveAllReady { .. }
+                WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
             ),
-            "an incoherent AI-granted latch must not survive its own hand-off, got {:?}",
+            "the human must never be parked on an AI's consent, got {:?}",
             session.state.waiting_for
         );
         assert!(
             session.state.resolve_all_consent_run.is_none(),
-            "the repair discards the run it could not honor"
+            "the requester's single-participant run materializes immediately"
         );
+
+        session.run_ai();
+
+        assert!(session.state.stack.is_empty());
+        assert!(session.state.resolve_all_consent_run.is_none());
+        assert!(session.state.stack_resolution_session.is_none());
+        assert!(!matches!(
+            session.state.waiting_for,
+            WaitingFor::ResolveAllReady { .. }
+        ));
     }
 
-    /// The regression this whole seam exists for: when the LAST Resolve All
-    /// consent comes from a server-driven AI seat, nothing else will ever
-    /// consume the resulting latch.
-    ///
-    /// `WaitingFor::ResolveAllReady` has no acting player, so `run_ai_actions`
-    /// stops there, every seat's legal-action set is empty, and no client is
-    /// prompted to send `ClientMessage::ResolveAll`. Before `run_ai` consumed
-    /// its own AI seats' grant, a solo-vs-AI table parked here permanently with
-    /// an unresolvable stack.
+    /// The public server driver observes the final state after the engine-owned
+    /// runner, with no extra Resolve All transport action.
     #[test]
-    fn run_ai_consumes_the_ready_latch_its_own_grant_produced() {
-        let (mut mgr, game_code, _ai_player) = ai_table_awaiting_one_consent();
-        let session = mgr
-            .sessions
-            .get_mut(&game_code)
+    fn run_ai_publishes_the_completed_shared_session() {
+        let (mgr, game_code, _ai_player) = ai_table_awaiting_one_consent();
+        let mut session = mgr
+            .try_session(&game_code)
             .expect("the game retains its session");
 
         apply(
             &mut session.state,
             PlayerId(0),
-            GameAction::BeginResolveAll { max_resolutions: 1 },
+            GameAction::BeginResolveAll {
+                max_resolutions: 1,
+                scope: ResolveAllScope::Own,
+            },
         )
-        .expect("the priority holder may start Resolve All consent");
-        assert!(
-            matches!(
-                session.state.waiting_for,
-                WaitingFor::ResolveAllConsent { .. }
-            ),
-            "the AI representative must still owe a consent response, got {:?}",
-            session.state.waiting_for
-        );
+        .expect("the priority holder may start Resolve All");
 
         let transitions = session.run_ai();
 
-        assert!(
-            !matches!(
-                session.state.waiting_for,
-                WaitingFor::ResolveAllReady { .. }
-            ),
-            "an AI-granted Ready latch must not survive its own hand-off"
-        );
         assert!(
             session.state.stack.is_empty(),
             "the consented entry must have resolved, stack: {:?}",
@@ -6791,50 +9635,41 @@ mod tests {
             session.state.resolve_all_consent_run.is_none(),
             "one run authorizes one batch and must not outlive it"
         );
-        // The collapse has to reach the wire as its own transition, or the
-        // client would render a state the server has already moved past.
-        // Anchored on the FIRST transition still carrying the stack: the loop's
-        // follow-up AI batch can append further transitions, so asserting only
-        // on the last one would pass without the collapse frame ever existing.
+        // CR 117.3d: an `Own` run asks nobody, so the AI-grant round-trip that
+        // used to supply a second transition here no longer happens -- that
+        // round-trip is the defect this test's fixture reproduces. What must
+        // still hold is that the engine-owned runner published, and that no
+        // frame it published ever parked a player on a consent decision.
         assert!(
-            transitions.transitions.len() >= 2,
-            "expected the AI grant and the collapsed batch, got {}",
-            transitions.transitions.len()
+            !transitions.transitions.is_empty(),
+            "the engine-owned runner must publish the post-collapse state"
         );
-        let (_, (granted_state, ..)) = transitions
-            .transitions
-            .first()
-            .expect("the AI grant transition");
-        assert_eq!(
-            granted_state.stack.len(),
-            1,
-            "the Grant itself resolves nothing; the collapse must be a later frame"
+        assert!(
+            transitions.transitions.iter().all(|transition| !matches!(
+                transition.state.waiting_for,
+                WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
+            )),
+            "a published frame parked a player on a Resolve All consent decision"
         );
         assert!(
             transitions
                 .transitions
                 .iter()
-                .any(|(_, (broadcast_state, ..))| broadcast_state.stack.is_empty()),
+                .any(|transition| transition.state.stack.is_empty()),
             "no broadcast frame carried the post-collapse state"
         );
     }
 
-    /// A human submitting the final consent keeps owning the consumption: their
-    /// own client sends `ResolveAll`. `run_ai` must not race ahead of it, or
-    /// that client's request would come back as an error.
-    ///
-    /// The fixture drives all the way to a Ready latch the human produced, so
-    /// the assertion is about the "we acted in this call" gate and not about
-    /// the latch simply being absent — removing the gate turns this red.
+    /// The same rule read from the other side: an AI seat's Resolve All is that
+    /// seat's own pre-commitment too, so it never interrupts the human for a
+    /// consent decision and never leaves a Ready latch behind.
     #[test]
-    fn run_ai_leaves_a_human_granted_ready_latch_for_its_own_client() {
-        let (mut mgr, game_code, ai_player) = ai_table_awaiting_one_consent();
-        let session = mgr
-            .sessions
-            .get_mut(&game_code)
+    fn an_ai_resolve_all_does_not_prompt_the_human() {
+        let (mgr, game_code, ai_player) = ai_table_awaiting_one_consent();
+        let mut session = mgr
+            .try_session(&game_code)
             .expect("the game retains its session");
-        // Flip the roles: the AI opens the run (auto-granting itself) so the
-        // remaining representative is the human.
+        // Flip the roles: the AI seat is the one starting Resolve All.
         session.state.priority_player = ai_player;
         session.state.waiting_for = WaitingFor::Priority { player: ai_player };
         session.state.priority_passes.clear();
@@ -6843,226 +9678,163 @@ mod tests {
         apply(
             &mut session.state,
             ai_player,
-            GameAction::BeginResolveAll { max_resolutions: 1 },
-        )
-        .expect("the priority holder may start Resolve All consent");
-        let WaitingFor::ResolveAllConsent {
-            epoch,
-            representative,
-        } = session.state.waiting_for
-        else {
-            panic!(
-                "expected a pending consent prompt, got {:?}",
-                session.state.waiting_for
-            );
-        };
-        assert_eq!(
-            representative,
-            PlayerId(0),
-            "the human must be the outstanding representative"
-        );
-
-        apply(
-            &mut session.state,
-            PlayerId(0),
-            GameAction::RespondResolveAllConsent {
-                epoch,
-                decision: ResolveAllConsentDecision::Grant,
+            GameAction::BeginResolveAll {
+                max_resolutions: 1,
+                scope: ResolveAllScope::Own,
             },
         )
-        .expect("the human representative may grant");
-        assert!(
-            matches!(
-                session.state.waiting_for,
-                WaitingFor::ResolveAllReady { .. }
-            ),
-            "the fixture must reach the latch, or the gate is untested"
-        );
-        // Non-vacuity, and a trap worth pinning: the latch really is
-        // consumable, so nothing about coherence is holding `run_ai` back.
-        // Note WHO it names — `pending_resolve_all_ready_requester` returns the
-        // run's INITIATOR (`participants[0]`, the seat that called
-        // `BeginResolveAll` — the AI here), NOT the seat whose Grant completed
-        // it (the human). Ownership of a latch follows the FINAL Grant, so this
-        // value can never be the gate: it says "an AI started this run", which
-        // is true in exactly the case `run_ai` must keep its hands off.
-        assert_eq!(
-            pending_resolve_all_ready_requester(&session.state),
-            Some(ai_player),
-            "the requester is the run's initiator, not its final grantor"
-        );
-
-        // SCOPE OF THIS TEST, measured rather than assumed. It pins the
-        // behavioural contract "run_ai never touches a latch that predates its
-        // own actions" — a gate keyed on latch-presence-at-entry instead of on
-        // batch contents turns all three assertions below red.
-        //
-        // It does NOT discriminate `minted_here` from the older `!batch
-        // .is_empty()` proxy, and cannot: the latch already stands at entry, so
-        // `acting_players()` is empty, so the batch is empty, so the
-        // `batch.is_empty()` break at the top of the loop fires before either
-        // predicate is read. Both mutations stay green here. The distinguishing
-        // input — a non-empty batch alongside a pre-existing latch — is
-        // unreachable precisely while `ResolveAllReady` has no acting set,
-        // which is the invariant the refinement exists to stop depending on.
-        // It becomes testable when that changes; until then, do not add a pin
-        // that only appears to cover it.
-        assert!(
-            session.run_ai().transitions.is_empty(),
-            "no AI seat may act at a latch with no acting player"
-        );
-        assert!(
-            matches!(
-                session.state.waiting_for,
-                WaitingFor::ResolveAllReady { .. }
-            ),
-            "a human-granted latch belongs to that human's client, got {:?}",
-            session.state.waiting_for
-        );
-        assert_eq!(
-            session.state.stack.len(),
-            1,
-            "run_ai must not collapse a batch it did not authorize"
-        );
-    }
-
-    /// A Ready latch whose frozen run is gone can prove no owner, so refusing
-    /// every seat would leave the game with no exit at all. Any seat may ask
-    /// for the repair, and the repair resolves nothing.
-    #[test]
-    fn resolve_all_for_player_repairs_a_ready_latch_with_no_run() {
-        let (mut mgr, game_code, ai_player) = ai_table_awaiting_one_consent();
-        let session = mgr
-            .sessions
-            .get_mut(&game_code)
-            .expect("the game retains its session");
-        apply(
-            &mut session.state,
-            PlayerId(0),
-            GameAction::BeginResolveAll { max_resolutions: 1 },
-        )
-        .expect("the priority holder may start Resolve All consent");
-        let WaitingFor::ResolveAllConsent { epoch, .. } = session.state.waiting_for else {
-            panic!("expected a pending consent prompt");
-        };
-        apply(
-            &mut session.state,
-            ai_player,
-            GameAction::RespondResolveAllConsent {
-                epoch,
-                decision: ResolveAllConsentDecision::Grant,
-            },
-        )
-        .expect("the AI representative may grant");
-        assert!(matches!(
-            session.state.waiting_for,
-            WaitingFor::ResolveAllReady { .. }
-        ));
-
-        // Strand the latch exactly as a dropped run would.
-        session.state.resolve_all_consent_run = None;
-        let token = session
-            .player_tokens
-            .first()
-            .cloned()
-            .expect("the host holds a token");
-
-        let (_, summary) = mgr
-            .resolve_all_for_player(&game_code, &token, 1)
-            .expect("a stranded latch is repaired, not rejected");
-        assert_eq!(
-            summary.items_resolved, 0,
-            "the repair must not resolve a stack entry"
-        );
-        let session = mgr.sessions.get(&game_code).expect("session survives");
-        assert!(
-            matches!(session.state.waiting_for, WaitingFor::Priority { .. }),
-            "the repair must restore ordinary priority, got {:?}",
-            session.state.waiting_for
-        );
-        assert_eq!(
-            session.state.stack.len(),
-            1,
-            "no stack entry may resolve through a repair"
-        );
-    }
-    /// A latch outlives the process that owed its consumption. Restoring a
-    /// session into `ResolveAllReady` would otherwise hand the players back a
-    /// game with no acting player and no client willing to send `ResolveAll` for
-    /// a batch it never started.
-    #[test]
-    fn restoring_a_session_discharges_an_orphaned_resolve_all_latch() {
-        let (mut mgr, game_code, ai_player) = ai_table_awaiting_one_consent();
-        let session = mgr
-            .sessions
-            .get_mut(&game_code)
-            .expect("the game retains its session");
-        apply(
-            &mut session.state,
-            PlayerId(0),
-            GameAction::BeginResolveAll { max_resolutions: 1 },
-        )
-        .expect("the priority holder may start Resolve All consent");
-        let WaitingFor::ResolveAllConsent { epoch, .. } = session.state.waiting_for else {
-            panic!("expected a pending consent prompt");
-        };
-        apply(
-            &mut session.state,
-            ai_player,
-            GameAction::RespondResolveAllConsent {
-                epoch,
-                decision: ResolveAllConsentDecision::Grant,
-            },
-        )
-        .expect("the AI representative may grant");
-        assert!(matches!(
-            session.state.waiting_for,
-            WaitingFor::ResolveAllReady { .. }
-        ));
-        let revision_before = session.state_revision;
-        let persisted = session.to_persisted();
-
-        let restored = GameSession::from_persisted(persisted, &CardDatabase::default())
-            .expect("the snapshot restores");
+        .expect("the priority holder may start Resolve All");
 
         assert!(
             !matches!(
-                restored.state.waiting_for,
-                WaitingFor::ResolveAllReady { .. }
+                session.state.waiting_for,
+                WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
             ),
-            "an orphaned latch must not survive restore, got {:?}",
-            restored.state.waiting_for
+            "the human is never asked to approve another seat's Resolve All, got {:?}",
+            session.state.waiting_for
         );
         assert!(
-            restored.state.stack.is_empty(),
-            "the consented entry must have resolved on restore"
+            session.state.resolve_all_consent_run.is_none(),
+            "the requester's single-participant run materializes immediately"
         );
-        assert!(restored.state.resolve_all_consent_run.is_none());
+        assert!(session.state.stack.is_empty());
+        assert!(session.state.stack_resolution_session.is_none());
+    }
+
+    /// Generic reconstruction deliberately preserves a coherent automation
+    /// session. The restore owner must opt into the one explicit resume after
+    /// it finishes attaching runtime authority.
+    #[test]
+    fn restored_session_resumes_a_coherent_automation_once_on_explicit_request() {
+        let (mgr, game_code, ai_player) = ai_table_awaiting_one_consent();
+        let mut session = mgr
+            .try_session(&game_code)
+            .expect("the game retains its session");
+        let initial_stack_len = session.state.stack.len();
+        let entry = session
+            .state
+            .stack
+            .back()
+            .expect("fixture retains a stack entry");
+        session.state.stack_resolution_session = Some(StackResolutionSession {
+            entries: vec![StackResolutionEntryFence::capture(entry)],
+            cursor: 0,
+            representatives: BTreeSet::from([PlayerId(0), ai_player]),
+            verified_pass_representatives: BTreeSet::new(),
+            budget: StackResolutionBudget::Unlimited,
+            policy: StackResolutionPolicy::Committed,
+            auto_pass_overlay: StackResolutionAutoPassOverlay {
+                baseline: BTreeMap::new(),
+            },
+        });
+        for representative in [PlayerId(0), ai_player] {
+            session.state.auto_pass.insert(
+                representative,
+                AutoPassMode::UntilStackEmpty {
+                    initial_stack_len,
+                    policy: StackResolutionPolicy::Committed,
+                },
+            );
+        }
+        assert!(session.state.stack_resolution_session.is_some());
+        let revision_before = session.state_revision;
+        let persisted = session.to_persisted();
+
+        let mut restored =
+            GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
+                .expect("the snapshot restores");
+
         assert!(
-            restored.state_revision > revision_before,
-            "clients must not see changed content under an unchanged revision"
+            restored.state.stack_resolution_session.is_some(),
+            "generic restore must preserve the active shared session"
+        );
+        assert!(
+            !restored.state.stack.is_empty(),
+            "generic restore must not resolve a stack entry"
+        );
+        assert_eq!(restored.state_revision, revision_before);
+
+        let resumed = restored
+            .resume_restored_stack_automation()
+            .expect("the fixture's restore resume is representable");
+        assert_eq!(
+            resumed.presentation.outcome,
+            RestoredStackAutomationOutcome::Progressed,
+            "the coherent authorization enters the ordinary runner"
+        );
+        assert_eq!(resumed.state_revision, Some(revision_before + 1));
+        let broadcast = resumed
+            .broadcast
+            .as_ref()
+            .expect("resume recomputes broadcast");
+        let (expected_legal, expected_costs, expected_by_object) =
+            engine_legal_actions_full(&restored.state);
+        assert_eq!(&broadcast.0, &restored.state);
+        assert_eq!(&broadcast.1, &expected_legal);
+        assert_eq!(
+            broadcast.2,
+            auto_pass_recommended(&restored.state, &broadcast.1)
+        );
+        assert_eq!(&broadcast.3, &expected_costs);
+        assert_eq!(&broadcast.4, &expected_by_object);
+        assert!(
+            resumed.presentation.omitted_event_count > 0,
+            "the runner's complete internal event batch must be accounted for"
+        );
+        let presentation_wire =
+            serde_json::to_string(&resumed.presentation).expect("bounded presentation serializes");
+        assert!(
+            !presentation_wire.contains("events"),
+            "the transport presentation must not serialize the internal event batch"
+        );
+        assert!(restored.state.stack.is_empty());
+        assert!(restored.state.stack_resolution_session.is_none());
+
+        let repeated = restored
+            .resume_restored_stack_automation()
+            .expect("the fixture's restore resume is representable");
+        assert_eq!(
+            repeated.presentation.outcome,
+            RestoredStackAutomationOutcome::Noop
+        );
+        assert_eq!(repeated.state_revision, None);
+        assert!(repeated.broadcast.is_none());
+        assert_eq!(
+            restored.state_revision,
+            revision_before + 1,
+            "the explicit resume must be one-shot"
         );
     }
 
-    /// The restore repair must also cover a latch whose run is gone, where
-    /// there is no prefix to collapse and the only correct outcome is a return
-    /// to ordinary priority with the stack untouched.
+    /// Legacy Ready persistence is identified exclusively by its missing
+    /// baseline; its explicit resume repair remains readable during migration.
     #[test]
-    fn restoring_a_session_repairs_a_latch_whose_run_is_gone() {
-        let (mut mgr, game_code, ai_player) = ai_table_awaiting_one_consent();
-        let session = mgr
-            .sessions
-            .get_mut(&game_code)
+    fn explicit_restore_resume_repairs_a_legacy_latch_whose_run_is_gone() {
+        let (mgr, game_code, ai_player) = ai_table_awaiting_one_consent();
+        let mut session = mgr
+            .try_session(&game_code)
             .expect("the game retains its session");
+        // `Shared` is the scope that still opens a consent queue; a missing
+        // baseline is then what identifies the run as the legacy encoding this
+        // migration path repairs.
         apply(
             &mut session.state,
             PlayerId(0),
-            GameAction::BeginResolveAll { max_resolutions: 1 },
+            GameAction::BeginResolveAll {
+                max_resolutions: 1,
+                scope: ResolveAllScope::Shared,
+            },
         )
-        .expect("the priority holder may start Resolve All consent");
+        .expect("the priority holder may start a shared Resolve All");
         let WaitingFor::ResolveAllConsent { epoch, .. } = session.state.waiting_for else {
             panic!("expected a pending consent prompt");
         };
+        session
+            .state
+            .resolve_all_consent_run
+            .as_mut()
+            .expect("fresh consent run exists")
+            .auto_pass_baseline = None;
         apply(
             &mut session.state,
             ai_player,
@@ -7075,8 +9847,18 @@ mod tests {
         session.state.resolve_all_consent_run = None;
         let persisted = session.to_persisted();
 
-        let restored = GameSession::from_persisted(persisted, &CardDatabase::default())
-            .expect("the snapshot restores");
+        let mut restored =
+            GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
+                .expect("the snapshot restores");
+
+        assert!(matches!(
+            restored.state.waiting_for,
+            WaitingFor::ResolveAllReady { .. }
+        ));
+        let revision_before = restored.state_revision;
+        let resumed = restored
+            .resume_restored_stack_automation()
+            .expect("the fixture's restore resume is representable");
 
         assert!(
             matches!(restored.state.waiting_for, WaitingFor::Priority { .. }),
@@ -7088,5 +9870,1808 @@ mod tests {
             1,
             "nothing may resolve without a run to authorize it"
         );
+        assert_eq!(
+            resumed.presentation.outcome,
+            RestoredStackAutomationOutcome::ZeroResolutionRepair
+        );
+        assert_eq!(resumed.state_revision, Some(revision_before + 1));
+        assert!(resumed.broadcast.is_some());
+    }
+
+    #[test]
+    fn explicit_restore_resume_is_a_revision_preserving_noop_for_ordinary_priority() {
+        let (mgr, game_code, _) = ai_table_awaiting_one_consent();
+        let session = mgr.try_session(&game_code).expect("session exists");
+        let persisted = session.to_persisted();
+        let mut restored =
+            GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
+                .expect("ordinary state restores");
+        let revision_before = restored.state_revision;
+
+        let resumed = restored
+            .resume_restored_stack_automation()
+            .expect("the fixture's restore resume is representable");
+
+        assert_eq!(
+            resumed.presentation.outcome,
+            RestoredStackAutomationOutcome::Noop
+        );
+        assert_eq!(resumed.state_revision, None);
+        assert!(resumed.broadcast.is_none());
+        assert_eq!(restored.state_revision, revision_before);
+    }
+
+    // ── Seat deck provenance, persistence revision, and restore ────────────
+
+    use engine::game::bracket_estimate::CommanderBracketTier;
+
+    /// A minimal card entry for every name a fixture deck uses, so
+    /// `resolve_deck` succeeds against a database this test owns.
+    fn db_with_names(names: &[String]) -> Arc<CardDatabase> {
+        let entries: serde_json::Map<String, serde_json::Value> = names
+            .iter()
+            .map(|name| {
+                (
+                    name.to_lowercase(),
+                    serde_json::json!({
+                        "name": name,
+                        "mana_cost": { "type": "NoCost" },
+                        "card_type": {
+                            "supertypes": [], "core_types": ["Land"], "subtypes": []
+                        },
+                        "power": null,
+                        "toughness": null,
+                        "loyalty": null,
+                        "defense": null,
+                        "oracle_text": null,
+                        "abilities": [],
+                        "triggers": [],
+                        "static_abilities": [],
+                        "replacements": [],
+                        "keywords": []
+                    }),
+                )
+            })
+            .collect();
+        Arc::new(
+            CardDatabase::from_json_str(&serde_json::Value::Object(entries).to_string())
+                .expect("fixture database parses"),
+        )
+    }
+
+    /// Row 9 leg (d)'s seed: Quicksilver Lapidary's real Oracle text run
+    /// through the production parser, so the conjure the registry rebuild
+    /// finds is the parser's own output rather than a hand-built AST.
+    fn conjure_seed_face() -> engine::types::card::CardFace {
+        const ORACLE: &str =
+            "When Quicksilver Lapidary enters, conjure a card named Mox Opal into your hand.";
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            ORACLE,
+            "Quicksilver Lapidary",
+            &[],
+            &["Creature".to_string()],
+            &["Phyrexian".to_string(), "Artificer".to_string()],
+        );
+        let mut face = make_deck().main_deck[0].card.clone();
+        face.name = "Quicksilver Lapidary".to_string();
+        face.card_type = CardType {
+            supertypes: vec![],
+            core_types: vec![engine::types::card_type::CoreType::Creature],
+            subtypes: vec!["Phyrexian".to_string(), "Artificer".to_string()],
+        };
+        face.oracle_text = Some(ORACLE.to_string());
+        face.abilities = parsed.abilities;
+        face.triggers = parsed.triggers;
+        face.static_abilities = parsed.statics;
+        face.replacements = parsed.replacements;
+        face
+    }
+
+    /// Row 9 leg (d): the faces a restore rebuilds from `deck_pools` alone.
+    ///
+    /// `rehydrate_card_db_metadata` is the first statement the restore
+    /// closure's rehydrate call runs, and it reads `state.deck_pools` to
+    /// rebuild `card_face_registry`. Both are `#[serde(skip)]`, so the gate is
+    /// open after every decode — a reinstatement placed anywhere after that
+    /// call loses every face seeded only by a pool entry.
+    #[test]
+    fn a_restore_rebuilds_conjure_faces_seeded_only_by_a_deck_pool() {
+        let db = db_with_names(&[
+            "Forest".to_string(),
+            "Mox Opal".to_string(),
+            "Quicksilver Lapidary".to_string(),
+        ]);
+        let seed = conjure_seed_face();
+
+        let restored_registry = |pool_face: engine::types::card::CardFace| {
+            let mut mgr = SessionManager::new();
+            // Historic rather than the default Standard: a conjure face is
+            // digital-only, and a Standard pool seeds no such face.
+            let (code, _) = mgr
+                .create_game_n_players(
+                    make_deck(),
+                    None,
+                    String::new(),
+                    None,
+                    2,
+                    MatchConfig::default(),
+                    Some(FormatConfig::historic()),
+                )
+                .expect("Historic must admit a 2-seat session");
+            let mut session = mgr.try_session(&code).unwrap();
+            session.state.deck_pools = vec![PlayerDeckPool {
+                player: PlayerId(0),
+                registered_main: Arc::new(vec![DeckEntry {
+                    card: pool_face.clone(),
+                    count: 1,
+                }]),
+                current_main: Arc::new(vec![DeckEntry {
+                    card: pool_face,
+                    count: 1,
+                }]),
+                ..Default::default()
+            }];
+            // Reach guard: nothing in the object map can seed the registry, so
+            // a face that survives came from the pools and nowhere else.
+            assert_eq!(
+                session.state.objects.len(),
+                0,
+                "reach guard: the walked object map must be empty, or a face \
+                 could reach the registry without the pools"
+            );
+            let restored = round_trip_through_disk(&session, &db);
+            assert_eq!(
+                restored.state.deck_pools.len(),
+                1,
+                "the pools themselves must survive the round trip"
+            );
+            restored.state.card_face_registry.clone()
+        };
+
+        let seeded = restored_registry(seed);
+        assert!(
+            seeded.contains_key("mox opal"),
+            "a conjure face seeded only by a deck-pool entry must survive the \
+             restore; got {:?}",
+            seeded.keys().collect::<Vec<_>>()
+        );
+
+        // Control: the same restore with a pool that conjures nothing must not
+        // produce the face, so the leg above measures the seed rather than a
+        // database the restore preloads wholesale.
+        let unseeded = restored_registry(make_deck().main_deck[0].card.clone());
+        assert!(
+            !unseeded.contains_key("mox opal"),
+            "control: a pool with no conjure card must seed no conjure face"
+        );
+    }
+
+    fn lands_db() -> Arc<CardDatabase> {
+        db_with_names(&["Forest".to_string(), "Mountain".to_string()])
+    }
+
+    /// Every starter deck resolves against this database, so a restore that
+    /// re-drew one would produce a real deck rather than failing to resolve.
+    fn every_starter_db() -> Arc<CardDatabase> {
+        let mut names = vec!["Forest".to_string(), "Mountain".to_string()];
+        for deck_name in crate::starter_decks::starter_deck_names() {
+            names.extend(
+                crate::starter_decks::find_starter_deck(deck_name)
+                    .expect("the table names this deck")
+                    .main_deck,
+            );
+        }
+        db_with_names(&names)
+    }
+
+    fn name_deck(name: &str, count: usize) -> crate::starter_decks::DeckData {
+        crate::starter_decks::DeckData {
+            main_deck: vec![name.to_string(); count],
+            ..Default::default()
+        }
+    }
+
+    fn list_choice(name: &str, count: usize) -> DeckChoice {
+        DeckChoice::DeckList(Box::new(name_deck(name, count)))
+    }
+
+    /// Stands in for `phase-server`'s `ServerDeckResolver`. A `DeckList` maps
+    /// to its own names; the starter table's decks are not in these fixture
+    /// databases, and these rows assert what the session RECORDS as the
+    /// choice, not what the resolver produced from it.
+    struct NameListResolver;
+
+    impl seat_reducer::types::DeckResolver for NameListResolver {
+        fn resolve(
+            &self,
+            choice: &DeckChoice,
+        ) -> Result<engine::game::deck_loading::PlayerDeckList, String> {
+            let main_deck = match choice {
+                DeckChoice::DeckList(data) => data.main_deck.clone(),
+                DeckChoice::Named(_) | DeckChoice::Random => vec!["Forest".to_string()],
+            };
+            Ok(engine::game::deck_loading::PlayerDeckList {
+                main_deck,
+                ..Default::default()
+            })
+        }
+    }
+
+    fn run_seat_mutation(
+        mgr: &mut SessionManager,
+        code: &str,
+        db: &CardDatabase,
+        mutation: SeatMutation,
+    ) -> SeatDelta {
+        let resolver = NameListResolver;
+        let ctx = seat_reducer::types::ReducerCtx {
+            platform: Platform::Native,
+            deck_resolver: &resolver,
+        };
+        let mut seat_state = mgr.try_session(code).unwrap().seat_state();
+        let delta = seat_reducer::apply(&mut seat_state, mutation, &ctx).expect("legal mutation");
+        mgr.try_session(code)
+            .unwrap()
+            .apply_seat_delta(seat_state, &delta, db);
+        delta
+    }
+
+    fn seat_ai_at(seat_index: u8, deck: DeckChoice) -> SeatMutation {
+        SeatMutation::SetKind {
+            seat_index,
+            expected_kind: None,
+            kind: SeatKind::Ai {
+                difficulty: AiDifficulty::Easy,
+                deck,
+            },
+        }
+    }
+
+    fn main_deck_names(payload: &PlayerDeckPayload) -> Vec<String> {
+        payload
+            .main_deck
+            .iter()
+            .flat_map(|entry| std::iter::repeat_n(entry.card.name.clone(), entry.count as usize))
+            .collect()
+    }
+
+    /// Mirrors `phase-server`'s `ServerDeckResolver` without its database check: a
+    /// `DeckList` converts through the engine's `From<DeckData> for PlayerDeckList`,
+    /// so every field the wire list carries reaches the seat delta.
+    struct ConvertingResolver;
+
+    impl seat_reducer::types::DeckResolver for ConvertingResolver {
+        fn resolve(
+            &self,
+            choice: &DeckChoice,
+        ) -> Result<engine::game::deck_loading::PlayerDeckList, String> {
+            match choice {
+                DeckChoice::DeckList(data) => Ok(engine::game::deck_loading::PlayerDeckList::from(
+                    (**data).clone(),
+                )),
+                DeckChoice::Named(_) | DeckChoice::Random => {
+                    Err("this resolver only converts submitted lists".to_string())
+                }
+            }
+        }
+    }
+
+    /// An AI seat's submitted list keeps its printings sidecar through the reducer's
+    /// delta into the session's stored payload. Reverting `apply_seat_delta` to a
+    /// hand-written `DeckData` literal without the field leaves `decks[1].printings`
+    /// empty and fails the last assertion.
+    #[test]
+    fn an_ai_seat_deck_list_keeps_its_printings_through_apply_seat_delta() {
+        use engine::types::card_printing::{CardPrinting, DeckPrinting, DeckSection};
+
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+        let db = lands_db();
+        let mut data = name_deck("Forest", 1);
+        data.printings = vec![DeckPrinting {
+            section: DeckSection::MainDeck,
+            name: "Forest".to_string(),
+            count: 1,
+            printing: CardPrinting {
+                set_code: "lea".to_string(),
+                collector_number: "294".to_string(),
+            },
+        }];
+
+        let resolver = ConvertingResolver;
+        let ctx = seat_reducer::types::ReducerCtx {
+            platform: Platform::Native,
+            deck_resolver: &resolver,
+        };
+        let mut seat_state = mgr.try_session(&code).unwrap().seat_state();
+        let delta = seat_reducer::apply(
+            &mut seat_state,
+            seat_ai_at(1, DeckChoice::DeckList(Box::new(data.clone()))),
+            &ctx,
+        )
+        .expect("legal mutation");
+        mgr.try_session(&code)
+            .unwrap()
+            .apply_seat_delta(seat_state, &delta, &db);
+
+        let session = mgr.try_session(&code).unwrap();
+        let payload = session.decks[1].as_ref().expect("the AI seat resolved");
+        // Reach guard: the seat's deck resolved, so the sidecar assertion below
+        // is not reading a seat that was cleared.
+        assert_eq!(main_deck_names(payload), vec!["Forest".to_string()]);
+        assert_eq!(payload.printings, data.printings);
+    }
+
+    #[test]
+    fn a_seat_edit_advances_the_persistence_revision() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+        let db = lands_db();
+        let before = mgr.try_session(&code).unwrap().state_revision;
+
+        run_seat_mutation(
+            &mut mgr,
+            &code,
+            &db,
+            seat_ai_at(1, list_choice("Forest", 1)),
+        );
+
+        assert!(
+            mgr.try_session(&code).unwrap().state_revision > before,
+            "a seat edit writes persisted fields, so it must allocate a revision"
+        );
+    }
+
+    #[test]
+    fn a_join_advances_the_persistence_revision() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+        let before = mgr.try_session(&code).unwrap().state_revision;
+
+        join_game(&mut mgr, &code, make_deck(), None).expect("seat 1 is open");
+
+        assert!(mgr.try_session(&code).unwrap().state_revision > before);
+    }
+
+    #[test]
+    fn a_no_op_seat_edit_still_allocates_a_revision() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+        let db = lands_db();
+        let before = mgr.try_session(&code).unwrap().state_revision;
+
+        // The durability contract, not a state transition: an empty delta
+        // still produces a snapshot that must clear the persistence fence.
+        let seat_state = mgr.try_session(&code).unwrap().seat_state();
+        mgr.try_session(&code)
+            .unwrap()
+            .apply_seat_delta(seat_state, &SeatDelta::empty(), &db);
+
+        assert!(mgr.try_session(&code).unwrap().state_revision > before);
+    }
+
+    #[test]
+    fn conditional_seat_assignment_preserves_joined_session_and_advances_revision() {
+        let mut mgr = SessionManager::new();
+        let (code, host) = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                4,
+                MatchConfig::default(),
+                Some(FormatConfig::commander()),
+            )
+            .unwrap();
+        let db = lands_db();
+        let guest_data = name_deck("Forest", 8);
+        let (guest, _) = join_game_with_name(
+            &mut mgr,
+            &code,
+            crate::resolve_deck(&db, &guest_data).unwrap(),
+            Some(DeckChoice::DeckList(Box::new(guest_data.clone()))),
+            "Guest".to_string(),
+        )
+        .unwrap();
+        let (other, _) =
+            join_game_with_name(&mut mgr, &code, make_deck(), None, "Other".to_string()).unwrap();
+        let before = mgr.try_session(&code).unwrap().state_revision;
+        let mut mutation = seat_ai_at(1, list_choice("Mountain", 1));
+        if let SeatMutation::SetKind { expected_kind, .. } = &mut mutation {
+            *expected_kind = Some(SeatKind::WaitingHuman);
+        }
+        let delta = run_seat_mutation(&mut mgr, &code, &db, mutation);
+        mgr.unindex_tokens(&delta.invalidated_tokens);
+        {
+            let session = mgr.try_session(&code).unwrap();
+            assert_eq!(session.seat_state().seats[1], SeatKind::JoinedHuman);
+            assert_eq!(
+                session.player_tokens,
+                vec![host.clone(), guest.clone(), other.clone(), String::new()]
+            );
+            assert_eq!(session.display_names[1], "Guest");
+            assert!(session.connected[1]);
+            assert_eq!(
+                main_deck_names(session.decks[1].as_ref().unwrap()),
+                guest_data.main_deck
+            );
+            assert_eq!(
+                session.deck_choices[1],
+                Some(DeckChoice::DeckList(Box::new(guest_data)))
+            );
+            assert!(session.state_revision > before);
+        }
+        assert_eq!(mgr.game_for_token(&guest), Some(code.as_str()));
+        assert_eq!(mgr.game_for_token(&other), Some(code.as_str()));
+        run_seat_mutation(
+            &mut mgr,
+            &code,
+            &db,
+            seat_ai_at(3, list_choice("Mountain", 1)),
+        );
+        assert!(matches!(
+            mgr.try_session(&code).unwrap().seat_state().seats[3],
+            SeatKind::Ai { .. }
+        ));
+        let delta = run_seat_mutation(
+            &mut mgr,
+            &code,
+            &db,
+            SeatMutation::SetKind {
+                seat_index: 1,
+                kind: SeatKind::WaitingHuman,
+                expected_kind: None,
+            },
+        );
+        mgr.unindex_tokens(&delta.invalidated_tokens);
+        assert_eq!(delta.invalidated_tokens, vec![guest.clone()]);
+        assert_eq!(mgr.game_for_token(&guest), None);
+        assert_eq!(mgr.game_for_token(&host), Some(code.as_str()));
+        assert_eq!(mgr.game_for_token(&other), Some(code.as_str()));
+    }
+
+    #[test]
+    fn both_projections_echo_the_installed_ai_deck() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+        let db = lands_db();
+        let choice = list_choice("Mountain", 1);
+
+        run_seat_mutation(&mut mgr, &code, &db, seat_ai_at(1, choice.clone()));
+
+        let session = mgr.try_session(&code).unwrap();
+        let expected = SeatKind::Ai {
+            difficulty: AiDifficulty::Easy,
+            deck: choice,
+        };
+        assert_eq!(session.player_slot_info()[1].kind, expected, "wire view");
+        assert_eq!(session.seat_state().seats[1], expected, "reducer input");
+    }
+
+    #[test]
+    fn re_sending_the_same_ai_seat_yields_an_empty_delta() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+        let db = lands_db();
+        let choice = list_choice("Mountain", 1);
+        run_seat_mutation(&mut mgr, &code, &db, seat_ai_at(1, choice.clone()));
+
+        // The loop the client's promote-on-non-DeckList effect drives: with the
+        // choice echoed back, the reducer's `current == kind` short-circuit
+        // fires and the seat is not torn down and re-resolved.
+        let delta = run_seat_mutation(&mut mgr, &code, &db, seat_ai_at(1, choice));
+
+        assert!(delta.new_ai.is_empty(), "new_ai: {:?}", delta.new_ai);
+        assert!(
+            delta.removed_ai.is_empty(),
+            "removed_ai: {:?}",
+            delta.removed_ai
+        );
+        assert!(
+            delta.mutated_seats.is_empty(),
+            "mutated_seats: {:?}",
+            delta.mutated_seats
+        );
+    }
+
+    #[test]
+    fn a_named_ai_deck_choice_is_not_coerced_to_a_list() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+        let db = lands_db();
+        let choice = DeckChoice::Named("Red Deck Wins".to_string());
+
+        run_seat_mutation(&mut mgr, &code, &db, seat_ai_at(1, choice.clone()));
+
+        assert_eq!(
+            mgr.try_session(&code).unwrap().player_slot_info()[1].kind,
+            SeatKind::Ai {
+                difficulty: AiDifficulty::Easy,
+                deck: choice,
+            }
+        );
+    }
+
+    #[test]
+    fn removing_a_seat_renumbers_deck_and_choice_together() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                4,
+                MatchConfig::default(),
+                Some(FormatConfig::commander()),
+            )
+            .expect("commander supports four seats");
+        let db = lands_db();
+        // The removed seat must itself be an AI: the reducer only reports a
+        // seat in `removed_ai` when it was one, and that list is the input to
+        // the cleanup pass that renumbering can put out of step. Removing a
+        // waiting seat here would leave that pass untaken and the row would
+        // hold with the arrays misaligned.
+        run_seat_mutation(
+            &mut mgr,
+            &code,
+            &db,
+            seat_ai_at(1, list_choice("Mountain", 1)),
+        );
+        run_seat_mutation(
+            &mut mgr,
+            &code,
+            &db,
+            seat_ai_at(2, list_choice("Forest", 1)),
+        );
+        run_seat_mutation(
+            &mut mgr,
+            &code,
+            &db,
+            seat_ai_at(3, list_choice("Mountain", 1)),
+        );
+
+        run_seat_mutation(&mut mgr, &code, &db, SeatMutation::Remove { seat_index: 1 });
+
+        let session = mgr.try_session(&code).unwrap();
+        // Each survivor keeps its OWN pairing, not a neighbour's.
+        for (seat, name) in [(1usize, "Forest"), (2usize, "Mountain")] {
+            assert_eq!(
+                session.deck_choices[seat],
+                Some(list_choice(name, 1)),
+                "seat {seat} choice"
+            );
+            assert_eq!(
+                main_deck_names(session.decks[seat].as_ref().expect("seat has a deck")),
+                vec![name.to_string()],
+                "seat {seat} resolved deck"
+            );
+        }
+    }
+
+    #[test]
+    fn turning_an_ai_seat_back_into_a_waiting_seat_clears_both_arrays() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+        let db = lands_db();
+        run_seat_mutation(
+            &mut mgr,
+            &code,
+            &db,
+            seat_ai_at(1, list_choice("Forest", 1)),
+        );
+        // Reach guard: the seat really held a deck before the transition.
+        assert!(mgr.try_session(&code).unwrap().decks[1].is_some());
+
+        run_seat_mutation(
+            &mut mgr,
+            &code,
+            &db,
+            SeatMutation::SetKind {
+                seat_index: 1,
+                expected_kind: None,
+                kind: SeatKind::WaitingHuman,
+            },
+        );
+
+        let session = mgr.try_session(&code).unwrap();
+        assert!(session.decks[1].is_none());
+        assert!(session.deck_choices[1].is_none());
+    }
+
+    #[test]
+    fn a_human_seats_choice_is_recorded_but_never_reaches_the_wire() {
+        let db = lands_db();
+        let data = name_deck("Forest", 8);
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+        join_game_with_name(
+            &mut mgr,
+            &code,
+            crate::resolve_deck(&db, &data).unwrap(),
+            Some(DeckChoice::DeckList(Box::new(data.clone()))),
+            "Guest".to_string(),
+        )
+        .expect("seat 1 is open");
+
+        let session = mgr.try_session(&code).unwrap();
+        assert_eq!(
+            session.deck_choices[1],
+            Some(DeckChoice::DeckList(Box::new(data)))
+        );
+        // The human variants carry no deck field, so the recorded list is
+        // structurally unable to reach a slot broadcast.
+        assert_eq!(session.player_slot_info()[1].kind, SeatKind::JoinedHuman);
+    }
+
+    #[test]
+    fn a_human_seats_recorded_choice_re_resolves_to_its_payload() {
+        let db = lands_db();
+        let data = name_deck("Forest", 8);
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+        join_game_with_name(
+            &mut mgr,
+            &code,
+            crate::resolve_deck(&db, &data).unwrap(),
+            Some(DeckChoice::DeckList(Box::new(data))),
+            "Guest".to_string(),
+        )
+        .unwrap();
+
+        let session = mgr.try_session(&code).unwrap();
+        let Some(DeckChoice::DeckList(recorded)) = session.deck_choices[1].clone() else {
+            panic!(
+                "expected a recorded list, got {:?}",
+                session.deck_choices[1]
+            );
+        };
+        assert_eq!(
+            main_deck_names(&crate::resolve_deck(&db, &recorded).unwrap()),
+            main_deck_names(session.decks[1].as_ref().unwrap())
+        );
+    }
+    /// The pregame leg is the control: a `to_persisted` that dropped the field
+    /// outright would satisfy the started leg on its own.
+    #[test]
+    fn a_started_sessions_snapshot_carries_no_deck_choices() {
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let (mgr, code) = seated_room(&db, &data);
+        assert!(mgr
+            .try_session(&code)
+            .unwrap()
+            .to_persisted()
+            .deck_choices
+            .iter()
+            .any(Option::is_some));
+
+        let mut session = mgr.try_session(&code).unwrap();
+        session.start_game(&db).expect("a fully decked room starts");
+        assert!(session.to_persisted().deck_choices.is_empty());
+    }
+
+    #[test]
+    fn starting_two_seat_room_rebinds_first_interaction_projection() {
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let mut mgr = SessionManager::new();
+        // Chooser P1 discriminates: `GameState::new` binds `(P0, Single)` for its
+        // pregame `Priority { player: P0 }`, so a missing post-start rebind
+        // leaves a P0 slot.
+        let (code, ()) = started_with_chooser(&mut mgr, PlayerId(1), |mgr| {
+            let code = seat_room_in(mgr, &db, &data);
+            mgr.try_session(&code)
+                .unwrap()
+                .start_game(&db)
+                .expect("a fully decked room starts");
+            (code, ())
+        });
+
+        let session = mgr
+            .session_exclusive(&code)
+            .expect("a freshly seated room is still solely owned by the manager");
+        // CR 103.1: the first interaction is the choice, bound to the chooser.
+        assert_eq!(session.state.active_interaction_slots.len(), 1);
+        let slot = &session.state.active_interaction_slots[0];
+        assert_eq!(slot.semantic_owner, 1);
+        assert_eq!(slot.slot_kind, InteractionSlotKind::Single);
+        let chooser_view = derive_viewer_interaction(
+            &session.state,
+            &filter_state_for_player(&session.state, PlayerId(1)),
+            PlayerId(1),
+        );
+        assert!(chooser_view.can_submit);
+        assert!(!chooser_view.opportunities.is_empty());
+        let other_view = derive_viewer_interaction(
+            &session.state,
+            &filter_state_for_player(&session.state, PlayerId(0)),
+            PlayerId(0),
+        );
+        assert!(!other_view.can_submit);
+
+        let chooser_token = session.player_tokens[1].clone();
+        session
+            .handle_action(
+                &chooser_token,
+                GameAction::ChooseStartingPlayer {
+                    player: PlayerId(1),
+                },
+            )
+            .expect("the chooser elects to play first");
+        assert_eq!(session.state.active_interaction_slots.len(), 2);
+        for player in [PlayerId(0), PlayerId(1)] {
+            let filtered = filter_state_for_player(&session.state, player);
+            let projection = derive_viewer_interaction(&session.state, &filtered, player);
+            assert!(projection.can_submit);
+            assert_eq!(projection.opportunities.len(), 1);
+        }
+    }
+
+    #[test]
+    fn seat_ai_records_the_choice_it_was_given() {
+        let db = lands_db();
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+        let data = name_deck("Mountain", 3);
+
+        mgr.try_session(&code).unwrap().seat_ai(AiSeatSetup {
+            seat_index: 1,
+            difficulty: AiDifficulty::Hard,
+            choice: DeckChoice::DeckList(Box::new(data.clone())),
+            resolved: crate::resolve_deck(&db, &data).unwrap(),
+        });
+
+        assert_eq!(
+            mgr.try_session(&code).unwrap().player_slot_info()[1].kind,
+            SeatKind::Ai {
+                difficulty: AiDifficulty::Hard,
+                deck: DeckChoice::DeckList(Box::new(data)),
+            }
+        );
+    }
+
+    #[test]
+    fn create_game_with_ai_records_the_host_choice_it_was_given() {
+        let db = Arc::new(engine::database::CardDatabase::default());
+        let mut mgr = SessionManager::new();
+        let asked_for = DeckChoice::Named("Sworn to Darkness".to_string());
+
+        let (code, _token) = mgr
+            .create_game_with_ai(
+                make_deck(),
+                asked_for.clone(),
+                "Host".to_string(),
+                None,
+                MatchConfig::default(),
+                vec![ai_setup(1, AiDifficulty::Easy, make_deck())],
+                Vec::new(),
+                None,
+                &db,
+            )
+            .expect("supported format config");
+
+        assert_eq!(
+            mgr.try_session(&code).unwrap().deck_choices[0],
+            Some(asked_for)
+        );
+    }
+
+    fn create_requesting(
+        mgr: &mut SessionManager,
+        requested_code: Option<&str>,
+    ) -> Result<(String, String), CreateGameError> {
+        mgr.create_game_n_players_with_code(
+            make_deck(),
+            None,
+            "Host".to_string(),
+            None,
+            2,
+            MatchConfig::default(),
+            None,
+            requested_code.map(str::to_string),
+        )
+    }
+
+    #[test]
+    fn a_requested_code_is_claimed() {
+        let mut mgr = SessionManager::new();
+
+        let (code, _token) = create_requesting(&mut mgr, Some("BOTAB1")).expect("free code");
+
+        assert_eq!(code, "BOTAB1");
+        assert!(mgr.contains_game("BOTAB1"));
+    }
+
+    #[test]
+    fn a_requested_code_held_by_a_live_session_is_code_in_use() {
+        let mut mgr = SessionManager::new();
+        let (_, first_token) = create_requesting(&mut mgr, Some("BOTAB1")).expect("free code");
+
+        let refused = create_requesting(&mut mgr, Some("BOTAB1"));
+
+        assert_eq!(
+            refused,
+            Err(CreateGameError::CodeInUse {
+                game_code: "BOTAB1".to_string()
+            })
+        );
+        assert_eq!(mgr.game_count(), 1);
+        assert_eq!(mgr.game_for_token(&first_token), Some("BOTAB1"));
+    }
+
+    #[test]
+    fn no_requested_code_mints_one() {
+        let mut mgr = SessionManager::new();
+
+        let (code, _token) = create_requesting(&mut mgr, None).expect("minted");
+
+        assert_eq!(code.len(), 6);
+        assert!(code
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn an_ai_create_claims_and_collides_on_a_requested_code() {
+        let db = Arc::new(engine::database::CardDatabase::default());
+        let mut mgr = SessionManager::new();
+        let create = |mgr: &mut SessionManager| {
+            mgr.create_game_with_ai_with_booster_pack_pool(
+                make_deck(),
+                DeckChoice::DeckList(Box::default()),
+                "Host".to_string(),
+                None,
+                MatchConfig::default(),
+                vec![ai_setup(1, AiDifficulty::Easy, make_deck())],
+                Vec::new(),
+                None,
+                None,
+                Some("BOTAI1".to_string()),
+                &db,
+            )
+        };
+
+        let (code, _token) = create(&mut mgr).expect("free code");
+        assert_eq!(code, "BOTAI1");
+
+        assert_eq!(
+            create(&mut mgr),
+            Err(CreateGameError::CodeInUse {
+                game_code: "BOTAI1".to_string()
+            })
+        );
+        assert_eq!(mgr.game_count(), 1);
+    }
+
+    #[test]
+    fn create_game_error_maps_onto_the_wire_error() {
+        match ServerMessage::from(CreateGameError::CodeInUse {
+            game_code: "BOTAB1".to_string(),
+        }) {
+            ServerMessage::Error { message, code } => {
+                assert_eq!(code, Some(ServerErrorCode::CodeInUse));
+                assert_eq!(message, code_in_use_message("BOTAB1"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        match ServerMessage::from(CreateGameError::Rejected("x".to_string())) {
+            ServerMessage::Error { message, code } => {
+                assert_eq!(message, "x");
+                assert_eq!(code, None);
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    // ── Restore ────────────────────────────────────────────────────────────
+
+    /// A two-seat room in `mgr` with only the host seated, its deck recorded
+    /// the way the create path records it.
+    fn host_room_in(
+        mgr: &mut SessionManager,
+        db: &CardDatabase,
+        data: &crate::starter_decks::DeckData,
+    ) -> String {
+        let (code, _token) = mgr
+            .create_game_n_players(
+                crate::resolve_deck(db, data).unwrap(),
+                Some(DeckChoice::DeckList(Box::new(data.clone()))),
+                "Host".to_string(),
+                None,
+                2,
+                MatchConfig::default(),
+                None,
+            )
+            .unwrap();
+        code
+    }
+
+    /// `host_room_in` with the second seat joined, both decks re-resolvable.
+    fn seat_room_in(
+        mgr: &mut SessionManager,
+        db: &CardDatabase,
+        data: &crate::starter_decks::DeckData,
+    ) -> String {
+        let code = host_room_in(mgr, db, data);
+        join_game_with_name(
+            mgr,
+            &code,
+            crate::resolve_deck(db, data).unwrap(),
+            Some(DeckChoice::DeckList(Box::new(data.clone()))),
+            "Guest".to_string(),
+        )
+        .unwrap();
+        code
+    }
+
+    /// A two-seat room with only the host seated, its deck recorded the way
+    /// the create path records it.
+    fn hosted_room(
+        db: &CardDatabase,
+        data: &crate::starter_decks::DeckData,
+    ) -> (SessionManager, String) {
+        let mut mgr = SessionManager::new();
+        let code = host_room_in(&mut mgr, db, data);
+        (mgr, code)
+    }
+
+    /// `hosted_room` with the second seat joined, both decks re-resolvable.
+    fn seated_room(
+        db: &CardDatabase,
+        data: &crate::starter_decks::DeckData,
+    ) -> (SessionManager, String) {
+        let mut mgr = SessionManager::new();
+        let code = seat_room_in(&mut mgr, db, data);
+        (mgr, code)
+    }
+
+    /// CR 103.1: `GameSession::start_game` rolls the contest on an OS-random seed
+    /// (`rebuild_pregame_state`), so a test that needs a particular chooser starts
+    /// fresh sessions until one waits on that seat. A two-seat contest names each
+    /// seat with probability at least (1 − 20⁻¹⁶)/2, so 64 attempts all miss with
+    /// probability at most ((1 + 20⁻¹⁶)/2)⁶⁴ ≈ 2⁻⁶⁴. Every session not kept is removed.
+    fn started_with_chooser<T>(
+        mgr: &mut SessionManager,
+        chooser: PlayerId,
+        mut start: impl FnMut(&mut SessionManager) -> (String, T),
+    ) -> (String, T) {
+        for _ in 0..64 {
+            let (code, kept) = start(mgr);
+            let found = matches!(
+                mgr.try_session(&code).unwrap().state.waiting_for,
+                WaitingFor::ChooseStartingPlayer { player, .. } if player == chooser
+            );
+            if found {
+                return (code, kept);
+            }
+            mgr.remove_game(&code);
+        }
+        panic!("64 fresh sessions never made {chooser:?} the chooser");
+    }
+
+    /// CR 103.1: a server game reaches the choice, and its answer starts the
+    /// game, for a human chooser and for an AI chooser.
+    #[test]
+    fn server_game_one_waits_for_the_chooser() {
+        // (a) Two humans: the chooser names the other seat.
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let mut mgr = SessionManager::new();
+        let code = seat_room_in(&mut mgr, &db, &data);
+        let mut session = mgr.try_session(&code).unwrap();
+        session.start_game(&db).expect("a fully decked room starts");
+        let WaitingFor::ChooseStartingPlayer {
+            player: chooser, ..
+        } = session.state.waiting_for
+        else {
+            panic!("the start rests at the CR 103.1 choice");
+        };
+        assert!(
+            matches!(
+                session.start_events.as_slice(),
+                [GameEvent::StartingPlayerContest { .. }]
+            ),
+            "the start batch is the contest alone: {:?}",
+            session.start_events
+        );
+        let other = PlayerId(1 - chooser.0);
+        let chooser_token = session.player_tokens[usize::from(chooser.0)].clone();
+        let other_token = session.player_tokens[usize::from(other.0)].clone();
+
+        assert!(
+            session
+                .handle_action(
+                    &other_token,
+                    GameAction::ChooseStartingPlayer { player: other },
+                )
+                .is_err(),
+            "only the chooser may answer"
+        );
+        assert!(
+            matches!(
+                session.state.waiting_for,
+                WaitingFor::ChooseStartingPlayer { player, .. } if player == chooser
+            ),
+            "the refused answer leaves the prompt in place"
+        );
+
+        session
+            .handle_action(
+                &chooser_token,
+                GameAction::ChooseStartingPlayer { player: other },
+            )
+            .expect("the chooser names the other seat");
+        assert_eq!(session.state.current_starting_player, other);
+        assert!(matches!(
+            session.state.waiting_for,
+            WaitingFor::MulliganDecision { .. }
+        ));
+        drop(session);
+
+        // (b) An AI chooser answers through the session's AI driver.
+        let db = Arc::new(CardDatabase::default());
+        let mut mgr = SessionManager::new();
+        let (code, _token) = started_with_chooser(&mut mgr, PlayerId(1), |mgr| {
+            mgr.create_game_with_ai(
+                make_deck(),
+                DeckChoice::Random,
+                "Host".to_string(),
+                None,
+                MatchConfig::default(),
+                vec![ai_setup(1, AiDifficulty::Easy, make_deck())],
+                Vec::new(),
+                None,
+                &db,
+            )
+            .expect("supported format config")
+        });
+        let mut session = mgr.try_session(&code).unwrap();
+        session.run_ai();
+        assert_eq!(session.state.turn_number, 1);
+        assert_eq!(session.state.current_starting_player, PlayerId(1));
+        assert!(!matches!(
+            session.state.waiting_for,
+            WaitingFor::ChooseStartingPlayer { .. }
+        ));
+    }
+
+    /// Single-user hosting offers game one's opening rewind boundary once the
+    /// CR 103.1 choice starts turn 1, as game two's `ChoosePlayDraw` does, and
+    /// the chooser's answer is an action-ring takeback point.
+    #[test]
+    fn game_one_opening_boundary_is_offered_after_the_choice() {
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let mut mgr = SessionManager::new();
+        let code = seat_room_in(&mut mgr, &db, &data);
+        let mut session = mgr.try_session(&code).unwrap();
+        session.start_game(&db).expect("a fully decked room starts");
+        session.set_hosting(HostingMode::SingleUser);
+        let WaitingFor::ChooseStartingPlayer {
+            player: chooser, ..
+        } = session.state.waiting_for
+        else {
+            panic!("the start rests at the CR 103.1 choice");
+        };
+        let starter = PlayerId(1 - chooser.0);
+        assert!(session.rewind_options().is_empty());
+        assert_eq!(session.takeback.history().len(), 0);
+
+        let chooser_token = session.player_tokens[usize::from(chooser.0)].clone();
+        session
+            .handle_action(
+                &chooser_token,
+                GameAction::ChooseStartingPlayer { player: starter },
+            )
+            .expect("the chooser names the other seat");
+
+        assert_eq!(
+            session.rewind_options(),
+            vec![RewindOption {
+                turn_number: 1,
+                active_player: starter,
+            }]
+        );
+        let history: Vec<_> = session.takeback.history().collect();
+        assert_eq!(history.len(), 1, "the answer is one takeback point");
+        let (actor, point) = history[0];
+        assert_eq!(actor, chooser);
+        assert!(matches!(
+            point.waiting_for,
+            WaitingFor::ChooseStartingPlayer { .. }
+        ));
+        assert_eq!(point.turn_number, 0);
+    }
+
+    fn install_ai_seat(
+        mgr: &mut SessionManager,
+        code: &str,
+        db: &CardDatabase,
+        difficulty: AiDifficulty,
+        choice: DeckChoice,
+        data: &crate::starter_decks::DeckData,
+    ) {
+        mgr.try_session(code).unwrap().seat_ai(AiSeatSetup {
+            seat_index: 1,
+            difficulty,
+            choice,
+            resolved: crate::resolve_deck(db, data).unwrap(),
+        });
+    }
+
+    #[test]
+    fn a_restored_room_keeps_every_seats_deck_and_deals_real_libraries() {
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let (mgr, code) = seated_room(&db, &data);
+
+        let mut restored = round_trip_through_disk(&mgr.try_session(&code).unwrap(), &db);
+
+        assert!(restored.decks.iter().all(Option::is_some), "restored decks");
+        restored.start_game(&db).expect("a restored room starts");
+        for player in &restored.state.players {
+            assert!(
+                !player.library.is_empty(),
+                "restored seat dealt an empty library"
+            );
+        }
+    }
+
+    #[test]
+    fn a_started_session_restores_without_re_resolving_its_seat_decks() {
+        // A started session reaches neither reader of `decks` again:
+        // `start_game` has already run, and the renumbering that copies the
+        // array is behind a reducer that refuses a started room. Rebuilding it
+        // on restore is work nothing consults, and it can log a seat as empty
+        // while the running game is perfectly healthy. The pregame half is the
+        // control: without it a restore that resolved nothing at all would pass
+        // this row.
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+
+        let (mgr, code) = seated_room(&db, &data);
+        mgr.try_session(&code)
+            .unwrap()
+            .start_game(&db)
+            .expect("the room starts");
+        let restored_started = round_trip_through_disk(&mgr.try_session(&code).unwrap(), &db);
+        assert!(
+            restored_started.decks.iter().all(Option::is_none),
+            "a started session re-resolved decks that nothing will read"
+        );
+
+        let (pregame_mgr, pregame_code) = seated_room(&db, &data);
+        let restored_pregame =
+            round_trip_through_disk(&pregame_mgr.try_session(&pregame_code).unwrap(), &db);
+        assert!(
+            restored_pregame.decks.iter().all(Option::is_some),
+            "a pregame restore must still resolve every seat"
+        );
+    }
+
+    /// The restore guard's live population is a snapshot written before
+    /// `to_persisted` began emptying the field, which carries the started flag
+    /// *and* every seat's choice. `to_persisted` can no longer produce that
+    /// shape, so the row that discriminates the guard builds it directly.
+    #[test]
+    fn a_started_snapshot_that_still_carries_choices_restores_without_re_resolving() {
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let (mgr, code) = seated_room(&db, &data);
+
+        let mut persisted = mgr.try_session(&code).unwrap().to_persisted();
+        // Reach guard: the pregame snapshot really carries the choices, so an
+        // all-`None` restore below cannot come from an empty list.
+        assert!(persisted.deck_choices.iter().any(Option::is_some));
+        persisted.game_started = true;
+
+        let restored = GameSession::from_persisted(persisted, &db).expect("the snapshot restores");
+        assert!(
+            restored.decks.iter().all(Option::is_none),
+            "a started restore re-resolved decks that nothing will read"
+        );
+    }
+
+    #[test]
+    fn a_live_room_still_starts_and_deals_cards() {
+        // The paired positive control for the refusal rows below, which a
+        // guard that refused everything would satisfy vacuously.
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let (mgr, code) = seated_room(&db, &data);
+
+        let mut session = mgr.try_session(&code).unwrap();
+        session.start_game(&db).expect("a live room starts");
+
+        for player in &session.state.players {
+            assert!(!player.library.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_restored_cedh_table_still_starts() {
+        let db = lands_db();
+        let mut data = name_deck("Forest", 40);
+        data.bracket_tier = CommanderBracketTier::Cedh;
+        let (mut mgr, code) = hosted_room(&db, &data);
+        install_ai_seat(
+            &mut mgr,
+            &code,
+            &db,
+            AiDifficulty::CEDH,
+            DeckChoice::DeckList(Box::new(data.clone())),
+            &data,
+        );
+
+        let mut restored = round_trip_through_disk(&mgr.try_session(&code).unwrap(), &db);
+
+        assert_eq!(restored.start_game(&db), Ok(()));
+    }
+
+    #[test]
+    fn a_restored_non_cedh_deck_under_a_cedh_seat_is_still_refused() {
+        // Reach guard for the row above: the bracket gate really does run on
+        // the restored path rather than being skipped.
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let (mut mgr, code) = hosted_room(&db, &data);
+        install_ai_seat(
+            &mut mgr,
+            &code,
+            &db,
+            AiDifficulty::CEDH,
+            DeckChoice::DeckList(Box::new(data.clone())),
+            &data,
+        );
+
+        let mut restored = round_trip_through_disk(&mgr.try_session(&code).unwrap(), &db);
+
+        assert!(matches!(
+            restored.start_game(&db),
+            Err(StartGameError::Bracket(
+                CedhBracketError::DeckNotCedh { .. }
+            ))
+        ));
+    }
+
+    /// A host table built from the JSON the client emits for a cEDH table: the
+    /// host's `deck` and the AI seat's `DeckList` choice are independent
+    /// payloads, each carrying `bracket_tier` only when its tier is `Some`.
+    /// The AI payload also resolves the AI seat's deck. Returns the table's
+    /// session room after seating the AI at `CEDH` difficulty.
+    fn client_emitted_cedh_table(
+        db: &CardDatabase,
+        host_bracket_tier: Option<&str>,
+        ai_bracket_tier: Option<&str>,
+    ) -> (SessionManager, String) {
+        let deck_json = |bracket_tier: Option<&str>| {
+            let mut deck = serde_json::json!({
+                "main_deck": vec!["Forest"; 40],
+                "sideboard": [],
+                "commander": [],
+                "planar_deck": [],
+                "scheme_deck": [],
+            });
+            if let Some(tier) = bracket_tier {
+                deck["bracket_tier"] = serde_json::json!(tier);
+            }
+            deck
+        };
+        let host: crate::starter_decks::DeckData =
+            serde_json::from_value(deck_json(host_bracket_tier))
+                .expect("the client's host deck shape parses");
+        let ai_deck = deck_json(ai_bracket_tier);
+        let ai: crate::starter_decks::DeckData = serde_json::from_value(ai_deck.clone())
+            .expect("the client's AI seat deck shape parses");
+        let ai_choice: DeckChoice =
+            serde_json::from_value(serde_json::json!({ "type": "DeckList", "data": ai_deck }))
+                .expect("the client's AI seat choice shape parses");
+        let (mut mgr, code) = hosted_room(db, &host);
+        install_ai_seat(&mut mgr, &code, db, AiDifficulty::CEDH, ai_choice, &ai);
+        (mgr, code)
+    }
+
+    #[test]
+    fn a_client_emitted_cedh_table_passes_the_start_gate() {
+        let db = lands_db();
+        let (mgr, code) = client_emitted_cedh_table(&db, Some("cedh"), Some("cedh"));
+
+        assert_eq!(mgr.try_session(&code).unwrap().start_game(&db), Ok(()));
+    }
+
+    #[test]
+    fn a_client_emitted_host_deck_without_a_declared_tier_is_refused_at_cedh() {
+        // Paired negative isolating the host payload: the pre-fix host deck
+        // omitted `bracket_tier`, which deserializes to Core.
+        let db = lands_db();
+        let (mgr, code) = client_emitted_cedh_table(&db, None, Some("cedh"));
+
+        assert!(matches!(
+            mgr.try_session(&code).unwrap().start_game(&db),
+            Err(StartGameError::Bracket(
+                CedhBracketError::DeckNotCedh { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn a_client_emitted_ai_deck_without_a_declared_tier_is_refused_at_cedh() {
+        // Paired negative isolating the AI seat payload, with the host deck
+        // correctly declared.
+        let db = lands_db();
+        let (mgr, code) = client_emitted_cedh_table(&db, Some("cedh"), None);
+
+        assert!(matches!(
+            mgr.try_session(&code).unwrap().start_game(&db),
+            Err(StartGameError::Bracket(
+                CedhBracketError::DeckNotCedh { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn a_restored_ai_seat_keeps_its_deck_and_its_choice() {
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let ai_data = name_deck("Mountain", 40);
+        let (mut mgr, code) = hosted_room(&db, &data);
+        install_ai_seat(
+            &mut mgr,
+            &code,
+            &db,
+            AiDifficulty::Easy,
+            DeckChoice::DeckList(Box::new(ai_data.clone())),
+            &ai_data,
+        );
+
+        let restored = round_trip_through_disk(&mgr.try_session(&code).unwrap(), &db);
+
+        assert_eq!(
+            restored.player_slot_info()[1].kind,
+            SeatKind::Ai {
+                difficulty: AiDifficulty::Easy,
+                deck: DeckChoice::DeckList(Box::new(ai_data)),
+            }
+        );
+        assert!(restored.decks[1].is_some());
+    }
+
+    #[test]
+    fn a_restored_named_seat_resolves_to_its_starter_deck() {
+        let starter = crate::starter_decks::find_starter_deck("Red Deck Wins")
+            .expect("the starter table names this deck");
+        let mut names = starter.main_deck.clone();
+        names.push("Forest".to_string());
+        let db = db_with_names(&names);
+        let data = name_deck("Forest", 40);
+        let (mut mgr, code) = hosted_room(&db, &data);
+        install_ai_seat(
+            &mut mgr,
+            &code,
+            &db,
+            AiDifficulty::Easy,
+            DeckChoice::Named("Red Deck Wins".to_string()),
+            &starter,
+        );
+
+        let restored = round_trip_through_disk(&mgr.try_session(&code).unwrap(), &db);
+
+        assert_eq!(
+            main_deck_names(restored.decks[1].as_ref().expect("named seat restored")),
+            main_deck_names(&crate::resolve_deck(&db, &starter).unwrap())
+        );
+    }
+
+    #[test]
+    fn a_restored_named_deck_this_build_dropped_leaves_its_seat_empty() {
+        // The negative twin of the row above: same install, a name the
+        // starter table does not carry.
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let (mut mgr, code) = hosted_room(&db, &data);
+        // Reach guard: the miss is the table's, not a typo that any name
+        // would produce.
+        assert!(crate::starter_decks::find_starter_deck("Red Deck Wins").is_some());
+        assert!(crate::starter_decks::find_starter_deck("Retired Precon").is_none());
+        install_ai_seat(
+            &mut mgr,
+            &code,
+            &db,
+            AiDifficulty::Easy,
+            DeckChoice::Named("Retired Precon".to_string()),
+            &data,
+        );
+
+        let mut restored = round_trip_through_disk(&mgr.try_session(&code).unwrap(), &db);
+
+        assert!(restored.decks[1].is_none());
+        assert_eq!(
+            restored.start_game(&db),
+            Err(StartGameError::SeatDeckMissing { seat_index: 1 })
+        );
+    }
+
+    #[test]
+    fn a_restored_deck_whose_cards_are_gone_leaves_its_seat_empty() {
+        // The restore loop's own re-resolution `Err` arm — distinct from
+        // `apply_seat_delta`'s, which the live-path row below drives.
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let (mgr, code) = hosted_room(&db, &data);
+
+        // Same snapshot, restored against a build whose database no longer
+        // carries the recorded names.
+        let mut restored = round_trip_through_disk(
+            &mgr.try_session(&code).unwrap(),
+            &Arc::new(CardDatabase::default()),
+        );
+
+        assert!(restored.decks[0].is_none());
+        assert_eq!(
+            restored.start_game(&db),
+            Err(StartGameError::SeatDeckMissing { seat_index: 0 })
+        );
+        // Paired positive control: the same snapshot against the database it
+        // was recorded on restores the seat, so the row above measures the
+        // missing cards and not a broken round trip.
+        let intact = round_trip_through_disk(&mgr.try_session(&code).unwrap(), &db);
+        assert!(intact.decks[0].is_some());
+    }
+
+    #[test]
+    fn a_restored_random_choice_invents_no_deck_and_the_guard_refuses() {
+        // Not `lands_db`: a re-draw there would fail to resolve anyway, and
+        // the row would pass without measuring the refusal to re-draw.
+        let db = every_starter_db();
+        let data = name_deck("Forest", 40);
+        let (mut mgr, code) = hosted_room(&db, &data);
+        install_ai_seat(
+            &mut mgr,
+            &code,
+            &db,
+            AiDifficulty::Easy,
+            DeckChoice::Random,
+            &data,
+        );
+
+        let mut restored = round_trip_through_disk(&mgr.try_session(&code).unwrap(), &db);
+
+        assert!(
+            restored.decks[1].is_none(),
+            "re-drawing would hand the seat a different deck"
+        );
+        assert_eq!(
+            restored.start_game(&db),
+            Err(StartGameError::SeatDeckMissing { seat_index: 1 })
+        );
+    }
+
+    #[test]
+    fn a_legacy_snapshot_without_deck_choices_still_loads() {
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let (mgr, code) = seated_room(&db, &data);
+        let mut json: serde_json::Value =
+            serde_json::to_value(mgr.try_session(&code).unwrap().to_persisted()).unwrap();
+        // Reach guard: the key really was there to remove.
+        assert!(json.get("deck_choices").is_some());
+        json.as_object_mut().unwrap().remove("deck_choices");
+
+        let persisted: crate::persist::PersistedSession =
+            serde_json::from_value(json).expect("a pre-field snapshot still decodes");
+        let restored = GameSession::from_persisted(persisted, &db).unwrap();
+
+        assert!(restored.decks.iter().all(Option::is_none));
+        assert_eq!(restored.deck_choices.len(), restored.player_count as usize);
+    }
+
+    #[test]
+    fn the_start_guard_refuses_instead_of_dealing_empty_libraries() {
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let (mgr, code) = seated_room(&db, &data);
+        let mut restored = round_trip_through_disk(&mgr.try_session(&code).unwrap(), &db);
+        restored.clear_seat_deck(0);
+
+        let result = restored.start_game(&db);
+
+        assert_eq!(
+            result,
+            Err(StartGameError::SeatDeckMissing { seat_index: 0 })
+        );
+        assert!(!restored.game_started);
+        assert!(restored.state.players.iter().all(|p| p.library.is_empty()));
+    }
+
+    /// The reducer flags the seat state as started the moment it accepts a
+    /// `Start`, and the host's start path applies that delta before calling
+    /// `start_game`. Committing the flag there would leave a room the guard
+    /// refuses flagged as started, which the reducer then refuses to edit.
+    #[test]
+    fn a_start_the_guard_refuses_leaves_the_room_editable() {
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let (mut mgr, code) = seated_room(&db, &data);
+        mgr.try_session(&code).unwrap().clear_seat_deck(1);
+
+        let delta = run_seat_mutation(&mut mgr, &code, &db, SeatMutation::Start);
+        assert!(
+            delta.now_started,
+            "the reducer accepts Start on a full room"
+        );
+        let mut session = mgr.try_session(&code).unwrap();
+        assert_eq!(
+            session.start_game(&db),
+            Err(StartGameError::SeatDeckMissing { seat_index: 1 })
+        );
+        assert!(
+            !session.game_started,
+            "a refused start must not flag the room"
+        );
+        drop(session);
+
+        // Repairing the named seat and starting is the control: a flag that is
+        // never set at all would satisfy the assertion above on its own.
+        run_seat_mutation(
+            &mut mgr,
+            &code,
+            &db,
+            seat_ai_at(1, list_choice("Forest", 40)),
+        );
+        let mut session = mgr.try_session(&code).unwrap();
+        assert_eq!(session.start_game(&db), Ok(()));
+        assert!(session.game_started);
+    }
+
+    /// The provenance parameter on `create_game` is load-bearing. A seat filled
+    /// through it with `None` holds a deck for as long as the process lives and
+    /// holds nothing after a restart, because `from_persisted` rebuilds `decks`
+    /// from `deck_choices` alone. Seat 0 is `SeatImmutable`, so no later reseat
+    /// can repair it and the room never starts again.
+    #[test]
+    fn a_host_seat_created_without_provenance_is_refused_after_a_restart() {
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(crate::resolve_deck(&db, &data).unwrap(), None);
+        join_game_with_name(
+            &mut mgr,
+            &code,
+            crate::resolve_deck(&db, &data).unwrap(),
+            Some(DeckChoice::DeckList(Box::new(data.clone()))),
+            "Guest".to_string(),
+        )
+        .unwrap();
+
+        let live = mgr.try_session(&code).unwrap();
+        // Both seats hold a deck right now and only seat 0 lacks the
+        // provenance to rebuild it, so the refusal below is that loss and not
+        // an empty create.
+        assert!(live.decks.iter().all(Option::is_some));
+        assert!(live.deck_choices[0].is_none());
+        assert!(live.deck_choices[1].is_some());
+
+        let mut restored = round_trip_through_disk(&live, &db);
+
+        assert!(restored.decks[0].is_none());
+        assert!(restored.decks[1].is_some());
+        assert_eq!(
+            restored.start_game(&db),
+            Err(StartGameError::SeatDeckMissing { seat_index: 0 })
+        );
+    }
+
+    #[test]
+    fn a_faulted_session_is_still_a_no_op_even_with_a_missing_seat_deck() {
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let (mgr, code) = seated_room(&db, &data);
+        let mut restored = round_trip_through_disk(&mgr.try_session(&code).unwrap(), &db);
+        restored.clear_seat_deck(0);
+        restored.ai_driver_fault = Some(AiDriverFault {
+            id: 1,
+            after_state_revision: restored.state_revision,
+            cause: AiDriverFailure::ActionSafetyCapReached { limit: 1 },
+        });
+
+        // The fault is terminal and dominant: what the two start arms
+        // broadcast for a faulted room must not change.
+        assert_eq!(restored.start_game(&db), Ok(()));
+    }
+
+    #[test]
+    fn an_ai_deck_that_fails_re_resolution_refuses_to_start() {
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let (mut mgr, code) = hosted_room(&db, &data);
+        // A database that no longer holds the AI seat's card drives
+        // `apply_seat_delta`'s resolution `Err` arm.
+        let empty_db = CardDatabase::default();
+        run_seat_mutation(
+            &mut mgr,
+            &code,
+            &empty_db,
+            seat_ai_at(1, list_choice("Mountain", 1)),
+        );
+
+        let mut session = mgr.try_session(&code).unwrap();
+
+        assert!(session.decks[1].is_none());
+        assert_eq!(
+            session.start_game(&db),
+            Err(StartGameError::SeatDeckMissing { seat_index: 1 })
+        );
+    }
+
+    #[test]
+    fn the_bracket_message_is_unchanged_and_is_not_reused() {
+        let bracket = StartGameError::Bracket(CedhBracketError::DeckNotCedh {
+            seat_index: 0,
+            actual_tier: CommanderBracketTier::Core,
+        });
+        let inner = CedhBracketError::DeckNotCedh {
+            seat_index: 0,
+            actual_tier: CommanderBracketTier::Core,
+        };
+
+        let rendered = bracket.to_string();
+        assert!(
+            rendered.starts_with("Cannot start cEDH game: "),
+            "{rendered}"
+        );
+        assert!(rendered.contains(&inner.to_string()), "{rendered}");
+        assert!(
+            !StartGameError::SeatDeckMissing { seat_index: 1 }
+                .to_string()
+                .contains("cEDH"),
+            "a missing deck must not be reported as a bracket violation"
+        );
+    }
+
+    fn dandan_pile_face(name: &str, core_type: engine::types::card_type::CoreType) -> CardFace {
+        let mut face = make_deck().main_deck[0].card.clone();
+        face.name = name.to_string();
+        face.card_type = CardType {
+            supertypes: vec![],
+            core_types: vec![core_type],
+            subtypes: vec![],
+        };
+        face
+    }
+
+    /// Both hands go back to the 78 Island + 2 Opt pile, the pile is ordered by
+    /// name, seat 0 is dealt seven Islands and seat 1 seven cards holding
+    /// `ai_opts` Opts, seat 0 is the starting player, and the RNG is reseeded:
+    /// the reveal chain is a function of `seed` alone, not of the session's
+    /// randomly assigned object ids or first player.
+    fn pin_dandan_hands(state: &mut GameState, seed: u64, ai_opts: usize) {
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let holder = state.zone_storage_seat(Zone::Library, p0);
+        for seat in [p0, p1] {
+            let hand: Vec<ObjectId> = state.players[seat.0 as usize]
+                .hand
+                .iter()
+                .copied()
+                .collect();
+            for id in hand {
+                remove_from_zone(state, id, Zone::Hand, seat);
+                add_to_zone(state, id, Zone::Library, holder);
+                state.objects.get_mut(&id).unwrap().zone = Zone::Library;
+            }
+        }
+        let mut pile: Vec<ObjectId> = state.library_of(p0).iter().copied().collect();
+        pile.sort_by_key(|id| (state.objects[id].name.clone(), *id));
+        *state.library_of_mut(p0) = pile.iter().copied().collect();
+        let named = |state: &GameState, name: &str| -> Vec<ObjectId> {
+            pile.iter()
+                .copied()
+                .filter(|id| state.objects[id].name == name)
+                .collect()
+        };
+        let (islands, opts) = (named(state, "Island"), named(state, "Opt"));
+        let mut ai_hand = islands[7..14 - ai_opts].to_vec();
+        ai_hand.extend_from_slice(&opts[..ai_opts]);
+        for (seat, cards) in [(p0, islands[..7].to_vec()), (p1, ai_hand)] {
+            for id in cards {
+                remove_from_zone(state, id, Zone::Library, holder);
+                add_to_zone(state, id, Zone::Hand, seat);
+                let object = state.objects.get_mut(&id).unwrap();
+                object.zone = Zone::Hand;
+                object.owner = seat;
+            }
+        }
+        state.active_player = p0;
+        state.current_starting_player = p0;
+        state.rng_seed = seed;
+        state.rng = engine::types::game_state::GameRng::seed_from_u64(seed);
+    }
+
+    /// The human keeps seven Islands, so the AI is offered the reveal on every
+    /// hand a 78 Island + 2 Opt pile deals; the session driver still leaves the
+    /// mulligan without tripping its action cap.
+    #[test]
+    fn ai_seat_leaves_a_dandan_mulligan_whose_every_redraw_is_offered_the_reveal() {
+        let pile = PlayerDeckPayload {
+            main_deck: vec![
+                DeckEntry {
+                    card: dandan_pile_face("Island", CoreType::Land),
+                    count: 78,
+                },
+                DeckEntry {
+                    card: dandan_pile_face("Opt", CoreType::Instant),
+                    count: 2,
+                },
+            ],
+            ..Default::default()
+        };
+        let reveal = GameAction::MulliganDecision {
+            choice: MulliganChoice::FreeReveal,
+        };
+        for ai_opts in [0, 1] {
+            let mut mgr = SessionManager::new();
+            let db = Arc::new(CardDatabase::default());
+            let (code, token) = started_with_chooser(&mut mgr, PlayerId(0), |mgr| {
+                mgr.create_game_with_ai(
+                    pile.clone(),
+                    DeckChoice::Random,
+                    "Host".to_string(),
+                    None,
+                    MatchConfig::default(),
+                    vec![ai_setup(
+                        1,
+                        AiDifficulty::Easy,
+                        PlayerDeckPayload::default(),
+                    )],
+                    Vec::new(),
+                    Some(engine::types::format::FormatConfig::dandan()),
+                    &db,
+                )
+                .unwrap()
+            });
+            let mut session = mgr.try_session(&code).unwrap();
+            // CR 103.1: the human chooser elects to play first, the starter
+            // `pin_dandan_hands` writes.
+            session
+                .handle_action(
+                    &token,
+                    GameAction::ChooseStartingPlayer {
+                        player: PlayerId(0),
+                    },
+                )
+                .expect("the human chooses to play first");
+            pin_dandan_hands(&mut session.state, 0, ai_opts);
+            assert!(
+                legal_actions_for_viewer(&session.state, PlayerId(1))
+                    .0
+                    .contains(&reveal),
+                "reach: the AI seat is offered the reveal"
+            );
+
+            session
+                .handle_action(
+                    &token,
+                    GameAction::MulliganDecision {
+                        choice: MulliganChoice::Keep,
+                    },
+                )
+                .expect("the human keeps");
+            let outcome = session.run_ai();
+
+            assert!(
+                outcome.failure.is_none(),
+                "{ai_opts} Opts: {:?}",
+                outcome.failure
+            );
+            assert!(session.ai_driver_fault().is_none(), "{ai_opts} Opts");
+            assert!(
+                !matches!(
+                    session.state.waiting_for,
+                    WaitingFor::MulliganDecision { .. }
+                ),
+                "{ai_opts} Opts: the AI left the mulligan"
+            );
+        }
     }
 }

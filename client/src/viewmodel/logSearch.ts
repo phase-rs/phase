@@ -32,15 +32,33 @@ export function filterLogEntries(
   },
 ): GameLogEntry[] {
   const q = opts.query.trim().toLowerCase();
-  return entries.filter((entry) => {
+  const matchesScope = (entry: GameLogEntry) => {
     if (opts.turn != null && entry.turn !== opts.turn) return false;
     if (opts.categories && opts.categories.size > 0 && !opts.categories.has(entry.category)) {
       return false;
     }
-    if (!q) return true;
+    return true;
+  };
+  if (!q) return entries.filter(matchesScope);
+
+  const matchesQuery = (entry: GameLogEntry) => {
     const haystack = `${entry.category} ${segmentsToPlainText(entry.segments)}`.toLowerCase();
     return haystack.includes(q);
-  });
+  };
+  const filtered: GameLogEntry[] = [];
+  let pendingBoundaries: GameLogEntry[] = [];
+
+  for (const entry of entries) {
+    if (!matchesScope(entry)) continue;
+    if (entry.presentation?.boundary === "Turn" || entry.presentation?.boundary === "Phase") {
+      pendingBoundaries.push(entry);
+      continue;
+    }
+    if (!matchesQuery(entry)) continue;
+    filtered.push(...pendingBoundaries, entry);
+    pendingBoundaries = [];
+  }
+  return filtered;
 }
 
 export function uniqueTurns(entries: GameLogEntry[]): number[] {

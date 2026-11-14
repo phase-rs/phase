@@ -28,7 +28,7 @@ const LEGACY_SCORE_LITERAL_COUNTS: &[(&str, usize)] = &[
     ("hold_mana_up.rs", 3),
     ("interaction_reservation.rs", 1),
     ("land_animation.rs", 6),
-    ("land_sequencing.rs", 1),
+    ("land_sequencing.rs", 0),
     ("landfall_timing.rs", 5),
     ("lethality_awareness.rs", 1),
     ("life_total_resource.rs", 1),

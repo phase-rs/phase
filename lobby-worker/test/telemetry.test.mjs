@@ -7,6 +7,7 @@ import {
   sanitizeTelemetryBatch,
   toDataPoint,
 } from "../src/telemetry.ts";
+import { serverProbeEvents } from "../src/directory.ts";
 
 /** Minimal valid envelope helper. */
 function batch(events, overrides = {}) {
@@ -134,6 +135,21 @@ test("unknown events are dropped, not errors", () => {
   );
   assert.equal(out.length, 1);
   assert.equal(out[0].event, "stuck_decision");
+});
+
+test("P2P disconnect diagnostics preserve column order and discard payload fields", () => {
+  const [event] = sanitizeTelemetryBatch(batch([{
+    event: "p2p_disconnect", reason: "ping-timeout", connection_state: "connected",
+    ice_state: "connected", visibility: "visible", last_message_type: "state_update",
+    pong_age_ms: 10000, receive_age_ms: 50, pending_sends: 2, pending_decodes: 1,
+    buffered_bytes: 16300, channel_open: true,
+    peer_id: "private", room_code: "private", payload: "private",
+  }]));
+  assert.deepEqual(toDataPoint(event), {
+    indexes: ["p2p_disconnect"],
+    blobs: ["p2p_disconnect", "0.42.1", "02b26c3", "web", "ping-timeout", "connected", "connected", "visible", "state_update", "", "", "", ""],
+    doubles: [10000, 50, 2, 1, 16300, 1, 0, 0, 0],
+  });
 });
 
 test("unknown fields are dropped from a known event", () => {
@@ -267,4 +283,45 @@ test("game event engine-mode fields occupy appended columns for current and olde
   ]);
   assert.deepEqual(toDataPoint(olderGameEnd).blobs.slice(4), ["draw", "", "ai", "", "", "", ""]);
   assert.deepEqual(toDataPoint(olderGameStart).blobs.slice(4), ["ai", "Standard", "", ""]);
+});
+
+// V-U13e. The `server_probe` column layout, asserted through the SAME
+// `toDataPoint` projection every other event uses. Analytics Engine columns
+// are positional and permanent, so an inserted (rather than appended) column
+// silently re-labels historical data.
+test("V-U13e: server_probe events land in the documented AE columns", () => {
+  const [point] = serverProbeEvents([
+    { url: "wss://known.example/ws", outcome: "connect_ok", rtt_ms: 42, game_code: "ABC123" },
+  ]).map(toDataPoint);
+
+  assert.deepEqual(point.indexes, ["server_probe"]);
+  // The first four blobs are the shared envelope (event, app version, build
+  // hash, platform); the event-specific columns start at index 4.
+  assert.deepEqual(point.blobs.slice(0, 4), ["server_probe", "", "", ""]);
+  assert.deepEqual(point.blobs.slice(4), ["wss://known.example/ws", "connect_ok", "ABC123"]);
+  assert.deepEqual(point.doubles, [42]);
+
+  // An event with no latency: `0` is this file's documented "unknown", never
+  // "0 ms". Paired with the case above so a projection that dropped the
+  // column entirely fails.
+  const [noRtt] = serverProbeEvents([
+    { url: "wss://known.example/ws", outcome: "connect_fail" },
+  ]).map(toDataPoint);
+  assert.deepEqual(noRtt.blobs.slice(4), ["wss://known.example/ws", "connect_fail", ""]);
+  assert.deepEqual(noRtt.doubles, [0]);
+
+  // The column COUNTS come from the schema, so a schema edit moves both sides
+  // together rather than leaving a stale literal here.
+  assert.equal(point.blobs.length - 4, EVENT_SCHEMAS.server_probe.blobs.length);
+  assert.equal(point.doubles.length, EVENT_SCHEMAS.server_probe.doubles.length);
+});
+
+
+test("WASM guard telemetry allows only bounded diagnostic fields", () => {
+  const [event] = sanitizeTelemetryBatch(batch([{
+    event: "wasm_not_initialized", operation: "getState", initializing: true,
+    disposed: false, observed_at: 123, message: "secret", stack: "secret",
+  }]));
+  assert.deepEqual(event.blobs, ["getState"]);
+  assert.deepEqual(event.doubles, [1, 0, 123]);
 });

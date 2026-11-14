@@ -75,6 +75,61 @@ describe("SearchChoice modal", () => {
     ).toBeTruthy();
   });
 
+  it("filters the displayed library locally without changing selection or legality", () => {
+    const waitingFor: WaitingFor = {
+      type: "SearchChoice",
+      data: { player: 0, cards: [42], count: 1 },
+    };
+    const state = buildGameState({
+      players: [buildPlayer({ id: 0, library: [42, 43] }), buildPlayer({ id: 1 })],
+      objects: {
+        42: makeObject(42, "Arcane Tutor"),
+        43: makeObject(43, "Ineligible Bolt"),
+      },
+      waiting_for: waitingFor,
+      active_library_searches: {
+        0: {
+          searcher: 0,
+          searched_zone_owner: 0,
+          effective_library_owner: 0,
+          learned_audience: [0],
+          looked_at: [
+            [0, "Library", { object_id: 42, incarnation: 0 }],
+            [0, "Library", { object_id: 43, incarnation: 0 }],
+          ],
+        },
+      },
+    });
+    useGameStore.setState({ gameMode: "online", gameState: state, waitingFor });
+
+    render(<CardChoiceModal />);
+
+    const filter = screen.getByRole("searchbox", {
+      name: "Filter cards by name",
+    });
+    fireEvent.change(filter, { target: { value: "arcane" } });
+    expect(screen.getByLabelText(/Arcane Tutor/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Ineligible Bolt/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText(/Arcane Tutor/).closest("button")!);
+    expect(screen.getByText("Choose")).toBeInTheDocument();
+
+    fireEvent.change(filter, { target: { value: "bolt" } });
+    expect(screen.queryByLabelText(/Arcane Tutor/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/Ineligible Bolt/).closest("button")).toBeDisabled();
+
+    fireEvent.change(filter, { target: { value: "" } });
+    expect(screen.getByLabelText(/Arcane Tutor/).closest("button")).toHaveTextContent(
+      "Choose",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [42] },
+    });
+  });
+
   it("labels ordered search selections by their chosen library position", () => {
     const cardIds = [42, 43, 44, 45, 46];
     const waitingFor: WaitingFor = {

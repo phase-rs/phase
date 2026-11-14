@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 interface PausedBannerProps {
   isVisible: boolean;
   reason: string;
+  /** Host-only recovery action for an intentional multiplayer pause. */
   onResume?: () => void;
 }
 
@@ -25,7 +26,7 @@ export function PausedBanner({ isVisible, reason, onResume }: PausedBannerProps)
           exit={{ opacity: 0, y: -16 }}
           transition={{ duration: 0.18 }}
         >
-          <div className="flex items-center gap-3 rounded-full bg-amber-500/20 px-4 py-1.5 text-xs font-semibold text-amber-200 ring-1 ring-amber-300/40 backdrop-blur">
+          <div className="pointer-events-auto flex items-center gap-3 rounded-full bg-amber-500/20 px-4 py-1.5 text-xs font-semibold text-amber-200 ring-1 ring-amber-300/40 backdrop-blur">
             {t("pausedBanner.message", { reason })}
             {onResume && (
               <button

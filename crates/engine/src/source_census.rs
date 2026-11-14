@@ -217,9 +217,15 @@ mod tests {
                 "Same inverse polarity: the asserted subject IS comment text (CR annotations).",
             ),
             (
+                "src/game/engine_resolution_choices.rs",
+                "Same inverse polarity: the citation gate's subject IS comment text (line-number \
+                 citations).",
+            ),
+            (
                 "tests/integration/loop_shortcut.rs",
-                "Parses with `syn` rather than by substring, so comments are excluded by \
-                 construction — the stronger instrument this module approximates.",
+                "Mixed: its `syn` readers exclude comments by construction, but its \
+                 `TriggerTargetSelection` arm census matches needles in raw `engine.rs` \
+                 lines, comments included.",
             ),
             (
                 "src/game/ability_scan.rs",
@@ -232,10 +238,6 @@ mod tests {
                 "SECOND WAVE, disclosed not routed: region slices of a source string.",
             ),
             (
-                "src/parser/oracle_condition.rs",
-                "SECOND WAVE, disclosed not routed: whole-file `body.contains(..)` family probe.",
-            ),
-            (
                 "tests/integration/interaction_contract.rs",
                 "SECOND WAVE, disclosed not routed: whole-file signature/arithmetic probes.",
             ),
@@ -245,10 +247,17 @@ mod tests {
             ),
             (
                 "tests/integration/no_top_level_test_binaries.rs",
-                "SECOND WAVE, disclosed not routed: collects `mod` registrations from main.rs.",
+                "SECOND WAVE, disclosed not routed: collects `mod` registrations from the shard \
+                 roots, plus one whole-FILE boolean signal (`src.contains(\"#[test]\")`) on each \
+                 shared helper; a comment naming `#[test]` there reds the guard loudly.",
             ),
             (
                 "tests/integration/waiting_for_actor_authority_census.rs",
+                "Parses with `syn` rather than by substring, so comments are excluded by \
+                 construction — the stronger instrument this module approximates.",
+            ),
+            (
+                "tests/integration/layer_boundary_census.rs",
                 "Parses with `syn` rather than by substring, so comments are excluded by \
                  construction — the stronger instrument this module approximates.",
             ),

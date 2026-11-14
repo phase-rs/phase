@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use super::*;
@@ -14,12 +15,14 @@ use crate::types::ability::{
 use crate::types::card_type::CardType;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
-use crate::types::events::PlayerActionKind;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::format::FormatConfig;
 use crate::types::game_state::{
-    CastPaymentMode, CastingVariant, PendingCast, ProductionOverride, TargetSelectionProgress,
+    ActionResult, CastPaymentMode, CastingVariant, PendingCast, ProductionOverride,
+    TargetSelectionProgress, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
+use crate::types::log::{GameLogEntry, LogCategory, LogSegment};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::TriggerMode;
@@ -75,6 +78,149 @@ fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
             )),
         },
     }
+}
+
+fn restored_automation_log_entry(seq: u32) -> GameLogEntry {
+    GameLogEntry {
+        seq,
+        turn: 1,
+        phase: Phase::PreCombatMain,
+        category: LogCategory::Stack,
+        segments: vec![LogSegment::Text("automated stack resolution".to_string())],
+        presentation: Default::default(),
+    }
+}
+
+fn restored_automation_action_result(
+    events: Vec<GameEvent>,
+    log_entries: Vec<GameLogEntry>,
+) -> ActionResult {
+    ActionResult::applied(events, WaitingFor::Priority { player: P0 }).with_log_entries(log_entries)
+}
+
+#[test]
+fn restored_stack_automation_presentation_bounds_transport_but_retains_full_engine_events() {
+    let event_count = 2_001_u64;
+    let mut events: Vec<_> = (0..event_count - 1)
+        .map(|id| GameEvent::StackResolved {
+            object_id: ObjectId(id),
+        })
+        .collect();
+    events.push(GameEvent::GameOver { winner: Some(P0) });
+    let log_count = MAX_RESTORED_STACK_AUTOMATION_LOG_ENTRIES as u32 + 7;
+    let logs: Vec<_> = (0..log_count).map(restored_automation_log_entry).collect();
+    let mut full_result = restored_automation_action_result(events, logs);
+    full_result.waiting_for = WaitingFor::GameOver { winner: Some(P0) };
+    let resumed = RestoredStackAutomationResume::from_completed(
+        RestoredStackAutomationResult::Progressed(full_result),
+    );
+
+    assert_eq!(
+        resumed.action_result().events.len(),
+        event_count as usize,
+        "the engine keeps every event needed for lifecycle bookkeeping"
+    );
+    assert!(matches!(
+        resumed.action_result().events.last(),
+        Some(GameEvent::GameOver { winner: Some(P0) })
+    ));
+    assert!(matches!(
+        resumed.action_result().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    ));
+    assert_eq!(
+        resumed.presentation.outcome,
+        RestoredStackAutomationOutcome::Progressed
+    );
+    assert_eq!(
+        resumed.presentation.automated_resolution_count,
+        event_count as u32 - 1
+    );
+    assert_eq!(resumed.presentation.omitted_event_count, event_count as u32);
+    assert_eq!(
+        resumed.presentation.log_entries.len(),
+        MAX_RESTORED_STACK_AUTOMATION_LOG_ENTRIES
+    );
+    assert_eq!(
+        resumed
+            .presentation
+            .log_entries
+            .first()
+            .expect("bounded tail is non-empty")
+            .seq,
+        log_count - MAX_RESTORED_STACK_AUTOMATION_LOG_ENTRIES as u32
+    );
+    assert_eq!(
+        resumed
+            .presentation
+            .log_entries
+            .last()
+            .expect("bounded tail is non-empty")
+            .seq,
+        log_count - 1
+    );
+
+    let wire = serde_json::to_value(&resumed).expect("presentation serializes");
+    assert!(
+        wire.get("result").is_none(),
+        "the unbounded internal result must never serialize"
+    );
+    assert_eq!(
+        wire["presentation"]["omittedEventCount"],
+        serde_json::json!(event_count),
+        "the transport gets an explicit lossless count instead of the event burst"
+    );
+}
+
+#[test]
+fn restored_stack_automation_presentation_distinguishes_noop_progress_and_repair() {
+    let noop = RestoredStackAutomationResume::from_completed(RestoredStackAutomationResult::Noop(
+        restored_automation_action_result(Vec::new(), Vec::new()),
+    ));
+    let progressed = RestoredStackAutomationResume::from_completed(
+        RestoredStackAutomationResult::Progressed(restored_automation_action_result(
+            vec![
+                GameEvent::PriorityPassed { player_id: P0 },
+                GameEvent::StackResolved {
+                    object_id: ObjectId(1),
+                },
+            ],
+            vec![restored_automation_log_entry(1)],
+        )),
+    );
+    let repair = RestoredStackAutomationResume::from_completed(
+        RestoredStackAutomationResult::ZeroResolutionRepair(restored_automation_action_result(
+            vec![GameEvent::PriorityPassed { player_id: P0 }],
+            Vec::new(),
+        )),
+    );
+
+    assert_eq!(
+        noop.presentation.outcome,
+        RestoredStackAutomationOutcome::Noop
+    );
+    assert_eq!(noop.presentation.automated_resolution_count, 0);
+    assert_eq!(noop.presentation.omitted_event_count, 0);
+
+    assert_eq!(
+        progressed.presentation.outcome,
+        RestoredStackAutomationOutcome::Progressed
+    );
+    assert_eq!(progressed.presentation.automated_resolution_count, 1);
+    assert_eq!(progressed.presentation.omitted_event_count, 2);
+    assert_eq!(progressed.presentation.log_entries.len(), 1);
+    assert_eq!(
+        progressed.action_result().events.len(),
+        2,
+        "small results still retain their normal engine event slice"
+    );
+
+    assert_eq!(
+        repair.presentation.outcome,
+        RestoredStackAutomationOutcome::ZeroResolutionRepair
+    );
+    assert_eq!(repair.presentation.automated_resolution_count, 0);
+    assert_eq!(repair.presentation.omitted_event_count, 1);
 }
 
 #[test]
@@ -282,10 +428,13 @@ fn choose_new_targets_all_allows_unchanged_illegal_target() {
         },
     });
     state.waiting_for = WaitingFor::RetargetChoice {
+        keep_is_distinct: Vec::new(),
         player: PlayerId(0),
         stack_entry_index: 0,
         scope: RetargetScope::All,
         current_targets: vec![unchanged.clone()],
+        slots: vec![],
+        slot_pools: vec![],
         legal_new_targets: vec![legal_alternative],
     };
 
@@ -293,7 +442,7 @@ fn choose_new_targets_all_allows_unchanged_illegal_target() {
         &mut state,
         PlayerId(0),
         GameAction::RetargetSpell {
-            new_targets: vec![unchanged.clone()],
+            new_targets: vec![Some(unchanged.clone())],
         },
     )
     .expect("unchanged targets do not need to be legal for choose-new-targets");
@@ -362,11 +511,7 @@ fn terminal_reconcile_does_not_run_sbas_for_cant_lose_player() {
         discard_frame: None,
     };
     let original_waiting_for = state.waiting_for.clone();
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for: original_waiting_for.clone(),
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), original_waiting_for.clone());
 
     reconcile_terminal_result(&mut state, &mut result);
 
@@ -390,11 +535,7 @@ fn terminal_reconcile_runs_player_loss_sba_for_unprotected_player() {
         unless_filter: None,
         discard_frame: None,
     };
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for: state.waiting_for.clone(),
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
 
     reconcile_terminal_result(&mut state, &mut result);
 
@@ -538,6 +679,7 @@ fn shigeki_channel_x_zero_resolves_from_stack_without_zone_choice() {
         GameAction::ActivateAbility {
             source_id: shigeki,
             ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -655,6 +797,7 @@ fn eldrazi_temple_restricted_mana_casts_kindred_eldrazi_spell_only() {
         GameAction::ActivateAbility {
             source_id: temple,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -738,6 +881,7 @@ fn eldrazi_temple_restricted_mana_casts_kindred_eldrazi_spell_only() {
         GameAction::ActivateAbility {
             source_id: temple,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -1269,6 +1413,8 @@ fn dragonstorm_globe_counters_created_dragon_token() {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -1608,6 +1754,7 @@ fn broadside_bombardiers_boast_activates_after_attacking_and_requires_sacrifice(
         GameAction::ActivateAbility {
             source_id: bombardiers,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -1636,6 +1783,8 @@ fn broadside_bombardiers_boast_activates_after_attacking_and_requires_sacrifice(
 
 fn room_back_face(name: &str) -> BackFaceData {
     BackFaceData {
+        is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: name.to_string(),
         power: None,
         toughness: None,
@@ -2172,19 +2321,19 @@ fn an_ordinary_permanent_copying_a_room_gains_its_door_gated_form() {
         .push(CoreType::Creature);
 
     let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
-    let effect_id = state.add_transient_continuous_effect(
-        bear,
-        PlayerId(0),
-        crate::types::ability::Duration::Permanent,
-        TargetFilter::SpecificObject { id: bear },
-        vec![crate::types::ability::ContinuousModification::CopyValues {
-            values: Box::new(values),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-        }],
-        None,
-    );
+    let effect_id = state
+        .add_transient_continuous_effect(
+            bear,
+            PlayerId(0),
+            crate::types::ability::Duration::Permanent,
+            TargetFilter::SpecificObject { id: bear },
+            vec![crate::types::ability::ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display: Default::default(),
+            }],
+            None,
+        )
+        .expect("the fixture's duration begins");
     crate::game::layers::evaluate_layers(&mut state);
 
     assert_eq!(
@@ -2219,7 +2368,7 @@ fn an_ordinary_permanent_copying_a_room_gains_its_door_gated_form() {
     )
     .unwrap();
     assert_eq!(
-        state.players[0].mana_pool.mana.len(),
+        state.players[0].mana_pool.total(),
         0,
         "CR 709.5e: the copied left half's {{1}} unlock cost must consume the mana"
     );
@@ -2281,19 +2430,19 @@ fn a_room_under_a_copy_effect_shows_the_copied_rooms_halves() {
     }
 
     let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
-    let effect_id = state.add_transient_continuous_effect(
-        room,
-        PlayerId(0),
-        crate::types::ability::Duration::Permanent,
-        TargetFilter::SpecificObject { id: room },
-        vec![crate::types::ability::ContinuousModification::CopyValues {
-            values: Box::new(values),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-        }],
-        None,
-    );
+    let effect_id = state
+        .add_transient_continuous_effect(
+            room,
+            PlayerId(0),
+            crate::types::ability::Duration::Permanent,
+            TargetFilter::SpecificObject { id: room },
+            vec![crate::types::ability::ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display: Default::default(),
+            }],
+            None,
+        )
+        .expect("the fixture's duration begins");
     crate::game::layers::evaluate_layers(&mut state);
     assert_eq!(
         state.objects[&room].name, "Bright Hall",
@@ -2343,19 +2492,19 @@ fn a_copy_of_an_already_copied_room_snapshots_the_copied_halves() {
         Zone::Battlefield,
     );
     let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
-    state.add_transient_continuous_effect(
-        bear,
-        PlayerId(0),
-        crate::types::ability::Duration::Permanent,
-        TargetFilter::SpecificObject { id: bear },
-        vec![crate::types::ability::ContinuousModification::CopyValues {
-            values: Box::new(values),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-        }],
-        None,
-    );
+    state
+        .add_transient_continuous_effect(
+            bear,
+            PlayerId(0),
+            crate::types::ability::Duration::Permanent,
+            TargetFilter::SpecificObject { id: bear },
+            vec![crate::types::ability::ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display: Default::default(),
+            }],
+            None,
+        )
+        .expect("the fixture's duration begins");
     crate::game::layers::evaluate_layers(&mut state);
 
     // CR 707.3: the bear's CURRENT copiable values are the Room's — including
@@ -2405,9 +2554,7 @@ fn a_set_name_exception_survives_the_room_name_derivation() {
         vec![
             crate::types::ability::ContinuousModification::CopyValues {
                 values: Box::new(values),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
+                display: Default::default(),
             },
             // CR 707.9b: the "except its name is X" rider follows CopyValues
             // within the same effect, exactly as production installs it.
@@ -2460,19 +2607,19 @@ fn a_set_name_exception_survives_the_room_name_derivation() {
         chained.name, "Wrong Turn",
         "CR 707.9b: the exception is part of the snapshot a later copy takes"
     );
-    state.add_transient_continuous_effect(
-        bear2,
-        PlayerId(0),
-        crate::types::ability::Duration::Permanent,
-        TargetFilter::SpecificObject { id: bear2 },
-        vec![crate::types::ability::ContinuousModification::CopyValues {
-            values: Box::new(chained),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-        }],
-        None,
-    );
+    state
+        .add_transient_continuous_effect(
+            bear2,
+            PlayerId(0),
+            crate::types::ability::Duration::Permanent,
+            TargetFilter::SpecificObject { id: bear2 },
+            vec![crate::types::ability::ContinuousModification::CopyValues {
+                values: Box::new(chained),
+                display: Default::default(),
+            }],
+            None,
+        )
+        .expect("the fixture's duration begins");
     crate::game::layers::evaluate_layers(&mut state);
     assert_eq!(
         state.objects[&bear2].name, "Wrong Turn",
@@ -2483,19 +2630,19 @@ fn a_set_name_exception_survives_the_room_name_derivation() {
     // marker must reset with it, so the door gate applies again. The bear's
     // left door is still unlocked from above, so the copied left name shows.
     let plain = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
-    state.add_transient_continuous_effect(
-        bear,
-        PlayerId(0),
-        crate::types::ability::Duration::Permanent,
-        TargetFilter::SpecificObject { id: bear },
-        vec![crate::types::ability::ContinuousModification::CopyValues {
-            values: Box::new(plain),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-        }],
-        None,
-    );
+    state
+        .add_transient_continuous_effect(
+            bear,
+            PlayerId(0),
+            crate::types::ability::Duration::Permanent,
+            TargetFilter::SpecificObject { id: bear },
+            vec![crate::types::ability::ContinuousModification::CopyValues {
+                values: Box::new(plain),
+                display: Default::default(),
+            }],
+            None,
+        )
+        .expect("the fixture's duration begins");
     crate::game::layers::evaluate_layers(&mut state);
     assert_eq!(
         state.objects[&bear].name, "Bright Hall",
@@ -2597,6 +2744,377 @@ fn a_materialized_duplicate_of_a_room_keeps_both_halves() {
     );
 }
 
+/// CR 601.2b + CR 709.3 (#7565): the cast-time face choice belongs to ONE
+/// cast. Casting a split Room, resolving it, and returning it to hand must
+/// offer the face choice AGAIN on the next cast. Before the fix the
+/// `ChooseModalFace` handler erased `back_face.layout_kind`, so every later
+/// cast silently auto-picked the front face — and every other layout_kind
+/// consumer (MDFC land playability, split handling) went blind with it.
+#[test]
+fn a_recast_split_room_offers_the_face_choice_again() {
+    use crate::game::stack;
+
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(903),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        obj.mana_cost = ManaCost::generic(0);
+        let mut back = room_back_face("Weight Room");
+        back.card_types.core_types.push(CoreType::Enchantment);
+        back.card_types.subtypes.push("Room".to_string());
+        obj.back_face = Some(back);
+    }
+
+    let first = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: room,
+            card_id: CardId(903),
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(first.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "first cast must offer the face choice, got {:?}",
+        first.waiting_for
+    );
+    let after_choice =
+        apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: false }).unwrap();
+    assert!(
+        !matches!(after_choice.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "the SAME cast must not re-prompt after the choice"
+    );
+    assert!(
+        state.stack.iter().any(|entry| entry.source_id == room),
+        "the chosen face must be on the stack"
+    );
+    let mut events = Vec::new();
+    stack::resolve_top(&mut state, &mut events);
+    assert_eq!(
+        state.objects[&room].zone,
+        Zone::Battlefield,
+        "the Room must resolve onto the battlefield"
+    );
+
+    // Bounce it (Rescue class) and cast again.
+    crate::game::zones::move_to_zone(&mut state, room, Zone::Hand, &mut events);
+    let second = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: room,
+            card_id: CardId(903),
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(second.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "the SECOND cast must offer the face choice again (#7565), got {:?}",
+        second.waiting_for
+    );
+}
+
+/// CR 601.2b + CR 709.3 (#7565): the BACK-half round trip. Casting the back
+/// half chooses that half before it reaches the stack; leaving the battlefield
+/// restores the front face. The per-cast commitment ends with that cast, so a
+/// later cast must offer its face choice again. `swap_object_faces` preserves
+/// the split layout marker across the first cast's face swap.
+#[test]
+fn a_room_recast_after_a_back_half_round_trip_offers_the_choice_again() {
+    use crate::game::stack;
+
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(904),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        obj.mana_cost = ManaCost::generic(0);
+        let mut back = room_back_face("Weight Room");
+        back.card_types.core_types.push(CoreType::Enchantment);
+        back.card_types.subtypes.push("Room".to_string());
+        back.mana_cost = ManaCost::generic(0);
+        obj.back_face = Some(back);
+    }
+
+    let first = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: room,
+            card_id: CardId(904),
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(first.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "first cast must offer the face choice, got {:?}",
+        first.waiting_for
+    );
+    // Cast the BACK half — this swaps the faces.
+    apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: true }).unwrap();
+    assert!(
+        state.stack.iter().any(|entry| entry.source_id == room),
+        "the back half must be on the stack"
+    );
+    let mut events = Vec::new();
+    stack::resolve_top(&mut state, &mut events);
+    assert_eq!(state.objects[&room].zone, Zone::Battlefield);
+    assert_eq!(
+        state.objects[&room].name, "Weight Room",
+        "the back half resolved onto the battlefield"
+    );
+
+    // Bounce — the zone-exit revert swaps the faces back via snapshots.
+    crate::game::zones::move_to_zone(&mut state, room, Zone::Hand, &mut events);
+    assert_eq!(
+        state.objects[&room].name, "Moldering Gym",
+        "in hand the front face shows again"
+    );
+
+    let second = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: room,
+            card_id: CardId(904),
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(second.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "after a BACK-half round trip the next cast must offer the choice again \\
+         (#7565 round 2), got {:?}",
+        second.waiting_for
+    );
+}
+
+/// Shared fixture for the off-hand recast tests: a zero-cost split Room in
+/// `zone` with both halves printed, so the only cast gate under test is the
+/// per-cast face choice itself.
+fn split_room_in_zone(state: &mut GameState, card_id: CardId, zone: Zone) -> ObjectId {
+    let room = create_object(
+        state,
+        card_id,
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        zone,
+    );
+    let obj = state.objects.get_mut(&room).unwrap();
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    obj.card_types.subtypes.push("Room".to_string());
+    obj.mana_cost = ManaCost::generic(0);
+    let mut back = room_back_face("Weight Room");
+    back.card_types.core_types.push(CoreType::Enchantment);
+    back.card_types.subtypes.push("Room".to_string());
+    obj.back_face = Some(back);
+    room
+}
+
+/// Drives one full front-half cast of `room` and pins the per-cast choice
+/// contract (CR 601.2b + CR 709.3, #7565): the cast prompts, the SAME cast
+/// never re-prompts after the choice, and the chosen face resolves onto the
+/// battlefield.
+fn cast_room_choosing_front(state: &mut GameState, room: ObjectId, card_id: CardId, label: &str) {
+    use crate::game::stack;
+
+    let first = apply_as_current(
+        state,
+        GameAction::CastSpell {
+            object_id: room,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(first.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "the {label} cast must offer the face choice, got {:?}",
+        first.waiting_for
+    );
+    let after_choice =
+        apply_as_current(state, GameAction::ChooseModalFace { back_face: false }).unwrap();
+    assert!(
+        !matches!(after_choice.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "the SAME {label} cast must not re-prompt after the choice"
+    );
+    assert!(
+        state.stack.iter().any(|entry| entry.source_id == room),
+        "the chosen face must be on the stack for the {label} cast"
+    );
+    let mut events = Vec::new();
+    stack::resolve_top(state, &mut events);
+    assert_eq!(
+        state.objects[&room].zone,
+        Zone::Battlefield,
+        "the Room must resolve onto the battlefield for the {label} cast"
+    );
+}
+
+/// CR 601.2a + CR 709.3 (#7565): the per-cast face choice is zone-agnostic.
+/// A split Room cast out of the GRAVEYARD under a static graveyard-cast
+/// permission (Conduit class) must announce its half per CR 601.2b on every
+/// cast: the initial cast prompts, that cast never re-prompts, and the next
+/// cast from the graveyard prompts afresh.
+#[test]
+fn a_room_cast_from_the_graveyard_offers_the_face_choice_per_cast() {
+    use crate::types::ability::CardPlayMode;
+
+    let mut state = setup_game_at_main_phase();
+    let permission_source = create_object(
+        &mut state,
+        CardId(905),
+        PlayerId(0),
+        "Graveyard Conduit".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&permission_source)
+        .unwrap()
+        .static_definitions
+        .push(
+            // CR 601.2a: graveyard cast via static permission;
+            // `Unlimited` (Conduit class) so the recast needs no new turn.
+            StaticDefinition::new(StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: None,
+                extra_cost: None,
+                enters_with_counter: None,
+                required_cast_keyword: None,
+                pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
+            })
+            .affected(TargetFilter::Any),
+        );
+    let room = split_room_in_zone(&mut state, CardId(906), Zone::Graveyard);
+
+    cast_room_choosing_front(&mut state, room, CardId(906), "graveyard");
+
+    // Destroyed back into the graveyard; the same permission backs the recast.
+    let mut events = Vec::new();
+    crate::game::zones::move_to_zone(&mut state, room, Zone::Graveyard, &mut events);
+    let second = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: room,
+            card_id: CardId(906),
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(second.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "the SECOND graveyard cast must offer the face choice again (#7565), got {:?}",
+        second.waiting_for
+    );
+}
+
+/// CR 601.2a + CR 709.3 (#7565): the EXILE leg of the recast class. A split
+/// Room cast out of exile under a persistent static exile-cast permission
+/// (The Matrix of Time class, pay-normal-cost) must announce its half per
+/// CR 601.2b on every cast: the initial cast prompts, that cast never
+/// re-prompts, and a later cast after the source re-exiles it prompts afresh.
+#[test]
+fn a_room_cast_from_exile_offers_the_face_choice_per_cast() {
+    use crate::types::ability::CardPlayMode;
+    use crate::types::game_state::{ExileLink, ExileLinkKind};
+    use crate::types::statics::{ExileCardPool, ExileCastCost, ExileCastTiming};
+
+    let mut state = setup_game_at_main_phase();
+    let permission_source = create_object(
+        &mut state,
+        CardId(907),
+        PlayerId(0),
+        "Exile Conduit".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&permission_source)
+        .unwrap()
+        .static_definitions
+        .push(
+            // CR 601.2a: exile cast via static permission; the
+            // persistent pool + `Unlimited` keep the recast in the same turn.
+            StaticDefinition::new(StaticMode::ExileCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                cost: ExileCastCost::PayNormalCost,
+                pool: ExileCardPool::Persistent,
+                timing: ExileCastTiming::AnyTime,
+                mana_spend_permission: None,
+                grants_flash: false,
+                extra_cost: None,
+                enters_with_counter: None,
+                grantee: crate::types::statics::ExileCastGrantee::SourceController,
+            })
+            .affected(TargetFilter::Any),
+        );
+    let room = split_room_in_zone(&mut state, CardId(908), Zone::Exile);
+    state.exile_links.push(ExileLink {
+        exiled_id: room,
+        source_id: permission_source,
+        kind: ExileLinkKind::TrackedBySource,
+    });
+
+    cast_room_choosing_front(&mut state, room, CardId(908), "exile");
+
+    // The source exiles it again. Leaving exile for the stack dropped the
+    // old link (CR 400.7: the `move_to_zone` exit path retains
+    // `exile_links` away), so the fresh exile event installs a fresh link.
+    let mut events = Vec::new();
+    crate::game::zones::move_to_zone(&mut state, room, Zone::Exile, &mut events);
+    assert!(
+        !state.exile_links.iter().any(|link| link.exiled_id == room),
+        "leaving exile must have dropped the stale link"
+    );
+    state.exile_links.push(ExileLink {
+        exiled_id: room,
+        source_id: permission_source,
+        kind: ExileLinkKind::TrackedBySource,
+    });
+    let second = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: room,
+            card_id: CardId(908),
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(second.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "the SECOND exile cast must offer the face choice again (#7565), got {:?}",
+        second.waiting_for
+    );
+}
+
 /// CR 106.6 + CR 116.2m + CR 709.5e: Smoky Lounge produces {R}{R} restricted
 /// to "cast Room spells and unlock doors". The door-unlock half lowers to
 /// `OnlyForSpecialAction(UnlockDoor)`; paying a Room's unlock cost routes
@@ -2604,8 +3122,8 @@ fn a_materialized_duplicate_of_a_room_keeps_both_halves() {
 /// IS eligible. Before this fix the unlock cost paid via
 /// `PaymentContext::Effect`, which rejects every restriction — the restricted
 /// {R} could not pay and the unlock failed. Reverting the
-/// `pay_special_action_mana_cost` wiring flips this assertion (the unlock
-/// would error "Cannot pay mana cost").
+/// `pay_special_action_mana_cost_with_resume` wiring flips this assertion (the
+/// unlock would error "Cannot pay mana cost").
 #[test]
 fn unlock_door_restricted_mana_pays_room_unlock_cost() {
     use crate::types::mana::{ManaRestriction, ManaType, ManaUnit, SpecialAction};
@@ -2675,8 +3193,7 @@ fn unlock_door_restricted_mana_pays_room_unlock_cost() {
         .find(|p| p.id == PlayerId(0))
         .unwrap()
         .mana_pool
-        .mana
-        .len();
+        .total();
     assert_eq!(
         pool_left, 0,
         "the restricted mana must be spent on the unlock"
@@ -2703,7 +3220,7 @@ fn setup_face_down_morph(state: &mut GameState, player: PlayerId) -> ObjectId {
         };
         obj.power = Some(4);
         obj.toughness = Some(5);
-        obj.keywords = vec![crate::types::keywords::Keyword::Morph(ManaCost::Cost {
+        obj.keywords = vec![crate::types::keywords::Keyword::morph(ManaCost::Cost {
             generic: 3,
             shards: vec![],
         })];
@@ -2743,7 +3260,8 @@ fn fund_restricted_pool(
 /// is paid through `PaymentContext::SpecialAction(TurnFaceUp)`, the permanent
 /// flips face up, a `TurnedFaceUp` event fires, and the pool empties. This is the
 /// positive reach-guard proving the payment routes through the real
-/// `pay_special_action_mana_cost` site, so R2/R3's negatives aren't vacuous.
+/// `pay_special_action_mana_cost_with_resume` site, so R2/R3's negatives aren't
+/// vacuous.
 #[test]
 fn turn_face_up_restricted_mana_funds_special_action() {
     use crate::types::mana::{ManaRestriction, SpecialAction};
@@ -3154,6 +3672,191 @@ fn cancel_auto_pass_routes_by_actor() {
     assert!(
         !state.auto_pass.contains_key(&PlayerId(0)),
         "P0's auto-pass should have been cancelled"
+    );
+}
+
+#[test]
+fn cancelling_a_session_representative_restores_the_pre_overlay_preferences() {
+    use crate::types::game_state::{
+        AutoPassMode, StackResolutionAutoPassOverlay, StackResolutionBudget,
+        StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, TurnBoundary,
+    };
+
+    let mut state = setup_game_at_main_phase();
+    let entry = no_op_stack_entry(7_777, PlayerId(0));
+    state.stack.push_back(entry.clone());
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 1,
+            policy: StackResolutionPolicy::Committed,
+        },
+    );
+    let baseline = BTreeMap::from([(
+        PlayerId(1),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::MyNextTurnStart,
+        },
+    )]);
+    state.stack_resolution_session = Some(StackResolutionSession {
+        entries: vec![StackResolutionEntryFence::capture(&entry)],
+        cursor: 0,
+        representatives: [PlayerId(0)].into_iter().collect(),
+        verified_pass_representatives: BTreeSet::new(),
+        budget: StackResolutionBudget::Unlimited,
+        policy: StackResolutionPolicy::Committed,
+        auto_pass_overlay: StackResolutionAutoPassOverlay {
+            baseline: baseline.clone(),
+        },
+    });
+
+    apply(&mut state, PlayerId(0), GameAction::CancelAutoPass)
+        .expect("the representative may cancel its own session");
+
+    assert!(state.stack_resolution_session.is_none());
+    assert_eq!(
+        state.auto_pass,
+        baseline.into_iter().collect::<HashMap<_, _>>()
+    );
+}
+
+#[test]
+fn representative_replacement_recaptures_the_restored_baseline() {
+    use crate::types::game_state::{
+        AutoPassMode, AutoPassRequest, StackResolutionAutoPassOverlay, StackResolutionBudget,
+        StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, TurnBoundary,
+    };
+
+    let mut state = setup_game_at_main_phase();
+    let entry = no_op_stack_entry(7_779, PlayerId(0));
+    state.stack.push_back(entry.clone());
+    let baseline = BTreeMap::from([(
+        PlayerId(1),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::MyNextTurnStart,
+        },
+    )]);
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 1,
+            policy: StackResolutionPolicy::Committed,
+        },
+    );
+    state.stack_resolution_session = Some(StackResolutionSession {
+        entries: vec![StackResolutionEntryFence::capture(&entry)],
+        cursor: 0,
+        representatives: [PlayerId(0)].into_iter().collect(),
+        verified_pass_representatives: BTreeSet::new(),
+        budget: StackResolutionBudget::Unlimited,
+        policy: StackResolutionPolicy::Committed,
+        auto_pass_overlay: StackResolutionAutoPassOverlay {
+            baseline: baseline.clone(),
+        },
+    });
+
+    let response_id = create_object(
+        &mut state,
+        CardId(7_780),
+        PlayerId(1),
+        "Priority Response".to_string(),
+        Zone::Battlefield,
+    );
+    let response = state
+        .objects
+        .get_mut(&response_id)
+        .expect("the response permanent was just created");
+    response.card_types.core_types.push(CoreType::Artifact);
+    Arc::make_mut(&mut response.abilities).push(AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    ));
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .expect("the representative may replace its live session");
+
+    assert_eq!(
+        state
+            .stack_resolution_session
+            .as_ref()
+            .expect("replacement installs a fresh session")
+            .auto_pass_overlay
+            .baseline,
+        baseline,
+        "replacement must not capture the previous overlay as its new baseline"
+    );
+    apply(&mut state, PlayerId(0), GameAction::CancelAutoPass)
+        .expect("the representative may cancel the replacement");
+    assert_eq!(
+        state.auto_pass,
+        baseline.into_iter().collect::<HashMap<_, _>>()
+    );
+}
+
+#[test]
+fn elimination_restores_session_baseline_before_departing_preferences_are_cleaned() {
+    use crate::types::game_state::{
+        AutoPassMode, StackResolutionAutoPassOverlay, StackResolutionBudget,
+        StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, TurnBoundary,
+    };
+
+    let mut state = setup_game_at_main_phase();
+    let entry = no_op_stack_entry(7_778, PlayerId(0));
+    state.stack.push_back(entry.clone());
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 1,
+            policy: StackResolutionPolicy::Committed,
+        },
+    );
+    let baseline = BTreeMap::from([
+        (
+            PlayerId(0),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        ),
+        (
+            PlayerId(1),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::MyNextTurnStart,
+            },
+        ),
+    ]);
+    state.stack_resolution_session = Some(StackResolutionSession {
+        entries: vec![StackResolutionEntryFence::capture(&entry)],
+        cursor: 0,
+        representatives: [PlayerId(0)].into_iter().collect(),
+        verified_pass_representatives: BTreeSet::new(),
+        budget: StackResolutionBudget::Unlimited,
+        policy: StackResolutionPolicy::Committed,
+        auto_pass_overlay: StackResolutionAutoPassOverlay {
+            baseline: baseline.clone(),
+        },
+    });
+
+    let mut events = Vec::new();
+    crate::game::elimination::eliminate_player(&mut state, PlayerId(0), &mut events);
+
+    assert!(state.stack_resolution_session.is_none());
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(0)),
+        "the departing seat is cleaned only after the baseline is restored"
+    );
+    assert_eq!(
+        state.auto_pass.get(&PlayerId(1)),
+        baseline.get(&PlayerId(1)),
+        "the survivor's pre-overlay preference is retained"
     );
 }
 
@@ -3647,7 +4350,8 @@ fn persistent_order_template(
     card_id: u64,
 ) -> crate::analysis::decision_template::DecisionTemplate {
     use crate::analysis::decision_template::{
-        DecisionGroupKey, DecisionKind, DecisionTemplate, PinnedDecision, ReplayMode,
+        ChoicePoint, DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate,
+        PinnedDecision, ReplayMode,
     };
     use crate::types::game_state::YieldTarget;
     let src = YieldTarget::AllCopies {
@@ -3657,7 +4361,7 @@ fn persistent_order_template(
     DecisionTemplate {
         owner,
         decisions: vec![PinnedDecision::Order {
-            source: src.clone(),
+            slot: DecisionSlot::first(src.clone(), ChoicePoint::TriggerOrder),
             pos: 0,
         }],
         replay: ReplayMode::Static,
@@ -4267,6 +4971,17 @@ fn thriving_grove_enters_tapped_with_color_choice() {
             card_id,
         })
         .unwrap();
+    // CR 614.12a: the colour is chosen before the land enters.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. })
+            && !runner.state().battlefield.contains(&grove),
+        "the as-enters colour choice is made before Thriving Grove enters"
+    );
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Red".to_string(),
+        })
+        .unwrap();
 
     assert!(
         runner.state().battlefield.contains(&grove),
@@ -4330,6 +5045,7 @@ fn black_dragon_gate_tap_offers_fixed_black_or_chosen_color() {
         GameAction::ActivateAbility {
             source_id: gate,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -4391,8 +5107,8 @@ fn thriving_grove_play_land_stays_tapped_after_color_choice() {
         } if source.prompt.identity.reference.object_id == grove
     ));
     assert!(
-        state.objects.get(&grove).unwrap().tapped,
-        "Thriving Grove must enter tapped before the as-enters color choice resolves"
+        state.objects.get(&grove).unwrap().zone == Zone::Hand,
+        "CR 614.12a: the as-enters color choice is made before Thriving Grove enters"
     );
 
     apply_as_current(
@@ -4764,7 +5480,7 @@ fn new_game_creates_two_player_state() {
 }
 
 /// CR 117.1c + CR 503.2: After Untap (no priority), the active player
-/// receives priority during their Upkeep step. CR 103.7a skips the
+/// receives priority during their Upkeep step. CR 103.8a skips the
 /// first-turn Draw step entirely, so passing both priorities through
 /// Upkeep lands at PreCombatMain.
 #[test]
@@ -4782,7 +5498,7 @@ fn start_game_pauses_at_first_turn_upkeep_priority() {
         }
     ));
 
-    // Both players pass through Upkeep → CR 103.7a skips Draw → PreCombatMain.
+    // Both players pass through Upkeep → CR 103.8a skips Draw → PreCombatMain.
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     let result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert_eq!(state.phase, Phase::PreCombatMain);
@@ -4814,29 +5530,84 @@ fn start_game_skips_draw_on_first_turn() {
     assert!(!state.players[0].hand.contains(&id));
 }
 
+// CR 103.8 + CR 500: the starting player TAKES their first turn, so it must
+// count toward `turns_taken` like every other turn. Turn 1 is established
+// inline by the game-start path rather than by `turns::start_next_turn`, so
+// before this was fixed the starting player stayed permanently one turn behind
+// every other seat — `QuantityRef::TurnsTaken` read low for exactly the player
+// who had taken the most turns.
 #[test]
-fn start_game_emits_game_started_event() {
+fn start_game_counts_the_starting_players_first_turn() {
+    for starting_player in [PlayerId(0), PlayerId(1)] {
+        let mut state = new_game(42);
+        start_game_with_starting_player(&mut state, starting_player);
+
+        assert_eq!(
+            state.players[starting_player.0 as usize].turns_taken, 1,
+            "the starting player's own first turn counts"
+        );
+        for player in state.players.iter() {
+            if player.id != starting_player {
+                assert_eq!(
+                    player.turns_taken, 0,
+                    "a player who has not had a turn yet counts none"
+                );
+            }
+        }
+    }
+
+    // `start_game_skip_mulligan` establishes turn 1 through the same inline
+    // path and must agree.
+    let mut state = new_game(42);
+    start_game_skip_mulligan(&mut state);
+    assert_eq!(state.players[0].turns_taken, 1);
+}
+
+/// CR 103.1: `start_game` ends at the choice; the chooser's answer starts
+/// the game.
+#[test]
+fn start_game_ends_at_the_choice_and_the_answer_starts_the_game() {
     let mut state = new_game(42);
     let result = start_game(&mut state);
 
-    assert!(result
+    assert!(!result
+        .events
+        .iter()
+        .any(|e| matches!(e, GameEvent::GameStarted)));
+    let WaitingFor::ChooseStartingPlayer {
+        player: chooser, ..
+    } = state.waiting_for
+    else {
+        panic!("the start rests at the CR 103.1 choice");
+    };
+
+    let answer = apply(
+        &mut state,
+        chooser,
+        GameAction::ChooseStartingPlayer { player: chooser },
+    )
+    .expect("the chooser elects to play first");
+    assert!(answer
         .events
         .iter()
         .any(|e| matches!(e, GameEvent::GameStarted)));
 }
 
-// CR 103.1: Regression — `start_game` must randomize the starting player for
-// all match types, not just Bo3. Previously gated on `match_type == Bo3`, which
+// CR 103.1: Regression — `start_game` must randomize the chooser for all
+// match types, not just Bo3. Previously gated on `match_type == Bo3`, which
 // caused every Bo1 (default) game to begin with PlayerId(0).
 #[test]
-fn start_game_randomizes_starting_player_for_default_match_type() {
+fn start_game_randomizes_the_chooser_for_default_match_type() {
     let mut saw_p0 = false;
     let mut saw_p1 = false;
 
     for seed in 0..64u64 {
         let mut state = new_game(seed);
         let _ = start_game(&mut state);
-        match state.current_starting_player {
+        let WaitingFor::ChooseStartingPlayer { player, .. } = state.waiting_for else {
+            panic!("the start rests at the CR 103.1 choice");
+        };
+        match player {
             PlayerId(0) => saw_p0 = true,
             PlayerId(1) => saw_p1 = true,
             _ => unreachable!("two-player game can only produce PlayerId(0) or PlayerId(1)"),
@@ -4857,7 +5628,7 @@ fn integration_full_turn_cycle() {
     let mut state = new_game(42);
 
     // Start game (turn 1, player 0) — engine pauses at Upkeep priority per
-    // CR 117.1c. CR 103.7a skips the first-turn Draw step entirely.
+    // CR 117.1c. CR 103.8a skips the first-turn Draw step entirely.
     // (Libraries are empty, which is fine because the first-turn player
     // never draws and we stop the test before turn 2's draw step.)
     let _result = start_game_with_starting_player(&mut state, PlayerId(0));
@@ -4967,7 +5738,7 @@ fn integration_play_land_then_pass() {
 
     // CR 305.3 + CR 117.1c: lands are sorcery-speed, so pass Upkeep
     // priority (both players) to reach PreCombatMain before playing.
-    // CR 103.7a skips first-turn Draw so two passes is enough.
+    // CR 103.8a skips first-turn Draw so two passes is enough.
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert_eq!(state.phase, Phase::PreCombatMain);
@@ -5532,8 +6303,7 @@ fn tapped_lands_produce_distinct_pip_ids() {
 
     let ids: Vec<u64> = state.players[0]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .map(|u| u.pip_id.0)
         .collect();
     assert_eq!(ids.len(), 3, "three taps must float three pool units");
@@ -6450,6 +7220,7 @@ fn multi_mana_land_activates_via_ability_index() {
         GameAction::ActivateAbility {
             source_id: dual_id,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -6515,6 +7286,7 @@ fn multi_mana_land_undoable_after_activate_ability() {
         GameAction::ActivateAbility {
             source_id: dual_id,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -6564,6 +7336,7 @@ fn controller_harming_mana_land_is_not_undoable_after_manual_activation() {
         GameAction::ActivateAbility {
             source_id: brushland,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -6692,6 +7465,7 @@ fn utopia_sprawl_on_forest_taps_for_both_base_and_additional_mana_inline() {
         GameAction::ActivateAbility {
             source_id: forest,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("Forest mana ability should activate");
@@ -6791,7 +7565,7 @@ fn full_turn_integration_with_mulligan() {
     ));
     assert_eq!(state.phase, Phase::Upkeep);
 
-    // Drain Upkeep priority (turn 1 skips Draw per CR 103.7a) to reach Main.
+    // Drain Upkeep priority (turn 1 skips Draw per CR 103.8a) to reach Main.
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert_eq!(state.phase, Phase::PreCombatMain);
@@ -7060,6 +7834,7 @@ fn brainstorm_resolves_draw_then_put_two_cards_on_top() {
             ),
             count: QuantityExpr::Fixed { value: 2 },
             position: LibraryPosition::Top,
+            arranger: None,
         },
     )));
     {
@@ -7189,7 +7964,9 @@ fn gamble_searches_to_hand_then_discards_random_card() {
     discard_pool.push(target);
     let expected_discard = {
         let mut rng = state.rng.clone();
-        let index = rng.random_range(0..discard_pool.len());
+        let index = rng
+            .draw(crate::types::game_state::RandomDraw::Outcome)
+            .random_range(0..discard_pool.len());
         discard_pool[index]
     };
 
@@ -8497,6 +9274,7 @@ fn test_mana_ability_during_priority_does_not_push_stack() {
         GameAction::ActivateAbility {
             source_id: obj_id,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -8547,7 +9325,13 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         prepaid_actual_mana_spent: None,
         base_cost: None,
         declared_mana_additions: Vec::new(),
+        accepted_cost_reductions: Vec::new(),
+        cost_reduction_election: None,
+        activation_cost_snapshot: None,
         activation_cost: None,
+        activation_cost_paused_on_draw: false,
+        deferred_hand_discard_cost: None,
+        prepaid_finalization: None,
         activation_ability_index: None,
         pending_loyalty_activation_player: None,
         target_constraints: vec![],
@@ -8566,9 +9350,13 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         deferred_target_selection: false,
         chosen_modes: Vec::new(),
         additional_cost_decided: false,
+        keyword_queue_before_targets: false,
+        alternative_cost_election:
+            crate::types::game_state::SpellAlternativeCostElection::Undecided,
         declared_kickers_to_pay: Vec::new(),
         declined_kickers: Vec::new(),
         convoked_creatures: Vec::new(),
+        delved_cards: Vec::new(),
         deferred_sacrificed_permanents: Vec::new(),
         pinned_pool_units: Vec::new(),
         cancel_restore_prepared_source: None,
@@ -8579,6 +9367,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         activation_cost_committed: false,
         alt_cost_grant_source: None,
         activation_trigger_collection: None,
+        activation_phyrexian_intent: None,
     }));
     state.waiting_for = WaitingFor::ManaPayment {
         player: PlayerId(0),
@@ -8653,6 +9442,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         GameAction::ActivateAbility {
             source_id: obj_id,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -8748,6 +9538,7 @@ fn springleaf_drum_prompts_for_creature_then_adds_mana() {
         GameAction::ActivateAbility {
             source_id: drum,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -8902,6 +9693,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_priority_resume() {
         GameAction::ActivateAbility {
             source_id: any_color,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -8984,7 +9776,13 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         prepaid_actual_mana_spent: None,
         base_cost: None,
         declared_mana_additions: Vec::new(),
+        accepted_cost_reductions: Vec::new(),
+        cost_reduction_election: None,
+        activation_cost_snapshot: None,
         activation_cost: None,
+        activation_cost_paused_on_draw: false,
+        deferred_hand_discard_cost: None,
+        prepaid_finalization: None,
         activation_ability_index: None,
         pending_loyalty_activation_player: None,
         target_constraints: vec![],
@@ -9003,9 +9801,13 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         deferred_target_selection: false,
         chosen_modes: Vec::new(),
         additional_cost_decided: false,
+        keyword_queue_before_targets: false,
+        alternative_cost_election:
+            crate::types::game_state::SpellAlternativeCostElection::Undecided,
         declared_kickers_to_pay: Vec::new(),
         declined_kickers: Vec::new(),
         convoked_creatures: Vec::new(),
+        delved_cards: Vec::new(),
         deferred_sacrificed_permanents: Vec::new(),
         pinned_pool_units: Vec::new(),
         cancel_restore_prepared_source: None,
@@ -9016,6 +9818,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         activation_cost_committed: false,
         alt_cost_grant_source: None,
         activation_trigger_collection: None,
+        activation_phyrexian_intent: None,
     }));
     state.waiting_for = WaitingFor::ManaPayment {
         player: PlayerId(0),
@@ -9094,6 +9897,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         GameAction::ActivateAbility {
             source_id: any_color,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -9357,6 +10161,7 @@ fn non_mana_activation_tap_creatures_cost_prompts_then_pays() {
         GameAction::ActivateAbility {
             source_id: lathril,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -9448,6 +10253,7 @@ fn non_mana_activation_tap_creatures_cost_rejects_tapped_source_before_prompt() 
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap_err();
@@ -10303,7 +11109,7 @@ fn reorder_hand_rejects_non_permutation() {
     // Wrong length.
     let err = apply(&mut state, p0, GameAction::ReorderHand { order: vec![a] })
         .expect_err("wrong length must error");
-    assert!(matches!(err, EngineError::InvalidAction(_)));
+    assert!(matches!(err, EngineError::StaleAction));
     assert_eq!(
         state, before,
         "a reducer rejection must restore transient boundary state as well as the hand"
@@ -10319,7 +11125,7 @@ fn reorder_hand_rejects_non_permutation() {
         },
     )
     .expect_err("stranger id must error");
-    assert!(matches!(err, EngineError::InvalidAction(_)));
+    assert!(matches!(err, EngineError::StaleAction));
     assert_eq!(
         state, before,
         "each rejected reducer attempt must leave the complete state unchanged"
@@ -10514,7 +11320,7 @@ fn morph_creature_offers_face_down_alternative_cast() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
@@ -10600,7 +11406,7 @@ fn face_down_cast_puts_blank_2_2_on_stack() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
@@ -10671,7 +11477,7 @@ fn face_down_cast_resolves_to_face_down_permanent() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
@@ -10733,7 +11539,7 @@ fn tin_street_gossip_restricted_mana_funds_face_down_cast() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     fund_restricted_pool(
@@ -10817,7 +11623,7 @@ fn disguise_face_down_has_ward_morph_does_not() {
         "CR 702.168a: a disguise face-down 2/2 must have ward {{2}}"
     );
     assert!(
-        !cast_face_down(crate::types::keywords::Keyword::Morph(ManaCost::generic(4))),
+        !cast_face_down(crate::types::keywords::Keyword::morph(ManaCost::generic(4))),
         "a morph face-down 2/2 must NOT have ward"
     );
 }
@@ -10832,7 +11638,7 @@ fn countered_face_down_spell_is_revealed_in_graveyard() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
@@ -10891,7 +11697,7 @@ fn face_down_spell_on_stack_is_redacted_to_opponents() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
@@ -10967,6 +11773,11 @@ fn grant_graveyard_creature_cast_and_bury(
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                required_cast_keyword: None,
+                pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
@@ -10993,7 +11804,7 @@ fn morph_creature_in_graveyard_offers_and_casts_face_down() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     grant_graveyard_creature_cast_and_bury(&mut state, PlayerId(0), morph);
@@ -11133,7 +11944,7 @@ fn face_down_cast_cancel_at_mana_payment_restores_real_card() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
@@ -11222,7 +12033,7 @@ fn morph_free_normal_cast_not_robbed_by_face_down_autoroute() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
@@ -11318,7 +12129,7 @@ fn nocost_morph_auto_casts_face_down_for_three() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::NoCost,
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
@@ -11411,7 +12222,7 @@ fn nocost_morph_without_three_mana_rejected() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::NoCost,
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
@@ -11447,7 +12258,7 @@ fn nocost_morph_offered_as_legal_action() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::NoCost,
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
@@ -11521,7 +12332,7 @@ fn prohibited_morph_fixture(axis: ProhibitionAxis, mana: usize) -> (GameState, O
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, mana);
@@ -11718,7 +12529,7 @@ fn morph_casts_face_down_under_multiple_name_prohibitions() {
         let morph = add_face_down_castable_to_hand(
             &mut state,
             PlayerId(0),
-            crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+            crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
             ManaCost::generic(5),
         );
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
@@ -11794,56 +12605,891 @@ fn morph_casts_face_down_under_multiple_name_prohibitions() {
     );
 }
 
-/// LOW-2 (CR 732.2a / CR 111.10): `derived_fodder_class` is the single-new-object gate that
-/// guarantees the boundary Tokens mint's per-cycle fodder count k ≡ 1. It returns `Some(class)`
-/// for a period that reproduced EXACTLY one new battlefield object, and `None` for a period that
-/// reproduced two+ (a non-certifiable multi-fodder shape ⇒ no `Tokens` stash ⇒ no k·N undercount).
-/// This is the structural proof behind the k≡1 annotation at the boundary mint and on the
-/// `PersistentAxisMaterialization::Tokens` variant.
+/// Two new battlefield objects created identically (`name`, types, P/T, controller, zone), plus
+/// the `before` frame they are diffed against. The shared fixture of rows A-1 / A-2 / A-2b: every
+/// row starts from a HOMOGENEOUS pair and applies at most ONE post-construction mutation, so the
+/// field it moves is the only thing that can explain its verdict.
 ///
-/// REVERT-FAILING assertion: delete `if new_ids.next().is_some() { return None }` in
-/// `derived_fodder_class` (engine.rs) ⇒ the two-new-object case returns `Some(first)` ⇒ the
-/// `is_none()` assert below flips to FAIL. Non-vacuity: the paired one-new-object `Some` case is
-/// the positive reach-guard (the gate genuinely admits the k≡1 shape).
-#[test]
-fn derived_fodder_class_is_single_new_object_gate() {
+/// `create_object`'s name argument writes BOTH `name` and `base_name` (`game_object.rs`), so it
+/// can never be the discriminating knob — moving it moves `object_content_eq`'s `name` conjunct
+/// AND `CopiableValues.name` at once. Every row below mutates a field directly instead.
+fn fodder_multiset_frames(
+    mutate: impl FnOnce(&mut GameState, ObjectId, ObjectId),
+) -> (GameState, GameState) {
     let before = GameState::new_two_player(7);
-
-    // One new battlefield object across the period ⇒ Some(class) (the k≡1 certifiable shape).
-    let mut after_one = before.clone();
-    let saproling = create_object(
-        &mut after_one,
+    let mut after = before.clone();
+    let a = create_object(
+        &mut after,
         CardId(1),
         PlayerId(0),
         "Saproling".to_string(),
         Zone::Battlefield,
     );
-    let class = derived_fodder_class(&before, &after_one);
-    assert!(
-        class.as_ref().is_some_and(|o| o.id == saproling),
-        "reach-guard: one new battlefield object ⇒ the reproduced fodder class; got {class:?}"
-    );
-
-    // Two new battlefield objects across the period ⇒ None: a multi-fodder period is not this
-    // shape, so no `Tokens` stash is registered and the k>1 undercount is unreachable.
-    let mut after_two = before.clone();
-    create_object(
-        &mut after_two,
+    let b = create_object(
+        &mut after,
         CardId(1),
         PlayerId(0),
         "Saproling".to_string(),
         Zone::Battlefield,
     );
-    create_object(
-        &mut after_two,
-        CardId(2),
+    mutate(&mut after, a, b);
+    // Reach-guard, holding under EVERY revert probe: the fixture genuinely produced two new
+    // battlefield entries. Without it a fixture bug that created zero new objects would make
+    // every `is_none()` row below pass for the wrong reason.
+    assert_eq!(
+        after.battlefield.len(),
+        before.battlefield.len() + 2,
+        "reach-guard: the fixture must produce exactly two new battlefield objects"
+    );
+    (before, after)
+}
+
+/// CR 732.2a / CR 111.3 / CR 707.2: `derived_fodder_class` is the ONE-CLASS gate that gives the
+/// boundary `Tokens` mint its per-cycle fodder count k. It returns `Some((class, k))` for a period
+/// whose new battlefield objects are all one homogeneous class, and `None` otherwise (a
+/// heterogeneous multi-fodder shape ⇒ no `Tokens` stash ⇒ no mint from an unrepresentative profile).
+///
+/// HOMOGENEITY IS A CONJUNCTION and each conjunct has its own row: `fodder_content_eq` (A-2) and
+/// `intrinsic_copiable_values` (A-2b). A-1 is the positive; A-2c is the fail-closed reconciliation.
+///
+/// REVERT-FAILING assertions: **A-1** restore `if new_ids.next().is_some() { return None }` ⇒ k=2
+/// returns `None`; **A-2** delete the `fodder_content_eq` conjunct ⇒ the counter-differing pair
+/// returns `Some((class, 2))` (`CopiableValues` carries no counters field, so the other conjunct
+/// cannot red it); **A-2b** delete the `intrinsic_copiable_values` conjunct ⇒ the
+/// `base_card_types`-differing pair returns `Some((class, 2))`; **A-2c** delete the `.then_some`
+/// reconciliation ⇒ the torn frame returns `Some((class, 1))`. Each ⇒ FAILS.
+#[test]
+fn derived_fodder_class_is_one_class_multiset_gate() {
+    // A-1 (positive) — a homogeneous k=2 period classifies AND reports k.
+    let (before, after) = fodder_multiset_frames(|_, _, _| {});
+    let derived = derived_fodder_class(&before, &after);
+    assert!(
+        derived.is_some(),
+        "A-1: a homogeneous two-object period is a certifiable fodder multiset; got {derived:?}"
+    );
+    let (class, k) = derived.expect("asserted Some above");
+    assert_eq!(
+        k, 2,
+        "A-1: the reported per-cycle count IS the member count"
+    );
+    assert_eq!(
+        class.name, "Saproling",
+        "A-1: the class is the reproduced fodder, not an unrelated object"
+    );
+
+    // A-1 reach-guard: the k≡1 shape still classifies, with k == 1.
+    let single_before = GameState::new_two_player(7);
+    let mut single_after = single_before.clone();
+    let lone = create_object(
+        &mut single_after,
+        CardId(1),
         PlayerId(0),
         "Saproling".to_string(),
         Zone::Battlefield,
     );
     assert!(
-        derived_fodder_class(&before, &after_two).is_none(),
-        "single-new-object gate: two new battlefield objects ⇒ None (delete the second-`next` \
-         guard and this flips to Some)"
+        derived_fodder_class(&single_before, &single_after)
+            .is_some_and(|(o, k)| o.id == lone && k == 1),
+        "A-1 reach-guard: one new battlefield object ⇒ that class with k == 1"
+    );
+
+    // A-2 (matched negative, MUTABLE axis) — a counter difference makes the multiset
+    // heterogeneous under `fodder_content_eq` (`object_content_eq` compares `counters`).
+    // CR 707.2: "Other effects …, status, counters, and stickers are
+    // not copied", so `CopiableValues` has no counters field and this moves EXACTLY one conjunct.
+    // `CounterType::Stun` is deliberate: `is_monotone_loop_resource()` is false for it, so
+    // `project_object_for_loop`'s `retain` cannot strip it if projection is ever reordered ahead
+    // of this derivation.
+    let (before, after) = fodder_multiset_frames(|state, _a, b| {
+        state
+            .objects
+            .get_mut(&b)
+            .expect("fixture object b exists")
+            .counters
+            .insert(CounterType::Stun, 1);
+    });
+    assert!(
+        derived_fodder_class(&before, &after).is_none(),
+        "A-2: a counter-differing pair is NOT one fodder class (delete the `fodder_content_eq` \
+         conjunct and this flips to Some)"
+    );
+
+    // A-2b (matched negative, COPIABLE axis) — the pair the OLD, content-only predicate would
+    // have accepted. `intrinsic_copiable_values` folds `obj.base_card_types` into
+    // `CopiableValues.card_types` (`printed_cards.rs`), and `object_content_eq` compares NEITHER
+    // `card_types` NOR `base_card_types` — asserted below rather than claimed.
+    let (before, after) = fodder_multiset_frames(|state, _a, b| {
+        state
+            .objects
+            .get_mut(&b)
+            .expect("fixture object b exists")
+            .base_card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Artifact],
+            subtypes: vec![],
+        };
+    });
+    {
+        let a_obj = after
+            .objects
+            .values()
+            .find(|o| o.base_card_types.core_types != vec![CoreType::Artifact])
+            .expect("the unmutated member");
+        let b_obj = after
+            .objects
+            .values()
+            .find(|o| o.base_card_types.core_types == vec![CoreType::Artifact])
+            .expect("the mutated member");
+        assert!(
+            crate::analysis::resource::fodder_content_eq(a_obj, b_obj),
+            "A-2b non-vacuity: the PRE-EXISTING content predicate cannot tell these two apart — \
+             so only the `CopiableValues` conjunct can refuse them"
+        );
+    }
+    assert!(
+        derived_fodder_class(&before, &after).is_none(),
+        "A-2b: members differing on what the MINT copies are not one class (delete the \
+         `intrinsic_copiable_values` conjunct and this flips to Some)"
+    );
+
+    // A-2c (fail-closed reconciliation) — a torn frame: a battlefield id with no `objects` entry
+    // is skipped by the `filter_map`, and must not be silently dropped from k.
+    let torn_before = GameState::new_two_player(7);
+    let mut torn_after = torn_before.clone();
+    create_object(
+        &mut torn_after,
+        CardId(1),
+        PlayerId(0),
+        "Saproling".to_string(),
+        Zone::Battlefield,
+    );
+    torn_after.battlefield.push_back(ObjectId(999_999));
+    assert!(
+        !torn_after.objects.contains_key(&ObjectId(999_999)),
+        "A-2c reach-guard: the torn id must genuinely have no `objects` entry"
+    );
+    assert!(
+        derived_fodder_class(&torn_before, &torn_after).is_none(),
+        "A-2c: a torn frame is refused, not under-counted (delete the `.then_some` \
+         reconciliation and this returns Some((class, 1)))"
+    );
+}
+
+/// CR 732.2a: `entry_publishes_pin_slots` must withhold the CR 603.5 "may" pin
+/// slot once the stamped announcer is not the proposer — a shortcut cannot
+/// describe "a sequence of game choices" that includes a choice which will
+/// never be posed to the proposer. Academy Loremaster's bare-`ScopedPlayer`
+/// stamp (P7: `filter_uses_relative_controller_scoped` does not match a bare
+/// `ScopedPlayer`, so this route is genuinely new) moves the announcer seat to
+/// whichever player's draw step it is, so once the draw step belongs to
+/// someone other than the ability's controller (== the proposer here), the
+/// slot this instrument publishes for that proposer must disappear.
+///
+/// Direction: strictly FEWER offers, never more — a shortcut slot is withheld
+/// when the announcer is not the proposer, never published to a seat that will
+/// not be asked. (The "Direction: strictly FEWER offers, never more." comment
+/// at `engine.rs:3894` documents a PRIOR change — the `optional_for`/infeasible
+/// withholds — and is not the evidence for this one; this test is.)
+///
+/// Willie cannot reach this branch (his stamp lives on a `sub_ability`; the
+/// stack entry's ability is the unstamped top-level), and none of the 23
+/// `SearchLibrary` movers reach it either (their `prompt_player` does not
+/// move — P2 runtime neutrality). Academy Loremaster is the fixture because
+/// its stamp lands on the top-level `execute` this instrument reads.
+///
+/// Positive control IN THIS SAME TEST: at the controller's own draw step, the
+/// identical call publishes a `may` slot — proving the instrument publishes a
+/// slot at all, and that the withhold below is caused by the seat move and not
+/// by a broken instrument.
+#[test]
+fn academy_loremaster_may_slot_is_withheld_when_the_announcer_is_not_the_proposer() {
+    const ACADEMY_LOREMASTER_ORACLE: &str = "At the beginning of each player's draw step, that \
+         player may draw an additional card. If they do, spells they cast this turn cost {2} \
+         more to cast.";
+
+    fn advance_to_priority_with_nonempty_stack(runner: &mut crate::game::scenario::GameRunner) {
+        for _ in 0..240 {
+            match runner.state().waiting_for.clone() {
+                // The `phase == Draw` conjunct makes the caller's reach-guard a
+                // loop invariant rather than a post-hoc hope: without it this
+                // could stop on an unrelated non-empty-stack priority window if
+                // the fixture ever gains another trigger source.
+                WaitingFor::Priority { .. }
+                    if !runner.state().stack.is_empty() && runner.state().phase == Phase::Draw =>
+                {
+                    return
+                }
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).ok();
+                }
+                WaitingFor::DeclareAttackers { .. } => {
+                    runner
+                        .act(GameAction::DeclareAttackers {
+                            attacks: vec![],
+                            bands: vec![],
+                        })
+                        .ok();
+                }
+                WaitingFor::DeclareBlockers { .. } => {
+                    runner
+                        .act(GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        })
+                        .ok();
+                }
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: false })
+                        .ok();
+                }
+                _ => return,
+            }
+        }
+    }
+
+    fn settle_optional_effect_and_pass(runner: &mut crate::game::scenario::GameRunner) {
+        for _ in 0..240 {
+            match runner.state().waiting_for.clone() {
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: false })
+                        .ok();
+                }
+                // Stop as soon as THIS trigger has finished resolving. Without
+                // this guard the loop passes straight through the OTHER player's
+                // draw step and consumes the very trigger the negative half
+                // below inspects, then burns the whole iteration budget and
+                // lands back on the controller's own draw step.
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).ok();
+                }
+                WaitingFor::DeclareAttackers { .. } => {
+                    runner
+                        .act(GameAction::DeclareAttackers {
+                            attacks: vec![],
+                            bands: vec![],
+                        })
+                        .ok();
+                }
+                WaitingFor::DeclareBlockers { .. } => {
+                    runner
+                        .act(GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        })
+                        .ok();
+                }
+                _ => return,
+            }
+        }
+    }
+
+    let proposer = P0;
+    let restricted = crate::game::scenario::P1;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+    for &pid in &[P0, restricted] {
+        scenario.with_library_top(pid, &["Lib A", "Lib B", "Lib C", "Lib D", "Lib E", "Lib F"]);
+    }
+    scenario.add_creature_from_oracle(P0, "Academy Loremaster", 2, 2, ACADEMY_LOREMASTER_ORACLE);
+    let mut runner = scenario.build();
+
+    // ---- Positive control: the controller's OWN draw step (this turn). ----
+    advance_to_priority_with_nonempty_stack(&mut runner);
+    assert_eq!(
+        runner.state().active_player,
+        P0,
+        "reach-guard: this must be the controller's own draw step"
+    );
+    assert_eq!(runner.state().phase, Phase::Draw);
+    {
+        let state = runner.state();
+        let entry = state
+            .stack
+            .back()
+            .expect("Academy Loremaster's draw-step trigger is on the stack");
+        let pins = entry_publishes_pin_slots(state, entry, proposer)
+            .expect("the controller's own draw step must publish a pin slot at all");
+        assert!(
+            pins.may.is_some(),
+            "positive control: at the controller's own draw step the may slot IS published"
+        );
+    }
+    settle_optional_effect_and_pass(&mut runner);
+
+    // ---- Negative: the OTHER player's draw step (next occurrence). ----
+    advance_to_priority_with_nonempty_stack(&mut runner);
+    assert_eq!(
+        runner.state().active_player,
+        restricted,
+        "reach-guard: this must be the OTHER player's draw step"
+    );
+    assert_eq!(runner.state().phase, Phase::Draw);
+    {
+        let state = runner.state();
+        let entry = state
+            .stack
+            .back()
+            .expect("Academy Loremaster's draw-step trigger is on the stack");
+        let pins = entry_publishes_pin_slots(state, entry, proposer);
+        let withheld = pins.is_none_or(|p| p.may.is_none());
+        assert!(
+            withheld,
+            "CR 732.2a: the announcer moved to the other player, who is not the proposer, so the \
+             may slot must be withheld"
+        );
+    }
+}
+
+/// CR 602.2b + CR 601.2h: a reversed activation commits none of its attempt's
+/// lifecycle facts. An ordinary (`Applied`) outermost boundary hands its frame to
+/// the prospective consumer — `Some`, even when empty — while a reversal
+/// DISCARDS the frame, so the consumer sees `None`.
+#[test]
+fn a_reversed_activation_discards_its_lifecycle_frame() {
+    use crate::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr, StaticDefinition,
+        TargetFilter, TypedFilter,
+    };
+    use crate::types::game_state::ActionDisposition;
+    use crate::types::statics::{ActivationExemption, CostModifyMode};
+
+    fn board() -> (GameState, ObjectId) {
+        let reducer = |amount: u32, minimum_mana: Option<u32>| {
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
+                keyword: "activated".to_string(),
+                amount,
+                minimum_mana,
+                dynamic_count: None,
+                exemption: ActivationExemption::None,
+                activator: None,
+                targets: None,
+                frequency: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+        };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario
+            .add_creature(P0, "Floored reducer", 1, 1)
+            .with_static_definition(reducer(2, Some(2)));
+        scenario
+            .add_creature(P0, "Unfloored reducer", 1, 1)
+            .with_static_definition(reducer(3, None));
+        let source = scenario
+            .add_creature(P0, "Activator", 2, 2)
+            .with_ability_definition(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )
+                .cost(AbilityCost::Mana {
+                    cost: ManaCost::generic(5),
+                }),
+            )
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )],
+        );
+        let mut state = scenario.build().state().clone();
+        apply(
+            &mut state,
+            P0,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            },
+        )
+        .expect("the activation reaches its election");
+        (state, source)
+    }
+    fn answer(state: &mut GameState, outcome: usize) -> ProspectiveSimulationOutcome {
+        let order = match &state.waiting_for {
+            WaitingFor::OrderCostReductions { outcomes, .. } => outcomes[outcome].order.clone(),
+            other => panic!("expected the cost election, got {other:?}"),
+        };
+        apply_interaction_for_prospective_simulation(
+            state,
+            P0,
+            P0,
+            GameAction::OrderCostReductions {
+                order,
+                hybrid_announcement: Vec::new(),
+            },
+        )
+        .expect("a legal election")
+    }
+
+    // −2 (floor two) then −3 on {5} is {0}; the reverse is {2}, and one mana
+    // cannot pay it.
+    let (mut state, _) = board();
+    let applied = answer(&mut state, 0);
+    assert_eq!(applied.action.disposition, ActionDisposition::Applied);
+    assert!(
+        applied.has_outer_lifecycle_facts(),
+        "control: an applied boundary hands its frame on"
+    );
+
+    let (mut state, _) = board();
+    let reversed = answer(&mut state, 1);
+    assert_eq!(reversed.action.disposition, ActionDisposition::Reversed);
+    assert!(
+        !reversed.has_outer_lifecycle_facts(),
+        "a reversal must discard its lifecycle frame"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CR 701.18b + CR 305.2a: playing a land during resolution
+// (`resolution_land_play_is_legal` / `play_land_during_resolution`)
+// ---------------------------------------------------------------------------
+
+/// P0's main phase with a NON-empty stack (the resolving ability's stand-in) and
+/// an exiled land owned by P0. The special action would refuse here (CR 305.1:
+/// empty stack); a play during resolution has no such gate.
+fn resolution_land_play_board() -> (GameState, ObjectId) {
+    let mut state = setup_game_at_main_phase();
+    state.stack.push_back(no_op_stack_entry(7_901, PlayerId(0)));
+    let land = create_object(
+        &mut state,
+        CardId(7_902),
+        PlayerId(0),
+        "Exiled Land".to_string(),
+        Zone::Exile,
+    );
+    let obj = state.objects.get_mut(&land).unwrap();
+    obj.card_types.core_types.push(CoreType::Land);
+    obj.base_card_types = obj.card_types.clone();
+    (state, land)
+}
+
+/// A1 — CR 305.2a + CR 116.2a + CR 110.2a: a land played during resolution enters
+/// from the zone it was in, under the player's control, and counts as the turn's
+/// land play.
+#[test]
+fn play_land_during_resolution_enters_from_exile_and_counts_the_play() {
+    let (mut state, land) = resolution_land_play_board();
+    assert!(
+        !state.stack.is_empty(),
+        "reach-guard: the stack is not empty"
+    );
+    assert!(resolution_land_play_is_legal(&state, PlayerId(0), land));
+    let mut events = Vec::new();
+    let commit = play_land_during_resolution(&mut state, PlayerId(0), land, &mut events);
+    assert_eq!(commit, Some(LandPlayCommit::Entered));
+    let obj = &state.objects[&land];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(!obj.face_down);
+    assert_eq!(obj.controller, PlayerId(0));
+    assert_eq!(state.lands_played_this_turn, 1);
+    assert_eq!(state.players[0].lands_played_this_turn, 1);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        GameEvent::LandPlayed {
+            object_id,
+            player_id: PlayerId(0),
+            from_zone: Zone::Exile,
+        } if *object_id == land
+    )));
+}
+
+/// A2 — CR 305.2b: at the allowance the instruction is ignored; an additional
+/// land drop (CR 305.2) restores it.
+#[test]
+fn play_land_during_resolution_is_ignored_at_the_allowance() {
+    let (mut state, land) = resolution_land_play_board();
+    state.lands_played_this_turn = 1;
+    state.players[0].lands_played_this_turn = 1;
+    assert!(!resolution_land_play_is_legal(&state, PlayerId(0), land));
+    let mut events = Vec::new();
+    assert_eq!(
+        play_land_during_resolution(&mut state, PlayerId(0), land, &mut events),
+        None
+    );
+    assert_eq!(state.objects[&land].zone, Zone::Exile);
+    assert_eq!(state.lands_played_this_turn, 1);
+    assert!(events.is_empty());
+
+    // Hostile sibling: one additional land drop makes the same play legal.
+    let source = create_object(
+        &mut state,
+        CardId(7_903),
+        PlayerId(0),
+        "Extra Drop".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .static_definitions
+        .push(StaticDefinition::new(StaticMode::AdditionalLandDrop {
+            count: 1,
+        }));
+    assert_eq!(
+        play_land_during_resolution(&mut state, PlayerId(0), land, &mut events),
+        Some(LandPlayCommit::Entered)
+    );
+    assert_eq!(state.objects[&land].zone, Zone::Battlefield);
+    assert_eq!(state.lands_played_this_turn, 2);
+}
+
+/// A3 — CR 305.3: a player can't play a land if it isn't their turn; CR 805.4c:
+/// a teammate may during the team's turn.
+#[test]
+fn play_land_during_resolution_requires_the_players_turn() {
+    let (mut state, land) = resolution_land_play_board();
+    state.active_player = PlayerId(1);
+    assert!(!resolution_land_play_is_legal(&state, PlayerId(0), land));
+    let mut events = Vec::new();
+    assert_eq!(
+        play_land_during_resolution(&mut state, PlayerId(0), land, &mut events),
+        None
+    );
+    assert_eq!(state.objects[&land].zone, Zone::Exile);
+    assert_eq!(state.lands_played_this_turn, 0);
+
+    // CR 805.4c: under shared team turns, with P0's teammate active, P0 may
+    // still play a land during the team's turn.
+    let mut team = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+    team.turn_number = 2;
+    team.phase = Phase::PreCombatMain;
+    let teammate = crate::game::topology::team_members(&team, PlayerId(0))
+        .into_iter()
+        .find(|member| *member != PlayerId(0))
+        .expect("P0 has a teammate under Two-Headed Giant");
+    team.active_player = teammate;
+    let team_land = create_object(
+        &mut team,
+        CardId(7_904),
+        PlayerId(0),
+        "Team Land".to_string(),
+        Zone::Exile,
+    );
+    team.objects
+        .get_mut(&team_land)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    assert!(resolution_land_play_is_legal(&team, PlayerId(0), team_land));
+}
+
+/// A4 — CR 305.2: a "can't play lands" static refuses the play during resolution.
+#[test]
+fn play_land_during_resolution_respects_cant_play_land() {
+    let (mut state, land) = resolution_land_play_board();
+    assert!(
+        resolution_land_play_is_legal(&state, PlayerId(0), land),
+        "reach-guard: legal before the static exists"
+    );
+    let source = create_object(
+        &mut state,
+        CardId(7_905),
+        PlayerId(0),
+        "Static Source".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .static_definitions
+        .push(
+            StaticDefinition::new(StaticMode::Other("CantPlayLand".to_string())).affected(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+            ),
+        );
+    assert!(!resolution_land_play_is_legal(&state, PlayerId(0), land));
+    let mut events = Vec::new();
+    assert_eq!(
+        play_land_during_resolution(&mut state, PlayerId(0), land, &mut events),
+        None
+    );
+    assert_eq!(state.objects[&land].zone, Zone::Exile);
+}
+
+/// A5 — CR 712.12: only a modal DFC whose back face is a land offers a land-face
+/// election; a transform DFC with a land back face does not (CR 712.8a).
+#[test]
+fn modal_land_face_election_requires_a_modal_land_back_face() {
+    use crate::types::card::LayoutKind;
+    let mut state = setup_game_at_main_phase();
+    let mut make = |front: CoreType, back: Option<(CoreType, LayoutKind)>| {
+        let id = create_object(
+            &mut state,
+            CardId(7_910),
+            PlayerId(0),
+            "Double Face".to_string(),
+            Zone::Exile,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(front);
+        obj.back_face = back.map(|(core, layout)| {
+            let mut card_types = CardType::default();
+            card_types.core_types.push(core);
+            BackFaceData {
+                name: "Back Face".to_string(),
+                card_types,
+                layout_kind: Some(layout),
+                ..Default::default()
+            }
+        });
+        obj.clone()
+    };
+    let spell_land = make(CoreType::Instant, Some((CoreType::Land, LayoutKind::Modal)));
+    let land_land = make(CoreType::Land, Some((CoreType::Land, LayoutKind::Modal)));
+    let transform_land = make(
+        CoreType::Enchantment,
+        Some((CoreType::Land, LayoutKind::Transform)),
+    );
+    let spell_spell = make(
+        CoreType::Sorcery,
+        Some((CoreType::Instant, LayoutKind::Modal)),
+    );
+    let single_land = make(CoreType::Land, None);
+    assert!(modal_land_face_election_available(&spell_land));
+    assert!(modal_land_face_election_available(&land_land));
+    assert!(!modal_land_face_election_available(&transform_land));
+    assert!(!modal_land_face_election_available(&spell_spell));
+    assert!(!modal_land_face_election_available(&single_land));
+}
+
+/// CR 732.1b + CR 704.5a + CR 800.4a: a take's record keeps its first and last repetition and every
+/// seat that lost and left in between, modelled on Phyrexian Altar recurring Gravecrawler beside
+/// Zulaport Cutthroat, where P1 and P2 leave in repetition 5 of six.
+#[test]
+fn elide_middle_repetitions_keeps_the_ends_and_each_departure_between() {
+    let marker = |repetition| GameEvent::ShortcutRepetition {
+        controller: P0,
+        repetition,
+    };
+    let step = |count| GameEvent::CardsDrawn {
+        player_id: P0,
+        count,
+    };
+    let lost = |seat| GameEvent::PlayerLost {
+        player_id: PlayerId(seat),
+    };
+    let left = |seat| GameEvent::PlayerEliminated {
+        player_id: PlayerId(seat),
+    };
+    for unchanged in [
+        vec![step(0), lost(1)],
+        vec![step(0), marker(1), step(1)],
+        vec![step(0), marker(1), step(1), lost(1), marker(2), step(2)],
+    ] {
+        let mut events = unchanged.clone();
+        elide_middle_repetitions(&mut events);
+        assert_eq!(events, unchanged);
+    }
+
+    let mut events = vec![step(0)];
+    for repetition in 1..=6 {
+        events.extend([marker(repetition), step(repetition)]);
+        if repetition == 5 {
+            events.extend([lost(1), lost(2), step(50), left(1), left(2)]);
+        }
+    }
+    events.push(step(7));
+    elide_middle_repetitions(&mut events);
+    assert_eq!(
+        events,
+        [
+            step(0),
+            marker(1),
+            step(1),
+            lost(1),
+            lost(2),
+            left(1),
+            left(2),
+            marker(6),
+            step(6),
+            step(7),
+        ]
+    );
+}
+
+/// The resolution land-play board with a spell (sorcery) // land card in exile
+/// instead of a plain land. `back_layout` selects a modal or transform back.
+fn resolution_spell_land_board(
+    back_layout: crate::types::card::LayoutKind,
+) -> (GameState, ObjectId) {
+    let mut state = setup_game_at_main_phase();
+    state.stack.push_back(no_op_stack_entry(7_920, PlayerId(0)));
+    let card = create_object(
+        &mut state,
+        CardId(7_921),
+        PlayerId(0),
+        "Spell Front".to_string(),
+        Zone::Exile,
+    );
+    let obj = state.objects.get_mut(&card).unwrap();
+    obj.card_types.core_types.push(CoreType::Sorcery);
+    obj.base_card_types = obj.card_types.clone();
+    let mut card_types = CardType::default();
+    card_types.core_types.push(CoreType::Land);
+    obj.back_face = Some(BackFaceData {
+        name: "Land Back".to_string(),
+        card_types,
+        layout_kind: Some(back_layout),
+        ..Default::default()
+    });
+    (state, card)
+}
+
+/// Put a P0 permanent carrying a "can't play lands" static (CR 101.2) onto
+/// the battlefield.
+fn add_cant_play_land_static(state: &mut GameState, card_id: u64) {
+    let source = create_object(
+        state,
+        CardId(card_id),
+        PlayerId(0),
+        "Static Source".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .static_definitions
+        .push(
+            StaticDefinition::new(StaticMode::Other("CantPlayLand".to_string())).affected(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+            ),
+        );
+}
+
+/// B6a — CR 712.12 + CR 305.2a + CR 116.2a: the land back face of a
+/// spell//land modal card is played during resolution by that face, from the
+/// zone it was in, and counts as the turn's land play.
+#[test]
+fn play_land_face_during_resolution_enters_by_its_back_face() {
+    let (mut state, card) = resolution_spell_land_board(crate::types::card::LayoutKind::Modal);
+    let mut events = Vec::new();
+    let commit = play_land_face_during_resolution(&mut state, PlayerId(0), card, &mut events);
+    assert_eq!(commit, Some(LandPlayCommit::Entered));
+    let obj = &state.objects[&card];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert_eq!(obj.name, "Land Back");
+    assert!(obj.modal_back_face);
+    assert_eq!(state.lands_played_this_turn, 1);
+    assert_eq!(state.players[0].lands_played_this_turn, 1);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        GameEvent::LandPlayed {
+            object_id,
+            player_id: PlayerId(0),
+            from_zone: Zone::Exile,
+        } if *object_id == card
+    )));
+}
+
+/// B6b — CR 712.12 + CR 101.2 + CR 305.2b + CR 305.3: the land face of a
+/// spell//land card may be played during resolution only for a modal land back
+/// face, on the player's turn, with no "can't play lands" prohibition, and
+/// below the allowance.
+#[test]
+fn resolution_back_land_face_play_is_legal_requires_a_modal_land_back_turn_and_allowance() {
+    use crate::types::card::LayoutKind;
+    let (state, card) = resolution_spell_land_board(LayoutKind::Modal);
+    assert!(
+        resolution_back_land_face_play_is_legal(&state, PlayerId(0), card),
+        "positive baseline: a modal land back face on P0's turn below the allowance"
+    );
+    assert!(
+        !resolution_land_play_is_legal(&state, PlayerId(0), card),
+        "the front face itself is not a land (CR 712.8a)"
+    );
+    assert!(
+        !state.objects[&card].modal_back_face,
+        "the probe does not mutate the real object"
+    );
+
+    let (transform, transform_card) = resolution_spell_land_board(LayoutKind::Transform);
+    assert!(
+        !resolution_back_land_face_play_is_legal(&transform, PlayerId(0), transform_card),
+        "a transform land back face is not a modal land face"
+    );
+
+    let mut single = state.clone();
+    single.objects.get_mut(&card).unwrap().back_face = None;
+    assert!(
+        !resolution_back_land_face_play_is_legal(&single, PlayerId(0), card),
+        "a single-faced card has no land face"
+    );
+
+    let mut at_allowance = state.clone();
+    at_allowance.lands_played_this_turn = 1;
+    at_allowance.players[0].lands_played_this_turn = 1;
+    assert!(!resolution_back_land_face_play_is_legal(
+        &at_allowance,
+        PlayerId(0),
+        card
+    ));
+
+    let mut opponents_turn = state.clone();
+    opponents_turn.active_player = PlayerId(1);
+    assert!(!resolution_back_land_face_play_is_legal(
+        &opponents_turn,
+        PlayerId(0),
+        card
+    ));
+
+    let mut prohibited = state.clone();
+    add_cant_play_land_static(&mut prohibited, 7_922);
+    assert!(
+        crate::game::static_abilities::player_has_static_other(
+            &prohibited,
+            PlayerId(0),
+            "CantPlayLand"
+        ),
+        "reach-guard: the prohibition is in force"
+    );
+    assert!(
+        !resolution_back_land_face_play_is_legal(&prohibited, PlayerId(0), card),
+        "CR 101.2: a \"can't play lands\" static refuses the land face"
+    );
+}
+
+/// CR 104.1 + CR 118.12: a finished game retires the staged payment before the
+/// match transition moves to sideboarding.
+#[test]
+fn a_finished_match_retires_the_payment_before_the_transition() {
+    use crate::types::game_state::{GameEnd, ResolutionPaymentTransaction};
+    use crate::types::match_config::MatchType;
+
+    let mut state = GameState::new_two_player(7);
+    state.match_config.match_type = MatchType::Bo3;
+    state.waiting_for = WaitingFor::GameOver { winner: Some(P0) };
+    state.game_end = Some(GameEnd { winner: Some(P0) });
+    state.payment_transaction = Some(Box::new(ResolutionPaymentTransaction {
+        wire_version: 1,
+        owner: P0,
+        root: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), P0)),
+        transcript: Vec::new(),
+        base_waiting_for: WaitingFor::Priority { player: P0 },
+        resolving_trigger_context: None,
+        recovered: None,
+    }));
+    let mut result = ActionResult::applied(vec![], state.waiting_for.clone());
+    super::settle_finished_game(&mut state, &mut result);
+    assert!(
+        state.payment_transaction.is_none(),
+        "the terminal transition sees no live payment descriptor"
     );
 }

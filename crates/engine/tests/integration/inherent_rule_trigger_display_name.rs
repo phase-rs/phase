@@ -40,7 +40,8 @@ fn only_trigger_source_name(runner: &engine::game::scenario::GameRunner) -> Stri
             StackEntryKind::TriggeredAbility { source_name, .. } => Some(source_name.clone()),
             StackEntryKind::Spell { .. }
             | StackEntryKind::ActivatedAbility { .. }
-            | StackEntryKind::KeywordAction { .. } => None,
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => None,
         })
         .collect();
     assert_eq!(

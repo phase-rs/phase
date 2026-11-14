@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
-import { BracketEstimateChip } from "../BracketEstimateChip";
+import { BracketEstimateChip, ManualBracketChip } from "../BracketEstimateChip";
 
 afterEach(cleanup);
 
@@ -13,5 +13,18 @@ describe("BracketEstimateChip", () => {
   it("renders nothing when tier is null", () => {
     const { container } = render(<BracketEstimateChip tier={null} />);
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+describe("ManualBracketChip", () => {
+  it("renders the bare tier without an 'Estimated:' prefix", () => {
+    render(<ManualBracketChip bracket={2} />);
+    expect(screen.getByText("B2")).toBeInTheDocument();
+    expect(screen.queryByText(/Estimated:/i)).not.toBeInTheDocument();
+  });
+
+  it("exposes the declared bracket as its accessible label", () => {
+    render(<ManualBracketChip bracket={5} />);
+    expect(screen.getByLabelText("Declared bracket: B5 cEDH")).toHaveTextContent("B5");
   });
 });

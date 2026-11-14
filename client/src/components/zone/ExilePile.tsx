@@ -1,18 +1,28 @@
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
-import { getPlayerZoneIds, getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
+import {
+  getPlayerZoneIds,
+  getWaitingForObjectChoiceIds,
+} from "../../viewmodel/gameStateView.ts";
 
 interface ExilePileProps {
   playerId: number;
-  onClick: () => void;
+  onClick: (launcher: HTMLButtonElement) => void;
   size?: { width: string; height: string };
 }
 
 export function ExilePile({ playerId, onClick, size }: ExilePileProps) {
   const { t } = useTranslation("game");
-  const count = useGameStore((s) => getPlayerZoneIds(s.gameState, "exile", playerId).length);
+  const gameState = useGameStore((s) => s.gameState);
+  const exileObjectIds = useMemo(
+    () => getPlayerZoneIds(gameState, "exile", playerId),
+    [gameState, playerId],
+  );
+  const visibleExileObjectIds = gameState?.derived?.visible_exile_object_ids?.[playerId] ?? [];
+  const count = exileObjectIds.length;
   const canActForWaitingState = useCanActForWaitingState();
   const hasSelectableCards = useGameStore((s) => {
     if (!canActForWaitingState) return false;
@@ -27,9 +37,11 @@ export function ExilePile({ playerId, onClick, size }: ExilePileProps) {
 
   return (
     <button
-      onClick={onClick}
+      onClick={(event) => onClick(event.currentTarget)}
       className={`group relative cursor-pointer ${hasSelectableCards ? "ring-2 ring-amber-400/60 rounded-lg shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]" : ""}`}
       title={t("zone.exileTitle", { count })}
+      data-exile-pile={playerId}
+      data-grouped-ids={visibleExileObjectIds.length > 0 ? visibleExileObjectIds.join(" ") : undefined}
       style={{ width: w, height: h }}
     >
       <div className="relative h-full w-full overflow-hidden rounded-lg border border-indigo-500/40 shadow-md group-hover:border-indigo-400/60 transition-colors">

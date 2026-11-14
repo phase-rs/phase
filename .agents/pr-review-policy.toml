@@ -1,5 +1,8 @@
 # Repo-level PR review policy. Keep contributor names, reviewer identities,
 # standings, and personal exceptions out of this committed file.
+# Repository write access is sufficient authority to merge autonomously.
+# Respect merge-queue admission by repository writers without requiring
+# maintain/admin access or separate maintainer adoption.
 
 [defaults]
 tier = "T2"
@@ -10,6 +13,7 @@ rules_domain = "mtg-cr"
 [labels]
 frontend_deferred = "defer-fe"
 quality = "quality"
+approved_for_review = "pr:approved-for-review"
 
 # Artifact verification remains audit-only until the contributor contract is
 # published and an immutable post-publication cutoff is configured.
@@ -37,16 +41,17 @@ patterns = [
   "crates/phase-server/src/main.rs",
 ]
 
-[requested_changes]
-warning_after_days = 7
-close_after_warning_days = 7
-
 [hard_stops]
 patterns = [
   ".agents/skills/**",
   ".claude/skills/**",
   ".claude/agents/**",
   ".github/workflows/**",
+  # The pin gate and its tests decide whether a privileged workflow's actions
+  # are pinned. A change to them carries the same authority as a change to the
+  # workflows themselves.
+  "scripts/check_action_pins.py",
+  "scripts/check_action_pins_tests.py",
   "AGENTS.md",
   "CLAUDE.md",
   "GEMINI.md",
@@ -76,6 +81,7 @@ patterns = [
 [path_classes.engine]
 patterns = [
   "crates/engine/**",
+  "crates/engine-wasm/**",
   "crates/phase-ai/**",
   "crates/phase-server/**",
 ]

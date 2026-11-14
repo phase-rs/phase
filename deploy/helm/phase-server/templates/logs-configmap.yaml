@@ -1,0 +1,48 @@
+{{- if .Values.logging.enabled }}
+{{- /* Static-file server for `logging.dir`, mounted read-only by the `logs`
+     sidecar in phase-server.podSpec. Config lives in a ConfigMap (not baked
+     into the image) so it stays generic across whatever image.repository is
+     set to. Temp/pid paths are under /tmp (an emptyDir) because the sidecar
+     runs with readOnlyRootFilesystem: true. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "phase-server.fullname" . }}-logs-conf
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+data:
+  nginx.conf: |
+    worker_processes 1;
+    pid /tmp/nginx.pid;
+    events {
+      worker_connections 64;
+    }
+    http {
+      client_body_temp_path /tmp/client_temp;
+      proxy_temp_path /tmp/proxy_temp;
+      fastcgi_temp_path /tmp/fastcgi_temp;
+      uwsgi_temp_path /tmp/uwsgi_temp;
+      scgi_temp_path /tmp/scgi_temp;
+      access_log /dev/stdout;
+      error_log /dev/stderr;
+      server {
+        # Loopback-only: the pod's network namespace is shared by every
+        # container in it, so `kubectl port-forward` (which tunnels into
+        # that namespace and connects to localhost) still reaches this, but
+        # traffic arriving on the pod's real interface — from the Service,
+        # another pod, or a CNI that silently doesn't enforce NetworkPolicy
+        # — gets refused outright. Operator-only stays true independent of
+        # networkPolicy.enabled.
+        listen 127.0.0.1:{{ .Values.logging.server.port }};
+        autoindex on;
+        location / {
+          root {{ .Values.logging.dir }};
+          # NGINX sets no Cache-Control/Expires by default, so a
+          # port-forward that lands on a different pod after this one
+          # could otherwise reuse the previous pod's cached file and
+          # autoindex responses.
+          add_header Cache-Control no-store always;
+        }
+      }
+    }
+{{- end }}

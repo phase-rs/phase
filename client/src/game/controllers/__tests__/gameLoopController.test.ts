@@ -80,6 +80,9 @@ describe("gameLoopController auto-pass authorization", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     dispatchAction.mockReset();
+    // The real `dispatchAction` returns a promise and the auto-pass beat now
+    // attaches a rejection handler to it, so the mock must be promise-shaped.
+    dispatchAction.mockResolvedValue(undefined);
     dispatchResolveAll.mockReset();
     waitingForSubscriber = null;
     animationSpeedMultiplier = 1.0;
@@ -227,6 +230,40 @@ describe("gameLoopController auto-pass authorization", () => {
     // Zero multiplier collapses the beat to 0ms but must still dispatch the pass.
     await vi.advanceTimersByTimeAsync(0);
     expect(dispatchAction).toHaveBeenCalledWith({ type: "PassPriority" });
+    controller.dispose();
+  });
+
+  it("attaches a rejection handler to the auto-pass dispatch", async () => {
+    // The auto-pass beat is a `dispatchAction` call site with no caller to
+    // propagate to. A P2P guest sitting in auto-pass now rejects on the guest
+    // adapter's submission timeout as well as on `action_rejected` /
+    // `action_failed` / host disconnect, so every beat must swallow its own
+    // failure.
+    const rejected = Promise.reject(new Error("The host did not answer this action in time"));
+    // Keep the probe itself from leaking a rejection regardless of what the
+    // controller does; `catch` is spied only afterwards, so this handler is not
+    // counted.
+    rejected.catch(() => undefined);
+    const attachedHandler = vi.spyOn(rejected, "catch");
+    dispatchAction.mockReturnValueOnce(rejected);
+    const waitingFor = priority(1);
+    storeState = {
+      waitingFor,
+      gameState: stateFor(waitingFor, 0),
+      autoPassRecommended: true,
+    };
+
+    const controller = createGameLoopController({ mode: "online" });
+    controller.start();
+
+    await vi.advanceTimersByTimeAsync(200);
+    expect(dispatchAction).toHaveBeenCalledWith({ type: "PassPriority" });
+
+    // The beat must attach its own rejection handler. Asserting on the absence
+    // of a `process` "unhandledRejection" event cannot see this: vitest's spy
+    // machinery observes the promise it returns, which marks the rejection
+    // handled no matter what the caller does.
+    expect(attachedHandler).toHaveBeenCalled();
     controller.dispose();
   });
 

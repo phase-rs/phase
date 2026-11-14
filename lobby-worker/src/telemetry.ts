@@ -46,6 +46,11 @@ export const EVENT_SCHEMAS: Record<string, { blobs: string[]; doubles: string[] 
   engine_panic: { blobs: ["reason", "panic", "game_mode"], doubles: ["fatal", "turn"] },
   stuck_decision: { blobs: ["waiting_for_kind", "game_mode", "phase"], doubles: [] },
   js_error: { blobs: ["name", "message", "top_frame", "source", "route"], doubles: [] },
+  p2p_disconnect: {
+    blobs: ["reason", "connection_state", "ice_state", "visibility", "last_message_type", "last_connection_state", "last_ice_state", "last_channel_state", "channel_error"],
+    doubles: ["pong_age_ms", "receive_age_ms", "pending_sends", "pending_decodes", "buffered_bytes", "channel_open", "transport_captured_at", "last_buffered_bytes", "transport_age_ms"],
+  },
+  wasm_not_initialized: { blobs: ["operation"], doubles: ["initializing", "disposed", "observed_at"] },
   // `probe_*` columns are appended (never inserted — AE columns are
   // positional) and populated only on `reason: "loop-abort"` events: the
   // client refetches the failing chunk and reports what it actually got.
@@ -83,6 +88,19 @@ export const EVENT_SCHEMAS: Record<string, { blobs: string[]; doubles: string[] 
     doubles: ["player_count", "ai_count"],
   },
   route_view: { blobs: ["route"], doubles: [] },
+  // Server-directory probe results, written by the lobby DO from
+  // `POST /servers/metrics` (see `directory.ts`), not by a client telemetry
+  // batch. Columns are appended, never inserted — AE columns are positional
+  // and permanent.
+  //
+  // Two consequences worth stating rather than discovering. Declaring the
+  // schema here also makes `server_probe` an acceptable event on
+  // `POST /telemetry`; that is intentional and harmless, because AE is a
+  // write-only dashboard sink that no counter and no score ever reads — the
+  // score is folded from the DO's own storage, and a forged AE point cannot
+  // reach it. And `rtt_ms` is `0` for every outcome that carries no latency,
+  // which per this file's `toDouble` convention means "unknown", never "0 ms".
+  server_probe: { blobs: ["url", "outcome", "game_code"], doubles: ["rtt_ms"] },
 };
 
 /** A validated, column-resolved event ready to become an AE data point. */

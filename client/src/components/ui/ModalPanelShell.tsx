@@ -1,7 +1,9 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { useId } from "react";
+import { useId, useRef, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
+
+import { FocusScope } from "./FocusScope";
 
 interface ModalPanelShellProps {
   /** When false, runs the exit animation before removing portal content. */
@@ -15,6 +17,8 @@ interface ModalPanelShellProps {
   bodyClassName?: string;
   /** Override the outer overlay z-index/stacking (default `z-50`). */
   overlayClassName?: string;
+  /** Stable destination for focus after the panel closes. */
+  returnFocusRef?: RefObject<HTMLElement | SVGElement | null>;
 }
 
 export function ModalPanelShell({
@@ -27,73 +31,100 @@ export function ModalPanelShell({
   maxWidthClassName = "max-w-4xl",
   bodyClassName = "",
   overlayClassName = "z-50",
+  returnFocusRef,
 }: ModalPanelShellProps) {
   const { t } = useTranslation();
   const titleId = useId();
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const resolvedEyebrow = eyebrow ?? t("modal.defaultEyebrow");
-  return createPortal(
-    <AnimatePresence>
-      {open && (
-        <motion.div
-          key="modal-panel-shell"
-          className={`fixed inset-0 flex items-stretch px-0 py-0 lg:items-center lg:justify-center lg:px-4 lg:py-6 ${overlayClassName}`}
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.18 }}
-        >
-          <button
-            type="button"
-            className="absolute inset-0 bg-black/68"
-            onClick={onClose}
-            aria-label={t("actions.closeNamed", { name: title })}
-          />
-
-          <motion.div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby={titleId}
-            className={`card-scale-reset relative z-10 flex h-full w-full flex-col overflow-hidden border-white/10 bg-[#0b1020] pt-[env(safe-area-inset-top)] shadow-[0_18px_48px_rgba(0,0,0,0.48)] lg:h-auto lg:max-h-[calc(100vh_-_3rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] lg:rounded-[12px] lg:border lg:pt-0 ${maxWidthClassName}`}
-            initial={{ scale: 0.97, opacity: 0, y: 10 }}
-            animate={{ scale: 1, opacity: 1, y: 0 }}
-            exit={{ scale: 0.97, opacity: 0, y: 10 }}
-            transition={{ duration: 0.2, ease: "easeOut" }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-start justify-between gap-3 border-b border-white/10 px-4 py-4 lg:gap-4 lg:px-6 lg:py-5">
-              <div className="min-w-0">
-                {resolvedEyebrow && (
-                  <div className="text-[0.62rem] uppercase tracking-[0.22em] text-slate-500 lg:text-[0.68rem]">
-                    {resolvedEyebrow}
-                  </div>
-                )}
-                <h2 id={titleId} className="mt-1 text-lg font-semibold text-white lg:text-xl">
-                  {title}
-                </h2>
-                {subtitle && (
-                  <p className="mt-1 text-sm text-slate-400">{subtitle}</p>
-                )}
-              </div>
-              <button
-                onClick={onClose}
-                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] border border-white/10 bg-slate-950/80 text-slate-400 transition hover:bg-slate-900 hover:text-white lg:h-11 lg:w-11"
-                aria-label={t("actions.closeNamed", { name: title })}
+  return (
+    <FocusScope
+      active={open}
+      containerRef={panelRef}
+      ownerRef={overlayRef}
+      returnFocusRef={returnFocusRef}
+      onEscape={onClose}
+    >
+      {({ onKeyDown }) =>
+        createPortal(
+          <AnimatePresence>
+            {open && (
+              <motion.div
+                ref={overlayRef}
+                key="modal-panel-shell"
+                className={`fixed inset-0 flex items-stretch px-0 py-0 lg:items-center lg:justify-center lg:px-4 lg:py-6 ${overlayClassName}`}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.18 }}
+                onKeyDown={onKeyDown}
               >
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4 lg:h-5 lg:w-5">
-                  <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />
-                </svg>
-              </button>
-            </div>
+                <button
+                  type="button"
+                  className="absolute inset-0 bg-black/68"
+                  onClick={onClose}
+                  aria-label={t("actions.closeNamed", { name: title })}
+                />
 
-            <div
-              className={`thin-scrollbar min-h-0 flex-1 pb-[calc(1rem_+_env(safe-area-inset-bottom))] lg:pb-[env(safe-area-inset-bottom)] ${bodyClassName}`}
-            >
-              {children}
-            </div>
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>,
-    document.body,
+                <motion.div
+                  ref={panelRef}
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby={titleId}
+                  tabIndex={-1}
+                  className={`card-scale-reset relative z-10 flex h-full w-full flex-col overflow-hidden border-white/10 bg-[#0b1020] pt-[env(safe-area-inset-top)] shadow-[0_18px_48px_rgba(0,0,0,0.48)] lg:h-auto lg:max-h-[calc(100vh_-_3rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] lg:rounded-[12px] lg:border lg:pt-0 ${maxWidthClassName}`}
+                  initial={{ scale: 0.97, opacity: 0, y: 10 }}
+                  animate={{ scale: 1, opacity: 1, y: 0 }}
+                  exit={{ scale: 0.97, opacity: 0, y: 10 }}
+                  transition={{ duration: 0.2, ease: "easeOut" }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="flex items-start justify-between gap-3 border-b border-white/10 px-4 py-4 lg:gap-4 lg:px-6 lg:py-5">
+                    <div className="min-w-0">
+                      {resolvedEyebrow && (
+                        <div className="text-[0.62rem] uppercase tracking-[0.22em] text-slate-500 lg:text-[0.68rem]">
+                          {resolvedEyebrow}
+                        </div>
+                      )}
+                      <h2
+                        id={titleId}
+                        className="mt-1 text-lg font-semibold text-white lg:text-xl"
+                      >
+                        {title}
+                      </h2>
+                      {subtitle && (
+                        <p className="mt-1 text-sm text-slate-400">{subtitle}</p>
+                      )}
+                    </div>
+                    <button
+                      onClick={onClose}
+                      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] border border-white/10 bg-slate-950/80 text-slate-400 transition hover:bg-slate-900 hover:text-white lg:h-11 lg:w-11"
+                      aria-label={t("actions.closeNamed", { name: title })}
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 20 20"
+                        fill="currentColor"
+                        className="h-4 w-4 lg:h-5 lg:w-5"
+                      >
+                        <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />
+                      </svg>
+                    </button>
+                  </div>
+
+                  <div
+                    className={`thin-scrollbar min-h-0 flex-1 pb-[calc(1rem_+_env(safe-area-inset-bottom))] lg:pb-[env(safe-area-inset-bottom)] ${bodyClassName}`}
+                  >
+                    {children}
+                  </div>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>,
+          document.body,
+        )
+      }
+    </FocusScope>
   );
 }

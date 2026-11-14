@@ -18,7 +18,7 @@ use engine::types::game_state::{
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::log::{LogCategory, LogSegment};
-use engine::types::mana::ManaType;
+use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use phase_ai::auto_play::{run_ai_actions, run_ai_actions_bounded, run_driver_loop, DriverExit};
@@ -33,7 +33,8 @@ fn gunzip_fixture(gz: &[u8]) -> String {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    json
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 #[test]
@@ -130,6 +131,234 @@ fn saved_cosmic_crucible_mana_prompt_uses_an_issued_action_and_advances() {
     );
 }
 
+/// Saved positions mtg-bot's judge rated as clear mistakes (pattern "Timing: Priority"): the AI
+/// used a deferrable ability in its own upkeep or draw step, with an empty stack, instead of
+/// waiting for its precombat main phase. Returns the state, the acting seat, and that ability's
+/// activation, which the position must still offer (the reach guard).
+fn judged_early_activation(
+    gz: &[u8],
+    phase: Phase,
+    source_name: &str,
+) -> (engine::types::game_state::GameState, PlayerId, GameAction) {
+    let state = load_saved_game_state(&gunzip_fixture(gz)).expect("judged position deserializes");
+    let player = state.active_player;
+    assert_eq!(
+        state.phase, phase,
+        "reach: the capture is in the judged step"
+    );
+    assert!(state.stack.is_empty(), "reach: the stack is empty");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player: holder } if holder == player),
+        "reach: the active player holds priority"
+    );
+    let activation = engine::ai_support::AiDecisionContract::issue(&state, player)
+        .candidates
+        .into_iter()
+        .map(|candidate| candidate.action)
+        .find(|action| {
+            matches!(action, GameAction::ActivateAbility { source_id, .. }
+            if state.objects[source_id].name == source_name)
+        })
+        .unwrap_or_else(|| panic!("reach: {source_name}'s activation is offered"));
+    (state, player, activation)
+}
+
+/// The root ranking the chooser samples from (CR 117.3a: the AI holds priority) must put
+/// passing above the early activation, at the four-seat Hard configuration the games ran at.
+fn assert_pass_outranks(
+    state: &engine::types::game_state::GameState,
+    player: PlayerId,
+    activation: &GameAction,
+    message: &str,
+) {
+    let config = phase_ai::config::create_config_for_players(
+        AiDifficulty::Hard,
+        Platform::Native,
+        state.players.len() as u8,
+    )
+    .into_measurement(42);
+    let scores = phase_ai::score_candidates(state, player, &config);
+    let score = |action: &GameAction| {
+        scores
+            .iter()
+            .find(|(candidate, _)| candidate == action)
+            .map(|(_, score)| *score)
+            .unwrap_or_else(|| panic!("reach: {action:?} is scored"))
+    };
+    assert!(
+        score(&GameAction::PassPriority) > score(activation),
+        "{message}: {scores:?}"
+    );
+}
+
+/// Cryptbreaker ("{1}{B}, {T}, Discard a card: Create a 2/2 black Zombie creature token.") in
+/// the AI's own draw step, with nothing happening as the main phase begins that an activation
+/// now could change: the mana and card stay available for it there, and passing must rank first.
+#[test]
+fn judged_cryptbreaker_draw_step_activation_waits_for_the_main_phase() {
+    let (state, player, activation) = judged_early_activation(
+        include_bytes!("../fixtures/scenarios/judged-cryptbreaker-draw-step.json.gz"),
+        Phase::Draw,
+        "Cryptbreaker",
+    );
+    assert_pass_outranks(
+        &state,
+        player,
+        &activation,
+        "the AI must not activate Cryptbreaker in its draw step",
+    );
+}
+
+/// Karn's Bastion ("{4}, {T}: Proliferate.") in the AI's own upkeep at 14 life of 40: low life
+/// alone gives no reason to act before the main phase, since no opponent attacks first, and
+/// passing must rank first.
+#[test]
+fn judged_karns_bastion_upkeep_activation_waits_at_low_life() {
+    let (state, player, activation) = judged_early_activation(
+        include_bytes!("../fixtures/scenarios/judged-karns-bastion-upkeep.json.gz"),
+        Phase::Upkeep,
+        "Karn's Bastion",
+    );
+    assert_eq!(
+        state.players[player.0 as usize].life, 14,
+        "reach: the AI is below 40% of 40"
+    );
+    assert_pass_outranks(
+        &state,
+        player,
+        &activation,
+        "the AI must not activate Karn's Bastion in its upkeep",
+    );
+}
+
+/// Staff of Domination ("{2}, {T}: You gain 1 life.") in the AI's own upkeep, with two
+/// Mountains untapped. With {C}{C} of activation-only mana floating (Thran Turbine's "This
+/// mana can't be spent to cast spells"), activating now spends mana that empties as the step
+/// ends (CR 500.5), so the production root score must not carry the patience hold it carries
+/// when only the lands could pay.
+#[test]
+fn floating_upkeep_mana_is_not_held_for_the_main_phase() {
+    use engine::types::mana::ManaRestriction;
+    let margin = |floating: bool| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        let staff = scenario
+            .add_artifact_from_oracle(P0, "Staff of Domination", "{2}, {T}: You gain 1 life.")
+            .id();
+        scenario.add_basic_land(P0, ManaColor::Red);
+        scenario.add_basic_land(P0, ManaColor::Red);
+        if floating {
+            scenario.with_mana_pool(
+                P0,
+                vec![
+                    ManaUnit::new(
+                        ManaType::Colorless,
+                        ObjectId(9_900),
+                        false,
+                        vec![ManaRestriction::OnlyForActivation]
+                    );
+                    2
+                ],
+            );
+        }
+        let runner = scenario.build();
+        let state = runner.state();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+                && state.active_player == P0
+                && state.stack.is_empty(),
+            "reach: P0 holds priority in its own upkeep with an empty stack"
+        );
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(42);
+        let scores = phase_ai::score_candidates(state, P0, &config);
+        let score = |pick: &dyn Fn(&GameAction) -> bool| {
+            scores
+                .iter()
+                .find(|(action, _)| pick(action))
+                .map(|(_, score)| *score)
+                .unwrap_or_else(|| panic!("reach: candidate scored in {scores:?}"))
+        };
+        score(
+            &|action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == staff),
+        ) - score(&|action| matches!(action, GameAction::PassPriority))
+    };
+    let (held, floating) = (margin(false), margin(true));
+    assert!(
+        floating > held,
+        "floating mana must lift the activation's margin over passing: held {held}, floating {floating}"
+    );
+}
+
+/// Words of Worship ("{1}: The next time you would draw a card this turn, you gain 5 life
+/// instead.") in the AI's own upkeep after Phyrexian Arena's trigger, with one Plains untapped.
+/// CR 614.4: the replacement must exist before the draw step's draw, so the production root
+/// score must not carry the patience hold there. The reference is the same board with one
+/// colorless mana floating, which stands patience down through its own escape hatch, so the
+/// two margins must agree. (The draw-step control, where the replacement is held, is pinned at
+/// the policy level in `activation_patience_repro.rs`.)
+#[test]
+fn a_draw_replacement_is_not_held_in_the_upkeep() {
+    let margin = |phase: Phase, floating: bool| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(phase);
+        scenario.add_enchantment_from_oracle(
+            P0,
+            "Phyrexian Arena",
+            "At the beginning of your upkeep, you draw a card and you lose 1 life.",
+        );
+        let words = scenario
+            .add_enchantment_from_oracle(
+                P0,
+                "Words of Worship",
+                "{1}: The next time you would draw a card this turn, you gain 5 life instead.",
+            )
+            .id();
+        scenario.add_basic_land(P0, ManaColor::White);
+        // A library, so the draw the replacement skips isn't a draw from an empty library.
+        scenario.with_library_top(P0, &["Plains"; 5]);
+        if floating {
+            scenario.with_mana_pool(
+                P0,
+                vec![ManaUnit::new(
+                    ManaType::Colorless,
+                    ObjectId(9_900),
+                    false,
+                    vec![],
+                )],
+            );
+        }
+        let runner = scenario.build();
+        let state = runner.state();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+                && state.active_player == P0
+                && state.stack.is_empty(),
+            "reach: P0 holds priority in its own {phase:?} with an empty stack"
+        );
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(42);
+        let scores = phase_ai::score_candidates(state, P0, &config);
+        let score = |pick: &dyn Fn(&GameAction) -> bool| {
+            scores
+                .iter()
+                .find(|(action, _)| pick(action))
+                .map(|(_, score)| *score)
+                .unwrap_or_else(|| panic!("reach: candidate scored in {scores:?}"))
+        };
+        score(
+            &|action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == words),
+        ) - score(&|action| matches!(action, GameAction::PassPriority))
+    };
+    // At Hard a patience hold would move the root margin by its full -1.68 verdict (the search
+    // root applies ActivationPatience unweighted) and lift Pass by the held line's continuation;
+    // with the draw replacement exempt, neither board is held, so the floating-mana reference
+    // must agree with the unfloated board well inside that.
+    let held = margin(Phase::Upkeep, true) - margin(Phase::Upkeep, false);
+    assert!(
+        held.abs() < 0.08,
+        "the upkeep must not hold the draw replacement (reference minus board: {held})"
+    );
+}
+
 #[test]
 fn scenario_prefers_opponent_target_over_self() {
     let mut runner = GameScenario::new().build();
@@ -222,6 +451,8 @@ fn scenario_blocks_lethal_attack_when_a_block_exists() {
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         };
     }
 
@@ -260,7 +491,11 @@ fn scenario_multiplayer_attacks_to_finish_exposed_player() {
         };
     }
 
-    let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+    // Measurement mode: this assertion is about the attack a deterministic search
+    // finds, not about how much of that search fits in the wall-clock budget. A
+    // loaded CI shard can expire `AI_SEARCH_TIME_BUDGET_MS` mid-search, which
+    // degrades the action to "declined to attack" and fakes a regression.
+    let config = create_config(AiDifficulty::VeryHard, Platform::Native).into_measurement(14);
     let mut rng = SmallRng::seed_from_u64(14);
     let action = choose_action(runner.state(), P0, &config, &mut rng);
 
@@ -353,6 +588,8 @@ fn scenario_bounded_ai_sequence_progresses_without_panicking() {
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         };
     }
 
@@ -1207,12 +1444,14 @@ fn scenario_claws_of_gix_witness_board_does_not_dead_end() {
 /// once `apply_interaction` succeeded (`auto_play.rs:214-250`), and the
 /// pending-cast `CancelCast` is offered to the AI only by
 /// `semantic_candidate_actions_with_probe`'s guarded push
-/// (`engine/src/ai_support/candidates.rs`, which requires `has_pending_cast` AND
-/// `allows_cancel_cast`; `candidate_actions_broad_with_probe`, which it calls,
-/// emits `CancelCast` only for Equipment/Vehicle/modal shapes absent from these
-/// boards). A dead-end satisfying only `allows_cancel_cast` therefore never
-/// becomes an applied action — it lands in `break_reason`, and a results-only
-/// assertion would miss it.
+/// (`engine/src/ai_support/candidates.rs`, which requires `allows_cancel_cast`
+/// — covering pending casts and pre-cost keyword-activation announcements
+/// alike, with keyword-state offers unreachable on these boards, which have no
+/// Equipment and no Vehicle — while `candidate_actions_broad_with_probe`,
+/// which it calls, emits `CancelCast` only for modal shapes likewise absent
+/// from these boards). A dead-end satisfying only `allows_cancel_cast`
+/// therefore never becomes an applied action — it lands in `break_reason`,
+/// and a results-only assertion would miss it.
 fn assert_no_fallback_cancel(run: &phase_ai::auto_play::AiActionsRun, what: &str) {
     use phase_ai::auto_play::AiActionsStop;
 
@@ -1816,5 +2055,729 @@ fn ai_obeys_planeswalker_directed_attack_requirement() {
             .iter()
             .any(|a| a.object_id == bear && a.attack_target == AttackTarget::Planeswalker(gideon))),
         "combat commits with the creature attacking Gideon"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CR 508.1d + CR 508.1h: the AI pays a Propaganda-style attack tax.
+//
+// The declare-attackers completion authority substitutes a TAX-FREE witness for
+// any proposal it will not pay for, and with no must-attack requirement on the
+// board that witness is the EMPTY declaration. The AI must therefore plan to pay
+// before it declares. These tests drive the real `choose_action` seam to prove
+// it attacks when paying is worth it, stops when it cannot pay, and that the
+// taxed round trip terminates.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Propaganda's verified Oracle text.
+///
+/// Source: client/public/card-data.json (2026-05-10), matching the engine-side
+/// `add_propaganda` helper in `crates/engine/tests/integration/rules/combat.rs`.
+const PROPAGANDA_ORACLE: &str = "Creatures can't attack you unless their controller pays {2} \
+     for each creature they control that's attacking you.";
+
+/// Park P1 in `DeclareAttackers` against a P0 that controls Propaganda.
+///
+/// P1 gets `attackers` untapped 3/3s and `untapped_lands` Forests; P0's only
+/// permanent is the enchantment, so nothing can block and the AI's only reason
+/// to hold back is the tax.
+fn build_propaganda_attack_scenario(
+    attackers: usize,
+    untapped_lands: usize,
+) -> (GameRunner, Vec<ObjectId>) {
+    use engine::types::mana::ManaColor;
+
+    let mut scenario = GameScenario::new();
+    scenario.add_enchantment_from_oracle(P0, "Propaganda", PROPAGANDA_ORACLE);
+    let attacker_ids: Vec<ObjectId> = (0..attackers)
+        .map(|index| {
+            scenario
+                .add_creature(P1, &format!("Bear {index}"), 3, 3)
+                .id()
+        })
+        .collect();
+    for _ in 0..untapped_lands {
+        scenario.add_basic_land(P1, ManaColor::Green);
+    }
+
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.active_player = P1;
+    state.priority_player = P1;
+    state.phase = Phase::DeclareAttackers;
+    state.turn_number = 2;
+    state.waiting_for = WaitingFor::DeclareAttackers {
+        player: P1,
+        valid_attacker_ids: attacker_ids.clone(),
+        valid_attack_targets: vec![AttackTarget::Player(P0)],
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+    (runner, attacker_ids)
+}
+
+/// The AI's chosen declaration, as attacker ids.
+fn ai_declared_attackers(runner: &GameRunner) -> (GameAction, Vec<ObjectId>) {
+    let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+    let mut rng = SmallRng::seed_from_u64(7);
+    let action = choose_action(runner.state(), P1, &config, &mut rng)
+        .expect("AI must choose a declare-attackers action");
+    let GameAction::DeclareAttackers { attacks, .. } = &action else {
+        panic!("expected DeclareAttackers, got {action:?}");
+    };
+    let ids = attacks.iter().map(|(id, _)| *id).collect();
+    (action, ids)
+}
+
+/// CR 508.1d + CR 508.1j: with the tax affordable and no blocker in sight, the
+/// AI declares the attack and pays, rather than collapsing to the empty
+/// tax-free witness.
+#[test]
+fn ai_attacks_through_propaganda_and_pays_the_tax() {
+    let (mut runner, attackers) = build_propaganda_attack_scenario(1, 4);
+
+    let (action, declared) = ai_declared_attackers(&runner);
+    assert_eq!(
+        declared, attackers,
+        "a 3/3 into an empty board must attack even though Propaganda taxes it {{2}}"
+    );
+
+    runner
+        .act(action)
+        .expect("the AI's taxed declaration must be reducer-legal");
+    let WaitingFor::CombatTaxPayment { total_cost, .. } = &runner.state().waiting_for else {
+        panic!(
+            "a taxed declaration must open the tax prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        total_cost.mana_value(),
+        2,
+        "Propaganda taxes {{2}} per attacker"
+    );
+
+    // CR 508.1j: the AI must now answer its OWN quote with a payment — a decline
+    // would rebuild the identical declare prompt and re-propose forever.
+    let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+    let mut rng = SmallRng::seed_from_u64(7);
+    let answer = choose_action(runner.state(), P1, &config, &mut rng)
+        .expect("AI must answer the combat tax prompt");
+    assert_eq!(
+        answer,
+        GameAction::PayCombatTax { accept: true },
+        "the AI proposed this taxed attack, so it must pay for it"
+    );
+
+    runner.act(answer).expect("paying the tax must succeed");
+    let combat = runner
+        .state()
+        .combat
+        .as_ref()
+        .expect("combat commits once the tax is paid");
+    assert_eq!(
+        combat
+            .attackers
+            .iter()
+            .map(|attacker| attacker.object_id)
+            .collect::<Vec<_>>(),
+        attackers,
+        "the paid-for attacker must actually be attacking"
+    );
+}
+
+/// CR 508.1j: an unaffordable tax is not attacked into. The AI must fall back to
+/// the empty declaration WITHOUT opening a prompt it cannot answer.
+#[test]
+fn ai_holds_back_when_the_propaganda_tax_is_unaffordable() {
+    let (mut runner, attackers) = build_propaganda_attack_scenario(1, 0);
+    assert!(
+        !engine::game::combat::attack_tax_is_affordable(
+            runner.state(),
+            &[(attackers[0], AttackTarget::Player(P0))],
+        ),
+        "premise: with no mana open the {{2}} tax is unaffordable"
+    );
+
+    let (action, declared) = ai_declared_attackers(&runner);
+    assert!(
+        declared.is_empty(),
+        "with no mana to pay {{2}} the AI must not declare a taxed attacker, got {declared:?}"
+    );
+
+    runner.act(action).expect("the empty declaration is legal");
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::CombatTaxPayment { .. }
+        ),
+        "an unaffordable proposal must never open a tax prompt, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 508.1h: Propaganda prices each attacker, and the locked-in total is their
+/// sum, so an alpha strike the AI cannot fund in full is trimmed to one it can,
+/// not abandoned. Three 3/3s cost {6}; with four lands open the AI attacks with
+/// two of them for {4}.
+#[test]
+fn ai_trims_the_attack_to_the_propaganda_tax_it_can_afford() {
+    let (mut runner, attackers) = build_propaganda_attack_scenario(3, 4);
+
+    let (action, declared) = ai_declared_attackers(&runner);
+    assert_eq!(
+        declared.len(),
+        2,
+        "four lands fund {{4}} of the {{6}} full strike, so two attackers must go, got {declared:?}"
+    );
+    assert!(
+        declared.iter().all(|id| attackers.contains(id)),
+        "the trimmed strike must be a subset of the available attackers"
+    );
+
+    runner
+        .act(action)
+        .expect("the trimmed declaration must be legal");
+    let WaitingFor::CombatTaxPayment { total_cost, .. } = &runner.state().waiting_for else {
+        panic!(
+            "the trimmed strike is still taxed and must prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(total_cost.mana_value(), 4, "two attackers at {{2}} each");
+}
+
+/// P1 has a lone 1/1 and six Forests; P0 controls Propaganda only when
+/// `with_propaganda`. The runner is parked at P1's `DeclareAttackers`.
+fn build_squire_attack_scenario(with_propaganda: bool) -> (GameRunner, ObjectId) {
+    use engine::types::mana::ManaColor;
+
+    let mut scenario = GameScenario::new();
+    if with_propaganda {
+        scenario.add_enchantment_from_oracle(P0, "Propaganda", PROPAGANDA_ORACLE);
+    }
+    let attacker = scenario.add_creature(P1, "Squire", 1, 1).id();
+    for _ in 0..6 {
+        scenario.add_basic_land(P1, ManaColor::Green);
+    }
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.active_player = P1;
+    state.priority_player = P1;
+    state.phase = Phase::DeclareAttackers;
+    state.turn_number = 2;
+    state.waiting_for = WaitingFor::DeclareAttackers {
+        player: P1,
+        valid_attacker_ids: vec![attacker],
+        valid_attack_targets: vec![AttackTarget::Player(P0)],
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+    (runner, attacker)
+}
+
+/// CR 508.1d: paying is optional, and a tax that costs more than the attack is
+/// worth is declined. A 1/1 into Propaganda's {2} is affordable with six lands
+/// open but not worth it, so the AI keeps it home and never opens the prompt.
+#[test]
+fn ai_declines_a_propaganda_tax_that_outprices_the_attack() {
+    // Control leg: on the same board without Propaganda, the real
+    // `choose_action` path attacks with the 1/1. Only the tax differs below.
+    let (control, attacker) = build_squire_attack_scenario(false);
+    let (_, control_declared) = ai_declared_attackers(&control);
+    assert_eq!(
+        control_declared,
+        vec![attacker],
+        "premise: untaxed, the AI attacks an empty board with the 1/1"
+    );
+
+    let (mut runner, attacker) = build_squire_attack_scenario(true);
+    assert!(
+        engine::game::combat::attack_tax_is_affordable(
+            runner.state(),
+            &[(attacker, AttackTarget::Player(P0))],
+        ),
+        "premise: six lands cover the {{2}} tax, so affordability cannot explain a hold-back"
+    );
+
+    let (action, declared) = ai_declared_attackers(&runner);
+    assert!(
+        declared.is_empty(),
+        "one damage is not worth {{2}}, so the 1/1 must stay home, got {declared:?}"
+    );
+    runner.act(action).expect("the empty declaration is legal");
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::CombatTaxPayment { .. }
+        ),
+        "a declined tax must never open the prompt, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// The taxed declare → pay round trip must TERMINATE under the host loop.
+///
+/// CR 508.1d: declining the tax rebuilds the identical `DeclareAttackers`
+/// prompt, so a seat whose payment answer disagreed with its declaration would
+/// spin here forever. `run_ai_actions_bounded` caps the work, and combat having
+/// advanced past the declare step is the evidence the loop converged.
+#[test]
+fn ai_taxed_attack_round_trip_terminates() {
+    let (mut runner, attackers) = build_propaganda_attack_scenario(1, 4);
+
+    let ai_players = HashSet::from([P1]);
+    let ai_configs = HashMap::from([(P1, create_config(AiDifficulty::VeryHard, Platform::Native))]);
+    let mut rng = SmallRng::seed_from_u64(7);
+    let session = phase_ai::session::AiSession::arc_from_game(runner.state());
+    let run = run_ai_actions_bounded(
+        runner.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut rng,
+        &session,
+        32,
+    );
+
+    assert!(
+        !run.results.is_empty(),
+        "the host loop must take at least the declare + pay actions"
+    );
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. } | WaitingFor::CombatTaxPayment { .. }
+        ),
+        "the declare/pay cycle must not still be pending, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().combat.as_ref().is_some_and(|combat| combat
+            .attackers
+            .iter()
+            .any(|attacker| attacker.object_id == attackers[0])),
+        "the attacker must have committed to combat rather than looping on the tax"
+    );
+}
+
+/// CR 508.1d: the attack round trip must also terminate for a control seat,
+/// whose archetype multiplier damps the attack-tax bias.
+///
+/// The prompt answer is the engine's affordability check, not a re-run of the
+/// deck-weighted judgement, so the answer cannot drift from the posture that
+/// opened the prompt however the seat's features weigh the tax.
+#[test]
+fn ai_taxed_attack_round_trip_terminates_for_a_control_seat() {
+    let (mut runner, attackers) = build_propaganda_attack_scenario(1, 4);
+
+    let mut session = phase_ai::AiSession::from_game(runner.state());
+    let mut control = phase_ai::features::DeckFeatures::default();
+    control.control.commitment = 0.9;
+    session.features.insert(P1, control);
+    let session = std::sync::Arc::new(session);
+
+    let ai_players = HashSet::from([P1]);
+    let ai_configs = HashMap::from([(P1, create_config(AiDifficulty::VeryHard, Platform::Native))]);
+    let mut rng = SmallRng::seed_from_u64(7);
+    run_ai_actions_bounded(
+        runner.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut rng,
+        &session,
+        32,
+    );
+
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. } | WaitingFor::CombatTaxPayment { .. }
+        ),
+        "the declare/pay cycle must not still be pending, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().combat.as_ref().is_some_and(|combat| combat
+            .attackers
+            .iter()
+            .any(|attacker| attacker.object_id == attackers[0])),
+        "a 3/3 into an empty board is worth {{2}} even to a control seat"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CR 509.1c + CR 509.1d: the block-side twin. The blocker completion authority
+// substitutes the same kind of tax-free witness, so the AI must plan to pay for
+// a taxed block before it declares one.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Archangel of Tithes' verified block-tax static.
+///
+/// Source: client/public/card-data.json (2026-05-10), matching the engine-side
+/// `add_archangel_of_tithes` helper in `crates/engine/tests/integration/rules/combat.rs`.
+/// Attached here to a ground attacker so the test isolates the tax building
+/// block from the Archangel's flying.
+const BLOCK_TAX_ORACLE: &str = "As long as this creature is attacking, creatures can't block \
+     unless their controller pays {1} for each of those creatures.";
+
+/// P0 attacks P1 (the AI) with a 3/3 carrying a {1} block tax. P1 has one 4/4
+/// that blocks the 3/3 profitably, plus `untapped_lands` Forests. The runner is
+/// left at P1's `DeclareBlockers` prompt.
+fn build_block_tax_scenario(untapped_lands: usize) -> (GameRunner, ObjectId, ObjectId) {
+    build_block_scenario(BlockFixture {
+        blocker_power: 4,
+        blocker_toughness: 4,
+        block_tax: true,
+        untapped_lands,
+    })
+}
+
+/// The board `build_block_scenario` lays out: P0's 3/3 attacker, optionally
+/// carrying the {1} block tax, against one P1 blocker and some Forests.
+struct BlockFixture {
+    blocker_power: i32,
+    blocker_toughness: i32,
+    block_tax: bool,
+    untapped_lands: usize,
+}
+
+fn build_block_scenario(fixture: BlockFixture) -> (GameRunner, ObjectId, ObjectId) {
+    use engine::parser::oracle_static::parse_static_line;
+    use engine::types::mana::ManaColor;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = {
+        let mut builder = scenario.add_creature(P0, "Taxing Raider", 3, 3);
+        if fixture.block_tax {
+            let block_tax =
+                parse_static_line(BLOCK_TAX_ORACLE).expect("block-tax static should parse");
+            builder.with_static_definition(block_tax);
+        }
+        builder.id()
+    };
+    let blocker = scenario
+        .add_creature(
+            P1,
+            "Stout Wall",
+            fixture.blocker_power,
+            fixture.blocker_toughness,
+        )
+        .id();
+    for _ in 0..fixture.untapped_lands {
+        scenario.add_basic_land(P1, ManaColor::Green);
+    }
+
+    let mut runner = scenario.build();
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("an untaxed attack declares directly");
+    // Priority passes after the declaration until the defender is asked to block.
+    let mut guard = 0;
+    while !matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareBlockers { .. }
+    ) {
+        runner.pass_both_players();
+        guard += 1;
+        assert!(
+            guard < 4,
+            "never reached DeclareBlockers: {:?}",
+            runner.state().waiting_for
+        );
+    }
+    (runner, attacker, blocker)
+}
+
+/// CR 509.1c + CR 509.1f: with {1} open, the AI keeps its profitable block and
+/// pays for it rather than letting the engine's tax-free witness drop it.
+#[test]
+fn ai_pays_a_block_tax_to_keep_a_profitable_block() {
+    let (mut runner, attacker, blocker) = build_block_tax_scenario(3);
+
+    let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+    let mut rng = SmallRng::seed_from_u64(7);
+    let action = choose_action(runner.state(), P1, &config, &mut rng)
+        .expect("AI must choose a blocker declaration");
+    let GameAction::DeclareBlockers { assignments } = &action else {
+        panic!("expected DeclareBlockers, got {action:?}");
+    };
+    assert_eq!(
+        assignments,
+        &vec![(blocker, attacker)],
+        "the 4/4 must keep its block on the 3/3 despite the {{1}} tax"
+    );
+
+    runner
+        .act(action)
+        .expect("the taxed block must be reducer-legal");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::CombatTaxPayment { .. }
+        ),
+        "a taxed block must open the tax prompt, got {:?}",
+        runner.state().waiting_for
+    );
+
+    let answer = choose_action(runner.state(), P1, &config, &mut rng)
+        .expect("AI must answer the block-tax prompt");
+    assert_eq!(
+        answer,
+        GameAction::PayCombatTax { accept: true },
+        "the AI chose this taxed block, so it must pay for it"
+    );
+    runner
+        .act(answer)
+        .expect("paying the block tax must succeed");
+    assert!(
+        runner
+            .state()
+            .combat
+            .as_ref()
+            .is_some_and(|combat| combat.blocker_to_attacker.contains_key(&blocker)),
+        "the paid-for blocker must actually be blocking"
+    );
+}
+
+/// CR 509.1h + CR 510.1b: a block tax is valued by the damage the block stops,
+/// not by the blocker's own power. A 0/4 wall that holds off a 3/3 is worth
+/// {1}, so the AI keeps the block and pays.
+#[test]
+fn ai_pays_a_block_tax_for_a_wall_that_stops_the_damage() {
+    let wall = |block_tax| BlockFixture {
+        blocker_power: 0,
+        blocker_toughness: 4,
+        block_tax,
+        untapped_lands: 3,
+    };
+    let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+
+    // Control leg: untaxed, the AI blocks the 3/3 with its 0/4 wall.
+    let (control, attacker, blocker) = build_block_scenario(wall(false));
+    let mut rng = SmallRng::seed_from_u64(7);
+    let control_action = choose_action(control.state(), P1, &config, &mut rng)
+        .expect("AI must choose a blocker declaration");
+    assert_eq!(
+        control_action,
+        GameAction::DeclareBlockers {
+            assignments: vec![(blocker, attacker)]
+        },
+        "premise: untaxed, the wall blocks the 3/3"
+    );
+
+    let (runner, attacker, blocker) = build_block_scenario(wall(true));
+    let mut rng = SmallRng::seed_from_u64(7);
+    let action = choose_action(runner.state(), P1, &config, &mut rng)
+        .expect("AI must choose a blocker declaration");
+    assert_eq!(
+        action,
+        GameAction::DeclareBlockers {
+            assignments: vec![(blocker, attacker)]
+        },
+        "three damage stopped is worth {{1}}, so the wall must keep its block"
+    );
+}
+
+/// CR 509.1f: with no mana open the block tax is unaffordable, so the AI must
+/// fall back to the tax-free declaration without opening a prompt it cannot pay.
+#[test]
+fn ai_drops_a_block_it_cannot_pay_the_tax_for() {
+    let (mut runner, attacker, blocker) = build_block_tax_scenario(0);
+    assert!(
+        !engine::game::combat::block_tax_is_affordable(runner.state(), P1, &[(blocker, attacker)]),
+        "premise: with no mana open the {{1}} block tax is unaffordable"
+    );
+
+    let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+    let mut rng = SmallRng::seed_from_u64(7);
+    let action = choose_action(runner.state(), P1, &config, &mut rng)
+        .expect("AI must choose a blocker declaration");
+    let GameAction::DeclareBlockers { assignments } = &action else {
+        panic!("expected DeclareBlockers, got {action:?}");
+    };
+    assert!(
+        assignments.is_empty(),
+        "an unaffordable block tax leaves only the tax-free empty declaration, got {assignments:?}"
+    );
+
+    runner
+        .act(action)
+        .expect("the empty block declaration is legal");
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::CombatTaxPayment { .. }
+        ),
+        "an unaffordable block must never open a tax prompt, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 302.6 + CR 508.1j: a tapped, summoning-sick source with a tapless
+/// sacrifice ability remains available after the two Forests pay Propaganda.
+/// Counting only tap-mana sources incorrectly applies the tap-out penalty and
+/// suppresses this otherwise worthwhile two-power attack.
+#[test]
+fn ai_tax_decision_counts_a_tapped_sick_tapless_mana_source() {
+    let mut scenario = GameScenario::new();
+    scenario.add_enchantment_from_oracle(P0, "Propaganda", PROPAGANDA_ORACLE);
+    let attacker = scenario.add_creature(P1, "Bear", 2, 2).id();
+    let source = scenario
+        .add_creature_from_oracle(
+            P1,
+            "Tapless Mana Source",
+            0,
+            1,
+            "Sacrifice this creature: Add one mana of any color.",
+        )
+        .id();
+    for _ in 0..2 {
+        scenario.add_basic_land(P1, ManaColor::Green);
+    }
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    let object = state.objects.get_mut(&source).unwrap();
+    object.tapped = true;
+    object.summoning_sick = true;
+    state.active_player = P1;
+    state.priority_player = P1;
+    state.phase = Phase::DeclareAttackers;
+    state.turn_number = 2;
+    state.waiting_for = WaitingFor::DeclareAttackers {
+        player: P1,
+        valid_attacker_ids: vec![attacker],
+        valid_attack_targets: vec![AttackTarget::Player(P0)],
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+    assert!(engine::game::combat::attack_tax_is_affordable(
+        runner.state(),
+        &[(attacker, AttackTarget::Player(P0))],
+    ));
+    let (action, declared) = ai_declared_attackers(&runner);
+    assert_eq!(declared, vec![attacker]);
+    runner.act(action).expect("the taxed attack must be legal");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CombatTaxPayment { .. }
+    ));
+    let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+    let mut rng = SmallRng::seed_from_u64(7);
+    let answer = choose_action(runner.state(), P1, &config, &mut rng)
+        .expect("the AI must answer its tax prompt");
+    assert_eq!(answer, GameAction::PayCombatTax { accept: true });
+    runner.act(answer).expect("the tax must be paid");
+    assert!(runner.state().combat.as_ref().is_some_and(|combat| combat
+        .attackers
+        .iter()
+        .any(|entry| entry.object_id == attacker)));
+    assert!(
+        !engine::game::mana_sources::activatable_mana_source_selections(runner.state(), P1)
+            .is_empty(),
+        "another legal mana source remains after paying the tax"
+    );
+}
+
+/// Both seats AI over the one shared Dandan pile: each seat acts and draws from
+/// it, and the session carries analysis for both seats.
+#[test]
+fn dandan_shared_pile_ai_pair_both_act_and_draw() {
+    use engine::game::deck_loading::{
+        load_deck_into_state, DeckEntry, DeckPayload, PlayerDeckPayload,
+    };
+    use engine::types::card::CardFace;
+    use engine::types::card_type::CardType;
+    use engine::types::format::FormatConfig;
+
+    let forests = || {
+        vec![DeckEntry {
+            card: CardFace {
+                name: "Forest".to_string(),
+                card_type: CardType {
+                    core_types: vec![CoreType::Land],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            count: 60,
+        }]
+    };
+    let mut scenario = GameScenario::new_with_format(FormatConfig::dandan(), 2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut runner = scenario.build();
+    load_deck_into_state(
+        runner.state_mut(),
+        &DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: forests(),
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: forests(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let state = runner.state();
+    assert_eq!(state.deck_pools.len(), 1, "reach: one pool for the pile");
+    assert!(state.players[1].library.is_empty());
+    assert_eq!(state.library_of(P1).len(), 60);
+    assert_eq!(state.library_of(P0), state.library_of(P1));
+
+    let session = phase_ai::session::AiSession::arc_from_game(state);
+    assert!(
+        session.features.contains_key(&P0) && session.features.contains_key(&P1),
+        "reach: the session analyses both seats"
+    );
+    let start_turn = state.turn_number;
+    let pile_before = state.library_of(P0).len();
+    let mut actor = state.waiting_for.acting_players();
+
+    let ai_players = HashSet::from([P0, P1]);
+    let ai_configs = HashMap::from([
+        (P0, create_config(AiDifficulty::VeryHard, Platform::Native)),
+        (P1, create_config(AiDifficulty::VeryHard, Platform::Native)),
+    ]);
+    let mut ai_rng = SmallRng::seed_from_u64(42);
+    let run = run_ai_actions_bounded(
+        runner.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &session,
+        400,
+    );
+
+    let mut acted = HashSet::new();
+    let mut drew: HashMap<PlayerId, usize> = HashMap::new();
+    for result in &run.results {
+        acted.extend(actor.iter().copied());
+        actor = result.state.waiting_for.acting_players();
+        for event in &result.events {
+            if let GameEvent::CardDrawn { player_id, .. } = event {
+                *drew.entry(*player_id).or_default() += 1;
+            }
+        }
+    }
+    let state = runner.state();
+    assert!(state.turn_number >= start_turn + 3, "the game advanced");
+    assert!(
+        acted.contains(&P0) && acted.contains(&P1),
+        "both seats acted: {acted:?}"
+    );
+    assert!(
+        drew.get(&P0).copied().unwrap_or(0) > 0 && drew.get(&P1).copied().unwrap_or(0) > 0,
+        "each seat drew from the pile: {drew:?}"
+    );
+    assert_eq!(
+        state.library_of(P0).len(),
+        pile_before - drew.values().sum::<usize>(),
+        "every draw came out of the one pile"
     );
 }

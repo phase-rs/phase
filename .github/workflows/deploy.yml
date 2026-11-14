@@ -7,9 +7,20 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# A deploy runs ~40 minutes; `main` merges more often than that. Cancelling the
+# run in flight therefore starved this workflow completely — every run was
+# superseded before it could publish, so the newest commit never shipped either.
+# On 2026-09-05 that left preview serving five-hour-old content while the
+# Actions tab showed a healthy stream of runs.
+#
+# Queueing instead is bounded, not unbounded: a concurrency group holds at most
+# ONE pending run, because a newly queued run cancels whatever was already
+# pending. Worst case is therefore the run in flight plus one more (~80 min),
+# and the pending slot always carries the newest commit at the moment it starts.
+# We trade "sometimes one deploy behind" for "always makes progress".
 concurrency:
   group: deploy-pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -68,8 +79,7 @@ jobs:
   # ── Preview inputs ─────────────────────────────────────────────────────────
   # Generates the immutable card-data/draft-pool pair and derives the engine
   # fingerprint shared by the preview server and frontend. The publication work
-  # follows in `card-data`, so native preview builds can start immediately after
-  # these inputs are ready rather than waiting on ancillary data generation.
+  # follows in `card-data`, which both Pages and the preview server need.
   preview-inputs:
     name: Prepare preview inputs
     needs: [deploy-gate]
@@ -99,17 +109,17 @@ jobs:
       draft_pools_hash16: ${{ steps.card-data-hash.outputs.draft_pools_hash16 }}
       engine_fingerprint: ${{ steps.engine-fingerprint.outputs.fingerprint }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           cache-shared-key: rust-tool
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Derive MTGJSON cache key
         id: mtgjson-key
@@ -142,7 +152,7 @@ jobs:
         # missing); a restore-keys fallback would pin the file-existence-gated
         # fetches to stale data forever.
         id: mtgjson-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: data/mtgjson
           key: mtgjson-full-${{ steps.mtgjson-key.outputs.suffix }}
@@ -211,7 +221,7 @@ jobs:
         # "the data is whole" gate. cache-hit gating skips a redundant save,
         # which would otherwise just warn that the key already exists.
         if: ${{ steps.mtgjson-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: data/mtgjson
           key: mtgjson-full-${{ steps.mtgjson-key.outputs.suffix }}
@@ -230,7 +240,7 @@ jobs:
         # NO restore-keys: every input to the output is in the key, so an
         # inexact hit is by construction a stale pool.
         id: draft-pools-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: client/public/draft-pools.json
           key: mtgjson-draft-pools-${{ steps.mtgjson-key.outputs.draft_pools_suffix }}
@@ -267,7 +277,7 @@ jobs:
         # file-existence-gated, so the next run fetches only the sets that are
         # still missing and regenerates a complete pool.
         if: ${{ steps.draft-pools-cache.outputs.cache-hit != 'true' && steps.draft-sets.outputs.failed == '0' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: client/public/draft-pools.json
           key: mtgjson-draft-pools-${{ steps.mtgjson-key.outputs.draft_pools_suffix }}
@@ -313,7 +323,7 @@ jobs:
         # The publication job runs on a fresh runner. Transfer only its
         # generated inputs so the preview-server matrix can overlap Scryfall,
         # audit, compression, and R2 work instead of re-generating card data.
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: preview-inputs
           path: |
@@ -332,29 +342,38 @@ jobs:
 
   # ── Ancillary data + R2 publication ───────────────────────────────────────
   # The preview inputs above are already immutable and fingerprinted. This job
-  # publishes the remaining frontend data while the signed preview-server
-  # matrix builds. Pages still depends on this job, so no browser sees a shell
-  # pointing at data that has not reached R2.
+  # publishes the remaining frontend data, including the content-addressed pair
+  # the preview manifest names. Pages and the preview server both depend on it,
+  # so nothing points at data that has not reached R2.
   card-data:
     name: Publish card data & R2
     needs: [deploy-gate, preview-inputs]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Data files built from inputs outside the repository. combo-table.json
+      # comes from a pinned Commander Spellbook snapshot that CI does not hold, so
+      # a missing one is warned and skipped instead of failing the job. Keep this
+      # list aligned with phase-server's best-effort data files.
+      # draft-pools.json is still required here because this job publishes its
+      # content-addressed copy (built by preview-inputs) before the mutable
+      # manifest loop.
+      BEST_EFFORT_DATA_FILES: "combo-table.json"
     permissions:
       actions: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           cache-shared-key: rust-tool
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Set cache keys
         id: cache-keys
@@ -365,13 +384,13 @@ jobs:
         # Exact-key-only: the generators skip downloads for existing files, so
         # a stale restore-key hit would pin the staging payload to old data.
         id: scryfall-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: data/scryfall
           key: scryfall-${{ steps.cache-keys.outputs.day }}
 
       - name: Download preview inputs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: preview-inputs
 
@@ -404,17 +423,18 @@ jobs:
         #
         # Same `mtgjson-` prefix as the draft-pools pair (so /clear-caches
         # mtgjson sweeps it) and the same published-data suffix. The generator's
-        # script hash joins the key because LOCALE_MAP lives in the script: a
-        # locale added there must rebuild, and the data-version suffix alone
-        # cannot see a source change.
+        # The v2 schema name prevents an old ID-only cache entry from reaching a
+        # client that expects exact face URLs. The Scryfall bulk cache rolls
+        # daily, so its day belongs in this output cache key too: exact face
+        # URLs are an input to this map, not merely a validation detail.
         #
         # NO restore-keys: every input to the output is in the key, so an
         # inexact hit is by construction a stale map.
         id: locale-images-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: client/public/scryfall-images.*.json
-          key: mtgjson-locale-images-${{ steps.mtgjson-key.outputs.suffix }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh') }}
+          path: client/public/scryfall-images.v2.*.json
+          key: mtgjson-locale-images-v2-${{ steps.mtgjson-key.outputs.suffix }}-${{ steps.cache-keys.outputs.day }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh', 'scripts/lib/localized-image-fallback.py') }}
 
       # Separate from the Scryfall step: this reads MTGJSON set files, not the
       # Scryfall bulk exports, so it is not covered by the data/scryfall cache.
@@ -431,17 +451,17 @@ jobs:
         # Banked the moment the maps exist, so the AllSetFiles download is never
         # paid twice for the same inputs even if a later step fails.
         if: ${{ steps.locale-images-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: client/public/scryfall-images.*.json
-          key: mtgjson-locale-images-${{ steps.mtgjson-key.outputs.suffix }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh') }}
+          path: client/public/scryfall-images.v2.*.json
+          key: mtgjson-locale-images-v2-${{ steps.mtgjson-key.outputs.suffix }}-${{ steps.cache-keys.outputs.day }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh', 'scripts/lib/localized-image-fallback.py') }}
 
       - name: Save Scryfall bulk data
         # data/scryfall is complete once the four generators have run. Banking
         # it here keeps a later failure from re-hitting the Scryfall API on the
         # next run — the throttle flakiness this cache exists to avoid.
         if: ${{ steps.scryfall-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: data/scryfall
           key: scryfall-${{ steps.cache-keys.outputs.day }}
@@ -503,8 +523,18 @@ jobs:
           npx wrangler r2 object put "phase-rs-data/staging/$DRAFT_POOLS_FILENAME" --file "$BRDIR/draft-pools.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
 
           # Mutable shared JSONs. Loop over the manifest.
+          is_best_effort() {
+            case " $BEST_EFFORT_DATA_FILES " in
+              *" $1 "*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
           while IFS= read -r f; do
             if [ ! -f "client/public/$f" ]; then
+              if is_best_effort "$f"; then
+                echo "::warning::Best-effort data file client/public/$f was not generated; skipping upload"
+                continue
+              fi
               echo "::error::Expected data file client/public/$f was not generated"
               exit 1
             fi
@@ -522,13 +552,20 @@ jobs:
       - name: Verify R2 uploads landed
         # Wrangler v4 silently writes to a local emulator unless --remote is
         # passed. Fail the deploy if any file the frontend will fetch is not
-        # actually reachable. Reads from data-files.json — same source as upload.
+        # actually reachable, except a BEST_EFFORT_DATA_FILES entry this run did
+        # not build. Reads from data-files.json — same source as upload.
         env:
           CARD_DATA_FILENAME: ${{ needs.preview-inputs.outputs.card_data_filename }}
           DRAFT_POOLS_FILENAME: draft-pools-${{ needs.preview-inputs.outputs.draft_pools_hash16 }}.json
         run: |
           BASE="https://data.phase-rs.dev/staging"
           fail=0
+          is_best_effort() {
+            case " $BEST_EFFORT_DATA_FILES " in
+              *" $1 "*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
           check() {
             local f="$1"
             local status
@@ -547,7 +584,13 @@ jobs:
           }
           check "$CARD_DATA_FILENAME"
           check "$DRAFT_POOLS_FILENAME"
-          while IFS= read -r f; do check "$f"; done < <(jq -r '.[]' data-files.json)
+          while IFS= read -r f; do
+            if is_best_effort "$f" && [ ! -f "client/public/$f" ]; then
+              echo "::warning::Best-effort data file client/public/$f was not uploaded in this run; skipping verification"
+              continue
+            fi
+            check "$f"
+          done < <(jq -r '.[]' data-files.json)
           # Prove the brotli round-trip end-to-end on one small file: --compressed
           # requests + decodes br, jq confirms it decoded to valid JSON. The 200
           # checks above pass regardless of encoding; this is the real proof.
@@ -565,11 +608,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           targets: wasm32-unknown-unknown
           cache-shared-key: rust-wasm
@@ -580,7 +623,7 @@ jobs:
           # authoritative.
           rustflags: ""
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
           tool: wasm-bindgen-cli@0.2.121
 
@@ -590,28 +633,30 @@ jobs:
       # build-wasm.sh's assert_wasm_stack guard parses the shipped wasm's memory
       # section with node; declare the dependency explicitly (release.yml already
       # sets up node for its build-wasm job).
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Build WASM
         run: ./scripts/build-wasm.sh release
 
       - name: Upload WASM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm
           path: client/src/wasm/*
           if-no-files-found: error
           retention-days: 1
 
-  # ── Signed preview server (parallel with data publication) ──────────────────
+  # ── Signed preview server (after data publication) ─────────────────────────
   # The shell uses ENGINE_FINGERPRINT to fetch this exact binary. Keep the
   # server publication in the same workflow graph so Pages can never publish a
   # fingerprint whose signed server artifact is missing from the manifest.
+  # It needs `card-data`, which uploads the files its manifest entry names, so
+  # the manifest can never advertise data that is not on R2.
   preview-server:
     name: Publish Preview Server
-    needs: [deploy-gate, preview-inputs]
+    needs: [deploy-gate, preview-inputs, card-data]
     uses: ./.github/workflows/preview-server.yml
     with:
       fingerprint: ${{ needs.preview-inputs.outputs.engine_fingerprint }}
@@ -639,11 +684,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           targets: wasm32-unknown-unknown
           cache-shared-key: rust-wasm
@@ -652,7 +697,7 @@ jobs:
           # RUSTFLAGS would override them.
           rustflags: ""
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
           # Must match the pinned wasm-bindgen crate version in
           # lobby-worker/broker-wasm/Cargo.toml (schema versions must be exact).
@@ -662,13 +707,17 @@ jobs:
         uses: ./.github/actions/binaryen
 
       - name: Deploy preview lobby Worker
-        uses: cloudflare/wrangler-action@v4
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           wranglerVersion: "4.113.0"
           workingDirectory: lobby-worker
           command: deploy --env preview
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
 
       - name: Assert the preview lobby advertises this commit's protocol versions
         # Guards the exact regression this job exists to prevent: a preview
@@ -685,10 +734,9 @@ jobs:
         # allowed to drift from the tree.
         run: |
           set -euo pipefail
-          expected=$(grep -oE 'pub const PROTOCOL_VERSION: u32 = [0-9]+' \
-            crates/lobby-broker/src/protocol.rs | grep -oE '[0-9]+$')
-          expected_lobby=$(grep -oE 'pub const LOBBY_PROTOCOL_VERSION: u32 = [0-9]+' \
-            crates/lobby-broker/src/protocol.rs | grep -oE '[0-9]+$')
+          versions=$(node scripts/protocol-versions.mjs show --json)
+          expected=$(jq -er '.full' <<< "$versions")
+          expected_lobby=$(jq -er '.lobby' <<< "$versions")
           if [ -z "$expected" ] || [ -z "$expected_lobby" ]; then
             echo "::error::Could not read protocol constants from the tree."
             exit 1
@@ -722,24 +770,26 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
+    outputs:
+      pages_artifact_id: ${{ steps.upload-pages.outputs.artifact_id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
       - name: Download WASM artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: wasm
           path: client/src/wasm
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           version: 9
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
           cache-dependency-path: client/pnpm-lock.yaml
 
@@ -854,35 +904,55 @@ jobs:
         run: cp client/dist/index.html client/dist/404.html
 
       - name: Configure Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        id: upload-pages
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: client/dist
 
       - name: Deploy to GitHub Pages
         id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
 
-  # ── Server binary compile (parallel with card-data) ─────────────────────────
+  # ── Preview web image (needs the deployed Pages bundle) ────────────────────
+  # Downstream of build-pages: no image for a failed Pages deploy, and an image
+  # failure cannot hold Pages back.
+  preview-web-image:
+    name: Publish Preview Web Image
+    needs: [build-pages]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/preview-web.yml
+    with:
+      deploy_sha: ${{ github.event.workflow_run.head_sha || github.sha }}
+      pages_artifact_id: ${{ needs.build-pages.outputs.pages_artifact_id }}
+
+  # ── Server binary compile (after preview inputs) ────────────────────────────
   # phase-server is compiled NATIVELY as a static musl binary, then uploaded as
-  # an artifact for push-server-image. The compile needs nothing the data
-  # pipeline produces, so it deliberately has no `needs:` and overlaps card-data's
-  # ~10min run instead of serializing behind it.
+  # an artifact for push-server-image. It embeds the preview identity that
+  # preview-server.yml's native builds carry (PHASE_CHANNEL=preview plus the
+  # engine fingerprint), so the image fetches its data into an empty
+  # PHASE_DATA_DIR. The fingerprint comes from preview-inputs; the compile then
+  # overlaps card-data and the preview-server builds.
   #
   # NOTE: this is a cold ~10min compile every run. Swatinem's rust-cache (via
   # setup-rust-toolchain) caches registry/git deps but prunes the workspace
   # crates' own artifacts, so the optimized server-release build of the engine
-  # crate recompiles each time. The win here is parallelism, not incrementality;
-  # warming the workspace compile would need sccache or similar.
+  # crate recompiles each time; warming the workspace compile would need sccache
+  # or similar.
   build-server-binary:
     name: Build server binary (linux ${{ matrix.arch }})
-    needs: [deploy-gate]
+    needs: [deploy-gate, preview-inputs]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       contents: read
+    env:
+      PHASE_CHANNEL: preview
+      PHASE_ENGINE_FINGERPRINT: ${{ needs.preview-inputs.outputs.engine_fingerprint }}
     strategy:
       fail-fast: false
       matrix:
@@ -895,11 +965,11 @@ jobs:
             triple: aarch64-unknown-linux-musl
             cargo_cmd: zigbuild
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           cache-shared-key: rust-server-${{ matrix.arch }}
 
@@ -913,7 +983,7 @@ jobs:
         # Python is PEP 668 externally-managed since GitHub reverted its
         # pip workaround (actions/runner-images#10897, 2025-05-09). Same
         # flag the Dockerfile already passes for this identical install.
-        run: pip install --break-system-packages cargo-zigbuild==0.23.0 ziglang==0.16.0
+        run: pip install --break-system-packages --require-hashes -r scripts/requirements-zigbuild.txt
 
       - name: Add musl target
         # The musl target must be added explicitly with `rustup target add`, not
@@ -937,40 +1007,42 @@ jobs:
           cp target/${{ matrix.triple }}/server-release/phase-server ./phase-server
 
       - name: Upload server binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: server-binary-${{ matrix.arch }}
           path: phase-server
           if-no-files-found: error
           retention-days: 1
 
-  # ── Server image push (needs binary) ────────────────────────────────────────
+  # ── Server image push (needs binary + published preview server + card data) ─
   # Pure packaging step: pulls the prebuilt musl binary, then BINARY_STAGE=prebuilt
   # makes Docker just apt + COPY (no compile).
   #
-  # NOTE: this binary is compiled WITHOUT a PHASE_CHANNEL identity (it builds in
-  # parallel with card-data, so the fingerprint cannot exist yet), which means
-  # the image cannot self-bootstrap its data: booting it against an empty
-  # PHASE_DATA_DIR is a clear fatal error. Any consumer must either
-  # pre-provision the data volume or set PHASE_DATA_MANIFEST_URL to a signed
-  # release-shaped data manifest. No in-repo deployment currently runs this
-  # image (beebs deploy-server is disabled); see GH #6287 for publishing a
-  # signed staging data manifest before re-enabling one.
+  # The binary finds its data under its fingerprint in the signed
+  # preview-server.json, so the push waits for preview-server: an image is pushed
+  # only once its fingerprint is listed, and a failed publication leaves the
+  # previous image in place, as it leaves the previous Pages deploy. The push also
+  # waits for card-data, which uploads the content-addressed files the entry's
+  # data URLs name. The manifest keeps only the current and previous
+  # fingerprints, and publications that push no image (a failed build or push
+  # here, a manual preview-server dispatch) still rotate it, so any image,
+  # `:preview` included, can outlive its entry and then needs pre-provisioned
+  # data or PHASE_DATA_MANIFEST_URL.
   push-server-image:
     name: Build & push server image
-    needs: [build-server-binary]
+    needs: [build-server-binary, preview-server, card-data]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
       - name: Download server binary artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: server-binary-*
           path: prebuilt
@@ -989,7 +1061,7 @@ jobs:
         run: echo "short_sha=${DEPLOY_SHA::12}" >> "$GITHUB_OUTPUT"
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -997,16 +1069,16 @@ jobs:
 
       # QEMU only runs the runtime stage's apt-get for the arm64 leg; the
       # binaries are prebuilt, so nothing heavy is emulated.
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
         with:
           platforms: arm64
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Build and push preview image
         # BINARY_STAGE=prebuilt makes Docker copy the prebuilt musl binaries
         # instead of compiling in-container — the build is just apt + COPY.
         # One manifest list covers both platforms under the same tag/digest.
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64,linux/arm64

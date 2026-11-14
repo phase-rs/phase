@@ -190,6 +190,7 @@ fn r2_ability_cost_sacrifice_outlet_redirects_to_exile() {
         .act(GameAction::ActivateAbility {
             source_id: outlet,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Goblin Bombardment must succeed");
 

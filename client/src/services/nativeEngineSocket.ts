@@ -1,17 +1,27 @@
+import { Channel, invoke } from "@tauri-apps/api/core";
+
 import { isDesktopTauri } from "./platform";
+import { normalizeLanEndpoint } from "./lan";
 
 type BridgeEvent =
   | { type: "message"; text: string }
+  | { type: "fragment"; text: string }
   | { type: "closed"; code: number; reason: string }
   | { type: "error"; detail: string };
 
+// Declares that this client reassembles `fragment` events; a shell splits texts only when told.
+type BridgeTextDelivery = "fragments";
+const TEXT_DELIVERY: BridgeTextDelivery = "fragments";
+
 type CloseListener = (event: CloseEvent) => void;
+type MessageListener = (event: MessageEvent<string>) => void;
 
 /**
  * WebSocket-shaped client for the shell-owned native-engine bridge.
  *
  * The bridge accepts and forwards JSON text frames only; it intentionally has
- * no URL, binary-frame, or feature-detection surface for remote content.
+ * no binary-frame negotiation surface. A typed LAN destination selects the
+ * independent desktop LAN registry; no destination preserves the solo bridge.
  */
 export class NativeEngineSocket {
   static readonly CONNECTING = 0;
@@ -30,11 +40,14 @@ export class NativeEngineSocket {
   onclose: ((event: CloseEvent) => void) | null = null;
 
   private readonly closeListeners = new Map<CloseListener, boolean>();
+  private readonly messageListeners = new Map<MessageListener, boolean>();
   private readonly pendingEvents: BridgeEvent[] = [];
+  // The shell splits one received message into fragments, so `pendingText` never exceeds the bridge's `MAX_BRIDGE_MESSAGE_BYTES`.
+  private pendingText = "";
   private bridgeId: number | null = null;
   private _readyState = NativeEngineSocket.CONNECTING;
 
-  constructor() {
+  constructor(private readonly destination?: { type: "lan"; url: string; origin: string }) {
     // Match the browser WebSocket lifecycle: construction returns while the
     // socket is CONNECTING, giving callers a chance to install terminal-event
     // handlers before even a platform-boundary failure can be dispatched.
@@ -49,22 +62,34 @@ export class NativeEngineSocket {
     type: "close",
     listener: CloseListener,
     options?: AddEventListenerOptions | boolean,
+  ): void;
+  addEventListener(
+    type: "message",
+    listener: MessageListener,
+    options?: AddEventListenerOptions | boolean,
+  ): void;
+  addEventListener(
+    type: "close" | "message",
+    listener: CloseListener | MessageListener,
+    options?: AddEventListenerOptions | boolean,
   ): void {
-    if (type !== "close") return;
     const once = typeof options === "object" && options.once === true;
-    this.closeListeners.set(listener, once);
+    if (type === "close") this.closeListeners.set(listener as CloseListener, once);
+    else this.messageListeners.set(listener as MessageListener, once);
   }
 
-  removeEventListener(type: "close", listener: CloseListener): void {
-    if (type !== "close") return;
-    this.closeListeners.delete(listener);
+  removeEventListener(type: "close", listener: CloseListener): void;
+  removeEventListener(type: "message", listener: MessageListener): void;
+  removeEventListener(type: "close" | "message", listener: CloseListener | MessageListener): void {
+    if (type === "close") this.closeListeners.delete(listener as CloseListener);
+    else this.messageListeners.delete(listener as MessageListener);
   }
 
   send(text: string): void {
     if (this.readyState !== NativeEngineSocket.OPEN || this.bridgeId === null) {
       throw new DOMException("WebSocket is not open.", "InvalidStateError");
     }
-    void this.invokeDesktop("native_engine_bridge_send", { id: this.bridgeId, text }).catch(
+    void this.invokeDesktop(this.destination ? "lan_bridge_send" : "native_engine_bridge_send", { id: this.bridgeId, text }).catch(
       (error) => {
         this.handleBridgeFailure(error);
       },
@@ -90,13 +115,17 @@ export class NativeEngineSocket {
       if (!isDesktopTauri()) {
         throw new Error("Native engine bridge is available only in the desktop shell.");
       }
-      const { Channel } = await import("@tauri-apps/api/core");
+      const lanUrl = this.destination ? normalizeLanEndpoint(this.destination.url) : null;
+      if (this.destination && !lanUrl) throw new Error("Invalid LAN endpoint");
       const channel = new Channel<BridgeEvent>((event) => {
         this.handleBridgeEvent(event);
       });
-      const bridgeId = await this.invokeDesktop<number>("connect_native_engine", {
-        onEvent: channel,
-      });
+      const bridgeId = await this.invokeDesktop<number>(
+        this.destination ? "connect_lan_server" : "connect_native_engine",
+        this.destination
+          ? { url: lanUrl, origin: this.destination.origin, onEvent: channel, textDelivery: TEXT_DELIVERY }
+          : { onEvent: channel, textDelivery: TEXT_DELIVERY },
+      );
       this.bridgeId = bridgeId;
       if (this.readyState === NativeEngineSocket.CLOSING) {
         this.closeBridge(bridgeId);
@@ -116,7 +145,7 @@ export class NativeEngineSocket {
   }
 
   private closeBridge(bridgeId: number): void {
-    void this.invokeDesktop("native_engine_bridge_close", { id: bridgeId }).catch((error) => {
+    void this.invokeDesktop(this.destination ? "lan_bridge_close" : "native_engine_bridge_close", { id: bridgeId }).catch((error) => {
       this.handleBridgeFailure(error);
     });
   }
@@ -128,7 +157,6 @@ export class NativeEngineSocket {
     if (!isDesktopTauri()) {
       throw new Error("Native engine bridge is available only in the desktop shell.");
     }
-    const { invoke } = await import("@tauri-apps/api/core");
     return invoke<T>(command, args);
   }
 
@@ -142,11 +170,22 @@ export class NativeEngineSocket {
 
   private dispatchBridgeEvent(event: BridgeEvent): void {
     switch (event.type) {
-      case "message":
+      case "fragment":
+        this.pendingText += event.text;
+        break;
+      case "message": {
+        const text = this.pendingText + event.text;
+        this.pendingText = "";
         if (this.readyState === NativeEngineSocket.OPEN) {
-          this.onmessage?.(new MessageEvent("message", { data: event.text }));
+          const message = new MessageEvent<string>("message", { data: text });
+          this.onmessage?.(message);
+          for (const [listener, once] of this.messageListeners) {
+            listener(message);
+            if (once) this.messageListeners.delete(listener);
+          }
         }
         break;
+      }
       case "error":
         if (this.readyState !== NativeEngineSocket.CLOSED) {
           this.onerror?.(new Event("error"));
@@ -162,8 +201,14 @@ export class NativeEngineSocket {
     if (this.readyState === NativeEngineSocket.CLOSED) {
       return;
     }
-    this.onerror?.(new Event("error"));
-    this.finishClose(1006, "Native engine bridge failed");
+    // The close is what `withReconnect` recovers from, so it must survive a
+    // throwing error handler: `ws-adapter`'s `emit()` does not catch. Same
+    // guard `gzipEnvelopeSocket` applies on this seam.
+    try {
+      this.onerror?.(new Event("error"));
+    } finally {
+      this.finishClose(1006, "Native engine bridge failed");
+    }
   }
 
   private finishClose(code: number, reason: string): void {
@@ -176,11 +221,16 @@ export class NativeEngineSocket {
       reason,
       wasClean: code === 1000,
     });
-    this.onclose?.(event);
-    for (const [listener, once] of this.closeListeners) {
-      listener(event);
-      if (once) {
-        this.closeListeners.delete(listener);
+    // The loop is cleanup and must not be skipped by a throwing `onclose`:
+    // `withReconnect` recovers through a close LISTENER, not through `onclose`.
+    try {
+      this.onclose?.(event);
+    } finally {
+      for (const [listener, once] of this.closeListeners) {
+        listener(event);
+        if (once) {
+          this.closeListeners.delete(listener);
+        }
       }
     }
   }

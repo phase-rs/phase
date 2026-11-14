@@ -116,7 +116,7 @@ fi
 # promotion both discards newer data and repeatedly wakes Tilt. A missing
 # vintage is intentionally permissive for rollout bootstrap; later writes use
 # the monotonic comparison below.
-MTGJSON_VINTAGE_FILE="crates/engine/data/mtgjson-vintage"
+MTGJSON_VINTAGE_FILE="crates/phase-ast/data/mtgjson-vintage"
 INPUT_DATE="$(jq -r '.meta.date' "$MTGJSON_META_FILE" | tr -d '\r')"
 # Meta.json is an external download; jq maps an absent .meta.date to the
 # literal string "null", which sorts ABOVE every ISO date — it would pass the
@@ -232,15 +232,15 @@ TOOL_BINS=(--bin tokens-gen --bin oracle-gen --bin coverage-report --bin card-da
 TOOL_BIN="${CARGO_TARGET_DIR:-target}/tool"
 cargo build --profile tool --features "$FEATURES" "${TOOL_BINS[@]}"
 
-# The token catalog is baked into the engine lib at compile time (build.rs
+# The token catalog is baked into the phase-ast lib at compile time (its build.rs
 # converts data/known-tokens.toml to JSON in OUT_DIR; token_presets.rs embeds
 # it via include_bytes!). Regenerate it, then re-embed it only if it actually
 # changed.
 echo "Generating token preset catalog from MTGJSON set files..."
-TOKENS_FILE="crates/engine/data/known-tokens.toml"
+TOKENS_FILE="crates/phase-ast/data/known-tokens.toml"
 # Temp beside the target so the replace below is an atomic same-filesystem
 # rename (Tilt's card-data resource may run this script concurrently). The
-# `.tmp.` infix is load-bearing: crates/engine/data/ is watched as part of the
+# `.tmp.` infix is load-bearing: crates/phase-ast/data/ is watched as part of the
 # Tiltfile's ENGINE_SRC, and only names matching its TMP_IGNORE (`**/*.tmp.*`)
 # are exempt from retriggering. Without it, creating this file re-triggers the
 # very resource that created it — an unbreakable card-data rebuild loop that
@@ -250,7 +250,9 @@ TOKENS_TMP="$(mktemp "${TOKENS_FILE}.tmp.XXXXXX")"
 # promote below would otherwise strand the staging file in the watched data dir,
 # where nothing else would ever collect it.
 track_tmp "$TOKENS_TMP"
-"$TOOL_BIN/tokens-gen" --input "$DATA_DIR/mtgjson/sets" --output "$TOKENS_TMP"
+"$TOOL_BIN/tokens-gen" --input "$DATA_DIR/mtgjson/sets" \
+  --overlay crates/phase-ast/data/known-tokens.overlay.toml \
+  --output "$TOKENS_TMP"
 # tokens-gen output is deterministic, so only overwrite when content actually
 # changed — an unconditional copy bumps the file's mtime and forces a full
 # (40-65s) engine recompile via build.rs's rerun-if-changed for nothing.
@@ -258,13 +260,21 @@ if cmp -s "$TOKENS_TMP" "$TOKENS_FILE"; then
   rm -f "$TOKENS_TMP"
   untrack_tmp "$TOKENS_TMP"
 elif [ "$ALLOW_TRACKED_WRITES" = "1" ]; then
+  # Count both sides before promoting: after promote_tmp the staged file is gone.
+  # `|| true` because the script runs under `set -euo pipefail` and `grep -c`
+  # exits 1 on a zero count and 2 (printing nothing) when the file is absent;
+  # either would otherwise abort the run or print an empty count.
+  TOKENS_BEFORE="$(grep -c '^\[\[token\]\]' "$TOKENS_FILE" 2>/dev/null || true)"
+  TOKENS_BEFORE="${TOKENS_BEFORE:-0}"
+  TOKENS_AFTER="$(grep -c '^\[\[token\]\]' "$TOKENS_TMP" 2>/dev/null || true)"
+  TOKENS_AFTER="${TOKENS_AFTER:-0}"
   # promote_tmp, not a bare `mv`: it deregisters the path so the EXIT trap
   # cannot delete the file it was just promoted onto.
   promote_tmp "$TOKENS_TMP" "$TOKENS_FILE"
   # The catalog changed, so the generator bins built above embed the stale
   # copy. Rebuild them (same shape) to re-bake the new catalog — this is the
   # one case where an engine recompile is genuinely required.
-  echo "Token catalog changed; rebuilding generators to embed it..."
+  echo "Token catalog changed: $TOKENS_BEFORE -> $TOKENS_AFTER presets; rebuilding generators to embed it..."
   cargo build --profile tool --features "$FEATURES" "${TOOL_BINS[@]}"
 else
   echo "WARNING: refusing to promote $TOKENS_FILE: MTGJSON input date $INPUT_DATE is older than committed vintage $STAMP_DATE. Refresh MTGJSON inputs (rerun without MTGJSON_SKIP_REFRESH=1 or set PHASE_REFRESH_MTGJSON=1) before retrying." >&2
@@ -275,7 +285,7 @@ fi
 track_tmp "$OUTPUT_TMP"
 track_tmp "$NAMES_OUTPUT_TMP"
 # `--write-subtypes` refreshes the committed creature-subtype vocabulary
-# (crates/engine/data/oracle-subtypes.json, `include_str!`d by the parser).
+# (crates/phase-ast/data/oracle-subtypes.json, `include_str!`d by the parser).
 # This script is the only caller that may pass it: it is the only one that
 # downloads CardTypes.json above, and CardTypes.json is the sole source of the
 # token-only subtypes (Army, Servo, Pentavite, …). oracle-gen hard-fails under
@@ -291,7 +301,7 @@ else
   # oracle-gen already avoids touching an unchanged sidecar, but that cannot
   # make an older CardTypes snapshot safe. Omit its write mode entirely so a
   # stale cache cannot regress this watched, committed vocabulary.
-  echo "WARNING: refusing to update crates/engine/data/oracle-subtypes.json: MTGJSON input date $INPUT_DATE is older than committed vintage $STAMP_DATE. Refresh MTGJSON inputs (rerun without MTGJSON_SKIP_REFRESH=1 or set PHASE_REFRESH_MTGJSON=1) before retrying." >&2
+  echo "WARNING: refusing to update crates/phase-ast/data/oracle-subtypes.json: MTGJSON input date $INPUT_DATE is older than committed vintage $STAMP_DATE. Refresh MTGJSON inputs (rerun without MTGJSON_SKIP_REFRESH=1 or set PHASE_REFRESH_MTGJSON=1) before retrying." >&2
 fi
 run_tool_with_recovery "$OUTPUT_TMP" "${ORACLE_GEN_ARGS[@]}"
 

@@ -1,7 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { createRef } from "react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 
 import { DeckStack } from "../DeckStack";
+import * as scryfall from "../../../services/scryfall";
 import type { ScryfallCard } from "../../../services/scryfall";
 
 vi.mock("../../../hooks/useCardImage", () => ({
@@ -64,6 +72,7 @@ describe("DeckStack", () => {
 
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -297,5 +306,44 @@ describe("DeckStack", () => {
       screen.getByRole("button", { name: /move one arcane signet to main/i }),
     );
     expect(onMoveCard).toHaveBeenCalledWith("Arcane Signet", "sideboard");
+  });
+
+  it("returns focus to the durable deck surface after the art picker closes", async () => {
+    vi.spyOn(scryfall, "resolveOracleIdSync").mockReturnValue("oracle-1");
+    vi.spyOn(scryfall, "hasAlternatePrintingsSync").mockReturnValue(true);
+    vi.spyOn(scryfall, "getCardPrintings").mockResolvedValue([]);
+    const deckSurfaceRef = createRef<HTMLElement>();
+
+    render(
+      <>
+        <section ref={deckSurfaceRef} tabIndex={-1} aria-label="Deck surface" />
+        <DeckStack
+          deck={{ main: [{ name: "Sol Ring", count: 1 }], sideboard: [] }}
+          commanders={[]}
+          cardDataCache={
+            new Map([["Sol Ring", makeCard("Sol Ring", "Artifact", 1)]])
+          }
+          onAddCard={vi.fn()}
+          canAddCard={() => true}
+          onRemoveCard={vi.fn()}
+          onMoveCard={vi.fn()}
+          onRemoveCommander={vi.fn()}
+          groupMode="type"
+          pickerReturnFocusRef={deckSurfaceRef}
+        />
+      </>,
+    );
+
+    fireEvent.contextMenu(getTileByRemoveTitle("Sol Ring"), {
+      clientX: 20,
+      clientY: 20,
+    });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Choose Art…" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Choose Art" });
+    expect(dialog).toBeInTheDocument();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    await waitFor(() => expect(deckSurfaceRef.current).toHaveFocus());
   });
 });

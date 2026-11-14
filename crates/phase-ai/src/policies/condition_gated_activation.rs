@@ -74,6 +74,7 @@ impl TacticalPolicy for ConditionGatedActivationPolicy {
         let GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } = &ctx.candidate.action
         else {
             return score(0.0, "condition_gated_na");
@@ -108,8 +109,8 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
-        Comparator, ControllerRef, Effect, ObjectProperty, QuantityExpr, QuantityRef, TargetFilter,
-        TypeFilter, TypedFilter,
+        CardTypeSetSource, Comparator, ControllerRef, Effect, ObjectProperty, PropertyAggregate,
+        QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
     };
     use engine::types::card_type::CoreType;
     use engine::types::game_state::{GameState, WaitingFor};
@@ -127,15 +128,20 @@ mod tests {
     fn your_creatures_power_ge(threshold: i32) -> AbilityCondition {
         AbilityCondition::QuantityCheck {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::Aggregate {
-                    function: AggregateFunction::Sum,
-                    property: ObjectProperty::Power,
-                    filter: TargetFilter::Typed(
-                        TypedFilter::default()
-                            .with_type(TypeFilter::Creature)
-                            .controller(ControllerRef::You),
-                    ),
-                },
+                qty: QuantityRef::PropertyAggregate(
+                    PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Power,
+                        CardTypeSetSource::Objects {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::default()
+                                    .with_type(TypeFilter::Creature)
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                    )
+                    .expect("AI fixture uses a valid live-object aggregate"),
+                ),
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: threshold },
@@ -190,6 +196,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };

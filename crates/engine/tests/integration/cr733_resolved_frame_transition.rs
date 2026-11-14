@@ -13,7 +13,7 @@ use engine::types::player::PlayerId;
 use engine::types::resolution::{
     CipherEncodeStage, FrameKind, MultiDrawFrame, OptionalEffectFrame, PendingCipherEncode,
     PendingCoinFlip, PendingCoinFlipKind, ResolutionFrame, ResolutionStackError,
-    ResolutionStateWire,
+    ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION,
 };
 use engine::types::resolved_commands::{
     ResolvedCommandOrdinal, ResolvedFrameTransition, ResolvedFrameTransitionCommand,
@@ -44,10 +44,12 @@ fn coin_flip_frame() -> ResolutionFrame {
         source_id: ObjectId(91),
         controller: PlayerId(0),
         flipper: PlayerId(0),
-        targets: Vec::new(),
         win_effect: None,
         lose_effect: None,
-        kind: PendingCoinFlipKind::Single,
+        kind: PendingCoinFlipKind::Exactly { remaining: 0 },
+        chain_root_targets: Vec::new(),
+        branch_context: Default::default(),
+        trigger_context: None,
     })
 }
 
@@ -57,6 +59,7 @@ fn optional_effect_frame(state: &GameState) -> ResolutionFrame {
         trigger_event: None,
         trigger_events: Vec::new(),
         trigger_match_count: None,
+        return_result_occurrence: None,
     })
 }
 
@@ -165,6 +168,7 @@ fn optional_effect_frame_cannot_survive_into_search_choice_parent_insertion() {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         }));
     state.waiting_for = WaitingFor::SearchChoice {
         player: PlayerId(0),
@@ -199,6 +203,7 @@ fn direct_choice_install_rejects_a_second_optional_owner_atomically() {
     let first_prompt = WaitingFor::OptionalEffectChoice {
         player: PlayerId(0),
         source_id: ObjectId(100),
+        decision_subject_id: None,
         description: None,
         may_trigger_key: None,
         same_card_may_trigger_choice_available: false,
@@ -217,6 +222,7 @@ fn direct_choice_install_rejects_a_second_optional_owner_atomically() {
             WaitingFor::OptionalEffectChoice {
                 player: PlayerId(1),
                 source_id: ObjectId(101),
+                decision_subject_id: None,
                 description: None,
                 may_trigger_key: None,
                 same_card_may_trigger_choice_available: false,
@@ -414,10 +420,10 @@ fn production_parent_insertions_preserve_adjacency_and_journal_the_transition() 
         )));
 }
 
-/// Frame-transition commands use the existing v2 resolution-state wire and
+/// Frame-transition commands use the current resolution-state wire and
 /// preserve both their journal evidence and their structural stack exactly.
 #[test]
-fn resolution_state_wire_v2_round_trip_preserves_frame_transition_journal_and_stack() {
+fn current_resolution_wire_round_trip_preserves_frame_transition_journal_and_stack() {
     let mut state = GameState::new_two_player(102);
     state
         .resolve_and_apply_frame_transition(ResolvedFrameTransition::Push {
@@ -428,10 +434,13 @@ fn resolution_state_wire_v2_round_trip_preserves_frame_transition_journal_and_st
     let expected_stack = frames(&state);
 
     let wire = serde_json::to_value(ResolutionStateWire::from_game_state(state))
-        .expect("v2 resolution state serializes");
-    assert_eq!(wire["resolution_state_version"], 2);
+        .expect("current resolution state serializes");
+    assert_eq!(
+        wire["resolution_state_version"],
+        RESOLUTION_STATE_WIRE_VERSION
+    );
     let restored = serde_json::from_value::<ResolutionStateWire>(wire)
-        .expect("v2 resolution state restores")
+        .expect("current resolution state restores")
         .into_game_state();
 
     assert_eq!(restored.resolved_rules_journal, expected_journal);
@@ -456,6 +465,7 @@ fn parking_beneath_a_live_prompt_journals_its_operand_and_replays_to_the_same_st
     state.waiting_for = WaitingFor::OpponentMayChoice {
         player: PlayerId(1),
         source_id: ObjectId(7),
+        decision_subject_id: None,
         description: None,
         remaining: Vec::new(),
     };
@@ -523,6 +533,7 @@ fn parking_beneath_a_live_prompt_journals_its_operand_and_replays_to_the_same_st
     replayed.waiting_for = WaitingFor::OpponentMayChoice {
         player: PlayerId(1),
         source_id: ObjectId(7),
+        decision_subject_id: None,
         description: None,
         remaining: Vec::new(),
     };

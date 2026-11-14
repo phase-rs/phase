@@ -127,6 +127,7 @@ fn devour_cannot_eat_simultaneous_co_arrival() {
 
     let ability = ResolvedAbility::new(
         Effect::ChangeZoneAll {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
             target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
@@ -136,6 +137,7 @@ fn devour_cannot_eat_simultaneous_co_arrival() {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
+            library_shuffle: Default::default(),
             random_order: false,
         },
         vec![],
@@ -209,6 +211,7 @@ fn two_devourers_cannot_eat_each_other() {
 
     let ability = ResolvedAbility::new(
         Effect::ChangeZoneAll {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
             target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
@@ -218,6 +221,7 @@ fn two_devourers_cannot_eat_each_other() {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
+            library_shuffle: Default::default(),
             random_order: false,
         },
         vec![],
@@ -318,6 +322,8 @@ fn single_pick_devour_does_not_leak_snapshot_to_later_sacrifice() {
 
     let change_zone = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
             target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),

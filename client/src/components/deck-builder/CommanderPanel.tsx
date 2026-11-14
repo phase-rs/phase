@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 
 import type { ScryfallCard } from "../../services/scryfall";
 import type { DeckEntry } from "../../services/deckParser";
+import type { DeckSizeRule } from "../../adapter/types";
 import {
   getCombinedColorIdentity,
 } from "./commanderUtils";
@@ -18,11 +19,80 @@ const COLOR_PIP_STYLES: Record<string, string> = {
   G: "bg-green-600 text-white",
 };
 
+/**
+ * CR 903.5a: does the `deck` this panel was handed already CONTAIN the
+ * designated commander cards, or are they held beside it?
+ *
+ * The two callers genuinely differ and neither is wrong. Constructed Commander
+ * is commanders-OUTSIDE — `useDeckBuilder.handleSetCommander` filters the
+ * chosen card out of `main`, so the 99 plus the commander make 100. A drafted
+ * Commander pool is commanders-INSIDE — `validate_limited_deck` step 5 requires
+ * a copy of every designated name IN `main_deck`, so the designation is a LABEL
+ * on a deck card, never an extra card beside the deck.
+ *
+ * Declared rather than inferred: a panel that guesses gets one caller's count
+ * wrong by exactly `commanders.length`, which is silent, plausible, and off by
+ * a legal-vs-illegal margin.
+ */
+export type CommanderDeckComposition = "commanders-inside" | "commanders-outside";
+
+/**
+ * How many of `commanders` are NOT already counted by `deck`. Exhaustive with
+ * no `default`, so a third composition is a compile error here rather than a
+ * silently-wrong total.
+ */
+function commandersNotInDeck(
+  composition: CommanderDeckComposition,
+  commanders: string[],
+): number {
+  switch (composition) {
+    case "commanders-inside":
+      return 0;
+    case "commanders-outside":
+      return commanders.length;
+  }
+}
+
+function hasCommanderCopyAvailable(
+  composition: CommanderDeckComposition,
+  entry: DeckEntry,
+  selectedCount: number,
+): boolean {
+  switch (composition) {
+    case "commanders-inside":
+      return selectedCount < entry.count;
+    case "commanders-outside":
+      return selectedCount === 0;
+  }
+}
+
+/**
+ * CR 903.13f(1) / CR 903.5: is `totalCards` a legal size under this rule?
+ * Exhaustive with no `default`, so a third `DeckSizeRule` variant is a compile
+ * error here rather than a silently-wrong indicator colour.
+ */
+function deckSizeSatisfied(rule: DeckSizeRule, totalCards: number): boolean {
+  switch (rule.type) {
+    case "Minimum":
+      return totalCards >= rule.data;
+    case "Exactly":
+      return totalCards === rule.data;
+  }
+}
+
 interface CommanderPanelProps {
   commanders: string[];
   deck: DeckEntry[];
+  /** CR 903.5a: whether `deck` already contains the designated commanders. */
+  deckComposition: CommanderDeckComposition;
   cardDataCache: Map<string, ScryfallCard>;
-  expectedDeckSize: number;
+  /**
+   * CR 903.13f(1): the format's typed deck-size rule. Read exhaustively — a
+   * `Minimum` rule (Commander Draft: at least 60, NO maximum) is satisfied by
+   * any larger deck, so an exact-equality indicator would paint a legal
+   * 61-card deck as not-yet-valid.
+   */
+  deckSizeRule: DeckSizeRule;
   isCommanderEligible: (name: string) => boolean;
   onSetCommander: (cardName: string) => void;
   onRemoveCommander: (cardName: string) => void;
@@ -45,8 +115,9 @@ interface CommanderPanelProps {
 export function CommanderPanel({
   commanders,
   deck,
+  deckComposition,
   cardDataCache,
-  expectedDeckSize,
+  deckSizeRule,
   isCommanderEligible,
   onSetCommander,
   onRemoveCommander,
@@ -68,7 +139,7 @@ export function CommanderPanel({
     scryfallId: cardDataCache.get(name)?.id,
   });
   const totalCards = deck.reduce((sum, e) => sum + e.count, 0)
-    + commanders.length
+    + commandersNotInDeck(deckComposition, commanders)
     + (signatureSpell ? 1 : 0);
 
   // Cards in deck that could become a commander. The handler decides whether
@@ -76,7 +147,10 @@ export function CommanderPanel({
   const eligibleCommanders = deck
     .filter((entry) => {
       if (!isCommanderEligible(entry.name)) return false;
-      return !commanders.includes(entry.name);
+      // CR 903.13f(2): Commander Draft may use any number of same-name cards
+      // from the pool, so inside-deck designations consume copies, not names.
+      const selectedCount = commanders.filter((name) => name === entry.name).length;
+      return hasCommanderCopyAvailable(deckComposition, entry, selectedCount);
     })
     .map((e) => e.name);
 
@@ -93,10 +167,12 @@ export function CommanderPanel({
             {t("commanderPanel.noCommander")}
           </div>
         )}
-        {commanders.map((name) => {
+        {commanders.map((name, index) => {
+          const occurrence = commanders.slice(0, index + 1)
+            .filter((commander) => commander === name).length;
           return (
             <div
-              key={name}
+              key={`${name}-${occurrence}`}
               {...mouseHoverPreview(onCardHover, hoverInfo(name))}
               className="flex items-center justify-between rounded bg-purple-900/30 px-2 py-1.5"
             >
@@ -223,9 +299,12 @@ export function CommanderPanel({
       {/* Validation summary */}
       <div className="space-y-1">
         <div
-          className={`text-xs ${totalCards === expectedDeckSize ? "text-green-400" : "text-yellow-400"}`}
+          className={`text-xs ${deckSizeSatisfied(deckSizeRule, totalCards) ? "text-green-400" : "text-yellow-400"}`}
         >
-          {t("commanderPanel.cardCount", { count: totalCards, expected: expectedDeckSize })}
+          {/* `Minimum(0)` refuses no count, so it is not shown as an expected size. */}
+          {deckSizeRule.type === "Minimum" && deckSizeRule.data === 0
+            ? t("commanderPanel.cardCountNoMinimum", { count: totalCards })
+            : t("commanderPanel.cardCount", { count: totalCards, expected: deckSizeRule.data })}
         </div>
         {formatValidationReasons.map((reason) => (
           <div key={reason} className="text-xs text-red-400">

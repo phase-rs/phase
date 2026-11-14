@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import type { AttachTarget, CardType, GameObject, Keyword, ManaColor, ObjectId } from "../adapter/types";
 import { isChangeling } from "./keywordProps";
 
@@ -41,6 +42,8 @@ export interface CardViewProps {
   attachmentIds: ObjectId[];
   keywords: Keyword[];
   colorIdentity: ManaColor[];
+  /** Displayed as an oversized melded card — see `isMeldedPermanent`. */
+  isMelded: boolean;
 }
 
 export type PTColor = "white" | "green" | "red";
@@ -50,6 +53,15 @@ export interface PTDisplay {
   toughness: number;
   powerColor: PTColor;
   toughnessColor: PTColor;
+}
+
+/**
+ * CR 701.42a + CR 712.4a: a melded permanent is one object represented by both
+ * cards of a meld pair, whose back faces combine into one oversized card face.
+ * Keyed on the engine's `merge_kind`, never inferred from names or components.
+ */
+export function isMeldedPermanent(obj: Pick<GameObject, "merge_kind">): boolean {
+  return obj.merge_kind === "Meld";
 }
 
 export function publicName(obj: GameObject): string {
@@ -88,6 +100,7 @@ export function toCardProps(obj: GameObject): CardViewProps {
     attachmentIds: obj.attachments,
     keywords: obj.keywords,
     colorIdentity: obj.color,
+    isMelded: isMeldedPermanent(obj),
   };
 }
 
@@ -150,24 +163,24 @@ export function counterIconClass(type: string): string | null {
 }
 
 type CounterTooltipTranslator = (
-  key: string,
+  key: ParseKeys<"game">,
   options?: { count?: number; label?: string; description?: string },
 ) => string;
 
-const COUNTER_DESCRIPTION_KEYS: Record<string, string> = {
-  P1P1: "counterTooltip.descriptions.p1p1",
-  M1M1: "counterTooltip.descriptions.m1m1",
-  loyalty: "counterTooltip.descriptions.loyalty",
-  lore: "counterTooltip.descriptions.lore",
-  stun: "counterTooltip.descriptions.stun",
-};
+const COUNTER_DESCRIPTION_KEYS: ReadonlyMap<string, ParseKeys<"game">> = new Map([
+  ["P1P1", "counterTooltip.descriptions.p1p1"],
+  ["M1M1", "counterTooltip.descriptions.m1m1"],
+  ["loyalty", "counterTooltip.descriptions.loyalty"],
+  ["lore", "counterTooltip.descriptions.lore"],
+  ["stun", "counterTooltip.descriptions.stun"],
+]);
 
 export function formatCounterDescription(
   type: string,
   translate: CounterTooltipTranslator,
 ): string {
   const label = formatCounterType(type);
-  const key = COUNTER_DESCRIPTION_KEYS[type];
+  const key = COUNTER_DESCRIPTION_KEYS.get(type);
   return key
     ? translate(key)
     : translate("counterTooltip.descriptions.generic", { label });

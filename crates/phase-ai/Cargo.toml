@@ -25,6 +25,13 @@ rayon = { version = "1", optional = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 mimalloc = "0.1"
 
+# Windows file identity for the ai-gate baseline-alias guard: volume serial + file
+# index via `GetFileInformationByHandle`, which std exposes only behind the unstable
+# `windows_by_handle` feature. Already in the lock (walkdir -> same-file), and gated
+# to windows so no other target's graph changes.
+[target.'cfg(windows)'.dependencies]
+same-file = "1"
+
 [features]
 tune = ["rayon"]
 # Scenario-backed benchmark binaries are opt-in: build them with
@@ -33,8 +40,10 @@ scenario-benches = ["engine/test-support"]
 
 [[bin]]
 name = "ai-duel"
+# No `test = false`: that key suppresses a bin's unittest target entirely, so it belongs only on a
+# bin with no `#[cfg(test)]` code. This one carries unit tests over the CLI option parser, the
+# per-game budget, the elimination ledger, the paired seed schedule and the outcome classifier.
 path = "src/bin/ai_duel.rs"
-test = false
 
 [[bin]]
 name = "ai-tune"
@@ -52,8 +61,10 @@ test = false
 
 [[bin]]
 name = "ai-gate"
+# No `test = false`: that key suppresses a bin's unittest target entirely, so it belongs only on a
+# bin with no `#[cfg(test)]` code. This one carries unit tests over the staging-path and aliasing
+# predicates, which have to be built before they can run.
 path = "src/bin/ai_gate.rs"
-test = false
 
 [[bin]]
 name = "ai-perf-gate"
@@ -66,6 +77,12 @@ path = "src/bin/legal_actions_bench.rs"
 test = false
 
 [[bin]]
+name = "mana-board-bench"
+path = "src/bin/mana_board_bench.rs"
+required-features = ["scenario-benches"]
+test = false
+
+[[bin]]
 name = "combat-priority-bench"
 path = "src/bin/combat_priority_bench.rs"
 required-features = ["scenario-benches"]
@@ -74,6 +91,18 @@ test = false
 [[bin]]
 name = "attack-scaling-bench"
 path = "src/bin/attack_scaling_bench.rs"
+required-features = ["scenario-benches"]
+test = false
+
+[[bin]]
+name = "priority-scaling-bench"
+path = "src/bin/priority_scaling_bench.rs"
+required-features = ["scenario-benches"]
+test = false
+
+[[bin]]
+name = "candelabra-target-walk-bench"
+path = "src/bin/candelabra_target_walk_bench.rs"
 required-features = ["scenario-benches"]
 test = false
 

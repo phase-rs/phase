@@ -196,13 +196,17 @@ pub(crate) fn continue_proliferate_actions(
     events: &mut Vec<GameEvent>,
 ) -> bool {
     let source_id = pending.source_id;
+    let actor = pending.actor;
     events.push(GameEvent::PlayerPerformedAction {
-        player_id: pending.actor,
+        player_id: actor,
         action: PlayerActionKind::Proliferate,
         look_count: None,
         scry_bottom_count: None,
         scry_top_count: None,
     });
+    // CR 701.34a: this event is published after the choice, outside any chain
+    // window, so record it here.
+    super::record_player_action_this_turn(state, actor, PlayerActionKind::Proliferate);
     if !resume_proliferate_actions(state, pending, events) {
         return false;
     }

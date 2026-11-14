@@ -1,12 +1,11 @@
 //! `MulliganCardFloor` — the single authority for the AI's minimum kept-hand
 //! size. Applies to every deck in every format.
 //!
-//! CR 103.5 (`docs/MagicCompRules.txt:295`) defines the mulligan process and,
-//! in its final sentence, permits a player to "take mulligans until their
-//! opening hand would be zero cards." The rules therefore impose NO minimum
-//! kept-hand size above zero — the floor below is an AI *strategy* heuristic
-//! bounding that process, not a rules requirement. CR 103.5c
-//! (`docs/MagicCompRules.txt:301`) supplies the free-first-mulligan discount,
+//! CR 103.5 defines the mulligan process and, in its final sentence, permits
+//! a player to "take mulligans until their opening hand would be zero cards."
+//! The rules therefore impose NO minimum kept-hand size above zero — the
+//! floor below is an AI *strategy* heuristic bounding that process, not a
+//! rules requirement. CR 103.5c supplies the free-first-mulligan discount,
 //! consumed here via `kept_hand_size_after`.
 //!
 //! Without this floor an ordinary deck can chain-mulligan toward a zero-card
@@ -131,6 +130,7 @@ mod tests {
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![],
             free_first_mulligan,
+            declared: Vec::new(),
         };
         state
     }
@@ -309,6 +309,7 @@ mod tests {
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
 
         match evaluate(&state, 3) {
@@ -333,17 +334,20 @@ mod tests {
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![
                 MulliganDecisionEntry {
+                    free_reveals_taken: 0,
                     player: PlayerId(0),
                     mulligan_count: 0,
                     phase: MulliganDecisionPhase::Declare,
                 },
                 MulliganDecisionEntry {
+                    free_reveals_taken: 0,
                     player: PlayerId(1),
                     mulligan_count: 4,
                     phase: MulliganDecisionPhase::Declare,
                 },
             ],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
         add_zero_cost_action(&mut state);
 

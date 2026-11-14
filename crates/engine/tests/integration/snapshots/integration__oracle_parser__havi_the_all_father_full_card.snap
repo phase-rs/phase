@@ -1,0 +1,152 @@
+---
+source: crates/engine/tests/integration/oracle_parser.rs
+expression: "&parsed"
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "ChangeZone",
+          "origin": "Graveyard",
+          "destination": "Battlefield",
+          "target": {
+            "type": "Typed",
+            "type_filters": [
+              "Creature"
+            ],
+            "controller": "You",
+            "properties": [
+              {
+                "type": "HasSupertype",
+                "value": "Legendary"
+              },
+              {
+                "type": "Cmc",
+                "comparator": "LT",
+                "value": {
+                  "type": "Ref",
+                  "qty": {
+                    "type": "ObjectManaValue",
+                    "scope": {
+                      "type": "CostPaidObject"
+                    }
+                  }
+                }
+              },
+              {
+                "type": "InZone",
+                "zone": "Graveyard"
+              }
+            ]
+          },
+          "owner_library": false,
+          "enter_transformed": false,
+          "enter_tapped": true,
+          "enters_attacking": false
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "Or",
+        "filters": [
+          {
+            "type": "SelfRef"
+          },
+          {
+            "type": "Typed",
+            "type_filters": [
+              "Creature"
+            ],
+            "controller": "You",
+            "properties": [
+              {
+                "type": "HasSupertype",
+                "value": "Legendary"
+              },
+              {
+                "type": "Another"
+              }
+            ]
+          }
+        ]
+      },
+      "origin": "Battlefield",
+      "destination": "Graveyard",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "Whenever ~ or another legendary creature you control dies, return target legendary creature card with lesser mana value from your graveyard to the battlefield tapped.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "affected": {
+        "type": "SelfRef"
+      },
+      "modifications": [
+        {
+          "type": "AddKeyword",
+          "keyword": "Indestructible"
+        }
+      ],
+      "condition": {
+        "type": "QuantityComparison",
+        "lhs": {
+          "type": "Ref",
+          "qty": {
+            "type": "ZoneCardCount",
+            "zone": "Graveyard",
+            "card_types": [],
+            "filter": {
+              "type": "Typed",
+              "type_filters": [
+                "Card"
+              ],
+              "controller": null,
+              "properties": [
+                {
+                  "type": "Historic"
+                }
+              ]
+            },
+            "scope": "Controller"
+          }
+        },
+        "comparator": "GE",
+        "rhs": {
+          "type": "Fixed",
+          "value": 4
+        }
+      },
+      "affected_zone": null,
+      "effect_zone": null,
+      "active_zones": [],
+      "characteristic_defining": false,
+      "description": "~ has indestructible as long as there are four or more historic cards in your graveyard."
+    }
+  ],
+  "replacements": [],
+  "extractedKeywords": []
+}

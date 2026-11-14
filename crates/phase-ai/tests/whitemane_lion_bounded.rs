@@ -98,6 +98,7 @@ fn whitemane_lion_self_bounce_does_not_infinite_loop() {
         },
         ai_decks: Vec::new(),
         ai_difficulties: Vec::new(),
+        ..Default::default()
     };
     let payload = resolve_deck_list(&db, &list);
 

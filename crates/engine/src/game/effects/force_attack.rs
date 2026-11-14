@@ -1,26 +1,31 @@
 use super::resolve_player_for_context_ref;
-use crate::game::targeting::resolved_object_ids_for_filter;
+use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::game::targeting::{
+    resolve_live_declared_player, resolve_live_parent_slot_from_root,
+    resolved_object_ids_for_filter,
+};
 use crate::types::ability::{
     ContinuousModification, ControllerRef, Duration, Effect, EffectError, EffectKind, EffectScope,
     PlayerScope, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectIncarnationRef;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::player::PlayerId;
 use crate::types::statics::{RequiredDefender, StaticMode};
 
-/// CR 506.3: which KIND of defender a `required_defender` filter names.
+/// CR 506.3: the RESOLVED defender a `required_defender` filter names.
 ///
 /// CR 506.3's category is "a player, a planeswalker, or a battle", so this is the
 /// discriminator the whole seam turns on.
 enum DefenderReferent {
     /// A permanent — lowers to `RequiredDefender::Permanent`.
-    Object,
+    Object(ObjectId),
     /// A player — lowers to `RequiredDefender::Fixed`.
-    Player,
+    Player(PlayerId),
 }
 
-/// CR 506.3: Classify a `required_defender` filter by its RESOLVED referent.
+/// CR 506.3: Resolve a `required_defender` filter to its referent.
 ///
 /// Two filters are unconditionally objects by construction (`SelfRef` is the
 /// ability's own source; `SpecificObject` names one). The inherited-target forms
@@ -32,21 +37,45 @@ enum DefenderReferent {
 ///
 /// Everything else is a player reference, which is the conservative default:
 /// every card using this effect before Gideon Jura named a player.
-fn defender_referent(ability: &ResolvedAbility, filter: &TargetFilter) -> DefenderReferent {
-    let inherited = match filter {
-        TargetFilter::SelfRef | TargetFilter::SpecificObject { .. } => {
-            return DefenderReferent::Object
-        }
-        // CR 608.2c: the parent's chosen target — first slot, or the named one.
-        TargetFilter::ParentTarget => ability.targets.first(),
-        TargetFilter::ParentTargetSlot { index } => ability.targets.get(*index),
-        _ => return DefenderReferent::Player,
+///
+/// `None` when the referent names no live object (a vanished defender, or a
+/// declared slot whose object left and returned) or a declared slot whose
+/// target was illegal as the ability resolved, so the caller grafts nothing.
+fn defender_referent(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Option<DefenderReferent> {
+    let object_referent = || {
+        resolved_object_ids_for_filter(state, ability, filter)
+            .into_iter()
+            .next()
+            .map(DefenderReferent::Object)
     };
-    match inherited {
-        Some(TargetRef::Object(_)) => DefenderReferent::Object,
-        // A player-valued parent target, or no target to inherit at all — read as
-        // a player, which `resolve_player_for_context_ref` handles.
-        Some(TargetRef::Player(_)) | None => DefenderReferent::Player,
+    let player_referent =
+        || resolve_player_for_context_ref(state, ability, filter).map(DefenderReferent::Player);
+    match filter {
+        TargetFilter::SelfRef | TargetFilter::SpecificObject { .. } => object_referent(),
+        // CR 608.2c: the parent's chosen target. A player-valued parent target,
+        // or no target to inherit at all, reads as a player, which
+        // `resolve_player_for_context_ref` handles.
+        TargetFilter::ParentTarget => match ability.targets.first() {
+            Some(TargetRef::Object(_)) => object_referent(),
+            Some(TargetRef::Player(_)) | None => player_referent(),
+        },
+        // CR 608.2c + CR 608.2b + CR 400.7: a declared slot of the WHOLE
+        // resolving chain — never this node's local `targets`, which chain
+        // propagation replaced with the most recent parent's. The chain-root
+        // authority names the exact referent of either kind, so it lowers
+        // directly; a slot whose target was illegal as the ability resolved, or
+        // whose object left and returned, names none, and nothing is grafted.
+        TargetFilter::ParentTargetSlot { index } => {
+            resolve_live_parent_slot_from_root(state, ability, *index).map(|target| match target {
+                TargetRef::Object(id) => DefenderReferent::Object(id),
+                TargetRef::Player(player) => DefenderReferent::Player(player),
+            })
+        }
+        _ => player_referent(),
     }
 }
 
@@ -55,11 +84,11 @@ fn defender_referent(ability: &ResolvedAbility, filter: &TargetFilter) -> Defend
 ///
 /// An OBJECT referent lowers to `Permanent`, pinned by incarnation (CR 400.7, so
 /// a defender that leaves and re-enters does not inherit a requirement aimed at
-/// the old object); a PLAYER referent lowers to `Fixed` via the shared
-/// context-ref resolver. `SelfRef` is the only object form a printed card reaches
-/// today (Gideon Jura's "attack Gideon Jura if able"), but the classification is
-/// genuinely by referent kind — see [`defender_referent`] — so a future "attacks
-/// target planeswalker if able" needs no new branch.
+/// the old object); a PLAYER referent lowers to `Fixed`. `SelfRef` is the only
+/// object form a printed card reaches today (Gideon Jura's "attack Gideon Jura
+/// if able"), but the classification is genuinely by referent kind — see
+/// [`defender_referent`] — so a future "attacks target planeswalker if able"
+/// needs no new branch.
 ///
 /// Returns `None` when an object referent names no live object, so the caller
 /// grafts nothing rather than a requirement aimed at a vanished defender.
@@ -68,14 +97,9 @@ fn snapshot_required_defender(
     ability: &ResolvedAbility,
     filter: &TargetFilter,
 ) -> Option<RequiredDefender> {
-    match defender_referent(ability, filter) {
-        DefenderReferent::Player => Some(RequiredDefender::Fixed {
-            player: resolve_player_for_context_ref(state, ability, filter),
-        }),
-        DefenderReferent::Object => {
-            let defender_id = resolved_object_ids_for_filter(state, ability, filter)
-                .into_iter()
-                .next()?;
+    match defender_referent(state, ability, filter)? {
+        DefenderReferent::Player(player) => Some(RequiredDefender::Fixed { player }),
+        DefenderReferent::Object(defender_id) => {
             let obj = state.objects.get(&defender_id)?;
             Some(RequiredDefender::Permanent {
                 permanent: ObjectIncarnationRef::from_object(obj),
@@ -118,11 +142,11 @@ enum SubjectLowering {
 /// turn must attack Gideon Jura if able. This includes creatures that come under
 /// that player's control after the ability has resolved."
 ///
-/// Only `ControllerRef::TargetPlayer` / `TargetOpponent` need lowering:
+/// Only `ControllerRef::TargetPlayer` / `TargetOpponent` / `DeclaredPlayer` need lowering:
 /// `ControllerRef::You` / `Opponent` are resolved by `layers.rs` against the
-/// continuous effect's own snapshotted `controller` (the Kardur path), and no
-/// other controller ref reaches a broadcast force-attack subject today.
+/// continuous effect's own snapshotted `controller` (the Kardur path).
 fn lower_dynamic_affected(
+    state: &GameState,
     ability: &ResolvedAbility,
     target: &TargetFilter,
     scope: EffectScope,
@@ -150,6 +174,12 @@ fn lower_dynamic_affected(
             TargetRef::Player(pid) => Some(*pid),
             TargetRef::Object(_) => None,
         }) else {
+            return SubjectLowering::Unlowerable;
+        };
+        typed.controller = Some(ControllerRef::SpecificPlayer { id });
+    } else if let Some(ControllerRef::DeclaredPlayer { group }) = typed.controller {
+        // CR 608.2c + CR 608.2b: the announced player, or no one once gone.
+        let Some(id) = resolve_live_declared_player(state, ability, group) else {
             return SubjectLowering::Unlowerable;
         };
         typed.controller = Some(ControllerRef::SpecificPlayer { id });
@@ -201,6 +231,62 @@ pub fn resolve(
         return Ok(());
     };
 
+    // CR 108.3 + CR 508.1d + CR 608.2c: owner-relative defender — "Each of
+    // them attacks its owner" / "Each of those creatures attacks its owner".
+    // `AffectedObjectOwner` names no one player: every affected member can
+    // have a different owner, so snapshot the members NOW and graft one
+    // per-object requirement pinned to that member's owner, mirroring the
+    // `ChosenTarget` path below.
+    //
+    // Members are the inherited parent targets ("those creatures" over
+    // declared targets), falling back to tracked set 0 ("them" over an
+    // unnamed moved set — the same set the sibling "those permanents" clause
+    // reads). An empty member set grafts nothing rather than a requirement
+    // aimed at nobody.
+    //
+    // CR 611.2c note: unlike Gideon Jura's open-ended "creatures that player
+    // controls" (whose set grows and must stay dynamic), the anaphor here
+    // binds the resolution-time set — later arrivals are not "them" — so
+    // per-object grafts are exact, not frozen.
+    if matches!(required_defender, TargetFilter::AffectedObjectOwner) {
+        let mut members = resolved_object_ids_for_filter(state, ability, target);
+        if members.is_empty() {
+            members = resolved_object_ids_for_filter(
+                state,
+                ability,
+                &TargetFilter::TrackedSet {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                },
+            );
+        }
+        let duration = ability.duration.clone().unwrap_or_else(|| duration.clone());
+        let duration = lower_target_scoped_duration(ability, duration);
+        for obj_id in members {
+            let Some(obj) = state.objects.get(&obj_id) else {
+                continue;
+            };
+            let owner = obj.owner;
+            state.add_transient_continuous_effect(
+                ability.source_id,
+                ability.controller,
+                duration.clone(),
+                TargetFilter::SpecificObject { id: obj_id },
+                vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MustAttackDefender {
+                        defender: RequiredDefender::Fixed { player: owner },
+                    },
+                }],
+                None,
+            );
+        }
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::ForceAttack,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
     // CR 611.2a: "lasts as long as stated by the spell or ability creating it."
     // A stated duration written as a leading CLAUSE rather than inside the
     // predicate — Gideon Jura's "During target opponent's next turn, creatures
@@ -226,7 +312,7 @@ pub fn resolve(
         // `MustAttackAwayFromSource` grants down the same path for the same
         // reason (Kardur, Maximum Carnage); this resolver installs directly, so
         // it makes the same call here.
-        match lower_dynamic_affected(ability, target, *scope) {
+        match lower_dynamic_affected(state, ability, target, *scope) {
             SubjectLowering::Population(affected) => state.add_transient_continuous_effect(
                 ability.source_id,
                 ability.controller,
@@ -257,11 +343,11 @@ pub fn resolve(
                         None,
                     );
                 }
-                0
+                None
             }
             // CR 611.2c: install NOTHING rather than a frozen per-object graft.
             // See `SubjectLowering::Unlowerable`.
-            SubjectLowering::Unlowerable => 0,
+            SubjectLowering::Unlowerable => None,
         };
     }
 
@@ -355,9 +441,83 @@ mod tests {
         };
         assert_eq!(permanent.object_id, walker);
     }
+
+    /// CR 608.2c: `required_defender: ParentTargetSlot { index }` classifies the
+    /// DECLARED chain-root slot, not the leaf's locally-propagated target. A
+    /// nested chain whose root slot 0 is a PLAYER must lower to `Fixed` even when
+    /// the leaf's local (propagated) target is an object.
+    #[test]
+    fn parent_target_slot_defender_classifies_from_chain_root() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Coercer".to_string(),
+            Zone::Battlefield,
+        );
+        let walker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Some Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Root chain declares slot 0 = player, slot 1 = the planeswalker.
+        let root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(walker)],
+            source,
+            PlayerId(0),
+        ));
+        state.resolving_stack_entry = Some(StackEntry {
+            id: source,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        });
+
+        // The leaf's local (propagated) target is the planeswalker, but its
+        // `ParentTargetSlot { index: 0 }` names root slot 0 = the player.
+        let leaf = ResolvedAbility::new(
+            Effect::ForceAttack {
+                target: TargetFilter::Any,
+                required_defender: TargetFilter::ParentTargetSlot { index: 0 },
+                duration: Duration::UntilEndOfCombat,
+                scope: EffectScope::Single,
+            },
+            vec![TargetRef::Object(walker)],
+            source,
+            PlayerId(0),
+        );
+
+        assert_eq!(
+            snapshot_required_defender(&state, &leaf, &TargetFilter::ParentTargetSlot { index: 0 }),
+            Some(RequiredDefender::Fixed {
+                player: PlayerId(1)
+            }),
+            "root slot 0 is a player, so the requirement must be Fixed, not Permanent"
+        );
+    }
+
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{ControllerRef, Duration, TargetRef, TypedFilter};
+    use crate::types::game_state::{StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -475,5 +635,332 @@ mod tests {
                 } if *player == PlayerId(1)
             )
         }));
+    }
+
+    /// CR 608.2b + CR 506.3: a `ParentTargetSlot` required defender whose
+    /// declared target was illegal as the ability resolved (the resolution
+    /// carrier's `illegal_target_slots` stamp) names no defender, so no
+    /// requirement is created. Classifying the slot from its declared player
+    /// and then resolving that player separately would still aim the
+    /// requirement at a player.
+    #[test]
+    fn parent_target_slot_defender_illegal_at_resolution_creates_no_requirement() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Coercer".to_string(),
+            Zone::Battlefield,
+        );
+        let mut root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        root.illegal_target_slots = vec![0];
+        state.resolving_stack_entry = Some(StackEntry {
+            id: source,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        });
+        let slot_zero = TargetFilter::ParentTargetSlot { index: 0 };
+        let leaf = ResolvedAbility::new(
+            Effect::ForceAttack {
+                target: TargetFilter::SelfRef,
+                required_defender: slot_zero.clone(),
+                duration: Duration::UntilEndOfCombat,
+                scope: EffectScope::Single,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        assert_eq!(
+            snapshot_required_defender(&state, &leaf, &slot_zero),
+            None,
+            "an illegal declared player is not a defender the creature must attack"
+        );
+    }
+
+    /// CR 608.2c + CR 506.3: a `ParentTargetSlot` required defender whose
+    /// chain-root slot names a planeswalker resolves, through the full
+    /// `resolve()`, to a `Permanent` requirement pinned to that walker. The
+    /// chained node's own `targets` hold only the most recent parent target, so
+    /// the slot must come from the chain root, and an object referent must
+    /// lower to `Permanent`, never to a player or to nothing.
+    #[test]
+    fn parent_target_slot_object_defender_resolves_to_permanent() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Coercer".to_string(),
+            Zone::Battlefield,
+        );
+        let walker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Some Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        // Root chain declares slot 0 = opponent (player), slot 1 = walker.
+        let root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(walker)],
+            source,
+            PlayerId(0),
+        ));
+        state.resolving_stack_entry = Some(StackEntry {
+            id: source,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        });
+        let leaf = ResolvedAbility::new(
+            Effect::ForceAttack {
+                target: TargetFilter::SelfRef,
+                required_defender: TargetFilter::ParentTargetSlot { index: 1 },
+                duration: Duration::UntilEndOfCombat,
+                scope: EffectScope::Single,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &leaf, &mut events).unwrap();
+
+        let defender = state
+            .transient_continuous_effects
+            .iter()
+            .find(|ce| ce.affected == TargetFilter::SpecificObject { id: source })
+            .and_then(|ce| {
+                ce.modifications.iter().find_map(|m| match m {
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::MustAttackDefender { defender },
+                    } => Some(defender.clone()),
+                    _ => None,
+                })
+            });
+        let Some(RequiredDefender::Permanent { permanent }) = defender else {
+            panic!("root slot 1 is a planeswalker, a PERMANENT defender; got {defender:?}");
+        };
+        assert_eq!(permanent.object_id, walker);
+    }
+
+    /// CR 108.3 + CR 508.1d: `AffectedObjectOwner` grafts one requirement per
+    /// affected member, pinned to THAT member's owner — DISCRIMINATING: a
+    /// single-defender snapshot would pin both grafts to one player and fail
+    /// the second member's assertion ("Each of those creatures attacks its
+    /// owner", The Dead Shall Serve).
+    #[test]
+    fn affected_object_owner_grafts_per_member_owner() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Scheme".to_string(),
+            Zone::Battlefield,
+        );
+        let ours = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Relic".to_string(),
+            Zone::Battlefield,
+        );
+        let theirs = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Spoils".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&theirs).unwrap().owner = PlayerId(1);
+
+        let ability = ResolvedAbility::new(
+            Effect::ForceAttack {
+                target: TargetFilter::ParentTarget,
+                required_defender: TargetFilter::AffectedObjectOwner,
+                duration: Duration::Permanent,
+                scope: EffectScope::All,
+            },
+            vec![TargetRef::Object(ours), TargetRef::Object(theirs)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Reach-guard: both members grafted (a snapshot-to-one-player
+        // implementation grafts at most one requirement here).
+        let grafts: Vec<_> = state
+            .transient_continuous_effects
+            .iter()
+            .filter(|ce| matches!(ce.affected, TargetFilter::SpecificObject { .. }))
+            .collect();
+        assert_eq!(
+            grafts.len(),
+            2,
+            "one graft per affected member, got {:?}",
+            state.transient_continuous_effects
+        );
+        for (member, owner) in [(ours, PlayerId(0)), (theirs, PlayerId(1))] {
+            let effect = state
+                .transient_continuous_effects
+                .iter()
+                .find(|ce| ce.affected == TargetFilter::SpecificObject { id: member })
+                .unwrap_or_else(|| panic!("member {member:?} gets its own graft"));
+            assert_eq!(effect.duration, Duration::Permanent);
+            assert!(
+                effect.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::MustAttackDefender {
+                                defender: RequiredDefender::Fixed { player },
+                            },
+                        } if *player == owner
+                    )
+                }),
+                "member {member:?} must attack its owner {owner:?}, got {:?}",
+                effect.modifications
+            );
+        }
+    }
+
+    /// CR 608.2c: with no declared parent targets ("Each of them" over an
+    /// unnamed moved set — My Crushing Masterstroke), the graft falls back to
+    /// tracked set 0, the same set the sibling "those permanents" clause
+    /// reads. Simulates the upstream gain-control having published the set.
+    #[test]
+    fn affected_object_owner_falls_back_to_tracked_set() {
+        use crate::types::identifiers::TrackedSetId;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Scheme".to_string(),
+            Zone::Battlefield,
+        );
+        let gained = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Seized Relic".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&gained).unwrap().owner = PlayerId(1);
+        // Simulate the upstream gain-control having published tracked set 0.
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(set_id, vec![gained]);
+        state.chain_tracked_set_id = Some(set_id);
+
+        let ability = ResolvedAbility::new(
+            Effect::ForceAttack {
+                target: TargetFilter::ParentTarget,
+                required_defender: TargetFilter::AffectedObjectOwner,
+                duration: Duration::UntilEndOfTurn,
+                scope: EffectScope::All,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let effect = state
+            .transient_continuous_effects
+            .iter()
+            .find(|ce| ce.affected == TargetFilter::SpecificObject { id: gained })
+            .expect("tracked-set member gets a graft");
+        assert!(effect.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MustAttackDefender {
+                        defender: RequiredDefender::Fixed { player },
+                    },
+                } if *player == PlayerId(1)
+            )
+        }));
+    }
+
+    /// CR 611.2a: a leading-clause duration stamped on `ability.duration`
+    /// wins over the effect's own field — pins Silver Surfer's "until the end
+    /// of your next turn … attacks that player each combat" effective span
+    /// after the defender-bound "each combat" window moved to `Permanent`.
+    #[test]
+    fn enclosing_duration_wins_over_effect_field() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Surfer".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::ForceAttack {
+                target: TargetFilter::Any,
+                required_defender: TargetFilter::Controller,
+                duration: Duration::Permanent,
+                scope: EffectScope::Single,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        ability.duration = Some(Duration::UntilEndOfTurn);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let effect = state
+            .transient_continuous_effects
+            .iter()
+            .find(|ce| ce.affected == TargetFilter::SpecificObject { id: target })
+            .expect("force attack should create a transient effect for the target");
+        assert_eq!(
+            effect.duration,
+            Duration::UntilEndOfTurn,
+            "enclosing duration wins over the Permanent field"
+        );
     }
 }

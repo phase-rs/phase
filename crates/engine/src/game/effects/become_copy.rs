@@ -1,14 +1,19 @@
+use crate::game::effects::token_copy::{copies_own_source, copy_source, CopySourceReferent};
 use crate::game::filter::{matches_target_filter, FilterContext};
-use crate::game::game_object::DisplaySource;
-use crate::game::layers::compute_current_copiable_values;
+use crate::game::game_object::DisplayIdentity;
+use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::game::layers::{remove_subtype_set, subtype_matches_core_types};
+use crate::game::printed_cards::ensure_keyword_triggers_for_copiable_values;
 use crate::types::ability::{
-    ContinuousModification, CopiableValues, Duration, Effect, EffectError, EffectKind,
-    ResolvedAbility, TargetFilter, TargetRef,
+    ContinuousModification, CopiableValues, CopyRecipient, Duration, Effect, EffectError,
+    EffectKind, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
 };
-use crate::types::card::{PrintedCardRef, PrintedLoyalty, TokenImageRef};
+use crate::types::card::PrintedLoyalty;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingCounterAddition, PendingEffectResolved};
-use crate::types::identifiers::ObjectId;
+use crate::types::game_state::{
+    GameState, PendingCounterAddition, PendingEffectResolved, TransientContinuousEffectBindings,
+};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 
 /// CR 707.2 / CR 613.1a: Become a copy of target permanent via a layer-1 copy effect.
@@ -31,57 +36,62 @@ pub fn resolve(
                 .unwrap_or(Duration::Permanent),
             additional_modifications.clone(),
         ),
+        // CR 707.2: a non-`BecomeCopy` effect reaching this resolver has no
+        // recipient axis of its own, so the copy lands on the ability's own
+        // source — the same default `CopyRecipient::Source` encodes.
         _ => (
-            TargetFilter::SelfRef,
+            crate::types::ability::CopyRecipient::Source,
             ability.duration.clone().unwrap_or(Duration::Permanent),
             Vec::new(),
         ),
     };
 
-    let target_id = ability
-        .targets
-        .iter()
-        .find_map(|t| match t {
-            TargetRef::Object(id) => Some(*id),
-            TargetRef::Player(_) => None,
-        })
-        .ok_or_else(|| EffectError::MissingParam("BecomeCopy requires a target".to_string()))?;
-
-    let values = compute_current_copiable_values(state, target_id)
-        .ok_or(EffectError::ObjectNotFound(target_id))?;
+    // CR 707.2 + CR 608.2h: the copy source is read once, through the
+    // copy-source authority. "It becomes a copy of this creature" (`SelfRef`,
+    // The Flood of Mars) copies the ability's own source, with its last-known
+    // copiable values once it has left; any other copy source is the declared
+    // object target.
+    let source = if copies_own_source(&ability.effect) {
+        copy_source(state, ability, CopySourceReferent::OwnSource)
+            .ok_or(EffectError::ObjectNotFound(ability.source_id))?
+    } else {
+        let target_id = ability
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            // CR 115.1 + CR 601.2c: when the RECIPIENT is itself an announced target
+            // (Shuri: "Target artifact you control becomes a copy of a second target
+            // artifact you control"), it was declared FIRST, so the copy source is
+            // the SECOND declared object. `become_copy_copy_source_target_index` is
+            // derived from the same authority the slot builder uses, so this index
+            // cannot drift from the surfaced slot order. Mirrors
+            // `fight::resolve_fight_fighters`.
+            .nth(crate::game::ability_utils::become_copy_copy_source_target_index(&ability.effect))
+            .ok_or_else(|| EffectError::MissingParam("BecomeCopy requires a target".to_string()))?;
+        copy_source(state, ability, CopySourceReferent::Object(target_id))
+            .ok_or(EffectError::ObjectNotFound(target_id))?
+    };
 
     // Display identity follows the copy: carry the source's image routing so the
     // copying object renders the copied source's art. Not a CR 707.2 copiable
     // value (kept off `CopiableValues`); rides on the modification so it reverts
-    // with the effect. The source is guaranteed present — the copiable-values
-    // lookup above returned `Some` for `target_id`.
+    // with the effect. The authority supplies it with the values.
     //
     // CR 111.1 + CR 707.2: when the source is a true token, `printed_ref` is
     // `None` and the token's art lives only in the token database — so capture
     // `display_source` + `token_image_ref` too, otherwise a copy-of-token (e.g.
     // Mockingbird copying a Rabbit token) is stranded on the real-card name path
     // for a name that has no real-card printing and renders blank.
-    let (source_display_source, source_printed_ref, source_token_image_ref) = state
-        .objects
-        .get(&target_id)
-        .map(|o| {
-            (
-                o.display_source,
-                o.printed_ref.clone(),
-                o.token_image_ref.clone(),
-            )
-        })
-        .unwrap_or_default();
-
     let copy = PrecomputedCopyValues {
         source_id: ability.source_id,
         controller: ability.controller,
-        duration_subject_id: target_id,
+        duration_subject: source.incarnation,
         duration,
-        values,
-        display_source: source_display_source,
-        printed_ref: source_printed_ref,
-        token_image_ref: source_token_image_ref,
+        values: source.values,
+        display: source.display,
         additional_modifications,
         effect_kind: EffectKind::from(&ability.effect),
     };
@@ -97,12 +107,10 @@ pub(crate) struct PrecomputedCopyValues {
     /// `ForAsLongAs` duration tracks. For self-copy effects this is the copy
     /// target; for effects applied to another recipient (Assimilation Aegis), this
     /// is the recipient while `values` carries the copied object's characteristics.
-    pub duration_subject_id: ObjectId,
+    pub duration_subject: ObjectIncarnationRef,
     pub duration: Duration,
     pub values: CopiableValues,
-    pub display_source: DisplaySource,
-    pub printed_ref: Option<PrintedCardRef>,
-    pub token_image_ref: Option<TokenImageRef>,
+    pub display: DisplayIdentity,
     pub additional_modifications: Vec<ContinuousModification>,
     pub effect_kind: EffectKind,
 }
@@ -120,15 +128,18 @@ pub(crate) fn apply_precomputed_copy_values(
     let PrecomputedCopyValues {
         source_id,
         controller,
-        duration_subject_id,
+        duration_subject,
         duration,
         mut values,
-        display_source,
-        printed_ref,
-        token_image_ref,
+        display,
         additional_modifications,
         effect_kind,
     } = copy;
+
+    let classified_modifications: Vec<_> = additional_modifications
+        .iter()
+        .map(CopyExceptionOperation::classify)
+        .collect();
 
     // CR 202.1b + CR 707.9: "except it has no mana cost" is a copy-value
     // exception consumed at resolution — strip the copied mana cost from the
@@ -136,52 +147,100 @@ pub(crate) fn apply_precomputed_copy_values(
     // layer pass (BecomeCopy re-applies `CopyValues` each pass; a one-shot bake
     // would be overwritten). Mirrors token_copy.rs, which bakes the strip into
     // the freshly created token's base mana cost.
-    if additional_modifications
+    //
+    // `CopyExceptionOperation::classify` is the sole authority for deciding
+    // which modifications are resolution-time exceptions. It is exhaustive over
+    // `ContinuousModification`, so adding a new variant cannot silently drift
+    // from the snapshot-folding decision below.
+    if classified_modifications
         .iter()
-        .any(|m| matches!(m, ContinuousModification::RemoveManaCost))
+        .any(|operation| matches!(operation, CopyExceptionOperation::RemoveManaCost))
     {
         values.mana_cost = crate::types::mana::ManaCost::NoCost;
     }
-    if let Some(loyalty) =
-        super::token_copy::copy_starting_loyalty_override(&additional_modifications)
-    {
+    if let Some(loyalty) = classified_modifications.iter().rev().find_map(|operation| {
+        if let CopyExceptionOperation::SetStartingLoyalty { value } = operation {
+            Some(*value)
+        } else {
+            None
+        }
+    }) {
         values.loyalty = Some(loyalty);
         values.printed_loyalty = Some(PrintedLoyalty::Fixed(loyalty));
     }
 
-    // CR 122.1 + CR 614.1c + CR 202.1b + CR 707.9b: `AddCounterOnEnter`
-    // (counter placement), `RemoveManaCost`, and `SetStartingLoyalty` are
-    // resolution-time exceptions, not layered modifications — partition them
-    // out so the layer pipeline only sees layered variants. Counter-on-enter is
-    // applied via the counter primitive after layer evaluation; the mana-cost
-    // and starting-loyalty exceptions were already consumed into `values`.
-    let (resolution_mods, layered_mods): (Vec<_>, Vec<_>) =
-        additional_modifications.into_iter().partition(|m| {
-            matches!(
-                m,
-                ContinuousModification::AddCounterOnEnter { .. }
-                    | ContinuousModification::RemoveManaCost
-                    | ContinuousModification::SetStartingLoyalty { .. }
-            )
-        });
+    // CR 122.1 + CR 614.1c + CR 202.1b + CR 707.9b: resolution-time
+    // exceptions never enter the continuous-layer list. Retain every
+    // non-resolution modification in its original order, so an unsupported
+    // snapshot fold can install the exact legacy representation.
+    let layered_operations: Vec<_> = classified_modifications
+        .iter()
+        .copied()
+        .filter(|operation| operation.is_layered())
+        .collect();
+    let legacy_layered_modifications: Vec<_> = additional_modifications
+        .iter()
+        .zip(&classified_modifications)
+        .filter_map(|(modification, operation)| operation.legacy_modification(modification))
+        .collect();
+
+    // CR 707.9d: A supplied characteristic excludes the copied CDA that
+    // defines it, even when another exception rider must remain layered. This
+    // pruning is independent of snapshot folding: a mixed exception such as a
+    // name change plus a dynamic P/T value cannot fold all of its riders, but
+    // a subsequent copy must still not inherit the source P/T CDA.
+    let cda_pruning = super::copy_exception::prune_copy_exception_overridden_cdas(
+        &values.static_definitions,
+        &additional_modifications,
+    );
+    values.static_definitions = std::sync::Arc::new(cda_pruning.definitions);
+
+    // CR 707.9a + CR 707.9b: Ability grants and characteristic modifications
+    // made during copying become copiable values. The layer pipeline used to
+    // install these riders after `CopyValues`; that realizes the first copy
+    // correctly, but a later copy snapshots only the unmodified source values.
+    // Fold the supported permanent-copy exception vocabulary into the one
+    // `CopyValues` payload instead. This is deliberately all-or-nothing: an
+    // unfamiliar modification keeps the historical layered representation,
+    // rather than making a partial snapshot with silently different semantics.
+    // If any CDA classification failed, retain that same fallback so its
+    // unknown source definition is never folded around selectively. Classified
+    // sibling CDAs have still been pruned above.
+    let folded = cda_pruning.all_definitions_classified
+        && fold_admitted_copy_exceptions_into_values(
+            &mut values,
+            state.objects.get(&source_id),
+            &layered_operations,
+            &state.all_creature_types,
+        );
 
     let mut modifications = vec![ContinuousModification::CopyValues {
         values: Box::new(values),
-        display_source,
-        printed_ref,
-        token_image_ref,
+        display,
     }];
-    modifications.extend(layered_mods);
+    if !folded {
+        modifications.extend(legacy_layered_modifications.into_iter().cloned());
+    }
 
-    let tce_id = state.add_transient_continuous_effect(
+    let recipient = ObjectIncarnationRef::from_object(
+        state
+            .objects
+            .get(&recipient_id)
+            .ok_or(EffectError::ObjectNotFound(recipient_id))?,
+    );
+    state.add_transient_continuous_effect_with_bindings(
         source_id,
         controller,
         duration,
         TargetFilter::SpecificObject { id: recipient_id },
         modifications,
         None,
+        TransientContinuousEffectBindings {
+            affected_recipient: Some(recipient),
+            duration_subject: Some(duration_subject),
+            granting_object: None,
+        },
     );
-    state.set_transient_duration_subject(tce_id, duration_subject_id);
 
     // CR 707.9f: "Some exceptions to the copying process apply only if the
     // copy is or has certain characteristics" — flush the layer re-evaluation
@@ -192,42 +251,21 @@ pub(crate) fn apply_precomputed_copy_values(
     // apply normally).
     crate::game::layers::flush_layers(state);
 
-    if !resolution_mods.is_empty() {
-        let mut additions = Vec::new();
-        for modification in resolution_mods {
-            // RemoveManaCost was already consumed into `values`; only the
-            // counter-placement exceptions remain to apply here.
-            if let ContinuousModification::AddCounterOnEnter {
-                counter_type,
-                count,
-                if_type,
-            } = modification
-            {
-                let n =
-                    crate::game::quantity::resolve_quantity(state, &count, controller, source_id)
-                        .max(0) as u32;
-                if n == 0 {
-                    continue;
-                }
-                let gate_passes = match if_type {
-                    None => true,
-                    Some(t) => state
-                        .objects
-                        .get(&recipient_id)
-                        .map(|obj| obj.card_types.core_types.contains(&t))
-                        .unwrap_or(false),
-                };
-                if !gate_passes {
-                    continue;
-                }
-                additions.push(PendingCounterAddition::Object {
-                    actor: controller,
-                    object_id: recipient_id,
-                    counter_type,
-                    count: n,
-                });
-            }
-        }
+    if !classified_modifications.is_empty() {
+        let additions: Vec<_> = entry_exception_counters(
+            state,
+            source_id,
+            controller,
+            recipient_id,
+            &additional_modifications,
+        )
+        .map(|(counter_type, count)| PendingCounterAddition::Object {
+            actor: controller,
+            object_id: recipient_id,
+            counter_type,
+            count,
+        })
+        .collect();
         for (index, addition) in additions.iter().cloned().enumerate() {
             let PendingCounterAddition::Object {
                 actor,
@@ -265,53 +303,557 @@ pub(crate) fn apply_precomputed_copy_values(
     Ok(())
 }
 
+/// CR 707.9f: evaluate counter exceptions against the realized copy, after layers.
+/// Both immediate copy resolution and merged entry placement use this authority.
+pub(crate) fn entry_exception_counters<'a>(
+    state: &'a GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+    recipient_id: ObjectId,
+    modifications: &'a [ContinuousModification],
+) -> impl Iterator<Item = (crate::types::counter::CounterType, u32)> + 'a {
+    modifications.iter().filter_map(move |modification| {
+        let CopyExceptionOperation::AddCounterOnEnter {
+            counter_type,
+            count,
+            if_type,
+        } = CopyExceptionOperation::classify(modification)
+        else {
+            return None;
+        };
+        let count = crate::game::quantity::resolve_quantity(state, count, controller, source_id)
+            .max(0) as u32;
+        if count == 0 {
+            return None;
+        }
+        let gate_passes = if_type.is_none_or(|core_type| {
+            state
+                .objects
+                .get(&recipient_id)
+                .is_some_and(|object| object.card_types.core_types.contains(core_type))
+        });
+        gate_passes.then(|| (counter_type.clone(), count))
+    })
+}
+
+/// CR 614.1c + CR 707.9f: split the resolution-time entry-counter exceptions
+/// from a copy's other modifications. `CopyExceptionOperation::classify` is the
+/// sole authority for which modifications are resolution-time exceptions, so a
+/// caller that places those counters itself (the merged enter-as-copy
+/// placement) cannot drift from the resolver's own classification.
+///
+/// Returns `(entry_counter_exceptions, remaining_modifications)`, each in
+/// their original order.
+pub(crate) fn partition_entry_counter_exceptions(
+    modifications: Vec<ContinuousModification>,
+) -> (Vec<ContinuousModification>, Vec<ContinuousModification>) {
+    modifications.into_iter().partition(|modification| {
+        matches!(
+            CopyExceptionOperation::classify(modification),
+            CopyExceptionOperation::AddCounterOnEnter { .. }
+        )
+    })
+}
+
+/// CR 707.2 + CR 613.1a: whether `recipient` carries a layer-1 copy effect
+/// installed by [`apply_precomputed_copy_values`]. A `BecomeCopy` that errored
+/// (for example because its source is gone) installs none, so entry-time copy
+/// exceptions must not be evaluated against the uncopied object.
+pub(crate) fn has_installed_copy_effect(
+    state: &GameState,
+    recipient: ObjectIncarnationRef,
+) -> bool {
+    state.transient_continuous_effects.iter().any(|effect| {
+        effect.affected_recipient == Some(recipient)
+            && effect.modifications.iter().any(|modification| {
+                matches!(modification, ContinuousModification::CopyValues { .. })
+            })
+    })
+}
+
+/// Fold the permanent `BecomeCopy` exception vocabulary into `values`.
+///
+/// CR 707.9a + CR 707.9b: Ability grants and characteristic modifications made
+/// during copying become copiable values. This helper has a closed admission
+/// set on purpose: callers must retain the legacy layer sequence for any shape
+/// it cannot model completely.
+fn fold_admitted_copy_exceptions_into_values(
+    values: &mut CopiableValues,
+    source: Option<&crate::game::game_object::GameObject>,
+    operations: &[CopyExceptionOperation<'_>],
+    all_creature_types: &[String],
+) -> bool {
+    let Some(foldable_operations) = operations
+        .iter()
+        .copied()
+        .map(CopyExceptionOperation::foldable)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+
+    let mut candidate = values.clone();
+    let trigger_count = candidate.trigger_definitions.len();
+    std::sync::Arc::make_mut(&mut candidate.trigger_printed_origins).resize(trigger_count, None);
+    for operation in foldable_operations {
+        operation.apply(&mut candidate, source, all_creature_types);
+    }
+
+    ensure_keyword_triggers_for_copiable_values(&mut candidate);
+    *values = candidate;
+    true
+}
+
+/// One compiler-audited classification of every copy exception modification.
+///
+/// The public `ContinuousModification` enum also serves effects that cannot
+/// become copiable values. This private view separates the permanent-copy
+/// vocabulary, resolution-time exceptions, and legacy layered operations
+/// without adding a second, drifting admission predicate.
+#[derive(Clone, Copy)]
+enum CopyExceptionOperation<'a> {
+    Fold(FoldableCopyException<'a>),
+    AddCounterOnEnter {
+        counter_type: &'a crate::types::counter::CounterType,
+        count: &'a crate::types::ability::QuantityExpr,
+        if_type: Option<&'a crate::types::card_type::CoreType>,
+    },
+    SetStartingLoyalty {
+        value: u32,
+    },
+    RemoveManaCost,
+    Layered(&'a ContinuousModification),
+}
+
+impl<'a> CopyExceptionOperation<'a> {
+    fn classify(modification: &'a ContinuousModification) -> Self {
+        match modification {
+            ContinuousModification::CopyValues { .. }
+            | ContinuousModification::CopyChosen
+            | ContinuousModification::SetTextName { .. }
+            | ContinuousModification::AddPower { .. }
+            | ContinuousModification::AddToughness { .. }
+            | ContinuousModification::RemoveKeyword { .. }
+            | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+            | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+            | ContinuousModification::GrantReplacement { .. }
+            | ContinuousModification::RemoveAllAbilities
+            | ContinuousModification::RemoveType { .. }
+            | ContinuousModification::RemoveSubtype { .. }
+            | ContinuousModification::SetDynamicPower { .. }
+            | ContinuousModification::SetDynamicToughness { .. }
+            | ContinuousModification::SetPowerDynamic { .. }
+            | ContinuousModification::SetToughnessDynamic { .. }
+            | ContinuousModification::AddDynamicPower { .. }
+            | ContinuousModification::AddDynamicToughness { .. }
+            | ContinuousModification::AddDynamicKeyword { .. }
+            | ContinuousModification::AddKeywordWithDerivedCost { .. }
+            | ContinuousModification::AddAllCreatureTypes
+            | ContinuousModification::AddAllBasicLandTypes
+            | ContinuousModification::AddAllLandTypes
+            | ContinuousModification::AddChosenSubtype { .. }
+            | ContinuousModification::AddChosenColor { .. }
+            | ContinuousModification::RemoveChosenKeyword
+            | ContinuousModification::AddChosenKeyword
+            | ContinuousModification::AddStaticMode { .. }
+            | ContinuousModification::SwitchPowerToughness
+            | ContinuousModification::AssignDamageFromToughness
+            | ContinuousModification::AssignDamageAsThoughUnblocked
+            | ContinuousModification::AssignNoCombatDamage
+            | ContinuousModification::ChangeController
+            | ContinuousModification::SetBasicLandType { .. }
+            | ContinuousModification::SetChosenBasicLandType
+            | ContinuousModification::SetChosenName
+            | ContinuousModification::SubstituteTextWord { .. } => Self::Layered(modification),
+            ContinuousModification::SetName { name } => {
+                Self::Fold(FoldableCopyException::SetName { name })
+            }
+            ContinuousModification::SetPower { value } => {
+                Self::Fold(FoldableCopyException::SetPower { value })
+            }
+            ContinuousModification::SetToughness { value } => {
+                Self::Fold(FoldableCopyException::SetToughness { value })
+            }
+            ContinuousModification::AddKeyword { keyword } => {
+                Self::Fold(FoldableCopyException::AddKeyword { keyword })
+            }
+            ContinuousModification::GrantAbility { definition } => {
+                Self::Fold(FoldableCopyException::GrantAbility { definition })
+            }
+            ContinuousModification::GrantTrigger { trigger } => {
+                Self::Fold(FoldableCopyException::GrantTrigger { trigger })
+            }
+            ContinuousModification::AddType { core_type } => {
+                Self::Fold(FoldableCopyException::AddType { core_type })
+            }
+            ContinuousModification::AddSubtype { subtype } => {
+                Self::Fold(FoldableCopyException::AddSubtype { subtype })
+            }
+            ContinuousModification::SetCardTypes { core_types } => {
+                Self::Fold(FoldableCopyException::SetCardTypes { core_types })
+            }
+            ContinuousModification::RemoveAllSubtypes { set } => {
+                Self::Fold(FoldableCopyException::RemoveAllSubtypes { set })
+            }
+            ContinuousModification::AddColor { color } => {
+                Self::Fold(FoldableCopyException::AddColor { color })
+            }
+            ContinuousModification::SetColor { colors } => {
+                Self::Fold(FoldableCopyException::SetColor { colors })
+            }
+            ContinuousModification::GrantStaticAbility { definition } => {
+                Self::Fold(FoldableCopyException::GrantStaticAbility { definition })
+            }
+            ContinuousModification::RetainPrintedTriggerFromSource {
+                source_trigger_index,
+            } => Self::Fold(FoldableCopyException::RetainPrintedTriggerFromSource {
+                source_trigger_index,
+            }),
+            ContinuousModification::RetainPrintedAbilityFromSource {
+                source_ability_index,
+            } => Self::Fold(FoldableCopyException::RetainPrintedAbilityFromSource {
+                source_ability_index,
+            }),
+            ContinuousModification::RetainAllOtherAbilitiesFromSource => {
+                Self::Fold(FoldableCopyException::RetainAllOtherAbilitiesFromSource)
+            }
+            ContinuousModification::AddSupertype { supertype } => {
+                Self::Fold(FoldableCopyException::AddSupertype { supertype })
+            }
+            ContinuousModification::RemoveSupertype { supertype } => {
+                Self::Fold(FoldableCopyException::RemoveSupertype { supertype })
+            }
+            ContinuousModification::AddCounterOnEnter {
+                counter_type,
+                count,
+                if_type,
+            } => Self::AddCounterOnEnter {
+                counter_type,
+                count,
+                if_type: if_type.as_ref(),
+            },
+            ContinuousModification::SetStartingLoyalty { value } => {
+                Self::SetStartingLoyalty { value: *value }
+            }
+            ContinuousModification::RemoveManaCost => Self::RemoveManaCost,
+        }
+    }
+
+    fn is_layered(self) -> bool {
+        match self {
+            Self::Fold(_) | Self::Layered(_) => true,
+            Self::AddCounterOnEnter { .. }
+            | Self::SetStartingLoyalty { .. }
+            | Self::RemoveManaCost => false,
+        }
+    }
+
+    fn foldable(self) -> Option<FoldableCopyException<'a>> {
+        match self {
+            Self::Fold(operation) => Some(operation),
+            Self::Layered(_)
+            | Self::AddCounterOnEnter { .. }
+            | Self::SetStartingLoyalty { .. }
+            | Self::RemoveManaCost => None,
+        }
+    }
+
+    fn legacy_modification(
+        self,
+        original: &'a ContinuousModification,
+    ) -> Option<&'a ContinuousModification> {
+        match self {
+            Self::Fold(_) => Some(original),
+            Self::Layered(modification) => Some(modification),
+            Self::AddCounterOnEnter { .. }
+            | Self::SetStartingLoyalty { .. }
+            | Self::RemoveManaCost => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FoldableCopyException<'a> {
+    SetName {
+        name: &'a String,
+    },
+    SetPower {
+        value: &'a i32,
+    },
+    SetToughness {
+        value: &'a i32,
+    },
+    AddKeyword {
+        keyword: &'a crate::types::keywords::Keyword,
+    },
+    GrantAbility {
+        definition: &'a crate::types::ability::AbilityDefinition,
+    },
+    GrantTrigger {
+        trigger: &'a crate::types::ability::TriggerDefinition,
+    },
+    AddType {
+        core_type: &'a crate::types::card_type::CoreType,
+    },
+    AddSubtype {
+        subtype: &'a String,
+    },
+    SetCardTypes {
+        core_types: &'a Vec<crate::types::card_type::CoreType>,
+    },
+    RemoveAllSubtypes {
+        set: &'a crate::types::card_type::SubtypeSet,
+    },
+    AddColor {
+        color: &'a crate::types::mana::ManaColor,
+    },
+    SetColor {
+        colors: &'a Vec<crate::types::mana::ManaColor>,
+    },
+    GrantStaticAbility {
+        definition: &'a StaticDefinition,
+    },
+    RetainPrintedTriggerFromSource {
+        source_trigger_index: &'a usize,
+    },
+    RetainPrintedAbilityFromSource {
+        source_ability_index: &'a usize,
+    },
+    RetainAllOtherAbilitiesFromSource,
+    AddSupertype {
+        supertype: &'a crate::types::card_type::Supertype,
+    },
+    RemoveSupertype {
+        supertype: &'a crate::types::card_type::Supertype,
+    },
+}
+
+impl FoldableCopyException<'_> {
+    fn apply(
+        self,
+        values: &mut CopiableValues,
+        source: Option<&crate::game::game_object::GameObject>,
+        all_creature_types: &[String],
+    ) {
+        match self {
+            Self::SetName { name } => {
+                values.name = name.clone();
+                values.name_origin = crate::types::ability::CopiedNameOrigin::Exception;
+            }
+            Self::SetPower { value } => values.power = Some(*value),
+            Self::SetToughness { value } => values.toughness = Some(*value),
+            Self::AddKeyword { keyword } => {
+                if keyword.instances_must_coexist() {
+                    values.keywords.push(keyword.clone());
+                } else if keyword.overrides_same_kind_on_grant() {
+                    values.keywords.retain(|existing| {
+                        std::mem::discriminant(existing) != std::mem::discriminant(keyword)
+                    });
+                    values.keywords.push(keyword.clone());
+                } else if !values.keywords.contains(keyword) {
+                    values.keywords.push(keyword.clone());
+                }
+            }
+            Self::GrantAbility { definition } => {
+                let abilities = std::sync::Arc::make_mut(&mut values.abilities);
+                if !abilities.contains(definition) {
+                    abilities.push(definition.clone());
+                }
+            }
+            Self::GrantTrigger { trigger } => {
+                let triggers = std::sync::Arc::make_mut(&mut values.trigger_definitions);
+                if !triggers.contains(trigger) {
+                    triggers.push(trigger.clone());
+                    std::sync::Arc::make_mut(&mut values.trigger_printed_origins).push(None);
+                }
+            }
+            Self::AddType { core_type } => {
+                if !values.card_types.core_types.contains(core_type) {
+                    values.card_types.core_types.push(*core_type);
+                }
+            }
+            Self::AddSubtype { subtype } => {
+                if !values.card_types.subtypes.contains(subtype) {
+                    values.card_types.subtypes.push(subtype.clone());
+                }
+            }
+            Self::SetCardTypes { core_types } => {
+                values.card_types.core_types = core_types.clone();
+                values
+                    .card_types
+                    .subtypes
+                    .retain(|subtype| subtype_matches_core_types(subtype, core_types));
+            }
+            Self::RemoveAllSubtypes { set } => {
+                remove_subtype_set(&mut values.card_types.subtypes, *set, all_creature_types);
+            }
+            Self::AddColor { color } => {
+                if !values.color.contains(color) {
+                    values.color.push(*color);
+                }
+            }
+            Self::SetColor { colors } => values.color = colors.clone(),
+            Self::GrantStaticAbility { definition } => {
+                let statics = std::sync::Arc::make_mut(&mut values.static_definitions);
+                if !statics.contains(definition) {
+                    // This is a copiable static definition, not an outer
+                    // layer-6 grant. Preserve the inner definition verbatim.
+                    statics.push(definition.clone());
+                }
+            }
+            Self::RetainPrintedTriggerFromSource {
+                source_trigger_index,
+            } => {
+                if let Some(trigger) = source.and_then(|source| {
+                    source
+                        .base_trigger_definitions
+                        .get(*source_trigger_index)
+                        .cloned()
+                }) {
+                    let triggers = std::sync::Arc::make_mut(&mut values.trigger_definitions);
+                    if !triggers.contains(&trigger) {
+                        triggers.push(trigger);
+                        std::sync::Arc::make_mut(&mut values.trigger_printed_origins).push(
+                            source.and_then(|source| {
+                                crate::game::printed_cards::base_trigger_printed_origins(source)
+                                    .get(*source_trigger_index)
+                                    .cloned()
+                                    .flatten()
+                            }),
+                        );
+                    }
+                }
+            }
+            Self::RetainPrintedAbilityFromSource {
+                source_ability_index,
+            } => {
+                if let Some(ability) = source
+                    .and_then(|source| source.base_abilities.get(*source_ability_index).cloned())
+                {
+                    let abilities = std::sync::Arc::make_mut(&mut values.abilities);
+                    if !abilities.contains(&ability) {
+                        abilities.push(ability);
+                    }
+                }
+            }
+            Self::RetainAllOtherAbilitiesFromSource => {
+                if let Some(source) = source {
+                    let abilities = std::sync::Arc::make_mut(&mut values.abilities);
+                    for ability in source.base_abilities.iter() {
+                        if !abilities.contains(ability) {
+                            abilities.push(ability.clone());
+                        }
+                    }
+                    let triggers = std::sync::Arc::make_mut(&mut values.trigger_definitions);
+                    let origins = std::sync::Arc::make_mut(&mut values.trigger_printed_origins);
+                    let source_origins =
+                        crate::game::printed_cards::base_trigger_printed_origins(source);
+                    for (printed_occurrence, trigger) in
+                        source.base_trigger_definitions.iter().enumerate()
+                    {
+                        if !triggers.contains(trigger) {
+                            triggers.push(trigger.clone());
+                            origins.push(source_origins[printed_occurrence].clone());
+                        }
+                    }
+                    let statics = std::sync::Arc::make_mut(&mut values.static_definitions);
+                    for static_definition in source.base_static_definitions.iter() {
+                        if !statics.contains(static_definition) {
+                            statics.push(static_definition.clone());
+                        }
+                    }
+                    for keyword in &source.base_keywords {
+                        if !values.keywords.contains(keyword) {
+                            values.keywords.push(keyword.clone());
+                        }
+                    }
+                }
+            }
+            Self::AddSupertype { supertype } => {
+                if !values.card_types.supertypes.contains(supertype) {
+                    values.card_types.supertypes.push(*supertype);
+                }
+            }
+            Self::RemoveSupertype { supertype } => {
+                values
+                    .card_types
+                    .supertypes
+                    .retain(|existing| existing != supertype);
+            }
+        }
+    }
+}
+
 fn apply_copy_values_to_recipients(
     state: &mut GameState,
     ability: &ResolvedAbility,
-    recipient: &TargetFilter,
+    recipient: &CopyRecipient,
     copy: PrecomputedCopyValues,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    match &recipient {
-        // Existing single-subject cards install one copy effect on the source.
-        TargetFilter::SelfRef => {
-            apply_precomputed_copy_values(state, ability.source_id, copy, events)
+    let recipient_ids: Vec<ObjectId> = match recipient {
+        // CR 707.2: the ability's own source becomes the copy. Every incumbent
+        // self-copy card (Mirage Mirror, Thespian's Stage, Lazav, …).
+        crate::types::ability::CopyRecipient::Source => {
+            return apply_precomputed_copy_values(state, ability.source_id, copy, events)
         }
-        // CR 611.2c: mass recipient set. `ParentTarget` reads the inherited
-        // object target(s); a typed group filter resolves against the
-        // battlefield at resolution (Niko: "Shards you control").
-        _ => {
-            let recipient_ids: Vec<crate::types::identifiers::ObjectId> = match &recipient {
-                TargetFilter::ParentTarget => ability
-                    .targets
-                    .iter()
-                    .filter_map(|t| match t {
-                        TargetRef::Object(id) => Some(*id),
-                        TargetRef::Player(_) => None,
-                    })
-                    .collect(),
-                _ => {
-                    let ctx = FilterContext::from_ability(ability);
-                    state
-                        .battlefield
-                        .iter()
-                        .copied()
-                        .filter(|id| matches_target_filter(state, *id, recipient, &ctx))
-                        .collect()
-                }
-            };
-            for id in recipient_ids {
-                let mut recipient_copy = copy.clone();
-                // CR 611.2b: recipient-relative durations ("for as long as ~
-                // remains attached to it") track the concrete object receiving
-                // the copy effect, while the copied values may come from a
-                // different object ("a creature card exiled with ~").
-                recipient_copy.duration_subject_id = id;
-                apply_precomputed_copy_values(state, id, recipient_copy, events)?;
-            }
-            Ok(())
+        // CR 115.1: an announced recipient — the FIRST declared object target
+        // (the copy source is the second; see `resolve`). Read straight off the
+        // chosen targets rather than re-evaluating the filter: CR 115.1 fixes
+        // the chosen objects at announcement, and the resolution-time legality
+        // recheck (CR 608.2b) is the skip guard in the loop below, not a
+        // re-selection.
+        crate::types::ability::CopyRecipient::Target(_) => ability
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .take(1)
+            .collect(),
+        // CR 611.2c: untargeted recipient set. `ParentTarget` reads the
+        // inherited object target(s); any other filter resolves against the
+        // battlefield at resolution and is then locked (Mirrorweave,
+        // Mirrorform, Niko's "Shards you control", Assimilation Aegis' host).
+        crate::types::ability::CopyRecipient::Untargeted(TargetFilter::ParentTarget) => ability
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect(),
+        crate::types::ability::CopyRecipient::Untargeted(filter) => {
+            let ctx = FilterContext::from_ability(ability);
+            state
+                .battlefield
+                .iter()
+                .copied()
+                .filter(|id| matches_target_filter(state, *id, filter, &ctx))
+                .collect()
         }
+    };
+    for id in recipient_ids {
+        // CR 608.2b (announced recipient) / CR 611.2c (untargeted set): a
+        // recipient that is no longer on the battlefield at resolution is
+        // skipped and the rest of the effect still happens. The two readings
+        // reach the same action by different routes — a `Target` recipient is a
+        // target whose legality is rechecked on resolution (608.2b), while an
+        // `Untargeted` recipient is never a target at all and simply is not
+        // among the objects the locked set can still affect (611.2c).
+        if !state.objects.contains_key(&id) {
+            continue;
+        }
+        let mut recipient_copy = copy.clone();
+        // CR 611.2b: recipient-relative durations ("for as long as ~
+        // remains attached to it") track the concrete object receiving
+        // the copy effect, while the copied values may come from a
+        // different object ("a creature card exiled with ~").
+        recipient_copy.duration_subject = ObjectIncarnationRef::from_object(&state.objects[&id]);
+        apply_precomputed_copy_values(state, id, recipient_copy, events)?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -370,7 +912,7 @@ mod tests {
     ) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration,
                 mana_value_limit: None,
@@ -427,7 +969,7 @@ mod tests {
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -472,7 +1014,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -543,7 +1085,7 @@ mod tests {
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: Some(Duration::UntilEndOfTurn),
                 mana_value_limit: None,
@@ -711,6 +1253,58 @@ mod tests {
     }
 
     #[test]
+    fn copy_of_token_carries_source_art_descriptor_and_reverts() {
+        // Token-source analog of the Mockingbird row above for the
+        // ref-LESS case: the source token has no exact `token_image_ref`,
+        // so the copy must ride the source's intrinsic `token_art`
+        // descriptor (not its own stale/absent one) — and drop it when
+        // the copy expires.
+        let mut state = GameState::new_two_player(42);
+
+        let source_art = crate::types::card::TokenArtDescriptor {
+            power: Some(2),
+            toughness: Some(2),
+            colors: vec![ManaColor::Green],
+            subtypes: vec!["Bear".to_string()],
+            keywords: vec![],
+            has_abilities: false,
+        };
+        let token_id = create_creature(&mut state, 1, PlayerId(0), "Bear", 2, 2);
+        {
+            let token = state.objects.get_mut(&token_id).unwrap();
+            token.is_token = true;
+            token.display_source = crate::game::game_object::DisplaySource::Token;
+            token.token_image_ref = None;
+            token.token_art = Some(source_art.clone());
+        }
+        let copier_id = create_creature(&mut state, 2, PlayerId(0), "Mockingbird", 1, 1);
+
+        let mut events = Vec::new();
+        let ability = make_copy_ability(
+            token_id,
+            copier_id,
+            PlayerId(0),
+            Some(Duration::UntilEndOfTurn),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let copy = &state.objects[&copier_id];
+        assert_eq!(
+            copy.token_art,
+            Some(source_art),
+            "the copy renders from the source token's intrinsic body"
+        );
+
+        execute_cleanup(&mut state, &mut events);
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&copier_id].token_art, None,
+            "a nontoken carries no art body of its own after revert"
+        );
+    }
+
+    #[test]
     fn permanent_become_copy_is_pruned_when_object_leaves_battlefield() {
         let mut state = GameState::new_two_player(42);
         let target_id = create_object(
@@ -733,7 +1327,7 @@ mod tests {
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -801,7 +1395,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -864,7 +1458,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1105,6 +1699,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -1142,6 +1738,8 @@ mod tests {
             obj.color = vec![ManaColor::Green];
             obj.base_color = vec![ManaColor::Green];
             obj.back_face = Some(BackFaceData {
+                is_swap_snapshot: false,
+                trigger_printed_origins: Vec::new(),
                 name: "Back Face".to_string(),
                 power: Some(5),
                 toughness: Some(4),
@@ -1263,7 +1861,7 @@ mod tests {
         // Resolve BecomeCopy with exactly the modifications the parser would emit.
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1329,7 +1927,7 @@ mod tests {
         // Spider-Man copies Elesh Norn with SetName override.
         let spidey_ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1400,7 +1998,7 @@ mod tests {
         // current_trigger_index = 0.
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1493,7 +2091,7 @@ mod tests {
         // exactly what the parser emits for "and she has this ability").
         let irma_to_bear = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1583,7 +2181,7 @@ mod tests {
 
         let assassin_to_bear = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1634,7 +2232,7 @@ mod tests {
         // Source has zero printed triggers — index 0 is out of bounds.
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1678,7 +2276,7 @@ mod tests {
         let copy_ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1691,7 +2289,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1748,7 +2346,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1788,6 +2386,125 @@ mod tests {
                 },
             ),
             "LegendRuleDoesntApply static must be retained on the copy"
+        );
+    }
+
+    /// CR 707.9b + CR 707.9d: Machine God's Effigy's `SetCardTypes` copy
+    /// exception provides Artifact as the copied card-type set, so a donor's
+    /// type-defining Changeling CDA is not copied. A later Copy Artifact copy
+    /// must snapshot that pruned copiable-value set rather than restore the
+    /// donor's CDA or its creature subtypes.
+    #[test]
+    fn machine_gods_effigy_type_replacement_prunes_changeling_cda_for_later_copies() {
+        let mut state = GameState::new_two_player(42);
+        state.all_creature_types = vec!["Dragon".to_string(), "Elf".to_string()];
+
+        let donor = create_creature(&mut state, 1, PlayerId(0), "Changeling Donor", 2, 2);
+        let changeling_cda = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddAllCreatureTypes])
+            .cda();
+        state
+            .objects
+            .get_mut(&donor)
+            .unwrap()
+            .base_static_definitions = Arc::new(vec![changeling_cda]);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects[&donor]
+                .card_types
+                .subtypes
+                .contains(&"Dragon".to_string()),
+            "reach guard: the donor's characteristic-defining Changeling static must apply"
+        );
+
+        let effigy = create_creature(&mut state, 2, PlayerId(0), "Machine God's Effigy", 0, 0);
+        let effigy_copy = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                recipient: crate::types::ability::CopyRecipient::Source,
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![ContinuousModification::SetCardTypes {
+                    core_types: vec![CoreType::Artifact],
+                }],
+            },
+            vec![TargetRef::Object(donor)],
+            effigy,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &effigy_copy, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let copied_effigy = &state.objects[&effigy];
+        assert_eq!(
+            copied_effigy.card_types.core_types,
+            vec![CoreType::Artifact]
+        );
+        assert!(
+            !copied_effigy
+                .card_types
+                .subtypes
+                .contains(&"Dragon".to_string()),
+            "the noncreature Artifact copy must not retain a creature subtype from the donor CDA"
+        );
+        assert!(
+            !copied_effigy
+                .static_definitions
+                .iter_all()
+                .any(|definition| definition.characteristic_defining),
+            "CR 707.9d: the type-defining donor CDA must be absent from Effigy's copiable values"
+        );
+
+        let copy_artifact = create_creature(&mut state, 3, PlayerId(0), "Copy Artifact", 0, 0);
+        let copy_artifact_copy = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                recipient: crate::types::ability::CopyRecipient::Source,
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![ContinuousModification::AddType {
+                    core_type: CoreType::Enchantment,
+                }],
+            },
+            vec![TargetRef::Object(effigy)],
+            copy_artifact,
+            PlayerId(0),
+        );
+        resolve(&mut state, &copy_artifact_copy, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let copied_artifact = &state.objects[&copy_artifact];
+        assert!(copied_artifact
+            .card_types
+            .core_types
+            .contains(&CoreType::Artifact));
+        assert!(copied_artifact
+            .card_types
+            .core_types
+            .contains(&CoreType::Enchantment));
+        assert!(
+            !copied_artifact
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "a later Copy Artifact copy must not regain Creature"
+        );
+        assert!(
+            !copied_artifact
+                .card_types
+                .subtypes
+                .contains(&"Dragon".to_string()),
+            "a later Copy Artifact copy must not regain the donor's creature subtype"
+        );
+        assert!(
+            !copied_artifact
+                .static_definitions
+                .iter_all()
+                .any(|definition| definition.characteristic_defining),
+            "a later Copy Artifact copy must not regain the pruned donor CDA"
         );
     }
 
@@ -1839,7 +2556,7 @@ mod tests {
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1888,7 +2605,7 @@ mod tests {
     // 20/20 flying indestructible legendary Avatar token.
     //
     // This drives the real runtime path: BecomeCopy resolution → layer
-    // evaluation → check_state_triggers (via the priority window) → stack
+    // evaluation → a priority pass's state-trigger check → stack
     // resolution of the Sacrifice + "if you do, create" chain.
     #[test]
     fn copying_dark_depths_with_zero_counters_creates_marit_lage() {
@@ -2007,19 +2724,23 @@ mod tests {
             "the copy must inherit Dark Depths' state-triggered ability (CR 603.8)"
         );
 
-        // Drive the runtime: granting priority runs `check_state_triggers`,
-        // which sees zero ice counters and puts the sacrifice trigger on the
-        // stack; resolving it sacrifices the copy and creates Marit Lage.
+        // CR 603.8 + CR 117.1: state triggers are checked whenever a player would
+        // receive priority, so P0's pass puts the sacrifice trigger on the stack.
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
-        // CR 603.8 + CR 117.1: state triggers are checked whenever a player would
-        // receive priority. Run the engine's state-trigger check (the same call
-        // the priority pipeline makes), which puts the sacrifice trigger on the
-        // stack, then drain the stack to resolve the Sacrifice + "if you do,
-        // create Marit Lage" chain.
-        crate::game::triggers::check_state_triggers(&mut state);
         let mut runner = GameRunner::from_state(state);
+        runner
+            .act(crate::types::actions::GameAction::PassPriority)
+            .expect("P0 passes priority");
+        assert!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == stage),
+            "reach: the copy's state trigger is on the stack"
+        );
         runner.advance_until_stack_empty();
         let state = runner.state();
 
@@ -2191,7 +2912,9 @@ mod tests {
             .expect("BecomeCopy must register a TCE");
         assert_eq!(
             tce.duration_subject,
-            Some(target_id),
+            Some(ObjectIncarnationRef::from_object(
+                &state.objects[&target_id]
+            )),
             "the copy TARGET must be captured as the duration subject"
         );
         assert_eq!(

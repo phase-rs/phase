@@ -9,6 +9,7 @@ use crate::types::ability::{
 use crate::types::card::CardFace;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::game_state::RandomDraw;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -93,6 +94,14 @@ pub fn resolve(
     // just-conjured copies in creation order (they sit at the bottom of the library).
     let mut library_placements: Vec<(PlayerId, Vec<ObjectId>)> = Vec::new();
 
+    // CR 608.2c (chain-created referent, digital-only mechanic): every object
+    // conjured by this resolution, in creation order. Published as
+    // `state.last_created_token_ids` below so a same-chain "it" that follows a
+    // conjure (Agent of Raffine's "... into your hand. It perpetually gains
+    // ...") resolves to the card just conjured via `TargetFilter::LastCreated`,
+    // mirroring the token/copy-token producers (`game/effects/token.rs`).
+    let mut created_ids: Vec<ObjectId> = Vec::new();
+
     for conjure_card in cards {
         let count =
             resolve_quantity_with_targets(state, &conjure_card.count, ability).max(0) as u32;
@@ -140,6 +149,7 @@ pub fn resolve(
                     card_name.clone(),
                     destination,
                 );
+                created_ids.push(obj_id);
 
                 // CR 613.7d: an object receives a timestamp when it enters a zone.
                 // Stage 2 stamps battlefield entries only, so only draw one when the
@@ -262,6 +272,12 @@ pub fn resolve(
         crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
     }
 
+    // ASSIGNS `state.last_created_token_ids` (never appended), matching every
+    // other token/copy producer's convention — a pre-existing publication from
+    // an earlier clause in this same resolution must not leak into a later,
+    // unrelated "it" (see `game/effects/token.rs`'s equivalent assignment).
+    state.last_created_token_ids = created_ids;
+
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Conjure,
         source_id: ability.source_id,
@@ -280,9 +296,9 @@ fn resolve_duplicate_reference(
     ability: &ResolvedAbility,
     reference: &TargetFilter,
 ) -> Option<ObjectId> {
-    let resolved = crate::game::targeting::resolved_targets(ability, reference, state);
-    let object_ids = crate::game::effects::effect_object_targets(reference, &resolved);
-    object_ids.into_iter().next()
+    crate::game::effects::resolved_effect_object_ids(state, ability, reference)
+        .into_iter()
+        .next()
 }
 
 /// Place every just-conjured copy for one recipient into `owner`'s library at the
@@ -313,14 +329,14 @@ fn place_conjured_in_library(
     if conjured.is_empty() {
         return;
     }
-    let Some(pidx) = state.players.iter().position(|p| p.id == owner) else {
+    if !state.players.iter().any(|p| p.id == owner) {
         return;
-    };
+    }
     // The recipient's existing library, with the just-conjured copies (currently at
     // the bottom in creation order) removed, so index math and the random window
     // treat the copies as being *inserted* among the existing cards.
-    let mut rest: Vec<ObjectId> = state.players[pidx]
-        .library
+    let mut rest: Vec<ObjectId> = state
+        .library_of(owner)
         .iter()
         .copied()
         .filter(|id| !conjured.contains(id))
@@ -363,7 +379,11 @@ fn place_conjured_in_library(
                 // `window` is the final top-N size; `head.len() + 1` is the
                 // slots available after this insert. Delegates to the single
                 // authority so zone-pipeline exhaustiveness arms stay identical.
-                let slot = zones::random_top_slot_index(&mut state.rng, window, head.len() + 1);
+                let slot = zones::random_top_slot_index(
+                    state.rng.draw(RandomDraw::Placement),
+                    window,
+                    head.len() + 1,
+                );
                 head.insert(slot, id);
             }
             head.extend(tail);
@@ -372,7 +392,7 @@ fn place_conjured_in_library(
     };
 
     // allow-raw-zone: in-library reorder of just-conjured cards, not a zone event.
-    state.players[pidx].library = final_library.into_iter().collect();
+    *state.library_of_mut(owner) = final_library.into_iter().collect();
 }
 
 #[cfg(test)]

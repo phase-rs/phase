@@ -47,8 +47,16 @@ spec:
          is still playing. */}}
     - metadata:
         name: data
+        {{- /* selectorLabels only, never the full label set. Kubernetes forbids
+             every change to volumeClaimTemplates on an existing StatefulSet, so
+             a label that moves — `helm.sh/chart` carries the chart version,
+             `app.kubernetes.io/version` the appVersion — makes the next chart
+             bump unappliable: `helm upgrade` fails with "updates to statefulset
+             spec for fields other than 'replicas', ... are forbidden" and the
+             only way out is deleting the StatefulSet with --cascade=orphan.
+             Keep these labels constant across versions. */}}
         labels:
-          {{- include "phase-server.labels" . | nindent 10 }}
+          {{- include "phase-server.selectorLabels" . | nindent 10 }}
       spec:
         accessModes:
           - ReadWriteOnce

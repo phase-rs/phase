@@ -400,7 +400,11 @@ fn balance_save_during_discard_choice_preserves_frozen_hand_minimum() {
         .expect("the authoritative paused state serializes");
     let restored: PersistedGameState =
         serde_json::from_str(&saved).expect("the authoritative paused state deserializes");
-    let mut runner = GameRunner::from_state(restored.into_game_state());
+    let mut runner = GameRunner::from_state(
+        restored
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract"),
+    );
     assert!(
         runner.state().clause_minimum_snapshot.is_some(),
         "the paused discard clause's frozen hand minimum must survive authoritative restore"

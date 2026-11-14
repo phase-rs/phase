@@ -12,7 +12,7 @@ describe("PausedBanner", () => {
     const user = userEvent.setup();
     render(<PausedBanner isVisible reason="Paused by host" onResume={onResume} />);
 
-    await user.click(screen.getByRole("button", { name: "Resume" }));
+    await user.click(screen.getByRole("button", { name: "Resume game" }));
 
     expect(onResume).toHaveBeenCalledOnce();
   });
@@ -20,6 +20,6 @@ describe("PausedBanner", () => {
   it("does not expose a resume control to guests", () => {
     render(<PausedBanner isVisible reason="Paused by host" />);
 
-    expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Resume game" })).toBeNull();
   });
 });

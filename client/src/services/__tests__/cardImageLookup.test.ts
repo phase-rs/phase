@@ -1,5 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { cardImageLookup } from "../cardImageLookup.ts";
+import type { GameObject } from "../../adapter/types.ts";
+import {
+  cardImageLookup,
+  decodeTokenFilterKeywords,
+  encodeTokenFilterKeywords,
+  formatKeywordForScryfall,
+  tokenFiltersForObject,
+} from "../cardImageLookup.ts";
+
+function tokenObj(overrides: Record<string, unknown>): GameObject {
+  return {
+    power: null,
+    toughness: null,
+    color: [],
+    card_types: { subtypes: [] },
+    keywords: [],
+    abilities: [],
+    ...overrides,
+  } as unknown as GameObject;
+}
 
 describe("cardImageLookup", () => {
   it("returns front-face lookup for a plain (non-transformed) card", () => {
@@ -149,5 +168,112 @@ describe("cardImageLookup", () => {
       name: "Kuruk, the Mastodon",
       faceIndex: 1,
     });
+  });
+});
+
+describe("tokenFiltersForObject", () => {
+  it("formats the engine descriptor without re-deriving anything", () => {
+    // The descriptor is authoritative: live values disagree (pumped P/T,
+    // color setter, anthem grant) and must be ignored wholesale.
+    expect(
+      tokenFiltersForObject(
+        tokenObj({
+          power: 4,
+          toughness: 4,
+          color: ["Blue"],
+          keywords: ["Flying"],
+          token_art: {
+            power: 1,
+            toughness: 1,
+            colors: ["White"],
+            subtypes: ["Soldier"],
+            keywords: [],
+            has_abilities: false,
+          },
+        }),
+      ),
+    ).toEqual({
+      power: 1,
+      toughness: 1,
+      colors: ["White"],
+      subtypes: ["Soldier"],
+      keywords: undefined,
+      hasAbilities: false,
+    });
+  });
+
+  it("passes descriptor keywords through the Scryfall formatter", () => {
+    expect(
+      tokenFiltersForObject(
+        tokenObj({
+          token_art: {
+            power: 1,
+            toughness: 1,
+            colors: ["White"],
+            subtypes: ["Spirit"],
+            keywords: ["Flying", "FirstStrike", "Flying"],
+            has_abilities: true,
+          },
+        }),
+      ).keywords,
+    ).toEqual(["flying", "first strike"]);
+  });
+
+  it("falls back to live fields when no descriptor is present", () => {
+    // Cards, non-tokens, and tokens from older snapshots: pre-descriptor
+    // behavior, preserved exactly.
+    expect(
+      tokenFiltersForObject(
+        tokenObj({
+          power: 2,
+          toughness: 2,
+          color: ["Green"],
+          card_types: { subtypes: ["Elf", "Warrior"] },
+          token_art: null,
+        }),
+      ),
+    ).toEqual({
+      power: 2,
+      toughness: 2,
+      colors: ["Green"],
+      subtypes: ["Elf", "Warrior"],
+      hasAbilities: false,
+    });
+    expect(
+      tokenFiltersForObject(tokenObj({ keywords: ["Flying"] })).hasAbilities,
+    ).toBe(true);
+  });
+});
+
+describe("formatKeywordForScryfall", () => {
+  it.each([
+    ["Flying", "flying"],
+    ["FirstStrike", "first strike"],
+    ["Protection", "protection"],
+    ["some-future-keyword", "some-future-keyword"],
+  ])("formats %s as %s", (family, expected) => {
+    expect(formatKeywordForScryfall(family)).toBe(expected);
+  });
+
+  it("drops empty names", () => {
+    expect(formatKeywordForScryfall("")).toBeNull();
+  });
+});
+
+describe("token filter keyword codec", () => {
+  it("round-trips lists containing commas without ambiguity", () => {
+    // An `Unknown` payload is an arbitrary string: ["foo,bar","baz"] and
+    // ["foo","bar,baz"] must encode (and key) distinctly.
+    const a = ["foo,bar", "baz"];
+    const b = ["foo", "bar,baz"];
+    expect(encodeTokenFilterKeywords(a)).not.toBe(encodeTokenFilterKeywords(b));
+    expect(decodeTokenFilterKeywords(encodeTokenFilterKeywords(a))).toEqual(a);
+    expect(decodeTokenFilterKeywords(encodeTokenFilterKeywords(b))).toEqual(b);
+  });
+
+  it("decodes empty and corrupt payloads to an empty list", () => {
+    expect(decodeTokenFilterKeywords("")).toEqual([]);
+    expect(decodeTokenFilterKeywords("not-json{{")).toEqual([]);
+    expect(decodeTokenFilterKeywords('"just-a-string"')).toEqual([]);
   });
 });

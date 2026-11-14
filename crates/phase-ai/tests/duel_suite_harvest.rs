@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use engine::database::CardDatabase;
 use phase_ai::config::AiDifficulty;
-use phase_ai::duel_suite::run::{run_suite, SuiteOptions};
+use phase_ai::duel_suite::run::{run_suite, ReportSink, SuiteOptions};
 
 const RED_MIRROR: &str = "red-mirror";
 const MIRROR_BASE_SEED: u64 = 0x00A1_57A1;
@@ -50,7 +50,7 @@ fn is_meta_line(line: &str) -> bool {
 
 fn harvest_opts(games: usize, base_seed: u64, harvest_path: &Path) -> SuiteOptions {
     let mut opts = SuiteOptions::new(AiDifficulty::Medium, games, base_seed);
-    opts.output_path = PathBuf::from("target/duel-suite-harvest-report.json");
+    opts.output = ReportSink::Create(PathBuf::from("target/duel-suite-harvest-report.json"));
     opts.filter = Some(RED_MIRROR.to_string());
     opts.harvest_output = Some(harvest_path.to_path_buf());
     opts

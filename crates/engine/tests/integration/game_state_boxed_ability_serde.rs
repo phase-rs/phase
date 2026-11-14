@@ -126,7 +126,7 @@ fn populated_state() -> GameState {
     // Safe for `boxed_abilities_round_trip_through_serde`: `GameState`'s manual
     // `PartialEq` deliberately excludes this field, so an intentionally-dropped
     // skipped field cannot make the round-trip equality assertion red.
-    state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume {
+    state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume::Chosen {
         player: P0,
         pending: PendingCast::new(
             ObjectId(704),
@@ -261,7 +261,14 @@ fn boxing_introduces_no_wrapper_level_in_the_wire_shape() {
 /// round trip, so this test covers the persisted seam on its own terms.
 fn state_with_resolving_stack_entry() -> GameState {
     let mut state = GameState::new_two_player(42);
-    state.waiting_for = WaitingFor::Priority { player: P0 };
+    state.waiting_for = WaitingFor::OptionalEffectChoice {
+        player: P0,
+        decision_subject_id: None,
+        source_id: SOURCE,
+        description: None,
+        may_trigger_key: None,
+        same_card_may_trigger_choice_available: false,
+    };
     state.resolving_stack_entry = Some(StackEntry {
         id: ObjectId(704),
         source_id: SOURCE,
@@ -274,6 +281,56 @@ fn state_with_resolving_stack_entry() -> GameState {
         },
     });
     state
+}
+
+#[test]
+fn optional_decision_subjects_round_trip_and_accept_legacy_payloads() {
+    let variants = [
+        WaitingFor::OptionalEffectChoice {
+            player: P0,
+            decision_subject_id: Some(ObjectId(44)),
+            source_id: SOURCE,
+            description: Some("cast that card".to_string()),
+            may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
+        },
+        WaitingFor::OpponentMayChoice {
+            player: P1,
+            decision_subject_id: Some(ObjectId(45)),
+            source_id: SOURCE,
+            description: Some("put that card into a graveyard".to_string()),
+            remaining: vec![P0],
+        },
+    ];
+
+    for waiting_for in variants {
+        let value = serde_json::to_value(&waiting_for).expect("waiting state serializes");
+        let restored: WaitingFor =
+            serde_json::from_value(value.clone()).expect("present subject deserializes");
+        assert_eq!(
+            restored, waiting_for,
+            "trusted subject identity round-trips"
+        );
+
+        let mut legacy = value;
+        legacy["data"]
+            .as_object_mut()
+            .expect("tagged waiting state has data")
+            .remove("decision_subject_id");
+        let legacy_restored: WaitingFor =
+            serde_json::from_value(legacy).expect("legacy missing subject deserializes");
+        match legacy_restored {
+            WaitingFor::OptionalEffectChoice {
+                decision_subject_id,
+                ..
+            }
+            | WaitingFor::OpponentMayChoice {
+                decision_subject_id,
+                ..
+            } => assert_eq!(decision_subject_id, None),
+            other => panic!("unexpected optional sibling after legacy decode: {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -308,7 +365,8 @@ fn persisted_round_trip_preserves_the_boxed_resolving_stack_entry() {
     // just the derived `GameState` one.
     let restored = serde_json::from_str::<PersistedGameState>(&json)
         .expect("and deserializes back through the persisted codec")
-        .into_game_state();
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
 
     let restored_entry = restored
         .resolving_stack_entry
@@ -387,7 +445,8 @@ fn persisted_restore_migrates_legacy_jeskas_will_mana_target_role() {
 
     let restored = serde_json::from_value::<PersistedGameState>(persisted)
         .expect("legacy Jeska's Will snapshot restores through the persisted codec")
-        .into_game_state();
+        .into_game_state()
+        .expect("persisted test snapshot satisfies the checked restore contract");
     let reserialized = serde_json::to_value(PersistedGameState::capture(restored))
         .expect("the migrated state reserializes");
     assert_eq!(

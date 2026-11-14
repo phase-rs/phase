@@ -14,12 +14,18 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 use crate::database::CardDatabase;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::player::PlayerId;
-use crate::types::replay::{RecordedAction, ReplayHeader, ReplayLog, REPLAY_FORMAT_VERSION};
+use crate::types::replay::{
+    RecordedAction, RecordedActionKind, ReplayHeader, ReplayLog, REPLAY_FORMAT_VERSION,
+};
 
 use super::deck_loading::{load_and_hydrate_decks, resolve_deck_list};
-use super::engine::{apply, start_game, start_game_with_starting_player};
+use super::engine::{
+    apply, apply_verified_ai_priority_pass, resolve_all_ready_access, resolve_all_ready_prefix,
+    start_game, start_game_winner_plays_first, start_game_with_starting_player,
+    ResolveAllReadyAccess,
+};
 
 /// Checkpoints are cached every `CHECKPOINT_INTERVAL` actions, bounding cache
 /// size to roughly `len / CHECKPOINT_INTERVAL` snapshots while keeping any
@@ -33,7 +39,9 @@ const CHECKPOINT_INTERVAL: u32 = 20;
 pub enum ReplayError {
     #[error("replay is missing its format version")]
     MissingFormatVersion,
-    #[error("unsupported replay format version {version}; this engine supports version 2")]
+    #[error(
+        "unsupported replay format version {version}; this engine supports versions 2 through 4"
+    )]
     UnsupportedFormatVersion { version: u32 },
     /// An action that was recorded as having succeeded failed to re-apply
     /// during reconstruction. This means the recording and the engine version
@@ -65,9 +73,21 @@ pub enum ReplayError {
 /// it isn't accepted silently. `db: None` is only valid when
 /// `header.deck_data` is also `None` (a format that genuinely starts with
 /// empty libraries).
+///
+/// Reconstructs a current-format (`REPLAY_FORMAT_VERSION`) header.
 pub fn reconstruct_initial_state(
     header: &ReplayHeader,
-    db: Option<&CardDatabase>,
+    db: Option<&std::sync::Arc<CardDatabase>>,
+) -> Result<GameState, ReplayError> {
+    reconstruct_initial_state_for_version(header, db, REPLAY_FORMAT_VERSION)
+}
+
+/// `reconstruct_initial_state` for a recording made in `format_version`, which
+/// selects how a contest-started (`first_player: None`) game begins.
+fn reconstruct_initial_state_for_version(
+    header: &ReplayHeader,
+    db: Option<&std::sync::Arc<CardDatabase>>,
+    format_version: u32,
 ) -> Result<GameState, ReplayError> {
     let mut state = GameState::new(
         header.format_config.clone(),
@@ -98,16 +118,23 @@ pub fn reconstruct_initial_state(
     match (&header.deck_data, db) {
         (Some(deck_data), Some(db)) => {
             let payload = resolve_deck_list(db, deck_data);
-            load_and_hydrate_decks(&mut state, &payload, Some(db));
+            load_and_hydrate_decks(&mut state, &payload, Some(&**db));
             state.all_card_names = db.card_names().into();
+            // CR 707.2 + CR 202.3: a replayed Momir game draws its random
+            // creatures from the whole corpus at resolution time, so the
+            // reconstructed state needs the same draw source a live game gets.
+            crate::game::install_card_db(&mut state, std::sync::Arc::clone(db));
         }
         (Some(_), None) => return Err(ReplayError::MissingCardDatabase),
         (None, _) => {}
     }
 
-    match header.first_player {
-        Some(0) => start_game_with_starting_player(&mut state, PlayerId(0)),
-        Some(1) => start_game_with_starting_player(&mut state, PlayerId(1)),
+    match (header.first_player, format_version) {
+        (Some(0), _) => start_game_with_starting_player(&mut state, PlayerId(0)),
+        (Some(1), _) => start_game_with_starting_player(&mut state, PlayerId(1)),
+        // CR 103.1: recordings before version 4 have no recorded choice; the
+        // contest winner took the first turn.
+        (_, 2 | 3) => start_game_winner_plays_first(&mut state),
         _ => start_game(&mut state),
     };
     Ok(state)
@@ -131,13 +158,17 @@ impl ReplayPlayer {
     /// (post-`start_game`) checkpoint. `db` is forwarded to
     /// `reconstruct_initial_state`, which errors if `log.header.deck_data`
     /// is `Some` and `db` is `None` — see that function's doc comment.
-    pub fn load(log: ReplayLog, db: Option<&CardDatabase>) -> Result<Self, ReplayError> {
-        match log.format_version {
-            Some(REPLAY_FORMAT_VERSION) => {}
+    pub fn load(
+        log: ReplayLog,
+        db: Option<&std::sync::Arc<CardDatabase>>,
+    ) -> Result<Self, ReplayError> {
+        let version = match log.format_version {
+            Some(version @ (2 | 3 | REPLAY_FORMAT_VERSION)) => version,
             Some(version) => return Err(ReplayError::UnsupportedFormatVersion { version }),
             None => return Err(ReplayError::MissingFormatVersion),
-        }
-        let initial = reconstruct_initial_state(&log.header, db)?;
+        };
+        validate_resolve_all_boundaries(&log)?;
+        let initial = reconstruct_initial_state_for_version(&log.header, db, version)?;
         let mut checkpoints = BTreeMap::new();
         checkpoints.insert(0, initial);
         Ok(Self {
@@ -191,30 +222,123 @@ impl ReplayPlayer {
             .next_back()
             .expect("index 0 checkpoint is always present");
         let mut state = base.clone();
-        for recorded in &self.log.actions[start_idx as usize..target as usize] {
-            apply(&mut state, recorded.actor, recorded.action.clone()).map_err(|e| {
-                ReplayError::Desync {
-                    index: recorded.seq,
-                    message: e.to_string(),
+        for (offset, recorded) in self.log.actions[start_idx as usize..target as usize]
+            .iter()
+            .enumerate()
+        {
+            let applied = match recorded.kind {
+                RecordedActionKind::Submitted => {
+                    apply(&mut state, recorded.actor, recorded.action.clone())
                 }
+                RecordedActionKind::VerifiedAiPriorityPass { semantic_owner } => {
+                    let contract =
+                        crate::ai_support::AiDecisionContract::issue(&state, semantic_owner);
+                    apply_verified_ai_priority_pass(
+                        &mut state,
+                        recorded.actor,
+                        &contract,
+                        recorded.action.clone(),
+                    )
+                }
+            };
+            applied.map_err(|e| ReplayError::Desync {
+                index: recorded.seq,
+                message: e.to_string(),
             })?;
+            let after_action_count = start_idx + offset as u32 + 1;
+            for boundary in self
+                .log
+                .resolve_all_boundaries
+                .iter()
+                .filter(|boundary| boundary.after_action_count == after_action_count)
+            {
+                if !matches!(state.waiting_for, WaitingFor::ResolveAllReady { .. }) {
+                    return Err(ReplayError::Desync {
+                        index: recorded.seq,
+                        message: "Resolve All boundary was due without a Ready latch".to_string(),
+                    });
+                }
+                if resolve_all_ready_access(&state, boundary.requester)
+                    != ResolveAllReadyAccess::Admitted
+                {
+                    return Err(ReplayError::Desync {
+                        index: recorded.seq,
+                        message:
+                            "Resolve All boundary requester is not entitled to the Ready latch"
+                                .to_string(),
+                    });
+                }
+                resolve_all_ready_prefix(&mut state, boundary.requester).map_err(|error| {
+                    ReplayError::Desync {
+                        index: recorded.seq,
+                        message: format!("Resolve All boundary is not reproducible: {error}"),
+                    }
+                })?;
+            }
         }
         Ok(state)
     }
 }
 
+fn validate_resolve_all_boundaries(log: &ReplayLog) -> Result<(), ReplayError> {
+    let boundary_error = |after_action_count: u32, message: &str| ReplayError::Desync {
+        index: after_action_count.saturating_sub(1),
+        message: message.to_string(),
+    };
+
+    if log.format_version == Some(2) && !log.resolve_all_boundaries.is_empty() {
+        return Err(boundary_error(
+            log.resolve_all_boundaries[0].after_action_count,
+            "version 2 replay cannot contain Resolve All boundaries",
+        ));
+    }
+
+    let action_count = log.actions.len() as u32;
+    let mut previous = 0;
+    for boundary in &log.resolve_all_boundaries {
+        if boundary.after_action_count == 0 || boundary.after_action_count > action_count {
+            return Err(boundary_error(
+                boundary.after_action_count,
+                "Resolve All boundary anchor is outside the action sequence",
+            ));
+        }
+        if boundary.after_action_count <= previous {
+            return Err(boundary_error(
+                boundary.after_action_count,
+                "Resolve All boundaries must be unique and strictly ordered",
+            ));
+        }
+        previous = boundary.after_action_count;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
-    use crate::types::actions::GameAction;
+    use std::sync::Arc;
+
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
+        TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
+    };
+    use crate::types::actions::{GameAction, ResolveAllConsentDecision, ResolveAllScope};
+    use crate::types::card_type::CoreType;
+    use crate::types::events::GameEvent;
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::{ProductionOverride, WaitingFor};
-    use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+    use crate::types::game_state::{
+        AutoPassMode, ProductionOverride, StackEntry, StackEntryKind, StackResolutionPolicy,
+        TurnBoundary, WaitingFor,
+    };
+    use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::mana::{
         ManaSourceOutput, ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
     };
     use crate::types::match_config::MatchConfig;
+    use crate::types::phase::Phase;
+    use crate::types::replay::RecordedResolveAll;
+    use crate::types::zones::Zone;
 
     fn two_player_header(seed: u64) -> ReplayHeader {
         ReplayHeader {
@@ -238,6 +362,107 @@ mod tests {
         }
     }
 
+    fn no_op_entry(id: u64, controller: PlayerId) -> StackEntry {
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    Vec::new(),
+                    object_id,
+                    controller,
+                )),
+            },
+        }
+    }
+
+    fn recheck_fixture_state() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        // P0's own entry: P1 has no standing pass over it
+        // (`priority::standing_priority_pass`), so the session is retained.
+        state.stack.push_back(StackEntry {
+            id: ObjectId(70_200),
+            source_id: ObjectId(70_200),
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(70_200),
+                ability: Box::new(crate::types::ability::ResolvedAbility::new(
+                    Effect::NoOp,
+                    Vec::new(),
+                    ObjectId(70_200),
+                    PlayerId(0),
+                )),
+            },
+        });
+        let object_id = create_object(
+            &mut state,
+            CardId(70_201),
+            PlayerId(1),
+            "Replay Recheck Action".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state
+            .objects
+            .get_mut(&object_id)
+            .expect("created battlefield object");
+        object.card_types.core_types.push(CoreType::Artifact);
+        Arc::make_mut(&mut object.abilities).push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+        state
+    }
+
+    #[test]
+    fn verified_ai_stack_pass_replays_with_live_private_session_state() {
+        let initial = recheck_fixture_state();
+        let contract = crate::ai_support::AiDecisionContract::issue(&initial, PlayerId(0));
+        let mut live = initial.clone();
+        apply_verified_ai_priority_pass(
+            &mut live,
+            PlayerId(0),
+            &contract,
+            GameAction::PassPriority,
+        )
+        .expect("the live verified pass applies");
+
+        let header = two_player_header(42);
+        let mut log = ReplayLog::new(header);
+        log.push_verified_ai_priority_pass(PlayerId(0), PlayerId(0));
+        let mut checkpoints = BTreeMap::new();
+        checkpoints.insert(0, initial);
+        let mut player = ReplayPlayer {
+            log,
+            checkpoints,
+            scratch: None,
+        };
+        let replayed = player.seek(1).expect("the marker must replay");
+
+        assert_eq!(replayed, &live, "replay must use the same engine seam");
+        assert_eq!(replayed.state_revision, live.state_revision);
+        assert_eq!(
+            replayed
+                .stack_resolution_session
+                .as_ref()
+                .map(|session| (session.cursor, session.policy)),
+            Some((0, StackResolutionPolicy::RecheckNoMeaningfulPriorityAction)),
+            "the retained private cursor and policy must match live application"
+        );
+    }
+
     #[test]
     fn load_rejects_missing_format_version_before_reconstruction() {
         let mut log = ReplayLog::new(two_player_header(1));
@@ -259,7 +484,255 @@ mod tests {
     }
 
     #[test]
-    fn version_two_roundtrips_semantic_mana_source_selections() {
+    fn version_two_rejects_resolve_all_boundaries() {
+        let mut legacy = ReplayLog::new(two_player_header(2));
+        legacy.format_version = Some(2);
+        ReplayPlayer::load(legacy.clone(), None)
+            .expect("v2 replay without Resolve All boundaries remains readable");
+
+        legacy.resolve_all_boundaries.push(RecordedResolveAll {
+            after_action_count: 1,
+            requester: PlayerId(0),
+        });
+        let error = ReplayPlayer::load(legacy, None)
+            .expect_err("v2 cannot represent an atomic Resolve All boundary");
+        assert!(matches!(
+            error,
+            ReplayError::Desync { message, .. }
+                if message == "version 2 replay cannot contain Resolve All boundaries"
+        ));
+    }
+
+    /// A header for a game started by the engine's own d20 contest.
+    fn contest_header(format_config: FormatConfig, player_count: u8, seed: u64) -> ReplayHeader {
+        ReplayHeader {
+            format_config,
+            match_config: MatchConfig::default(),
+            player_count,
+            first_player: None,
+            seed,
+            deck_data: None,
+        }
+    }
+
+    /// The first seed whose contest winner satisfies `wanted`, with that winner.
+    fn seed_whose_winner(
+        format_config: &FormatConfig,
+        player_count: u8,
+        wanted: impl Fn(PlayerId) -> bool,
+    ) -> (u64, PlayerId) {
+        (0..256u64)
+            .find_map(|seed| {
+                let mut probe = GameState::new(format_config.clone(), player_count, seed);
+                start_game(&mut probe)
+                    .events
+                    .iter()
+                    .find_map(|event| match event {
+                        GameEvent::StartingPlayerContest { winner, .. } => Some(*winner),
+                        _ => None,
+                    })
+                    .filter(|&winner| wanted(winner))
+                    .map(|winner| (seed, winner))
+            })
+            .expect("a seed with the wanted contest winner within 256 seeds")
+    }
+
+    fn load_at_version(header: &ReplayHeader, format_version: u32) -> ReplayPlayer {
+        let mut log = ReplayLog::new(header.clone());
+        log.format_version = Some(format_version);
+        ReplayPlayer::load(log, None).expect("a supported version loads")
+    }
+
+    /// CR 103.1: a version-4 recording starts at the prompt and replays the
+    /// recorded choice.
+    #[test]
+    fn recorded_choice_replays_from_the_prompt() -> Result<(), ReplayError> {
+        let header = contest_header(FormatConfig::standard(), 2, 42);
+        let mut live = reconstruct_initial_state(&header, None)?;
+        let WaitingFor::ChooseStartingPlayer { player: winner, .. } = live.waiting_for else {
+            panic!("a current-format contest header reconstructs to the CR 103.1 choice");
+        };
+        let starter = PlayerId(1 - winner.0);
+        let answer = GameAction::ChooseStartingPlayer { player: starter };
+        apply(&mut live, winner, answer.clone()).expect("the chooser names the other seat");
+        let mut log = ReplayLog::new(header);
+        log.push_action(winner, answer);
+
+        let mut player = ReplayPlayer::load(log, None)?;
+        assert_eq!(player.len(), 1, "the choice is the one recorded action");
+        assert!(matches!(
+            player.seek(0)?.waiting_for,
+            WaitingFor::ChooseStartingPlayer { player: chooser, .. } if chooser == winner
+        ));
+        let replayed = player.seek(1)?;
+        assert_eq!(replayed.current_starting_player, starter);
+        assert_eq!(
+            replayed.current_starting_player,
+            live.current_starting_player
+        );
+        assert_eq!(replayed.turn_number, live.turn_number);
+        Ok(())
+    }
+
+    /// CR 103.1: versions 2 and 3 predate the recorded choice, so their
+    /// contest winner takes the first turn; the version, not the header,
+    /// selects the route.
+    #[test]
+    fn pre_choice_recordings_start_with_the_roll_winner() {
+        let format_config = FormatConfig::standard();
+        let (seed, winner) = seed_whose_winner(&format_config, 2, |winner| winner == PlayerId(1));
+        let header = contest_header(format_config, 2, seed);
+
+        for version in [3, 2] {
+            let mut player = load_at_version(&header, version);
+            let start = player.seek(0).expect("the start reconstructs");
+            assert_eq!(start.turn_number, 1, "version {version}");
+            assert_eq!(start.current_starting_player, winner, "version {version}");
+            assert!(
+                !matches!(start.waiting_for, WaitingFor::ChooseStartingPlayer { .. }),
+                "version {version} has no recorded choice to wait for"
+            );
+        }
+
+        let mut current = load_at_version(&header, REPLAY_FORMAT_VERSION);
+        assert!(matches!(
+            current.seek(0).expect("the start reconstructs").waiting_for,
+            WaitingFor::ChooseStartingPlayer { player, .. } if player == winner
+        ));
+    }
+
+    /// CR 103.1a: a version-3 Two-Headed Giant recording was started by its raw
+    /// roll winner, even a team's second seat, so it replays that start.
+    #[test]
+    fn pre_choice_two_headed_giant_recording_starts_the_raw_winner() {
+        let format_config = FormatConfig::two_headed_giant();
+        let (seed, winner) = seed_whose_winner(&format_config, 4, |winner| {
+            winner == PlayerId(1) || winner == PlayerId(3)
+        });
+        let header = contest_header(format_config, 4, seed);
+
+        let mut legacy = load_at_version(&header, 3);
+        let start = legacy.seek(0).expect("the start reconstructs");
+        assert_eq!(start.current_starting_player, winner);
+        assert_eq!(start.seat_order[0], winner);
+
+        let representative = if winner == PlayerId(1) {
+            PlayerId(0)
+        } else {
+            PlayerId(2)
+        };
+        let mut current = load_at_version(&header, REPLAY_FORMAT_VERSION);
+        assert!(matches!(
+            current.seek(0).expect("the start reconstructs").waiting_for,
+            WaitingFor::ChooseStartingPlayer { player, .. } if player == representative
+        ));
+    }
+
+    #[test]
+    fn version_three_rejects_invalid_resolve_all_boundary_anchors() {
+        let mut base = ReplayLog::new(two_player_header(3));
+        base.push_action(PlayerId(0), GameAction::PassPriority);
+        base.push_action(PlayerId(1), GameAction::PassPriority);
+
+        let mut zero = base.clone();
+        zero.resolve_all_boundaries.push(RecordedResolveAll {
+            after_action_count: 0,
+            requester: PlayerId(0),
+        });
+        let mut past_end = base.clone();
+        past_end.resolve_all_boundaries.push(RecordedResolveAll {
+            after_action_count: 3,
+            requester: PlayerId(0),
+        });
+        let mut unordered = base.clone();
+        unordered.resolve_all_boundaries = vec![
+            RecordedResolveAll {
+                after_action_count: 2,
+                requester: PlayerId(0),
+            },
+            RecordedResolveAll {
+                after_action_count: 1,
+                requester: PlayerId(1),
+            },
+        ];
+        let mut duplicate = base;
+        duplicate.resolve_all_boundaries = vec![
+            RecordedResolveAll {
+                after_action_count: 1,
+                requester: PlayerId(0),
+            },
+            RecordedResolveAll {
+                after_action_count: 1,
+                requester: PlayerId(1),
+            },
+        ];
+
+        for malformed in [zero, past_end, unordered, duplicate] {
+            let error = ReplayPlayer::load(malformed, None)
+                .expect_err("v3 boundary anchors must be in-range, unique, and ordered");
+            assert!(matches!(error, ReplayError::Desync { .. }));
+        }
+    }
+
+    #[test]
+    fn due_resolve_all_boundary_requires_a_ready_latch() {
+        let mut log = ReplayLog::new(two_player_header(4));
+        log.push_action(PlayerId(0), GameAction::PassPriority);
+        log.push_resolve_all_boundary(PlayerId(0));
+
+        let mut replay = ReplayPlayer::load(log, None).expect("boundary shape is valid");
+        let error = replay
+            .seek(1)
+            .expect_err("a due Resolve All boundary must not be silently ignored");
+        assert!(matches!(
+            error,
+            ReplayError::Desync { message, .. }
+                if message == "Resolve All boundary was due without a Ready latch"
+        ));
+    }
+
+    #[test]
+    fn due_resolve_all_boundary_rejects_a_legacy_boundary_after_engine_owned_resolution() {
+        let header = two_player_header(5);
+        let mut initial = GameState::new_two_player(header.seed);
+        initial.stack.push_back(no_op_entry(1, PlayerId(0)));
+        let mut log = ReplayLog::new(header);
+
+        let begin = GameAction::BeginResolveAll {
+            max_resolutions: 0,
+            scope: ResolveAllScope::Shared,
+        };
+        let mut consent = initial.clone();
+        apply(&mut consent, PlayerId(0), begin.clone())
+            .expect("P0 can begin Resolve All from priority");
+        log.push_action(PlayerId(0), begin);
+        let WaitingFor::ResolveAllConsent { epoch, .. } = consent.waiting_for else {
+            panic!(
+                "P1 should be asked for consent, got {:?}",
+                consent.waiting_for
+            );
+        };
+        let grant = GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        };
+        log.push_action(PlayerId(1), grant);
+        log.push_resolve_all_boundary(PlayerId(2));
+
+        let mut replay = ReplayPlayer::load(log, None).expect("boundary shape is valid");
+        replay.checkpoints.insert(0, initial);
+        let error = replay
+            .seek(2)
+            .expect_err("new Resolve All actions resolve through the engine without a Ready latch");
+        assert!(matches!(
+            error,
+            ReplayError::Desync { message, .. }
+                if message == "Resolve All boundary was due without a Ready latch"
+        ));
+    }
+
+    #[test]
+    fn current_version_roundtrips_semantic_mana_source_selections() {
         let source = ObjectIncarnationRef::of(ObjectId(7), 3);
         let aura = ObjectIncarnationRef::of(ObjectId(9), 2);
         let action = GameAction::TapLandForMana {
@@ -370,6 +843,66 @@ mod tests {
                 "waiting_for at {index}"
             );
         }
+    }
+
+    #[test]
+    fn replay_player_reconstructs_a_legacy_atomic_resolve_all_boundary() {
+        let header = two_player_header(101);
+        let mut initial = GameState::new_two_player(header.seed);
+        initial.stack.push_back(no_op_entry(1, PlayerId(0)));
+        for player in [PlayerId(0), PlayerId(1)] {
+            initial.auto_pass.insert(
+                player,
+                AutoPassMode::UntilTurnBoundary {
+                    until: TurnBoundary::EndOfCurrentTurn,
+                },
+            );
+        }
+
+        let begin = GameAction::BeginResolveAll {
+            max_resolutions: 0,
+            scope: ResolveAllScope::Shared,
+        };
+        apply(&mut initial, PlayerId(0), begin).expect("P0 begins Resolve All consent");
+        let WaitingFor::ResolveAllConsent { epoch, .. } = initial.waiting_for else {
+            panic!(
+                "P1 should be asked for consent, got {:?}",
+                initial.waiting_for
+            );
+        };
+        let run = initial
+            .resolve_all_consent_run
+            .as_mut()
+            .expect("the consent prompt retains its private run");
+        run.auto_pass_baseline = None;
+        initial.auto_pass.remove(&PlayerId(0));
+
+        let mut live = initial.clone();
+        let mut log = ReplayLog::new(header);
+        let grant = GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        };
+        apply(&mut live, PlayerId(1), grant.clone()).expect("P1 grants Resolve All consent");
+        log.push_action(PlayerId(1), grant);
+        assert!(matches!(
+            live.waiting_for,
+            WaitingFor::ResolveAllReady { .. }
+        ));
+
+        resolve_all_ready_prefix(&mut live, PlayerId(0))
+            .expect("the fixture's Resolve All prefix is representable");
+        log.push_resolve_all_boundary(PlayerId(0));
+
+        let mut replay = ReplayPlayer::load(log, None).expect("the atomic boundary is replayable");
+        replay.checkpoints.insert(0, initial);
+        let replay_len = replay.len();
+        let reconstructed = replay
+            .seek(replay_len)
+            .expect("ReplayPlayer applies the Resolve All boundary")
+            .clone();
+
+        assert_eq!(reconstructed, live);
     }
 
     #[test]

@@ -608,11 +608,21 @@ fn prohibited_entry_survives_departed_source() {
 }
 
 /// Row 15: an ability that is merely unaffordable (no prohibition) is NOT read
-/// out — the read-out reflects only prohibitions, not payability. Reach-guard:
-/// the SAME ability is enumerated by `activated_ability_definitions` and gains an
-/// entry once a prohibition is added.
+/// out ON THE OBJECT FIELD — the read-out reflects only prohibitions, not
+/// payability. Reach-guard: the SAME ability is enumerated by
+/// `activated_ability_definitions` and gains an entry once a prohibition is
+/// added.
+///
+/// **The contract is channel-scoped, and this assertion is deliberately NOT
+/// inverted.** `AbilityBlockKind::CostNotPayableNow` exists, but it is published
+/// on the legal-actions payload by `ai_support::activation_block_reasons`, never
+/// on `GameObject::blocked_abilities` — the `derived.rs` sweep this test drives
+/// consults only `casting::activation_prohibition_reason` (the three CR 602.5
+/// arms). So "an unaffordable ability is not read out here" remains correct as
+/// written; the payability read-out is covered by
+/// `ability_cost_block_readout.rs`.
 #[test]
-fn unaffordable_ability_without_prohibition_is_not_read_out() {
+fn unaffordable_ability_without_prohibition_is_not_read_out_on_the_object_field() {
     use engine::game::casting::activated_ability_definitions;
 
     let mut scenario = GameScenario::new();

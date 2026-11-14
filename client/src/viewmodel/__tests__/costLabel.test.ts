@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { AdditionalCost, GameAction, GameObject, Keyword, ManaCost } from "../../adapter/types.ts";
 import { buildGameObject } from "../../test/factories/gameObjectFactory.ts";
+import i18n from "../../i18n";
 import {
   abilityChoiceLabel,
   abilityLabel,
@@ -10,6 +11,8 @@ import {
   formatCost,
   spellCostDisplay,
   stripLoyaltyCostPrefix,
+  unlessDrawCostLabel,
+  unlessPaymentCanBeDeclined,
 } from "../costLabel.ts";
 
 function makeObject(overrides: Partial<GameObject> = {}): GameObject {
@@ -102,6 +105,19 @@ describe("abilityChoiceLabel per-variant formatting", () => {
       "Return a Forest you control to its owner's hand",
     );
     expect(formatCost({ type: "ReturnToHand", count: 1 })).toBe("Return 1 permanent");
+  });
+
+  it("labels Reveal costs formatted with count, card filter and zone", () => {
+    expect(
+      formatCost({
+        type: "Reveal",
+        count: 1,
+        filter: {
+          type: "Typed",
+          type_filters: [{ Subtype: "Elf" }],
+        },
+      }),
+    ).toBe("Reveal 1 Elf card from your hand");
   });
 
   it("labels an ActivateAbility with its serialized cost", () => {
@@ -490,6 +506,51 @@ describe("formatAbilityCost", () => {
       ],
     })).toBe("{1} or Pay 2 life");
   });
+
+  it("formats the external-tag mana wire shape", () => {
+    expect(formatAbilityCost({
+      type: "Mana",
+      cost: { type: "Cost", shards: ["Blue"], generic: 2 },
+    })).toBe("{2}{U}");
+  });
+
+  it("formats typed discard filters from the server wire shape", () => {
+    expect(formatAbilityCost({
+      type: "Discard",
+      count: { type: "Fixed", value: 1 },
+      filter: { type: "Typed", type_filters: [{ Non: "Land" }], controller: null, properties: [] },
+      random: "Chosen",
+      self_ref: "AnyCard",
+    })).toBe("Discard 1 nonLand card");
+  });
+
+  it("formats exile filters and zones from the server wire shape", () => {
+    expect(formatAbilityCost({
+      type: "Exile",
+      count: { type: "Fixed", value: 2 },
+      zone: "Graveyard",
+      filter: { type: "Typed", type_filters: ["Creature"], controller: null, properties: [] },
+    })).toBe("Exile 2 Creature cards from your graveyard");
+  });
+
+  it("routes exile templates through the active locale with engine values as interpolation", async () => {
+    const key = "resolutionOptionalPayment.cost.exile";
+    const previousLanguage = i18n.language;
+    const previousTemplate = String(i18n.getResource("de", "game", key));
+    i18n.addResource("de", "game", key, "LOK {{count}} {{cards}} / {{zone}}");
+    await i18n.changeLanguage("de");
+    try {
+      expect(formatAbilityCost({
+        type: "Exile",
+        count: { type: "Fixed", value: 2 },
+        zone: "Graveyard",
+        filter: { type: "Typed", type_filters: ["Creature"], controller: null, properties: [] },
+      })).toBe("LOK 2 Creature-Karten / deinem Friedhof");
+    } finally {
+      i18n.addResource("de", "game", key, previousTemplate);
+      await i18n.changeLanguage(previousLanguage);
+    }
+  });
 });
 
 describe("spellCostDisplay", () => {
@@ -531,5 +592,47 @@ describe("spellCostDisplay", () => {
   it("does not flag an unchanged effective cost as reduced", () => {
     const { isReduced } = spellCostDisplay(cost(5, ["Blue"]), cost(5, ["Blue"]));
     expect(isReduced).toBe(false);
+  });
+});
+
+describe("unlessDrawCostLabel renders the engine-resolved draw", () => {
+  it("names a single one-card instruction as drawing a card", () => {
+    expect(unlessDrawCostLabel({ cards: 1, instructions: 1, stage: "Offered" })).toBe(
+      i18n.t("game:gamePage.cost.draw"),
+    );
+  });
+
+  it("counts a multi-card instruction", () => {
+    expect(unlessDrawCostLabel({ cards: 3, instructions: 1, stage: "Offered" })).toBe(
+      i18n.t("game:gamePage.cost.drawCount", { count: 3 }),
+    );
+  });
+
+  it("shows a resolved zero instead of drawing a card", () => {
+    const label = unlessDrawCostLabel({ cards: 0, instructions: 1, stage: "Offered" });
+    expect(label).toBe(i18n.t("game:gamePage.cost.drawCount", { count: 0 }));
+    expect(label).not.toBe(i18n.t("game:gamePage.cost.draw"));
+  });
+
+  it("appends the repetition the engine supplies", () => {
+    expect(unlessDrawCostLabel({ cards: 1, instructions: 65, stage: "Offered" })).toBe(
+      `${i18n.t("game:gamePage.cost.draw")} × 65`,
+    );
+  });
+});
+
+describe("unlessPaymentCanBeDeclined follows the engine's payment stage", () => {
+  it("offers a decline while the payment is only offered", () => {
+    expect(unlessPaymentCanBeDeclined({ cards: 1, instructions: 3, stage: "Offered" })).toBe(true);
+  });
+
+  it("offers a decline for a cost that is not a draw", () => {
+    expect(unlessPaymentCanBeDeclined(undefined)).toBe(true);
+  });
+
+  it("offers no decline once the payment is continuing", () => {
+    expect(unlessPaymentCanBeDeclined({ cards: 1, instructions: 2, stage: "Continuing" })).toBe(
+      false,
+    );
   });
 });

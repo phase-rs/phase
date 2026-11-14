@@ -12,7 +12,13 @@
 
 import { createStore, del, get, set } from "idb-keyval";
 
+import { DRAFT_KINDS } from "../adapter/draft-adapter";
 import type { DraftKind, DraftStatus, PoolInput } from "../adapter/draft-adapter";
+import {
+  isPlainRecord,
+  validateWorkspaceState,
+  type DraftWorkspaceState,
+} from "../components/draft/workspace/types";
 import type { DraftMatchBinding, DraftMatchLaunch, DraftMatchSettlement } from "../network/draftProtocol";
 import { parseRoomCode } from "../network/connection";
 import { ACTIVE_DRAFT_GUEST_KEY, ACTIVE_DRAFT_POD_KEY } from "../constants/storage";
@@ -42,6 +48,9 @@ export interface PersistedDraftHostSession {
   seatNames: Record<number, string>;
   /** Tokens that were kicked — refused on reconnect. */
   kickedTokens: string[];
+  /** Absolute reconnect deadline by seat. An absent field is legacy and cannot
+   * safely establish a new recovery window. */
+  reconnectDeadlines?: Record<number, number>;
   /** Seats whose reconnect grace elapsed while this host owned the pod. */
   expiredDisconnectedSeats?: number[];
   /** Whether StartDraft has been applied. */
@@ -88,6 +97,8 @@ export interface PersistedDraftHostSession {
     submissionId: string;
     payloadFingerprint: string;
   }>;
+  /** Complete, validated workspace state per authoritative seat. */
+  perSeatWorkspaceSnapshots?: Record<number, DraftWorkspaceState>;
 }
 
 /**
@@ -118,6 +129,14 @@ export interface PersistedDraftDeckSubmission {
   draftToken: string;
   submissionId: string;
   mainDeck: string[];
+  /**
+   * CR 903.3: the commander designation this submission carried. Persisted
+   * because `draft_submit_deck` REQUIRES it (draft protocol 17) — a reconnect
+   * replay that omitted it would be refused by `validateSubmitDeck` on the
+   * host, and `draftPeerSession`'s decode `.catch` would drop the frame
+   * silently rather than surfacing an error.
+   */
+  commanders: string[];
   timestamp: number;
 }
 
@@ -129,9 +148,24 @@ export interface ActiveDraftGuestMeta {
   timestamp: number;
 }
 
+/** Stable identity of a guest recovery locator read from local storage. */
+export interface ActiveDraftGuestMetaCapture {
+  roomCode: string;
+  displayName: string;
+  hostPeerId: string;
+  timestamp: number;
+}
+
+/** Non-mutating classification for guest recovery callers. */
+export type ActiveDraftGuestLoadResult =
+  | { type: "absent" }
+  | { type: "invalid"; capture: ActiveDraftGuestMetaCapture | null }
+  | { type: "present"; meta: ActiveDraftGuestMeta; capture: ActiveDraftGuestMetaCapture };
+
 export type ActiveDraftPodPhase =
   | "lobby"
   | "drafting"
+  | "review"
   | "deckbuilding"
   | "pairing"
   | "matchInProgress"
@@ -164,9 +198,24 @@ export type ActiveDraftPodLoadResult =
 
 export type PersistedDraftHostSessionState = "live" | "terminal" | "invalid";
 
+/**
+ * Host recovery must keep absence, malformed storage, terminal history and an
+ * IndexedDB failure distinct.  In particular, a read failure keeps the saved
+ * record for a source-bound retry and does not authorize locator cleanup.
+ * The loader reads a saved draft session only for its status; whether the
+ * draft engine can restore it is the engine's own check.
+ */
+export type DraftHostSessionLoadResult =
+  | { type: "absent" }
+  | { type: "invalid"; raw: unknown }
+  | { type: "terminal"; session: PersistedDraftHostSession; raw: unknown }
+  | { type: "admitted"; session: PersistedDraftHostSession; raw: unknown }
+  | { type: "readFailure"; error: unknown };
+
 const PERSISTED_DRAFT_STATUS: Record<DraftStatus, PersistedDraftHostSessionState> = {
   Lobby: "live",
   Drafting: "live",
+  Review: "live",
   Paused: "live",
   Deckbuilding: "live",
   Pairing: "live",
@@ -212,16 +261,47 @@ export async function saveDraftHostSession(
 
 export async function loadDraftHostSession(
   id: string,
-): Promise<PersistedDraftHostSession | null> {
+): Promise<DraftHostSessionLoadResult> {
   try {
-    const s = await get<PersistedDraftHostSession>(
+    const raw = await get<unknown>(
       DRAFT_HOST_PREFIX + id,
       getDraftStore(),
     );
-    if (!s) return null;
-    return isPersistedDraftHostSession(s) ? s : null;
-  } catch {
-    return null;
+    // IndexedDB deletion is represented by a nullish read.  Falsy values are
+    // still values: they must pass through the structural classifier so a
+    // corrupt `false`, `0`, or empty string cannot take the absent/guest
+    // fallback route by truthiness.
+    if (raw === undefined || raw === null) return { type: "absent" };
+    if (!isPersistedDraftHostSession(raw)) return { type: "invalid", raw };
+    const s = raw;
+
+    const snapshots: Record<number, DraftWorkspaceState> = {};
+    if (s.perSeatWorkspaceSnapshots !== undefined) {
+      if (!isPlainRecord(s.perSeatWorkspaceSnapshots)) return { type: "invalid", raw };
+      const rawSnapshots = s.perSeatWorkspaceSnapshots as unknown as Record<PropertyKey, unknown>;
+      for (const key of Reflect.ownKeys(rawSnapshots)) {
+        if (
+          typeof key !== "string"
+          || !Object.prototype.propertyIsEnumerable.call(rawSnapshots, key)
+        ) {
+          return { type: "invalid", raw };
+        }
+        const seat = Number(key);
+        if (!Number.isSafeInteger(seat) || seat < 0 || String(seat) !== key) return { type: "invalid", raw };
+        const snapshot = validateWorkspaceState(rawSnapshots[key]);
+        if ("error" in snapshot) return { type: "invalid", raw };
+        snapshots[seat] = snapshot;
+      }
+    }
+
+    const session = { ...s, perSeatWorkspaceSnapshots: snapshots };
+
+    const state = persistedDraftHostSessionState(session);
+    if (state === "invalid") return { type: "invalid", raw };
+    if (state === "terminal") return { type: "terminal", session, raw };
+    return { type: "admitted", session, raw };
+  } catch (error) {
+    return { type: "readFailure", error };
   }
 }
 
@@ -283,19 +363,56 @@ export function saveActiveDraftGuest(meta: Omit<ActiveDraftGuestMeta, "timestamp
   }));
 }
 
-export function loadActiveDraftGuest(): ActiveDraftGuestMeta | null {
+function activeDraftGuestCapture(value: unknown): ActiveDraftGuestMetaCapture | null {
+  if (!isActiveDraftGuestMeta(value)) return null;
+  return {
+    roomCode: value.roomCode,
+    displayName: value.displayName,
+    hostPeerId: value.hostPeerId,
+    timestamp: value.timestamp,
+  };
+}
+
+/** Inspects the guest recovery locator without removing malformed or expired data. */
+export function inspectActiveDraftGuest(): ActiveDraftGuestLoadResult {
   try {
     const raw = localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY);
-    if (!raw) return null;
+    if (!raw) return { type: "absent" };
     const value: unknown = JSON.parse(raw);
-    if (!isActiveDraftGuestMeta(value) || Date.now() - value.timestamp > GUEST_SESSION_TTL_MS) {
-      clearActiveDraftGuest();
-      return null;
+    if (!isActiveDraftGuestMeta(value)) return { type: "invalid", capture: null };
+    const capture = activeDraftGuestCapture(value);
+    if (!capture || Date.now() - capture.timestamp > GUEST_SESSION_TTL_MS) {
+      return { type: "invalid", capture };
     }
-    return value;
+    return { type: "present", meta: value, capture };
   } catch {
-    clearActiveDraftGuest();
-    return null;
+    return { type: "invalid", capture: null };
+  }
+}
+
+export function loadActiveDraftGuest(): ActiveDraftGuestMeta | null {
+  const active = inspectActiveDraftGuest();
+  if (active.type === "present") return active.meta;
+  if (active.type === "invalid") clearActiveDraftGuest();
+  return null;
+}
+
+/** Clears guest metadata only when it still matches a previously inspected locator. */
+export function clearActiveDraftGuestIfCurrent(capture: ActiveDraftGuestMetaCapture): void {
+  try {
+    const raw = localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY);
+    if (!raw) return;
+    const currentCapture = activeDraftGuestCapture(JSON.parse(raw));
+    if (
+      currentCapture?.roomCode === capture.roomCode
+      && currentCapture.displayName === capture.displayName
+      && currentCapture.hostPeerId === capture.hostPeerId
+      && currentCapture.timestamp === capture.timestamp
+    ) {
+      clearActiveDraftGuest();
+    }
+  } catch {
+    // A malformed replacement is not evidence that this caller owns it.
   }
 }
 
@@ -307,6 +424,12 @@ export function clearActiveDraftGuest(): void {
 export function clearActiveDraftGuestForHost(hostPeerId: string): void {
   const current = loadActiveDraftGuest();
   if (current?.hostPeerId === hostPeerId) clearActiveDraftGuest();
+}
+
+/** Do not erase a newer pod's host locator when an older pod is ended. */
+export function clearActiveDraftPodFor(persistenceId: string): void {
+  const current = inspectActiveDraftPod();
+  if (current.type !== "absent" && current.capture?.id === persistenceId) clearActiveDraftPod();
 }
 
 /** Clears stale metadata only when it is still the record this caller read. */
@@ -357,12 +480,12 @@ function isActiveDraftPodMeta(value: unknown): value is ActiveDraftPodMeta {
   return (
     typeof value.id === "string" && value.id.length > 0 &&
     isCanonicalRoomCode(value.roomCode) &&
-    (value.kind === "Premier" || value.kind === "Traditional" || value.kind === "Sealed" || value.kind === "CommanderDraft") &&
+    isDraftKind(value.kind) &&
     isPositiveInteger(value.podSize) &&
     typeof value.hostDisplayName === "string" &&
     (value.tournamentFormat === "Swiss" || value.tournamentFormat === "SingleElimination") &&
     (value.podPolicy === "Competitive" || value.podPolicy === "Casual") &&
-    (value.phase === "lobby" || value.phase === "drafting" || value.phase === "deckbuilding" ||
+    (value.phase === "lobby" || value.phase === "drafting" || value.phase === "review" || value.phase === "deckbuilding" ||
       value.phase === "pairing" || value.phase === "matchInProgress" || value.phase === "complete") &&
     isNonnegativeInteger(value.pickCount) &&
     isPositiveFiniteNumber(value.updatedAt)
@@ -396,6 +519,7 @@ function isPersistedDraftHostSession(value: unknown): value is PersistedDraftHos
     isSeatStringRecord(value.seatTokens) &&
     isSeatStringRecord(value.seatNames) &&
     Array.isArray(value.kickedTokens) && value.kickedTokens.every((token) => typeof token === "string") &&
+    (value.reconnectDeadlines === undefined || isSeatDeadlineRecord(value.reconnectDeadlines)) &&
     (value.expiredDisconnectedSeats === undefined ||
       (Array.isArray(value.expiredDisconnectedSeats) && value.expiredDisconnectedSeats.every(isNonnegativeInteger))) &&
     typeof value.draftStarted === "boolean" &&
@@ -416,14 +540,52 @@ function isPersistedDraftHostSession(value: unknown): value is PersistedDraftHos
   );
 }
 
+/**
+ * The kinds a persisted pod may carry, DERIVED from `DRAFT_KINDS` rather than
+ * restated beside it.
+ *
+ * `"Quick"` is excluded because a Quick draft is single-player against bots and
+ * is never persisted as a P2P host session; that exclusion is expressed once,
+ * here, as a filter over the authority.
+ */
+const PERSISTABLE_DRAFT_KINDS: readonly Exclude<DraftKind, "Quick">[] = DRAFT_KINDS.filter(
+  (kind): kind is Exclude<DraftKind, "Quick"> => kind !== "Quick",
+);
+
+/**
+ * IndexedDB is untrusted, so the kind is validated rather than asserted.
+ *
+ * Folds `PERSISTABLE_DRAFT_KINDS` instead of enumerating the kinds inline:
+ * TypeScript never checks a type-guard BODY against the union in its
+ * `value is …` clause, so a hand-written chain here would keep compiling —
+ * and keep refusing — after `DRAFT_KINDS` grew. The symptom is silent: a
+ * persisted host session of the new kind is classified corrupt and discarded
+ * on resume, with no error raised anywhere.
+ */
 function isDraftKind(value: unknown): value is Exclude<DraftKind, "Quick"> {
-  return value === "Premier" || value === "Traditional" || value === "Sealed" || value === "CommanderDraft";
+  return PERSISTABLE_DRAFT_KINDS.some((kind) => kind === value);
 }
 
 function isPoolInput(value: unknown): value is PoolInput {
   if (!isRecord(value) || !isRecord(value.data)) return false;
   if (value.type === "Set") {
+    // Two spellings reach here. The live one is a `SetPackSequence`: the
+    // distinct pools plus the pack-ordered sequence naming which fills each
+    // booster. A pod persisted before multi-set pods existed carries one
+    // serialized pool under `set_pool_json`; draft-wasm still promotes that to
+    // the one-element sequence it meant, so a host mid-lobby across the upgrade
+    // resumes instead of having its snapshot discarded as corrupt.
+    if (isSetPackSequence(value.data)) return true;
     return typeof value.data.set_pool_json === "string" && isJsonRecord(value.data.set_pool_json);
+  }
+  if (value.type === "Chaos") {
+    return (
+      Array.isArray(value.data.pools) &&
+      value.data.pools.every(isRecord) &&
+      Array.isArray(value.data.candidate_codes) &&
+      value.data.candidate_codes.length > 0 &&
+      value.data.candidate_codes.every(isNonEmptyString)
+    );
   }
   if (value.type !== "Cube") return false;
   const settings = value.data.cube_draft_settings;
@@ -444,8 +606,30 @@ function isPoolInput(value: unknown): value is PoolInput {
   );
 }
 
+/**
+ * A pack sequence carries one pool object per distinct set and one set code per
+ * booster. The sequence must be non-empty — a pod that named no booster has no
+ * pool at all — and every entry a string, since draft-wasm resolves each
+ * against the supplied pools by name.
+ */
+function isSetPackSequence(data: Record<string, unknown>): boolean {
+  return (
+    Array.isArray(data.pools) &&
+    data.pools.every(isRecord) &&
+    Array.isArray(data.sequence) &&
+    data.sequence.length > 0 &&
+    data.sequence.every((code) => typeof code === "string")
+  );
+}
+
 function isSeatStringRecord(value: unknown): value is Record<number, string> {
   return isRecord(value) && Object.entries(value).every(([seat, token]) => isPositiveSeat(seat) && typeof token === "string");
+}
+
+function isSeatDeadlineRecord(value: unknown): value is Record<number, number> {
+  return isRecord(value) && Object.entries(value).every(
+    ([seat, deadline]) => isPositiveSeat(seat) && isPositiveFiniteNumber(deadline),
+  );
 }
 
 function isPositiveSeat(value: string): boolean {
@@ -577,6 +761,7 @@ export async function saveDraftDeckSubmission(
     draftToken: submission.draftToken,
     submissionId: submission.submissionId,
     mainDeck: [...submission.mainDeck],
+    commanders: [...submission.commanders],
     timestamp: Date.now(),
   };
   await set(`${DRAFT_DECK_SUBMISSION_PREFIX}${hostPeerId}`, value, getDraftStore());
@@ -596,7 +781,12 @@ export async function loadDraftDeckSubmission(
     if (!value || value.hostPeerId !== hostPeerId || !isNonEmptyString(value.draftCode)
       || !isCanonicalRoomCode(value.roomCode)
       || !isNonEmptyString(value.draftToken) || !isNonEmptyString(value.submissionId)
-      || !Array.isArray(value.mainDeck) || !value.mainDeck.every((card) => typeof card === "string")) {
+      || !Array.isArray(value.mainDeck) || !value.mainDeck.every((card) => typeof card === "string")
+      // A record written before the designation existed cannot be replayed:
+      // the host would refuse it. Discarding it is the fail-safe answer — the
+      // guest simply builds a fresh submission.
+      || !Array.isArray(value.commanders)
+      || !value.commanders.every((card) => typeof card === "string")) {
       return null;
     }
     if (identity && (value.roomCode !== roomCode || value.draftToken !== identity.draftToken)) {

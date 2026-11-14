@@ -132,11 +132,11 @@ describe("processRemoteUpdate", () => {
     });
 
     // NOT TESTED HERE: that a *superseded* update declines to write. The
-    // generation is bumped only by `abandonDispatchesForStateRestore`
-    // (reachable via `restoreGameState`), and an event-free update runs to
-    // completion synchronously, so there is no window in which to supersede it
-    // from this harness. The property is structural instead: the write sits
-    // immediately after `processRemoteUpdateInner`'s second
+    // generation is bumped only by `abandonPendingDispatches` (reachable via
+    // `restoreGameState` and `clearPromptOverlayState`), and an event-free
+    // update runs to completion synchronously, so there is no window in which
+    // to supersede it from this harness. The property is structural instead:
+    // the write sits immediately after `processRemoteUpdateInner`'s second
     // `isCurrentDispatchGeneration` guard, next to `commitEngineSnapshot`, and
     // is the reason the list is threaded through dispatch rather than written
     // from `GameProvider`. A `reset()`-based version of this test passes

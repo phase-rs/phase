@@ -20,7 +20,7 @@ import { ManaSymbol } from "./ManaSymbol.tsx";
  * display layer that dispatches the caster's chosen value via `ChooseX`.
  */
 export function ChooseXValueUI() {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const gameState = useGameStore((s) => s.gameState);
   const dispatch = useGameStore((s) => s.dispatch);
@@ -125,6 +125,7 @@ export function ChooseXValueUI() {
               input: t("mana.chooseXInputAria"),
               decrease: t("mana.decreaseX"),
               increase: t("mana.increaseX"),
+              setMaximum: t("mana.setXToMaximum"),
             }}
           />
 

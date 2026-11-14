@@ -126,10 +126,10 @@
 //! against. A new `events.push(GameEvent::TokenCreated { … })` written anywhere else tripped
 //! nothing.
 //!
-//! COUNT, MEASURED on this tree, not recalled: 38 anchor occurrences in `engine/src`, of which
-//! exactly TWO are production-scope constructions — the emitter (`effects/token.rs`, inside
-//! `push_committed_token_entry_events`) and the adjudicated `stack.rs` probe. The other 10
-//! constructions are `#[cfg(test)]`-scoped and the remaining 26 are consumer PATTERNS.
+//! Exactly ONE anchor occurrence in `engine/src` is a production-scope construction — the emitter
+//! (`effects/token.rs`, inside `push_committed_token_entry_events`). Every other construction is
+//! `#[cfg(test)]`-scoped and the remaining occurrences are consumer PATTERNS; the assertion below
+//! pins both counts.
 //!
 //! THE CONSTRUCTION PREDICATE IS DIFFERENT HERE, AND THAT DIFFERENCE IS THE POINT. `ZoneChanged`
 //! keys on an explicit `record:` initializer, so it cannot see a construction written entirely in
@@ -160,10 +160,9 @@
 //!   consumers of this surface, not members of it, and that tree is deliberately not walked.
 //!
 //! RESIDUAL, STATED RATHER THAN IMPLIED: the function-scope conjunct pins only the `token.rs`
-//! hit. A second production construction written inside `stack.rs` that ALSO deleted the probe
-//! would keep the multiset intact and pass. That is the same residual the `ZoneChanged` half
-//! carries for each of its three non-authority files; closing it would mean a per-file enclosing-fn
-//! pin on files whose hits are adjudicated survivors rather than authorities.
+//! hit. That is the same residual the `ZoneChanged` half carries for each of its non-authority
+//! files; closing it would mean a per-file enclosing-fn pin on files whose hits are adjudicated
+//! survivors rather than authorities.
 //!
 //! ── THIRD ANCHOR: the SINGLE-ID ANAPHORA PUBLISH ─────────────────────────────────────────────
 //!
@@ -985,14 +984,13 @@ fn enclosing_fn(headers: &[(usize, String)], line: usize) -> Option<&str> {
         .map(|(_, name)| name.as_str())
 }
 
-/// The three production `from: None` constructions that are NOT the authority, each adjudicated by
+/// The two production `from: None` constructions that are NOT the authority, each adjudicated by
 /// name with its verdict. A failure message naming them reads as "a NEW construction appeared",
 /// not as "someone re-measured".
 const ADJUDICATED_SURVIVORS: &str = "\n  \
      engine/src/game/log.rs      — a match PATTERN (`GameEvent::ZoneChanged { .., from: None, to, .. } => …`), a CONSUMER, not a writer;\n  \
      engine/src/game/merge.rs    — already routed through `record_zone_change`, and its `to: dest` is a VARIABLE, which the \
-     `Battlefield`-hardcoding authority cannot serve;\n  \
-     engine/src/game/stack.rs    — a synthetic `PROBE_ID` record inside `observers_are_batch_safe`, which never reaches the trigger collector.\n";
+     `Battlefield`-hardcoding authority cannot serve.\n";
 
 #[test]
 fn every_from_none_battlefield_entry_construction_lives_in_the_authority() {
@@ -1005,14 +1003,16 @@ fn every_from_none_battlefield_entry_construction_lives_in_the_authority() {
 
     assert_eq!(
         (production.len(), test_scoped.len()),
-        (4, 10),
-        "the no-origin-zone battlefield-entry construction surface moved. Expected 4 production \
-         constructions — the authority plus three adjudicated survivors:{ADJUDICATED_SURVIVORS}\
+        (3, 11),
+        "the no-origin-zone battlefield-entry construction surface moved. Expected 3 production \
+         constructions — the authority plus two adjudicated survivors:{ADJUDICATED_SURVIVORS}\
          A NEW production hit means a SEVENTH clone of the record/emit split was written: route it \
          through `zones::record_and_emit_entry_from_no_zone` instead. A REMOVED hit means the \
-         authority or a survivor moved. The 10 test-scoped hits are 7 spelled `from: None` plus 3 \
-         written in field-init shorthand (`analysis/sim.rs`, `trigger_matchers.rs`, \
-         `targeting.rs`), which the shorthand branch of `classify` is what sees. \
+         authority or a survivor moved. The 11 test-scoped hits include \
+         the Saga entry-boundary regression, 7 other constructions spelled `from: None`, \
+         and 3 written in field-init shorthand \
+         (`analysis/sim.rs`, `trigger_matchers.rs`, `targeting.rs`), which the shorthand branch of \
+         `classify` is what sees. \
          Production hits = {production:#?}"
     );
 
@@ -1021,7 +1021,6 @@ fn every_from_none_battlefield_entry_construction_lives_in_the_authority() {
         vec![
             ("engine/src/game/log.rs".to_string(), 1),
             ("engine/src/game/merge.rs".to_string(), 1),
-            ("engine/src/game/stack.rs".to_string(), 1),
             ("engine/src/game/zones.rs".to_string(), 1),
         ],
         "per-file production multiset moved. Absent files must NOT appear — that exactness is what \
@@ -1064,21 +1063,13 @@ fn every_from_none_battlefield_entry_construction_lives_in_the_authority() {
     battlefield_files.sort_unstable();
     assert_eq!(
         battlefield_files,
-        vec!["engine/src/game/stack.rs", "engine/src/game/zones.rs"],
-        "exactly two production windows may name `to: Zone::Battlefield` literally — the named \
-         `stack.rs` probe and the authority. `log.rs` binds a bare `to,` in a pattern and \
-         `merge.rs` uses the variable `dest`; either of them gaining the literal is a new \
-         battlefield-entry writer.{ADJUDICATED_SURVIVORS}"
+        vec!["engine/src/game/zones.rs"],
+        "exactly one production window may name `to: Zone::Battlefield` literally — the \
+         authority. `log.rs` binds a bare `to,` in a \
+         pattern, and `merge.rs` uses the variable `dest`; either production survivor gaining the \
+         literal is a new battlefield-entry writer.{ADJUDICATED_SURVIVORS}"
     );
 }
-
-/// The ONE production `GameEvent::TokenCreated` construction that is not the emitter, adjudicated
-/// by name with its verdict — the same probe the `ZoneChanged` anchor adjudicates, which is what
-/// makes it a shared verdict rather than two independent judgement calls.
-const ADJUDICATED_TOKEN_SURVIVOR: &str = "\n  \
-     engine/src/game/stack.rs — a synthetic `PROBE_ID` construction inside `observers_are_batch_safe`, \
-     handed to `trigger_index::candidates_for_event` to shape-test observers and never pushed onto a \
-     real event stream, so no consumer and no ledger ever sees it.\n";
 
 #[test]
 fn every_token_created_construction_lives_in_the_single_emitter() {
@@ -1091,31 +1082,27 @@ fn every_token_created_construction_lives_in_the_single_emitter() {
 
     assert_eq!(
         (production.len(), test_scoped.len()),
-        (2, 10),
-        "the `TokenCreated` construction surface moved. Expected 2 production constructions — \
+        (1, 10),
+        "the `TokenCreated` construction surface moved. Expected one production construction — \
          `token::push_committed_token_entry_events`, the SINGLE emitter every one of its eight \
-         callers inherits its `record.is_some()` gate from, plus one adjudicated \
-         survivor:{ADJUDICATED_TOKEN_SURVIVOR}\
+         callers inherits its `record.is_some()` gate from. \
          A NEW production hit means a SECOND emit site was written: a `TokenCreated` that does not \
          go through the emitter is a creation event with no `created_tokens_this_turn` row behind \
          it, which makes `trigger_matchers::match_token_created` skip its CR 111.2 controller \
          filter and fire for a controller it should have rejected. Route it through \
-         `token::push_committed_token_entry_events` instead. A REMOVED hit means the emitter or the \
-         probe moved. The 10 test-scoped constructions are `analysis/sim.rs`, `game/log.rs`, \
-         `game/triggers.rs` x4 and `game/effects/destroy.rs` x4. \
+         `token::push_committed_token_entry_events` instead. A REMOVED hit means the emitter moved. \
+         The 10 test-scoped constructions include `analysis/sim.rs`, \
+         `game/log.rs`, `game/triggers.rs` x4, and `game/effects/destroy.rs` x4. \
          Production hits = {production:#?}"
     );
 
     assert_eq!(
         multiset,
-        vec![
-            ("engine/src/game/effects/token.rs".to_string(), 1),
-            ("engine/src/game/stack.rs".to_string(), 1),
-        ],
+        vec![("engine/src/game/effects/token.rs".to_string(), 1)],
         "per-file production `TokenCreated` multiset moved. Absent files must NOT appear — that \
          exactness is what makes `cfg_test_scoped_lines`'s two known scope ceilings, and \
          `is_token_construction`'s exhaustive-pattern ceiling, fail-CLOSED: each can only add an \
-         unexpected file and fail.{ADJUDICATED_TOKEN_SURVIVOR}"
+         unexpected file and fail."
     );
 
     // ── CONJUNCT 2 — the FUNCTION-SCOPE anchor, fail-closed by construction. ─────────────────
@@ -1222,7 +1209,7 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
     // this conjunct does not try: it pins the whole `.extend(` / `.append(` / `.resize(` /
     // `.splice(` population instead, and a new one anywhere in `engine/src` turns this red so a
     // human reads the argument. Kept as a separate pin rather than folded into conjunct 1 for a
-    // measured reason: folding would take the pin to `(7, 0)` and put `counters.rs` and
+    // measured reason: folding would raise conjunct 1's pin and put `counters.rs` and
     // `token_copy.rs` — whose ABSENCE is conjunct 1's whole claim — back into the multiset, and
     // would add a non-authority function to conjunct 2's list.
     let ambiguous = census_with(classify_ambiguous_mutators);
@@ -1242,25 +1229,32 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
          Ambiguous hits = {ambiguous_production:#?}"
     );
 
-    // Issue #5904 moved TWO of these from `counters.rs` to `token_copy.rs` without changing
-    // the total, which is exactly the shape this pin's own instructions ask for. The
-    // `ContinueCopyTokenCreation` resume arm's `if let Some(pending) = active_copy_token_mut()
-    // { pending.created_ids.extend(..) } else { last_created_token_ids.extend(..) }` pair was
-    // about to be COPIED verbatim into the new `ContinueCopyTokenEntryAfterAuraHost` resume,
-    // so it was lifted into `token_copy::extend_copy_batch_created_ids` instead and both arms
-    // now call it. Same five calls, same bulk arguments (`status.created_ids`, a `Vec`), one
-    // fewer place to write the destination-selection rule wrong. `counters.rs` therefore drops
-    // out of this multiset entirely; its absence is now a claim, not an omission.
+    // Issue #5904 moved the copy-batch resume arms' bulk republishes out of `counters.rs` into
+    // `token_copy.rs`, and `counters.rs` has carried none since; its absence from this multiset
+    // is a claim, not an omission. The three post-action arms that restart a paused copy batch
+    // (`ContinueCopyTokenCreation`, the Aura-host resume, the copied entry-payment resume) now
+    // all call `token_copy::resume_copy_token_batch_remainder`, the one bulk republish they
+    // share. Its `pending.created_ids.extend(status.created_ids)` (a `Vec`) is the one hit it
+    // contributes; its frameless branch assigns the continuation's prefixed list onto ledger 3
+    // instead, so it is not a mutator this conjunct pins. The other `token_copy.rs` hits are the
+    // CopyToken batch loop's `.extend(state.last_created_token_ids.clone())` pair.
+    //
+    // The compound CreateToken event (CR 614.1a: a batch a replacement appends belongs to the one
+    // modified event) added one more, in `token.rs`: `token::repark_event_copy_frame`'s
+    // `frame.created_ids.extend(ids)`. A bulk argument (a `Vec`): the event's ordered ids at
+    // completion, or the ledger at a copy batch's pause, handed to the CopyToken owner the
+    // delivery detached. It is the ONE hand-over site for every re-park of that owner, so the
+    // pause and completion paths cannot pick different ids.
     assert_eq!(
         production_multiset(&ambiguous_production),
         vec![
-            ("engine/src/game/effects/token.rs".to_string(), 1),
-            ("engine/src/game/effects/token_copy.rs".to_string(), 4),
+            ("engine/src/game/effects/token.rs".to_string(), 2),
+            ("engine/src/game/effects/token_copy.rs".to_string(), 3),
         ],
         "per-file argument-ambiguous mutator multiset moved. All five of these are bulk \
-         republishes today — `.extend(status.created_ids)` and `.extend(state.\
-         last_created_token_ids.clone())` — and the pin exists so that a SIXTH cannot arrive \
-         without someone reading its argument"
+         republishes today — `.extend(status.created_ids)`, `.extend(state.\
+         last_created_token_ids.clone())` and `repark_event_copy_frame`'s `.extend(ids)` — and \
+         the pin exists so that a SIXTH cannot arrive without someone reading its argument"
     );
 }
 
@@ -1395,7 +1389,7 @@ fn token_form_shorthand_construction() -> String {
     format!("events.push({needle}\n    object_id,\n    name,\n    source_id,\n}});")
 }
 
-/// The `stack.rs` probe's shape: the same three fields with explicit values, and a COMMENT inside
+/// An explicit-value shape: the same three fields with explicit values, and a COMMENT inside
 /// the literal (comments there must not knock a field off the completeness check).
 fn token_form_explicit_construction() -> String {
     let needle = token_anchor();
@@ -1461,7 +1455,7 @@ fn the_token_created_resolver_keys_on_cfg_scope_and_on_field_completeness() {
     assert_eq!(
         token_score(&at_both_scopes(&token_form_explicit_construction())),
         (1, 1),
-        "arm 4(ii): an explicit-value construction (the `stack.rs` probe's shape) must score the \
+        "arm 4(ii): an explicit-value construction must score the \
          same as the shorthand one, and an interleaved comment line must not hide a field from the \
          completeness check"
     );

@@ -160,6 +160,7 @@ fn legal_ability_indices(state: &GameState, player: PlayerId, source: ObjectId) 
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                ..
             } if *source_id == source => Some(*ability_index),
             _ => None,
         })
@@ -259,6 +260,7 @@ fn v1b_a_confined_fetchland_accepts_instead_of_buying_a_vacuous_window() {
         actions.contains(&GameAction::ActivateAbility {
             source_id: terramorphic,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto
         }),
         "REACH-GUARD 1: the fetchland's ability must be enumerated, otherwise this row \
          degenerates to the empty-board stage-1 path; got {actions:?}"
@@ -536,7 +538,8 @@ fn gunzip_dump(gz: &[u8]) -> String {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    json
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 /// Decode AS `PersistedGameState` — the production chokepoint the server's
@@ -550,6 +553,7 @@ fn restore_dump(json: &str) -> GameState {
     )
     .expect("gameState deserializes through the production decoder")
     .into_game_state()
+    .expect("persisted test snapshot satisfies the checked restore contract")
 }
 
 /// The LIVE-PATH board: the real 4-player Dina / Bloodthirsty Conqueror drain
@@ -560,8 +564,22 @@ fn restore_dump(json: &str) -> GameState {
 /// artifact's provenance rather than a claim about it:
 /// `unzip -p combofb-dumps-pristine/dina-conqueror-offers-no-ff.zip |
 ///  jq -c '{gameState}' | gzip -9 -n`
-/// → 844846 bytes, sha256
-/// `9843d5165cbbf7dd7bca4171c7888c190b7eba7e52a2ed095b44ff76fadd7886`.
+/// → 841479 bytes, sha256
+/// `2f074a73963d8f4a87ced4ec3af315e402632046aa3ce9e9b66a9c26960c60cc`.
+///
+/// That pipeline ALONE is no longer sufficient: this capture predates U5, so
+/// its bare `"deck_size": 100` must first become the adjacently-tagged
+/// `DeckSizeRule` form `{"type":"Exactly","data":100}` — the variant taken from
+/// the sibling `format` field, `Commander` here. Piping the raw member straight
+/// through does not merely miss the digest; it yields a fixture
+/// `PersistedGameState` cannot deserialize, so `restore_dump`'s
+/// `.expect("gameState deserializes through the production decoder")` aborts —
+/// a red test on a green engine. Then the retired
+/// `combat_phases_started_this_turn` / `end_steps_started_this_turn` keys must
+/// be rewritten to `steps_started_this_turn` (`{"BeginCombat": n, "End": m}`,
+/// zeros dropped, placed at the first old key). `dina_noff_turn5_loader.rs`
+/// carries the full provenance table for this same artifact.
+///
 /// `gzip -n` is a no-op from a pipe but load-bearing from a file (it strips the
 /// stored name and mtime), so KEEP it: a re-derivation that stages the 21 MB
 /// dump through an intermediate file — the natural thing to do at that size —
@@ -775,7 +793,7 @@ fn non_pass_actions(state: &GameState, seat: PlayerId) -> Vec<String> {
         .map(|a| match a {
             GameAction::ActivateAbility {
                 source_id,
-                ability_index,
+                ability_index, ..
             } => {
                 let o = state.objects.get(source_id);
                 format!(
@@ -810,12 +828,12 @@ fn non_pass_actions(state: &GameState, seat: PlayerId) -> Vec<String> {
 /// drain. Stage 2 answers `Accept`.
 ///
 /// **V5 — bounded offers are NOT exempt.** MEASURED on this board: the offer
-/// mints at beat 21 carrying `predicted_winner: None` and
-/// `IterationCount::Fixed(25)`. It is the BOUNDED class, not the `UntilLethal`
-/// class the synthetic rows use, and `predicted_winner: None` additionally
-/// proves arm (A) cannot be what produces the `Accept` below — only arm (B)
-/// can. Re-introducing an `UntilLethal`-only gate makes this row return
-/// `Shorten` and fail.
+/// mints at beat 21 carrying `predicted_winner: None` and a FINITE
+/// `IterationCount::Fixed` count. It is the BOUNDED class, not the
+/// `UntilLethal` class the synthetic rows use, and
+/// `predicted_winner: None` additionally proves arm (A) cannot be what produces
+/// the `Accept` below — only arm (B) can. Re-introducing an `UntilLethal`-only
+/// gate makes this row return `Shorten` and fail.
 ///
 /// **Why the flip set is exactly {P2}, asserted rather than asserted-about.**
 /// P1 and P3 are polled on the same board and hold nothing, so they answer at
@@ -856,11 +874,12 @@ fn v1_live_path_fetchland_seat_accepts_on_the_real_4p_board() {
         "V5: the BOUNDED class mints no crown — so arm (A) is structurally unable to produce \
          the Accept below, and only arm (B) can (offer beat {beat})"
     );
-    assert_eq!(
-        schema.iteration_count,
-        IterationCount::Fixed(25),
+    assert!(
+        matches!(schema.iteration_count, IterationCount::Fixed(_)),
         "V5: a FINITE count is the point — stage 2 takes the identical rule for it and for \
-         the UntilLethal class"
+         the UntilLethal class. The VARIANT is the class; the value is the producer's own \
+         suggestion and is deliberately not re-derived here. got {:?}",
+        schema.iteration_count
     );
 
     // ── the row: P2, whose only action is its own fetchland ──
@@ -983,8 +1002,9 @@ fn v1_positive_control_interactive_seat_still_shortens_on_the_real_4p_board() {
 ///
 /// The previously-tracked `dina_conqueror_4p` board is the same matchup at a
 /// beat where NO seat holds any meaningful priority action. MEASURED: the offer
-/// mints at beat 19 with `predicted_winner: None`, `IterationCount::Fixed(30)`,
-/// and all three polled seats (P1, P2, P3) enumerate exactly
+/// mints at beat 19 with `predicted_winner: None`, a FINITE
+/// `IterationCount::Fixed` count, and all three polled seats (P1, P2, P3)
+/// enumerate exactly
 /// `["PassPriority"]` — length one, NOT empty; it is
 /// `has_meaningful_priority_action` returning false that produces the Accept,
 /// not an empty action vector.
@@ -1009,7 +1029,12 @@ fn v1_control_quiet_board_is_unchanged_and_cannot_discriminate() {
         unreachable!()
     };
     assert_eq!(predicted_winner, None, "bounded class (offer beat {beat})");
-    assert_eq!(schema.iteration_count, IterationCount::Fixed(30));
+    assert!(
+        matches!(schema.iteration_count, IterationCount::Fixed(_)),
+        "the bounded producer publishes a FINITE count; its VALUE is that producer's own \
+         suggestion and is not this control's subject. got {:?}",
+        schema.iteration_count
+    );
 
     for seat in [P1, P2, P3] {
         let polled = declare_and_poll(&board, seat);
@@ -1270,6 +1295,7 @@ fn v9a_stage_two_folds_over_every_action_stage_one_counted() {
     let activation = GameAction::ActivateAbility {
         source_id: ironworks,
         ability_index: 0,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     };
 
     let (probe, flat) = engine::ai_support::shortcut_probe(runner.state(), P2);
@@ -1338,6 +1364,7 @@ fn v9b_a_sacrifice_for_mana_seat_still_gets_its_window() {
     let activation = GameAction::ActivateAbility {
         source_id: ironworks,
         ability_index: 0,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     };
 
     let flat = probe_actions(runner.state(), P2);
@@ -1370,7 +1397,8 @@ fn v9b_a_sacrifice_for_mana_seat_still_gets_its_window() {
 // mana "can be used to pay costs immediately", CR 106.1 says paying costs is
 // mana's whole function, and CR 601.2g runs mana abilities during the very cast
 // they fund. So producing mana widens what the polled seat can do inside the
-// window `game::engine`'s `RespondToShortcut(Shorten)` arm hands back, and the
+// window a Shorten opens for that seat — the ending point it holds once the
+// shortcut is taken — and the
 // classifier — which reads ONE ability's AST and no other object — cannot prove
 // otherwise. Both rows below ride the REAL 4p board through the same production
 // chokepoint the flagship uses.
@@ -1896,6 +1924,7 @@ fn v10b_an_actor_owned_sacrifice_for_mana_seat_keeps_its_window() {
     let activation = GameAction::ActivateAbility {
         source_id: petal,
         ability_index: 0,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     };
 
     assert!(
@@ -2021,6 +2050,7 @@ fn v10b_an_actor_owned_sacrifice_for_mana_seat_keeps_its_window() {
             .contains(&GameAction::ActivateAbility {
                 source_id: sol_ring,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto
             }),
         "REACH-GUARD: the Sol Ring must reach the sweep stage 2 filters, or the negatives \
          below pass because nothing was ever there to re-admit — which is not the \
@@ -2077,7 +2107,7 @@ fn v10b_an_actor_owned_sacrifice_for_mana_seat_keeps_its_window() {
 /// over: `effect_window_reach`'s `ChangeZone` arm allowlisted ANY
 /// `Library -> Battlefield` move, and a land that arrives untapped (CR 110.5b —
 /// permanents enter untapped "unless a spell or ability says otherwise") taps for
-/// mana inside the window the Shorten hands back. CR 302.6's summoning-sickness
+/// mana inside the window a Shorten opens. CR 302.6's summoning-sickness
 /// bar is a CREATURE rule and never reaches a land, and CR 601.2g runs the mana
 /// ability during the cast it funds.
 ///

@@ -8,7 +8,6 @@ import type { ObjectId } from "../../adapter/types.ts";
 import { dispatchAction, dispatchInteraction } from "../../game/dispatch.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
-import { useAppNotificationStore } from "../../stores/appToastStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import {
@@ -77,11 +76,9 @@ function fanCardSizingStyle(cardCount: number): CSSProperties {
  * convenience opened from the "⧉" badge, not a forced modal.
  */
 export function AttachmentFan() {
-  const { t } = useTranslation("game");
   const hostId = useUiStore((s) => s.attachmentFanHostId);
   const setAttachmentFanHost = useUiStore((s) => s.setAttachmentFanHost);
   const dismissPreview = useUiStore((s) => s.dismissPreview);
-  const showNotification = useAppNotificationStore((s) => s.showNotification);
 
   const objects = useGameStore((s) => s.gameState?.objects);
   const viewerInteraction = useGameStore((s) => s.viewerInteraction);
@@ -141,16 +138,6 @@ export function AttachmentFan() {
     return () => window.removeEventListener("keydown", onKey);
   }, [hostId, close]);
 
-  const notifyFailure = useCallback(
-    (error: unknown) => {
-      showNotification({
-        title: t("actionError.title", { action: t("permanent.fanPick") }),
-        description: error instanceof Error ? error.message : t("actionError.unknownEngineError"),
-      });
-    },
-    [showNotification, t],
-  );
-
   const handlePick = useCallback(
     (id: ObjectId) => {
       // Mode 1 — the engine published a pick for THIS card: forward its opaque
@@ -159,7 +146,9 @@ export function AttachmentFan() {
       const submission = submissionById.get(id);
       if (submission) {
         if (!viewerInteraction?.canSubmit) return;
-        void dispatchInteraction(submission).then(close).catch(notifyFailure);
+        void dispatchInteraction(submission).then((outcome) => {
+          if (outcome.status === "applied") close();
+        }).catch(() => undefined);
         return;
       }
       // Mode 2 — no prompt is open, so the fan is a reachability surface for the
@@ -182,7 +171,7 @@ export function AttachmentFan() {
       switch (verdict.kind) {
         case "dispatch":
           close();
-          void dispatchAction(verdict.action).catch(notifyFailure);
+          void dispatchAction(verdict.action).catch(() => undefined);
           return;
         case "choose":
           close();
@@ -206,7 +195,6 @@ export function AttachmentFan() {
       canActivate,
       close,
       submissionById,
-      notifyFailure,
       setPendingAbilityChoice,
       viewerInteraction?.canSubmit,
     ],
@@ -303,6 +291,7 @@ function FanCard({
         if (selectable) onPick(objectId);
       }}
       aria-label={obj.name}
+      data-object-id={objectId}
       className={`relative leading-[0] select-none ${selectable ? "cursor-pointer" : "cursor-default"}`}
       style={{ marginLeft, zIndex }}
     >
@@ -312,6 +301,7 @@ function FanCard({
           faceIndex={lookup.faceIndex}
           oracleId={lookup.oracleId}
           faceName={lookup.faceName}
+          ownerPrinting={lookup.ownerPrinting}
           size="large"
           isToken={isToken}
           tokenFilters={isToken ? tokenFiltersForObject(obj) : undefined}

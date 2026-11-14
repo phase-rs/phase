@@ -1,8 +1,11 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { createRef, useState } from "react";
 import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { GameMenu } from "../GameMenu";
+import { ConcedeDialog } from "../../multiplayer/ConcedeDialog";
+import { ModalPanelShell } from "../../ui/ModalPanelShell";
 
 vi.mock("../../../hooks/useCardDataMeta.ts", () => ({
   useCardDataMeta: () => null,
@@ -21,6 +24,8 @@ function renderGameMenu(
         isOnlineMode={false}
         showAiHand={false}
         onToggleAiHand={vi.fn()}
+        logPanelOpen={false}
+        onToggleGameLog={vi.fn()}
         onSettingsClick={vi.fn()}
         onHelpClick={vi.fn()}
         multiplayerBoardLayout="split"
@@ -61,6 +66,15 @@ describe("GameMenu", () => {
       "overflow-y-auto",
       "overscroll-contain",
       "touch-pan-y",
+    );
+  });
+
+  it("exposes the production hamburger through a shared trigger ref", () => {
+    const menuTriggerRef = createRef<HTMLButtonElement>();
+    renderGameMenu({ menuTriggerRef });
+
+    expect(menuTriggerRef.current).toBe(
+      screen.getByRole("button", { name: "Game menu" }),
     );
   });
 
@@ -108,6 +122,122 @@ describe("GameMenu", () => {
     expect(screen.queryByRole("button", { name: "Open Sandbox Tools" })).not.toBeInTheDocument();
   });
 
+  it("restores the hamburger after Settings replaces its transient menu item", async () => {
+    function SettingsHarness() {
+      const [settingsOpen, setSettingsOpen] = useState(false);
+      return (
+        <MemoryRouter initialEntries={["/game/test-game"]}>
+          <GameMenu
+            gameId="test-game"
+            isAiMode={false}
+            isOnlineMode={false}
+            showAiHand={false}
+            onToggleAiHand={vi.fn()}
+            logPanelOpen={false}
+            onToggleGameLog={vi.fn()}
+            onSettingsClick={() => setSettingsOpen(true)}
+            onHelpClick={vi.fn()}
+          />
+          <ModalPanelShell
+            open={settingsOpen}
+            title="Settings"
+            onClose={() => setSettingsOpen(false)}
+          >
+            <button type="button">Save settings</button>
+          </ModalPanelShell>
+        </MemoryRouter>
+      );
+    }
+
+    render(<SettingsHarness />);
+    const trigger = screen.getByRole("button", { name: "Game menu" });
+    fireEvent.click(trigger);
+    const settingsItem = screen.getByRole("button", { name: "Settings" });
+    settingsItem.focus();
+    fireEvent.click(settingsItem);
+
+    const dialog = screen.getByRole("dialog", { name: "Settings" });
+    await waitFor(() => expect(dialog).toHaveFocus());
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Settings" })).not.toBeInTheDocument(),
+    );
+    expect(trigger).toHaveFocus();
+  });
+
+  it("moves focus to the hamburger before opening menu-owned surfaces", () => {
+    const onReportCardClick = vi.fn();
+    const onHelpClick = vi.fn();
+    renderGameMenu({ showReportCard: true, onReportCardClick, onHelpClick });
+
+    const trigger = screen.getByRole("button", { name: "Game menu" });
+    fireEvent.click(trigger);
+    const reportItem = screen.getByRole("button", { name: "Report a card" });
+    reportItem.focus();
+    fireEvent.click(reportItem);
+
+    expect(onReportCardClick).toHaveBeenCalledOnce();
+    expect(trigger).toHaveFocus();
+
+    fireEvent.click(trigger);
+    const helpItem = screen.getByRole("button", { name: "Help & Shortcuts ?" });
+    helpItem.focus();
+    fireEvent.click(helpItem);
+
+    expect(onHelpClick).toHaveBeenCalledOnce();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("restores the hamburger after the online concede confirmation closes", async () => {
+    function OnlineConcedeHarness() {
+      const [open, setOpen] = useState(false);
+      return (
+        <MemoryRouter initialEntries={["/game/test-game"]}>
+          <GameMenu
+            gameId="test-game"
+            isAiMode={false}
+            isOnlineMode
+            showAiHand={false}
+            onToggleAiHand={vi.fn()}
+            logPanelOpen={false}
+            onToggleGameLog={vi.fn()}
+            onSettingsClick={vi.fn()}
+            onHelpClick={vi.fn()}
+            onConcede={() => setOpen(true)}
+          />
+          <ConcedeDialog
+            isOpen={open}
+            gameAction={{
+              kind: "game",
+              consequence: "ordinary-game",
+              onConfirm: vi.fn(),
+            }}
+            onCancel={() => setOpen(false)}
+          />
+        </MemoryRouter>
+      );
+    }
+    render(<OnlineConcedeHarness />);
+
+    const trigger = screen.getByRole("button", { name: "Game menu" });
+    fireEvent.click(trigger);
+    const concedeItem = screen.getByRole("button", { name: "Concede" });
+    concedeItem.focus();
+    fireEvent.click(concedeItem);
+
+    const dialog = await screen.findByRole("alertdialog", { name: "Concede Game?" });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus(),
+    );
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    await waitFor(() =>
+      expect(screen.queryByRole("alertdialog", { name: "Concede Game?" })).not.toBeInTheDocument(),
+    );
+    expect(trigger).toHaveFocus();
+  });
+
   it("toggles the floating click mode button from the collapsed menu", () => {
     const onToggleDebugClickModeButtonVisible = vi.fn();
     renderGameMenu({
@@ -136,6 +266,48 @@ describe("GameMenu", () => {
       "aria-pressed",
       "true",
     );
+  });
+
+  it("toggles click mode directly from the menu", () => {
+    const onToggleDebugInteractionMode = vi.fn();
+    renderGameMenu({
+      showSandboxTools: true,
+      onSandboxToolsClick: vi.fn(),
+      onToggleDebugInteractionMode,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+    const toggle = screen.getByRole("button", { name: "Click Mode K" });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(toggle);
+
+    expect(onToggleDebugInteractionMode).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows click mode as on in the menu", () => {
+    renderGameMenu({
+      showSandboxTools: true,
+      onSandboxToolsClick: vi.fn(),
+      debugInteractionMode: true,
+      onToggleDebugInteractionMode: vi.fn(),
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    expect(screen.getByRole("button", { name: "Click Mode K" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  it("offers no click mode toggle without its handler", () => {
+    renderGameMenu({ showSandboxTools: true, onSandboxToolsClick: vi.fn() });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    // Reach guard: the Tools section rendered in this open menu.
+    expect(screen.getByRole("button", { name: "Open Sandbox Tools" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Click Mode K" })).not.toBeInTheDocument();
   });
 
   // The takeback item's gate used to be `isOnlineMode && onRequestTakeback`,
@@ -207,4 +379,69 @@ describe("GameMenu", () => {
     expect(screen.queryByRole("button", { name: "Request Takeback" })).toBeNull();
   });
 
+  it("replaces the no-op Resume entry with a game log toggle", () => {
+    const onToggleGameLog = vi.fn();
+    renderGameMenu({ onToggleGameLog });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open Game Log" }));
+
+    expect(onToggleGameLog).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Open Game Log" })).not.toBeInTheDocument();
+  });
+
+  it("offers to close the game log while it is open", () => {
+    renderGameMenu({ logPanelOpen: true });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    expect(screen.getByRole("button", { name: "Close Game Log" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open Game Log" })).toBeNull();
+  });
+
+  it.each([
+    {
+      preview: true,
+      origin: "https://preview.phase-rs.dev",
+      text: `v${__APP_VERSION__} ${__BUILD_HASH__}`,
+      href: `${__GIT_REPO_URL__}/commit/${__BUILD_HASH__}`,
+    },
+    {
+      preview: false,
+      origin: "https://preview.phase-rs.dev",
+      text: `v${__APP_VERSION__}`,
+      href: __GIT_REPO_URL__,
+    },
+    {
+      preview: true,
+      origin: "https://phase-rs.dev",
+      text: `v${__APP_VERSION__}`,
+      href: __GIT_REPO_URL__,
+    },
+  ])(
+    "shows the build hash beside the version only on preview builds at the preview origin (preview=$preview, origin=$origin)",
+    ({ preview, origin, text, href }) => {
+      const originalLocation = window.location;
+      vi.stubGlobal("__IS_PREVIEW_BUILD__", preview);
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: { ...originalLocation, origin },
+        writable: true,
+      });
+      try {
+        renderGameMenu();
+        fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+        expect(screen.getByRole("link", { name: text })).toHaveAttribute("href", href);
+      } finally {
+        vi.unstubAllGlobals();
+        Object.defineProperty(window, "location", {
+          configurable: true,
+          value: originalLocation,
+          writable: true,
+        });
+      }
+    },
+  );
 });

@@ -202,16 +202,19 @@ mod tests {
                 risk_tolerance: 0.9,
                 interaction_patience: 0.2,
                 stabilize_bias: 0.8,
+                ..AiProfile::default()
             },
             AiProfile {
                 risk_tolerance: 0.45,
                 interaction_patience: 1.0,
                 stabilize_bias: 1.2,
+                ..AiProfile::default()
             },
             AiProfile {
                 risk_tolerance: 0.65,
                 interaction_patience: 0.7,
                 stabilize_bias: 1.0,
+                ..AiProfile::default()
             },
         ];
         let archetypes = [

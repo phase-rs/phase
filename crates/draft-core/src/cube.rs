@@ -209,6 +209,8 @@ fn core_type_name(core_type: &CoreType) -> &'static str {
         CoreType::Phenomenon => "Phenomenon",
         CoreType::Scheme => "Scheme",
         CoreType::Conspiracy => "Conspiracy",
+        CoreType::Boss => "Boss",
+        CoreType::Event => "Event",
         CoreType::Planeswalker => "Planeswalker",
         CoreType::Sorcery => "Sorcery",
         CoreType::Tribal => "Tribal",
@@ -226,6 +228,10 @@ impl CubePackSource {
 }
 
 impl PackSource for CubePackSource {
+    fn booster_pack_pool(&self) -> Option<Vec<String>> {
+        Some(self.cards.iter().map(|card| card.name.clone()).collect())
+    }
+
     fn generate_pack(
         &self,
         _rng: &mut dyn rand::RngCore,
@@ -311,6 +317,9 @@ mod tests {
             .collect();
         let source = CubePackSource::new(cards);
         let config = DraftConfig {
+            flow: crate::types::DraftFlow::LegacyBarrier,
+            selection_policy: crate::types::DraftSelectionPolicy::default(),
+            clock_policy: crate::types::DraftClockPolicy::default(),
             source: DraftSource::Cube {
                 id: "cube".to_string(),
                 name: "Cube".to_string(),
@@ -391,6 +400,15 @@ mod tests {
         assert_eq!(cards.len(), 1);
         // Resolved to the real printed card via the oracle-id fallback.
         assert_eq!(cards[0].name, "Spider-Woman, Stunning Savior");
+        let counted = CubeListEntry {
+            count: 3,
+            ..entries[0].clone()
+        };
+        let source = CubePackSource::new(cube_cards_from_entries(&[counted], &db).unwrap());
+        assert_eq!(
+            source.booster_pack_pool(),
+            Some(vec!["Spider-Woman, Stunning Savior".to_string(); 3])
+        );
     }
 
     #[test]

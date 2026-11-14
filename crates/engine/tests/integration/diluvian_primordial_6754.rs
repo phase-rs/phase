@@ -150,7 +150,7 @@ fn diluvian_primordial_uses_selected_pairs_as_its_fixed_free_cast_pool() {
         } => {
             assert_eq!(member_pool, vec![p1_selected, p2_selected]);
             assert_eq!(candidates, vec![p1_selected, p2_selected]);
-            assert_eq!(remaining_casts, 2);
+            assert_eq!(remaining_casts, Some(2));
             assert_eq!(
                 graveyard_replacement,
                 Some(SpellStackToGraveyardReplacement::Exile)
@@ -417,7 +417,7 @@ fn diluvian_primordial_skips_targetless_opponent_and_casts_other_selected_spell(
         } => {
             assert_eq!(member_pool, vec![p2_selected]);
             assert_eq!(candidates, vec![p2_selected]);
-            assert_eq!(remaining_casts, 1);
+            assert_eq!(remaining_casts, Some(1));
         }
         other => panic!("expected P2-only Diluvian FreeCastWindow, got {other:?}"),
     }

@@ -138,16 +138,16 @@ fn mastercraft_raptor_power_is_total_power_of_craft_materials() {
     // additionally pins the source to the linked-exile pool, not a tracked set.
     match power_qty {
         QuantityExpr::Ref {
-            qty:
-                QuantityRef::Aggregate {
-                    function: AggregateFunction::Sum,
-                    property: ObjectProperty::Power,
-                    filter,
-                },
-        } => assert!(
-            filter_reads_exiled_by_source(filter),
-            "power aggregate must read ExiledBySource, got {filter:?}"
-        ),
+            qty: QuantityRef::PropertyAggregate(aggregate),
+        } if aggregate.function() == AggregateFunction::Sum
+            && aggregate.property() == ObjectProperty::Power =>
+        {
+            assert!(
+                matches!(aggregate.source(), CardTypeSetSource::Objects { filter } if filter_reads_exiled_by_source(filter)),
+                "power aggregate must read ExiledBySource, got {:?}",
+                aggregate.source()
+            )
+        }
         other => panic!("expected Aggregate{{Sum, Power, ExiledBySource}}, got {other:?}"),
     }
 
@@ -296,16 +296,16 @@ fn jadeheart_attendant_gains_life_equal_to_craft_material_mana_value() {
     // Revert guard: pre-fix this parsed to Unimplemented (name="gain").
     match amount {
         QuantityExpr::Ref {
-            qty:
-                QuantityRef::Aggregate {
-                    function: AggregateFunction::Sum,
-                    property: ObjectProperty::ManaValue,
-                    filter,
-                },
-        } => assert!(
-            filter_reads_exiled_by_source(filter),
-            "life amount must read ExiledBySource mana value, got {filter:?}"
-        ),
+            qty: QuantityRef::PropertyAggregate(aggregate),
+        } if aggregate.function() == AggregateFunction::Sum
+            && aggregate.property() == ObjectProperty::ManaValue =>
+        {
+            assert!(
+                matches!(aggregate.source(), CardTypeSetSource::Objects { filter } if filter_reads_exiled_by_source(filter)),
+                "life amount must read ExiledBySource mana value, got {:?}",
+                aggregate.source()
+            )
+        }
         other => panic!("expected Aggregate{{Sum, ManaValue, ExiledBySource}}, got {other:?}"),
     }
 

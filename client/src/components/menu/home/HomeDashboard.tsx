@@ -1,7 +1,9 @@
+import type { ParseKeys } from "i18next";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 
+import { isAiDifficulty } from "../../../constants/ai";
 import { ACTIVE_DECK_KEY, isRandomDeckSelection } from "../../../constants/storage";
 import { MenuShell } from "../MenuShell";
 import { MenuActionTile, type MenuTileTone } from "../MenuActionTile";
@@ -15,7 +17,7 @@ import {
   getDeckCardCount,
   getDeckColorIdentity,
   getDeckColorIdentityPips,
-  getRepresentativeCard,
+  getRepresentativeDeckVisual,
   loadDeck,
 } from "../deckHelpers";
 
@@ -25,8 +27,8 @@ interface ActionDef {
   tone: MenuTileTone;
   icon: string;
   motif: TileMotif;
-  titleKey: string;
-  descKey: string;
+  titleKey: ParseKeys<"menu">;
+  descKey: ParseKeys<"menu">;
   gated: boolean;
 }
 const ACTIONS: ActionDef[] = [
@@ -77,7 +79,7 @@ function ResumeHero() {
   // turn it is, and your own life — never bare unlabeled numbers.
   const modeLabel = match ? t(`home.dashboard.mode.${match.mode}`) : "";
   const difficultyLabel =
-    match && match.mode === "ai" && match.difficulty
+    match && match.mode === "ai" && isAiDifficulty(match.difficulty)
       ? t(`aiDifficulty.levels.${match.difficulty}`)
       : null;
   // GameFormat is PascalCase ("PauperCommander"); space compound names for display.
@@ -178,8 +180,11 @@ function ActiveDeckCard() {
   // an empty name yields no src and falls back to the loading shimmer.
   const randomDeckSelected = isRandomDeckSelection(name);
   const displayName = randomDeckSelected ? t("myDecks.randomDeckTile") : name;
-  const repCard = name && !randomDeckSelected ? getRepresentativeCard(name) : null;
-  const { src: artSrc } = useCardImage(repCard ?? "", { size: "art_crop" });
+  const representativeVisual = name && !randomDeckSelected ? getRepresentativeDeckVisual(name) : null;
+  const { src: artSrc, advanceFailedSource } = useCardImage(representativeVisual?.name ?? "", {
+    size: "art_crop",
+    sourcePrinting: representativeVisual?.sourcePrinting,
+  });
 
   useEffect(() => {
     if (!name || randomDeckSelected) {
@@ -237,7 +242,12 @@ function ActiveDeckCard() {
           dark backing chip so they stay legible over any artwork. */}
       <div className="relative h-24 overflow-hidden">
         {artSrc ? (
-          <img src={artSrc} alt="" className="absolute inset-0 h-full w-full object-cover" />
+          <img
+            src={artSrc}
+            alt=""
+            className="absolute inset-0 h-full w-full object-cover"
+            onError={() => advanceFailedSource?.(artSrc)}
+          />
         ) : (
           <div className="absolute inset-0 animate-pulse bg-gray-800" />
         )}

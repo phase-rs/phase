@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { faceDownMarkerRef } from "../faceDownMarker.ts";
+import { FACE_DOWN_MARKER_VISUALS, faceDownMarkerName, faceDownMarkerRef } from "../faceDownMarker.ts";
 
 describe("faceDownMarkerRef", () => {
   it("maps each rules cause onto the printing paper play uses", () => {
@@ -19,6 +19,22 @@ describe("faceDownMarkerRef", () => {
     // Ixidron turns permanents face down with no keyword action, and Wizards
     // prints nothing for it — the generic card back stays.
     expect(faceDownMarkerRef(true, "TurnedFaceDown")).toBeNull();
+    expect(faceDownMarkerName(true, "TurnedFaceDown")).toBeNull();
+  });
+
+  it("keeps the five-cause audit exhaustive with one explicit none", () => {
+    expect(Object.keys(FACE_DOWN_MARKER_VISUALS).sort()).toEqual([
+      "Cloak",
+      "Disguise",
+      "Manifest",
+      "Morph",
+      "TurnedFaceDown",
+    ]);
+    expect(
+      Object.entries(FACE_DOWN_MARKER_VISUALS)
+        .filter(([, visual]) => visual.outcome === "none")
+        .map(([cause]) => cause),
+    ).toEqual(["TurnedFaceDown"]);
   });
 
   it("stays null unless the permanent is actually face down", () => {

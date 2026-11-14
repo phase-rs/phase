@@ -5,7 +5,7 @@
 //!    you controlled that were destroyed this way."
 //!
 //! Before the fix the lifegain clause lowered to `Effect::Unimplemented` because
-//! `parse_quantity_ref` let `parse_type_phrase` consume "creatures you controlled"
+//! `parse_quantity_ref` let `parse_type_phrase_folding` consume "creatures you controlled"
 //! and leave an unresolved "that were destroyed this way" tail. The fix routes
 //! "the number of … destroyed/sacrificed this way" through
 //! `FilteredTrackedSetSize` before the generic object-count fall-through.

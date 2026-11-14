@@ -7,9 +7,12 @@
 //! CR 205.3: subtype-based tribal membership.
 //! CR 613.4c: lord P/T anthems apply in layer 7c.
 
+use engine::game::game_object::GameObject;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
+use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
@@ -93,7 +96,12 @@ impl TacticalPolicy for TribalLordPriorityPolicy {
             .any(|s| canonicalize_subtype_name(s) == dominant_tribe);
 
         // Count on-board tribe members for observability.
-        let on_board = count_tribe_on_board(ctx.state, ctx.ai_player, dominant_tribe);
+        let on_board = count_subtype_members(
+            ctx.state,
+            ctx.state.battlefield.iter().copied(),
+            |obj| obj.controller == ctx.ai_player && obj.zone == Zone::Battlefield,
+            dominant_tribe,
+        );
 
         if on_tribe {
             // CR 613.4c: lords grant P/T (or ability) modifications to other tribe members
@@ -134,17 +142,33 @@ impl TacticalPolicy for TribalLordPriorityPolicy {
     }
 }
 
-fn count_tribe_on_board(state: &GameState, player: PlayerId, tribe: &str) -> usize {
-    state
-        .battlefield
-        .iter()
-        .filter_map(|id| state.objects.get(id))
-        .filter(|obj| obj.controller == player && obj.zone == Zone::Battlefield)
+/// Shared creature-type census. Counts the objects in `ids` that pass `filter`
+/// and belong to the canonical creature type `canon`; each object contributes
+/// at most 1. The zone/controller predicate is the caller's (`filter`), so the
+/// same census serves a battlefield-controller sweep, a command-zone owner
+/// sweep, and an unfiltered hand sweep.
+///
+/// CR 205.3m: creature types are the subtypes shared by creature and Kindred
+/// cards, so subtype membership is the authoritative test.
+/// CR 702.73a: Changeling means "this object is every creature type", so a
+/// changeling is a member of `canon` whatever its printed subtypes. The `||`
+/// cannot double count — each object is counted once regardless of which arm
+/// matches — which also makes it exact for battlefield changelings, whose types
+/// the layer system has already expanded into `subtypes`.
+pub(super) fn count_subtype_members(
+    state: &GameState,
+    ids: impl Iterator<Item = ObjectId>,
+    filter: impl Fn(&GameObject) -> bool,
+    canon: &str,
+) -> usize {
+    ids.filter_map(|id| state.objects.get(&id))
+        .filter(|obj| filter(obj))
         .filter(|obj| {
             obj.card_types
                 .subtypes
                 .iter()
-                .any(|s| canonicalize_subtype_name(s) == tribe)
+                .any(|s| canonicalize_subtype_name(s) == canon)
+                || obj.has_keyword(&Keyword::Changeling)
         })
         .count()
 }
@@ -330,6 +354,117 @@ mod tests {
             PolicyVerdict::Score { delta, reason } => {
                 assert_eq!(reason.kind, "tribal_lord_na");
                 assert_eq!(delta, 0.0);
+            }
+            PolicyVerdict::Reject { .. } => panic!("unexpected Reject"),
+        }
+    }
+
+    fn put_creature(
+        state: &mut GameState,
+        card_id: CardId,
+        owner: PlayerId,
+        name: &str,
+        zone: Zone,
+        subtypes: &[&str],
+    ) -> ObjectId {
+        let oid = create_object(state, card_id, owner, name.to_string(), zone);
+        state.objects.get_mut(&oid).unwrap().card_types = CardType {
+            supertypes: Vec::new(),
+            core_types: vec![CoreType::Creature],
+            subtypes: subtypes.iter().map(|s| s.to_string()).collect(),
+        };
+        oid
+    }
+
+    /// The census is the shared building block: the caller's `filter` owns the
+    /// zone/controller predicate, and CR 702.73a membership is the helper's own
+    /// rule rather than a per-policy quirk.
+    #[test]
+    fn count_subtype_members_filters_by_controller_and_counts_changelings() {
+        const OPPONENT: PlayerId = PlayerId(1);
+        let mut state = GameState::new_two_player(42);
+
+        put_creature(
+            &mut state,
+            CardId(10),
+            AI,
+            "Llanowar Elves",
+            Zone::Battlefield,
+            &["Elf"],
+        );
+        // Excluded by the caller's controller predicate, not by the census.
+        put_creature(
+            &mut state,
+            CardId(11),
+            OPPONENT,
+            "Elvish Mystic",
+            Zone::Battlefield,
+            &["Elf"],
+        );
+        // CR 702.73a: no printed Elf subtype, but Changeling makes it one.
+        let changeling = put_creature(
+            &mut state,
+            CardId(12),
+            AI,
+            "Woodland Changeling",
+            Zone::Battlefield,
+            &[],
+        );
+        state
+            .objects
+            .get_mut(&changeling)
+            .unwrap()
+            .keywords
+            .push(Keyword::Changeling);
+
+        let count = count_subtype_members(
+            &state,
+            state.battlefield.iter().copied(),
+            |obj| obj.controller == AI && obj.zone == Zone::Battlefield,
+            "Elf",
+        );
+        assert_eq!(
+            count, 2,
+            "the AI's Elf and its changeling count; the opponent's Elf does not"
+        );
+    }
+
+    #[test]
+    fn on_board_tribe_members_fact_counts_battlefield_members() {
+        let mut state = GameState::new_two_player(42);
+        put_creature(
+            &mut state,
+            CardId(20),
+            AI,
+            "Llanowar Elves",
+            Zone::Battlefield,
+            &["Elf"],
+        );
+        let card_id = CardId(21);
+        let oid = put_creature(&mut state, card_id, AI, "Elf Warrior", Zone::Hand, &["Elf"]);
+
+        let candidate = cast_candidate(oid, card_id);
+        let (context, config) = context_with_features(tribal_features(0.8, "Elf"));
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision(),
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+
+        let verdict = TribalLordPriorityPolicy.verdict(&ctx);
+        match verdict {
+            PolicyVerdict::Score { reason, .. } => {
+                assert_eq!(reason.kind, "tribal_member_deploy");
+                assert!(
+                    reason.facts.contains(&("on_board_tribe_members", 1)),
+                    "expected the battlefield Elf in the fact, got {:?}",
+                    reason.facts
+                );
             }
             PolicyVerdict::Reject { .. } => panic!("unexpected Reject"),
         }

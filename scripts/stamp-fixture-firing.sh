@@ -3,17 +3,33 @@
 # made mandatory onto an ALREADY-COMMITTED fixture, in place.
 #
 # WHY IN PLACE AND NOT A PRISTINE REGENERATION. `migrate-dump-fixture.sh`
-# regenerates from the read-only pristine root, which is the stronger provenance
-# and is preferred where it applies. It does NOT apply to every fixture in this
-# corpus: measured, `dina_conqueror_4p` and `witherbloom_sprout_lumaret_simple_4p`
-# differ from their pristine regeneration in exactly one object each (Priest of
-# Forgotten Gods' `abilities` / `base_abilities` AST), because the committed
-# fixture carries a LATER parser state than the 2026-07-22/25 capture. Rerunning
-# those from pristine would silently REVERT that. Stamping in place is additive
-# and cannot revert anything, and its arm-1 control is strictly stronger: the
-# stamped artifact minus the five stamped keys (three firing carriers plus the
-# two delayed-trigger allocators — the exact `del()` list below) must be
-# BYTE-IDENTICAL to what was committed, which proves zero collateral change.
+# regenerates from the read-only pristine root, which is the stronger provenance and is
+# preferred where it applies. IT APPLIES TO A `deck_size`-CARRYING FIXTURE NOW: that
+# script's `--deck-size <Minimum|Exactly>:<count>` stage converts the pre-U5 bare `N`
+# from an operator-supplied variant, so a regeneration from the UNMIGRATED pristine root
+# — and with it that script's `--control` comparison — is runnable for any fixture
+# carrying a `deck_size`. The pristine root itself never has to be touched.
+#
+# THE REASON THAT STANDS IS THE PARSER-STATE ONE, and it was always the load-bearing
+# half. A committed fixture can differ from its pristine regeneration inside an object's
+# `abilities` / `base_abilities` AST, because the fixture carries a LATER parser state
+# than the 2026-07-22/25 capture. WHICH objects and WHICH cards is a property of the
+# parser on the day, not of these files, so naming them here rots — read the divergence
+# off the artifacts with
+#   diff <(gzip -dc <fixture> | jq -S .gameState) <(unzip -p <dump> | jq -S .gameState)
+# Rerunning from pristine would silently REVERT that state. Stamping in place is additive
+# and cannot revert anything. The deck-size stage does not touch that ground.
+#
+# RESIDUAL: the exact per-fixture object difference is unmeasured here, and this file
+# does not quote one — a transcribed corpus figure rots, and the committed population is
+# regenerated with `find crates/engine/tests/fixtures -name '*.json.gz'`. What moved is
+# only the residual's PRECONDITION, from a migrated pristine root (out-of-repo work) to a
+# `--deck-size` regeneration, which is now runnable: the measurement is closeable rather
+# than blocked.
+#
+# Its arm-1 control is strictly stronger than a difference check: the stamped artifact
+# minus the stamped keys — the exact `del()` list below — must be BYTE-IDENTICAL to what
+# was committed, which proves zero collateral change.
 #
 # The derivation is NOT re-spelled here — it is loaded from
 # scripts/lib/trigger-firing.jq, the same single definition
@@ -34,23 +50,13 @@
 #      engine's own coherence validator rejects. Stamping the repaired value on
 #      disk keeps the decoders in agreement WITHOUT weakening any assertion.
 #
-# ALL FIVE control arms, and a partial check passes vacuously:
-#   arm 1 => NO_COLLATERAL=true        stamped minus the 5 stamped keys is
-#            byte-identical to the committed fixture, so nothing else moved.
-#   arm 2 => CARRIERS_ADDED=true       every firing carrier the dump needs is
-#            present (got == need). Keyed on CARRIER COUNT, not on byte
-#            difference: gzip/jq re-serialization alone changes bytes without
-#            stamping anything, which is the stale-artifact false pass.
-#   arm 3 => ALLOCATORS_CANONICAL=true both allocators exist and are >= 1.
-#   arm 4 => DEFINITION_SHAPES=true    a PRE-FLIGHT control, run once before any
-#            fixture is touched: the shipped `_defs` must read BOTH serialized
-#            definition shapes, and must still ABORT when a description is in
-#            neither. See `definition_shape_control` below.
-#   arm 5 => CARRIER_PRESERVED=true    a PRE-FLIGHT control: an existing canonical
-#            carrier must SURVIVE the stamp (the "additive" claim above, which arm 1
-#            structurally cannot check because it deletes those keys before
-#            comparing), while an absent one is still derived. See
-#            `carrier_preservation_control` below.
+# A PARTIAL CHECK CERTIFIES NOTHING. Each arm states its own subject and reports its own
+# verdict, and a conclusion may only be drawn from the arms that actually RAN — an arm
+# reporting `n/a` has certified nothing. The arms are labelled where they run rather than
+# inventoried here, because a private copy drifts from the code:
+#   grep -inE '^ *# arm [0-9]' scripts/migrate-dump-fixture.sh scripts/stamp-fixture-firing.sh
+# The pre-flight controls that carry no arm label are reached by:
+#   grep -n '_control || exit 1' scripts/stamp-fixture-firing.sh
 
 set -euo pipefail
 
@@ -77,8 +83,8 @@ CARRIERS='del(.gameState.pending_trigger_firing, .gameState.stack_trigger_firing
 # `Definitions<TriggerEntry>` and nests its text at `.definition.description`;
 # `base_trigger_definitions` is `Vec<TriggerDefinition>` and exposes
 # `.description` directly. A filter that reads one field name across both still
-# resolves every carrier in THIS corpus — measured, 172 of 172 — because the base
-# list happens to repeat the same descriptions. So "every carrier resolved" is NOT
+# resolves every carrier in THIS corpus, because the base list happens to repeat the
+# same descriptions. So "every carrier resolved" is NOT
 # evidence that both shapes are read, and no fixture-level arm can supply that
 # evidence. This one can: it asks the question directly, per shape.
 #

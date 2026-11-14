@@ -1,12 +1,28 @@
+import { WIRE_PROTOCOL_VERSION as GENERATED_VERSION } from "../../generated/protocol-versions";
 import { describe, it, expect } from "vitest";
 
-import type { EndContinuousEffectOffer } from "../../adapter/types";
+import {
+  LOBBY_PROTOCOL_VERSION,
+  MIN_LOBBY_PROTOCOL_FOR_DANDAN,
+  MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS,
+  lobbyProtocolRequiredForFormat,
+} from "../../adapter/ws-adapter";
+import type {
+  ActivationPhyrexianIntent,
+  EndContinuousEffectOffer,
+  GameAction,
+  PendingCast,
+  TakebackEvent,
+} from "../../adapter/types";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 import {
   WIRE_PROTOCOL_VERSION,
   decodeWireMessage,
   encodeWireMessage,
   legalActionsFromWire,
+  legalActionsToWire,
+  takebackEventFromWire,
+  takebackEventToWire,
   validateMessage,
 } from "../protocol";
 import type { P2PMessage } from "../protocol";
@@ -35,13 +51,92 @@ const viewerInteractionWithProducedMana = {
   availability: { type: "inputRequired" },
 } as never;
 
+/**
+ * An allocation whose segments are UNEQUAL and whose `choice_id` order is NOT
+ * the candidate publication order, so a sort or a canonicalisation anywhere on
+ * the wire path is caught rather than coinciding with the input.
+ */
+export const HOSTILE_PREVIEW_REQUEST = {
+  requestId: "preview-req-1",
+  interactionId: "interaction-1",
+  response: {
+    type: "shortcut",
+    data: {
+      decision: { type: "fixed", data: { iterations: 6 } },
+      pins: [{
+        group: 0,
+        choiceIds: ["choice-c", "choice-a", "choice-b"],
+        amounts: [
+          { choiceId: "choice-c", amount: 3 },
+          { choiceId: "choice-a", amount: 1 },
+          { choiceId: "choice-b", amount: 2 },
+        ],
+      }],
+    },
+  },
+} as never;
+
+const PREVIEW_ANSWER = {
+  requestId: "preview-req-1",
+  interactionId: "interaction-1",
+  status: { type: "confirmable" },
+  progress: { selected: 3, minimum: 1, maximum: 3, aggregate: 6, confirmable: true },
+  outcome: "advanced",
+  summaries: ["confirmAvailable", "progress"],
+} as never;
+
+describe("lobby capability floor for the Dandan format", () => {
+  it("requires the frozen Dandan floor for a lobby frame naming the format", () => {
+    expect(lobbyProtocolRequiredForFormat("Dandan")).toBe(16);
+    expect(MIN_LOBBY_PROTOCOL_FOR_DANDAN).toBe(16);
+    expect(MIN_LOBBY_PROTOCOL_FOR_DANDAN).toBeLessThanOrEqual(LOBBY_PROTOCOL_VERSION);
+  });
+
+  it("reads the floor per format, not as a constant", () => {
+    expect(lobbyProtocolRequiredForFormat("Freeform")).toBe(MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS);
+    expect(lobbyProtocolRequiredForFormat("Standard")).toBeNull();
+  });
+});
+
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v30", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(30);
+  it("uses the generated P2P wire protocol", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(GENERATED_VERSION);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {
     expect(legalActionsFromWire({ legalActions: [] }).manaPaymentShortcutActions).toEqual([]);
+  });
+
+  // CR 118.3 — matrix row 20: the acting-player "can't pay this cost right now"
+  // read-out must survive the P2P host->guest wire. Omit it from either
+  // projection helper and a P2P guest silently loses the read-out; because the
+  // field is OPTIONAL, `type-check` stays green, so this round-trip is the only
+  // instrument that catches it.
+  it("round-trips the CR 118.3 activation-block read-out host->guest", () => {
+    const activationBlockReasons = {
+      "408": [
+        { ability_index: 0, type: "CostNotPayableNow" as const },
+        { ability_index: 1, type: "CostNotPayableNow" as const },
+      ],
+    };
+
+    const wire = legalActionsToWire({
+      actions: [],
+      autoPassRecommended: false,
+      activationBlockReasons,
+    });
+    // Guard the HOST half separately: a `legalActionsToWire` that dropped the
+    // field would still round-trip to `undefined` below and could be read as an
+    // absent-field pass.
+    expect(wire.activationBlockReasons).toEqual(activationBlockReasons);
+
+    expect(legalActionsFromWire(wire).activationBlockReasons).toEqual(activationBlockReasons);
+  });
+
+  // The absent direction: a v45 peer sends no field at all. It must hydrate to
+  // `undefined` (the store applies its own `?? {}` default) rather than throwing.
+  it("hydrates an absent activation-block read-out without crashing", () => {
+    expect(legalActionsFromWire({ legalActions: [] }).activationBlockReasons).toBeUndefined();
   });
 
   it("preserves the engine-authored pay-to-end offer order and display payload", () => {
@@ -87,12 +182,32 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     { type: "game_resumed" },
     { type: "lobby_progress", joined: 1, total: 3 },
     { type: "emote", emote: "🔥" },
-    { type: "reconnect", playerToken: "token-123" },
+    { type: "reconnect", playerToken: "token-123", wireProtocolVersion: WIRE_PROTOCOL_VERSION },
+    { type: "state_ack", revision: 17 },
     { type: "reconnect_rejected", reason: "Unknown token" },
-    { type: "action_rejected", reason: "Player kicked" },
+    {
+      type: "action_rejected",
+      rejection: {
+        code: "action_not_allowed",
+        disposition: "unavailable",
+        message: "Player kicked",
+        related_object_ids: [],
+      },
+    },
+    { type: "action_failed", message: "Host failed to submit action" },
     { type: "action_noop" },
     { type: "mana_payment_preview", requestId: 4, sourceIds: [12] },
-    { type: "mana_payment_preview_rejected", requestId: 4, reason: "Not your turn" },
+    {
+      type: "mana_payment_preview_rejected",
+      requestId: 4,
+      rejection: {
+        code: "not_your_priority",
+        disposition: "unavailable",
+        message: "Not your turn",
+        related_object_ids: [],
+      },
+    },
+    { type: "mana_payment_preview_failed", requestId: 4, message: "Preview unavailable" },
     {
       type: "action",
       senderPlayerId: 0,
@@ -115,6 +230,20 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       type: "preview_mana_payment",
       requestId: 4,
       action: { type: "PassPriority" },
+    },
+    {
+      type: "preview_interaction",
+      request: HOSTILE_PREVIEW_REQUEST,
+    },
+    {
+      type: "interaction_preview",
+      requestId: "preview-req-1",
+      answer: { type: "preview", preview: PREVIEW_ANSWER },
+    },
+    {
+      type: "interaction_preview",
+      requestId: "preview-req-1",
+      answer: { type: "failed", message: "Game paused" },
     },
     {
       type: "action",
@@ -183,6 +312,52 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     expect(out).toEqual(msg);
   });
 
+  // CR 601.2a + CR 601.2b: an announced graveyard permission's digest travels
+  // as a string, so a value above 2^53 survives JSON between JavaScript peers
+  // bit for bit (a JSON number would have lost its low bits).
+  it("round-trips an announced graveyard permission with a digest above 2^53", async () => {
+    const digest = (2n ** 60n + 1n).toString(16).padStart(16, "0");
+    expect(Number.parseInt(digest, 16)).toBeGreaterThan(Number.MAX_SAFE_INTEGER);
+    const msg: P2PMessage = {
+      type: "state_update",
+      state: buildGameState({
+        waiting_for: {
+          type: "CastingVariantChoice",
+          data: {
+            player: 0,
+            object_id: 7,
+            card_id: 7,
+            options: [
+              {
+                variant: { type: "Blitz" },
+                face: "Current",
+                mana_cost: { type: "Cost", shards: ["Green"], generic: 3 },
+                authority: {
+                  announcement: {
+                    permission: { source: 3, grant: { type: "Static", index: 1 } },
+                    grant_digest: digest,
+                    slot_type: "Creature",
+                  },
+                  frequency: "OncePerTurnPerPermanentType",
+                },
+              },
+            ],
+          },
+        },
+      }),
+      events: [],
+      legalActions: [],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
+    };
+    const out = await decodeWireMessage(await encodeWireMessage(msg));
+    expect(out).toEqual(msg);
+    const decoded = out as Extract<P2PMessage, { type: "state_update" }>;
+    const waiting = decoded.state.waiting_for;
+    if (waiting.type !== "CastingVariantChoice") throw new Error("menu lost");
+    expect(waiting.data.options[0].authority?.announcement.grant_digest).toBe(digest);
+  });
+
   it("round-trips monarch-bounded exile links", async () => {
     const msg: P2PMessage = {
       type: "state_update",
@@ -207,6 +382,127 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     };
     const bytes = await encodeWireMessage(msg);
     await expect(decodeWireMessage(bytes)).resolves.toEqual(msg);
+  });
+
+  it("round-trips nonempty resolution-cast receipts and legacy empty cleanup", async () => {
+    const nonempty: P2PMessage = {
+      type: "state_update",
+      state: buildGameState({
+        waiting_for: {
+          type: "CastOffer",
+          data: {
+            player: 0,
+            kind: {
+              type: "GraveyardPaidCast",
+              hit_card: 17,
+              cast_transformed: false,
+              // CR 608.2c + CR 601.2a: a populated gains-modifications rider —
+              // the typed modifications AND the printed spell-quality predicate
+              // must survive the wire round trip.
+              enters_with_modifications: {
+                modifications: [{ type: "AddKeyword", keyword: "Haste" }],
+                cast_filter: {
+                  type: "Typed",
+                  type_filters: [{ type: "Creature" }],
+                },
+              },
+              graveyard_replacement: {
+                type: "Library",
+                position: { type: "BeneathTop", depth: { type: "Fixed", value: 2 } },
+              },
+              cleanup: {
+                source_id: 11,
+                face_policy: {
+                  filter: { type: "Any" },
+                  source_id: 11,
+                  controller: 0,
+                  constraint: null,
+                },
+                exiled_misses: [],
+                reject_action: { type: "RemainExiled" },
+                success_action: { type: "BottomMisses" },
+                delayed_trigger_receipts: [{ token: 31, instance: 32, source_id: 11 }],
+              },
+            },
+          },
+        },
+      }),
+      events: [],
+      legalActions: [],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
+    };
+    const legacyEmpty: P2PMessage = {
+      ...nonempty,
+      state: buildGameState({
+        waiting_for: {
+          type: "CastOffer",
+          data: {
+            player: 0,
+            kind: {
+              type: "GraveyardPaidCast",
+              hit_card: 17,
+              cast_transformed: false,
+              graveyard_replacement: {
+                type: "Library",
+                position: { type: "RandomWithinTop", n: { type: "Fixed", value: 3 } },
+              },
+              cleanup: {
+                source_id: 11,
+                face_policy: {
+                  filter: { type: "Any" },
+                  source_id: 11,
+                  controller: 0,
+                  constraint: null,
+                },
+                exiled_misses: [],
+                reject_action: { type: "RemainExiled" },
+                success_action: { type: "BottomMisses" },
+              },
+            },
+          },
+        },
+      }),
+    };
+
+    // FreeCastWindow — a populated rider on the window carrier, with the
+    // optional offer fields (remaining_casts / remaining_mv_budget /
+    // member_pool) omitted; the round trip must keep the populated values and
+    // keep the omitted values omitted.
+    const windowMessage: P2PMessage = {
+      ...nonempty,
+      state: buildGameState({
+        waiting_for: {
+          type: "CastOffer",
+          data: {
+            player: 0,
+            kind: {
+              type: "FreeCastWindow",
+              candidates: [17, 18],
+              face_policy: {
+                filter: { type: "Any" },
+                source_id: 11,
+                controller: 0,
+                constraint: null,
+              },
+              zones: ["Exile"],
+              enters_with_modifications: {
+                modifications: [{ type: "AddKeyword", keyword: "Haste" }],
+                cast_filter: {
+                  type: "Typed",
+                  type_filters: [{ type: "Creature" }],
+                },
+              },
+            },
+          },
+        },
+      }),
+    };
+
+    for (const message of [nonempty, legacyEmpty, windowMessage]) {
+      const bytes = await encodeWireMessage(message);
+      await expect(decodeWireMessage(bytes)).resolves.toEqual(message);
+    }
   });
 
   // (b) Tiny messages take FORMAT_RAW.
@@ -254,6 +550,173 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     bytes.set(gz, 1);
     await expect(decodeWireMessage(bytes)).rejects.toThrow(/Invalid message type/);
   });
+
+  /**
+   * Row 6's paired demonstration that the allowlist is load-bearing: the two
+   * new types are accepted by `validateMessage` while a neighbouring
+   * near-miss name is not, so the round-trips above are not passing through a
+   * validator that accepts everything.
+   */
+  it("gates the two new preview types on VALID_TYPES", () => {
+    expect(validateMessage({ type: "preview_interaction", request: HOSTILE_PREVIEW_REQUEST }))
+      .toMatchObject({ type: "preview_interaction" });
+    expect(validateMessage({
+      type: "interaction_preview",
+      requestId: "preview-req-1",
+      answer: { type: "failed", message: "x" },
+    })).toMatchObject({ type: "interaction_preview" });
+    expect(() => validateMessage({ type: "preview_interactions" }))
+      .toThrow(/Invalid message type/);
+    expect(() => validateMessage({ type: "interaction_previewed" }))
+      .toThrow(/Invalid message type/);
+  });
+
+  it("accepts the durable terminal receipt tag and rejects a near miss", () => {
+    const result = {
+      key: "session-key",
+      lease: { sessionKey: "session-key", hostIncarnation: "host-1" },
+      recipient: 1,
+      revision: 7,
+      terminalId: "terminal-1:recipient:1",
+      finalStateCommitment: `sha256:${"0".repeat(64)}`,
+      display: { winner: 0, reason: "Game complete" },
+    };
+    expect(validateMessage({ type: "terminal_result_receipt", result, authority: result.lease }))
+      .toMatchObject({ type: "terminal_result_receipt", result });
+    expect(() => validateMessage({ type: "terminal_result_receipts" }))
+      .toThrow(/Invalid message type/);
+  });
+
+  /**
+   * Row 7, P2P half, at the real wire format: a decoder that does not know the
+   * tag throws rather than passing it through. The KNOWN tag on the identical
+   * path in the same test is the positive control — without it this could be a
+   * decoder that rejects everything.
+   */
+  it("refuses an unknown preview-shaped tag while the known one decodes", async () => {
+    const known: P2PMessage = { type: "preview_interaction", request: HOSTILE_PREVIEW_REQUEST };
+    await expect(decodeWireMessage(await encodeWireMessage(known))).resolves.toEqual(known);
+
+    const unknown = { type: "preview_interaction_v2", request: HOSTILE_PREVIEW_REQUEST };
+    const json = new TextEncoder().encode(JSON.stringify(unknown));
+    const bytes = new Uint8Array(1 + json.length);
+    bytes[0] = 0x00;
+    bytes.set(json, 1);
+    await expect(decodeWireMessage(bytes)).rejects.toThrow(/Invalid message type/);
+  });
+});
+
+// CR 602.2b + CR 601.2g-h: an activation's payment mode and a manually paid
+// activation's Phyrexian announcement/payment records are engine-authored
+// payload the P2P wire carries untouched. These are transport contracts; the
+// engine's reducer tests own the rules outcomes.
+describe("manual activation payment payload on the P2P wire", () => {
+  const autoActivation: GameAction = {
+    type: "ActivateAbility",
+    data: { source_id: 21, ability_index: 1 },
+  };
+  const manualActivation: GameAction = {
+    type: "ActivateAbility",
+    data: { source_id: 21, ability_index: 1, payment_mode: { type: "Manual" } },
+  };
+
+  it("keeps the Auto and Manual siblings of one activation distinct in legal actions", () => {
+    const wire = legalActionsToWire({
+      actions: [autoActivation, manualActivation],
+      autoPassRecommended: false,
+    });
+    expect(wire.legalActions).toEqual([autoActivation, manualActivation]);
+    expect(legalActionsFromWire(wire).actions).toEqual([autoActivation, manualActivation]);
+  });
+
+  const pendingActivation = (intent?: ActivationPhyrexianIntent): PendingCast =>
+    ({
+      object_id: 21,
+      card_id: 21,
+      ability: { targets: [] },
+      cost: { type: "Cost", shards: ["PhyrexianBlack"], generic: 1 },
+      activation_ability_index: 0,
+      ...(intent ? { activation_phyrexian_intent: intent } : {}),
+    }) as unknown as PendingCast;
+
+  const intents: Array<[string, ActivationPhyrexianIntent | undefined]> = [
+    ["no announcement", undefined],
+    [
+      "a native announcement only",
+      { native_choices: [{ shard_index: 0, shard: "PhyrexianBlack", choice: { type: "PayLife" } }] },
+    ],
+    [
+      "a native announcement and a distinct indexed payment selection",
+      {
+        native_choices: [{ shard_index: 0, shard: "PhyrexianBlack", choice: { type: "PayMana" } }],
+        payment_choices: [{ shard_index: 0, shard: "PhyrexianBlack", choice: { type: "PayLife" } }],
+      },
+    ],
+    [
+      "a grant-only payment selection with no native symbol",
+      {
+        native_choices: [],
+        payment_choices: [{ shard_index: 1, shard: "Black", choice: { type: "PayLife" } }],
+      },
+    ],
+  ];
+
+  it.each(intents)("round-trips a paused manual activation with %s", async (_label, intent) => {
+    const msg: P2PMessage = {
+      type: "state_update",
+      state: buildGameState({
+        waiting_for: {
+          type: "OrderCostReductions",
+          data: {
+            player: 0,
+            reductions: [],
+            outcomes: [],
+            pending_cast: pendingActivation(intent),
+          },
+        },
+      }),
+      events: [],
+      legalActions: [],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
+    };
+    const out = await decodeWireMessage(await encodeWireMessage(msg));
+    expect(out).toEqual(msg);
+    const decoded = out as Extract<P2PMessage, { type: "state_update" }>;
+    const waiting = decoded.state.waiting_for;
+    if (waiting.type !== "OrderCostReductions") throw new Error("prompt lost");
+    expect(waiting.data.pending_cast.activation_phyrexian_intent).toEqual(intent);
+  });
+
+  it("round-trips a modal activation's Manual mode across the mode prompt", async () => {
+    const msg: P2PMessage = {
+      type: "state_update",
+      state: buildGameState({
+        waiting_for: {
+          type: "AbilityModeChoice",
+          data: {
+            player: 0,
+            modal: { min_choices: 1, max_choices: 1, mode_count: 2, mode_descriptions: ["a", "b"] },
+            source_id: 21,
+            mode_abilities: [],
+            is_activated: true,
+            ability_index: 0,
+            activation_payment_mode: { type: "Manual" },
+          },
+        } as never,
+      }),
+      events: [],
+      legalActions: [manualActivation],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
+    };
+    const out = await decodeWireMessage(await encodeWireMessage(msg));
+    expect(out).toEqual(msg);
+    const decoded = out as Extract<P2PMessage, { type: "state_update" }>;
+    const waiting = decoded.state.waiting_for;
+    if (waiting.type !== "AbilityModeChoice") throw new Error("prompt lost");
+    expect(waiting.data.activation_payment_mode).toEqual({ type: "Manual" });
+  });
 });
 
 describe("validateMessage", () => {
@@ -269,5 +732,42 @@ describe("validateMessage", () => {
 
   it("rejects raw unbound match concessions", () => {
     expect(() => validateMessage({ type: "concede_match" })).toThrow(/Invalid message type/);
+  });
+});
+
+describe("takeback frames", () => {
+  const frames: P2PMessage[] = [
+    { type: "request_takeback" },
+    { type: "respond_takeback", approve: false },
+    { type: "cancel_takeback" },
+    { type: "takeback_requested", requester: 1, requesterName: "Guest", voters: [0, 2] },
+    { type: "takeback_resolved", resolution: "withdrawn", resolvedBy: 2 },
+    { type: "request_rejected", reason: "No takeback request is pending" },
+  ];
+
+  it.each(frames)("validateMessage admits $type", (frame) => {
+    expect(validateMessage(frame)).toEqual(frame);
+  });
+
+  it.each(["request_takebacks", "takeback_resolve"])("validateMessage rejects the neighbour %s", (type) => {
+    expect(() => validateMessage({ type })).toThrow(/Invalid message type/);
+  });
+
+  const events: TakebackEvent[] = [
+    { type: "takebackRequested", requester: 0, requesterName: "Host", voters: [1, 2] },
+    { type: "takebackResolved", resolution: "approved", resolvedBy: null },
+    { type: "requestRejected", reason: "Only the players asked to approve this takeback may respond" },
+  ];
+
+  it.each(events)("$type survives the wire mapping", (event) => {
+    expect(takebackEventFromWire(takebackEventToWire(event))).toEqual(event);
+  });
+
+  it("maps each event to its frame", () => {
+    expect(events.map(takebackEventToWire)).toEqual([
+      { type: "takeback_requested", requester: 0, requesterName: "Host", voters: [1, 2] },
+      { type: "takeback_resolved", resolution: "approved", resolvedBy: null },
+      { type: "request_rejected", reason: "Only the players asked to approve this takeback may respond" },
+    ]);
   });
 });

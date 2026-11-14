@@ -32,6 +32,8 @@ export interface AmountInputLabels {
   decrease: string;
   /** aria-label for the + stepper. */
   increase: string;
+  /** Accessible name for the optional maximum shortcut. Providing this opts into the control. */
+  setMaximum?: string;
 }
 
 export function AmountInput({
@@ -181,6 +183,20 @@ export function AmountInput({
         >
           +
         </button>
+        {labels.setMaximum && (
+          <button
+            type="button"
+            onClick={() => onRawChange(String(max))}
+            aria-label={labels.setMaximum}
+            className={gameButtonClass({
+              tone: "neutral",
+              size: "xs",
+              className: "h-11 text-base",
+            })}
+          >
+            {t("mana.maximum")}
+          </button>
+        )}
         <span id={hintId} className="shrink-0 text-xs text-gray-500">
           {min > 0 ? t("mana.minMax", { min, max }) : t("mana.maxOnly", { max })}
         </span>

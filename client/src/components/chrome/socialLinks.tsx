@@ -3,7 +3,7 @@ import type { ComponentType, MouseEvent } from "react";
 import { openExternal } from "../../services/openExternal";
 
 const DISCORD_URL = "https://discord.gg/dUZwhYHUyk";
-const GITHUB_URL = "https://github.com/phase-rs/phase";
+export const GITHUB_URL = "https://github.com/phase-rs/phase";
 const KOFI_URL = "https://ko-fi.com/phasers";
 const SPONSOR_URL = "https://github.com/sponsors/matthewevans";
 

@@ -339,7 +339,7 @@ fn motivated_pony_untaps_only_the_attacking_creatures_it_pumped() {
     runner
         .state_mut()
         .battlefield_entries_this_turn
-        .push(BattlefieldEntryRecord {
+        .push_back(BattlefieldEntryRecord {
             object_id: ObjectId(9_999),
             name: "Food".to_string(),
             core_types: vec![CoreType::Artifact],
@@ -406,26 +406,33 @@ fn suicidal_charge_coerces_the_creatures_it_shrank() {
 /// LEG-1 ROW. The `Mill` already published the milled cards, so the mass pump is
 /// not the antecedent of "from among the milled cards" and must not join the
 /// set. (`leg1_witness_surge_to_victory_*` is the sharper revert probe for the
-/// same leg; this row covers the same leg on a `PumpAll` whose own enumeration
-/// happens to be empty.)
+/// same leg; this row covers the same leg on a `PumpAll` that follows a `Mill`.
+/// The printed "each creature card in your graveyard perpetually gets +1/+1" is an
+/// honest perpetual gap, so the fixture uses a non-perpetual mass pump.)
 #[test]
-fn elvish_elegy_keeps_the_milled_set_free_of_the_graveyard_pump() {
+fn elvish_elegy_keeps_the_milled_set_free_of_the_mass_pump() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Lib Elf", "Lib Land", "Lib Bear"]);
-    scenario.with_graveyard(P0, &["Yard Creature"]);
+    let bear = scenario.add_creature(P0, "Pumped Bear", 2, 2).id();
     let spell = scenario
         .add_spell_to_hand_from_oracle(
             P0,
             "Elvish Elegy",
             false,
-            "Mill three cards, then each creature card in your graveyard perpetually gets +1/+1. You may put an Elf or land card from among the milled cards into your hand.",
+            "Mill three cards, then creatures you control get +1/+1 until end of turn. You may put an Elf or land card from among the milled cards into your hand.",
         )
         .with_mana_cost(ManaCost::generic(0))
         .id();
     let mut runner: GameRunner = scenario.build();
     runner.cast(spell).resolve();
+    evaluate_layers(runner.state_mut());
 
+    assert_eq!(
+        runner.state().objects[&bear].power,
+        Some(3),
+        "non-vacuity: the mass pump ran over a non-empty population"
+    );
     let set = published_set(runner.state());
     assert_eq!(
         set.len(),
@@ -913,15 +920,15 @@ fn essence_of_antiquity_untaps_the_creatures_it_granted_hexproof() {
 
 /// Valley Floodcaller's cast trigger.
 ///
-/// KNOWN, BOUNDED GAP (issue #7451): the grant's four-subtype filter
-/// ("Birds, Frogs, Otters, and Rats") is misparsed upstream of this change —
-/// only the last subtype survives into the pumped population. This row therefore
-/// asserts the INVARIANT this PR owns, which holds regardless of that bug:
-/// **the untapped set is exactly the pumped set is exactly the published set.**
-/// Before the fix nothing untapped at all, so the row is strictly closer to
-/// correct; when #7451 is fixed the pumped set widens and this test follows it
-/// without needing to change, because it asserts the identity and not a
-/// hard-coded population.
+/// Issue #7451 is fixed: the grant's four-subtype filter ("Birds, Frogs,
+/// Otters, and Rats") now parses in full, so the pumped population is the
+/// whole printed list PLUS Valley Floodcaller itself — it is an Otter (CR
+/// 205.3m: the printed type line) and the filter carries no
+/// `FilterProp::Another`, so the source is inside its own
+/// population. This row asserts the INVARIANT #6857 owns — **the untapped set
+/// is exactly the pumped set is exactly the published set** — over that full
+/// population; the identity, not the population, is what #6857 is
+/// responsible for.
 #[test]
 fn valley_floodcaller_untaps_exactly_the_creatures_it_pumped() {
     let mut scenario = GameScenario::new();
@@ -943,15 +950,18 @@ fn valley_floodcaller_untaps_exactly_the_creatures_it_pumped() {
         .with_subtypes(vec!["Rat"])
         .id();
     let bear = scenario.add_creature(P0, "Beary", 2, 2).id();
-    scenario.add_creature_from_oracle(
-        P0,
-        "Valley Floodcaller",
-        2,
-        2,
-        "Flash\nYou may cast noncreature spells as though they had flash.\nWhenever you cast a noncreature spell, Birds, Frogs, Otters, and Rats you control get +1/+1 until end of turn. Untap them.",
-    );
+    let floodcaller = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Valley Floodcaller",
+            2,
+            2,
+            "Flash\nYou may cast noncreature spells as though they had flash.\nWhenever you cast a noncreature spell, Birds, Frogs, Otters, and Rats you control get +1/+1 until end of turn. Untap them.",
+        )
+        .with_subtypes(vec!["Otter", "Wizard"]) // CR 205.3m: the printed type line
+        .id();
     let bolt = scenario.add_bolt_to_hand(P0);
-    let subjects = [bird, frog, otter, rat, bear];
+    let subjects = [bird, frog, otter, rat, bear, floodcaller];
     let mut runner: GameRunner = scenario.build();
     for id in subjects {
         runner.state_mut().objects.get_mut(&id).unwrap().tapped = true;
@@ -979,6 +989,12 @@ fn valley_floodcaller_untaps_exactly_the_creatures_it_pumped() {
     assert!(
         !pumped.is_empty(),
         "non-vacuity: the trigger must have pumped something, or the identity below is trivial"
+    );
+    assert_eq!(
+        pumped,
+        vec![bird.0, frog.0, otter.0, rat.0, floodcaller.0],
+        "issue #7451: the pumped population must be exactly the printed subtype list \
+         (Birds, Frogs, Otters, and Rats) plus Valley Floodcaller itself"
     );
     assert_eq!(pumped, untapped, "untapped set == pumped set");
     assert_eq!(published_set(runner.state()), pumped, "== published set");

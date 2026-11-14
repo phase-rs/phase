@@ -1,7 +1,7 @@
 import { loadSavedDeck } from "../../constants/storage";
 import { getDeckFeedOrigin, getCachedFeed } from "../../services/feedService";
-import type { ParsedDeck } from "../../services/deckParser";
-import { BASIC_LAND_NAMES } from "../../constants/game";
+import { representativeDeckVisual } from "../../services/deckParser";
+import type { DeckVisualIdentity, ParsedDeck } from "../../services/deckParser";
 
 export function loadDeck(deckName: string): ParsedDeck | null {
   return loadSavedDeck(deckName);
@@ -35,14 +35,10 @@ export function getDeckCardCount(deckName: string): number {
   return mainCount + (commanders.length - representedInMain);
 }
 
-export function getRepresentativeCard(deckName: string): string | null {
+export function getRepresentativeDeckVisual(deckName: string): DeckVisualIdentity | null {
   const deck = loadDeck(deckName);
   if (!deck) return null;
-  if (deck.commander && deck.commander.length > 0) {
-    return deck.commander[0];
-  }
-  const entry = deck.main.find((item) => !BASIC_LAND_NAMES.has(item.name));
-  return entry?.name ?? null;
+  return representativeDeckVisual(deck);
 }
 
 export function isBundledDeck(deckName: string): boolean {

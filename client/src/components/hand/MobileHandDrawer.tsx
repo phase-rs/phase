@@ -4,14 +4,16 @@ import { useTranslation } from "react-i18next";
 
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { spellCostDisplay } from "../../viewmodel/costLabel.ts";
+import { useBackFaceSpellCost } from "../../hooks/useBackFaceSpellCost.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
-import type { GameObject, ManaCost, ObjectId } from "../../adapter/types.ts";
+import type { CardPrinting, GameObject, ManaCost, ObjectId } from "../../adapter/types.ts";
 import {
   collectObjectActions,
   resolveSingleActionDispatch,
@@ -25,8 +27,12 @@ import { StormCopyBadge } from "./StormCopyBadge.tsx";
 const EMPTY_OBJECTS: Record<string, GameObject> = {};
 const EMPTY_STORM_COUNTS: Record<string, number> = {};
 
-export function MobileHandDrawer() {
-  const { t } = useTranslation("game");
+interface MobileHandDrawerProps {
+  interactionDisabled?: boolean;
+}
+
+export function MobileHandDrawer({ interactionDisabled = false }: MobileHandDrawerProps) {
+  const { t } = useTranslation(["game", "common"]);
   const isOpen = useUiStore((s) => s.mobileHandOpen);
   const setOpen = useUiStore((s) => s.setMobileHandOpen);
   const playerId = usePerspectivePlayerId();
@@ -52,6 +58,14 @@ export function MobileHandDrawer() {
     if (wf?.type === "TargetSelection") return wf.data.pending_cast.object_id;
     return null;
   });
+
+  useEffect(() => {
+    if (!interactionDisabled) return;
+    setOpen(false);
+    if (useUiStore.getState().previewSource === "playerHand") {
+      useUiStore.getState().dismissPreview();
+    }
+  }, [interactionDisabled, setOpen]);
 
   useEffect(() => {
     if (
@@ -101,7 +115,7 @@ export function MobileHandDrawer() {
   const handleDebugOpen = useCallback(
     (objectId: number, x: number, y: number) => {
       setOpen(false);
-      openDebugContextMenu({ objectId, x, y });
+      openDebugContextMenu({ objectId, x, y, surface: "game" });
     },
     [setOpen, openDebugContextMenu],
   );
@@ -132,7 +146,7 @@ export function MobileHandDrawer() {
     [hasPriority, objects, legalActionsByObject, inspectObject, setPendingAbilityChoice, setOpen],
   );
 
-  if (!player || !objects) return null;
+  if (interactionDisabled || !player || !objects) return null;
 
   return (
     <AnimatePresence>
@@ -202,7 +216,13 @@ export function MobileHandDrawer() {
                     key={obj.id}
                     objectId={obj.id}
                     cardName={obj.name}
+                    oracleId={obj.printed_ref?.oracle_id}
+                    faceName={obj.printed_ref?.face_name}
+                    ownerPrinting={obj.printing}
+                    isToken={obj.display_source === "Token"}
+                    tokenImageRef={obj.token_image_ref}
                     manaCost={obj.mana_cost}
+                    backFaceManaCost={obj.back_face?.mana_cost}
                     isPlayable={isPlayable}
                     hasPriority={hasPriority}
                     stormCopyCount={prospectiveStormCounts[String(obj.id)]}
@@ -222,7 +242,13 @@ export function MobileHandDrawer() {
 interface DrawerCardProps {
   objectId: number;
   cardName: string;
+  oracleId?: string;
+  faceName?: string;
+  ownerPrinting?: CardPrinting | null;
+  isToken: boolean;
+  tokenImageRef?: GameObject["token_image_ref"];
   manaCost: ManaCost;
+  backFaceManaCost?: ManaCost;
   isPlayable: boolean;
   hasPriority: boolean;
   stormCopyCount?: number;
@@ -233,7 +259,13 @@ interface DrawerCardProps {
 const DrawerCard = memo(function DrawerCard({
   objectId,
   cardName,
+  oracleId,
+  faceName,
+  ownerPrinting,
+  isToken,
+  tokenImageRef,
   manaCost,
+  backFaceManaCost,
   isPlayable,
   hasPriority,
   stormCopyCount,
@@ -243,8 +275,16 @@ const DrawerCard = memo(function DrawerCard({
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const effectiveCost = useGameStore((s) => s.spellCosts[String(objectId)]);
-  const { src } = useCardImage(cardName, { size: "normal" });
+  const { src, rungs, advanceFailedSource } = useCardImage(cardName, {
+    size: "normal",
+    oracleId,
+    faceName,
+    ownerPrinting,
+    isToken,
+    tokenImageRef,
+  });
   const { displayCost, isReduced } = spellCostDisplay(effectiveCost, manaCost);
+  const backFace = useBackFaceSpellCost(objectId, backFaceManaCost);
 
   // Mouse hover (desktop) + long-press (touch) both open the card preview, and
   // the hook tags the element with `data-card-hover` so usePreviewDismiss's
@@ -252,7 +292,7 @@ const DrawerCard = memo(function DrawerCard({
   // This is what lets a player read any card in the full-hand modal: the fanned
   // hand overlaps cards, so the modal is the only place to inspect the ones
   // hidden behind others — and that inspection must work for mouse and touch.
-  const { handlers, firedRef } = useCardHover(objectId);
+  const { handlers, firedRef } = useCardHover(objectId, "playerHand");
 
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
@@ -272,7 +312,7 @@ const DrawerCard = memo(function DrawerCard({
       if (isPlayable) {
         onPlay(objectId);
       } else {
-        inspectObject(objectId);
+        inspectObject(objectId, undefined, "hover", "cursor", "playerHand");
         setPreviewSticky(true);
       }
     },
@@ -286,15 +326,18 @@ const DrawerCard = memo(function DrawerCard({
   return (
     <button
       className={`relative aspect-[5/7] w-full overflow-hidden rounded-lg bg-gray-800 ${glowClass}`}
+      data-object-id={objectId}
       onClick={handleClick}
       {...handlers}
     >
       {src ? (
         <img
           src={src}
+          {...getCardImageSrcSetProps(src, rungs)}
           alt={cardName}
           className="h-full w-full object-cover"
           draggable={false}
+          onError={() => advanceFailedSource?.(src)}
         />
       ) : (
         <div className="h-full w-full bg-gray-700" />
@@ -302,7 +345,7 @@ const DrawerCard = memo(function DrawerCard({
       {/* @container overlay sized to the card so the pips scale in cqi with the
           drawer card's width instead of a fixed px size. */}
       <div className="pointer-events-none absolute inset-0 @container">
-        <ManaCostPips cost={displayCost} isReduced={isReduced} size="fluid" />
+        <ManaCostPips cost={displayCost} isReduced={isReduced} backFace={backFace} size="fluid" />
       </div>
       {stormCopyCount !== undefined && (
         <StormCopyBadge count={stormCopyCount} variant="drawer" />

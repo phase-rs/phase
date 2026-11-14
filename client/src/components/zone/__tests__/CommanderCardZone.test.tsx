@@ -7,6 +7,7 @@ import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 import {
   buildCommanderGameObject,
+  buildGameObject,
   buildObjectMap,
   gameObjectFactory,
 } from "../../../test/factories/gameObjectFactory.ts";
@@ -15,10 +16,23 @@ import {
   buildPlayers,
   buildPriorityWaitingFor,
 } from "../../../test/factories/gameStateFactory.ts";
-import { CommanderCardZone } from "../CommanderCardZone.tsx";
+import { CommandDock } from "../CommandDock.tsx";
+import { CommanderCardZone, ConspiracyCardZone } from "../CommanderCardZone.tsx";
 
 vi.mock("../../../game/dispatch.ts", () => ({
   dispatchAction: vi.fn(),
+}));
+
+const dockDisplay = vi.hoisted(() => ({ mode: "compact" as "compact" | "inline" }));
+
+vi.mock("../../../hooks/useResolvedCommandZoneDisplay.ts", () => ({
+  useResolvedCommandZoneDisplay: () => dockDisplay.mode,
+}));
+
+const localizedNames = vi.hoisted(() => new Map<string, string>());
+
+vi.mock("../../../hooks/useEngineCardData.ts", () => ({
+  useLocalizedCardName: (name: string | null) => localizedNames.get(name ?? "") ?? name,
 }));
 
 // Keep the test hermetic: the card-image hook otherwise fires a dev-server
@@ -118,6 +132,7 @@ function seedStores(
 
 describe("CommanderCardZone commander ninjutsu (issue #5239)", () => {
   beforeEach(() => {
+    localizedNames.clear();
     vi.mocked(dispatchAction).mockClear();
   });
 
@@ -139,6 +154,14 @@ describe("CommanderCardZone commander ninjutsu (issue #5239)", () => {
     // Auto-dispatch does not open the choice modal, and does not inspect.
     expect(useUiStore.getState().pendingAbilityChoice).toBeNull();
     expect(useUiStore.getState().inspectedObjectId).toBeNull();
+  });
+
+  it("identifies the commander card for contextual errors", () => {
+    seedStores([castAction()]);
+
+    render(<CommanderCardZone playerId={0} />);
+
+    expect(screen.getByRole("button")).toHaveAttribute("data-object-id", String(COMMANDER_ID));
   });
 
   it("opens the ability-choice modal when multiple attackers can be returned", () => {
@@ -205,6 +228,7 @@ describe("CommanderCardZone commander ninjutsu (issue #5239)", () => {
  */
 describe("CommanderCardZone activation gate", () => {
   beforeEach(() => {
+    localizedNames.clear();
     vi.mocked(dispatchAction).mockClear();
   });
 
@@ -309,6 +333,7 @@ describe("CommanderCardZone art resolution", () => {
   }
 
   beforeEach(() => {
+    localizedNames.clear();
     cardImage.calls.length = 0;
     cardImage.result = { src: null, isLoading: false };
     seedWithPrintedRef();
@@ -352,10 +377,115 @@ describe("CommanderCardZone art resolution", () => {
     expect(screen.getByText("Kefka, Court Mage")).toBeInTheDocument();
   });
 
+  it("uses the localized commander name for visible fallback and tooltip text", () => {
+    localizedNames.set("Kefka, Court Mage", "ケフカ・宮廷魔道士");
+    cardImage.result = { src: null, isLoading: false };
+
+    render(<CommanderCardZone playerId={0} />);
+
+    expect(screen.getByRole("img", { name: "ケフカ・宮廷魔道士" })).toBeInTheDocument();
+    expect(screen.getByRole("button")).toHaveAttribute("title", expect.stringContaining("ケフカ・宮廷魔道士"));
+
+    cleanup();
+    render(<CommandDock playerId={0} isMirrored={false} />);
+    expect(screen.getByRole("img", { name: "ケフカ・宮廷魔道士" })).toBeInTheDocument();
+    expect(cardImage.calls[cardImage.calls.length - 1]?.name).toBe("Kefka, Court Mage");
+  });
+
   it("renders the resolved art", () => {
     cardImage.result = { src: ART_URL, isLoading: false };
     render(<CommanderCardZone playerId={0} />);
 
     expect(screen.getByAltText("Kefka, Court Mage")).toHaveAttribute("src", ART_URL);
   });
+});
+
+const CONSPIRACY_ID = 201;
+
+function conspiracyObject(overrides: Partial<GameObject> = {}): GameObject {
+  return buildGameObject({
+    id: CONSPIRACY_ID,
+    name: "Brago's Favor",
+    owner: 0,
+    controller: 0,
+    is_commander: false,
+    is_conspiracy: true,
+    card_types: { core_types: ["Conspiracy"], supertypes: [], subtypes: [] },
+    zone: "Command",
+    face_down: true,
+    ...overrides,
+  });
+}
+
+function turnFaceUpAction(objectId = CONSPIRACY_ID): GameAction {
+  return {
+    type: "TurnFaceUp",
+    data: { object_id: objectId },
+  };
+}
+
+describe("ConspiracyCardZone", () => {
+  beforeEach(() => {
+    localizedNames.clear();
+    vi.mocked(dispatchAction).mockClear();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("renders conspiracy badge and dispatches TurnFaceUp when clicked", () => {
+    const conspiracy = conspiracyObject();
+    const action = turnFaceUpAction();
+    const gameState = makeState(conspiracy);
+    useGameStore.setState({
+      gameMode: "local",
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [action],
+      legalActionsByObject: { [String(CONSPIRACY_ID)]: [action] },
+      spellCosts: {},
+    });
+    useUiStore.setState({
+      inspectedObjectId: null,
+      pendingAbilityChoice: null,
+      debugInteractionMode: false,
+    });
+
+    render(<ConspiracyCardZone playerId={0} />);
+
+    expect(screen.getByText("Conspiracy")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button"));
+
+    expect(dispatchAction).toHaveBeenCalledTimes(1);
+    expect(dispatchAction).toHaveBeenCalledWith(action);
+  });
+
+  // CR 315.5b: an opponent's face-down conspiracy reaches the client with no
+  // card types, so the engine's display classification alone keeps it visible.
+  it.each(["compact", "inline"] as const)(
+    "shows an opponent's redacted face-down conspiracy in the %s command dock",
+    (mode) => {
+      dockDisplay.mode = mode;
+      const conspiracy = conspiracyObject({
+        owner: 1,
+        controller: 1,
+        name: "Hidden Card",
+        card_types: { core_types: [], supertypes: [], subtypes: [] },
+      });
+      const gameState = makeState(conspiracy);
+      useGameStore.setState({
+        gameMode: "local",
+        gameState,
+        waitingFor: gameState.waiting_for,
+        legalActions: [],
+        legalActionsByObject: {},
+        spellCosts: {},
+      });
+
+      render(<CommandDock playerId={1} isMirrored />);
+
+      expect(screen.getByRole("img", { name: "Hidden Card" })).toBeInTheDocument();
+    },
+  );
 });

@@ -15,6 +15,7 @@ interface Props {
   className?: string;
   style?: CSSProperties;
   title?: string;
+  onAvatarError(failedSrc: string): void;
   /** Per-seat identity color, used to tint the preview's outer glow and
    *  accent line so the hover preview is visually tied to the player it
    *  represents. Falls back to a neutral platinum when absent. */
@@ -31,6 +32,7 @@ export function AvatarHoverPreview({
   style,
   title,
   seatColor,
+  onAvatarError,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [anchor, setAnchor] = useState<Anchor | null>(null);
@@ -103,7 +105,12 @@ export function AvatarHoverPreview({
               }}
               transition={{ duration: 0.18, ease: [0.22, 0.61, 0.36, 1] }}
             >
-              <PreviewCard avatarUrl={avatarUrl} label={label} accent={accent} />
+              <PreviewCard
+                avatarUrl={avatarUrl}
+                label={label}
+                accent={accent}
+                onAvatarError={onAvatarError}
+              />
             </motion.div>
           )}
         </AnimatePresence>,
@@ -117,10 +124,12 @@ function PreviewCard({
   avatarUrl,
   label,
   accent,
+  onAvatarError,
 }: {
   avatarUrl: string;
   label: string;
   accent: string;
+  onAvatarError(failedSrc: string): void;
 }) {
   return (
     <div
@@ -139,6 +148,7 @@ function PreviewCard({
           alt={label}
           className="block h-auto w-72 max-w-[60vw] object-cover"
           draggable={false}
+          onError={() => onAvatarError(avatarUrl)}
         />
         {/* Top sheen + bottom vignette for portrait feel */}
         <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-white/10 via-transparent to-black/55" />

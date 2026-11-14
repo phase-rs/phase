@@ -1,187 +1,128 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkProtocolHistory, checkProtocolVersions } from "./protocol-versions.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const EXPECTED_PROTOCOL_VERSION = 39;
-// The LOBBY message-set version. Deliberately separate from the full-game
-// number above and deliberately NOT derived from it: a GameState-only bump must
-// not move the lobby's compatibility window. See the assertions at the bottom.
-const EXPECTED_LOBBY_PROTOCOL_VERSION = 1;
-// The P2P wire version. A THIRD independent surface: host/guest first-contact
-// frames carry it, and the same GameState shape change that moves
-// EXPECTED_PROTOCOL_VERSION must move this one too. It was previously ungated
-// here, so a full-game bump could ship with an unbumped P2P version and CI
-// stayed green — a v(n-1) host and a v(n) guest would then complete a
-// handshake and only fail when the incompatible payload arrived.
-const EXPECTED_WIRE_PROTOCOL_VERSION = 30;
+const args = process.argv.slice(2);
+if (args.length !== 0 && (args.length !== 2 || args[0] !== "--base" || args[1].trim().length === 0)) {
+  throw new Error("Usage: node scripts/check-protocol-version.mjs [--base <ref>]");
+}
+if (args.length) checkProtocolHistory(root, args[1]);
+const versions = checkProtocolVersions(root);
+const read = (path) => readFileSync(resolve(root, path), "utf8");
+
+function requirePattern(source, pattern, label) {
+  if (!pattern.test(source)) throw new Error(`Required protocol ownership/policy not found in ${label}`);
+}
 
 function extractVersion(source, pattern, label) {
   const match = source.match(pattern);
-  if (!match) {
-    throw new Error(`Could not find protocol version in ${label}`);
-  }
+  if (!match) throw new Error(`Could not find constant in ${label}`);
   return Number(match[1]);
 }
 
-function requirePattern(source, pattern, label) {
-  if (!pattern.test(source)) {
-    throw new Error(`Protocol floor does not match expectation in ${label}`);
+const rustSource = read("crates/lobby-broker/src/protocol.rs");
+const serverCoreSource = read("crates/server-core/src/protocol.rs");
+const clientSource = read("client/src/adapter/ws-adapter.ts");
+const draftProtocolSource = read("client/src/network/draftProtocol.ts");
+const draftCoreTypesSource = read("crates/draft-core/src/types.rs");
+
+requirePattern(read("crates/lobby-broker/src/lib.rs"),
+  /mod\s+protocol_versions\s*\{\s*include!\(concat!\(env!\("OUT_DIR"\),\s*"\/protocol_versions\.rs"\)\);\s*\}/,
+  "broker private generated module");
+for (const name of ["PROTOCOL_VERSION", "LOBBY_PROTOCOL_VERSION", "MIN_SUPPORTED_LOBBY_PROTOCOL", "DIRECTORY_VERSION"]) {
+  const source = name === "DIRECTORY_VERSION" ? read("crates/lobby-broker/src/directory.rs") : rustSource;
+  requirePattern(source, new RegExp(`pub\\s+const\\s+${name}\\s*:\\s*u32\\s*=\\s*crate::protocol_versions::${name}\\s*;`), `broker ${name}`);
+}
+requirePattern(serverCoreSource, /pub\s+const\s+PROTOCOL_VERSION\s*:\s*u32\s*=\s*lobby_broker::PROTOCOL_VERSION\s*;/, "server-core full alias");
+for (const name of ["LOBBY_PROTOCOL_VERSION", "MIN_SUPPORTED_LOBBY_PROTOCOL"]) {
+  requirePattern(serverCoreSource, new RegExp(`pub\\s+const\\s+${name}\\s*:\\s*u32\\s*=\\s*lobby_broker::${name}\\s*;`), `server-core ${name}`);
+}
+
+const clientExports = [
+  ["client/src/adapter/ws-adapter.ts", "../generated/protocol-versions", ["PROTOCOL_VERSION", "LOBBY_PROTOCOL_VERSION", "MIN_SUPPORTED_LOBBY_PROTOCOL as MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL"]],
+  ["client/src/network/protocol.ts", "../generated/protocol-versions", ["WIRE_PROTOCOL_VERSION"]],
+  ["client/src/network/draftProtocol.ts", "../generated/protocol-versions", ["DRAFT_PROTOCOL_VERSION"]],
+  ["client/src/services/serverDirectory.ts", "../generated/protocol-versions", ["DIRECTORY_VERSION"]],
+  ["scripts/card-bot/servers.ts", "../../client/src/generated/protocol-versions.ts", ["DIRECTORY_VERSION"]],
+];
+for (const [path, module, bindings] of clientExports) {
+  const source = read(path);
+  const imports = [...source.matchAll(/import\s*\{([^}]+)\}\s*from\s*"([^"]+)"/g)]
+    .filter((match) => match[2] === module)
+    .flatMap((match) => match[1].split(",").map((binding) => binding.trim().replace(/\s+/g, " ")));
+  for (const binding of bindings) {
+    if (!imports.includes(binding)) throw new Error(`${path}: missing generated import ${binding}`);
+    const name = binding.split(" as ").at(-1);
+    requirePattern(source, new RegExp(`export\\s*\\{\\s*${name}\\s*\\}\\s*;`), `${path} export ${name}`);
   }
 }
 
-const rustSource = readFileSync(
-  resolve(root, "crates/lobby-broker/src/protocol.rs"),
-  "utf8",
-);
-const serverCoreSource = readFileSync(
-  resolve(root, "crates/server-core/src/protocol.rs"),
-  "utf8",
-);
-const clientSource = readFileSync(
-  resolve(root, "client/src/adapter/ws-adapter.ts"),
-  "utf8",
-);
-const workerHelloGateSource = readFileSync(
-  resolve(root, "lobby-worker/src/hello-gate.ts"),
-  "utf8",
-);
-const p2pProtocolSource = readFileSync(
-  resolve(root, "client/src/network/protocol.ts"),
-  "utf8",
-);
+requirePattern(rustSource, /pub\s+const\s+MIN_SUPPORTED_PROTOCOL\s*:\s*u32\s*=\s*PROTOCOL_VERSION\.saturating_sub\(1\)\s*;/, "broker legacy floor");
+requirePattern(serverCoreSource, /pub\s+const\s+MIN_SUPPORTED_PROTOCOL\s*:\s*u32\s*=\s*PROTOCOL_VERSION\s*;/, "server-core full floor");
+requirePattern(serverCoreSource, /pub\s+const\s+LOBBY_MIN_SUPPORTED_PROTOCOL\s*:\s*u32\s*=\s*lobby_broker::MIN_SUPPORTED_PROTOCOL\s*;/, "server-core legacy floor");
+requirePattern(clientSource, /export\s+const\s+MIN_SUPPORTED_SERVER_PROTOCOL\s*=\s*PROTOCOL_VERSION\s*;/, "client full floor");
+requirePattern(read("lobby-worker/src/hello-gate.ts"), /const\s+legacyMin\s*=\s*Math\.max\(0,\s*policy\.serverProtocolVersion\s*-\s*1\)\s*;/, "Worker legacy floor");
 
-const rustVersion = extractVersion(
-  rustSource,
-  /pub\s+const\s+PROTOCOL_VERSION\s*:\s*u32\s*=\s*(\d+)\s*;/,
-  "crates/lobby-broker/src/protocol.rs",
-);
-const clientVersion = extractVersion(
-  clientSource,
-  /export\s+const\s+PROTOCOL_VERSION\s*=\s*(\d+)\s*;/,
-  "client/src/adapter/ws-adapter.ts",
-);
+// Capability floors are historical introduction versions, not current versions.
+const frozenFloors = {
+  MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK: 5,
+  MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING: 6,
+  MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE: 8,
+  MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION: 9,
+  MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS: 11,
+  MIN_LOBBY_PROTOCOL_FOR_DANDAN: 16,
+  MIN_LOBBY_PROTOCOL_FOR_HORDE: 17,
+  MIN_LOBBY_PROTOCOL_FOR_TWO_HEADED_GIANT_COMMANDER: 17,
+  MIN_LOBBY_PROTOCOL_FOR_ARCHENEMY_COMMANDER: 18,
+  MIN_LOBBY_PROTOCOL_FOR_PLANECHASE_COMMANDER: 19,
+  MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES: 23,
+};
+for (const [name, expected] of Object.entries(frozenFloors)) {
+  const actual = extractVersion(clientSource, new RegExp(`export\\s+const\\s+${name}\\s*=\\s*(\\d+)\\s*;`), name);
+  if (actual !== expected || actual > versions.lobby) throw new Error(`${name}: invalid frozen capability floor`);
+}
+requirePattern(read("scripts/card-bot/servers.ts"), /export\s+const\s+REQUESTED_CODE_LOBBY_PROTOCOL\s*=\s*10\s*;/, "bot requested-code floor");
 
-requirePattern(
-  rustSource,
-  /pub\s+const\s+MIN_SUPPORTED_PROTOCOL\s*:\s*u32\s*=\s*PROTOCOL_VERSION\.saturating_sub\(1\)\s*;/,
-  "crates/lobby-broker/src/protocol.rs",
-);
-requirePattern(
-  serverCoreSource,
-  /pub\s+const\s+MIN_SUPPORTED_PROTOCOL\s*:\s*u32\s*=\s*PROTOCOL_VERSION\s*;/,
-  "crates/server-core/src/protocol.rs",
-);
-requirePattern(
-  clientSource,
-  /export\s+const\s+MIN_SUPPORTED_SERVER_PROTOCOL\s*=\s*PROTOCOL_VERSION\s*;/,
-  "client/src/adapter/ws-adapter.ts",
-);
-requirePattern(
-  workerHelloGateSource,
-  /const\s+legacyMin\s*=\s*Math\.max\(0,\s*policy\.serverProtocolVersion\s*-\s*1\)\s*;/,
-  "lobby-worker/src/hello-gate.ts",
-);
-
-if (rustVersion !== clientVersion) {
-  console.error(
-    `Protocol version mismatch: Rust=${rustVersion}, client=${clientVersion}`,
-  );
-  process.exit(1);
+// Current versions and derived policies cannot become authored numeric mirrors.
+const declarations = /(?:pub(?:\([^)]+\))?\s+|export\s+)?(?:const|static)\s+([A-Z][A-Z0-9_]*)\s*(?::\s*[^=;]+)?\s*=\s*([^;]+);/g;
+const integer = /^\d[\d_]*(_?[iu]\d+)?(\s+(as|satisfies)\s+[^=;]+)?$/;
+for (const path of ["crates/lobby-broker/src/protocol.rs", "crates/server-core/src/protocol.rs", ...clientExports.map(([path]) => path)]) {
+  for (const [, name, rhs] of read(path).matchAll(declarations)) {
+    if (/PROTOCOL|MIN_SUPPORTED/.test(name) && integer.test(rhs.trim())
+      && !Object.hasOwn(frozenFloors, name) && name !== "REQUESTED_CODE_LOBBY_PROTOCOL") {
+      throw new Error(`${path}: ${name} must derive from the registry or policy`);
+    }
+  }
 }
 
-if (
-  rustVersion !== EXPECTED_PROTOCOL_VERSION ||
-  clientVersion !== EXPECTED_PROTOCOL_VERSION
-) {
-  console.error(
-    `Protocol version must remain ${EXPECTED_PROTOCOL_VERSION}: Rust=${rustVersion}, client=${clientVersion}`,
+const DRAFT_PAYLOAD_BOUNDS = [
+  "MAX_CARDS_PER_PICK",
+  "MAX_COMMANDER_DESIGNATIONS",
+  "MAX_SHARED_STACK_PILES",
+];
+
+for (const name of DRAFT_PAYLOAD_BOUNDS) {
+  // Both sides require a bare integer right-hand side, for the same reason the
+  // version regexes do: re-deriving either mirror from the other would defeat
+  // the comparison, and an expression trips "Could not find" instead.
+  const rustBound = extractVersion(
+    draftCoreTypesSource,
+    new RegExp(`pub\\s+const\\s+${name}\\s*:\\s*usize\\s*=\\s*(\\d+)\\s*;`),
+    `crates/draft-core/src/types.rs ${name}`,
   );
-  process.exit(1);
-}
-
-// ── P2P wire protocol: the third surface ───────────────────────────────────
-//
-// Pinned here for the same reason the full-game number is: a `GameState` shape
-// change crosses BOTH the WebSocket full-game wire and the P2P host/guest wire,
-// and bumping only one leaves the other pairing to fail at payload-decode time
-// instead of at the handshake. Gating both in one place makes "I bumped the
-// protocol" mean all of it.
-
-const wireProtocolVersion = extractVersion(
-  p2pProtocolSource,
-  /export\s+const\s+WIRE_PROTOCOL_VERSION\s*=\s*(\d+)\s*as\s+const\s*;/,
-  "client/src/network/protocol.ts",
-);
-
-if (wireProtocolVersion !== EXPECTED_WIRE_PROTOCOL_VERSION) {
-  console.error(
-    `P2P wire protocol version must remain ${EXPECTED_WIRE_PROTOCOL_VERSION}: got ${wireProtocolVersion}. ` +
-      `A GameState shape change must bump this alongside PROTOCOL_VERSION, not instead of it.`,
+  const clientBound = extractVersion(
+    draftProtocolSource,
+    new RegExp(`const\\s+${name}\\s*=\\s*(\\d+)\\s*;`),
+    `client/src/network/draftProtocol.ts ${name}`,
   );
-  process.exit(1);
-}
-
-// ── Lobby protocol: a SEPARATE surface with its own version ────────────────
-//
-// `PROTOCOL_VERSION` versions the full-game GameState/GameAction wire surface.
-// The lobby broker parses none of that, yet its accept-window used to be
-// derived from that same number — so a GameState-only bump slid the lobby
-// window and stranded every already-deployed client. These assertions keep the
-// two surfaces genuinely independent.
-
-const rustLobbyVersion = extractVersion(
-  rustSource,
-  /pub\s+const\s+LOBBY_PROTOCOL_VERSION\s*:\s*u32\s*=\s*(\d+)\s*;/,
-  "crates/lobby-broker/src/protocol.rs",
-);
-const clientLobbyVersion = extractVersion(
-  clientSource,
-  /export\s+const\s+LOBBY_PROTOCOL_VERSION\s*=\s*(\d+)\s*;/,
-  "client/src/adapter/ws-adapter.ts",
-);
-const rustLobbyFloor = extractVersion(
-  rustSource,
-  /pub\s+const\s+MIN_SUPPORTED_LOBBY_PROTOCOL\s*:\s*u32\s*=\s*(\d+)\s*;/,
-  "crates/lobby-broker/src/protocol.rs",
-);
-const clientLobbyFloor = extractVersion(
-  clientSource,
-  /export\s+const\s+MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL\s*=\s*(\d+)\s*;/,
-  "client/src/adapter/ws-adapter.ts",
-);
-
-// The structural invariant, and the reason this block exists. Each of the four
-// regexes above requires a bare integer literal on the right-hand side, so a
-// future edit to `LOBBY_PROTOCOL_VERSION = PROTOCOL_VERSION - 1` (or any other
-// expression) fails to match and trips "Could not find protocol version"
-// rather than silently re-coupling the two surfaces.
-
-if (rustLobbyVersion !== clientLobbyVersion) {
-  console.error(
-    `Lobby protocol version mismatch: Rust=${rustLobbyVersion}, client=${clientLobbyVersion}`,
-  );
-  process.exit(1);
-}
-
-if (rustLobbyFloor !== clientLobbyFloor) {
-  console.error(
-    `Lobby protocol floor mismatch: Rust=${rustLobbyFloor}, client=${clientLobbyFloor}`,
-  );
-  process.exit(1);
-}
-
-if (rustLobbyVersion !== EXPECTED_LOBBY_PROTOCOL_VERSION) {
-  console.error(
-    `Lobby protocol version must remain ${EXPECTED_LOBBY_PROTOCOL_VERSION}: got ${rustLobbyVersion}. ` +
-      `Bump it ONLY for a LobbyClientMessage/LobbyServerMessage shape change — never for a full-game bump.`,
-  );
-  process.exit(1);
-}
-
-if (rustLobbyFloor > rustLobbyVersion) {
-  console.error(
-    `Lobby floor ${rustLobbyFloor} exceeds the lobby version ${rustLobbyVersion}: no client could connect.`,
-  );
-  process.exit(1);
+  if (rustBound !== clientBound) {
+    console.error(
+      `Draft payload bound mismatch for ${name}: Rust=${rustBound}, client=${clientBound}. ` +
+        "The engine constant is derived from the procedure table; the transport mirror must move with it, " +
+        "or the client will refuse payloads the reducer accepts.",
+    );
+    process.exit(1);
+  }
 }

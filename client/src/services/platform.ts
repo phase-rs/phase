@@ -71,3 +71,18 @@ export function isBundledTauriOrigin(): boolean {
     (window.location.protocol === "tauri:" || window.location.hostname === "tauri.localhost")
   );
 }
+
+/** Load the desktop visual-pack adapter without evaluating Tauri code on web. */
+let visualPackBackendPromise: Promise<import("./visualPacks/backend.ts").VisualPackBackend | null> | null = null;
+
+export function loadVisualPackBackend(): Promise<import("./visualPacks/backend.ts").VisualPackBackend | null> {
+  if (!visualPackBackendPromise) {
+    visualPackBackendPromise = import("./visualPacks/backendFactory.ts")
+      .then(({ createVisualPackBackend }) => createVisualPackBackend(isTauri()))
+      .catch((error) => {
+        visualPackBackendPromise = null;
+        throw error;
+      });
+  }
+  return visualPackBackendPromise;
+}

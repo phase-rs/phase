@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 
@@ -8,6 +14,8 @@ import { FullscreenButton } from "./FullscreenButton.tsx";
 import { VolumeControl } from "./VolumeControl.tsx";
 import { clearGame } from "../../stores/gameStore.ts";
 import { useDraftStore } from "../../stores/draftStore.ts";
+import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore.ts";
+import { displayedBuildHash } from "../../services/buildInfo.ts";
 import { useCardDataMeta } from "../../hooks/useCardDataMeta.ts";
 import { useConcedeHandler } from "../../hooks/useConcedeHandler.ts";
 import type { ResolvedMultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
@@ -23,10 +31,13 @@ export type TakebackAudience = "table" | "solo";
 
 interface GameMenuProps {
   gameId: string;
+  /** Offers the "Show AI Hand" toggle: an AI game whose transport can honor it. */
   isAiMode: boolean;
   isOnlineMode: boolean;
   showAiHand: boolean;
   onToggleAiHand: () => void;
+  logPanelOpen: boolean;
+  onToggleGameLog: () => void;
   /** The currently displayed layout, already resolved from the raw preference. */
   multiplayerBoardLayout?: ResolvedMultiplayerBoardLayout;
   onToggleMultiplayerBoardLayout?: () => void;
@@ -34,6 +45,8 @@ interface GameMenuProps {
   onTryMultiplayerSplitLayout?: () => void;
   onDismissMultiplayerSplitLayoutNudge?: () => void;
   onSettingsClick: () => void;
+  /** Optional shared authority for the persistent hamburger launcher. */
+  menuTriggerRef?: RefObject<HTMLButtonElement | null>;
   onHelpClick: () => void;
   onConcede?: () => void;
   /** GH #1507: ask every other human player to approve rolling the game
@@ -47,6 +60,10 @@ interface GameMenuProps {
    *  multiplayer sandbox). */
   showSandboxTools?: boolean;
   onSandboxToolsClick?: () => void;
+  /** Toggles Click Mode directly. Present only where debug actions apply —
+   *  the prop's presence is the authority (GamePage decides). */
+  debugInteractionMode?: boolean;
+  onToggleDebugInteractionMode?: () => void;
   debugClickModeButtonVisible?: boolean;
   onToggleDebugClickModeButtonVisible?: () => void;
   /** Show the always-visible "Report a card problem" flag button. Gated by the
@@ -61,18 +78,23 @@ export function GameMenu({
   isOnlineMode,
   showAiHand,
   onToggleAiHand,
+  logPanelOpen,
+  onToggleGameLog,
   multiplayerBoardLayout,
   onToggleMultiplayerBoardLayout,
   showMultiplayerSplitLayoutNudge = false,
   onTryMultiplayerSplitLayout,
   onDismissMultiplayerSplitLayoutNudge,
   onSettingsClick,
+  menuTriggerRef,
   onHelpClick,
   onConcede,
   onRequestTakeback,
   takebackAudience = "table",
   showSandboxTools,
   onSandboxToolsClick,
+  debugInteractionMode = false,
+  onToggleDebugInteractionMode,
   debugClickModeButtonVisible = false,
   onToggleDebugClickModeButtonVisible,
   showReportCard,
@@ -83,7 +105,10 @@ export function GameMenu({
   const [searchParams] = useSearchParams();
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const ownedMenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const resolvedMenuTriggerRef = menuTriggerRef ?? ownedMenuTriggerRef;
   const cardDataMeta = useCardDataMeta();
+  const buildHash = displayedBuildHash();
   const isDraft = searchParams.get("source") === "draft" && !!searchParams.get("draftId");
   const isDraftPodMatch = searchParams.get("mode") === "draft-match";
   const boardLayoutToggleLabel = multiplayerBoardLayout === "split"
@@ -100,6 +125,15 @@ export function GameMenu({
     isDraftPodMatch,
     onConcede,
   });
+
+  const openSurfaceFromMenu = (openSurface: () => void) => {
+    // The selected menu item unmounts as this dropdown closes. Move focus to
+    // its stable launcher first so the surface can capture a durable return
+    // target rather than <body> during the same React commit.
+    resolvedMenuTriggerRef.current?.focus();
+    setOpen(false);
+    openSurface();
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -120,12 +154,16 @@ export function GameMenu({
          container's left edge and is unaffected by the row's flow. */
       className="fixed z-40 flex items-center gap-2"
       style={{
-        left: "calc(env(safe-area-inset-left) + 0.5rem)",
+        // Fixed, so the board grid's rail padding does not apply — the
+        // left-dock log offset has to be added here, mirroring how the action
+        // rail consumes `--game-right-rail-offset`.
+        left: "calc(env(safe-area-inset-left) + 0.5rem + var(--game-left-rail-offset, 0px))",
         top: "calc(env(safe-area-inset-top) + var(--game-top-overlay-offset, 0px) + 0.75rem)",
       }}
     >
       <div className="flex h-9 w-9 items-center justify-center rounded-full border border-cyan-200/45 bg-slate-950/84 shadow-[0_8px_22px_rgba(0,0,0,0.32),0_0_14px_rgba(34,211,238,0.22)] backdrop-blur-md">
         <button
+          ref={resolvedMenuTriggerRef}
           onClick={() => {
             setOpen(!open);
           }}
@@ -213,10 +251,7 @@ export function GameMenu({
             <MenuButton
               label={t("gameMenu.reportCard")}
               icon={<FlagIcon />}
-              onClick={() => {
-                onReportCardClick();
-                setOpen(false);
-              }}
+              onClick={() => openSurfaceFromMenu(onReportCardClick)}
             />
           )}
           {showSandboxTools && onSandboxToolsClick && (
@@ -224,6 +259,18 @@ export function GameMenu({
               label={t("gameMenu.openSandboxTools")}
               onClick={() => {
                 onSandboxToolsClick();
+                setOpen(false);
+              }}
+            />
+          )}
+          {onToggleDebugInteractionMode && (
+            <MenuButton
+              label={t("gameMenu.clickMode")}
+              shortcut="K"
+              active={debugInteractionMode}
+              pressed={debugInteractionMode}
+              onClick={() => {
+                onToggleDebugInteractionMode();
                 setOpen(false);
               }}
             />
@@ -244,21 +291,21 @@ export function GameMenu({
           )}
           <div className="my-1 border-t border-gray-700/70" />
           <MenuSectionLabel label={t("gameMenu.sections.game")} />
-          <MenuButton label={t("gameMenu.resume")} onClick={() => setOpen(false)} />
+          <MenuButton
+            label={logPanelOpen ? t("gameMenu.closeGameLog") : t("gameMenu.openGameLog")}
+            onClick={() => {
+              onToggleGameLog();
+              setOpen(false);
+            }}
+          />
           <MenuButton
             label={t("gameMenu.settings")}
-            onClick={() => {
-              setOpen(false);
-              onSettingsClick();
-            }}
+            onClick={() => openSurfaceFromMenu(onSettingsClick)}
           />
           <MenuButton
             label={t("gameMenu.helpShortcuts")}
             shortcut="?"
-            onClick={() => {
-              setOpen(false);
-              onHelpClick();
-            }}
+            onClick={() => openSurfaceFromMenu(onHelpClick)}
           />
           {isAiMode && (
             <MenuButton
@@ -290,15 +337,15 @@ export function GameMenu({
             label={t("gameMenu.concede")}
             variant="danger"
             onClick={() => {
-              setOpen(false);
               // Online concedes route through the confirmation dialog
               // (`onConcede` opens it). All other modes go straight through
               // the unified concede hook, which dispatches `Concede` to the
               // engine before clearing local state — see useConcedeHandler.
               if (isOnlineMode && onConcede) {
-                onConcede();
+                openSurfaceFromMenu(onConcede);
                 return;
               }
+              setOpen(false);
               handleConcede();
             }}
           />
@@ -312,7 +359,24 @@ export function GameMenu({
                   navigate("/draft/quick?resume=1");
                 });
               } else if (isDraftPodMatch) {
-                navigate("/draft-pod");
+                // One of THREE exits from a `draft-match` game — this menu
+                // entry, `GamePage`'s game-over button, and Concede — and all
+                // three ask the same question, so all three ask
+                // `endCommanderSession`. It owns the answer and the reasoning:
+                // a pairwise pod match is mid-tournament and must survive being
+                // left, a Commander launch is the pod's last act and must not.
+                // Do not re-inline the condition here; a second copy of that
+                // rationale is how the two drift apart.
+                //
+                // This entry is reachable for the WHOLE game, not just at game
+                // over, so it is the likeliest of the three routes.
+                //
+                // `finally`, not `then` — a teardown that rejects must not
+                // strand the player in a game they have left.
+                void useMultiplayerDraftStore
+                  .getState()
+                  .endCommanderSession()
+                  .finally(() => navigate("/draft-pod"));
               } else {
                 navigate("/");
               }
@@ -321,12 +385,12 @@ export function GameMenu({
           <div className="my-1 border-t border-gray-700" />
           <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 px-3 py-1.5 text-[10px] text-slate-500">
             <a
-              href={`${__GIT_REPO_URL__}/commit/${__BUILD_HASH__}`}
+              href={buildHash ? `${__GIT_REPO_URL__}/commit/${buildHash}` : __GIT_REPO_URL__}
               target="_blank"
               rel="noopener noreferrer"
               className="transition-colors hover:text-white"
             >
-              v{__APP_VERSION__} {__BUILD_HASH__}
+              v{__APP_VERSION__}{buildHash && ` ${buildHash}`}
             </a>
             {cardDataMeta && (
               <>

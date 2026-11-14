@@ -12,20 +12,23 @@ interface FolderActionsMenuProps {
 export function FolderActionsMenu({ onRename, onDelete }: FolderActionsMenuProps) {
   const { t } = useTranslation("menu");
 
-  const runAndClose = (close: () => void, action: () => void) => (event: React.MouseEvent) => {
-    event.stopPropagation();
-    action();
-    close();
-  };
+  const runAndClose =
+    (close: () => void, focusTrigger: () => void, action: () => void) =>
+    (event: React.MouseEvent) => {
+      event.stopPropagation();
+      focusTrigger();
+      action();
+      close();
+    };
 
   return (
     <PopoverMenu ariaLabel={t("folder.actionsMenu")} menuWidthPx={176}>
-      {(close) => (
+      {(close, focusTrigger) => (
         <>
           <button
             type="button"
             role="menuitem"
-            onClick={runAndClose(close, onRename)}
+            onClick={runAndClose(close, focusTrigger, onRename)}
             className={popoverMenuItemClass}
           >
             {t("folder.rename")}
@@ -33,7 +36,7 @@ export function FolderActionsMenu({ onRename, onDelete }: FolderActionsMenuProps
           <button
             type="button"
             role="menuitem"
-            onClick={runAndClose(close, onDelete)}
+            onClick={runAndClose(close, focusTrigger, onDelete)}
             className={`${popoverMenuItemClass} text-red-300 hover:bg-red-500/15`}
           >
             {t("folder.delete")}

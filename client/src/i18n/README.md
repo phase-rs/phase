@@ -19,7 +19,11 @@ Never wrap with `t()`:
 - Card Oracle text, token rules text, ability/reminder text.
 - Card names, player names, object IDs.
 - Engine enum strings interpolated into text (phase, mana type, counter type).
-- `className`, CSS, data attributes, dev/debug strings, console logs.
+- `className`, CSS, data attributes, developer-only diagnostics, console logs.
+
+Player-facing sandbox tool labels, forms, and help are chrome and use `t()`,
+even when their components or wire actions are named `Debug`. Raw diagnostic
+logs and engine enum values remain unchanged.
 
 In hybrid spots like `GameLog.formatEvent`, translate the **template** and
 interpolate engine data raw:
@@ -31,6 +35,16 @@ t("log.counterAdded", { counterType, count, objectId });
 
 Content localization (translating the card text itself) is a *separate* mechanism
 that sources official MTGJSON data — it does not happen via `t()`.
+
+Ability decisions and the stack may show the full localized printed text as an
+explicit **reference**, alongside the engine's original ability description.
+The sidecar does not identify individual abilities: never split or align its
+paragraphs to infer translations. Printed wording may differ from current Oracle
+or a modified/granted ability. Keep the original description and its canonical
+source name intact (apart from `renderDescription`'s self-reference expansion).
+Stack ability labels are UI copy, not Oracle text: format them from the
+engine's typed `ability_kind` (preserving its ability number) and never by
+parsing `kind_label`; with no `ability_kind`, show `kind_label` as sent.
 
 ## Structure
 
@@ -49,12 +63,12 @@ Namespaces: `common` (default), `menu`, `game`, `deck-builder`, `draft`,
 ## Conventions
 
 - Keys: nested dot paths, `camelCase` leaves, `<componentOrFeature>.<element>`.
-- Opt into a namespace: `const { t } = useTranslation("game")`. `common` is implicit.
+- Opt into a namespace: `const { t } = useTranslation("game")`. `useTranslation()` defaults to `common`. A `ns:`-prefixed key needs its namespace in the array: `useTranslation(["game", "common"])`, then `t("common:…")`.
 - Plurals: `key_one` / `key_other` + `t(key, { count })` (CLDR rules per locale).
   Don't hand-roll `count === 1 ? "" : "s"`.
 - Numbers needing locale grouping: `{{value, number}}`.
-- The store owns the active language; never call `i18n.changeLanguage` directly —
-  use `usePreferencesStore.getState().setLanguage(lng)`.
+- The store owns the active language; the i18n bootstrap mirrors it to i18next
+  and `<html lang>`, so use `usePreferencesStore.getState().setLanguage(lng)`.
 - English (`en`) is the typing oracle: add a key to `en/<ns>.json` **before**
   referencing it, or it won't type-check. Other locales fall back to English.
 - Encoding: catalogs are **UTF-8 with literal accented characters** (write
@@ -63,3 +77,32 @@ Namespaces: `common` (default), `menu`, `game`, `deck-builder`, `draft`,
 - Every other locale must carry the **exact same keys** as `en` — no missing
   translations, no orphans. `resources.test.ts` enforces both key parity and
   UTF-8 encoding across all catalogs (runs in CI + Tilt `test-frontend`).
+
+
+## Japanese (`ja`)
+
+Use concise, natural Japanese for frontend-authored text, with MTG terminology:
+cast = 唱える, activate = 起動, resolve = 解決, priority = 優先権,
+battlefield = 戦場, graveyard = 墓地, library = ライブラリー,
+commander = 統率者 (the format is 統率者戦). Keep countering a spell (打ち消す)
+distinct from counters (カウンター), and owner (オーナー) from controller
+(コントローラー). Translate a complete sentence rather than joining English-order
+fragments. Preserve optional choices, quantities, costs, and who may act.
+
+Keep every interpolation token, formatter, markup tag, and shortcut intact.
+Japanese uses the `other` plural category; keep all catalog keys for parity,
+and make the `other` wording correct even for a count of one. Language selection
+and persisted `ja-JP` normalization use the existing preferences store.
+
+This catalog localizes UI text, not card identity, Oracle text, engine-authored
+messages, or rules execution. Japanese card content uses the existing MTGJSON/Scryfall display-data pipeline:
+`oracle-gen --sidecar-dir client/public` emits `card-data.ja.json`, and
+`scripts/gen-scryfall-locale-images.sh` emits `scryfall-images.v2.ja.json`.
+Both files are in `data-files.json` for publication alongside other locales.
+Regenerate and publish these assets when enabling Japanese; UI catalogs alone
+do not provide card content. Names and printed text currently cover single-faced
+cards, following the existing exporter restriction. Art keeps the chosen printing
+and uses its Japanese sibling when available, including face-specific image URLs.
+Missing localized fields or printings fall back to English. Printed text can
+differ from current Oracle wording; rules and card identity remain English.
+Do not invent card translations in UI catalogs.

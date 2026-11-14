@@ -175,7 +175,7 @@ fn mutable_pupa_accumulates_every_matching_keyword() {
 // `resolve_chain_body` disjunct. CR 608.2c. Oracle text verbatim from
 // data/card-data.json. The counter recipient, "any creature you control", now
 // parses to a real `TargetFilter::Typed{Creature, controller: You}` (see the
-// `parse_type_phrase_with_ctx` "any " quantifier fix) instead of falling back
+// `parse_type_phrase_folding_with_ctx` "any " quantifier fix) instead of falling back
 // to the degenerate `TargetFilter::Any`.
 //
 // CR 608.2d: an untargeted "any creature you control" choice (no literal

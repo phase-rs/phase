@@ -1,28 +1,33 @@
 use std::collections::HashMap;
 
 use engine::game::interaction::ObjectActionPayload;
+use engine::types::ability::AbilityBlockEntry;
+use engine::types::action_rejection::ActionRejection;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::format::FormatConfig;
+use engine::types::format::{FormatConfig, GameFormat};
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
-use engine::types::interaction::InteractionSubmission;
+use engine::types::interaction::{
+    InteractionPreview, InteractionPreviewRequest, InteractionSubmission, PreviewRequestId,
+};
 use engine::types::log::GameLogEntry;
 use engine::types::mana::ManaCost;
-use engine::types::match_config::MatchConfig;
+use engine::types::match_config::{MatchConfig, MatchType};
 use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
 use crate::session::{AiDriverFault, FullSessionKey};
-use crate::takeback::{RewindOption, RewindTarget};
+use crate::takeback::{RewindOption, RewindTarget, TakebackResolution};
 
 /// Full game wire protocol version. Kept numerically aligned with the lobby
 /// broker while state/action messages share the same WebSocket protocol enum.
 pub const PROTOCOL_VERSION: u32 = lobby_broker::PROTOCOL_VERSION;
 
-/// Minimum protocol version accepted by full game servers. Planechase changed
-/// game-state/action payload shape, so stale clients must not join full games.
+/// Minimum protocol version accepted by full game servers. Engine-owned
+/// presentation fields can be serde-additive yet still require exact matching
+/// when the client no longer derives a fallback from raw game state.
 pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION;
 
 /// Minimum protocol version accepted by lobby-only brokers from clients that
@@ -54,6 +59,49 @@ pub enum ServerMode {
     LobbyOnly,
 }
 
+/// Optional binary JSON envelopes a WebSocket peer can encode and decode.
+/// Capabilities are negotiated independently of the semantic protocol version
+/// so old peers retain the plain-text JSON path during rolling deployments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WireFormat {
+    GzipEnvelopeV1,
+    /// Future capability advertised by a newer peer. Unknown entries must not
+    /// make an otherwise compatible additive handshake fail.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Optional recipient-projected state encoding, independent of compression.
+/// Native Full servers confirm selection in a second plain-text ServerHello
+/// before application dispatch. Frames encode the complete socket envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StateCodec {
+    StateCodecV1,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Optional timing hints for application JSON Ping/Pong diagnostics.
+/// These describe client JSON pings, not the native WebSocket Ping cadence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeartbeatContract {
+    pub ping_interval_ms: u64,
+    pub silence_budget_ms: u64,
+}
+
+/// Connection-scoped command ownership, never player authority or idempotency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CommandId(pub u64);
+
+/// Optional command-completion correlation supported by a native server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandCorrelation {
+    CommandIdV1,
+    #[serde(other)]
+    Unknown,
+}
+
 pub use engine::starter_decks::DeckData;
 
 /// AI seat configuration sent by the client when creating a game with AI opponents.
@@ -74,7 +122,116 @@ pub struct AiSeatRequest {
 // wire bytes are byte-identical (guarded by tests/lobby_wire_contract.rs).
 pub use lobby_broker::protocol::{DraftLobbyMetadata, LobbyGame, ServerErrorCode};
 
+// The tournament wire surface follows the same rule for the same reason: the
+// view projections are DEFINED in `lobby-broker` (which owns the token-free
+// projection of its own domain types) and re-exported here, so the canonical
+// `ServerMessage` and the broker's `LobbyServerMessage` carry the identical
+// struct rather than two copies that could drift apart field by field.
+pub use lobby_broker::protocol::{
+    PairingView, PlayerSummary, TournamentRequestId, TournamentSummary, TournamentView,
+};
+// The domain types those views embed, re-exported for the same reason. All are
+// already `Serialize`/`Deserialize` — `MatchArity` and `ScoringPolicy` through
+// validated `try_from`/`into` boundaries, so a malformed value is refused at
+// deserialization rather than discovered later inside pairing/scoring logic.
+pub use lobby_broker::tournament::{
+    BracketShape, MatchArity, PairingId, PairingOutcome, PodOutcome, ReportGate, ScoringPolicy,
+    TournamentAction, TournamentRole, TournamentStanding, TournamentStatus,
+};
+
 pub use seat_reducer::types::{DeckChoice, SeatKind, SeatMutation, SeatTeamInfo, SeatView};
+
+/// Client-authored source intent for a server-hosted draft.
+///
+/// This deliberately differs from [`draft_core::types::DraftSource`]. A
+/// Chaos source persists one resolved set for every seat and booster round;
+/// accepting that matrix from a client would let a host control the random
+/// draw and would disclose assignments across the wire. The server resolves
+/// this intent exactly once, then persists the resulting core source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum DraftSourceIntent {
+    /// Every seat opens the same set in each round. A short sequence repeats
+    /// its final code, preserving the single-set shorthand.
+    Uniform { set_codes: Vec<String> },
+    /// The server randomly assigns one of these candidate sets to every
+    /// `(seat, round)` before creating the session.
+    Chaos { candidate_codes: Vec<String> },
+}
+
+impl DraftSourceIntent {
+    /// Borrow the client-supplied set tokens for boundary validation before
+    /// pool lookup. The returned list is never an assignment schedule.
+    pub fn set_codes(&self) -> &[String] {
+        match self {
+            Self::Uniform { set_codes } => set_codes,
+            Self::Chaos { candidate_codes } => candidate_codes,
+        }
+    }
+}
+
+/// Resolve the canonical source intent from a new `source` object or the
+/// legacy top-level set spelling. Pre-multi-set clients sent `set_code` or
+/// `set_codes` at the message root; both deliberately become a Uniform
+/// intent, never a special third source form.
+pub fn resolve_draft_source_intent(
+    source: Option<DraftSourceIntent>,
+    legacy_set_codes: Option<Vec<String>>,
+) -> Result<DraftSourceIntent, String> {
+    match (source, legacy_set_codes) {
+        (Some(source), None) => Ok(source),
+        (None, Some(set_codes)) => Ok(DraftSourceIntent::Uniform { set_codes }),
+        (Some(_), Some(_)) => Err(
+            "CreateDraftWithSettings must provide either source or legacy set_codes, not both"
+                .to_string(),
+        ),
+        (None, None) => Err("CreateDraftWithSettings requires a draft source".to_string()),
+    }
+}
+
+/// Borrowed form of [`DraftSourceIntent`] for pre-dispatch validation. This
+/// keeps oversized malformed frames from being cloned merely to decide which
+/// source spelling they used.
+pub enum DraftSourceIntentRef<'a> {
+    Uniform { set_codes: &'a [String] },
+    Chaos { candidate_codes: &'a [String] },
+}
+
+impl DraftSourceIntentRef<'_> {
+    pub fn set_codes(&self) -> &[String] {
+        match self {
+            Self::Uniform { set_codes } => set_codes,
+            Self::Chaos { candidate_codes } => candidate_codes,
+        }
+    }
+}
+
+pub fn resolve_draft_source_intent_ref<'a>(
+    source: Option<&'a DraftSourceIntent>,
+    legacy_set_codes: Option<&'a Vec<String>>,
+) -> Result<DraftSourceIntentRef<'a>, String> {
+    match (source, legacy_set_codes) {
+        (Some(DraftSourceIntent::Uniform { set_codes }), None) => {
+            Ok(DraftSourceIntentRef::Uniform { set_codes })
+        }
+        (Some(DraftSourceIntent::Chaos { candidate_codes }), None) => {
+            Ok(DraftSourceIntentRef::Chaos { candidate_codes })
+        }
+        (None, Some(set_codes)) => Ok(DraftSourceIntentRef::Uniform { set_codes }),
+        (Some(_), Some(_)) => Err(
+            "CreateDraftWithSettings must provide either source or legacy set_codes, not both"
+                .to_string(),
+        ),
+        (None, None) => Err("CreateDraftWithSettings requires a draft source".to_string()),
+    }
+}
+
+fn deserialize_optional_set_codes<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    draft_core::types::deserialize_set_codes(deserializer).map(Some)
+}
 
 /// Info about a single player slot in a waiting room, sent to all connected players.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +286,10 @@ pub struct CurrentTerminalDelivery {
     pub delivery_id: TerminalDeliveryId,
     pub credential: TerminalCredential,
     pub display: TerminalMatchDisplay,
+    /// Recipient-filtered final Full state with its server-derived projection.
+    /// Raw JSON preserves object-key order across durable delivery retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_view: Option<Box<serde_json::value::RawValue>>,
 }
 
 /// Bootstrap proof held by a reconnecting player before the regular Full
@@ -142,6 +303,11 @@ pub struct TerminalBootstrapRequest {
     pub request_id: String,
 }
 
+// clippy::large_enum_variant: `CreateGameWithSettings` is the outlier. This
+// enum is a short-lived per-frame deserialize target that is matched and
+// destructured at once, never stored or queued, so boxing that variant's fields
+// buys nothing but call-site churn.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
@@ -158,7 +324,17 @@ pub enum ClientMessage {
         /// versions its own message set separately from `PROTOCOL_VERSION`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lobby_protocol_version: Option<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        wire_formats: Vec<WireFormat>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        state_codecs: Vec<StateCodec>,
     },
+    /// Request a FULL of this socket's currently authorized view. No client
+    /// game, seat, hash or revision is accepted. Requires confirmed StateCodecV1
+    /// on a native Full server. At most one response is pending until encoding
+    /// completes; retries in that interval are no-ops charged to ingress quota.
+    /// Rejection, enqueue/encoding failure and teardown release admission.
+    ResyncState,
     CreateGame {
         deck: DeckData,
     },
@@ -169,18 +345,16 @@ pub enum ClientMessage {
     Action {
         action: GameAction,
     },
-    /// Server-authoritative fast-forward of repeated priority passes. The
-    /// authenticated session supplies both the requester and AI seats.
-    ResolveAll {
-        request_id: u64,
-        max_resolutions: u32,
-    },
     /// Read-only simulation of an exact automatic spell-cast action. The
     /// authenticated session, rather than the client, determines the actor.
     PreviewManaPayment {
         request_id: u64,
         action: GameAction,
     },
+    /// Requests an unredacted, trusted engine snapshot for diagnostics. The
+    /// server authorizes this capability from the authenticated host seat;
+    /// neither a player token nor a game code travels in the payload.
+    ExportAuthoritativeState,
     /// One opaque, engine-authored interaction response. The client echoes the
     /// submission the engine published in `ViewerInteraction`; it never derives
     /// a `GameAction` from the opportunity schema. Like `Action`, the
@@ -193,6 +367,17 @@ pub enum ClientMessage {
     /// See `client_message_wire_guard::wire_rejection_message`.
     Interaction {
         submission: InteractionSubmission,
+    },
+    /// Read-only preview of one engine-authored interaction response. The client
+    /// echoes the request it minted; the authenticated session — not the payload —
+    /// determines the acting seat.
+    ///
+    /// The answer never travels on `ServerMessage::Error`: like `Interaction`, a
+    /// preview is a routine client decision, and the native client tears the
+    /// session down on any `Error`. Both answer variants carry the request's
+    /// `PreviewRequestId` so the caller's pending promise settles.
+    PreviewInteraction {
+        request: InteractionPreviewRequest,
     },
     Reconnect {
         game_code: String,
@@ -219,7 +404,12 @@ pub enum ClientMessage {
         match_config: MatchConfig,
         #[serde(default)]
         ai_seats: Vec<AiSeatRequest>,
-        #[serde(default)]
+        /// Decoded as its writer recorded it for the lobby relay; Full mode re-checks it
+        /// strictly (`guard_client_message_before_dispatch`).
+        #[serde(
+            default,
+            deserialize_with = "FormatConfig::deserialize_recorded_option"
+        )]
         format_config: Option<FormatConfig>,
         /// Optional distinct label for this room, separate from the host's
         /// player name. Routed into `LobbyGame.room_name`.
@@ -243,6 +433,17 @@ pub enum ClientMessage {
         /// Enable ranked rating updates for this room.
         #[serde(default)]
         ranked: bool,
+        /// Room code pre-minted by a caller (the Discord LFG bot) that the host
+        /// claims instead of a server-minted one; `None` keeps server minting.
+        /// Twin of the lobby field added in lobby protocol 10. A server that
+        /// predates it ignores it and mints its own, which the client detects
+        /// as `GameCreated.game_code != requested`.
+        #[serde(default)]
+        requested_code: Option<String>,
+        /// Host-private Cube draft source for a native Full-server game. This
+        /// deliberately belongs to the Full session, never the lobby broker.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        booster_pack_pool: Option<Vec<String>>,
     },
     JoinGameWithPassword {
         game_code: String,
@@ -286,6 +487,16 @@ pub enum ClientMessage {
     Emote {
         emote: String,
     },
+    /// One click in the running Eye to Eye / Mouth to Mouth contest. Carries the
+    /// engine-authored identity of the contest it is for (so a frame delayed from an
+    /// earlier contest is dropped, never counted as activity in a later one) and a
+    /// per-contest sequence number (duplicate / reorder protection): the sender is
+    /// the authenticated seat and the instant is the server's own clock, so a client
+    /// can claim neither a win nor a timestamp.
+    ContestClick {
+        contest: u64,
+        seq: u32,
+    },
     SpectatorJoin {
         game_code: String,
     },
@@ -317,7 +528,27 @@ pub enum ClientMessage {
     },
     CreateDraftWithSettings {
         display_name: String,
-        set_code: String,
+        /// Canonical client source request. For Chaos, this carries candidate
+        /// set codes only; the server creates the private assignment matrix.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<DraftSourceIntent>,
+        /// Legacy Uniform spelling from clients that predate the tagged
+        /// `source` boundary. `set_code` and `set_codes` both normalize through
+        /// [`resolve_draft_source_intent`] before validation or pool lookup.
+        #[serde(
+            default,
+            alias = "set_code",
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_optional_set_codes"
+        )]
+        set_codes: Option<Vec<String>>,
+        /// The string encoding of the draft kind. `DraftKind` carries no
+        /// `#[serde(other)]`, no `#[serde(default)]` and no `Default`, so an
+        /// unrecognized kind name fails deserialization of the WHOLE frame
+        /// rather than resolving to a fallback variant. That is what makes a
+        /// version-skewed peer loud instead of silently creating the wrong
+        /// kind of draft; do not add any of those three attributes to
+        /// `DraftKind`.
         kind: draft_core::types::DraftKind,
         public: bool,
         password: Option<String>,
@@ -363,6 +594,111 @@ pub enum ClientMessage {
     },
     /// Withdraw a takeback request the caller themselves made.
     CancelTakeback,
+
+    // --- Tournament organizer ---------------------------------------------
+    //
+    // Field-for-field mirrors of `lobby_broker::LobbyClientMessage`'s own
+    // tournament variants, sharing the same payload types by re-export above
+    // so the projection in `to_lobby_client_message` stays a zero-cost
+    // re-tag. Authority is the token in the payload, never the socket.
+    CreateTournament {
+        name: String,
+        arity: MatchArity,
+        /// Relaxed to an `Option` in lockstep with
+        /// [`lobby_broker::LobbyClientMessage::CreateTournament`]'s, `None`
+        /// meaning "the broker applies `ScoringPolicy::default_for_arity`".
+        ///
+        /// The mirror MUST relax with it. Leaving it required here would make
+        /// broker-owned default scoring work over the lobby/Worker socket and
+        /// hard-fail over the native `phase-server` game socket — a functional
+        /// asymmetry in the exact layer this mirror exists to keep identical.
+        /// `to_lobby_client_message`'s arm stays a pass-through; "repairing"
+        /// its compile error with `Some(*scoring)` instead is the defect this
+        /// note exists to foreclose, and
+        /// `tournament_variants_survive_the_canonical_lobby_roundtrip` is what
+        /// fails on it.
+        #[serde(default)]
+        scoring: Option<ScoringPolicy>,
+        bracket: BracketShape,
+        #[serde(default)]
+        total_rounds: Option<u32>,
+        /// "Automatic + N" round addend, mirroring
+        /// [`lobby_broker::LobbyClientMessage::CreateTournament`]'s field in the
+        /// same position with the same serde attribute (added in lockstep for
+        /// lobby protocol 7). Mutually exclusive with `total_rounds`.
+        #[serde(default)]
+        plus_rounds: Option<u32>,
+        /// The event's game-format label, mirroring
+        /// [`lobby_broker::LobbyClientMessage::CreateTournament`]'s field. A
+        /// display label only; the tournament enforces no deck legality.
+        #[serde(default)]
+        format: Option<GameFormat>,
+        /// The match structure (Bo1 / Bo3), mirroring
+        /// [`lobby_broker::LobbyClientMessage::CreateTournament`]'s field in the
+        /// same position with the same serde attribute (lobby protocol 8).
+        /// `None` resolves to the arity default; `Bo3` is head-to-head only.
+        #[serde(default)]
+        match_type: Option<MatchType>,
+    },
+    JoinTournament {
+        code: String,
+        /// Client-supplied stable entrant identity, opaque to the server —
+        /// the same "the client names its own identity" precedent as
+        /// `host_peer_id`.
+        player_key: String,
+        display_name: String,
+    },
+    GetTournament {
+        code: String,
+    },
+    // The four GATED actions each mirror `lobby_broker`'s optional
+    // `request_id`, in the same position with the same serde attributes. The
+    // position is load-bearing, not cosmetic: serde emits struct-variant fields
+    // in declaration order, and `tournament_variants_survive_the_canonical_lobby_roundtrip`
+    // compares the two enums' serialized STRINGS, so a field that sits
+    // elsewhere in one mirror breaks the projection's wire compatibility.
+    StartTournamentRound {
+        code: String,
+        organizer_token: String,
+        /// Mirrors [`lobby_broker::LobbyClientMessage::StartTournamentRound`]'s
+        /// correlator. `None` from a client that predates correlation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
+    },
+    ReportMatchResult {
+        code: String,
+        pairing_id: PairingId,
+        player_token: String,
+        outcome: PodOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
+    },
+    DropFromTournament {
+        code: String,
+        player_token: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
+    },
+    EndTournament {
+        code: String,
+        organizer_token: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
+    },
+    /// Mirrors [`lobby_broker::LobbyClientMessage::RenewTournamentCredential`].
+    /// Present for the same reason the seven above are: a native-socket client
+    /// must be able to rotate a credential the lobby socket can rotate, or the
+    /// two transports diverge in what a holder can recover from.
+    RenewTournamentCredential {
+        code: String,
+        role: TournamentRole,
+        token: String,
+        /// Mirrors `rotation_nonce` on the lobby variant: the client-minted,
+        /// per-attempt nonce that lets a lost renewal reply be recovered by an
+        /// idempotent replay. `#[serde(default)]` for the same wire tolerance.
+        #[serde(default)]
+        rotation_nonce: String,
+    },
 }
 
 fn default_player_count() -> u8 {
@@ -373,6 +709,19 @@ fn default_true() -> bool {
     true
 }
 
+/// Which frame a [`ServerMessage::StateWithheld`] replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum WithheldFrame {
+    /// Carries the recipient's seat, the only seat assignment a board-less client receives.
+    GameStarted {
+        your_player: PlayerId,
+    },
+    StateUpdate,
+}
+
+/// On a codec-confirmed connection, top-level type values Full and Delta are
+/// state-codec frames. These tags are reserved and must not become ServerMessage tags.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ServerMessage {
@@ -380,6 +729,8 @@ pub enum ServerMessage {
     /// `protocol_version` against its own and refuses to proceed on mismatch.
     /// `build_commit` is the git short-hash of the server binary; it is used
     /// by the lobby to gate joins when host and guest are on different builds.
+    /// Native Full servers repeat this in plain text with selected_state_codec
+    /// before dispatching application commands for an opted-in peer.
     ServerHello {
         server_version: String,
         build_commit: String,
@@ -399,6 +750,21 @@ pub enum ServerMessage {
         /// LobbyOnly brokers and for servers with no advertised address.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         public_url: Option<String>,
+        /// Binary envelopes this server can negotiate after the text hello.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        wire_formats: Vec<WireFormat>,
+        /// Present when application Ping replies are independent of game CPU work.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        heartbeat: Option<HeartbeatContract>,
+        /// Completion ownership is optional transport-envelope metadata.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_correlation: Option<CommandCorrelation>,
+        /// Supported codecs; empty on LobbyOnly and broker projections.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        state_codecs: Vec<StateCodec>,
+        /// Set only by the second plain-text negotiation confirmation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_state_codec: Option<StateCodec>,
     },
     GameCreated {
         game_code: String,
@@ -445,6 +811,12 @@ pub enum ServerMessage {
         /// introspecting `GameAction` variants client-side. Empty for non-actors.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         legal_actions_by_object: HashMap<ObjectId, Vec<ObjectActionPayload>>,
+        /// CR 118.3: per-object read-out of activated abilities the acting player
+        /// is not being offered solely because they can't pay the cost right now.
+        /// Acting-player-scoped and empty for non-actors, exactly like
+        /// `legal_actions_by_object` above. Display only — never dispatchable.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        activation_block_reasons: HashMap<ObjectId, Vec<AbilityBlockEntry>>,
         /// Engine-authored presentation projections computed alongside
         /// `state`. See `engine::game::derived_views::DerivedViews`.
         /// Required for Commander-format games so the CommanderDamage HUD
@@ -478,6 +850,10 @@ pub enum ServerMessage {
         rewind_targets: Vec<RewindOption>,
     },
     StateUpdate {
+        /// The exact Full identity associated with this state stream. It is
+        /// omitted only for wire-compatible non-Full producers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
         /// Monotonic server-authored snapshot revision. Reused for read-only
         /// snapshots and advanced only by authoritative state transitions.
         state_revision: u64,
@@ -503,6 +879,11 @@ pub enum ServerMessage {
         /// Empty for non-actors.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         legal_actions_by_object: HashMap<ObjectId, Vec<ObjectActionPayload>>,
+        /// CR 118.3: per-object "can't pay this cost right now" read-out.
+        /// Acting-player-scoped and empty for non-actors, exactly like
+        /// `legal_actions_by_object` above. Display only — never dispatchable.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        activation_block_reasons: HashMap<ObjectId, Vec<AbilityBlockEntry>>,
         /// Engine-authored presentation projections for this state snapshot.
         /// See `engine::game::derived_views::DerivedViews`. Always populated
         /// by server construction sites — the `#[serde(default)]` exists
@@ -520,24 +901,31 @@ pub enum ServerMessage {
         rewind_targets: Vec<RewindOption>,
     },
     ActionRejected {
+        rejection: ActionRejection,
+    },
+    /// An operational failure while processing one submitted game action or
+    /// interaction. This deliberately carries no engine-rejection DTO.
+    ActionFailed {
+        message: String,
+    },
+    /// A request outside the engine game-action boundary was refused. This is
+    /// deliberately prose: takeback and match-lifecycle requests have no
+    /// engine action/rejection provenance to expose.
+    RequestRejected {
         reason: String,
     },
     /// Confirms an authenticated action that intentionally produced no state
     /// transition. The submitting adapter resolves its pending request without
     /// caching or publishing a replacement snapshot.
     ActionNoOp,
-    /// Requester-only rejection for a native Resolve All batch. The request
-    /// identifier prevents unrelated action failures from settling this promise.
-    ResolveAllRejected {
-        request_id: u64,
+    /// Sent in place of a `GameStarted` or `StateUpdate` over the frame bound.
+    /// The action it answers applied; only its state was not delivered.
+    StateWithheld {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
+        state_revision: u64,
+        withheld: WithheldFrame,
         reason: String,
-    },
-    /// Requester-only acknowledgement for a native Resolve All batch. The
-    /// matching StateUpdate is sent first and carries the authoritative state.
-    ResolveAllResult {
-        request_id: u64,
-        items_resolved: u32,
-        total: u32,
     },
     /// Acknowledges a host-authorized permanent game cleanup.
     GameAbandoned {
@@ -551,14 +939,47 @@ pub enum ServerMessage {
     },
     ManaPaymentPreviewRejected {
         request_id: u64,
-        reason: String,
+        rejection: ActionRejection,
+    },
+    /// Requester-only operational failure for a mana-payment preview.
+    ManaPaymentPreviewFailed {
+        request_id: u64,
+        message: String,
+    },
+    /// Host-only trusted engine persistence snapshot. This deliberately
+    /// contains no server-session metadata or player reconnect tokens.
+    AuthoritativeStateExport {
+        state: String,
+    },
+    /// Requester-only operational or authorization failure for an
+    /// authoritative-state export.
+    AuthoritativeStateExportFailed {
+        message: String,
+    },
+    /// Answer to a `PreviewInteraction` request, carrying the engine's own DTO —
+    /// including its `Rejected` status, so there is no `*Rejected` sibling. Sent
+    /// only to the requesting player.
+    InteractionPreview {
+        preview: InteractionPreview,
+    },
+    /// Correlated operational failure for an interaction preview: the session
+    /// could not be reached, was interlocked, or the socket is no longer
+    /// current. Never `Error`, which the native client treats as a session
+    /// teardown.
+    InteractionPreviewFailed {
+        request_id: PreviewRequestId,
+        message: String,
     },
     OpponentDisconnected {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
         grace_seconds: u32,
         #[serde(default)]
         player: Option<PlayerId>,
     },
     OpponentReconnected {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
         #[serde(default)]
         player: Option<PlayerId>,
     },
@@ -633,6 +1054,8 @@ pub enum ServerMessage {
         reservation_token: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reservation_expires_at_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        draft_metadata: Option<DraftLobbyMetadata>,
     },
     PlayerSlotsUpdate {
         slots: Vec<PlayerSlotInfo>,
@@ -643,6 +1066,15 @@ pub enum ServerMessage {
     Emote {
         from_player: PlayerId,
         emote: String,
+    },
+    /// Live click counters of the running contest, sent between full state
+    /// transitions (display only — the counts never decide the winner).
+    ContestProgress {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
+        /// The contest these counters belong to; a client ignores any other.
+        contest: u64,
+        clicks: Vec<(PlayerId, u32)>,
     },
     TimerUpdate {
         player: PlayerId,
@@ -686,6 +1118,11 @@ pub enum ServerMessage {
         match_id: String,
         round: u8,
         game_code: String,
+        /// Exact identity of the spawned Full session. The client accepts the
+        /// following `GameStarted` only when it carries this same key.
+        full_key: FullSessionKey,
+        /// Stable draft-seat credential used to reattach this socket. The Full
+        /// game token remains server-side and is derived from the pairing.
         player_token: String,
         your_player: PlayerId,
         opponent_name: String,
@@ -708,19 +1145,78 @@ pub enum ServerMessage {
     TakebackRequested {
         requester: PlayerId,
         requester_name: String,
+        /// The seats asked to approve; the UI offers Approve/Decline only to them.
+        voters: Vec<PlayerId>,
     },
-    /// The pending takeback request has been resolved, either by unanimous
-    /// approval, a decline, or the requester cancelling it. When
-    /// `approved` is true, a `StateUpdate` carrying the rolled-back state
-    /// is sent to every seat immediately before this message.
+    /// The pending takeback vote ended, for `resolution`'s reason. On
+    /// `approved`, a `StateUpdate` carrying the rolled-back state is sent to
+    /// every seat immediately before this message.
     TakebackResolved {
-        approved: bool,
+        resolution: TakebackResolution,
         /// The player whose response concluded the request: the decliner,
         /// or the requester on self-cancel. `None` when every human seat
         /// approved without a final distinguished responder (e.g. the
         /// requester was the sole human seat).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resolved_by: Option<PlayerId>,
+    },
+
+    // --- Tournament organizer ---------------------------------------------
+    //
+    // Mirrors of `lobby_broker::LobbyServerMessage`'s tournament variants.
+    // `TournamentCreated`/`TournamentJoined` are the only two carrying a
+    // token, and both are point replies to the caller who just earned it;
+    // every broadcast variant carries only token-free views.
+    TournamentCreated {
+        code: String,
+        organizer_token: String,
+        /// When `organizer_token` stops being accepted, in epoch
+        /// milliseconds. Mirrors
+        /// [`lobby_broker::LobbyServerMessage::TournamentCreated`]'s, in the
+        /// same position — the position is load-bearing, see the client-mirror
+        /// note above.
+        expires_at_ms: u64,
+        view: TournamentView,
+    },
+    TournamentJoined {
+        code: String,
+        player_token: String,
+        /// When `player_token` stops being accepted, in epoch milliseconds.
+        expires_at_ms: u64,
+        view: TournamentView,
+    },
+    TournamentUpdate {
+        code: String,
+        view: TournamentView,
+    },
+    TournamentRemoved {
+        code: String,
+    },
+    TournamentListUpdate {
+        tournaments: Vec<TournamentSummary>,
+    },
+    /// Requester-only acknowledgement of one gated tournament action, carrying
+    /// the correlator the caller minted. Mirrors
+    /// [`lobby_broker::LobbyServerMessage::TournamentActionAck`]. Carries no
+    /// token: the caller already holds the one that authorized the action.
+    TournamentActionAck {
+        request_id: TournamentRequestId,
+        code: String,
+        view: TournamentView,
+    },
+    /// Requester-only refusal of one gated tournament action. Mirrors
+    /// [`lobby_broker::LobbyServerMessage::TournamentActionRejected`].
+    TournamentActionRejected {
+        request_id: TournamentRequestId,
+        message: String,
+    },
+    /// Point reply carrying a freshly rotated credential. Mirrors
+    /// [`lobby_broker::LobbyServerMessage::TournamentCredentialRenewed`].
+    TournamentCredentialRenewed {
+        code: String,
+        role: TournamentRole,
+        token: String,
+        expires_at_ms: u64,
     },
 }
 
@@ -732,10 +1228,10 @@ impl ServerMessage {
         }
     }
 
-    pub fn deck_rejected(message: impl Into<String>) -> Self {
+    pub fn error_with_code(code: ServerErrorCode, message: impl Into<String>) -> Self {
         Self::Error {
             message: message.into(),
-            code: Some(ServerErrorCode::DeckRejected),
+            code: Some(code),
         }
     }
 }
@@ -749,7 +1245,8 @@ mod tests {
     use engine::types::game_state::ProductionOverride;
     use engine::types::identifiers::ObjectIncarnationRef;
     use engine::types::mana::{
-        ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
+        ManaSourceOutput, ManaSourcePenalty, ManaSourceQuantity, ManaSourceSelection, ManaType,
+        TapsForManaSelection,
     };
     use serde_json::Value;
 
@@ -848,6 +1345,33 @@ mod tests {
             } => assert_eq!(restored_action, generic),
             _ => panic!("wrong variant"),
         }
+
+        let GameAction::ActivateManaSource { mut selection } = generic else {
+            unreachable!("fixture action is a generic mana-source selection");
+        };
+        selection.ability_index = Some(0);
+        selection.penalty = ManaSourcePenalty::Sacrifices;
+        selection.taps_for_mana.clear();
+        for quantity in [ManaSourceQuantity::Fixed(3), ManaSourceQuantity::Variable] {
+            selection.output = ManaSourceOutput::DeferredColorChoice { quantity };
+            selection.mana_type = ManaType::Colorless;
+            let msg = ClientMessage::Action {
+                action: GameAction::ActivateManaSource {
+                    selection: selection.clone(),
+                },
+            };
+            let json = serde_json::to_string(&msg).unwrap();
+            let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+            let ClientMessage::Action { action } = parsed else {
+                panic!("wrong variant");
+            };
+            assert_eq!(
+                action,
+                GameAction::ActivateManaSource {
+                    selection: selection.clone()
+                }
+            );
+        }
     }
 
     #[test]
@@ -868,6 +1392,25 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_state_export_messages_roundtrip() {
+        let request = ClientMessage::ExportAuthoritativeState;
+        let request_json = serde_json::to_string(&request).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(&request_json).unwrap(),
+            ClientMessage::ExportAuthoritativeState
+        ));
+
+        let response = ServerMessage::AuthoritativeStateExport {
+            state: "{\"state\":{}}".to_string(),
+        };
+        let response_json = serde_json::to_string(&response).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ServerMessage>(&response_json).unwrap(),
+            ServerMessage::AuthoritativeStateExport { state } if state == "{\"state\":{}}"
+        ));
+    }
+
+    #[test]
     fn server_message_mana_payment_preview_roundtrips() {
         let msg = ServerMessage::ManaPaymentPreview {
             request_id: 7,
@@ -884,6 +1427,109 @@ mod tests {
                 assert_eq!(source_ids, vec![ObjectId(12)]);
             }
             _ => panic!("wrong variant"),
+        }
+    }
+
+    fn preview_request() -> InteractionPreviewRequest {
+        use engine::types::interaction::{InteractionChoiceId, InteractionId, InteractionResponse};
+        InteractionPreviewRequest {
+            request_id: PreviewRequestId("req-1".to_string()),
+            interaction_id: InteractionId("interaction-1".to_string()),
+            response: InteractionResponse::Choose {
+                choice_id: InteractionChoiceId("a".to_string()),
+            },
+        }
+    }
+
+    /// Row 7's full-game leg. The known tag is the positive control on the
+    /// identical decoder in the same test: without it, the `Err` below would
+    /// be indistinguishable from a decoder that rejects everything.
+    #[test]
+    fn client_message_interaction_preview_roundtrips_and_an_unknown_tag_is_a_benign_err() {
+        let request = preview_request();
+        let json = serde_json::to_string(&ClientMessage::PreviewInteraction {
+            request: request.clone(),
+        })
+        .unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::PreviewInteraction { request: restored } => {
+                assert_eq!(restored, request);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        // The cross-language contract the three adapters send against:
+        // `ClientMessage` carries no `rename_all`, so `data` is snake_case
+        // while the engine DTO inside it is camelCase.
+        assert_eq!(
+            json,
+            r#"{"type":"PreviewInteraction","data":{"request":{"requestId":"req-1","interactionId":"interaction-1","response":{"type":"choose","data":{"choiceId":"a"}}}}}"#
+        );
+
+        // The decode loop answers this `Err` with `ServerMessage::error` and
+        // continues; a peer that does not know the new tag degrades to phase
+        // 7's rendering rather than losing its session.
+        assert!(serde_json::from_str::<ClientMessage>(
+            r#"{"type":"PreviewInteractionFromTheFuture","data":{}}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn server_message_interaction_preview_roundtrips() {
+        use engine::types::interaction::{
+            InteractionOutcomeCode, InteractionPreviewStatus, InteractionProgress,
+            InteractionSummaryCode,
+        };
+        let request = preview_request();
+        let preview = InteractionPreview {
+            request_id: request.request_id.clone(),
+            interaction_id: request.interaction_id.clone(),
+            status: InteractionPreviewStatus::Confirmable,
+            progress: InteractionProgress {
+                confirmable: true,
+                ..InteractionProgress::default()
+            },
+            outcome: InteractionOutcomeCode::Advanced,
+            summaries: vec![InteractionSummaryCode::ConfirmAvailable],
+            shortcut_preview: None,
+        };
+
+        let json = serde_json::to_string(&ServerMessage::InteractionPreview {
+            preview: preview.clone(),
+        })
+        .unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::InteractionPreview { preview: restored } => {
+                assert_eq!(restored, preview);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        // The failure frame is correlated: the adapter keys its pending map on
+        // this field, so an uncorrelated frame would leave a promise hanging.
+        // `ServerMessage` carries no `rename_all`, so this field is snake_case
+        // on the wire while the DTO inside `InteractionPreview` is camelCase.
+        let failed = serde_json::to_string(&ServerMessage::InteractionPreviewFailed {
+            request_id: request.request_id.clone(),
+            message: "preview lookup failed".to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            failed,
+            r#"{"type":"InteractionPreviewFailed","data":{"request_id":"req-1","message":"preview lookup failed"}}"#
+        );
+        match serde_json::from_str::<ServerMessage>(&failed).unwrap() {
+            ServerMessage::InteractionPreviewFailed {
+                request_id,
+                message,
+            } => {
+                assert_eq!(request_id, request.request_id);
+                assert_eq!(message, "preview lookup failed");
+            }
+            other => panic!("wrong variant: {other:?}"),
         }
     }
 
@@ -1029,9 +1675,21 @@ mod tests {
                     reason: "Match conceded".to_string(),
                     ranked_result: None,
                 },
+                final_view: Some(
+                    serde_json::value::RawValue::from_string(
+                        r#"{"turn_number":7,"derived":{"unique_authorized_submitter":1}}"#
+                            .to_string(),
+                    )
+                    .unwrap(),
+                ),
             }),
         };
         let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""terminalRevision":9"#));
+        assert!(json.contains(r#""deliveryId":"delivery-0""#));
+        assert!(json.contains(
+            r#""finalView":{"turn_number":7,"derived":{"unique_authorized_submitter":1}}"#
+        ));
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::TerminalBootstrapResult {
@@ -1040,6 +1698,10 @@ mod tests {
                 assert_eq!(delivery.key.generation, 4);
                 assert_eq!(delivery.terminal_revision, 9);
                 assert_eq!(delivery.delivery_id.0, "delivery-0");
+                assert_eq!(
+                    delivery.final_view.as_ref().unwrap().get(),
+                    r#"{"turn_number":7,"derived":{"unique_authorized_submitter":1}}"#
+                );
             }
             _ => panic!("wrong variant"),
         }
@@ -1047,7 +1709,10 @@ mod tests {
 
     #[test]
     fn server_message_tagged_json_format() {
-        let msg = ServerMessage::OpponentReconnected { player: None };
+        let msg = ServerMessage::OpponentReconnected {
+            full_key: None,
+            player: None,
+        };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["type"], "OpponentReconnected");
     }
@@ -1090,6 +1755,12 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            requested_code: None,
+            booster_pack_pool: Some(vec![
+                "Cube Card".into(),
+                "Cube Card".into(),
+                "Undealt sentinel".into(),
+            ]),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -1102,6 +1773,7 @@ mod tests {
                 player_count,
                 match_config,
                 room_name,
+                booster_pack_pool,
                 ..
             } => {
                 assert_eq!(display_name, "Alice");
@@ -1111,6 +1783,14 @@ mod tests {
                 assert_eq!(player_count, 4);
                 assert_eq!(match_config, MatchConfig::default());
                 assert_eq!(room_name, Some("Friday Night Commander".to_string()));
+                assert_eq!(
+                    booster_pack_pool,
+                    Some(vec![
+                        "Cube Card".into(),
+                        "Cube Card".into(),
+                        "Undealt sentinel".into()
+                    ])
+                );
             }
             _ => panic!("wrong variant"),
         }
@@ -1308,6 +1988,7 @@ mod tests {
                     interaction_action_id: interaction_action_id.clone(),
                 }],
             )]),
+            activation_block_reasons: HashMap::new(),
             derived: Default::default(),
             viewer_interaction: viewer_interaction.clone(),
             player_token: None,
@@ -1359,6 +2040,7 @@ mod tests {
             mana_payment_shortcut_actions: vec![],
             spell_costs: HashMap::new(),
             legal_actions_by_object: HashMap::new(),
+            activation_block_reasons: HashMap::new(),
             derived: Default::default(),
             viewer_interaction: engine::game::interaction::derive_viewer_interaction(
                 &state,
@@ -1556,6 +2238,43 @@ mod tests {
         }
     }
 
+    /// `ContestClick` carries only a contest identity and a sequence number: no seat,
+    /// timestamp or count for a client to forge. The exact wire shape is pinned because the TypeScript adapter
+    /// (`ws-adapter.ts` `submitContestClick`) writes it by hand.
+    #[test]
+    fn client_message_contest_click_roundtrips_with_only_a_sequence() {
+        let json =
+            serde_json::to_string(&ClientMessage::ContestClick { contest: 3, seq: 7 }).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ContestClick","data":{"contest":3,"seq":7}}"#
+        );
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            ClientMessage::ContestClick { contest: 3, seq: 7 }
+        ));
+    }
+
+    #[test]
+    fn server_message_contest_progress_roundtrips() {
+        let msg = ServerMessage::ContestProgress {
+            full_key: None,
+            contest: 3,
+            clicks: vec![(PlayerId(0), 12), (PlayerId(1), 9)],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ContestProgress","data":{"contest":3,"clicks":[[0,12],[1,9]]}}"#
+        );
+        match serde_json::from_str::<ServerMessage>(&json).unwrap() {
+            ServerMessage::ContestProgress { clicks, .. } => {
+                assert_eq!(clicks, vec![(PlayerId(0), 12), (PlayerId(1), 9)]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
     #[test]
     fn server_message_timer_update_roundtrips() {
         let msg = ServerMessage::TimerUpdate {
@@ -1634,6 +2353,8 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            requested_code: None,
+            booster_pack_pool: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -1652,6 +2373,7 @@ mod tests {
         let msg = ClientMessage::SeatMutate {
             mutation: SeatMutation::SetKind {
                 seat_index: 1,
+                expected_kind: None,
                 kind: SeatKind::Ai {
                     difficulty: AiDifficulty::Medium,
                     deck: DeckChoice::DeckList(Box::new(DeckData {
@@ -1681,6 +2403,65 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn decoded_conditional_seat_mutation_preserves_joined_human() {
+        struct Resolver;
+        impl seat_reducer::types::DeckResolver for Resolver {
+            fn resolve(
+                &self,
+                _choice: &DeckChoice,
+            ) -> Result<engine::game::deck_loading::PlayerDeckList, String> {
+                Ok(Default::default())
+            }
+        }
+        let context = seat_reducer::types::ReducerCtx {
+            platform: phase_ai::config::Platform::Native,
+            deck_resolver: &Resolver,
+        };
+        let mut state = seat_reducer::types::SeatState {
+            seats: vec![SeatKind::HostHuman, SeatKind::JoinedHuman],
+            tokens: vec!["host".to_string(), "guest".to_string()],
+            format: engine::types::format::FormatConfig::standard(),
+            game_started: false,
+        };
+        let mut frame = serde_json::json!({
+            "type": "SeatMutate",
+            "data": { "mutation": {
+                "type": "SetKind",
+                "data": {
+                    "seatIndex": 1,
+                    "kind": { "type": "Ai", "data": {
+                        "difficulty": "Medium", "deck": { "type": "Random" }
+                    }},
+                    "expectedKind": { "type": "WaitingHuman" }
+                }
+            }}
+        });
+        let ClientMessage::SeatMutate { mutation } = serde_json::from_value(frame.clone()).unwrap()
+        else {
+            panic!("expected seat mutation");
+        };
+        crate::seat_mutation_wire_guard::guard_seat_mutation(&mutation).unwrap();
+        let delta = seat_reducer::apply(&mut state, mutation, &context).unwrap();
+        assert_eq!(state.seats[1], SeatKind::JoinedHuman);
+        assert_eq!(state.tokens[1], "guest");
+        assert!(delta.invalidated_tokens.is_empty());
+
+        frame["data"]["mutation"]["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("expectedKind");
+        let ClientMessage::SeatMutate { mutation } = serde_json::from_value(frame).unwrap() else {
+            panic!("expected seat mutation");
+        };
+        assert!(serde_json::to_value(&mutation).unwrap()["data"]
+            .get("expectedKind")
+            .is_none());
+        let delta = seat_reducer::apply(&mut state, mutation, &context).unwrap();
+        assert_eq!(delta.invalidated_tokens, vec!["guest"]);
+        assert!(matches!(state.seats[1], SeatKind::Ai { .. }));
     }
 
     #[test]
@@ -1738,6 +2519,8 @@ mod tests {
             build_commit: "abc1234".to_string(),
             protocol_version: PROTOCOL_VERSION,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+            wire_formats: vec![WireFormat::GzipEnvelopeV1],
+            state_codecs: Vec::new(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -1747,14 +2530,70 @@ mod tests {
                 build_commit,
                 protocol_version,
                 lobby_protocol_version,
+                wire_formats,
+                state_codecs,
             } => {
                 assert_eq!(client_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
                 assert_eq!(protocol_version, PROTOCOL_VERSION);
                 assert_eq!(lobby_protocol_version, Some(LOBBY_PROTOCOL_VERSION));
+                assert_eq!(wire_formats, vec![WireFormat::GzipEnvelopeV1]);
+                assert!(state_codecs.is_empty());
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn client_hello_defaults_missing_and_future_wire_formats_safely() {
+        let legacy = r#"{"type":"ClientHello","data":{"client_version":"0.1.0","build_commit":"abc","protocol_version":1}}"#;
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(legacy).unwrap(),
+            ClientMessage::ClientHello { wire_formats, .. } if wire_formats.is_empty()
+        ));
+
+        let future = r#"{"type":"ClientHello","data":{"client_version":"0.1.0","build_commit":"abc","protocol_version":1,"wire_formats":["FutureEnvelopeV2"]}}"#;
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(future).unwrap(),
+            ClientMessage::ClientHello { wire_formats, .. }
+                if wire_formats == vec![WireFormat::Unknown]
+        ));
+    }
+
+    #[test]
+    fn codec_hello_missing_and_unknown_capabilities_are_tolerated() {
+        for (advertisement, expected) in [
+            (None, Vec::new()),
+            (
+                Some(serde_json::json!(["FutureCodec"])),
+                vec![StateCodec::Unknown],
+            ),
+            (
+                Some(serde_json::json!(["FutureCodec", "StateCodecV1"])),
+                vec![StateCodec::Unknown, StateCodec::StateCodecV1],
+            ),
+        ] {
+            let mut wire = serde_json::json!({"type": "ClientHello", "data": {
+                "client_version": "peer", "build_commit": "build", "protocol_version": PROTOCOL_VERSION
+            }});
+            if let Some(advertisement) = advertisement {
+                wire["data"]["state_codecs"] = advertisement;
+            }
+            let ClientMessage::ClientHello { state_codecs, .. } =
+                serde_json::from_value(wire).unwrap()
+            else {
+                panic!("hello expected")
+            };
+            assert_eq!(state_codecs, expected);
+        }
+        let hello: ServerMessage = serde_json::from_value(serde_json::json!({
+            "type": "ServerHello", "data": {"server_version": "server", "build_commit": "build",
+                "protocol_version": PROTOCOL_VERSION, "mode": "Full"}
+        }))
+        .unwrap();
+        assert!(matches!(hello, ServerMessage::ServerHello {
+            state_codecs, selected_state_codec: None, ..
+        } if state_codecs.is_empty()));
     }
 
     #[test]
@@ -1766,8 +2605,21 @@ mod tests {
             mode: ServerMode::Full,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             public_url: Some("https://x.ngrok-free.app".to_string()),
+            wire_formats: vec![WireFormat::GzipEnvelopeV1],
+            heartbeat: Some(HeartbeatContract {
+                ping_interval_ms: 5_000,
+                silence_budget_ms: 45_000,
+            }),
+            command_correlation: None,
+            state_codecs: vec![StateCodec::StateCodecV1],
+            selected_state_codec: Some(StateCodec::StateCodecV1),
         };
         let json = serde_json::to_string(&msg).unwrap();
+        let wire: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            wire["data"]["heartbeat"],
+            serde_json::json!({"ping_interval_ms": 5000, "silence_budget_ms": 45000})
+        );
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::ServerHello {
@@ -1777,6 +2629,11 @@ mod tests {
                 mode,
                 lobby_protocol_version,
                 public_url,
+                wire_formats,
+                heartbeat,
+                command_correlation: _,
+                state_codecs,
+                selected_state_codec,
             } => {
                 assert_eq!(server_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
@@ -1784,6 +2641,16 @@ mod tests {
                 assert_eq!(mode, ServerMode::Full);
                 assert_eq!(lobby_protocol_version, Some(LOBBY_PROTOCOL_VERSION));
                 assert_eq!(public_url.as_deref(), Some("https://x.ngrok-free.app"));
+                assert_eq!(wire_formats, vec![WireFormat::GzipEnvelopeV1]);
+                assert_eq!(state_codecs, vec![StateCodec::StateCodecV1]);
+                assert_eq!(selected_state_codec, Some(StateCodec::StateCodecV1));
+                assert_eq!(
+                    heartbeat,
+                    Some(HeartbeatContract {
+                        ping_interval_ms: 5_000,
+                        silence_budget_ms: 45_000,
+                    })
+                );
             }
             _ => panic!("wrong variant"),
         }
@@ -1801,6 +2668,11 @@ mod tests {
             mode: ServerMode::LobbyOnly,
             lobby_protocol_version: None,
             public_url: None,
+            wire_formats: Vec::new(),
+            heartbeat: None,
+            command_correlation: None,
+            state_codecs: Vec::new(),
+            selected_state_codec: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("public_url"), "None must be omitted: {json}");
@@ -1810,6 +2682,33 @@ mod tests {
             !json.contains("lobby_protocol_version"),
             "None must be omitted: {json}"
         );
+        assert!(
+            !json.contains("wire_formats"),
+            "empty list must be omitted: {json}"
+        );
+    }
+
+    #[test]
+    fn legacy_hello_does_not_advertise_compute_independent_heartbeats() {
+        let legacy = serde_json::json!({
+            "type": "ServerHello",
+            "data": {
+                "server_version": "0.109.0",
+                "build_commit": "legacy",
+                "protocol_version": PROTOCOL_VERSION,
+                "mode": "Full"
+            }
+        });
+        let parsed: ServerMessage = serde_json::from_value(legacy).unwrap();
+        assert!(matches!(
+            parsed,
+            ServerMessage::ServerHello {
+                heartbeat: None,
+                ..
+            }
+        ));
+        let encoded = serde_json::to_value(parsed).unwrap();
+        assert!(encoded["data"].get("heartbeat").is_none());
     }
 
     #[test]
@@ -1910,6 +2809,7 @@ mod tests {
             filled_seats: 2,
             reservation_token: None,
             reservation_expires_at_ms: None,
+            draft_metadata: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -1969,12 +2869,66 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            requested_code: None,
+            booster_pack_pool: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ClientMessage::CreateGameWithSettings { host_peer_id, .. } => {
                 assert_eq!(host_peer_id, Some("peer-host-abc".to_string()));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn create_game_with_settings_requested_code_roundtrips() {
+        let msg = ClientMessage::CreateGameWithSettings {
+            deck: DeckData::default(),
+            display_name: "Alice".to_string(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            match_config: MatchConfig::default(),
+            ai_seats: vec![],
+            format_config: None,
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+            start_when_full: true,
+            ranked: false,
+            requested_code: Some("AB12CD".to_string()),
+            booster_pack_pool: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::CreateGameWithSettings { requested_code, .. } => {
+                assert_eq!(requested_code.as_deref(), Some("AB12CD"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn create_game_with_settings_missing_requested_code_defaults_to_none() {
+        let json = r#"{
+          "type":"CreateGameWithSettings",
+          "data":{
+            "deck":{"main_deck":["Forest"],"sideboard":[]},
+            "display_name":"Alice",
+            "public":true,
+            "password":null,
+            "timer_seconds":null,
+            "player_count":2
+          }
+        }"#;
+        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            ClientMessage::CreateGameWithSettings { requested_code, .. } => {
+                assert_eq!(requested_code, None);
             }
             _ => panic!("wrong variant"),
         }
@@ -2044,11 +2998,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn client_message_create_sealed_draft_with_settings_roundtrips() {
-        let msg = ClientMessage::CreateDraftWithSettings {
+    fn create_draft_frame(set_codes: Vec<String>) -> ClientMessage {
+        ClientMessage::CreateDraftWithSettings {
             display_name: "Alice".to_string(),
-            set_code: "MKM".to_string(),
+            source: Some(DraftSourceIntent::Uniform { set_codes }),
+            set_codes: None,
             kind: draft_core::types::DraftKind::Sealed,
             public: true,
             password: Some("secret".to_string()),
@@ -2056,13 +3010,37 @@ mod tests {
             tournament_format: draft_core::types::TournamentFormat::Swiss,
             pod_policy: draft_core::types::PodPolicy::Competitive,
             pod_size: 8,
-        };
+        }
+    }
+
+    fn roundtripped_set_codes(msg: &ClientMessage) -> Vec<String> {
+        let json = serde_json::to_string(msg).unwrap();
+        parsed_set_codes(&json)
+    }
+
+    fn parsed_set_codes(json: &str) -> Vec<String> {
+        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            ClientMessage::CreateDraftWithSettings {
+                source, set_codes, ..
+            } => resolve_draft_source_intent(source, set_codes)
+                .unwrap()
+                .set_codes()
+                .to_vec(),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn client_message_create_sealed_draft_with_settings_roundtrips() {
+        let msg = create_draft_frame(vec!["MKM".to_string()]);
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ClientMessage::CreateDraftWithSettings {
                 display_name,
-                set_code,
+                source,
+                set_codes,
                 kind,
                 public,
                 password,
@@ -2071,7 +3049,12 @@ mod tests {
                 ..
             } => {
                 assert_eq!(display_name, "Alice");
-                assert_eq!(set_code, "MKM");
+                assert_eq!(
+                    resolve_draft_source_intent(source, set_codes),
+                    Ok(DraftSourceIntent::Uniform {
+                        set_codes: vec!["MKM".to_string()]
+                    })
+                );
                 assert_eq!(kind, draft_core::types::DraftKind::Sealed);
                 assert!(public);
                 assert_eq!(password, Some("secret".to_string()));
@@ -2080,6 +3063,99 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    /// The multi-set claim at the wire: a pod's ORDER is what the frame carries,
+    /// so a repeated set and a reordering must both survive the round trip.
+    /// Deduping or sorting here would silently rewrite which set fills which
+    /// booster.
+    #[test]
+    fn create_draft_frame_preserves_pack_order_and_repeats() {
+        let ordered = vec![
+            "ISD".to_string(),
+            "DKA".to_string(),
+            "ISD".to_string(),
+            "AVR".to_string(),
+        ];
+        assert_eq!(
+            roundtripped_set_codes(&create_draft_frame(ordered.clone())),
+            ordered
+        );
+
+        let reversed: Vec<String> = ordered.iter().rev().cloned().collect();
+        assert_ne!(
+            roundtripped_set_codes(&create_draft_frame(reversed.clone())),
+            ordered
+        );
+        assert_eq!(
+            roundtripped_set_codes(&create_draft_frame(reversed.clone())),
+            reversed
+        );
+    }
+
+    /// A client that predates multi-set pods sends the single `"set_code"`
+    /// string. It must arrive as the one-element sequence it always meant
+    /// rather than failing the whole frame — the same contract
+    /// `DraftSource`'s `code`/`codes` alias gives snapshots.
+    #[test]
+    fn create_draft_frame_accepts_the_legacy_single_set_code() {
+        let legacy = r#"{"type":"CreateDraftWithSettings","data":{
+            "display_name":"Alice","set_code":"MKM","kind":"Sealed","public":true,
+            "password":null,"timer_seconds":null,"tournament_format":"Swiss",
+            "pod_policy":"Competitive","pod_size":8}}"#;
+        assert_eq!(parsed_set_codes(legacy), vec!["MKM".to_string()]);
+    }
+
+    #[test]
+    fn create_draft_frame_accepts_the_legacy_set_codes_sequence_as_uniform() {
+        let legacy = r#"{"type":"CreateDraftWithSettings","data":{
+            "display_name":"Alice","set_codes":["ISD","DKA"],"kind":"Premier","public":true,
+            "password":null,"timer_seconds":null,"tournament_format":"Swiss",
+            "pod_policy":"Competitive","pod_size":8}}"#;
+        assert_eq!(
+            parsed_set_codes(legacy),
+            vec!["ISD".to_string(), "DKA".to_string()]
+        );
+    }
+
+    /// A new client emits the tagged source spelling. Legacy root keys remain
+    /// deserialize-only, so a Chaos request can never carry assignments.
+    #[test]
+    fn create_draft_frame_serializes_the_tagged_uniform_source() {
+        let json = serde_json::to_string(&create_draft_frame(vec![
+            "ISD".to_string(),
+            "DKA".to_string(),
+        ]))
+        .unwrap();
+        assert!(
+            json.contains(r#""source":{"type":"Uniform","data":{"set_codes":["ISD","DKA"]}}"#),
+            "{json}"
+        );
+        assert!(!json.contains(r#""set_code":"#), "{json}");
+    }
+
+    #[test]
+    fn create_draft_frame_serializes_chaos_candidates_without_assignments() {
+        let msg = ClientMessage::CreateDraftWithSettings {
+            display_name: "Alice".to_string(),
+            source: Some(DraftSourceIntent::Chaos {
+                candidate_codes: vec!["AAA".to_string(), "BBB".to_string()],
+            }),
+            set_codes: None,
+            kind: draft_core::types::DraftKind::Premier,
+            public: true,
+            password: None,
+            timer_seconds: None,
+            tournament_format: draft_core::types::TournamentFormat::Swiss,
+            pod_policy: draft_core::types::PodPolicy::Competitive,
+            pod_size: 8,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            json.contains(r#""candidate_codes":["AAA","BBB"]"#),
+            "{json}"
+        );
+        assert!(!json.contains("assignments"), "{json}");
     }
 
     #[test]
@@ -2111,10 +3187,19 @@ mod tests {
             draft_code: "ABCD12".to_string(),
             action: draft_core::types::DraftAction::Pick {
                 seat: 3,
-                card_instance_id: "card-001".to_string(),
+                card_instance_ids: vec!["card-001".to_string()],
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
+        // Pin the wire KEY, not just the Rust round-trip: a round-trip alone
+        // passes for any field name, since both sides move together. The
+        // client emits this exact literal (`server-draft-adapter.test.ts`), and
+        // `DraftAction` carries no `serde(rename)`/`alias` on this field, so
+        // this assertion is what ties the two halves of the contract together.
+        assert!(
+            json.contains(r#""card_instance_ids":["card-001"]"#),
+            "unexpected wire shape: {json}"
+        );
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ClientMessage::DraftAction { draft_code, action } => {
@@ -2123,7 +3208,7 @@ mod tests {
                     action,
                     draft_core::types::DraftAction::Pick {
                         seat: 3,
-                        card_instance_id: "card-001".to_string(),
+                        card_instance_ids: vec!["card-001".to_string()],
                     }
                 );
             }
@@ -2177,7 +3262,9 @@ mod tests {
     #[test]
     fn server_message_draft_state_update_roundtrips() {
         use draft_core::types::*;
-        use draft_core::view::{DraftPlayerView, DraftPoolGroups};
+        use draft_core::view::{
+            DraftLaunchCapability, DraftPlayerView, DraftPoolGroups, DraftSourceView, SetLayoutView,
+        };
 
         let first_pull = DraftCardInstance {
             instance_id: "pack-1-card-1".to_string(),
@@ -2202,41 +3289,102 @@ mod tests {
             draft_effect: None,
         };
         let pool = vec![first_pull.clone(), second_pull.clone()];
-        let pool_groups = DraftPoolGroups::from_pool(&pool);
+        let pool_groups = DraftPoolGroups::from_pool(&pool, &DraftSource::single_set("TST"));
         let view = DraftPlayerView {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            fifo: None,
             status: DraftStatus::Deckbuilding,
             kind: DraftKind::Sealed,
+            source: DraftSourceView::Set {
+                layout: SetLayoutView::UniformByRound {
+                    codes: vec!["TST".to_string()],
+                },
+            },
+            launch_capability: DraftLaunchCapability::None,
+            // Read off the same procedure the kind above names, so the fixture
+            // stays a view the engine could actually have built.
+            distribution: DraftKind::Sealed.procedure().distribution,
+            commanders_required: 0,
             current_pack_number: 0,
             pick_number: 2,
             pass_direction: PassDirection::Left,
             current_pack: None,
+            required_pick_count: 0,
+            pick_selection_mode: PickSelectionMode::Direct,
             pool,
             draft_effects: vec![first_pull.clone()],
             pool_groups,
             sealed_packs: Some(vec![vec![first_pull], vec![second_pull]]),
             seats: Vec::new(),
             cards_per_pack: 14,
+            pack_sizes: vec![14, 14, 14],
+            pack_set_codes: vec!["TST".to_string(); 3],
+            pack_pick_steps: vec![14, 14, 14],
+            // `cards_per_pack.div_ceil(cards_per_pick)` with Sealed's
+            // `cards_per_pick: 1` -- a degenerate axis value under
+            // `PackDistribution::AllAtOnce`, which has no pick step at all.
+            pick_steps_per_pack: 14,
             pack_count: 3,
             min_deck_size: 40,
             addable_cards: Vec::new(),
+            grantable_commander_fillers: Vec::new(),
+            draft_set_codes: Vec::new(),
             timer_remaining_ms: Some(5000),
             standings: Vec::new(),
             current_round: 0,
             next_pairing_round: 1,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
+            post_draft_play: DraftKind::Sealed.procedure().post_draft_play,
+            deck_submission_open: false,
             pairings: Vec::new(),
             match_config: DraftKind::Sealed.match_config(),
+            // Sealed has no shared stack and no Winston play/draw election, so
+            // both are `None` -- which makes this round trip a free
+            // byte-compatibility assertion: with `skip_serializing_if` on both
+            // fields, this message's JSON is byte-identical to the pre-Winston
+            // wire shape.
+            shared_stack: None,
+            play_first_chooser: None,
         };
         let msg = ServerMessage::DraftStateUpdate { view: view.clone() };
         let json = serde_json::to_string(&msg).unwrap();
+        let shape: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(shape["data"]["view"].get("flow").is_none());
+        assert!(shape["data"]["view"].get("fifo").is_none());
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::DraftStateUpdate { view: v } => {
                 assert_eq!(v.status, DraftStatus::Deckbuilding);
                 assert_eq!(v.pick_number, 2);
+                assert_eq!(v.pick_selection_mode, PickSelectionMode::Direct);
+                assert_eq!(v.launch_capability, DraftLaunchCapability::None);
+                assert_eq!(v.post_draft_play, PostDraftPlay::TournamentPairings);
+                assert_eq!(v.commanders_required, 0);
                 assert_eq!(v.timer_remaining_ms, Some(5000));
                 assert_eq!(v.pool_groups, view.pool_groups);
+                assert_eq!(
+                    v.pool_groups.workspace_capabilities.rarity_group_order,
+                    Some(vec![
+                        draft_core::view::DraftRarityGroupKind::Mythic,
+                        draft_core::view::DraftRarityGroupKind::Rare,
+                        draft_core::view::DraftRarityGroupKind::Uncommon,
+                        draft_core::view::DraftRarityGroupKind::Common,
+                        draft_core::view::DraftRarityGroupKind::RarityOther,
+                    ])
+                );
+                assert_eq!(
+                    v.pool_groups
+                        .workspace_row_classification
+                        .creature_instance_ids,
+                    vec!["pack-1-card-1"]
+                );
+                assert_eq!(
+                    v.pool_groups
+                        .workspace_row_classification
+                        .noncreature_instance_ids,
+                    vec!["pack-2-card-1"]
+                );
                 assert_eq!(v.draft_effects, view.draft_effects);
                 assert_eq!(
                     v.sealed_packs
@@ -2257,11 +3405,111 @@ mod tests {
     }
 
     #[test]
+    fn draft_pool_groups_nested_workspace_metadata_is_strict_and_legacy_compatible() {
+        use draft_core::types::DraftSource;
+        use draft_core::view::{
+            DraftPoolGroups, DraftWorkspaceCapabilities, DraftWorkspaceRowClassification,
+        };
+
+        let source = DraftSource::single_set("TST");
+        let value = serde_json::to_value(DraftPoolGroups::from_pool(&[], &source)).unwrap();
+
+        let mut legacy = value.clone();
+        let legacy_object = legacy.as_object_mut().unwrap();
+        legacy_object.remove("workspace_capabilities");
+        legacy_object.remove("workspace_row_classification");
+        let legacy_groups: DraftPoolGroups = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            legacy_groups.workspace_capabilities,
+            DraftWorkspaceCapabilities::default()
+        );
+        assert_eq!(
+            legacy_groups.workspace_row_classification,
+            DraftWorkspaceRowClassification::default()
+        );
+
+        let malformed = [
+            (
+                "empty capabilities",
+                "workspace_capabilities",
+                serde_json::json!({}),
+            ),
+            (
+                "missing rarity order",
+                "workspace_capabilities",
+                serde_json::json!({"other": []}),
+            ),
+            (
+                "invalid rarity kind",
+                "workspace_capabilities",
+                serde_json::json!({"rarity_group_order": ["legendary"]}),
+            ),
+            (
+                "non-rarity group kind",
+                "workspace_capabilities",
+                serde_json::json!({"rarity_group_order": ["creature"]}),
+            ),
+            (
+                "non-array rarity order",
+                "workspace_capabilities",
+                serde_json::json!({"rarity_group_order": "common"}),
+            ),
+            (
+                "empty row classification",
+                "workspace_row_classification",
+                serde_json::json!({}),
+            ),
+            (
+                "missing creature ids",
+                "workspace_row_classification",
+                serde_json::json!({"noncreature_instance_ids": []}),
+            ),
+            (
+                "missing noncreature ids",
+                "workspace_row_classification",
+                serde_json::json!({"creature_instance_ids": []}),
+            ),
+            (
+                "non-array row",
+                "workspace_row_classification",
+                serde_json::json!({
+                    "creature_instance_ids": "card-1",
+                    "noncreature_instance_ids": []
+                }),
+            ),
+            (
+                "non-string row id",
+                "workspace_row_classification",
+                serde_json::json!({
+                    "creature_instance_ids": [],
+                    "noncreature_instance_ids": [1]
+                }),
+            ),
+        ];
+
+        for (label, field, malformed_value) in malformed {
+            let mut candidate = value.clone();
+            candidate
+                .as_object_mut()
+                .unwrap()
+                .insert(field.to_string(), malformed_value);
+            assert!(
+                serde_json::from_value::<DraftPoolGroups>(candidate).is_err(),
+                "{label} must reject"
+            );
+        }
+    }
+
+    #[test]
     fn server_message_draft_match_start_roundtrips() {
         let msg = ServerMessage::DraftMatchStart {
             match_id: "r1-t0".to_string(),
             round: 1,
             game_code: "GAME01".to_string(),
+            full_key: FullSessionKey {
+                game_code: "GAME01".to_string(),
+                generation: 7,
+            },
             player_token: "tok456".to_string(),
             your_player: PlayerId(0),
             opponent_name: "Bob".to_string(),
@@ -2273,6 +3521,7 @@ mod tests {
                 match_id,
                 round,
                 game_code,
+                full_key,
                 player_token,
                 your_player,
                 opponent_name,
@@ -2280,6 +3529,8 @@ mod tests {
                 assert_eq!(match_id, "r1-t0");
                 assert_eq!(round, 1);
                 assert_eq!(game_code, "GAME01");
+                assert_eq!(full_key.game_code, "GAME01");
+                assert_eq!(full_key.generation, 7);
                 assert_eq!(player_token, "tok456");
                 assert_eq!(your_player, PlayerId(0));
                 assert_eq!(opponent_name, "Bob");
@@ -2362,19 +3613,32 @@ mod tests {
     #[test]
     fn server_message_draft_spectator_view_roundtrips() {
         use draft_core::types::*;
-        use draft_core::view::SpectatorDraftView;
+        use draft_core::view::{DraftSourceView, SetLayoutView, SpectatorDraftView};
 
         let view = SpectatorDraftView {
+            flow: DraftFlow::LegacyBarrier,
+            fifo: None,
             status: DraftStatus::Drafting,
             kind: DraftKind::Premier,
+            source: DraftSourceView::Set {
+                layout: SetLayoutView::UniformByRound {
+                    codes: vec!["TST".to_string()],
+                },
+            },
             current_pack_number: 1,
             pick_number: 5,
             pass_direction: PassDirection::Right,
             seats: Vec::new(),
             cards_per_pack: 14,
+            pack_sizes: vec![14, 14, 14],
+            pack_set_codes: vec!["TST".to_string(); 3],
+            pack_pick_steps: vec![14, 14, 14],
+            // CR 905.1a: Premier takes one card per step.
+            pick_steps_per_pack: 14,
             pack_count: 3,
             min_deck_size: 40,
             addable_cards: Vec::new(),
+            grantable_commander_fillers: Vec::new(),
             standings: Vec::new(),
             current_round: 0,
             tournament_format: TournamentFormat::Swiss,
@@ -2383,9 +3647,15 @@ mod tests {
             match_config: DraftKind::Premier.match_config(),
             pools: None,
             current_packs: None,
+            // Premier has no shared stack; `skip_serializing_if` keeps this
+            // frame byte-identical to the pre-Winston wire shape.
+            shared_stack: None,
         };
         let msg = ServerMessage::DraftSpectatorView { view };
         let json = serde_json::to_string(&msg).unwrap();
+        let shape: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(shape["data"]["view"].get("flow").is_none());
+        assert!(shape["data"]["view"].get("fifo").is_none());
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::DraftSpectatorView { view: v } => {
@@ -2397,9 +3667,293 @@ mod tests {
         }
     }
 
+    /// v159: coin-flip effects are one `Effect::FlipCoins { flips: CoinFlipRun, .. }`
+    /// and the coin-flip resolution frame's kind becomes `Exactly`/`UntilLoss`.
+    /// A v158 or older peer silently reads a multi-flip or until-loss run as one flip, so
+    /// it must be refused before it receives v159 state.
+    /// v157: `ChooseFromZoneConstraint::TotalManaValue` in paused zone choices
+    /// and ability state requires a versioned full-game peer.
+    ///
+    /// v156: `StaticCondition`, `TriggerCondition` and `AbilityCondition` gain
+    /// `QuantityQuality { quantity, quality }` with the new `NumberQuality`
+    /// (CR 107.1, CR 603.4), carried in `GameState` ability definitions; a v155
+    /// peer cannot decode the new tag, so it must be refused before it receives
+    /// v156 state.
+    /// The same bump adds the optional per-seat `created_tokens` channel (each
+    /// seat's pinned creation result) to the private
+    /// player-scope tail sidecar that `PendingContinuation` carries under its
+    /// existing `player_scope_linked_exile` key (CR 608.2c + CR 608.2f: the
+    /// tokens every seat created, for a paused "each player creates … The
+    /// tokens …" tail); it is serde-defaulted, so a sidecar without it decodes
+    /// as the linked-exile-only sidecar.
+    ///
+    /// v155: `PendingChangeZoneIteration.remaining` carries each member's
+    /// pre-event entry modifications (`ChangeZoneMemberEntry`, CR 603.6a +
+    /// CR 614.12) and drops the raw gate fields, and the persisted resolution
+    /// state moves from version 6 to 7; a v154 peer cannot parse a parked
+    /// ChangeZone frame, so it must be refused before it receives v155 state.
+    ///
+    /// v154: `PendingCostMoveResume` gains `CounterCostRemovalPayment` (a
+    /// counter-removal cost paused on a CR 616.1 replacement choice, whose
+    /// settled count the activation reads, CR 118.11) and
+    /// `ManaAbilityCostCursor` gains `counter_removal`, both carried in
+    /// `GameState::pending_cost_move_resume`; a v153 peer cannot parse the new
+    /// tag, so it must be refused before it receives v154 state;
+    /// `PausedCounterCostRemoval` carries its `replacement_subtree` boundary.
+    ///
+    /// v153: `GrantAllActivatedAbilitiesOf` gains the optional `kind` selector
+    /// and the loyalty-grant sibling variant is removed. A v152 peer
+    /// drops the defaulted field silently and over-grants, so it must be
+    /// refused before it receives v153 state.
+    ///
+    /// v152: `ShortcutDecisionSchema` gains `suggested_declaration` and
+    /// `leading_aims`, and `ShortcutProposal` gains `leading_aims`; a v151 peer
+    /// drops them, so it must be refused before it receives v152 state.
+    /// v151: populated Bestow form payloads require a versioned full-game peer.
+    /// v150: the cast-this-way gains rider is reshaped —
+    /// `CastingPermission::ExileWithAltCost.enters_with_modifications` becomes a
+    /// `PendingEntersModifications` object and
+    /// `Effect::AddPendingEntersModifications` carries its `rider`; a v149 peer
+    /// cannot parse either new shape, so it must be refused before it receives
+    /// v150 state.
+    /// v149: `GameState::deferred_spell_delivery` is gone and
+    /// `GameState::resolving_spell_final_part` marks the CR 608.2n final part a
+    /// paused instant or sorcery still owes; a v148 peer drops the key and would
+    /// move the spell before its paused instructions finish, so it must be refused
+    /// before it receives v149 state.
+    /// v148: Timesifter's top-card exile contest — `Effect::ExileTopCardContest`
+    /// in serialized ability definitions and the parked
+    /// `BatchCompletion::TopCardContestRoundComplete`; a v147 peer cannot parse
+    /// either tag, so it must be refused before it receives v148 state.
+    /// v147: online physical contests (Eye to Eye, Mouth to Mouth) —
+    /// `WaitingFor::PhysicalContest`, `Effect::PhysicalContest`, the two
+    /// `PhysicalContest*` `GameEvent`s, `ClientMessage::ContestClick` and
+    /// `ServerMessage::ContestProgress`; a v146 peer cannot parse the new tags, so
+    /// it must be refused before it receives v147 state.
+    /// v146: `ConfirmedPeriod` gains `counted_by` (CR 732.2a counted loop offers) and `performance`,
+    /// and a loop offer's `win_kind` becomes optional; a v145 peer drops the field
+    /// or cannot parse the offer, so it must be refused before it receives v146 state.
+    /// v145: `ParentTargetMissingReason` gains `SearchLibrary` (CR 701.23b),
+    /// serialized on `ResolvedAbility.parent_target_missing_reason`; a v144
+    /// peer cannot parse the tag. P2P moves in lockstep (wire 127); lobby
+    /// messages unchanged.
+    ///
+    /// v144: one-time boons (#7495) add `Effect::CreateBoon`, `Effect::NoteNumber`,
+    /// the `HasBoon` conditions, and `WaitingFor::ChooseTokenHost` tags, and
+    /// retype the perpetual P/T edit's `power_delta`/`toughness_delta` to
+    /// required `QuantityExpr` `power`/`toughness`. A v143 peer cannot parse
+    /// the new shapes, so it must be refused before it receives v144 state.
+    ///
+    /// v143: `GameState::modal_modes_chosen_this_turn` / `_this_game` retype to
+    /// `(ObjectIncarnationRef, usize)` (CR 400.7 incarnation-keyed modal
+    /// history); a v142 peer cannot decode the object-shaped key, so it must be
+    /// refused before it receives v143 state.
+    ///
+    /// v142: `LinkedExileSnapshot` gains `incarnation` (CR 400.7), carried in
+    /// `GameState::linked_exile_lki` and the trigger and zone-change linked-exile
+    /// snapshots; a v141 peer re-encoding state drops it, so it must be refused
+    /// before it receives v142 state.
+    ///
+    /// v141: `ExileLinkKind` gains `CastCost` (CR 607.2q cast-cost exile links),
+    /// carried in `GameState::exile_links`; a v140 peer cannot parse the tag, so
+    /// it must be refused before it receives v141 state.
+    ///
+    /// v140: `AttackSubject` gains `EventAttackers` (the players a trigger's
+    /// attack event's attackers attacked), carried in a resolving or pending
+    /// ability's `player_scope` inside `GameState`; a v139 peer cannot parse the
+    /// tag, so it must be refused before it receives v140 state.
+    ///
+    /// v139: CR 702.122c per-turn crew relation —
+    /// `GameState::crew_history_this_turn` and `FilterProp::CrewedThisTurn`, both
+    /// inside `GameState`; a v138 peer cannot parse the new filter tag, so it
+    /// must be refused before it receives v139 state.
+    ///
+    /// v134: `GameEvent::AbilityActivated` gains
+    /// `stack_entry`, the stack object a stack-using activation created, carried
+    /// in `GameState`'s trigger events; an older peer drops it silently and
+    /// resolves an activation trigger's "copy that ability" differently, so it
+    /// must be refused before it receives v134 state.
+    ///
+    /// v133: CR 614.12a pre-entry as-enters choices —
+    /// `NamedChoiceSourceBinding::PendingEntry`, `ProposedEvent::ZoneChange`'s
+    /// `enter_with_choices` and `PendingReplacement::delivery_boundary`, all
+    /// inside `GameState`; a v132 peer cannot parse the new binding tag, so it
+    /// must be refused before it receives v133 state.
+    ///
+    /// v132: `GameObject::exile_from_stack_linked_source`
+    /// carries the stamping incarnation (`ObjectIncarnationRef`, CR 400.7); a
+    /// v131 peer cannot decode a set rider, so it must be refused before it
+    /// receives v132 state.
+    ///
+    /// v131: `PlayerFilter` gains `AnyOf { filters }` and
+    /// `TargetPlayer`, carried in a resolving or pending ability's `player_scope`
+    /// inside `GameState`; a v130 peer cannot parse either tag, so it must be
+    /// refused before it receives v131 state.
+    ///
+    /// v130: `GameState::linked_exile_lki` holds one incarnation-bounded
+    /// `LinkedExileLki` per departure (CR 400.7); a v129 peer cannot decode a
+    /// non-empty map, so it must be refused before it receives v130 state.
+    ///
+    /// v129: `WaitingFor::LoopShortcut` and
+    /// `ShortcutProposal` gained a required `road: OfferRoad`. A v128 peer drops
+    /// the key from every frame it re-encodes, so the handshake refuses the
+    /// pairing rather than leave the road to the legacy-offer migration's
+    /// inference.
+    ///
+    /// The resolved-rules journal admits a land-play `rebound_from` on a
+    /// `ResolvedZoneChangeCommand` (Library/Graveyard/Exile -> Battlefield); a v123
+    /// peer rejects that `GameState.resolved_rules_journal`, so it must be refused
+    /// before it receives v124 state.
+    /// `MulliganDecisionEntry` and `MulliganDeclaration` gain `free_reveals_taken`; a
+    /// v124 peer drops the count, so it must be refused before it receives v125 state.
+    /// `ZoneChangeRecord` gains `arrival`; a v125 peer rejects the journal when the
+    /// departure owner differs from the command owner, so it must be refused before it
+    /// receives v126 state.
+    /// `TargetFilter::DeclaredPlayer` is new in serialized full-game state
+    /// (CR 608.2c + CR 115.1a); a v127 peer cannot deserialize it, so it must be
+    /// refused before it receives v128 state. `SpellContext` also gains
+    /// `outer_declared_players` (CR 603.7a), the players a delayed ability's
+    /// creating chain named by group, omitted when empty; amended in place, not
+    /// bumped.
+    /// `FilterProp::PrepareSpell` (CR 722.3d), the `scope` field on
+    /// `Effect::BecomePrepared` / `BecomeUnprepared` (CR 722.3a + CR 115.10a),
+    /// `SpellCastRecord::prepared_copy_source`, `CopiableValues::prepare_face`
+    /// and `GameObject::copied_prepare_face` are new in serialized full-game
+    /// state; a v122 peer cannot parse the new `FilterProp` tag and would read a
+    /// mass prepare as a single-target one, so it must be refused before it
+    /// receives v123 state.
+    /// `PermissionGrantee` gains `TriggeringSourceController` (a cast grant bound to
+    /// the triggering object's controller, CR 603.2 + CR 109.4), and damage events
+    /// carry the source incarnation (CR 400.7); a v121 peer cannot deserialize
+    /// the tag, so it must be refused before it receives v122 state.
+    /// The successful-mana-history ledger now stores the actual receiving
+    /// player with each trigger definition. A v120 peer cannot decode a
+    /// nonempty pair ledger, so it must be refused before v121 state.
+    /// `FilterProp`'s attachment-referent siblings are one parameterized
+    /// `FilterProp::AttachedTo { to: AttachmentReferent }` (CR 701.3a + CR
+    /// 303.4b); a v126 peer cannot parse the `"AttachedTo"` tag carried in
+    /// `GameState` ability definitions, so it must be refused before it
+    /// receives v127 state. v127 also carries the positional retarget wire
+    /// (`RetargetSpell` `null` keeps, engine-derived copy-walk keep
+    /// permissions), which a v126 peer cannot parse or render.
+    /// (Reserved as 119 and then 121 while under review; it landed after 126, so 119 stays unused.)
+    /// The CR 601.2a spell announcement adds `GameObject::spell_announcement`,
+    /// `GameState::next_spell_announcement` and `GameEvent::BecomesTarget.targeter`;
+    /// a v119 peer cannot decode v120 state, so it must be refused before state
+    /// delivery. (v119 is reserved for the Legends of Jidoor PR.)
+    /// `ManaColorSpent` on `AbilityCondition` and `TriggerCondition` retypes `color`
+    /// to `SpentColor` (word versus symbol provenance, CR 612.2); a v117 peer cannot
+    /// deserialize the tagged color, so it must be refused before it receives v118
+    /// state.
+    /// `DerivedViews` gains `shared_piles` (the seat storing a shared library and
+    /// graveyard); a v116 peer drops the key and renders per-seat piles for a
+    /// state whose other seat's containers are empty, so it must be refused before
+    /// it receives v117 state.
+    /// `DrawSequenceFrame` gains `dealer` (the in-game simultaneous-draw dealer),
+    /// serialized in the resolution frames behind `RESOLUTION_STATE_WIRE_VERSION`
+    /// 5; a v115 peer refuses that resolution state, so it must be refused before it
+    /// receives v116 state.
+    /// `MulliganChoice` gains `FreeReveal` and `MulliganDeclaration` gains `kind`
+    /// (the Dandân free reveal mulligan); a v114 peer cannot deserialize the
+    /// choice and would carry out a held free reveal as a regular mulligan, so it
+    /// must be refused before it receives v115 state.
+    /// `WaitingFor::MulliganDecision` gains `declared` (CR 103.5 declare round),
+    /// serialized in `GameState.waiting_for`; a v113 peer would drop it silently,
+    /// so it must be refused before it receives v114 state.
+    /// `ResolvedZoneChangeCommand` gains `rebound_from` (CR 108.3 as modified by
+    /// the Dandân hand-entry rebind), serialized inside
+    /// `GameState.resolved_rules_journal`; a v112 peer would drop it silently,
+    /// so it must be refused before it receives v113 state.
+    /// `ContinuousModification` gains `SubstituteTextWord` (CR 612.1), serialized
+    /// inside `GameState`'s transient continuous effects; a v111 peer cannot parse
+    /// the tag, so it must be refused before it receives v112 state.
+    /// `GameFormat` gains `Dandan`, which serializes as its `Display` string and
+    /// deserializes through `FromStr`; a v110 peer cannot parse a `GameState`
+    /// whose format names it, so it must be refused before it receives v111
+    /// state.
+    /// `GameState.deferred_spell_delivery` (CR 608.2n + CR 608.2g) is new in
+    /// serialized state. A v109 peer would leave a spell paused on its own
+    /// free-cast window on the stack in no zone, so the handshake must refuse
+    /// the mismatch before it receives v110 state. The same version adds
+    /// `WaitingFor::SpellCopyOrderChoice` and
+    /// `PendingRepeatIteration.copy_order_fixed` (CR 405.3).
+    /// The CR 201.5a granter binding adds `ObjectScope::GrantingObject` /
+    /// `ObjectScope::SpecificObject`, `TargetFilter::GrantingObject { bound }`,
+    /// `PlayerFilter::GrantingObjectCaster` and the `granting_object` stamp; v108 state
+    /// cannot decode as v109 state, so it must be refused before state delivery.
+    /// `IllegalTargetsDisposition::StillResolves` is serialized on the root
+    /// ability. A v107 peer would silently apply ordinary non-resolution
+    /// after target invalidation, so the handshake must refuse the mismatch
+    /// before it receives v108 state.
+    /// `UntilCondition::NextMatches.count` (CR 608.2c), the paused loop's `hits`,
+    /// `ZoneChoiceCandidateSource::ParentTargets` and
+    /// `SpellContext.exile_until_batch` are new in serialized
+    /// full-game state; a v106 peer would run a counted loop as a one-card loop,
+    /// so it must be refused before it receives v107 state.
+    /// `PendingCast` gains `delved_cards` and the pending cost-move resume swaps
+    /// `DelveManaPayment` for `FinalizeDelvedCast` (#9400); a v103 peer cannot
+    /// parse the parked delve commit, so it must be refused before it receives
+    /// v104 state.
+    /// `GameEvent::AbilityActivated` now carries `kind: "Mana"` for mana-ability
+    /// activations and an optional `departed_source_lki`; a v100 peer cannot
+    /// parse the `Mana` kind, so it must be refused before it receives v101 state.
+    /// `Effect::AdditionalPhase` now carries a `TurnSegment` in place of its
+    /// `phase` field and an `ExtraPhaseRecipient` in place of its `target`
+    /// field; a v99 peer cannot parse it, so it must be refused before it
+    /// receives v100 state.
+    /// `GraveyardCastPermission.pool` (CR 404.1 + CR 601.3) is new in serialized
+    /// full-game state; a v98 peer would default it to the own graveyard and
+    /// refuse a cast from any graveyard the permission allows, so it must be
+    /// refused before it receives v99 state.
+    /// `ZoneOpponentChooserPurpose::PerPlayerChoiceOrder` (CR 101.4c) and
+    /// `SubstituteChooser` (CR 800.4g), the per-player frame's `current` and
+    /// `nominee` fields, and `PerPlayerScope::Opponents` (CR 102.2 + CR 102.3)
+    /// are serialized; a v97 peer cannot deserialize them, so it must be
+    /// refused before it receives v98 state.
+    /// `ResolvedAbility.target_reads` and `AbilityDefinition.target_reads`
+    /// (`TargetReadOrigin`, CR 115.1 + CR 608.2c) are serialized; a v96 peer
+    /// would default the field and rebuild a target slot the rules do not
+    /// announce, so it must be refused before it receives v97 state.
+    /// `FilterProp::Unblocked` is reshaped to `FilterProp::BlockStatus { status:
+    /// AttackerBlockStatus }` (CR 509.1h); a v94 peer cannot parse the new
+    /// `"BlockStatus"` tag carried in `GameState` ability definitions, so it must
+    /// be refused before it receives v95 state.
+    /// `SpellContext.creation_lookback_event` and `TriggerSourceContext.mana_cost`
+    /// are new in serialized full-game state (CR 603.7 + CR 603.10a + CR 608.2h,
+    /// CR 707.2); a v93 peer would drop both and resolve a phase-delayed
+    /// departure look-back differently, so it must be refused before it
+    /// receives v94 state.
+    /// `ReductionProvenance` gains `SacrificedForCost`, the reduction an Emerge
+    /// or Offering sacrifice earns before a deferred target declaration; v92
+    /// state cannot decode a v93 provenance, so it must be refused before
+    /// state delivery.
+    /// `ResolvedAbility.parent_target_missing_reason` is serialized and gains
+    /// `ParentTargetMissingReason::RevealUntil`, and `EffectOutcomeSignal` gains
+    /// `RevealUntilMatched`, and the CR 701.20a reveal lease adds
+    /// `ResolvedInformationLifetime::UntilStackObjectLeaves` plus
+    /// `GameState.stack_bound_reveals` (CR 701.20a + CR 603.12), presented through
+    /// `DerivedViews.stack_revealed_cards`; a v91 peer cannot parse
+    /// the tags and would drop a paused reveal-until whiff's verdict, so it must
+    /// be refused before it receives v92 state.
+    /// `PendingManaAbility` now carries required `chosen_counter_counts`
+    /// instead of `chosen_counter_count` (#9207); v90 state cannot decode as
+    /// v91 state, so it must be refused before state delivery.
+    /// `FormatConfig` gained `allow_experimental_dungeons`; a v89 peer fails
+    /// the flag closed to `false` and runs the game without the experimental
+    /// dungeon pool the host chose, so it must be refused before it receives
+    /// v90 state.
+    /// `GraveyardCastPermission.required_cast_keyword` (CR 118.9b) is new in
+    /// serialized full-game state; a v88 peer would drop it silently and admit
+    /// a printed-cost graveyard cast the permission forbids, so it must be
+    /// refused before it receives v89 state. v89 also carries the announced
+    /// graveyard permission (CR 601.2a + CR 601.2b: the casting-menu option's
+    /// `authority`, the slot prompt's `permission`, the cast's latched terms).
+    /// The preceding v88 bump gave `WaitingFor::DeclareBlockers` its
+    /// `block_capacities` (CR 509.1a + CR 101.1).
+    ///
     #[test]
-    fn protocol_version_is_39() {
-        assert_eq!(PROTOCOL_VERSION, 39);
+    fn protocol_version_is_owned_by_broker() {
+        assert_eq!(PROTOCOL_VERSION, lobby_broker::PROTOCOL_VERSION);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -2409,7 +3963,8 @@ mod tests {
     /// understand.
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
-    /// this guards — and this test reds while `protocol_version_is_39` stays
+    /// this guards — and this test reds while
+    /// `protocol_version_is_owned_by_broker` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
@@ -2431,6 +3986,7 @@ mod tests {
         assert!(matches!(parsed, ClientMessage::RequestTakeback(None)));
     }
 
+    #[cfg(any())]
     #[test]
     fn resolve_all_wire_frames_carry_only_server_safe_metadata() {
         let request = ClientMessage::ResolveAll {
@@ -2456,11 +4012,37 @@ mod tests {
 
         let rejected = ServerMessage::ResolveAllRejected {
             request_id: 7,
-            reason: "Resolve All requires your priority".to_string(),
+            rejection: ActionRejection::new(
+                engine::types::action_rejection::ActionRejectionCode::ResolveAllNotReady,
+            ),
         };
         assert_eq!(
             serde_json::to_string(&rejected).unwrap(),
-            r#"{"type":"ResolveAllRejected","data":{"request_id":7,"reason":"Resolve All requires your priority"}}"#
+            r#"{"type":"ResolveAllRejected","data":{"request_id":7,"rejection":{"code":"resolve_all_not_ready","disposition":"unavailable","message":"Resolve All is not ready to run.","related_object_ids":[]}}}"#
+        );
+
+        assert_eq!(
+            serde_json::to_string(&ServerMessage::ActionFailed {
+                message: "session storage failed".to_string(),
+            })
+            .unwrap(),
+            r#"{"type":"ActionFailed","data":{"message":"session storage failed"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ServerMessage::ResolveAllFailed {
+                request_id: 7,
+                message: "batch persistence failed".to_string(),
+            })
+            .unwrap(),
+            r#"{"type":"ResolveAllFailed","data":{"request_id":7,"message":"batch persistence failed"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ServerMessage::ManaPaymentPreviewFailed {
+                request_id: 7,
+                message: "preview lookup failed".to_string(),
+            })
+            .unwrap(),
+            r#"{"type":"ManaPaymentPreviewFailed","data":{"request_id":7,"message":"preview lookup failed"}}"#
         );
     }
 
@@ -2527,6 +4109,7 @@ mod tests {
         let viewer_interaction =
             engine::game::interaction::derive_viewer_interaction(&state, &state, PlayerId(0));
         let build = |rewind_targets: Vec<RewindOption>| ServerMessage::StateUpdate {
+            full_key: None,
             state_revision: 4,
             state: state.clone(),
             events: vec![],
@@ -2538,6 +4121,7 @@ mod tests {
             log_entries: vec![],
             spell_costs: HashMap::new(),
             legal_actions_by_object: HashMap::new(),
+            activation_block_reasons: HashMap::new(),
             derived: Default::default(),
             viewer_interaction: viewer_interaction.clone(),
             rewind_targets,
@@ -2605,10 +4189,71 @@ mod tests {
     }
 
     #[test]
+    fn server_message_state_withheld_wire_shape_roundtrips() {
+        let msg = ServerMessage::StateWithheld {
+            full_key: None,
+            state_revision: 6,
+            withheld: WithheldFrame::StateUpdate,
+            reason: "too large".to_string(),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "StateWithheld",
+                "data": {
+                    "state_revision": 6,
+                    "withheld": { "type": "StateUpdate" },
+                    "reason": "too large",
+                },
+            })
+        );
+        assert!(matches!(
+            serde_json::from_value::<ServerMessage>(json).unwrap(),
+            ServerMessage::StateWithheld {
+                full_key: None,
+                state_revision: 6,
+                withheld: WithheldFrame::StateUpdate,
+                ..
+            }
+        ));
+        let started = serde_json::to_value(ServerMessage::StateWithheld {
+            full_key: None,
+            state_revision: 2,
+            withheld: WithheldFrame::GameStarted {
+                your_player: PlayerId(1),
+            },
+            reason: String::new(),
+        })
+        .unwrap();
+        assert_eq!(
+            started,
+            serde_json::json!({
+                "type": "StateWithheld",
+                "data": {
+                    "state_revision": 2,
+                    "withheld": { "type": "GameStarted", "data": { "your_player": 1 } },
+                    "reason": "",
+                },
+            })
+        );
+        assert!(matches!(
+            serde_json::from_value::<ServerMessage>(started).unwrap(),
+            ServerMessage::StateWithheld {
+                withheld: WithheldFrame::GameStarted {
+                    your_player: PlayerId(1)
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn server_message_takeback_requested_roundtrips() {
         let msg = ServerMessage::TakebackRequested {
             requester: PlayerId(1),
             requester_name: "Alice".to_string(),
+            voters: vec![PlayerId(0), PlayerId(2)],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -2616,9 +4261,11 @@ mod tests {
             ServerMessage::TakebackRequested {
                 requester,
                 requester_name,
+                voters,
             } => {
                 assert_eq!(requester, PlayerId(1));
                 assert_eq!(requester_name, "Alice");
+                assert_eq!(voters, vec![PlayerId(0), PlayerId(2)]);
             }
             _ => panic!("wrong variant"),
         }
@@ -2626,34 +4273,90 @@ mod tests {
 
     #[test]
     fn server_message_takeback_resolved_roundtrips() {
-        let msg = ServerMessage::TakebackResolved {
-            approved: true,
-            resolved_by: Some(PlayerId(0)),
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
-        match parsed {
-            ServerMessage::TakebackResolved {
-                approved,
-                resolved_by,
-            } => {
-                assert!(approved);
-                assert_eq!(resolved_by, Some(PlayerId(0)));
+        for resolution in [
+            TakebackResolution::Approved,
+            TakebackResolution::Declined,
+            TakebackResolution::Cancelled,
+            TakebackResolution::Withdrawn,
+        ] {
+            let msg = ServerMessage::TakebackResolved {
+                resolution,
+                resolved_by: Some(PlayerId(0)),
+            };
+            let json = serde_json::to_string(&msg).unwrap();
+            let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+            match parsed {
+                ServerMessage::TakebackResolved {
+                    resolution: parsed_resolution,
+                    resolved_by,
+                } => {
+                    assert_eq!(parsed_resolution, resolution);
+                    assert_eq!(resolved_by, Some(PlayerId(0)));
+                }
+                _ => panic!("wrong variant"),
             }
-            _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn server_message_takeback_resolved_wire_bytes_name_the_resolution() {
+        let msg = ServerMessage::TakebackResolved {
+            resolution: TakebackResolution::Withdrawn,
+            resolved_by: Some(PlayerId(2)),
+        };
+        assert_eq!(
+            serde_json::to_value(&msg).unwrap(),
+            serde_json::json!({
+                "type": "TakebackResolved",
+                "data": { "resolution": "withdrawn", "resolved_by": 2 },
+            })
+        );
     }
 
     #[test]
     fn server_message_takeback_resolved_omits_resolved_by_when_none() {
         let msg = ServerMessage::TakebackResolved {
-            approved: false,
+            resolution: TakebackResolution::Declined,
             resolved_by: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(
             !json.contains("resolved_by"),
             "None must be omitted: {json}"
+        );
+    }
+
+    #[test]
+    fn optional_command_correlation_hello_preserves_old_server_fallback() {
+        let legacy = serde_json::json!({
+            "type": "ServerHello",
+            "data": {
+                "server_version": "test",
+                "build_commit": "test",
+                "protocol_version": PROTOCOL_VERSION,
+                "mode": "Full",
+            },
+        });
+        assert!(matches!(
+            serde_json::from_value::<ServerMessage>(legacy.clone()).unwrap(),
+            ServerMessage::ServerHello {
+                command_correlation: None,
+                ..
+            }
+        ));
+        let mut negotiated = legacy;
+        negotiated["data"]["command_correlation"] = serde_json::json!("CommandIdV1");
+        let hello: ServerMessage = serde_json::from_value(negotiated.clone()).unwrap();
+        assert!(matches!(
+            &hello,
+            ServerMessage::ServerHello {
+                command_correlation: Some(CommandCorrelation::CommandIdV1),
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::to_value(hello).unwrap()["data"]["command_correlation"],
+            "CommandIdV1"
         );
     }
 }

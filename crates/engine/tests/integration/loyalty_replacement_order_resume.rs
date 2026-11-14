@@ -80,6 +80,7 @@ fn activate_to_ordering_prompt() -> (GameRunner, ObjectId, usize) {
         .act(GameAction::ActivateAbility {
             source_id: pw,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate the +3 loyalty ability");
 
@@ -90,6 +91,7 @@ fn activate_to_ordering_prompt() -> (GameRunner, ObjectId, usize) {
             player,
             candidate_count,
             candidates,
+            ..
         } => {
             assert_eq!(*player, P0, "the affected permanent's controller chooses");
             assert_eq!(*candidate_count, 2, "doubler + halver compete");

@@ -1,5 +1,5 @@
 use crate::types::ability::{ResolvedAbility, TargetRef};
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     GameState, TargetSelectionConstraint, TargetSelectionSlot, WaitingFor,
 };
@@ -8,7 +8,7 @@ use crate::types::player::PlayerId;
 
 use super::ability_utils::{
     assign_selected_slots_in_chain, assign_targets_in_chain, choose_target_for_ability,
-    distribution_targets, flatten_targets_in_chain, validate_selected_targets_for_ability,
+    declared_targets_in_chain, distribution_targets, validate_selected_targets_for_ability,
     TargetSelectionAdvance,
 };
 use super::casting_targets::extract_distribution_total;
@@ -31,7 +31,7 @@ pub(super) fn finalize_trigger_target_selection(
     ability: Box<ResolvedAbility>,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
-    let assigned_targets = flatten_targets_in_chain(&ability);
+    let assigned_targets = declared_targets_in_chain(&ability);
     let crime_candidate =
         casting::targets_commit_crime(state, &assigned_targets, trigger.controller);
     casting::emit_targeting_events(
@@ -39,6 +39,9 @@ pub(super) fn finalize_trigger_target_selection(
         &assigned_targets,
         trigger.source_id,
         trigger.controller,
+        Some(crate::types::events::Targeter::Ability(
+            crate::types::ability::StackAbilityKind::Triggered,
+        )),
         events,
     );
 
@@ -66,12 +69,13 @@ pub(super) fn finalize_trigger_target_selection(
                     // keep `pending_trigger_entry` set until division completes.
                     if !triggers::mutate_pending_trigger_entry(state, &trigger.ability) {
                         // Unexpected dangling cursor: the entry is gone before the
-                        // division prompt could open. Recover per CR 608.2b / CR
-                        // 800.4a (a stack object that has left the stack does not
-                        // resolve) — record the diagnostic, abandon, hand back
-                        // priority. Matches the DistributeAmong-return convention
-                        // below; the next priority pass re-normalizes (CR 117.3b
-                        // would give the active player).
+                        // division prompt could open. Recover per CR 608.1
+                        // (resolution selects the spell or ability on top of the
+                        // stack, so an entry absent from it is never selected to
+                        // begin resolving) — record the diagnostic, abandon, hand
+                        // back priority. Matches the DistributeAmong-return
+                        // convention below; the next priority pass re-normalizes
+                        // (CR 117.3b would give the active player).
                         triggers::abandon_ceased_pending_trigger(state, &trigger.ability);
                         priority::clear_priority_passes(state);
                         return WaitingFor::Priority { player: controller };
@@ -83,6 +87,7 @@ pub(super) fn finalize_trigger_target_selection(
                         total,
                         targets: dist_targets,
                         unit,
+                        scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
                     };
                 }
             }
@@ -95,11 +100,12 @@ pub(super) fn finalize_trigger_target_selection(
     // `pending_trigger_entry` so the resolver may now fire this entry.
     if !triggers::finalize_pending_trigger_entry(state, &trigger.ability) {
         // Unexpected dangling cursor: the entry is no longer on the stack.
-        // Recover per CR 608.2b / CR 800.4a (a stack object that has left the
-        // stack does not resolve) — record the diagnostic, abandon the dead
-        // trigger, and hand control back rather than panic. Returns Priority for
-        // the controller (matching the DistributeAmong convention above); the
-        // next priority pass re-normalizes (CR 117.3b would give active player).
+        // Recover per CR 608.1 (resolution selects the spell or ability on top of
+        // the stack, so an entry absent from it is never selected to begin
+        // resolving) — record the diagnostic, abandon the dead trigger, and hand
+        // control back rather than panic. Returns Priority for the controller
+        // (matching the DistributeAmong convention above); the next priority pass
+        // re-normalizes (CR 117.3b would give active player).
         triggers::abandon_ceased_pending_trigger(state, &trigger.ability);
         priority::clear_priority_passes(state);
         return WaitingFor::Priority { player: controller };
@@ -418,11 +424,34 @@ pub(super) fn handle_multi_target_selection(
     }
 
     let mut ability = pending_ability;
-    ability.targets = selected.iter().map(|&id| TargetRef::Object(id)).collect();
+    ability.set_unpinned_targets(selected.iter().map(|&id| TargetRef::Object(id)).collect());
 
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
+    let events_before = events.len();
     let _ = effects::resolve_ability_chain(state, &ability, events, 0);
+    // CR 608.2c + CR 118.12: "if a player does" reads the instruction, not the
+    // acceptance. An accepted instruction that resolved without doing anything
+    // retracts the mark its accept parked on the printed tail. A replacement
+    // choice has not finished the instruction, so it is not judged yet.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && !effects::mandatory_parent_effect_performed(&ability.effect, &events[events_before..])
+    {
+        if let Some(acceptor) = ability.context.accepting_player {
+            state
+                .player_actions_this_way
+                .remove(&(acceptor, PlayerActionKind::AcceptedOptionalEffect));
+            if let Some(frame) = state
+                .active_ability_continuation_frame_mut()
+                .filter(|frame| frame.pending.chain.context.accepting_player == Some(acceptor))
+            {
+                frame
+                    .pending
+                    .chain
+                    .set_optional_effect_performed_recursive(false);
+            }
+        }
+    }
     resume_pending_continuation_if_priority(state, events)?;
 
     Ok(state.waiting_for.clone())

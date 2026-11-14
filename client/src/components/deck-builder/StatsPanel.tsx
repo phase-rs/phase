@@ -1,9 +1,10 @@
 import { useTranslation } from "react-i18next";
 
-import type { DeckCompatibilityResult } from "../../services/deckCompatibility";
+import type { DeckColorDistributionEntry, DeckCompatibilityResult } from "../../services/deckCompatibility";
 import { scryfallLegalityKey } from "../../services/scryfall";
 import { DECK_CONSTRUCTION_FORMATS } from "../../data/formatRegistry";
 import type { BracketEstimate, CommanderBracket } from "../../types/bracket";
+import { ColorDistribution } from "./ColorDistribution";
 import { ManaCurve } from "./ManaCurve";
 import { BracketAuditPanel } from "./BracketAuditPanel";
 import { BracketPicker } from "./BracketPicker";
@@ -38,7 +39,7 @@ function formatLegalityBadges(formatLegality: Record<string, string>) {
 interface StatsPanelProps {
   compatibility: DeckCompatibilityResult | null;
   cmcValues: number[];
-  colorValues: string[];
+  colorDistribution: readonly DeckColorDistributionEntry[];
   isCommander: boolean;
   estimate: BracketEstimate | null;
   manualBracket: CommanderBracket | null;
@@ -50,7 +51,7 @@ interface StatsPanelProps {
 export function StatsPanel({
   compatibility,
   cmcValues,
-  colorValues,
+  colorDistribution,
   isCommander,
   estimate,
   manualBracket,
@@ -66,7 +67,7 @@ export function StatsPanel({
   );
 
   return (
-    <div className="flex flex-col gap-3">
+    <div data-stats-panel-analysis className="flex flex-col gap-3">
       {isCommander && (
         <div className="space-y-2">
           {/* The bracket picker lives beside the audit it's compared against, so
@@ -88,7 +89,10 @@ export function StatsPanel({
       )}
 
       <div className="rounded-[18px] border border-white/8 bg-black/18 p-3">
-        <ManaCurve cmcValues={cmcValues} colorValues={colorValues} />
+        <div className="space-y-3">
+          <ManaCurve cmcValues={cmcValues} />
+          <ColorDistribution distribution={colorDistribution} />
+        </div>
       </div>
 
       {showLegality && (

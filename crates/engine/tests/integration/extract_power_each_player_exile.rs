@@ -17,7 +17,7 @@
 //! Fix (parser only): `parse_dig_library_owner` now maps "of each player's
 //! library" to `TargetFilter::ScopedPlayer` (mirroring the direct-exile path's
 //! `parse_library_player_suffix`), and the `ExileLookedAtCard` materialization
-//! seam calls the shared `lift_each_player_exile_top_scope`, rewriting the
+//! seam calls the shared `lift_distributive_exile_top_scope`, rewriting the
 //! materialized `ExileTop { ScopedPlayer }` to `ExileTop { Controller }` +
 //! `player_scope: All` — the exact production-proven shape of Etali / Nashi /
 //! Lidless Gaze, whose `player_scope: All` fan-out (`resolve_chain_body`

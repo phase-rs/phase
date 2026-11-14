@@ -27,6 +27,8 @@ const storeState = {
 const debugDispatch = vi.fn();
 
 vi.mock("../../../stores/gameStore", () => ({
+  canExportAuthoritativeState: (mode: GameMode | null) =>
+    mode === "ai" || mode === "local" || mode === "native-ai",
   useGameStore: Object.assign(
     vi.fn((selector: (s: typeof storeState) => unknown) => selector(storeState)),
     { getState: () => storeState, setState: vi.fn() },
@@ -61,7 +63,6 @@ vi.mock("../../../game/dispatch", () => ({ restoreGameState: vi.fn() }));
 vi.mock("../../../audio/AudioManager", () => ({
   audioManager: { play: vi.fn(), diagnostics: () => "" },
 }));
-vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 // `CardNameAutocomplete` fetches the full name list on mount via a build-time
 // define that vitest does not provide. Only the ungated branch mounts it, and
 // the suggestion list is not what these tests measure — the input's presence
@@ -169,6 +170,11 @@ describe("DebugPanel — desktop solo capability", () => {
     fireEvent.click(screen.getByRole("button", { name: /Create Card/ }));
   }
 
+  function selectBattlefieldZone() {
+    fireEvent.click(screen.getByRole("button", { name: "Hand" }));
+    fireEvent.click(screen.getByRole("option", { name: "Battlefield" }));
+  }
+
   it("explains why card spawning is unavailable on the sidecar transport", () => {
     uiState.debugPanelTab = "actions";
     storeState.adapter = new SidecarAdapter();
@@ -203,6 +209,9 @@ describe("DebugPanel — desktop solo capability", () => {
 
     expect(screen.getByPlaceholderText("Lightning Bolt")).toBeInTheDocument();
     expect(screen.getByLabelText("Make nonlegendary")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Create as token")).toBeNull();
+    selectBattlefieldZone();
+    expect(screen.getByLabelText("Create as token")).toBeInTheDocument();
     expect(
       screen.queryByText(/Spawning a card by name needs the in-browser engine/),
     ).toBeNull();
@@ -218,7 +227,9 @@ describe("DebugPanel — desktop solo capability", () => {
     fireEvent.change(screen.getByPlaceholderText("Lightning Bolt"), {
       target: { value: "Isamaru, Hound of Konda" },
     });
+    selectBattlefieldZone();
     fireEvent.click(screen.getByLabelText("Make nonlegendary"));
+    fireEvent.click(screen.getByLabelText("Create as token"));
     fireEvent.click(screen.getByRole("button", { name: "Create Card" }));
 
     expect(debugDispatch).toHaveBeenCalledWith({
@@ -228,10 +239,11 @@ describe("DebugPanel — desktop solo capability", () => {
         data: {
           card_name: "Isamaru, Hound of Konda",
           owner: 0,
-          zone: "Hand",
+          zone: "Battlefield",
           attach_to: undefined,
           run_etb: true,
           nonlegendary: true,
+          creation_kind: "Token",
           count: 1,
         },
       },

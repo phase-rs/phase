@@ -60,7 +60,11 @@ describe("OpponentHud", () => {
     // OR `isSpectator`, and the two live in different module-singleton stores that
     // persist across tests in this file. Both are reset here, not only in
     // `afterEach`, so one spectator row cannot make every later seated row inert.
-    useMultiplayerStore.setState({ activePlayerId: 0, isSpectator: false });
+    useMultiplayerStore.setState({
+      activePlayerId: 0,
+      isSpectator: false,
+      playerAvatars: new Map(),
+    });
     usePreferencesStore.setState({ followActiveOpponent: false, battlefieldPeekOnHover: false });
     useUiStore.setState({ focusedOpponent: 1 });
     useGameStore.setState({ gameState: createGameState(), gameMode: null, waitingFor: null });
@@ -84,10 +88,14 @@ describe("OpponentHud", () => {
     expect(screen.getByTitle("This player's turn is next.")).toHaveTextContent("Next Up");
   });
 
-  it("keeps multiplayer opponent tabs in stable seat order while marking next up", () => {
+  it("renders opponent tabs clockwise from a non-zero viewer, including eliminated seats", () => {
+    useMultiplayerStore.setState({ activePlayerId: 1 });
+    useUiStore.setState({ focusedOpponent: 2 });
     useGameStore.setState({
+      gameMode: "online",
       gameState: createGameState({
         seat_order: [0, 3, 1, 2],
+        eliminated_players: [0],
         derived: {
           turn_order: [
             { player: 2, slot_index: 1, turns_from_now: 1, turn_number: 2 },
@@ -101,13 +109,16 @@ describe("OpponentHud", () => {
     render(<OpponentHud />);
 
     const tabs = Array.from(document.querySelectorAll('button[data-player-hud]'));
-    expect(tabs.map((tab) => tab.getAttribute("data-player-hud"))).toEqual(["3", "1", "2"]);
+    expect(tabs.map((tab) => tab.getAttribute("data-player-hud"))).toEqual(["2", "0", "3"]);
+    expect(tabs[1]).toBeDisabled();
     expect(screen.getByTitle("This player's turn is next.")).toHaveTextContent("Next Up");
   });
 
   it("shows a tooltip and hover preview for opponent avatars with art", async () => {
     useMultiplayerStore.setState({
-      playerAvatars: new Map([[1, "https://example.test/opponent-avatar.jpg"]]),
+      playerAvatars: new Map([
+        [1, { kind: "external", url: "https://example.test/opponent-avatar.jpg" }],
+      ]),
     });
 
     render(<OpponentHud />);
@@ -120,6 +131,11 @@ describe("OpponentHud", () => {
     await waitFor(() => {
       expect(screen.getAllByAltText("Opp 2")).toHaveLength(2);
     });
+
+    const [primary] = screen.getAllByAltText("Opp 2");
+    fireEvent.error(primary);
+    expect(screen.queryByRole("img", { name: "Opp 2" })).not.toBeInTheDocument();
+    expect(screen.getByTitle("Opp 2")).toHaveTextContent("O");
   });
 
   it("auto-selects the active opponent when Follow is enabled", async () => {
@@ -331,6 +347,23 @@ describe("OpponentHud", () => {
     expect(screen.getByLabelText("Speed 2")).toBeInTheDocument();
     expect(screen.getByText("Speed: 2")).toBeInTheDocument();
     expect(screen.queryByText("Speed")).toBeNull();
+  });
+
+  it("renders the engine's unbounded life as ∞ in that opponent's tab only", () => {
+    // Only `life_magnitude` is seeded, so no `UnboundedBadge` can supply the title.
+    useGameStore.setState({
+      gameState: createGameState({ derived: { life_magnitude: { 2: "Unbounded" } } }),
+    });
+
+    render(<OpponentHud />);
+
+    const unboundedTab = document.querySelector<HTMLElement>('button[data-player-hud="2"]')!;
+    const readout = within(unboundedTab).getByText("∞");
+    expect(readout).toHaveAttribute("title", "Unbounded life (∞)");
+    expect(readout).toHaveAttribute("aria-label", "Unbounded life (∞)");
+    const finiteTab = document.querySelector<HTMLElement>('button[data-player-hud="3"]')!;
+    expect(within(finiteTab).getByText("40")).not.toHaveAttribute("title");
+    expect(within(finiteTab).queryByText("∞")).toBeNull();
   });
 
   it("hides zero poison counters", () => {

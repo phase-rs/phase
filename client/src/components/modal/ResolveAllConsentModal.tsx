@@ -1,7 +1,6 @@
 import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 
-import { dispatchResolveAll } from "../../game/dispatch.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { DialogShell } from "./DialogShell.tsx";
@@ -23,21 +22,12 @@ export function ResolveAllConsentModal({ playerId }: { playerId: number }) {
   const respond = useCallback(
     async (decision: "Grant" | "Decline") => {
       if (waitingFor?.type !== "ResolveAllConsent") return;
-      const grantedEpoch = waitingFor.data.epoch;
       await dispatch({
         type: "RespondResolveAllConsent",
-        data: { epoch: grantedEpoch, decision: { type: decision } },
+        data: { epoch: waitingFor.data.epoch, decision: { type: decision } },
       });
-      const waitingForAfterSubmission = useGameStore.getState().gameState?.waiting_for;
-      if (
-        decision === "Grant" &&
-        waitingForAfterSubmission?.type === "ResolveAllReady" &&
-        waitingForAfterSubmission.data.epoch === grantedEpoch
-      ) {
-        await dispatchResolveAll(playerId, []);
-      }
     },
-    [dispatch, playerId, waitingFor],
+    [dispatch, waitingFor],
   );
 
   if (!visible) return null;

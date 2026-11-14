@@ -142,7 +142,9 @@ impl SacrificeValuePolicy {
             ctx.decision.waiting_for,
             WaitingFor::PayCost {
                 kind: PayCostKind::Sacrifice,
-                resume: CostResume::Spell { .. } | CostResume::SpellCost { .. },
+                resume: CostResume::Spell { .. }
+                    | CostResume::SpellCost { .. }
+                    | CostResume::Resolution,
                 ..
             } | WaitingFor::WardSacrificeChoice { .. }
                 | WaitingFor::EffectZoneChoice {
@@ -430,6 +432,23 @@ mod tests {
         choices: &[ObjectId],
         cards: Vec<ObjectId>,
     ) -> (f64, PolicyVerdict) {
+        let (raw, verdict, _) = sacrifice_policy_score_and_verdict_for_resume(
+            state,
+            choices,
+            cards,
+            CostResume::Spell {
+                spell: dummy_pending(),
+            },
+        );
+        (raw, verdict)
+    }
+
+    fn sacrifice_policy_score_and_verdict_for_resume(
+        state: &GameState,
+        choices: &[ObjectId],
+        cards: Vec<ObjectId>,
+        resume: CostResume,
+    ) -> (f64, PolicyVerdict, f64) {
         let config = AiConfig::default();
         let selection_count = cards.len();
         let decision = AiDecisionContext {
@@ -439,9 +458,7 @@ mod tests {
                 choices: choices.to_vec(),
                 count: selection_count,
                 min_count: selection_count,
-                resume: CostResume::Spell {
-                    spell: dummy_pending(),
-                },
+                resume,
             },
             candidates: Vec::new(),
         };
@@ -461,7 +478,42 @@ mod tests {
             search_depth: crate::policies::context::SearchDepth::Root,
         };
         let raw = SacrificeValuePolicy.score(&policy_context);
-        (raw, SacrificeValuePolicy.verdict(&policy_context))
+        (
+            raw,
+            SacrificeValuePolicy.verdict(&policy_context),
+            super::super::registry::PolicyRegistry::shared().score(&policy_context),
+        )
+    }
+
+    #[test]
+    fn resolution_payment_production_policy_prefers_fodder_over_commander() {
+        let mut state = GameState::new_two_player(42);
+        let fodder = creature_body(&mut state, "Fodder", 1, 1);
+        let commander = owned_commander_body(&mut state, "Commander", 5, 5, 5, 1);
+
+        let (fodder_score, _, fodder_production_score) =
+            sacrifice_policy_score_and_verdict_for_resume(
+                &state,
+                &[fodder, commander],
+                vec![fodder],
+                CostResume::Resolution,
+            );
+        let (commander_score, _, commander_production_score) =
+            sacrifice_policy_score_and_verdict_for_resume(
+                &state,
+                &[fodder, commander],
+                vec![commander],
+                CostResume::Resolution,
+            );
+
+        assert!(
+            fodder_score > commander_score,
+            "resolution-time payment must value fodder above the commander: {fodder_score} <= {commander_score}"
+        );
+        assert!(
+            fodder_production_score > commander_production_score,
+            "the production registry must rank the fodder selection above the commander: {fodder_production_score} <= {commander_production_score}"
+        );
     }
 
     /// At temperature 1.0, two equally priced 4/4 bodies gave the commander a
@@ -675,10 +727,12 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: source,
+            decision_subject_id: None,
             description: Some("You may sacrifice a creature. If you do, draw a card.".to_string()),
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,

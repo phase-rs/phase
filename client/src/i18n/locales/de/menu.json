@@ -117,6 +117,8 @@
     "coverageThresholdHint": "Decks unterhalb dieser Engine-Unterstützungsschwelle ausschließen",
     "bracket": "Bracket",
     "bracketHint": "Die zufällige KI wählt aus diesen Brackets. Nicht markierte Decks werden beim Filtern ausgeschlossen.",
+    "bracketPoolEmpty": "Keine Decks entsprechen den gewählten Brackets. Die zufällige KI zieht aus allen legalen Decks.",
+    "cedhPoolEmpty": "Keine Bracket-5-Decks verfügbar. Zufällige KI-Gegner können keine Decks erhalten.",
     "opponentLabel": "Gegner {{number}}",
     "deck": "Deck",
     "difficulty": "Schwierigkeit",
@@ -131,7 +133,21 @@
       "feed": "Feed",
       "user": "Benutzer",
       "precon": "Precon"
-    }
+    },
+    "brain": "Gesteuert von",
+    "brainEngine": "Engine-KI",
+    "poolBracketConflict": "Keines der {{selected}} gewählten Decks ist unter den aktuellen Filtern legal, daher ziehen zufällige KI-Gegner aus allen {{total}} Decks."
+  },
+  "randomPool": {
+    "titleHuman": "Dein Zufallspool",
+    "titleAi": "KI-Zufallspool",
+    "hint": "Deaktiviere Ordner oder Decks, um sie aus Zufallsziehungen zu entfernen.",
+    "count": "{{selected}} von {{total}}",
+    "emptyWarning": "Alles ist ausgeschlossen, daher zieht Zufällig aus allen {{total}} Decks.",
+    "reset": "Zurücksetzen",
+    "precons": "Precons",
+    "playable": "{{playable}} spielbar",
+    "nonePlayable": "Keines der {{selected}} gewählten Decks ist unter den aktuellen Filtern legal, daher zieht Zufällig aus allen {{total}} Decks."
   },
   "feedManager": {
     "title": "Feeds verwalten",
@@ -143,6 +159,7 @@
     "lastRefreshed": "Zuletzt aktualisiert: {{date}}",
     "addCustomFeed": "Eigenen Feed hinzufügen",
     "add": "Hinzufügen",
+    "offlineUnavailable": "Feed-Aktualisierungen sind offline nicht verfügbar.",
     "done": "Fertig"
   },
   "importDeck": {
@@ -165,6 +182,7 @@
     "confirmOathbreakerImport": "Oathbreaker-Deck importieren",
     "backToImport": "Zurück zum Import",
     "errorInvalidUrl": "Gib eine gültige Moxfield- oder Archidekt-Deck-URL ein.",
+    "errorOffline": "URL-Importe sind offline nicht verfügbar. Nutze Text einfügen oder Aus Datei.",
     "errorNetworkFailure": "Der Deck-Import-Dienst ist nicht erreichbar. Prüfe deine Verbindung und versuche es erneut.",
     "errorGeneric": "Deck-Import fehlgeschlagen.",
     "errorNoOathbreaker": "Diese Liste enthält keinen zulässigen Oathbreaker.",
@@ -292,7 +310,8 @@
     "sectionStarred": "Favoriten",
     "sectionUnfiled": "Nicht zugeordnet",
     "collapseAll": "Alle einklappen",
-    "expandAll": "Alle ausklappen"
+    "expandAll": "Alle ausklappen",
+    "poolBracketConflict": "Keines der {{selected}} gewählten Decks ist unter den aktuellen Filtern legal, daher wird dein zufälliges Deck aus allen {{total}} Decks gezogen."
   },
   "subscriptions": {
     "emptyTitle": "Keine Feed-Abonnements",
@@ -316,6 +335,7 @@
     "online": "Online",
     "draft": "Draft",
     "decks": "Decks",
+    "tournament": "Turniere",
     "alpha": "Alpha",
     "profile": "Profil",
     "settings": "Einstellungen",
@@ -357,5 +377,9 @@
       "ai": "AI",
       "multiplayer": "Multiplayer"
     }
+  },
+  "pileSource": {
+    "label": "Stapel",
+    "default": "Standardstapel"
   }
 }

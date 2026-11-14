@@ -1,700 +1,292 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import {
-  fetchCardImageAsset,
-  fetchCardImageAssetByOracleId,
-  fetchTokenImageByRef,
-  fetchTokenImageUrl,
-  findPrintingById,
-  getCardPrintings,
-  isCardImageFlipLayoutSync,
-  isCardImageRotatedSync,
-  isLocaleArtReady,
-  loadLocaleArt,
-  pickOldestPrinting,
-  resolveFaceIndexSync,
-  resolveOracleIdSync,
-  resolvePrintingImageUrl,
-} from "../services/scryfall.ts";
-import type { ImageSize, PrintingEntry, TokenSearchFilters } from "../services/scryfall.ts";
-import type { CardImageAsset } from "../services/scryfall.ts";
-import type { TokenImageRef } from "../adapter/types.ts";
-import { usePreferencesStore, registerStrategyCacheClearFn } from "../stores/preferencesStore.ts";
-import type { ArtChainEntry } from "../stores/preferencesStore.ts";
+import type { CardPrinting, PrintedRef } from "../adapter/types.ts";
+import { matchSourcePrinting } from "../services/artSelection.ts";
+import { createOwnerArtCatalogReader, deriveImageUrl, imageUrlSize } from "../services/scryfall.ts";
+import type { ImageSize, OwnerArtCatalogReader, OwnerArtAuthority } from "../services/scryfall.ts";
+import { cardCandidateGroups } from "../services/visualPacks/candidateKeys.ts";
+import { VisualPackRepository } from "../services/visualPacks/repository.ts";
+import type { VisualCandidateGroup } from "../services/visualPacks/repository.ts";
+import type { CardImageSource, ImageRungs } from "../services/visualPacks/types.ts";
+import { getEffectiveOffline, useEffectiveOffline } from "../stores/connectivityStore.ts";
+import { usePreferencesStore } from "../stores/preferencesStore.ts";
+import { nextImageSourceIndex } from "./imageSourceLadder.ts";
+import { BoundedCache, useCardImage as useLegacyCardImage } from "./useLegacyCardImage.ts";
 
-export interface SourcePrinting {
+export { BoundedCache, useCardBackImage, useLocaleArt } from "./useLegacyCardImage.ts";
+export type { SourcePrinting, UseCardBackImageResult } from "./useLegacyCardImage.ts";
+
+type LegacyOptions = NonNullable<Parameters<typeof useLegacyCardImage>[1]>;
+type ImageResult = ReturnType<typeof useLegacyCardImage>;
+
+type UseCardImageOptions = LegacyOptions & {
+  ownerPrinting?: CardPrinting | null;
+  /** Object-owned Oracle and face; never changes the legacy lookup request. */
+  ownerPrintedRef?: PrintedRef | null;
+  showOwnerPrintings?: boolean;
+};
+
+interface OwnerInput {
+  key: string;
+  cardName: string;
+  oracleId?: string;
+  faceName?: string;
+  faceIndex: number;
   setCode: string;
   collectorNumber: string;
+  size: ImageSize;
+  language: string;
+  offline: boolean;
 }
 
-interface UseCardImageOptions {
-  size?: "small" | "normal" | "large" | "art_crop";
-  faceIndex?: number;
-  isToken?: boolean;
-  tokenFilters?: TokenSearchFilters;
-  tokenImageRef?: TokenImageRef | null;
-  /** Canonical lookup id from `printed_ref.oracle_id`. When provided, the
-   * Scryfall service resolves the image by oracle id (preferred) and
-   * `cardName`/`faceIndex` are used only as cache-key disambiguators and
-   * `aria-label`/diagnostic context. Battlefield call sites should set this. */
-  oracleId?: string;
-  /** Companion to `oracleId` — the engine-reported face name selects which
-   * Scryfall `card_faces` entry to render. */
-  faceName?: string;
-  /** When set, resolves the image from this specific Scryfall printing ID
-   * instead of using the default/strategy resolution. Used by the printing
-   * picker to preview a specific printing's art. Requires `oracleId` to
-   * look up the printings list. */
-  scryfallId?: string;
-  /** Source printing context from a draft pack or imported deck list. When no
-   * explicit art rule applies, this set+collector pair is matched against the
-   * printings list before falling back to default Scryfall art. If the art
-   * chain contains a `source_printing` entry, the chain controls priority. */
-  sourcePrinting?: SourcePrinting;
-}
-
-interface UseCardImageResult {
-  src: string | null;
-  isLoading: boolean;
+interface OwnerPresentation {
+  key: string;
+  sources: CardImageSource[];
+  index: number;
+  failed: Set<string>;
+  remoteDone: boolean;
+  settled: boolean;
   isRotated: boolean;
-  /** True for Kamigawa-style flip cards (`layout: "flip"`), whose alternate half
-   *  is the same image rotated 180°. The preview uses this to enable Ctrl-spin. */
   isFlip: boolean;
 }
 
-interface MemoryCacheEntry {
-  promise: Promise<CardImageAsset | null> | null;
-  refCount: number;
-  asset: CardImageAsset | null;
-}
+// These instances never alias the normal hook's caches or repository.
+const ownerPresentations = new BoundedCache<string, OwnerPresentation>(256);
+let ownerRepository: VisualPackRepository | undefined;
 
-const imageRequestCache = new Map<string, MemoryCacheEntry>();
-
-const strategyCacheMap = new Map<string, PrintingEntry>();
-const printingsCacheMap = new Map<string, PrintingEntry[]>();
-const strategyInflight = new Set<string>();
-const artCacheEvents = new EventTarget();
-/**
- * Oracle IDs we've already checked and found to have no printings in
- * `scryfall-printings.json`. Without this negative cache, every render of a
- * deck tile whose representative card is missing from the printings catalog
- * (tokens, name mismatches, newly-released cards not yet in the cached JSON)
- * spin-loops: cache miss → background fetch returns [] → dispatch update
- * event → tile re-renders → cache still missing → fetch again, forever. The
- * empty-result case must short-circuit subsequent calls just like a positive
- * cache hit does. Profile recording confirmed 30+ tiles updating per commit
- * across 670 commits — one missing oracleId per tile is enough to stall the
- * deck-select screen.
- */
-const printingsNegativeCache = new Set<string>();
-
-/**
- * Oracle IDs where `printings.length > 0` but `applyChain` returned `null` —
- * the card has printings, but none match the user's current art-chain
- * preferences (e.g., user prefers borderless but no borderless exists).
- * Without this set, render-time misses on `strategyCacheMap` re-trigger
- * `resolveStrategyInBackground` → cached fetch returns instantly → dispatch
- * `update` event → `setArtCacheTick(+1)` → re-render → re-fetch loop at
- * ~70 Hz. Distinct from `printingsNegativeCache` which covers
- * `printings.length === 0` (no printings at all). Cleared together when art
- * preferences change.
- */
-const strategyNoWinnerCache = new Set<string>();
-
-registerStrategyCacheClearFn(() => {
-  strategyCacheMap.clear();
-  strategyInflight.clear();
-  printingsNegativeCache.clear();
-  strategyNoWinnerCache.clear();
-});
-
-/**
- * Locales whose card-art map is currently being fetched. Same anti-spin-loop
- * discipline as `strategyInflight`: without it, every render before the map
- * lands would start another fetch.
- *
- * A failed fetch cannot loop either — `loadLocaleArt` swallows errors and
- * resolves an empty map, which still installs, so `isLocaleArtReady` flips true
- * and every card simply keeps its English art.
- */
-const localeArtInflight = new Set<string>();
-
-/**
- * Fetch the active locale's card-art map, then invalidate every mounted tile.
- *
- * The dispatch deliberately carries no `detail`: unlike a printings fetch (which
- * concerns one oracleId), a language change re-resolves the URL of every card on
- * screen, and the listener treats a detail-less event as a global invalidation.
- */
-function loadLocaleArtInBackground(lang: string): void {
-  if (isLocaleArtReady(lang) || localeArtInflight.has(lang)) return;
-  localeArtInflight.add(lang);
-  loadLocaleArt(lang)
-    .then(() => {
-      localeArtInflight.delete(lang);
-      artCacheEvents.dispatchEvent(new Event("update"));
-    })
-    .catch(() => {
-      localeArtInflight.delete(lang);
-    });
-}
-
-/**
- * Cache-key component for a resolved image URL. It encodes the *art vocabulary*
- * the URL was produced with, not merely the language: before the locale map
- * arrives every card legitimately resolves to English art, and caching that
- * under a bare `"de"` key would pin it there forever — the background load
- * dispatches an invalidation, but the request key would be unchanged, so the
- * resolution effect would never re-run. Distinguishing pending from ready makes
- * the map's arrival a genuine key change.
- */
-function localeArtCacheKey(lang: string): string {
-  return isLocaleArtReady(lang) ? lang : `${lang}:pending`;
-}
-
-/**
- * Load the active language's card-art map and re-render the caller when it
- * lands, returning the art-locale key its URLs were resolved with.
- *
- * For components that resolve art through `resolvePrintingImageUrl` directly
- * instead of through `useCardImage` — they otherwise render whatever vocabulary
- * happened to be installed at mount and never hear about the map arriving.
- *
- * `useCardImage` deliberately does NOT call this: it already owns an
- * `artCacheEvents` subscription filtered by oracleId, and an unfiltered second
- * one per tile would resurrect the unscoped re-render storm that filter exists
- * to prevent (see the subscription comment in the hook body). Callers of this
- * hook subscribe once per component, not once per rendered card.
- */
-export function useLocaleArt(): string {
-  const language = usePreferencesStore((s) => s.language);
-  const [, setLocaleArtTick] = useState(0);
-
-  useEffect(() => {
-    const handler = () => setLocaleArtTick((t) => t + 1);
-    artCacheEvents.addEventListener("update", handler);
-    return () => artCacheEvents.removeEventListener("update", handler);
-  }, []);
-
-  useEffect(() => {
-    loadLocaleArtInBackground(language);
-  }, [language]);
-
-  return localeArtCacheKey(language);
-}
-
-function applyChainEntry(
-  entry: ArtChainEntry,
-  printings: PrintingEntry[],
-  source?: SourcePrinting,
-): PrintingEntry | null {
-  switch (entry.type) {
-    case "set":
-      return printings.find((p) => p.set === entry.setCode) ?? null;
-    case "newest":
-      return printings[0];
-    case "oldest":
-      return pickOldestPrinting(printings);
-    case "prefer_borderless":
-      return printings.find((p) => p.border_color === "borderless") ?? null;
-    case "prefer_extended":
-      return printings.find((p) => p.frame_effects.includes("extendedart")) ?? null;
-    case "source_printing": {
-      if (!source) return null;
-      const setLower = source.setCode.toLowerCase();
-      return printings.find((p) => p.set === setLower && p.collector_number === source.collectorNumber) ?? null;
-    }
-  }
-}
-
-function applyChain(chain: ArtChainEntry[], printings: PrintingEntry[], source?: SourcePrinting): PrintingEntry | null {
-  if (printings.length === 0) return null;
-  for (const entry of chain) {
-    const match = applyChainEntry(entry, printings, source);
-    if (match) return match;
-  }
-  return null;
-}
-
-function resolveStrategyInBackground(oracleId: string, chain: ArtChainEntry[]): void {
-  if (strategyInflight.has(oracleId)) return;
-  if (printingsNegativeCache.has(oracleId)) return;
-  // Already determined the chain produces no winner for this oracleId; refetching
-  // would land back here and dispatch another update event, looping the consumer.
-  if (strategyNoWinnerCache.has(oracleId)) return;
-  strategyInflight.add(oracleId);
-
-  getCardPrintings(oracleId).then((printings) => {
-    if (printings.length > 0) {
-      printingsCacheMap.set(oracleId, printings);
-      const winner = applyChain(chain, printings);
-      if (winner) {
-        strategyCacheMap.set(oracleId, winner);
-      } else {
-        // Printings exist but the chain matched nothing — remember that so the
-        // next render's strategyCacheMap miss does not re-enter the fetch loop.
-        strategyNoWinnerCache.add(oracleId);
-      }
-    } else {
-      printingsNegativeCache.add(oracleId);
-    }
-    strategyInflight.delete(oracleId);
-    artCacheEvents.dispatchEvent(new CustomEvent("update", { detail: oracleId }));
-  }).catch(() => {
-    strategyInflight.delete(oracleId);
+function ownerExactGroups(id: string, faceIndex: number, language: string, size: ImageSize): VisualCandidateGroup[] {
+  const build = (rung: ImageSize) => cardCandidateGroups({
+    englishPrintingId: id,
+    language: language === "en" ? undefined : language,
+    faceIndex,
+    variant: size === "art_crop" ? "art_crop" : "full_card",
+    rung,
   });
+  const requested = build(size);
+  const small = size === "art_crop" ? [] : build("small");
+  const normal = size === "art_crop" ? [] : build("normal");
+  return requested.map((group, index) => ({
+    requested: group.keys,
+    ...(size === "art_crop" ? {} : { small: small[index]?.keys, normal: normal[index]?.keys }),
+  }));
 }
 
-function loadPrintingsInBackground(oracleId: string): void {
-  if (strategyInflight.has(oracleId)) return;
-  if (printingsNegativeCache.has(oracleId)) return;
-  strategyInflight.add(oracleId);
-
-  getCardPrintings(oracleId).then((printings) => {
-    if (printings.length > 0) {
-      printingsCacheMap.set(oracleId, printings);
-    } else {
-      printingsNegativeCache.add(oracleId);
-    }
-    strategyInflight.delete(oracleId);
-    artCacheEvents.dispatchEvent(new CustomEvent("update", { detail: oracleId }));
-  }).catch(() => {
-    strategyInflight.delete(oracleId);
-  });
+function admittedPrinting(authority: OwnerArtAuthority, input: OwnerInput) {
+  return authority.oracleId && authority.printings
+    ? matchSourcePrinting(authority.printings, input)
+    : null;
 }
 
-function resolveOverrideUrl(
-  oracleId: string,
-  scryfallId: string,
-  faceIndex: number,
-  size: ImageSize,
-): string | null {
-  const cached = printingsCacheMap.get(oracleId);
-  if (cached) {
-    const entry = findPrintingById(cached, scryfallId);
-    return entry ? resolvePrintingImageUrl(entry, faceIndex, size) : null;
-  }
-  if (printingsNegativeCache.has(oracleId)) return null;
-
-  getCardPrintings(oracleId).then((printings) => {
-    if (printings.length > 0) {
-      printingsCacheMap.set(oracleId, printings);
-      artCacheEvents.dispatchEvent(new CustomEvent("update", { detail: oracleId }));
-    } else {
-      printingsNegativeCache.add(oracleId);
-    }
-  }).catch(() => {});
-
-  return null;
-}
-
-function resolveSourcePrintingUrl(
-  oracleId: string,
-  source: SourcePrinting,
-  faceIndex: number,
-  size: ImageSize,
-): string | null {
-  const cached = printingsCacheMap.get(oracleId);
-  if (cached) {
-    const setLower = source.setCode.toLowerCase();
-    const entry = cached.find((p) => p.set === setLower && p.collector_number === source.collectorNumber);
-    return entry ? resolvePrintingImageUrl(entry, faceIndex, size) : null;
-  }
-
-  loadPrintingsInBackground(oracleId);
-  return null;
-}
-
-function imageRequestKey(
-  cardName: string,
-  size: string,
-  faceIndex: number,
-  isToken: boolean,
-  filterPower: number | null,
-  filterToughness: number | null,
-  filterColors: string,
-  filterSubtypes: string,
-  filterHasAbilities: boolean | null,
-  tokenImageRefKey: string,
-  oracleId: string,
-  faceName: string,
-  // `imageRequestCache` stores the FINAL resolved URL, which differs per
-  // language once localized art is applied — so the art locale belongs in the
-  // key. The printing-selection caches (`strategyCacheMap`, `printingsCacheMap`)
-  // stay language-neutral on purpose: which printing wins is a function of the
-  // user's art preferences, not of their language.
-  artLocaleKey: string,
-): string {
-  return [
-    oracleId || cardName,
-    oracleId ? faceName : String(faceIndex),
-    size,
-    isToken ? "token" : "card",
-    filterPower ?? "",
-    filterToughness ?? "",
-    filterColors,
-    filterSubtypes,
-    String(filterHasAbilities),
-    tokenImageRefKey,
-    artLocaleKey,
-  ].join("|");
-}
-
-function releaseCachedImageSrc(key: string): void {
-  const entry = imageRequestCache.get(key);
-  if (!entry) return;
-  entry.refCount = Math.max(0, entry.refCount - 1);
-  if (entry.refCount === 0 && !entry.promise) {
-    imageRequestCache.delete(key);
-  }
-}
-
-async function acquireCachedImageSrc(
-  key: string,
-  cardName: string,
-  size: "small" | "normal" | "large" | "art_crop",
-  faceIndex: number,
-  isToken: boolean,
-  filterPower: number | null,
-  filterToughness: number | null,
-  filterColors: string,
-  filterSubtypes: string,
-  filterHasAbilities: boolean | null,
-  tokenImageRef: TokenImageRef | null,
-  oracleId: string,
-  faceName: string,
-): Promise<CardImageAsset | null> {
-  const existing = imageRequestCache.get(key);
-  if (existing) {
-    existing.refCount += 1;
-    if (existing.asset !== null) return existing.asset;
-    if (existing.promise) return existing.promise;
-  }
-
-  const entry: MemoryCacheEntry = {
-    promise: null,
-    refCount: 1,
-    asset: null,
+function presentationResult(presentation: OwnerPresentation, advanceFailedSource: (src: string) => void): ImageResult {
+  const source = presentation.sources[presentation.index] ?? null;
+  return {
+    src: source?.src ?? null,
+    source,
+    rungs: source?.kind === "fallback" ? undefined : source?.rungs,
+    isLoading: source?.kind === "fallback" && !presentation.remoteDone,
+    isRotated: presentation.isRotated,
+    isFlip: presentation.isFlip,
+    advanceFailedSource,
   };
-  imageRequestCache.set(key, entry);
-
-  entry.promise = (async () => {
-    let asset: CardImageAsset | null;
-    if (isToken) {
-      let remoteSrc: string | null = null;
-      if (tokenImageRef) {
-        try {
-          remoteSrc = await fetchTokenImageByRef(tokenImageRef, size);
-        } catch {
-          remoteSrc = null;
-        }
-      }
-      remoteSrc ??= await fetchTokenImageUrl(cardName, size, {
-        power: filterPower,
-        toughness: filterToughness,
-        colors: filterColors ? filterColors.split(",") : undefined,
-        subtypes: filterSubtypes ? filterSubtypes.split(",") : undefined,
-        hasAbilities: filterHasAbilities ?? undefined,
-      });
-      asset = { src: remoteSrc, isRotated: false };
-    } else if (oracleId) {
-      asset = await fetchCardImageAssetByOracleId(oracleId, faceName, size);
-    } else {
-      asset = await fetchCardImageAsset(cardName, faceIndex, size);
-    }
-    entry.asset = asset;
-    entry.promise = null;
-    if (entry.refCount === 0) {
-      imageRequestCache.delete(key);
-    }
-    return asset;
-  })().catch(() => {
-    imageRequestCache.delete(key);
-    return null;
-  });
-
-  return entry.promise;
 }
 
-export function useCardImage(
-  cardName: string,
-  options?: UseCardImageOptions,
-): UseCardImageResult {
-  const size = options?.size ?? "normal";
-  const faceIndex = options?.faceIndex ?? 0;
-  const isToken = options?.isToken ?? false;
-  const tokenFilters = options?.tokenFilters;
-  const tokenImageRef = options?.tokenImageRef ?? null;
-  const tokenImageRefKey = tokenImageRef
-    ? [
-        tokenImageRef.scryfall_id,
-        tokenImageRef.scryfall_oracle_id ?? "",
-        tokenImageRef.face_name ?? "",
-      ].join(":")
-    : "";
-  // Stabilize the token ref's identity to tokenImageRefKey. fetchTokenImageByRef
-  // reads only scryfall_id / scryfall_oracle_id / face_name — all captured by the
-  // key (preset_id is intentionally excluded; it doesn't affect image lookup) —
-  // so a caller passing a fresh inline {scryfall_id,...} object on every render
-  // would otherwise re-fire the image-load effect (release + refetch the cached
-  // src) for an unchanged image. exhaustive-deps can't see that the key fully
-  // captures the object, so the disable is scoped to this one line rather than
-  // blinding the dependency check on the large effect below.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const stableTokenImageRef = useMemo(() => tokenImageRef, [tokenImageRefKey]);
-  // A token ref is only a pointer when it names a printing: with BOTH ids
-  // empty there is nothing to resolve, so such a ref must not hold the
-  // empty-name guards open — the request would fall through to a
-  // `fetchTokenImageUrl("")` junk search. Our face-down markers carry only an
-  // oracle id (empty `scryfall_id`), so either id keeps the guard open.
-  const resolvableTokenImageRef =
-    stableTokenImageRef &&
-    (stableTokenImageRef.scryfall_id || stableTokenImageRef.scryfall_oracle_id)
-      ? stableTokenImageRef
-      : null;
-  const oracleId = options?.oracleId ?? "";
-  const faceName = options?.faceName ?? "";
-  const scryfallId = options?.scryfallId ?? "";
-  const sourcePrinting = options?.sourcePrinting;
-  const filterPower = tokenFilters?.power ?? null;
-  const filterToughness = tokenFilters?.toughness ?? null;
-  const filterSubtypes = tokenFilters?.subtypes?.join(",") ?? "";
-  const filterColors = tokenFilters?.colors?.join(",") ?? "";
-  const filterHasAbilities = tokenFilters?.hasAbilities ?? null;
+/**
+ * Revalidate generation/admission immediately before each overlay-initiated repository API call. A repository call initiated while admitted may finish its internal initialization, subscription, resolution and revision retry after admission is lost; those operations are not cancellable through the existing API. The overlay must start no further calls and must discard stale results before presentation, caching or publication.
+ */
+function useOwnerCardImageOverlay(input: OwnerInput | null): ImageResult | null {
+  const readerRef = useRef<OwnerArtCatalogReader | null>(null);
+  const latest = useRef(input);
+  latest.current = input;
+  const [presentation, setPresentation] = useState<OwnerPresentation | null>(null);
+  const advanceRef = useRef<(key: string, src: string) => void>(() => {});
+  const inputKey = input?.key ?? "";
 
-  const artOverrides = usePreferencesStore((s) => s.artOverrides);
-  const artChain = usePreferencesStore((s) => s.artChain);
-  // Card art follows the UI language: the printing the user chose is kept, and
-  // only its image is swapped for the same printing in their language. Cards
-  // with no localized sibling keep their English art.
-  const language = usePreferencesStore((s) => s.language);
-  const artLocaleKey = localeArtCacheKey(language);
+  // Read current authority on every eligible render; no backend access before membership.
+  let currentKey = "";
+  let warm: OwnerPresentation | undefined;
+  if (input) {
+    readerRef.current ??= createOwnerArtCatalogReader(() => latest.current !== null && !getEffectiveOffline());
+    const authority = readerRef.current.read(input);
+    const printing = admittedPrinting(authority, input);
+    if (printing) {
+      const revision = ownerRepository?.currentRevision() ?? "0";
+      currentKey = JSON.stringify([input.key, authority.key, printing.id, revision]);
+      const cached = ownerPresentations.get(currentKey);
+      if (cached?.settled) warm = cached;
+    }
+  }
 
-  const [src, setSrc] = useState<string | null>(null);
-  const [isRotated, setIsRotated] = useState(false);
-  const [isFlip, setIsFlip] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
-  const [stateRequestKey, setStateRequestKey] = useState<string | null>(null);
-  const [, setArtCacheTick] = useState(0);
-
-  const resolvedOracleId = oracleId || resolveOracleIdSync(cardName) || "";
-
-  // Scope the cache subscription to this hook's oracleId so a background
-  // printings fetch for card A doesn't force re-renders on every other deck
-  // tile mounted with `useCardImage`. With ~100 deck tiles on the deck-select
-  // screen and ~200 lazy printings fetches, an unscoped bus produced ~20,000
-  // re-renders (heap snapshot Heap-20260526T075828 — the sawtooth that peaked
-  // the tab at 500 MB). The ref keeps the subscription stable (mounted once
-  // like the original) so we don't race a re-subscribe against the first
-  // dispatch; the per-oracleId filter happens inside the handler.
-  const oracleIdRef = useRef(resolvedOracleId);
-  oracleIdRef.current = resolvedOracleId;
   useEffect(() => {
-    const handler = (e: Event) => {
-      const target = oracleIdRef.current;
-      if (!target) return;
-      const detail = (e as CustomEvent<string>).detail;
-      // Be tolerant of any plain `Event` dispatch (no detail) — treat as a
-      // global invalidation match. All in-tree dispatchers send a CustomEvent
-      // with detail; this is defensive against future callers.
-      if (detail && detail !== target) return;
-      setArtCacheTick((t) => t + 1);
-    };
-    artCacheEvents.addEventListener("update", handler);
-    return () => artCacheEvents.removeEventListener("update", handler);
-  }, []);
+    if (!inputKey) return;
+    const reader = readerRef.current!;
+    let disposed = false;
+    let generation = 0;
+    let sessionKey = "";
+    let unlistenRepository: (() => void) | undefined;
+    let selected = false;
 
-  // Kick the locale-art load from an effect, not from render. It writes
-  // module-global state (`desiredArtLang`, which decides whose fetch may
-  // install itself), and under concurrent rendering React may start a render
-  // and discard it — so a render-phase call can let a language that was never
-  // committed win that race. Running after commit means only the committed
-  // language is ever requested.
-  //
-  // Deliberately placed after the subscription effect above: effects run in
-  // source order, so the `update` listener is registered before any dispatch
-  // this load can trigger, even when `loadLocaleArt` resolves from cache.
-  useEffect(() => {
-    loadLocaleArtInBackground(language);
-  }, [language]);
-
-  // The printings/art-strategy path indexes faces numerically, but for a
-  // DFC/MDFC the reliable signal is the engine's `faceName` (an MDFC cast as its
-  // back face reports `transformed: false`, so the caller's `faceIndex` is 0 —
-  // the front). Resolve the real index from `faceName` here so every override
-  // path renders the active face; fall back to the caller's `faceIndex`.
-  const resolvedFaceIndex =
-    resolveFaceIndexSync(resolvedOracleId, faceName) ?? faceIndex;
-
-  let overrideUrl: string | null = null;
-  if (!isToken && resolvedOracleId) {
-    if (scryfallId) {
-      overrideUrl = resolveOverrideUrl(resolvedOracleId, scryfallId, resolvedFaceIndex, size);
-    } else if (artOverrides[resolvedOracleId]) {
-      overrideUrl = resolveOverrideUrl(resolvedOracleId, artOverrides[resolvedOracleId].scryfallId, resolvedFaceIndex, size);
-    } else if (artChain.length > 0) {
-      if (sourcePrinting && artChain.some((e) => e.type === "source_printing")) {
-        const printings = printingsCacheMap.get(resolvedOracleId);
-        if (printings) {
-          const winner = applyChain(artChain, printings, sourcePrinting);
-          if (winner) {
-            overrideUrl = resolvePrintingImageUrl(winner, resolvedFaceIndex, size);
+    const reconcile = () => {
+      const activeInput = latest.current;
+      if (disposed || !activeInput || activeInput.key !== inputKey) return;
+      const authority = reader.read(activeInput);
+      const printing = admittedPrinting(authority, activeInput);
+      if (!printing) {
+        if (sessionKey) reader.release();
+        generation += 1;
+        sessionKey = "";
+        unlistenRepository?.();
+        unlistenRepository = undefined;
+        advanceRef.current = () => {};
+        if (selected) {
+          selected = false;
+          setPresentation(null);
+        }
+        return;
+      }
+      const admitted = () => {
+        const current = latest.current;
+        if (disposed || !current || current.key !== inputKey) return false;
+        const snapshot = reader.read(current);
+        return snapshot.key === authority.key && admittedPrinting(snapshot, current)?.id === printing.id;
+      };
+      if (!admitted()) return;
+      ownerRepository ??= new VisualPackRepository();
+      const repository = ownerRepository;
+      if (!admitted()) return;
+      const key = JSON.stringify([activeInput.key, authority.key, printing.id, repository.currentRevision()]);
+      if (sessionKey === key) return;
+      sessionKey = key;
+      const captured = ++generation;
+      unlistenRepository?.();
+      unlistenRepository = undefined;
+      const current = () => captured === generation && admitted();
+      if (!current()) return;
+      unlistenRepository = repository.subscribe(reconcile);
+      const cached = ownerPresentations.get(key);
+      let state: OwnerPresentation = cached ? {
+        ...cached, failed: new Set(cached.failed),
+      } : {
+        key, sources: [], index: 0, failed: new Set(), remoteDone: activeInput.offline, settled: false,
+        isRotated: authority.isRotated, isFlip: authority.isFlip,
+      };
+      let remoteStarted = false;
+      const publish = (settled: boolean) => {
+        if (!current()) return;
+        state = { ...state, settled };
+        ownerPresentations.set(key, { ...state, failed: new Set(state.failed) });
+        selected = true;
+        setPresentation(state);
+      };
+      const groups = ownerExactGroups(printing.id, authority.faceIndex, activeInput.language, activeInput.size);
+      const continueRemote = async () => {
+        if (remoteStarted || state.remoteDone || !current()) return;
+        remoteStarted = true;
+        const src = reader.imageUrl(printing, authority.faceIndex, activeInput.size, activeInput.language);
+        let rungs: ImageRungs | undefined;
+        if (src && activeInput.size !== "art_crop" && imageUrlSize(src) !== null) {
+          rungs = { small: deriveImageUrl(src, "small"), normal: deriveImageUrl(src, "normal") };
+        }
+        if (!current()) return;
+        const result = await repository.resolve({
+          groups, rung: activeInput.size, allowRemote: true, remote: src ? { src, rungs } : null,
+        });
+        if (!current()) return;
+        state.sources = result.sources.filter((source) => !source.src || !state.failed.has(source.src));
+        state.index = 0;
+        state.remoteDone = true;
+        publish(true);
+      };
+      advanceRef.current = (failedKey, failedSrc) => {
+        if (!current() || failedKey !== key) return;
+        const next = nextImageSourceIndex(state.sources, state.index, state.failed, failedSrc);
+        if (next === null) return;
+        state.index = next;
+        if (state.sources[next]?.kind === "fallback" && !state.remoteDone) {
+          publish(false);
+          void continueRemote();
+        } else {
+          publish(true);
+        }
+      };
+      if (cached) {
+        publish(cached.settled);
+        if (!cached.settled) void continueRemote();
+      } else {
+        if (selected) {
+          selected = false;
+          setPresentation(null);
+        }
+        void (async () => {
+          if (!current()) return;
+          const result = await repository.resolve({ groups, rung: activeInput.size, allowRemote: false });
+          if (!current()) return;
+          state.sources = result.sources;
+          state.index = 0;
+          if (state.sources[0]?.kind === "installed" || activeInput.offline) {
+            publish(true);
+          } else {
+            await continueRemote();
           }
-        } else {
-          resolveStrategyInBackground(resolvedOracleId, artChain);
-        }
-      } else {
-        const cached = strategyCacheMap.get(resolvedOracleId);
-        if (cached) {
-          overrideUrl = resolvePrintingImageUrl(cached, resolvedFaceIndex, size);
-        } else {
-          resolveStrategyInBackground(resolvedOracleId, artChain);
-        }
+        })();
       }
-    } else if (sourcePrinting) {
-      overrideUrl = resolveSourcePrintingUrl(resolvedOracleId, sourcePrinting, resolvedFaceIndex, size);
-    }
-  }
-
-  const requestKey = imageRequestKey(
-    cardName,
-    size,
-    faceIndex,
-    isToken,
-    filterPower,
-    filterToughness,
-    filterColors,
-    filterSubtypes,
-    filterHasAbilities,
-    tokenImageRefKey,
-    oracleId,
-    faceName,
-    artLocaleKey,
-  );
-
-  useEffect(() => {
-    if (overrideUrl) {
-      setStateRequestKey(requestKey);
-      setSrc(overrideUrl);
-      setIsRotated(isCardImageRotatedSync(resolvedOracleId, cardName));
-      setIsFlip(isCardImageFlipLayoutSync(resolvedOracleId, cardName));
-      setIsLoading(false);
-      return;
-    }
-
-    // A face-down marker request carries NO name and NO oracle id — only the
-    // `tokenImageRef` names the printing. Bailing on the empty name here was
-    // what kept the #7535 markers from ever loading at runtime (#7549): the
-    // ref-driven fetch below never ran.
-    if (!cardName && !oracleId && !resolvableTokenImageRef) {
-      setStateRequestKey(requestKey);
-      setSrc(null);
-      setIsRotated(false);
-      setIsFlip(false);
-      setIsLoading(false);
-      return;
-    }
-
-    let cancelled = false;
-
-    async function loadImage() {
-      const cachedEntry = imageRequestCache.get(requestKey);
-      setStateRequestKey(requestKey);
-      if (cachedEntry && !cachedEntry.promise) {
-        setSrc(cachedEntry.asset?.src ?? null);
-        setIsRotated(cachedEntry.asset?.isRotated ?? false);
-        setIsFlip(isCardImageFlipLayoutSync(resolvedOracleId, cardName));
-        setIsLoading(false);
-      } else {
-        setIsLoading(true);
-        setSrc(null);
-      }
-
-      try {
-        const imageAsset = await acquireCachedImageSrc(
-          requestKey,
-          cardName,
-          size,
-          faceIndex,
-          isToken,
-          filterPower,
-          filterToughness,
-          filterColors,
-          filterSubtypes,
-          filterHasAbilities,
-          stableTokenImageRef,
-          oracleId,
-          faceName,
-        );
-        if (!cancelled) {
-          setSrc(imageAsset?.src || null);
-          setIsRotated(imageAsset?.isRotated ?? false);
-          setIsFlip(isCardImageFlipLayoutSync(resolvedOracleId, cardName));
-          setIsLoading(false);
-        }
-      } catch {
-        if (!cancelled) {
-          setIsRotated(false);
-          setIsFlip(false);
-          setIsLoading(false);
-        }
-      }
-    }
-
-    loadImage();
-
-    return () => {
-      cancelled = true;
-      releaseCachedImageSrc(requestKey);
+      // Locale preparation is isolated too, and starts only after membership.
+      if (current()) void reader.prepareLocale(activeInput.language, activeInput.offline);
     };
-  }, [
-    cardName,
-    faceIndex,
-    faceName,
-    filterColors,
-    filterHasAbilities,
-    filterPower,
-    filterSubtypes,
-    filterToughness,
-    resolvableTokenImageRef,
-    stableTokenImageRef,
-    tokenImageRefKey,
-    isToken,
-    oracleId,
-    overrideUrl,
-    requestKey,
-    resolvedOracleId,
-    size,
-  ]);
 
-  // Effects reset the state after render, so a component reused for a new card
-  // would otherwise expose the previous card's src for one frame. Hand previews
-  // intentionally keep one mounted component while scrubbing; gate the result
-  // by request identity and synchronously reuse the hand card's cached asset
-  // when available.
-  if (stateRequestKey !== requestKey) {
-    if (overrideUrl) {
-      return {
-        src: overrideUrl,
-        isLoading: false,
-        isRotated: isCardImageRotatedSync(resolvedOracleId, cardName),
-        isFlip: isCardImageFlipLayoutSync(resolvedOracleId, cardName),
-      };
-    }
-    if (!cardName && !oracleId && !resolvableTokenImageRef) {
-      return { src: null, isLoading: false, isRotated: false, isFlip: false };
-    }
-    const cachedEntry = imageRequestCache.get(requestKey);
-    if (cachedEntry && !cachedEntry.promise) {
-      return {
-        src: cachedEntry.asset?.src ?? null,
-        isLoading: false,
-        isRotated: cachedEntry.asset?.isRotated ?? false,
-        isFlip: isCardImageFlipLayoutSync(resolvedOracleId, cardName),
-      };
-    }
-    return { src: null, isLoading: true, isRotated: false, isFlip: false };
+    const unlistenReadiness = reader.subscribe(reconcile);
+    reconcile();
+    const activeInput = latest.current;
+    if (activeInput) void reader.prepare(activeInput);
+    return () => {
+      disposed = true;
+      generation += 1;
+      unlistenReadiness();
+      reader.release();
+      unlistenRepository?.();
+      advanceRef.current = () => {};
+    };
+  }, [inputKey]);
+
+  const selected = presentation?.key === currentKey ? presentation : warm;
+  return selected ? presentationResult(selected, (src) => advanceRef.current(selected.key, src)) : null;
+}
+
+/**
+ * Normal rendering runs unchanged, including while owner art is pending or displayed.
+ * An admitted exact owner printing replaces it when ready. Missing admitted art is
+ * terminal null/nonloading, never a substitution from another printing. Toggle off
+ * immediately reveals the still-live normal result; pending/rejected owners do not
+ * blank it or add a loading flag. Owner admission requires identity delivered with
+ * its carrier (`ownerPrintedRef`, or the caller's `oracleId`); never a name lookup.
+ */
+export function useCardImage(cardName: string, options?: UseCardImageOptions): ImageResult {
+  let legacyOptions: Parameters<typeof useLegacyCardImage>[1] = options;
+  if (options && ("ownerPrinting" in options || "ownerPrintedRef" in options || "showOwnerPrintings" in options)) {
+    const { ownerPrinting: _owner, ownerPrintedRef: _ref, showOwnerPrintings: _show, ...ordinary } = options;
+    legacyOptions = ordinary;
   }
-
-  return { src, isLoading, isRotated, isFlip };
+  const normal = useLegacyCardImage(cardName, legacyOptions);
+  const owner = options?.ownerPrinting;
+  const eligible = typeof owner?.set_code === "string" && owner.set_code.length > 0
+    && typeof owner.collector_number === "string" && owner.collector_number.length > 0;
+  const enabled = usePreferencesStore((state) =>
+    eligible ? options?.showOwnerPrintings ?? state.showOwnerPrintings : false);
+  const offline = useEffectiveOffline();
+  const language = usePreferencesStore((state) => eligible && enabled ? state.language : "en");
+  const oracleId = options?.ownerPrintedRef?.oracle_id ?? options?.oracleId;
+  let input: OwnerInput | null = null;
+  if (eligible && enabled && oracleId) {
+    const setCode = owner.set_code.toLowerCase();
+    const collectorNumber = owner.collector_number;
+    const faceName = options?.ownerPrintedRef?.face_name ?? options?.faceName;
+    const faceIndex = options?.faceIndex ?? 0;
+    const size = options?.size ?? "normal";
+    input = {
+      key: JSON.stringify([cardName, oracleId, faceName, faceIndex, setCode, collectorNumber, size, language, offline]),
+      cardName, oracleId, faceName,
+      faceIndex, setCode, collectorNumber, size, language, offline,
+    };
+  }
+  const overlay = useOwnerCardImageOverlay(input);
+  return overlay ?? normal;
 }

@@ -1,3 +1,4 @@
+import { generateProtocolVersions, protocolGenerationPlugin } from "./protocol-generation";
 import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -8,7 +9,10 @@ import wasm from "vite-plugin-wasm";
 import { VitePWA } from "vite-plugin-pwa";
 import { compression } from "vite-plugin-compression2";
 import { resolveMultiplayerServerUrls } from "./src/config/multiplayerServerUrls";
+import { resolveTurnCredentialsUrl } from "./src/config/turnCredentials";
 import type { Plugin } from "vite";
+
+generateProtocolVersions();
 
 
 
@@ -118,7 +122,7 @@ function workspaceVersion(): string {
 // weight since no frontend code fetches it. Local dev falls back to the
 // public/ copy served at `/card-data.json` (also used by Tauri bundles and
 // phase-server via `data/card-data.json`).
-function dataFileDefines(mode: string): Record<string, string> {
+function dataFileDefines(mode: string, buildHash: string): Record<string, string> {
   const manifest = JSON.parse(
     readFileSync(path.resolve(__dirname, "../data-files.json"), "utf-8"),
   ) as string[];
@@ -133,7 +137,7 @@ function dataFileDefines(mode: string): Record<string, string> {
   const multiplayerServers = resolveMultiplayerServerUrls(envVar);
   const defines: Record<string, string> = {
     __APP_VERSION__: JSON.stringify(workspaceVersion()),
-    __BUILD_HASH__: JSON.stringify(gitHash()),
+    __BUILD_HASH__: JSON.stringify(buildHash),
     // Preview deployment stamps this with the fingerprint of its signed native
     // engine artifact. Local and release builds intentionally compile it as
     // `undefined`, which keeps preview native routing on the WASM fallback.
@@ -160,12 +164,23 @@ function dataFileDefines(mode: string): Record<string, string> {
     // lobby a preview client cannot handshake with.
     __OFFICIAL_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.official),
     __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.buildDefault),
+    // Self-hosted builds may mint short-lived TURN credentials from their own
+    // endpoint. Keep the official endpoint as the compatibility default.
+    __TURN_CREDENTIALS_URL__: JSON.stringify(
+      resolveTurnCredentialsUrl(process.env.TURN_CREDENTIALS_URL),
+    ),
     // True only for tagged production releases (release.yml sets RELEASE_BUILD).
     // The staging deploy (deploy.yml) is also a production Vite build, so we
     // cannot key off import.meta.env.PROD — that would surface the "try the
     // preview" link on the preview site itself. dev + staging → false (hidden);
     // tagged release → true (shown).
     __IS_RELEASE_BUILD__: JSON.stringify(process.env.RELEASE_BUILD === "true"),
+    // True only for the preview deploy (deploy.yml stamps ENGINE_FINGERPRINT;
+    // PREVIEW_BUILD is also accepted as an explicit override). Gates showing
+    // the commit hash next to the version in the UI.
+    __IS_PREVIEW_BUILD__: JSON.stringify(
+      process.env.PREVIEW_BUILD === "true" || Boolean(process.env.ENGINE_FINGERPRINT),
+    ),
     // Supabase cloud-sync config. Anon key is public by design (RLS is the
     // access control), so it ships in the bundle. Empty when unset → cloud sync
     // is disabled, leaving file backup as the only data-portability path. This
@@ -177,6 +192,14 @@ function dataFileDefines(mode: string): Record<string, string> {
     // compiles to a permanent no-op and nothing is ever sent anywhere.
     __TELEMETRY_URL__: JSON.stringify(process.env.TELEMETRY_URL || ""),
     __CARD_DATA_URL__: JSON.stringify(process.env.CARD_DATA_URL || "/card-data.json"),
+    // Operator status message. Deliberately NOT manifest-driven: the deploy
+    // workflow's upload loop reads data-files.json and (a) hard-errors when a
+    // listed file was not generated into client/public/, and (b) re-uploads
+    // whatever it finds on EVERY deploy — which would clobber a live status
+    // message the maintainer published out of band. It is published and cleared
+    // by scripts/publish-status.sh alone; no CI job ever touches the object.
+    // Same explicit, non-manifest shape as __CARD_DATA_URL__ above.
+    __STATUS_URL__: JSON.stringify(base ? `${base}/status.json` : "/status.json"),
     // Per-locale content-i18n sidecar URL template ({lng} replaced at runtime).
     // The sidecars are listed in data-files.json, so on deploy they are uploaded
     // to `${DATA_BASE_URL}/card-data.<lng>.json` and stripped from the Pages
@@ -196,7 +219,7 @@ function dataFileDefines(mode: string): Record<string, string> {
     // printing has no localized sibling. An explicit env override still wins.
     __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__: JSON.stringify(
       process.env.SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE ||
-        (base ? `${base}/scryfall-images.{lng}.json` : "/scryfall-images.{lng}.json"),
+        (base ? `${base}/scryfall-images.v2.{lng}.json` : "/scryfall-images.v2.{lng}.json"),
     ),
   };
   for (const filename of manifest) {
@@ -211,17 +234,49 @@ function dataFileDefines(mode: string): Record<string, string> {
   return defines;
 }
 
-export default defineConfig(({ mode }) => ({
+function offlineShellMarker(buildHash: string): Plugin {
+  const filename = `offline-shell-${buildHash}.json`;
+  return {
+    name: "offline-shell-marker",
+    apply: "build",
+    generateBundle() {
+      this.emitFile({
+        type: "asset",
+        fileName: filename,
+        source: JSON.stringify({ build: buildHash }),
+      });
+    },
+  };
+}
+
+/** `/build.json`: the deployed build's identity, fetched network-only by the Discord-link version gate. */
+function buildManifest(buildHash: string): Plugin {
+  return {
+    name: "build-manifest",
+    apply: "build",
+    generateBundle() {
+      this.emitFile({ type: "asset", fileName: "build.json", source: JSON.stringify({ build: buildHash }) });
+    },
+  };
+}
+
+export default defineConfig(({ mode }) => {
+  const buildHash = gitHash();
+  const offlineShellMarkerFilename = `offline-shell-${buildHash}.json`;
+
+  return {
   resolve: {
     alias: {
       "@wasm/engine": path.resolve(__dirname, "src/wasm/engine_wasm"),
       "@wasm/draft": path.resolve(__dirname, "src/wasm/draft_wasm"),
     },
   },
-  plugins: [
+  plugins: [protocolGenerationPlugin(),
     wasmEnvShim(),
     externalEngineWasm(),
     trimManaFont(),
+    offlineShellMarker(buildHash),
+    buildManifest(buildHash),
     react(),
     tailwindcss(),
     wasm(),
@@ -240,6 +295,8 @@ export default defineConfig(({ mode }) => ({
       manifest: false, // Use public/manifest.json
       includeAssets: ["**/*.mp3", "**/*.m4a"],
       workbox: {
+        additionalManifestEntries: [{ url: `/${offlineShellMarkerFilename}`, revision: buildHash }],
+        ignoreURLParametersMatching: [/^utm_/, /^fbclid$/, /^phase-precache-probe$/],
         maximumFileSizeToCacheInBytes: 15 * 1024 * 1024,
         // Workbox's default globPatterns (`**/*.{js,wasm,css,html}`) omit fonts,
         // so the hashed self-hosted webfonts (@fontsource-variable/* and
@@ -259,6 +316,14 @@ export default defineConfig(({ mode }) => ({
           "**/draft_wasm_bg-*.wasm",
           "**/changelog.json",
           "**/changelog-meta.json",
+          // config.js is per-deployment: a self-hoster serves their own copy
+          // over the placeholder shipped in the bundle. `.js` is in
+          // globPatterns, so precaching it would pin the BUILD-TIME copy for
+          // every client that already has a service worker, and the deployed
+          // one would never be read. Same mechanism as the wasm entries above,
+          // different motive: those are fetched by a runtime rule, this one
+          // must always come from the network.
+          "**/config.js",
         ],
         runtimeCaching: [
           {
@@ -338,7 +403,7 @@ export default defineConfig(({ mode }) => ({
             },
           },
           {
-            // Per-locale card-ART maps (`scryfall-images.<lng>.json`), the image
+            // Per-locale card-ART maps (`scryfall-images.v2.<lng>.json`), the image
             // counterpart to the content sidecars above. The data-manifest rule
             // below is an exact-name alternation that does not list these, and
             // the precache glob covers only js/css/html — so without this rule a
@@ -347,7 +412,8 @@ export default defineConfig(({ mode }) => ({
             // as card-locale-sidecars: regenerated each deploy, so
             // StaleWhileRevalidate.
             //
-            // Two anchored branches, mirroring the engine-WASM rule above.
+            // The anchored R2 branch covers both production and staging,
+            // mirroring the engine-WASM rule above.
             // Workbox's RegExpRoute refuses a cross-origin match that does not
             // begin at index 0 of the href, and in production these are served
             // from R2 at DATA_BASE_URL — so a bare `…\.json$` suffix pattern
@@ -355,7 +421,7 @@ export default defineConfig(({ mode }) => ({
             // second branch keeps the same-origin path working in dev/Tauri,
             // where the files are served from the site root.
             urlPattern:
-              /(?:^https:\/\/data\.phase-rs\.dev\/scryfall-images\.[a-z]{2}\.json$|\/scryfall-images\.[a-z]{2}\.json$)/,
+              /(?:^https:\/\/data\.phase-rs\.dev\/(?:staging\/)?scryfall-images\.v2\.[a-z]{2}\.json$|\/scryfall-images\.v2\.[a-z]{2}\.json$)/,
             handler: "StaleWhileRevalidate",
             options: {
               cacheName: "card-art-locale-maps",
@@ -390,9 +456,12 @@ export default defineConfig(({ mode }) => ({
           {
             // Same-origin deck feeds fetched by the home dashboard
             // (see src/data/feedRegistry.ts). Mutable — regenerated
-            // periodically — so StaleWhileRevalidate.
+            // periodically — so prefer the network and retain the cached copy
+            // only as an offline fallback. StaleWhileRevalidate returned an
+            // old feed to startup while refreshing it in the background,
+            // allowing default catalogs to differ between active clients.
             urlPattern: /\/feeds\/[^/]+\.json$/,
-            handler: "StaleWhileRevalidate",
+            handler: "NetworkFirst",
             options: {
               cacheName: "deck-feeds",
               expiration: { maxEntries: 16 },
@@ -412,6 +481,17 @@ export default defineConfig(({ mode }) => ({
           // colliding cache variants. See the #4822 (introduced) / #4855
           // (credentials patch) incident before re-adding.
           {
+            // Installed images are committed directly to this Cache Storage
+            // bucket by the browser backend. The service worker only reads it;
+            // installation owns every write and never revalidates an image.
+            urlPattern: ({ sameOrigin, url }) =>
+              sameOrigin && /^\/__visual-packs\/sha256\/[0-9a-f]{64}\.(jpg|png|webp|svg)$/.test(url.pathname),
+            handler: "CacheOnly",
+            options: {
+              cacheName: "phase-visual-pack-scryfall-images-v1",
+            },
+          },
+          {
             // Same-origin static imagery from public/ (battlefield art, nav
             // icons, logos). Not in the precache manifest — the default glob
             // only covers js/css/html — and unhashed, so StaleWhileRevalidate
@@ -430,7 +510,7 @@ export default defineConfig(({ mode }) => ({
     }),
     compression({ algorithms: ["brotliCompress"] }),
   ],
-  define: dataFileDefines(mode),
+  define: dataFileDefines(mode, buildHash),
   worker: {
     plugins: () => [wasmEnvShim(), externalEngineWasm()],
   },
@@ -441,6 +521,16 @@ export default defineConfig(({ mode }) => ({
   // hit Caddy rather than the bare :5173 dev server. Both are gated on a
   // hostname presence check so plain `pnpm dev` on localhost still works.
   server: {
+    // Every consumer of this dev server pins :5173 as a literal it cannot
+    // re-resolve — tauri.conf.json's `devUrl`, the Caddyfile's reverse_proxy
+    // upstreams, the Tiltfile's link. `strictPort` is the enforcement: vite
+    // defaults it to false and on EADDRINUSE drifts to ++port, announced only
+    // by an info line that scrolls past inside `tauri dev`, leaving the shell
+    // on a dead URL painting a blank white document. `port` declares the pin;
+    // `strictPort` is what holds it. `vite preview` inherits strictPort from
+    // here (its own port stays 4173), so `pnpm preview` refuses.
+    port: 5173,
+    strictPort: true,
     allowedHosts: ["local.phase-rs.dev", ".local.phase-rs.dev"],
     hmr: process.env.CADDY_PROXY === "1"
       ? { protocol: "wss", host: "local.phase-rs.dev", clientPort: 443 }
@@ -459,4 +549,5 @@ export default defineConfig(({ mode }) => ({
   build: {
     target: "esnext",
   },
-}));
+  };
+});

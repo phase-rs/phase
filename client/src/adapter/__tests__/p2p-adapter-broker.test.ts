@@ -15,6 +15,7 @@ import type { DataConnection } from "peerjs";
 import { P2PHostAdapter } from "../p2p-adapter";
 import type { BrokerClient } from "../../services/brokerClient";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
+import { WIRE_PROTOCOL_VERSION } from "../../network/protocol";
 
 // See p2p-adapter-multiplayer.test.ts — bypass CompressionStream because it
 // doesn't drain under fake timers in happy-dom. `protocol.test.ts` covers
@@ -39,37 +40,44 @@ vi.mock("../../network/protocol", async (orig) => {
 });
 
 
-const mocks = vi.hoisted(() => ({
-  initializeMultiplayerHostGame: vi.fn(async () => ({ events: [] })),
-  getLegalActions: vi.fn(async () => ({
-    actions: [],
-    autoPassRecommended: false,
-  })),
-  getLegalActionsForViewer: vi.fn(async (_pid: number) => ({
-    actions: [],
-    autoPassRecommended: false,
-  })),
-  getFilteredState: vi.fn(async (pid: number) => ({ filteredFor: pid })),
-  getViewerSnapshot: vi.fn(async (pid: number) => ({
+const mocks = vi.hoisted(() => {
+  const getViewerSnapshot = vi.fn(async (pid: number) => ({
     state: { filteredFor: pid },
     actions: [],
     autoPassRecommended: false,
-  })),
-  projectSeatView: vi.fn(async (stateJson: string) => {
-    const state = JSON.parse(stateJson) as {
-      seats: Array<{ type: string }>;
-      format: unknown;
-      gameStarted: boolean;
-    };
-    return {
-      seats: state.seats,
-      format: state.format,
-      isFull: state.seats.every((seat) => seat.type !== "WaitingHuman"),
-      gameStarted: state.gameStarted,
-    };
-  }),
-  setMultiplayerMode: vi.fn(async (_enabled: boolean) => undefined),
-}));
+  }));
+  return {
+    initializeMultiplayerHostGame: vi.fn(async () => ({ events: [] })),
+    getLegalActions: vi.fn(async () => ({
+      actions: [],
+      autoPassRecommended: false,
+    })),
+    getLegalActionsForViewer: vi.fn(async (_pid: number) => ({
+      actions: [],
+      autoPassRecommended: false,
+    })),
+    getFilteredState: vi.fn(async (pid: number) => ({ filteredFor: pid })),
+    getViewerSnapshot,
+    getViewerTransitionSnapshot: vi.fn(async (pid: number, events: unknown[]) => ({
+      ...(await getViewerSnapshot(pid)),
+      events,
+    })),
+    projectSeatView: vi.fn(async (stateJson: string) => {
+      const state = JSON.parse(stateJson) as {
+        seats: Array<{ type: string }>;
+        format: unknown;
+        gameStarted: boolean;
+      };
+      return {
+        seats: state.seats,
+        format: state.format,
+        isFull: state.seats.every((seat) => seat.type !== "WaitingHuman"),
+        gameStarted: state.gameStarted,
+      };
+    }),
+    setMultiplayerMode: vi.fn(async (_enabled: boolean) => undefined),
+  };
+});
 
 // Mirrors `p2p-adapter-multiplayer.test.ts`: the host acquires its engine via
 // `getHostAdapter()`, and teardown goes through `releaseHostSession()`.
@@ -78,11 +86,15 @@ vi.mock("../wasm-adapter", () => {
     initialize: vi.fn(async () => undefined),
     initializeMultiplayerHostGame: mocks.initializeMultiplayerHostGame,
     submitAction: vi.fn(async () => ({ events: [] })),
+    // The host's guest admission is fail-closed on the engine's sidecar bound, so
+    // an engine mock without this method would kick every guest in this suite.
+    checkDeckPrintingsBounds: vi.fn(async () => undefined),
     getState: vi.fn(async () => ({})),
     getLegalActions: mocks.getLegalActions,
     getLegalActionsForViewer: mocks.getLegalActionsForViewer,
     getFilteredState: mocks.getFilteredState,
     getViewerSnapshot: mocks.getViewerSnapshot,
+    getViewerTransitionSnapshot: mocks.getViewerTransitionSnapshot,
     projectSeatView: mocks.projectSeatView,
     setMultiplayerMode: mocks.setMultiplayerMode,
     releaseHostSession: vi.fn(async (_claimed: boolean) => undefined),
@@ -91,6 +103,7 @@ vi.mock("../wasm-adapter", () => {
   return {
     WasmAdapter: vi.fn().mockImplementation(createEngine),
     getHostAdapter: vi.fn(createEngine),
+    createHostSessionOwner: vi.fn(() => Symbol("test-host-session-owner")),
   };
 });
 
@@ -235,6 +248,7 @@ describe("P2PHostAdapter — broker integration", () => {
     conn.fireOpen();
     await conn.simulateData({
       type: "guest_deck",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
       deckData: {
         player: { main_deck: ["Forest"], sideboard: [] },
       },
@@ -259,6 +273,7 @@ describe("P2PHostAdapter — broker integration", () => {
     conn.fireOpen();
     await conn.simulateData({
       type: "guest_deck",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
       deckData: {
         player: { main_deck: ["Forest"], sideboard: [] },
       },
@@ -283,6 +298,7 @@ describe("P2PHostAdapter — broker integration", () => {
     conn.fireOpen();
     await conn.simulateData({
       type: "guest_deck",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
       deckData: {
         player: { main_deck: ["Forest"], sideboard: [] },
       },
@@ -305,6 +321,7 @@ describe("P2PHostAdapter — broker integration", () => {
     conn.fireOpen();
     await conn.simulateData({
       type: "guest_deck",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
       deckData: {
         player: { main_deck: ["Forest"], sideboard: [] },
       },

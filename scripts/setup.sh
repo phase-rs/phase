@@ -7,8 +7,9 @@ set -euo pipefail
 #
 #   Mode axis — what gets fetched/built:
 #     * Full mode (default): everything an interactive human dev needs to run
-#       the app in a browser, including the three Scryfall image/printing
-#       sidecars consumed at runtime by the React frontend for card art.
+#       the app in a browser, including the five Scryfall sidecars —
+#       image/printing data and the set-icon catalog — consumed at runtime by
+#       the React frontend.
 #     * Agent mode (--agent, env PHASE_SETUP_AGENT=1): skips the Scryfall
 #       sidecars. They are runtime-only image data — no Rust or frontend test
 #       depends on them (the one vitest test that names them mocks `fetch`).
@@ -91,6 +92,25 @@ if [ "${#missing[@]}" -ne 0 ]; then
   exit 1
 fi
 
+# --- Preflight: pnpm major must match client/package.json's packageManager ---
+# pnpm >= 10 stopped reading the "pnpm" field in package.json. Running it in
+# client/ silently drops that file's `pnpm.overrides` (the supply-chain pins for
+# serialize-javascript, ws, brace-expansion, postcss, …) from pnpm-lock.yaml,
+# writes a stray client/pnpm-workspace.yaml, and then fails `pnpm install` with
+# ERR_PNPM_IGNORED_BUILDS because `onlyBuiltDependencies` is ignored too. That
+# leaves a dirty tree and a lockfile that would ship without its security
+# overrides, so treat a major mismatch as fatal.
+#
+# The check resolves pnpm from client/, not from here: `packageManager` is
+# directory-scoped, so corepack and pnpm >= 10 pick it up only when the working
+# directory is under client/. The root can legitimately resolve a different,
+# newer pnpm while client/ resolves the pin — measuring the root would reject
+# that valid setup before installing anything. See scripts/lib/pnpm-preflight.sh.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/pnpm-preflight.sh
+source "$SCRIPT_DIR/lib/pnpm-preflight.sh"
+pnpm_preflight_check client || exit 1
+
 # --- Preflight: soft tool (tilt-dev/tilt, NOT other CLIs named "tilt") ---
 # Multiple unrelated binaries ship as `tilt` (e.g. Go template tools). The
 # tilt-dev/tilt binary is the only one whose help text references the
@@ -125,22 +145,31 @@ else
   # the same category of artifact: runtime-only frontend image data, needed
   # only when a non-English UI language is selected.
   ./scripts/gen-scryfall-locale-images.sh  & PID_LOCALE_IMAGES=$!
+  # Set-icon catalog (icon_svg_uri + release dates) for the draft/Sealed set
+  # picker — metadata that drives set-icon images. Fetched from the small
+  # /sets endpoint, not the bulk download.
+  ./scripts/gen-scryfall-sets.sh           & PID_SETS=$!
 
   wait $PID_IMAGES        || FAIL=1
   wait $PID_TOKEN_IMAGES  || FAIL=1
   wait $PID_PRINTINGS     || FAIL=1
   wait $PID_LOCALE_IMAGES || FAIL=1
+  wait $PID_SETS          || FAIL=1
   if [ $FAIL -ne 0 ]; then
     echo "ERROR: Scryfall sidecar fetch failed." >&2
     exit 1
   fi
 fi
 
-# Comprehensive Rules — gitignored, non-fatal on failure.
-if [ ! -f docs/MagicCompRules.txt ]; then
+# Comprehensive Rules — gitignored, non-fatal on failure. The fetch is a no-op
+# when the local copy is already the edition pinned in docs/MagicCompRules.edition.
+if ! ./scripts/check-cr-edition.sh >/dev/null 2>&1; then
   echo ""
   echo "Fetching MTG Comprehensive Rules (local dev reference only)..."
-  ./scripts/fetch-comp-rules.sh || echo "  (skipped — run ./scripts/fetch-comp-rules.sh later)"
+  ./scripts/fetch-comp-rules.sh --force || {
+    echo "  (skipped — run ./scripts/fetch-comp-rules.sh later)"
+    ./scripts/check-cr-edition.sh || :
+  }
 fi
 
 # --- Frontend deps (parallel-safe with cargo work below) ---

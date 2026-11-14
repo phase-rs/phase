@@ -79,19 +79,19 @@
 // resource, locally, on engine-source edits. It is NOT checked in GitHub CI, and CI
 // enrollment is policy-blocked (`.agents/pr-review-policy.toml` `[hard_stops]` lists
 // `.github/workflows/**`). A green block in a merged commit is not a CI-verified block.
-// PROBE-PIN:BEGIN manifest=probe-pin/engine-census.toml digest=sha256:38836c2e1f2fddb8
+// PROBE-PIN:BEGIN manifest=probe-pin/engine-census.toml digest=sha256:0553f51f3b146368
 // instrument rustc = rustc 1.97.0-nightly (0febdbab2 2026-04-18)
 // | probe | mutation | expect | verdict | firing assertion (anchor) | provenance |
 // |---|---|---|---|---|---|
 // | P0_control | (none) | pass | pass | (control; no mounts) | — |
-// | P1_production_site_removed | scenario.rs ×1 | fail | fail | left: (21, 21) / right: (22, 21) / THE TEST HALF HAS BEEN ADJUDICATED FIVE TIMES | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P2_test_site_removed | projection.rs ×1 | fail | fail | left: (22, 20) / right: (22, 21) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P3_walk_reaches_phase_ai_and_skips_comments | lib.rs ×1 | fail | fail | left: (23, 21) / right: (22, 21) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P4_counting_is_per_line | lib.rs ×1 | fail | fail | left: (24, 21) / right: (22, 21) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P1_production_site_removed | scenario.rs ×1 | fail | fail | left: (26, 29) / right: (27, 29) / THE TEST HALF HAS BEEN ADJUDICATED NINE TIMES | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P2_test_site_removed | projection.rs ×1 | fail | fail | left: (27, 28) / right: (27, 29) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P3_walk_reaches_phase_ai_and_skips_comments | lib.rs ×1 | fail | fail | left: (28, 29) / right: (27, 29) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P4_counting_is_per_line | lib.rs ×1 | fail | fail | left: (29, 29) / right: (27, 29) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P5_relocation_preserves_the_count | scenario.rs ×1, interaction.rs ×1 | fail | fail | the COUNT can be preserved by a move that relocates a writer / ("engine/src/game/interaction.rs", 6) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P6_second_validate_pins_consumer | scenario.rs ×1 | fail | fail | expected `validate_pins(` to appear in production exactly twice | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P7_coverage_half_unpaired | decision_template.rs ×1 | fail | fail | validating pin VALUES without also running | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P8_authority_call_site_removed | engine.rs ×1 | fail | fail | expected 1 definition + 3 call sites / ("engine/src/game/engine.rs", 1) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P8_authority_call_site_removed | engine.rs ×1 | fail | fail | expected 1 definition + 4 call sites / ("engine/src/game/engine.rs", 2) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // probe-pin validates only the lines between BEGIN and END. Prose outside is never checked.
 // PROBE-PIN:END
 
@@ -270,9 +270,9 @@ fn census(needle: &str) -> Vec<Hit> {
 /// R8 CONJUNCT 1 — the offer-writer surface, pinned BIDIRECTIONALLY (an EQUALITY
 /// on each half, so a REMOVED site fails too) and by per-file multiset.
 ///
-/// ⚠ THE `#[cfg(test)]` HALF HAS MOVED REPEATEDLY — 12 ⇒ 13 ⇒ 14 ⇒ 16 ⇒ 17 ⇒ the
-/// value the assert below pins — AND EACH ADJUDICATION IS RECORDED RATHER THAN
-/// THE ASSERT RELAXED.
+/// ⚠ THE `#[cfg(test)]` HALF HAS MOVED REPEATEDLY — 12 ⇒ 13 ⇒ 14 ⇒ 16 ⇒ 17 ⇒ 21 ⇒ 22
+/// ⇒ the value the assert below pins — AND EACH ADJUDICATION IS RECORDED RATHER
+/// THAN THE ASSERT RELAXED.
 /// * 12 ⇒ 13: §6 R27 (b)
 ///   (`analysis::resource::tests::r27_b_a_stored_may_auto_choice_survives_the_ring`)
 ///   destructures the offer the mint RETURNED to count its published CR 603.5
@@ -283,7 +283,7 @@ fn census(needle: &str) -> Vec<Hit> {
 ///   `template.owner` — i.e. that arm (b)'s drive-seam configuration is
 ///   production-unreachable.
 /// * 14 ⇒ 16: both in `phase-ai/src/policies/loop_shortcut.rs`'s `#[cfg(test)]`
-///   module — `bounded_offer_with_period`, a builder minting an offer whose
+///   module — `bounded_offer_declaring`, a builder minting an offer whose
 ///   certificate carries a real `per_cycle` so the proposer-elimination arm can
 ///   be driven, and `certificate_of`, a READ accessor for the same rows.
 /// * 16 ⇒ 17: the cap-round row
@@ -291,16 +291,63 @@ fn census(needle: &str) -> Vec<Hit> {
 ///   `engine/src/analysis/resource.rs` — A READ, NOT A WRITER: it destructures
 ///   the offer it minted to assert an EMPTY `schema.points` beside a
 ///   `victim_slot` that still names the forced victim.
-/// * 17 ⇒ the pinned value: the CR 732.2a declaration change's two in-crate
+/// * 17 ⇒ 21: the CR 732.2a declaration change's two in-crate
 ///   rows spell the anchor FOUR
 ///   times between them — `game/visibility.rs` row D5-h's mint and its projection
 ///   read, and `ai_support/candidates.rs` row D6-n's mint and its reach-guard read.
+/// * 21 ⇒ 22: the frame-wise charge row
+///   `the_bound_charges_the_frame_wise_loss_not_the_period_endpoint_pair` in
+///   `engine/src/game/engine.rs` — A READ: it destructures the offer it minted
+///   through the production seam to assert the published `victim_slot` magnitude
+///   and `seat_life_charge` divisor.
+/// * 22 ⇒ 24: the consumption-ceiling rows' shared fixture helper
+///   `signmix_offer_at_responder_beat` in `engine/src/game/engine.rs`, which
+///   spells the anchor TWICE — once destructuring the offer the production mint
+///   returned, once re-reading its schema for the published count before taking
+///   the declare path to the response window. Both READS in one `#[cfg(test)]`
+///   helper, shared by the ceiling row and the accepted-count row.
+/// * 24 ⇒ 28: the reduction's typed-absence rows — three READS in
+///   `engine/src/game/engine.rs` and one fixture WRITER in
+///   `engine/src/game/interaction.rs`.
+/// * 28 ⇒ 29: `offer_period` in `phase-ai/src/policies/loop_shortcut.rs`'s
+///   `#[cfg(test)]` module — a READ of an offer `apply()` minted (its period and
+///   declaration), minting none.
+/// * 29 ⇒ the pinned value: `first_mandatory_recurrence` in
+///   `engine/src/game/period_confirm.rs`'s `#[cfg(test)]` module — a READ: it
+///   declines (CR 732.2a) each offer play minted on its way to a priority frame
+///   inside a mandatory loop, minting none.
 ///
-/// All five are in a `#[cfg(test)]` scope — mints and reads both — which is the
-/// benign case this row's own failure message names: a test fixture cannot make
-/// the period machinery certify. The PRODUCTION half is UNCHANGED across all five
-/// — and so is the per-file multiset below, which is the half §10 ruling condition
-/// (2) is about. Its VALUE is the assert's, not this comment's.
+/// EVERY addition listed above is in a `#[cfg(test)]` scope — mints and reads
+/// both — which is the benign case this row's own failure message names: a test
+/// fixture cannot make the period machinery certify. The PRODUCTION half is
+/// UNCHANGED across all of them — and so is the per-file multiset below, which is
+/// the half §10 ruling condition (2) is about. Its VALUE is the assert's, not this
+/// comment's.
+///
+/// ⚠ THE PRODUCTION HALF HAS BEEN ADJUDICATED TOO — `game/derived_views.rs`'s
+/// `derive_views` arm, on the ground the failure message already excludes
+/// `filter_state_for_viewer` on: a match PATTERN on `state.waiting_for` inside a
+/// projection taking `&GameState`, minting no offer, unreachable unless a window
+/// is already open, in a file holding no declare-time authority call. A benign
+/// READ, so the assert is adjudicated and not relaxed. Phase 3 adds another
+/// benign read: `game/visibility.rs`'s exhaustive
+/// `redact_paid_cast_cleanup_authority` match projects/redacts an already-open
+/// offer while minting no offer and holding no declaration or certification
+/// authority. The assert below is where the pair is authoritative. A third benign
+/// read, `WaitingFor::is_mana_ability_continuation` in `types/game_state.rs`,
+/// names the variant only in its exhaustive `=> false` arm (not a mana ability's
+/// activation). A fourth benign read, `play_trace::answer_optionality` in
+/// `game/play_trace.rs`, names the variant only in its exhaustive `=> Mandatory`
+/// arm: it classifies the answer to an open prompt, minting no offer and reading
+/// none of its fields. A fifth benign read,
+/// `WaitingFor::chooses_play_before_announcement` in `types/game_state.rs`, names
+/// the variant only in its exhaustive `=> false` arm (not a pre-announcement
+/// prompt). A sixth benign read, `drive_mana_outlet_offer` in `analysis/corpus.rs`,
+/// reads the certificate of an offer `apply()` already minted and mints none. A
+/// seventh benign read, the restore validator's `visit_waiting_for_chains` in
+/// `types/game_state.rs`, names the variant only in its exhaustive no-op arm: a
+/// loop-shortcut offer holds no suspended ability chain to check, and the walk
+/// mints no offer and reads none of its fields.
 ///
 /// R8 CONJUNCT 2, same test — pin VALUE-legality has exactly ONE production
 /// consumer (`analysis::decision_template::declaration_conforms`), that consumer
@@ -333,58 +380,27 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
 
     assert_eq!(
         (production.len(), in_test.len()),
-        (22, 21),
+        (29, 30),
         "CR 732.2a OFFER-WRITER SURFACE CHANGED (not re-measured — this number is an \
          INVARIANCE pin over the whole 5d U-series).\n\
-         The three CERTIFICATION-PATH writers are `reconcile_terminal_result` (object-growth \
-         arm), `interactive_loop_bridge` (drain bridge arm) and \
-         `try_offer_bounded_cycle_shortcut` (bounded arm), all in `engine/src/game/engine.rs`. \
+         The four CERTIFICATION-PATH writers are `reconcile_terminal_result` (object-growth \
+         arm), `interactive_loop_bridge` (drain bridge arm), `offer_draw_without_end` \
+         (out-only ring arm) and `try_offer_bounded_cycle_shortcut` (bounded arm), all in `engine/src/game/engine.rs`. \
          `game/visibility.rs`'s `filter_state_for_viewer` writer is EXCLUDED by name and not \
          silently: it re-emits an ALREADY-minted offer into a per-viewer projection and cannot \
-         run unless `state.waiting_for` is already a `LoopShortcut`.\n\
+         run unless `state.waiting_for` is already a `LoopShortcut`. `game/derived_views.rs`'s \
+         `derive_views` arm is excluded on the same ground, and is what moved the production \
+         half: it is a match PATTERN on `state.waiting_for` inside a projection taking \
+         `&GameState`, so it mints no offer and cannot run unless a `LoopShortcut` is already \
+         open. That file holds no declare-time authority call. The exhaustive \
+         `redact_paid_cast_cleanup_authority` match in `game/visibility.rs` is an additional \
+         benign read on the same ground: it projects/redacts an already-open offer and owns no \
+         declaration or certification authority.\n\
          A new PRODUCTION site in a certification-path file means the period machinery may \
          certify without declaring or driving — §10 ruling condition (2), i.e. \
          answer-legality-at-certification becomes OWED WORK and the U-series stops. A new READ \
          site is the benign case; adjudicate, do not relax the assert.\n\
-         THE TEST HALF HAS BEEN ADJUDICATED FIVE TIMES (12 ⇒ 13, §6 R27 (b)'s schema read in \
-         `engine/src/analysis/resource.rs`; 13 ⇒ 14, 5d U4's `u4_park_on_offer` fixture in \
-         `engine/src/game/engine.rs`, which parks a constructed board on an offer so §6 R28 \
-         arm (b) can assert the DECLARE firewall refuses a hostile `template.owner`; 14 ⇒ 16, \
-         BOTH in `phase-ai/src/policies/loop_shortcut.rs`'s `#[cfg(test)]` module — \
-         `bounded_offer_with_period`, a builder minting an offer whose certificate carries a \
-         real `per_cycle` so the proposer-elimination arm can be driven, and `certificate_of`, \
-         a read accessor for the same rows. PRODUCTION STAYED AT 22 across that change, which \
-         is the half this pin exists to protect: the new policy arm READS the certificate and \
-         writes no offer). FOURTH ADJUDICATION, 16 => 17: the cap-round row \
-         `the_bounded_offer_charges_a_forced_victim_it_publishes_no_point_for` in \
-         `engine/src/analysis/resource.rs`, whose `WaitingFor::LoopShortcut` DESTRUCTURE reads the \
-         offer it minted to assert the combination that decoupling CR 732.2a publication from CR \
-         704.5a charging makes reachable: `schema.points` EMPTY while `victim_slot` still names the \
-         forced victim. A READ, not a writer. PRODUCTION STAYED AT 22 with an IDENTICAL per-file \
-         multiset, and that conjunct is what makes this the benign case rather than a surface \
-         change; if it moves again, name the new site here too rather than only moving the \
-         number.\n\
-         FIFTH ADJUDICATION, 17 => 21: publishing the bounded offer's own CR 732.2a \
-         `declaration` on `WaitingFor::LoopShortcut` added two in-crate rows that spell the anchor \
-         FOUR times between them. Named individually, because this census counts LINES (its \
-         `classify()` is `line.contains(needle)`, deliberately replacing a construction-shaped \
-         detector), so a mint and a read of the same fixture are two counted sites: (1) \
-         `engine/src/game/visibility.rs` row D5-h's MINT, `d5h_offer` — one local helper called \
-         twice, staging a declaration whose pins are all-seat vs. one naming a hidden object; \
-         (2) `engine/src/game/visibility.rs` row D5-h's READ, `d5h_projected_declaration` — one \
-         local helper destructuring `filter_state_for_viewer(..).waiting_for`, called three \
-         times (hidden/viewer, hidden/proposer, public); (3) \
-         `engine/src/ai_support/candidates.rs` row D6-n's MINT, `d6n_offer` — one local helper \
-         called twice, `declaration: None` vs `Some(..)` and nothing else; (4) \
-         `engine/src/ai_support/candidates.rs` row D6-n's READ — the reach-guard destructure \
-         that asserts the staged offer really `is_bounded()` and really publishes a point \
-         BEFORE the negative claim, without which that row would pass on the wrong conjunct. \
-         Site (4) was NOT predicted (the plan budgeted 20 on the reading that D6-n's assertions \
-         touch only `legal_actions`); the measurement wins and the site is named rather than the \
-         row contorted to hit the budget. ALL FOUR ARE `#[cfg(test)]` FIXTURES: none writes an \
-         offer the period machinery can certify. PRODUCTION STAYED AT 22 with an IDENTICAL \
-         per-file multiset — C2b adds the field INSIDE existing literals and patterns and \
-         introduces no new production anchor line.\n\
+         THE TEST HALF HAS BEEN ADJUDICATED TEN TIMES.\n\
          measured per-file production multiset: {multiset:?}\n\
          production: {production:?}\n\
          test: {in_test:?}"
@@ -393,11 +409,14 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
         multiset,
         vec![
             ("engine/src/ai_support/candidates.rs".to_string(), 1),
-            ("engine/src/game/engine.rs".to_string(), 5),
+            ("engine/src/analysis/corpus.rs".to_string(), 1),
+            ("engine/src/game/derived_views.rs".to_string(), 1),
+            ("engine/src/game/engine.rs".to_string(), 6),
             ("engine/src/game/interaction.rs".to_string(), 5),
+            ("engine/src/game/play_trace.rs".to_string(), 1),
             ("engine/src/game/scenario.rs".to_string(), 1),
-            ("engine/src/game/visibility.rs".to_string(), 2),
-            ("engine/src/types/game_state.rs".to_string(), 4),
+            ("engine/src/game/visibility.rs".to_string(), 3),
+            ("engine/src/types/game_state.rs".to_string(), 6),
             ("phase-ai/src/decision_kind.rs".to_string(), 1),
             ("phase-ai/src/policies/loop_shortcut.rs".to_string(), 1),
             ("phase-ai/src/projection.rs".to_string(), 1),
@@ -494,12 +513,13 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
         authority_per_file.into_iter().collect::<Vec<_>>(),
         vec![
             ("engine/src/analysis/decision_template.rs", 1),
-            ("engine/src/game/engine.rs", 2),
+            ("engine/src/game/engine.rs", 3),
             ("engine/src/game/interaction.rs", 1),
         ],
-        "expected 1 definition + 3 call sites: \
+        "expected 1 definition + 4 call sites: \
          `game/engine.rs::handle_declare_shortcut` (accept), \
          `game/engine.rs::build_bounded_declaration` (publish), \
+         `game/engine.rs::bounded_offer_tail` (publish the suggestion), \
          `game/interaction.rs::materialize_loop_shortcut_response` (human emit). A MISSING \
          call site is a path that publishes or accepts a declaration under its own predicate; \
          a NEW one is benign but must be named here rather than absorbed. \

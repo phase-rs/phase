@@ -29,6 +29,7 @@
 //!     its power to the player it is attacking, in the combat damage step.
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::{effects::attach::attach_to, game_object::AttachTarget};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
@@ -68,6 +69,172 @@ const DRAW_ON_COMBAT_DAMAGE_MANDATORY: &str =
 /// `OptionalEffectChoice`.
 const GAIN_ON_COMBAT_DAMAGE_MANDATORY: &str =
     "Whenever this creature deals combat damage to a player, gain 1 life.";
+
+const ONCE_PER_TURN_COMBAT_DAMAGE: &str = "Whenever a creature you control deals combat \
+     damage to a player, draw a card. This ability triggers only once each turn.";
+
+/// Exact Oracle text for Calix, Guided by Fate, verified against Scryfall.
+const CALIX_GUIDED_BY_FATE: &str = "Constellation — Whenever Calix or another enchantment you \
+     control enters, put a +1/+1 counter on target creature.\nWhenever Calix or an enchanted \
+     creature you control deals combat damage to a player, you may create a token that's a copy of \
+     a nonlegendary enchantment you control. Do this only once each turn.";
+
+const TEST_AURA: &str = "Enchant creature";
+
+#[test]
+fn once_per_turn_combat_damage_trigger_admits_one_of_two_qualifying_attackers() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Once-per-turn watcher",
+        1,
+        1,
+        ONCE_PER_TURN_COMBAT_DAMAGE,
+    );
+    let attacker_a = scenario
+        .add_creature(P0, "Qualifying attacker A", 2, 2)
+        .id();
+    let attacker_b = scenario
+        .add_creature(P0, "Qualifying attacker B", 2, 2)
+        .id();
+    scenario.with_library_top(P0, &["L0", "L1", "L2"]);
+
+    let mut runner = scenario.build();
+    let hand_before = runner.state().players[P0.0 as usize].hand.len();
+    run_combat(&mut runner, vec![attacker_a, attacker_b], vec![]);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].hand.len(),
+        hand_before + 1,
+        "two qualifying combat-damage candidates must admit only one once-per-turn trigger"
+    );
+}
+
+/// CR 603.2h: "Do this only once each turn" is spent by taking the action, not by
+/// triggering. Calix and the enchanted creature each deal combat damage, so the ability
+/// triggers twice; declining the first takes no action, so the second instance still
+/// offers its "you may".
+#[test]
+fn calix_declining_one_combat_trigger_leaves_the_second_instance_to_prompt() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let calix = scenario
+        .add_creature_from_oracle(P0, "Calix, Guided by Fate", 2, 2, CALIX_GUIDED_BY_FATE)
+        .id();
+    let enchanted_attacker = scenario
+        .add_creature(P0, "Aura-enchanted attacker", 2, 2)
+        .id();
+    let aura = scenario
+        .add_enchantment_from_oracle(P0, "Test Aura", TEST_AURA)
+        .with_subtypes(vec!["Aura"])
+        .id();
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), aura, enchanted_attacker);
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(enchanted_attacker)),
+        "the Aura's attachment pointer identifies the enchanted attacker"
+    );
+    assert!(
+        runner.state().objects[&enchanted_attacker]
+            .attachments
+            .contains(&aura),
+        "the enchanted attacker retains the reciprocal attachment"
+    );
+
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(enchanted_attacker)),
+        "the legal Aura remains attached immediately before combat damage"
+    );
+    run_combat(&mut runner, vec![calix, enchanted_attacker], vec![]);
+
+    // Combat leaves the admitted trigger on the stack with a priority window.
+    // Resolve that window before checking the optional effect it produces.
+    runner.advance_until_stack_empty();
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P0, .. }
+    ));
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the first Calix combat-damage trigger succeeds");
+    runner.advance_until_stack_empty();
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ),
+        "declining takes no action, so the second Calix instance still prompts: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the second Calix combat-damage trigger succeeds");
+    runner.advance_until_stack_empty();
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "after declining both Calix triggers, priority resumes: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        runner
+            .state()
+            .trigger_indicated_actions_this_turn
+            .is_empty(),
+        "two declines take no indicated action"
+    );
+}
+
+/// CR 608.2d + CR 603.2h: with no nonlegendary enchantment to copy, Calix's "you
+/// may create a token that's a copy of a nonlegendary enchantment you control"
+/// offers nothing and spends nothing. The fixture Calix is a plain creature (not
+/// an enchantment), so P0 controls no nonlegendary enchantment; do not add
+/// `as_enchantment()` to it without also making it legendary.
+///
+/// Passes today because the copy is modeled as a stack-time target, so the
+/// trigger is removed for lack of a legal target (CR 603.3d). It must keep
+/// passing after the copied enchantment is re-modeled as chosen on resolution,
+/// at which point a CR 608.2d feasibility arm becomes required.
+#[test]
+fn calix_with_no_nonlegendary_enchantment_offers_nothing_and_spends_nothing() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let calix = scenario
+        .add_creature_from_oracle(P0, "Calix, Guided by Fate", 2, 2, CALIX_GUIDED_BY_FATE)
+        .id();
+
+    let mut runner = scenario.build();
+    let life_before = runner.life(P1);
+    run_combat(&mut runner, vec![calix], vec![]);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.life(P1),
+        life_before - 2,
+        "reach: Calix dealt combat damage to P1"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "nothing to copy is never offered: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        runner
+            .state()
+            .trigger_indicated_actions_this_turn
+            .is_empty(),
+        "an impossible copy takes no indicated action"
+    );
+}
 
 /// Primary regression — two same-controller creatures with combat-damage
 /// triggers attack unblocked, both deal combat damage to P1, and the resulting

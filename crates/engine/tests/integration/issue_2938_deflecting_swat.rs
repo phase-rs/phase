@@ -173,6 +173,7 @@ fn deflecting_swat_retargets_opponent_spell_on_stack() {
         scope,
         current_targets,
         legal_new_targets,
+        ..
     } = &runner.state().waiting_for
     else {
         unreachable!();
@@ -188,7 +189,7 @@ fn deflecting_swat_retargets_opponent_spell_on_stack() {
     let stack_index = *stack_entry_index;
     runner
         .act(GameAction::RetargetSpell {
-            new_targets: vec![TargetRef::Object(redirect_host)],
+            new_targets: vec![Some(TargetRef::Object(redirect_host))],
         })
         .expect("retarget submission must succeed");
 

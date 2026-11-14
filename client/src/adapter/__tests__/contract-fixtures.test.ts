@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { InteractionSubmission } from "../generated/interaction";
 import type { GameAction, GameObject, GameState, WaitingFor } from "../types";
 import { PROTOCOL_VERSION, WebSocketAdapter } from "../ws-adapter";
 
@@ -75,10 +76,17 @@ describe("shared adapter contract fixtures", () => {
 
   it("drives GameStarted through the websocket adapter", async () => {
     const fixture = readFixture<{ type: "GameStarted"; data: { state: GameState } }>("game_started.json");
+    // Explicit opt-out: these fixtures pin snapshot delivery, so no decoder
+    // preparation may introduce an await before the socket is created.
     const adapter = new WebSocketAdapter(
       "ws://localhost:9374/ws",
-      "host",
+      "join",
       { main_deck: [], sideboard: [] },
+      "ABC123",
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
     );
     const listener = vi.fn();
     adapter.onEvent(listener);
@@ -104,10 +112,17 @@ describe("shared adapter contract fixtures", () => {
       data: { state: GameState; events: unknown[] };
     }>("state_update.json");
 
+    // Explicit opt-out: these fixtures pin snapshot delivery, so no decoder
+    // preparation may introduce an await before the socket is created.
     const adapter = new WebSocketAdapter(
       "ws://localhost:9374/ws",
-      "host",
+      "join",
       { main_deck: [], sideboard: [] },
+      "ABC123",
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
     );
     const listener = vi.fn();
     adapter.onEvent(listener);
@@ -155,5 +170,35 @@ describe("shared adapter contract fixtures", () => {
     }
     expect(gameObject.name).toBe("Fixture Bear");
     expect(gameObject.id).toBe(1);
+  });
+
+  it("loads the curated shortcut allocation submission", () => {
+    // `readFixture`'s `as T` is an unchecked cast, so the type annotation links
+    // nothing on its own — the values are what tie this end to the Rust row.
+    const submission = readFixture<InteractionSubmission>("shortcut_allocation_submission.json");
+
+    expect(submission.interactionId).toBe("i-1.0.1");
+    expect(submission.response.type).toBe("shortcut");
+    if (submission.response.type !== "shortcut") return;
+    expect(submission.response.data.decision).toEqual({
+      type: "fixed",
+      data: { iterations: 18 },
+    });
+    // Every answerable point the offer publishes, not just the allocation: the
+    // Rust row drives this same payload through production submission, which
+    // refuses a partial pin set.
+    expect(submission.response.data.pins).toEqual([
+      { group: 0, choiceIds: ["i-1.0.1.k0"], amounts: [] },
+      { group: 1, choiceIds: ["i-1.0.1.k2"], amounts: [] },
+      {
+        group: 2,
+        choiceIds: ["i-1.0.1.k4", "i-1.0.1.k5", "i-1.0.1.k6"],
+        amounts: [
+          { choiceId: "i-1.0.1.k4", amount: 6 },
+          { choiceId: "i-1.0.1.k5", amount: 6 },
+          { choiceId: "i-1.0.1.k6", amount: 6 },
+        ],
+      },
+    ]);
   });
 });

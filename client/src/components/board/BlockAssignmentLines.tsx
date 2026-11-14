@@ -8,6 +8,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useRafPositions } from "../../hooks/useRafPositions.ts";
 import { arcPath } from "../../hooks/useAttackerArrowPositions.ts";
+import { GAME_Z_LAYER } from "../../constants/ui.ts";
 import { objectAnchorSelector } from "../../utils/objectAnchorSelector.ts";
 import { getVisibleBoardPlayerIds, isOneOnOne } from "../../viewmodel/gameStateView.ts";
 import type { BlockerAssignmentPair, ObjectId, PlayerId } from "../../adapter/types.ts";
@@ -66,7 +67,7 @@ export function BlockAssignmentLines({
   const isMinimal = vfxQuality === "minimal";
 
   return createPortal(
-    <svg className="pointer-events-none fixed inset-0 z-30 h-full w-full">
+    <svg className={`pointer-events-none fixed inset-0 ${GAME_Z_LAYER.combatArrow} h-full w-full`}>
       <defs>
         {!isMinimal && (
           <filter id="block-line-glow">

@@ -67,14 +67,14 @@ export interface CardEntryRowProps {
   /** Eligibility predicate paired with `onSetAsCommander`. The row consults it
    *  per-entry so the parent doesn't have to fan out card-data lookups. */
   isCommanderEligible?: (name: string) => boolean;
-  /** "compact" (default) keeps the row controls hover-revealed — used by the
-   *  in-game BO3 sideboard modal. "comfortable" makes them always-visible and
-   *  touch-sized for the deck builder (hover reveal is invisible on touch). */
+  /** "compact" (default) keeps the row controls hover-revealed. "comfortable"
+   *  makes them always-visible and touch-sized, which is what any surface
+   *  reachable on touch needs (hover reveal is invisible there). */
   density?: "comfortable" | "compact";
   /** When provided, the alternate-art (✦) badge becomes a tap target that
    *  opens the printing picker — the touch path for art selection (right-click
    *  context menus don't exist on touch). */
-  onOpenArtPicker?: (name: string) => void;
+  onOpenArtPicker?: (name: string, launcher: HTMLButtonElement) => void;
   /** Destination name shown on the move button (e.g. "Sideboard",
    *  "Maybeboard", "Main"). When provided, the move control renders as a
    *  labelled "→ {label}" pill so the move target is explicit on touch (where
@@ -168,7 +168,10 @@ export function CardEntryRow({
             onOpenArtPicker ? (
               <button
                 type="button"
-                onClick={(e) => { e.stopPropagation(); onOpenArtPicker(entry.name); }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenArtPicker(entry.name, e.currentTarget);
+                }}
                 className="ml-1 inline-flex h-4 w-4 items-center justify-center rounded-sm bg-sky-500/60 text-[9px] leading-none text-sky-100 hover:bg-sky-500/80"
                 aria-label={t("card.chooseArtFor", { name: entry.name })}
                 title={t("card.alternateArtTap")}

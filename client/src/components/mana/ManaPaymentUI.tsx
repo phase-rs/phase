@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type {
+  ManaSourceSelection,
   ManaType,
   PhyrexianShard,
   ShardChoice,
@@ -38,7 +39,7 @@ function hasAmbiguousCost(shards: string[]): boolean {
 }
 
 export function ManaPaymentUI() {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const gameState = useGameStore((s) => s.gameState);
   const dispatch = useGameStore((s) => s.dispatch);
@@ -46,14 +47,20 @@ export function ManaPaymentUI() {
 
   const isManaPayment = waitingFor?.type === "ManaPayment";
   const isPhyrexianPayment = waitingFor?.type === "PhyrexianPayment";
-  const isAnyPayment = isManaPayment || isPhyrexianPayment;
-  const playerId = isManaPayment
+  const isManaAbilityPayment = waitingFor?.type === "ManaAbilityManaPayment";
+  const isAnyPayment = isManaPayment || isPhyrexianPayment || isManaAbilityPayment;
+  const playerId = isManaPayment || isPhyrexianPayment || isManaAbilityPayment
     ? waitingFor.data.player
-    : isPhyrexianPayment
-      ? waitingFor.data.player
-      : null;
+    : null;
   const convokeMode = isManaPayment ? waitingFor.data.convoke_mode : undefined;
   const player = playerId != null ? gameState?.players[playerId] : null;
+  // CR 601.2g + CR 605.3a: the engine publishes a manual mana ability's payment
+  // window to its payer only; an automatic window has no view and is paid by
+  // board taps alone.
+  const manaAbilityPayment = isManaAbilityPayment
+    ? gameState?.derived?.mana_ability_payment ?? null
+    : null;
+  const selectsPoolUnits = isManaPayment || manaAbilityPayment != null;
 
   // CR 702.51a: the bottom-anchored convoke panel can sit on top of the very
   // creatures the player must tap to pay. The DialogHost peek affordance lets
@@ -79,6 +86,9 @@ export function ManaPaymentUI() {
   // any frontend cost computation.
   const costShards = useMemo(() => {
     if (!gameState) return null;
+    // Checked first: an outer spell's `pending_cast` persists while a mana
+    // ability activated to pay it has its own window open.
+    if (manaAbilityPayment) return manaCostToShards(manaAbilityPayment.cost);
     if (gameState.pending_cast) {
       // Activated-ability mana payment: prefer `activation_cost` when present.
       // The engine reuses PendingCast for both spell casts and activated abilities;
@@ -102,10 +112,11 @@ export function ManaPaymentUI() {
       return manaCostToShards(sourceObj.mana_cost);
     }
     return null;
-  }, [gameState, isManaPayment, isPhyrexianPayment, spellObjectId]);
+  }, [gameState, isManaPayment, isPhyrexianPayment, manaAbilityPayment, spellObjectId]);
 
   const cardName = useMemo(() => {
     if (!gameState) return null;
+    if (manaAbilityPayment) return gameState.objects[manaAbilityPayment.source_id]?.name ?? null;
     if (isPhyrexianPayment && spellObjectId != null) {
       return gameState.objects[spellObjectId]?.name ?? null;
     }
@@ -119,7 +130,7 @@ export function ManaPaymentUI() {
       return gameState.objects[topEntry.source_id]?.name ?? null;
     }
     return null;
-  }, [gameState, isManaPayment, isPhyrexianPayment, spellObjectId]);
+  }, [gameState, isManaPayment, isPhyrexianPayment, manaAbilityPayment, spellObjectId]);
 
   const isAmbiguous = costShards != null && hasAmbiguousCost(costShards);
 
@@ -203,13 +214,19 @@ export function ManaPaymentUI() {
     return remaining ? manaCostToShards(remaining) : null;
   }, [gameState]);
 
-  // CR 118.3a: the engine records player-directed pins on `pending_cast`.
-  // The frontend is a pure mirror — it renders the engine's pin set and the
-  // individual pool units, and dispatches Spend/UnspendPoolMana on click. It
-  // computes no eligibility (the engine accepts or rejects each pin).
+  // CR 118.3a: the engine records player-directed pins on `pending_cast`, or
+  // on the manual mana ability whose window is open. The frontend is a pure
+  // mirror — it renders the engine's pin set and the individual pool units, and
+  // dispatches Spend/UnspendPoolMana on click. It computes no eligibility (the
+  // engine accepts or rejects each pin).
   const pinnedPipIds = useMemo(
-    () => new Set(gameState?.pending_cast?.pinned_pool_units ?? []),
-    [gameState],
+    () =>
+      new Set(
+        manaAbilityPayment?.pinned_pool_units ??
+          gameState?.pending_cast?.pinned_pool_units ??
+          [],
+      ),
+    [gameState, manaAbilityPayment],
   );
 
   const pinUnit = useCallback(
@@ -319,6 +336,32 @@ export function ManaPaymentUI() {
   // decisions for the caster alone; opponents see the mid-cast state via the
   // stack display, not an interactive panel.
   if (!isAnyPayment || !player || !canAct) return null;
+
+  // CR 605.3a + CR 117.1d: an automatic mana ability's payment window is paid
+  // only by board taps, so it shows the prompt and the cancel that withdraws the
+  // activation.
+  if (isManaAbilityPayment && !manaAbilityPayment) {
+    return (
+      <div className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex justify-center pb-4">
+        <div className="pointer-events-auto rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700 min-w-[280px] max-w-[420px]">
+          <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
+            {t("mana.payMana")}
+          </h3>
+          <p className="mb-3 text-center text-xs text-gray-400">
+            {t("mana.paymentPending")}
+          </p>
+          <div className="flex justify-center">
+            <button
+              onClick={handleCancel}
+              className={gameButtonClass({ tone: "slate", size: "md" })}
+            >
+              {t("common:actions.cancel")}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <AnimatePresence>
@@ -543,7 +586,7 @@ export function ManaPaymentUI() {
               </div>
             )}
 
-            {paymentGroups.length > 0 && !isManaPayment && (
+            {paymentGroups.length > 0 && !selectsPoolUnits && (
               <div className="flex flex-wrap items-center justify-center gap-1.5">
                 {paymentGroups.map((group) => (
                   <ManaChip key={group.key} group={group} count={group.pipIds.length} />
@@ -551,7 +594,7 @@ export function ManaPaymentUI() {
               </div>
             )}
 
-            {paymentGroups.length > 0 && isManaPayment && (
+            {paymentGroups.length > 0 && selectsPoolUnits && (
               <>
                 <div>
                   <p className="mb-1 text-center text-[11px] text-gray-500">
@@ -621,6 +664,30 @@ export function ManaPaymentUI() {
   );
 }
 
+// Color → shard symbol code for `ManaSymbol` (White→"W", …, Colorless→"C").
+const COLOR_SHARD: Record<ManaType, string> = {
+  White: "W",
+  Blue: "U",
+  Black: "B",
+  Red: "R",
+  Green: "G",
+  Colorless: "C",
+};
+
+function manaSourceOutputDisplay(selection: ManaSourceSelection): string[] {
+  // CR 605.3b: this overlay only echoes engine-enumerated options.
+  // CR 106.1a/b: pips only when the engine serialized Concrete types or atomic_combination.
+  // DeferredColorChoice carries neither a color nor a type set (restricted AnyOneColor is still Deferred).
+  if (selection.output.type === "DeferredColorChoice") return [];
+  if (selection.atomic_combination && selection.atomic_combination.length > 0) {
+    return selection.atomic_combination.map((manaType) => COLOR_SHARD[manaType]);
+  }
+  if (selection.output.type === "Concrete") {
+    return [COLOR_SHARD[selection.output.data]];
+  }
+  return [];
+}
+
 /** CR 605.3b: The engine has reached a mana ability that sacrifices a
  * permanent. It supplies every legal capability; this display layer only
  * renders those rows and returns the selected opaque action. */
@@ -629,8 +696,9 @@ export function ManaSourceSelectionUI() {
   const waitingFor = useGameStore((s) => s.waitingFor);
   const gameState = useGameStore((s) => s.gameState);
   const dispatch = useGameStore((s) => s.dispatch);
+  const canAct = useCanActForWaitingState();
 
-  if (waitingFor?.type !== "ManaSourceSelection") return null;
+  if (waitingFor?.type !== "ManaSourceSelection" || !canAct) return null;
 
   return (
     <AnimatePresence>
@@ -654,6 +722,7 @@ export function ManaSourceSelectionUI() {
           <div className="mt-4 space-y-2">
             {waitingFor.data.options.map((selection, index) => {
               const source = gameState?.objects[selection.source.object_id];
+              const shards = manaSourceOutputDisplay(selection);
               return (
                 <button
                   key={`${selection.source.object_id}-${selection.ability_index ?? "basic"}-${index}`}
@@ -661,8 +730,28 @@ export function ManaSourceSelectionUI() {
                   className="flex min-h-11 w-full items-center justify-between rounded-lg bg-amber-500/10 px-3 text-left text-sm text-white ring-1 ring-amber-300/30 transition hover:bg-amber-500/20"
                   onClick={() => dispatch({ type: "ActivateManaSource", data: { selection } })}
                 >
-                  <span>{source?.name ?? t("manaSourceSelection.unknownSource")}</span>
-                  <span className="text-xs text-amber-200">{t("manaSourceSelection.sacrifice")}</span>
+                  <span className="flex items-center gap-1.5">
+                    <span>{source?.name ?? t("manaSourceSelection.unknownSource")}</span>
+                    {selection.output.type === "DeferredColorChoice" ? (
+                      <span className="text-xs text-slate-300">
+                        {selection.output.data.quantity.type === "Fixed"
+                          ? t("manaSourceSelection.baseOutput", {
+                              count: selection.output.data.quantity.data,
+                            })
+                          : t("manaSourceSelection.baseOutputVariable")}
+                      </span>
+                    ) : null}
+                    {shards.length > 0
+                      ? shards.map((shard, shardIndex) => (
+                          <ManaSymbol key={shardIndex} shard={shard} size="sm" />
+                        ))
+                      : null}
+                  </span>
+                  {selection.penalty === "Sacrifices" ? (
+                    <span className="text-xs text-amber-200">
+                      {t("manaSourceSelection.sacrifice")}
+                    </span>
+                  ) : null}
                 </button>
               );
             })}
@@ -683,16 +772,6 @@ export function ManaSourceSelectionUI() {
     </AnimatePresence>
   );
 }
-
-// Color → shard symbol code for `ManaSymbol` (White→"W", …, Colorless→"C").
-const COLOR_SHARD: Record<ManaType, string> = {
-  White: "W",
-  Blue: "U",
-  Black: "B",
-  Red: "R",
-  Green: "G",
-  Colorless: "C",
-};
 
 /**
  * A run of fungible pool units the payment panel renders as one chip — same

@@ -122,15 +122,19 @@ fn rishkars_expertise_free_cast_completes_during_resolution() {
                 .casting_permissions
                 .as_slice(),
             [CastingPermission::ExileWithAltCost {
-                resolution_cleanup: None,
+                resolution_cleanup: Some(cleanup),
                 mana_spend_permission: None,
                 graveyard_replacement: None,
                 enters_with_counter: None,
                 enters_with_modifications,
                 ..
-            }] if enters_with_modifications.is_empty()
+            }] if cleanup.source_id == expertise
+                && cleanup.face_policy.source_id == expertise
+                && cleanup.face_policy.controller == P0
+                && cleanup.exiled_misses.is_empty()
+                && enters_with_modifications.is_empty()
         ),
-        "the consumed free-cast permission must remain only as a neutral stable slot"
+        "the stack spell must retain its exact resolution cleanup until its cast exits"
     );
 
     runner.advance_until_stack_empty();

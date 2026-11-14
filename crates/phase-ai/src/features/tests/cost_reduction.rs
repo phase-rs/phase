@@ -50,6 +50,7 @@ fn reducer(
         amount: generic(amount),
         spell_filter,
         dynamic_count: None,
+        reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
     });
     def.affected = Some(TargetFilter::Typed(TypedFilter {
         controller: Some(ControllerRef::You),
@@ -183,6 +184,7 @@ fn self_cost_reduction_does_not_count() {
         amount: generic(1),
         spell_filter: None,
         dynamic_count: None,
+        reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
     });
     def.affected = Some(TargetFilter::SelfRef);
     f_card.static_abilities = vec![def];
@@ -201,6 +203,7 @@ fn opponent_scoped_reducer_does_not_count() {
         amount: generic(1),
         spell_filter: None,
         dynamic_count: None,
+        reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
     });
     def.affected = Some(TargetFilter::Typed(TypedFilter {
         controller: Some(ControllerRef::Opponent),
@@ -344,6 +347,7 @@ fn parts_predicate_sums_multiple_reducing_statics() {
         amount: generic(1),
         spell_filter: None,
         dynamic_count: None,
+        reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
     });
     first.affected = Some(TargetFilter::Typed(TypedFilter {
         controller: Some(ControllerRef::You),
@@ -354,6 +358,7 @@ fn parts_predicate_sums_multiple_reducing_statics() {
         amount: generic(2),
         spell_filter: None,
         dynamic_count: None,
+        reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
     });
     f_card.static_abilities = vec![first, second];
 

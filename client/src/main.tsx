@@ -13,6 +13,7 @@ import "mana-font/css/mana.css";
 import "./index.css";
 import "./i18n"; // initialize i18next before any component renders
 import { App } from "./App";
+import { installHiddenDocumentMotion } from "./animation/hiddenDocumentMotion";
 import { registerServiceWorker } from "./pwa/registerServiceWorker";
 import { registerTauriUpdater } from "./pwa/tauriUpdater";
 import { installChunkReloadHandler } from "./pwa/chunkReloadHandler";
@@ -20,13 +21,22 @@ import { installTauriExternalLinkHandler } from "./services/externalLinks";
 import { importLegacyStorage, markRemoteLoadOk } from "./services/legacyMigration";
 import { installTelemetry } from "./services/telemetryEvents";
 import { initializeHostPlatform } from "./services/platform";
+import { initializeConnectivity } from "./stores/connectivityStore";
 
 export async function bootstrap(): Promise<void> {
+  // Before anything renders: a tab opened in the background must not start
+  // CSS animations it can never finish (see animation/hiddenDocumentMotion).
+  installHiddenDocumentMotion();
+
   await initializeHostPlatform();
 
   // Cloud-sync restores its Supabase session from an App effect, so migration
   // must finish before React mounts and that effect can observe localStorage.
   await importLegacyStorage();
+
+  // Connectivity persistence intentionally hydrates after legacy migration and
+  // before any React effect or background registration can own a network path.
+  await initializeConnectivity();
 
   // StrictMode is scoped inside App.tsx instead of wrapping the root. P2P game
   // sessions own PeerJS resources whose cleanup is intentionally destructive, so

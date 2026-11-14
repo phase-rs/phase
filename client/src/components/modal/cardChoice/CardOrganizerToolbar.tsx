@@ -9,12 +9,14 @@ export interface CardOrganizerToolbarProps {
   onGroupChange?: (group: GroupKey) => void;
   filter?: FilterKey;
   onFilterChange?: (filter: FilterKey) => void;
-  /** Which controls to render. Sort defaults on; group/filter default off so a
-   *  caller opts into each axis it actually wants (the grid shows sort+group,
-   *  the hand shows sort+filter). */
+  query?: string;
+  onQueryChange?: (query: string) => void;
+  /** Which controls to render. Sort defaults on; the other axes default off so
+   *  a caller opts into exactly the controls it needs. */
   showSort?: boolean;
   showGroup?: boolean;
   showFilter?: boolean;
+  showQuery?: boolean;
   /** Disable every control (e.g. during target selection, when reorganizing the
    *  displayed order would be unsafe). */
   disabled?: boolean;
@@ -25,10 +27,10 @@ const SELECT_CLASS =
   "rounded bg-black/40 px-1 py-0.5 disabled:cursor-not-allowed disabled:opacity-40";
 
 /**
- * Presentational sort / group / filter selects for {@link useCardOrganizer}.
- * Stateless — it renders the current axis values and reports changes; the hook
- * (or the consuming component) owns the state. Shared by the card-choice grid
- * and the player's hand so both expose ONE organizing mechanism.
+ * Presentational organizer controls for {@link useCardOrganizer}. Stateless —
+ * it renders the current axis values and reports changes; the hook (or the
+ * consuming component) owns the state. Shared across card-choice surfaces and
+ * the player's hand so both expose one organizing mechanism.
  */
 export function CardOrganizerToolbar({
   sort,
@@ -37,9 +39,12 @@ export function CardOrganizerToolbar({
   onGroupChange,
   filter,
   onFilterChange,
+  query,
+  onQueryChange,
   showSort = true,
   showGroup = false,
   showFilter = false,
+  showQuery = false,
   disabled = false,
   className = "flex flex-wrap items-center gap-2 text-xs text-slate-300",
 }: CardOrganizerToolbarProps) {
@@ -93,6 +98,20 @@ export function CardOrganizerToolbar({
             <option value="lands">{t("cardChoice.bulk.filterLands")}</option>
             <option value="nonland">{t("cardChoice.bulk.filterNonland")}</option>
           </select>
+        </label>
+      )}
+      {showQuery && query !== undefined && onQueryChange && (
+        <label className="flex items-center gap-1">
+          {t("cardChoice.bulk.searchLabel")}
+          <input
+            className={SELECT_CLASS}
+            type="search"
+            value={query}
+            disabled={disabled}
+            placeholder={t("cardChoice.bulk.searchPlaceholder")}
+            aria-label={t("cardChoice.bulk.searchCardsAria")}
+            onChange={(e) => onQueryChange(e.target.value)}
+          />
         </label>
       )}
     </div>

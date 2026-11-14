@@ -60,18 +60,16 @@
 //!     effect is applied; a player can't choose an impossible option.
 
 use super::rules::{GameScenario, Phase, WaitingFor, Zone, P0, P1};
-use engine::types::ability::TargetRef;
+use engine::types::ability::{
+    Effect, QuantityExpr, ResolvedAbility, SubAbilityLink, TargetFilter, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::game_state::StackEntryKind;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 
 const OZOLITH_ORACLE: &str = "Whenever a creature you control leaves the battlefield, if it had counters on it, put those counters on The Ozolith.\nAt the beginning of combat on your turn, if The Ozolith has counters on it, you may move all counters from The Ozolith onto target creature.";
-
-/// Same `MoveCounters` shape as The Ozolith's second ability but with NO
-/// intervening-if, so the trigger still resolves when the source holds nothing.
-/// Used to pin the counterfactual the negative tests depend on.
-const NO_GATE_ORACLE: &str = "At the beginning of combat on your turn, you may move all counters from Counter Shuttle onto target creature.";
 
 /// Removal used to take a creature off the battlefield through the production
 /// pipeline. Casting this and letting it resolve drives the departure through
@@ -90,13 +88,50 @@ fn counters(runner: &super::rules::GameRunner, id: ObjectId, ct: &CounterType) -
         .unwrap_or(0)
 }
 
+/// Append a test-only independent instruction to the live Ozolith trigger.
+///
+/// The life-gain probe is a `SequentialSibling`, the engine's existing model
+/// of an independent following instruction under CR 608.2c. It therefore
+/// survives the optional move being auto-declined, but cannot run if the
+/// trigger is removed before normal resolution by CR 603.4 or CR 608.2b.
+fn append_resolution_entry_probe(runner: &mut super::rules::GameRunner) {
+    let entry = runner
+        .state_mut()
+        .stack
+        .back_mut()
+        .expect("the begin-combat trigger must be on the stack");
+    let StackEntryKind::TriggeredAbility { ability, .. } = &mut entry.kind else {
+        panic!("the probe must extend The Ozolith's triggered ability");
+    };
+    assert!(
+        ability.optional,
+        "the production Ozolith trigger must retain its printed 'you may'"
+    );
+    assert!(
+        ability.sub_ability.is_none(),
+        "the production Ozolith trigger has no existing continuation"
+    );
+
+    let mut probe = ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        ability.source_id,
+        ability.controller,
+    );
+    probe.sub_link = SubAbilityLink::SequentialSibling;
+    ability.sub_ability = Some(Box::new(probe));
+}
+
 /// Which decisions the engine actually presented while the trigger resolved.
 ///
-/// These counts are the load-bearing discriminator for the negative tests. A
-/// "removed from the stack" path (CR 603.3d / 603.4 / 608.2b) asks NOTHING,
-/// whereas an ability that resolves and merely moves zero counters DOES present
-/// its "you may" window first (CR 608.2d). Without observing `optional`, a
-/// negative test that only checks counter totals passes either way.
+/// These counts distinguish the targeting and optional-decision surfaces that
+/// the engine actually presented. The negative tests separately record their
+/// expected stack departure under CR 603.3d / CR 603.4 / CR 608.2b; an absent
+/// optional prompt alone is not a stack-departure discriminator because
+/// CR 608.2d forbids choosing an impossible counter move.
 ///
 /// `trigger_target` and `target` are tracked separately so an assertion can pin
 /// which selection surface was used rather than conflating the two.
@@ -301,67 +336,6 @@ fn issue_7386_ozolith_moves_counters_it_collected_from_a_dead_creature() {
     );
 }
 
-/// COUNTERFACTUAL CONTROL for the two "no prompt" tests below.
-///
-/// Those tests prove a rule fired by observing that NO "you may" window was
-/// presented. That inference is only valid while a `MoveCounters` that resolves
-/// with nothing to move DOES present one. `optional_effect_is_infeasible`
-/// (effects/mod.rs) has CR 608.2d suppression arms for `PutChosenCounter`,
-/// `RemoveCounter`, `Forage` and `CastFromZone` but none for `MoveCounters`;
-/// adding the natural `MoveCounters` arm would silently turn both tests into
-/// tautologies that pass even with their rule deleted.
-///
-/// This test pins that assumption directly, using the same effect shape without
-/// an intervening-if so the ability actually resolves while empty. If someone
-/// adds the suppression arm, THIS test fails loudly and points at the two tests
-/// whose discriminator it just disarmed.
-#[test]
-fn issue_7386_resolved_but_empty_move_still_offers_its_optional_window() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-
-    // No counters at all, and no intervening-if to stop the trigger.
-    let shuttle = scenario
-        .add_creature_from_oracle(P0, "Counter Shuttle", 0, 0, NO_GATE_ORACLE)
-        .as_artifact()
-        .id();
-
-    let receiver = scenario
-        .add_creature(P0, "Counter Receiver", 2, 2)
-        .with_plus_counters(12)
-        .id();
-
-    let mut runner = scenario.build();
-    runner.advance_to_phase(Phase::BeginCombat);
-
-    assert_eq!(
-        runner.state().stack.len(),
-        1,
-        "reach-guard: an ungated begin-combat trigger reaches the stack even \
-         with nothing to move"
-    );
-
-    let prompts = drive_trigger(&mut runner, receiver, true);
-
-    assert_eq!(
-        prompts.optional, 1,
-        "CR 608.2d: a MoveCounters that resolves with nothing to move STILL \
-         offers its 'you may' window. The CR 603.4 and CR 608.2b tests below \
-         infer 'the ability left the stack' from the ABSENCE of this window — \
-         if this assertion ever fails, those two tests are no longer valid."
-    );
-    assert_eq!(
-        counters(&runner, shuttle, &CounterType::Plus1Plus1),
-        0,
-        "control: nothing was on the source to move"
-    );
-    assert_eq!(
-        counters(&runner, receiver, &CounterType::Plus1Plus1),
-        12,
-        "control: accepting an empty move changes nothing"
-    );
-}
-
 /// CR 608.2b: the declared target is illegal by resolution, so the ability is
 /// removed from the stack and does nothing — the counters stay on The Ozolith
 /// rather than being destroyed or half-moved.
@@ -409,6 +383,8 @@ fn issue_7386_illegal_target_at_resolution_leaves_counters_untouched() {
         1,
         "reach-guard: the begin-combat trigger is on the stack awaiting resolution"
     );
+    append_resolution_entry_probe(&mut runner);
+    let life_before = runner.life(P0);
 
     // Kill the bound target IN RESPONSE, exactly as a real game would: an
     // instant cast while the trigger sits on the stack. `commit()` + a single
@@ -438,14 +414,19 @@ fn issue_7386_illegal_target_at_resolution_leaves_counters_untouched() {
         prompts,
         Prompts::default(),
         "CR 608.2b: the ability is removed from the stack, so NO decision is \
-         presented — not the target walk and not the 'you may' window. A \
-         resolved-but-empty move WOULD have asked (pinned by \
-         issue_7386_resolved_but_empty_move_still_offers_its_optional_window)."
+         presented — not the target walk and not the 'you may' window."
     );
     assert_eq!(
         runner.state().stack.len(),
         0,
         "CR 608.2b: the ability actually left the stack rather than stalling on it"
+    );
+    assert_eq!(
+        runner.life(P0),
+        life_before,
+        "CR 608.2b: removing the ability before normal resolution also skips its \
+         independent continuation. If the resolver instead reached the optional \
+         move and auto-declined it, this SequentialSibling probe would gain life."
     );
     assert_eq!(
         counters(&runner, ozolith, &CounterType::Plus1Plus1),
@@ -459,9 +440,10 @@ fn issue_7386_illegal_target_at_resolution_leaves_counters_untouched() {
 /// counters gone by then, the ability is removed from the stack and the target
 /// receives nothing.
 ///
-/// The discriminator is `prompts.optional == 0`. Were the recheck skipped, the
-/// ability would resolve normally, present its "you may" window, and then move
-/// zero counters — leaving counter totals byte-identical to this test's.
+/// The reach guards establish that the trigger was on the stack, and the final
+/// stack assertion records its expected departure. Counter totals and prompt
+/// absence alone cannot distinguish that from an impossible optional move,
+/// because CR 608.2d suppresses an unchoosable move.
 #[test]
 fn issue_7386_intervening_if_rechecked_at_resolution() {
     let mut scenario = GameScenario::new();
@@ -491,6 +473,8 @@ fn issue_7386_intervening_if_rechecked_at_resolution() {
         1,
         "reach-guard: the begin-combat trigger is on the stack awaiting resolution"
     );
+    append_resolution_entry_probe(&mut runner);
+    let life_before = runner.life(P0);
 
     // Stand in for an opponent's removal effect emptying The Ozolith while the
     // trigger is on the stack. Injected directly because no counter-removal
@@ -509,14 +493,19 @@ fn issue_7386_intervening_if_rechecked_at_resolution() {
     assert_eq!(
         prompts.optional, 0,
         "CR 603.4: the intervening-if is false on resolution, so the ability \
-         leaves the stack WITHOUT presenting its 'you may' window. A \
-         resolved-but-empty move WOULD have prompted (pinned by \
-         issue_7386_resolved_but_empty_move_still_offers_its_optional_window)."
+         leaves the stack WITHOUT presenting its 'you may' window."
     );
     assert_eq!(
         runner.state().stack.len(),
         0,
         "CR 603.4: the ability actually left the stack rather than stalling on it"
+    );
+    assert_eq!(
+        runner.life(P0),
+        life_before,
+        "CR 603.4: the false intervening-if prevents normal resolution and its \
+         independent continuation. If the resolver instead reached the optional \
+         move and auto-declined it, this SequentialSibling probe would gain life."
     );
     assert_eq!(
         counters(&runner, receiver, &CounterType::Plus1Plus1),

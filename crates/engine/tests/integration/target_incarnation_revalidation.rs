@@ -9,7 +9,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
-    CastingVariant, RetargetScope, StackEntry, StackEntryKind, WaitingFor,
+    CastingVariant, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::CardId;
 use engine::types::phase::Phase;
@@ -44,6 +44,7 @@ fn selected_target_does_not_follow_object_id_after_zone_change_and_return() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activation announcement must be accepted");
     runner
@@ -57,7 +58,7 @@ fn selected_target_does_not_follow_object_id_after_zone_change_and_return() {
             .stack
             .back()
             .and_then(|entry| entry.ability())
-            .map(|ability| ability.selected_target_incarnations.len()),
+            .map(|ability| ability.target_pins.iter().flatten().count()),
         Some(1),
         "the announced target must be pinned on the stack entry"
     );
@@ -66,6 +67,7 @@ fn selected_target_does_not_follow_object_id_after_zone_change_and_return() {
         .act(GameAction::ActivateAbility {
             source_id: blink,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the intervening blink activation must be accepted");
     runner
@@ -153,7 +155,7 @@ fn stale_target_stack() -> (
             .stack
             .back()
             .and_then(|entry| entry.ability())
-            .is_some_and(|ability| ability.selected_target_pin_is_current(target, runner.state())),
+            .is_some_and(|ability| ability.target_occurrence_is_current(0, runner.state())),
         "the round-trip must stale the original selected-target pin"
     );
     (runner, target)
@@ -162,23 +164,35 @@ fn stale_target_stack() -> (
 #[test]
 fn interactive_same_object_id_retarget_refreshes_selected_target_pin() {
     let (mut runner, target) = stale_target_stack();
+    // CR 115.7d, INVARIANT SC (phase-rs/phase#8355 round-8 review finding H2):
+    // production-shaped, not the outer-empty `#[serde(default)]` compatibility
+    // shape (N16) — a real prompt always stores `slots`/`slot_pools` for the
+    // position it addresses, and this row exists to exercise THAT path, not
+    // the compatibility fallback (which routes through a different branch in
+    // `apply_retarget` and would leave this row unable to detect H2's defect).
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
+        keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::Single,
         current_targets: vec![TargetRef::Object(target)],
+        slots: vec![RetargetSlotAddress {
+            path: vec![],
+            slot: 0,
+        }],
+        slot_pools: vec![vec![TargetRef::Object(target)]],
         legal_new_targets: vec![TargetRef::Object(target)],
     };
 
     runner
         .act(GameAction::RetargetSpell {
-            new_targets: vec![TargetRef::Object(target)],
+            new_targets: vec![Some(TargetRef::Object(target))],
         })
         .expect("same-ID retarget must be accepted");
 
     let ability = runner.state().stack[0].ability().expect("ability on stack");
     assert!(
-        ability.selected_target_pin_is_current(target, runner.state()),
+        ability.target_occurrence_is_current(0, runner.state()),
         "interactive same-ID retarget must refresh the selected-target pin"
     );
 }
@@ -253,7 +267,7 @@ fn forced_same_object_id_retarget_refreshes_selected_target_pin() {
 
     let ability = runner.state().stack[0].ability().expect("ability on stack");
     assert!(
-        ability.selected_target_pin_is_current(target, runner.state()),
+        ability.target_occurrence_is_current(0, runner.state()),
         "forced same-ID retarget must refresh the selected-target pin"
     );
 }

@@ -7,12 +7,14 @@ type SavedDeckSubmission = {
   draftToken: string;
   submissionId: string;
   mainDeck: string[];
+  commanders: string[];
   timestamp: number;
 };
 
 const sessionState = vi.hoisted(() => ({
   sessions: [] as Array<{
     handler: ((message: unknown) => void) | null;
+    end: (() => void) | null;
     send: ReturnType<typeof vi.fn>;
     close: ReturnType<typeof vi.fn>;
   }>,
@@ -30,9 +32,10 @@ const persistenceState = vi.hoisted(() => ({
 }));
 
 vi.mock("../../network/draftPeerSession", () => ({
-  createDraftPeerSession: vi.fn(() => {
+  createDraftPeerSession: vi.fn((_connection: unknown, options: { onSessionEnd: () => void }) => {
     const session = {
       handler: null as ((message: unknown) => void) | null,
+      end: options.onSessionEnd,
       send: vi.fn(async () => {}),
       close: vi.fn(),
     };
@@ -52,6 +55,7 @@ vi.mock("../../network/draftPeerSession", () => ({
 vi.mock("../../services/draftPersistence", () => persistenceState);
 
 import { P2PDraftGuest } from "../p2p-draft-guest";
+import { PEER_CONNECT_OPTIONS } from "../../network/connection";
 import { DRAFT_PROTOCOL_VERSION, validateDraftMessage } from "../../network/draftProtocol";
 
 const reconnectAck = {
@@ -59,7 +63,7 @@ const reconnectAck = {
   draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
   seatIndex: 2,
   draftCode: "draft-xyz",
-  view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+  view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
 };
 
 describe("P2P draft guest handshake attempts", () => {
@@ -69,7 +73,7 @@ describe("P2P draft guest handshake attempts", () => {
     persistenceState.loadDraftDeckSubmission.mockResolvedValue(null);
   });
 
-  it("keeps a deck submission in the participant outbox until its matching receipt", async () => {
+  it("keeps an ordered duplicate commander designation in the participant outbox until its matching receipt", async () => {
     sessionState.sessions.length = 0;
     persistenceState.loadDraftDeckSubmission.mockResolvedValue(null);
     const guest = new P2PDraftGuest(
@@ -89,16 +93,21 @@ describe("P2P draft guest handshake attempts", () => {
       draftToken: "opaque-token",
       seatIndex: 2,
       draftCode: "draft-xyz",
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await handshake;
 
-    const submitted = guest.submitDeck(["Island"]);
+    const commanders = ["The Prismatic Piper", "The Prismatic Piper"];
+    const submitted = guest.submitDeck(["Island"], commanders);
     await vi.waitFor(() => expect(persistenceState.saveDraftDeckSubmission).toHaveBeenCalledOnce());
+    expect(persistenceState.saveDraftDeckSubmission).toHaveBeenCalledWith(
+      "phase2-ABCDE",
+      expect.objectContaining({ mainDeck: ["Island"], commanders }),
+    );
     const sent = sessionState.sessions[0]!.send.mock.calls.find(
       ([message]) => (message as { type?: string }).type === "draft_submit_deck",
-    )?.[0] as { submissionId: string; mainDeck: string[] };
-    expect(sent).toMatchObject({ mainDeck: ["Island"] });
+    )?.[0] as { submissionId: string; mainDeck: string[]; commanders: string[] };
+    expect(sent).toMatchObject({ mainDeck: ["Island"], commanders });
     const sendIndex = sessionState.sessions[0]!.send.mock.calls.findIndex(
       ([message]) => (message as { type?: string }).type === "draft_submit_deck",
     );
@@ -110,7 +119,7 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[0]!.handler!({
       type: "draft_deck_submit_ack",
       submissionId: sent.submissionId,
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await submitted;
     expect(persistenceState.clearDraftDeckSubmission).toHaveBeenCalledWith(
@@ -134,7 +143,7 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[0]!.handler!({
       type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
       draftToken: "opaque-token", seatIndex: 2, draftCode: "draft-xyz",
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await handshake;
     await Promise.resolve();
@@ -145,8 +154,8 @@ describe("P2P draft guest handshake attempts", () => {
       releaseLoad = () => resolve(null);
     }));
 
-    const first = guest.submitDeck(["Island"]);
-    const second = guest.submitDeck(["Island"]);
+    const first = guest.submitDeck(["Island"], []);
+    const second = guest.submitDeck(["Island"], []);
     expect(second).toBe(first);
     expect(persistenceState.loadDraftDeckSubmission).toHaveBeenCalledTimes(1);
     releaseLoad();
@@ -161,7 +170,7 @@ describe("P2P draft guest handshake attempts", () => {
     const command = commands[0]![0] as { submissionId: string };
     sessionState.sessions[0]!.handler!({
       type: "draft_deck_submit_ack", submissionId: command.submissionId,
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
   });
@@ -181,10 +190,10 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[0]!.handler!({
       type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
       draftToken: "opaque-token", seatIndex: 2, draftCode: "draft-xyz",
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await handshake;
-    const first = guest.submitDeck(["Island"]);
+    const first = guest.submitDeck(["Island"], []);
     await vi.waitFor(() => expect(sessionState.sessions[0]!.send.mock.calls.some(
       ([message]) => (message as { type?: string }).type === "draft_submit_deck",
     )).toBe(true));
@@ -217,10 +226,10 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[0]!.handler!({
       type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
       draftToken: "opaque-token", seatIndex: 2, draftCode: "draft-xyz",
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await handshake;
-    const submitted = guest.submitDeck(["Island"]);
+    const submitted = guest.submitDeck(["Island"], []);
     await vi.waitFor(() => expect(sessionState.sessions[0]!.send.mock.calls.some(
       ([message]) => (message as { type?: string }).type === "draft_submit_deck",
     )).toBe(true));
@@ -252,10 +261,10 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[0]!.handler!({
       type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
       draftToken: "opaque-token", seatIndex: 2, draftCode: "draft-xyz",
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await initialHandshake;
-    const submitted = guest.submitDeck(["Island"]);
+    const submitted = guest.submitDeck(["Island"], []);
     await vi.waitFor(() => expect(sessionState.sessions[0]!.send.mock.calls.some(
       ([message]) => (message as { type?: string }).type === "draft_submit_deck",
     )).toBe(true));
@@ -265,7 +274,7 @@ describe("P2P draft guest handshake attempts", () => {
     persistenceState.loadDraftDeckSubmission.mockResolvedValue({
       hostPeerId: "phase2-ABCDE", draftCode: "draft-xyz", roomCode: "ABCDE",
       draftToken: "opaque-token", submissionId: command.submissionId,
-      mainDeck: ["Island"], timestamp: Date.now(),
+      mainDeck: ["Island"], commanders: [], timestamp: Date.now(),
     });
 
     const reconnect = privateGuest.handshakeOn({} as never, undefined, true);
@@ -277,7 +286,7 @@ describe("P2P draft guest handshake attempts", () => {
     ));
     sessionState.sessions[1]!.handler!({
       type: "draft_deck_submit_ack", submissionId: command.submissionId,
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await submitted;
   });
@@ -296,6 +305,7 @@ describe("P2P draft guest handshake attempts", () => {
           draftToken: "old-token",
           submissionId: "old-submission",
           mainDeck: ["Island"],
+          commanders: [],
           timestamp: Date.now(),
         };
       }
@@ -313,7 +323,7 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[0]!.handler!({
       type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
       draftToken: "new-token", seatIndex: 2, draftCode: "new-pod",
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await handshake;
     await vi.waitFor(() => expect(persistenceState.loadDraftDeckSubmission).toHaveBeenCalledWith(
@@ -352,7 +362,7 @@ describe("P2P draft guest handshake attempts", () => {
       draftToken: "opaque-token",
       seatIndex: 2,
       draftCode: "draft-xyz",
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
     await Promise.resolve();
 
@@ -371,6 +381,180 @@ describe("P2P draft guest handshake attempts", () => {
       displayName: "Alice",
       hostPeerId: "phase2-ABCDE",
     });
+  });
+
+  it("clears recovery and the deck outbox only after the host acknowledges leave", async () => {
+    const guest = new P2PDraftGuest(
+      { destroy: vi.fn() } as never,
+      "phase2-ABCDE",
+      {} as never,
+      { kind: "new", roomCode: "ABCDE", displayName: "Alice" },
+    );
+    const privateGuest = guest as unknown as {
+      handshakeOn: (connection: unknown, signal: AbortSignal | undefined, reconnect: boolean) => Promise<void>;
+    };
+    const handshake = privateGuest.handshakeOn({} as never, undefined, false);
+    await Promise.resolve();
+    sessionState.sessions[0]!.handler!({
+      type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+      draftToken: "leave-token", seatIndex: 2, draftCode: "draft-xyz",
+      view: { launch_capability: "None", status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
+    });
+    await handshake;
+
+    const leave = guest.leave();
+    await vi.waitFor(() => expect(sessionState.sessions[0]!.send).toHaveBeenCalledWith({
+      type: "draft_leave", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
+    }));
+    expect(persistenceState.clearDraftGuestRecovery).not.toHaveBeenCalled();
+    expect(persistenceState.clearDraftDeckSubmission).not.toHaveBeenCalled();
+
+    sessionState.sessions[0]!.handler!({
+      type: "draft_leave_ack", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
+    });
+    await leave;
+    expect(persistenceState.clearDraftGuestRecovery).toHaveBeenCalledWith("phase2-ABCDE");
+    expect(persistenceState.clearDraftDeckSubmission).toHaveBeenCalledWith("phase2-ABCDE");
+  });
+
+  it("keeps a dropped leave acknowledgement recoverable and permits a later leave", async () => {
+    const events: unknown[] = [];
+    const guest = new P2PDraftGuest(
+      { destroy: vi.fn() } as never,
+      "phase2-ABCDE",
+      {} as never,
+      { kind: "new", roomCode: "ABCDE", displayName: "Alice" },
+    );
+    guest.onEvent((event) => events.push(event));
+    const privateGuest = guest as unknown as {
+      handshakeOn: (connection: unknown, signal: AbortSignal | undefined, reconnect: boolean) => Promise<void>;
+    };
+    const handshake = privateGuest.handshakeOn({} as never, undefined, false);
+    await Promise.resolve();
+    sessionState.sessions[0]!.handler!({
+      type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+      draftToken: "leave-token", seatIndex: 2, draftCode: "draft-xyz",
+      view: { launch_capability: "None", status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
+    });
+    await handshake;
+
+    const abandonedLeave = guest.leave();
+    await vi.waitFor(() => expect(sessionState.sessions[0]!.send).toHaveBeenCalledWith({
+      type: "draft_leave", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
+    }));
+    sessionState.sessions[0]!.end!();
+
+    await expect(abandonedLeave).rejects.toThrow("disconnected before acknowledging leave");
+    expect(guest.token).toBe("leave-token");
+    expect(events).toContainEqual({ type: "reconnecting", attempt: 1 });
+    expect(persistenceState.clearDraftGuestRecovery).not.toHaveBeenCalled();
+
+    const reconnect = privateGuest.handshakeOn({} as never, undefined, true);
+    await Promise.resolve();
+    sessionState.sessions[1]!.handler!(reconnectAck);
+    await reconnect;
+
+    const laterLeave = guest.leave();
+    await vi.waitFor(() => expect(sessionState.sessions[1]!.send).toHaveBeenCalledWith({
+      type: "draft_leave", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
+    }));
+    sessionState.sessions[1]!.handler!({
+      type: "draft_leave_ack", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
+    });
+    await laterLeave;
+    expect(persistenceState.clearDraftGuestRecovery).toHaveBeenCalledWith("phase2-ABCDE");
+  });
+
+  it("clears recovery and the deck outbox when the host ends the draft", async () => {
+    const guest = new P2PDraftGuest(
+      {} as never,
+      "phase2-ABCDE",
+      {} as never,
+      { kind: "new", roomCode: "ABCDE", displayName: "Alice" },
+    );
+    const privateGuest = guest as unknown as {
+      handshakeOn: (connection: unknown, signal: AbortSignal | undefined, reconnect: boolean) => Promise<void>;
+    };
+    const handshake = privateGuest.handshakeOn({} as never, undefined, false);
+    await Promise.resolve();
+    sessionState.sessions[0]!.handler!({
+      type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+      draftToken: "host-left-token", seatIndex: 2, draftCode: "draft-xyz",
+      view: { launch_capability: "None", status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
+    });
+    await handshake;
+    persistenceState.clearDraftGuestRecovery.mockClear();
+    persistenceState.clearDraftDeckSubmission.mockClear();
+
+    sessionState.sessions[0]!.handler!({ type: "draft_host_left", reason: "Host left" });
+    await vi.waitFor(() => expect(persistenceState.clearDraftGuestRecovery).toHaveBeenCalledWith("phase2-ABCDE"));
+    expect(persistenceState.clearDraftDeckSubmission).toHaveBeenCalledWith("phase2-ABCDE");
+    await vi.waitFor(() => expect(guest.isRecoveryRevoked).toBe(true));
+  });
+
+  it.each([
+    ["draft_kicked", { type: "draft_kicked", reason: "Removed from draft" }, { type: "kicked", reason: "Removed from draft" }],
+    ["draft_host_left", { type: "draft_host_left", reason: "Host left" }, { type: "hostLeft", reason: "Host left" }],
+  ])("settles a pending leave when the host sends %s", async (_messageType, message, terminalEvent) => {
+    const events: unknown[] = [];
+    const guest = new P2PDraftGuest(
+      {} as never,
+      "phase2-ABCDE",
+      {} as never,
+      { kind: "new", roomCode: "ABCDE", displayName: "Alice" },
+    );
+    guest.onEvent((event) => events.push(event));
+    const privateGuest = guest as unknown as {
+      handshakeOn: (connection: unknown, signal: AbortSignal | undefined, reconnect: boolean) => Promise<void>;
+    };
+    const handshake = privateGuest.handshakeOn({} as never, undefined, false);
+    await Promise.resolve();
+    sessionState.sessions[0]!.handler!({
+      type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+      draftToken: "leave-token", seatIndex: 2, draftCode: "draft-xyz",
+      view: { launch_capability: "None", status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
+    });
+    await handshake;
+
+    const leave = guest.leave();
+    await vi.waitFor(() => expect(sessionState.sessions[0]!.send).toHaveBeenCalledWith({
+      type: "draft_leave", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "leave-token",
+    }));
+    sessionState.sessions[0]!.handler!(message);
+
+    await expect(leave).resolves.toBeUndefined();
+    expect(events).toContainEqual(terminalEvent);
+  });
+
+  it("finishes terminal host handling when recovery cleanup fails", async () => {
+    const events: unknown[] = [];
+    const guest = new P2PDraftGuest(
+      {} as never,
+      "phase2-ABCDE",
+      {} as never,
+      { kind: "new", roomCode: "ABCDE", displayName: "Alice" },
+    );
+    guest.onEvent((event) => events.push(event));
+    const privateGuest = guest as unknown as {
+      handshakeOn: (connection: unknown, signal: AbortSignal | undefined, reconnect: boolean) => Promise<void>;
+    };
+    const handshake = privateGuest.handshakeOn({} as never, undefined, false);
+    await Promise.resolve();
+    sessionState.sessions[0]!.handler!({
+      type: "draft_welcome", draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+      draftToken: "host-left-token", seatIndex: 2, draftCode: "draft-xyz",
+      view: { launch_capability: "None", status: "Lobby", draft_effects: [], seats: [] }, workspaceState: null,
+    });
+    await handshake;
+    persistenceState.clearDraftGuestRecovery.mockRejectedValueOnce(new Error("storage unavailable"));
+    persistenceState.clearDraftDeckSubmission.mockRejectedValueOnce(new Error("outbox unavailable"));
+
+    sessionState.sessions[0]!.handler!({ type: "draft_host_left", reason: "Host left" });
+
+    await vi.waitFor(() => expect(guest.isRecoveryRevoked).toBe(true));
+    expect(events).toContainEqual({ type: "hostLeft", reason: "Host left" });
+    expect(persistenceState.clearDraftGuestRecovery).toHaveBeenCalledWith("phase2-ABCDE");
+    expect(persistenceState.clearDraftDeckSubmission).toHaveBeenCalledWith("phase2-ABCDE");
   });
 
   it("waits for token persistence before completing a reconnect acknowledgement", async () => {
@@ -430,7 +614,7 @@ describe("P2P draft guest handshake attempts", () => {
       draftToken: "opaque-token",
       seatIndex: 2,
       draftCode: "draft-xyz",
-      view: { status: "Deckbuilding", draft_effects: [], seats: [] },
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
     });
 
     await expect(handshake).rejects.toThrow("IDB unavailable");
@@ -527,5 +711,37 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[1]!.handler!(reconnectAck);
     await expect(second).resolves.toBeUndefined();
     expect(secondSettled).toBe(true);
+  });
+
+  it("dials the reconnect transport with the shared ordered-channel connect options", async () => {
+    // Unlike every other test here, this one needs a real `guestPeer`: the dial
+    // is `this.guestPeer.connect(...)`, which the shared `{} as never` peer
+    // cannot answer.
+    const connHandlers = new Map<string, (arg?: unknown) => void>();
+    const reconnectConn = {
+      on: vi.fn((event: string, handler: (arg?: unknown) => void) => {
+        connHandlers.set(event, handler);
+      }),
+    };
+    const connect = vi.fn(() => reconnectConn);
+    const guest = new P2PDraftGuest(
+      { connect } as never,
+      "phase2-ABCDE",
+      {} as never,
+      { kind: "reconnect", roomCode: "ABCDE", displayName: "Alice", draftToken: "opaque-token" },
+    );
+    const privateGuest = guest as unknown as {
+      openReconnectConnection: (signal?: AbortSignal) => Promise<unknown>;
+    };
+
+    const dial = privateGuest.openReconnectConnection();
+
+    // `reliable: true` is what PeerJS maps to `createDataChannel(…, { ordered
+    // }) `; an option-less dial silently yields an unordered channel that a
+    // TURN relay will actually reorder.
+    expect(connect).toHaveBeenCalledWith("phase2-ABCDE", PEER_CONNECT_OPTIONS);
+
+    connHandlers.get("open")!();
+    await expect(dial).resolves.toBe(reconnectConn);
   });
 });

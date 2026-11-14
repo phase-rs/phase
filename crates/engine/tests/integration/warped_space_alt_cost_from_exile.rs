@@ -14,7 +14,7 @@
 //! concern, not this one.
 
 use engine::game::scenario::{GameScenario, P0};
-use engine::types::ability::{CastingPermission, Duration};
+use engine::types::ability::{CardPlayMode, CastingPermission, Duration};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -27,8 +27,10 @@ const WARPED_SPACE_TEXT: &str = "Once each turn, you may pay {0} rather than pay
 
 fn exile_permission() -> CastingPermission {
     CastingPermission::PlayFromExile {
+        provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
         duration: Duration::UntilEndOfTurn,
         granted_to: P0,
+        mode: CardPlayMode::Play,
         frequency: CastFrequency::Unlimited,
         source_id: None,
         invalidation: None,
@@ -37,7 +39,9 @@ fn exile_permission() -> CastingPermission {
         card_filter: None,
         single_use_group: None,
         single_use: false,
-        cast_cost_raise: None,
+        cast_cost_modifier: None,
+        alt_ability_cost: None,
+        without_paying_mana_cost: false,
         land_enter_tapped: EtbTapState::Unspecified,
     }
 }

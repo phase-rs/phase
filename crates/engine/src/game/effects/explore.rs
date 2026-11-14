@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::game::filter;
+use crate::game::priority;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
@@ -281,7 +282,8 @@ pub(crate) fn resolve_explore_effect(
         .find(|p| p.id == controller)
         .ok_or(EffectError::PlayerNotFound)?;
 
-    if player.library.is_empty() {
+    let library = state.library_of(player.id);
+    if library.is_empty() {
         // CR 701.44a: Explore with empty library — just put a +1/+1 counter.
         add_explore_counter(state, explorer_id, events);
 
@@ -294,7 +296,7 @@ pub(crate) fn resolve_explore_effect(
     }
 
     // Reveal top card
-    let top_card_id = player.library[0];
+    let top_card_id = library[0];
     let revealed_name = state
         .objects
         .get(&top_card_id)
@@ -325,7 +327,10 @@ pub(crate) fn resolve_explore_effect(
                 top_card_id,
                 crate::types::zones::Zone::Hand,
                 ability.source_id,
-            )],
+            )
+            .actors(crate::game::zone_pipeline::MoveActors::performer_and_owner(
+                controller,
+            ))],
             Some(BatchCompletion::ExploreLandDeliveryComplete { explorer_id }),
             events,
         );
@@ -352,6 +357,13 @@ pub(crate) fn resolve_explore_effect(
             up_to: true,
             kept_destination: Some(crate::types::zones::Zone::Library),
             rest_destination: Some(crate::types::zones::Zone::Graveyard),
+            // CR 701.44a: the printed instruction names both dispositions, so
+            // this is a routed remainder, not a silent one.
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
+            // CR 701.44a: explore reveals exactly ONE card (the top card of the
+            // library) and sends it to one place — hand, graveyard, or left on
+            // top. A single card has no remainder to split.
+            rest_split_top_count: None,
             rest_order: crate::types::ability::DigRestOrder::Preserve,
             source_id: Some(ability.source_id),
             enter_tapped: false,
@@ -415,6 +427,15 @@ pub fn handle_choice(
             "Invalid explore choice".to_string(),
         ));
     }
+
+    // CR 701.44d + CR 608.2c + CR 117.3b: Retire the consumed APNAP-ordering
+    // choice before carrying out this explorer's instruction. `Priority` is an
+    // internal neutral sentinel here, not a mid-resolution priority grant; the
+    // resolving ability grants the active player priority only after it finishes.
+    priority::reset_priority(state);
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
 
     let remaining: Vec<ObjectId> = remaining
         .iter()

@@ -15,7 +15,7 @@
 //! firing the bounce rider every time regardless of affordability.
 //!
 //! Fix: `rewrite_cant_rider_for_non_zone_change_parent`
-//! (`crates/engine/src/parser/oracle_effect/mod.rs`) — already carved out for
+//! (`crates/phase-parser/src/parser/oracle_effect/mod.rs`) — already carved out for
 //! the analogous `Effect::TurnFaceUp` class (Etrata, Deadly Fugitive: "Turn
 //! this creature face up. If you can't, exile it …") — now also recognizes
 //! `Effect::PayCost` as a zone-change-ledger-invisible parent and rewrites the
@@ -247,7 +247,7 @@ fn scenario_with_stolen_rampager(
     // `GameScenario::at_phase` hands the active player/priority to P0 (the
     // scenario default). The reanimation spell is cast by P1, so hand P1 both
     // active-player status and priority — otherwise the sorcery-speed cast is
-    // rejected as "not a castable zone" (CR 601.3g: sorcery-speed casting
+    // rejected as "not a castable zone" (CR 307.1: sorcery-speed casting
     // requires the caster to be the active player with an empty stack).
     runner.state_mut().active_player = P1;
     runner.state_mut().priority_player = P1;

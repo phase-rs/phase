@@ -47,10 +47,11 @@ const EMPTY_PILLS: ReadonlyArray<CounterRowView> = [];
  * the fix lands at every `groupByName` consumer at once instead of per chip. `isUnboundedPile`'s
  * `.every()` stays as written: it is a fail-safe over a channel `groupKey` does not key on.
  *
- * Subscribed today by exactly FIVE render sites — EVERY counter DISPLAY surface in the client:
+ * Subscribed today by exactly SIX render sites — EVERY counter DISPLAY surface in the client:
  * `board/PermanentCard`, `card/ArtCropCard`, `card/CardPreview`'s `CardInfoPanel`,
- * `controls/AttackTargetPicker`'s `StackLabel`, and `hud/DialogAttachmentCard`. FU-B (the last
- * one) landed with this ledger revision; it previously enumerated and re-filtered
+ * `controls/AttackTargetPicker`'s `StackLabel`, `hud/DialogAttachmentCard`, and
+ * `zone/ZoneViewer`'s public-exile time-counter badge. FU-B (the last
+ * pre-ZoneViewer one) landed with this ledger revision; it previously enumerated and re-filtered
  * `obj.counters`, so it could not express an `Unbounded` pill at all.
  *
  * Every surviving reader of the raw `objects[id].counters` map, measured with `git grep` and
@@ -86,7 +87,15 @@ export const pillsOf = (display: ObjectCounterDisplay): ReadonlyArray<CounterRow
   display.pills ?? EMPTY_PILLS;
 
 /**
- * The single spelling of the engine enum → render-time distinction, so the five render sites
+ * The engine-projected time-counter row, if the object has one. This is deliberately only a
+ * display-row lookup: callers must not use it to infer a keyword or rules status (for example,
+ * whether an exiled card is suspended).
+ */
+export const timeCounterOf = (display: ObjectCounterDisplay): CounterRowView | undefined =>
+  pillsOf(display).find((row) => row.counter === "time");
+
+/**
+ * The single spelling of the engine enum → render-time distinction, so the six render sites
  * cannot drift. An absent `magnitude` is the serde default, `"Finite"`.
  */
 export const isUnbounded = (row?: CounterRowView): boolean => row?.magnitude === "Unbounded";
