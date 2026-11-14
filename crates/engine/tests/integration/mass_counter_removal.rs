@@ -11,16 +11,21 @@
 //! Temporal Distortion's bare-plural population ("permanents that player
 //! controls") is covered in `controller_anaphor_binds_through_context.rs`.
 
+use engine::game::coverage::card_face_gaps;
 use engine::game::game_object::{PhaseOutCause, PhaseStatus};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::parser::parse_oracle_text;
+use engine::types::ability::CounterTriggerFilter;
 use engine::types::actions::GameAction;
+use engine::types::card::CardFace;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::{PlayerCounterKind, PlayerId};
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 const AETHER_SNAP: &str = "Remove all counters from all permanents and exile all tokens.";
@@ -378,226 +383,7 @@ fn heartmender_upkeep_removes_one_counter_from_each_of_your_creatures() {
     );
 }
 
-const PROTEAN_HYDRA: &str = "This creature enters with X +1/+1 counters on it.\n\
-If damage would be dealt to this creature, prevent that damage and remove that many +1/+1 counters from it.\n\
-Whenever a +1/+1 counter is removed from this creature, put two +1/+1 counters on it at the beginning of the next end step.";
-const GLORIOUS_ANTHEM: &str = "Creatures you control get +1/+1.";
 const THRULL_PARASITE: &str = "{T}, Pay 2 life: Remove a counter from target nonland permanent.";
-
-/// F1 (CR 603.2c): one `CounterRemoved { count: 2 }` event holds two occurrences,
-/// so Protean Hydra's "Whenever a +1/+1 counter is removed from this creature"
-/// fires twice (ruling: "If multiple +1/+1 counters are removed from Protean
-/// Hydra at once, its last ability will trigger that many times"). Glorious
-/// Anthem keeps the 0/0 Hydra alive once Aether Snap strips its two counters;
-/// each firing creates its own delayed trigger, restoring 2 + 2 counters.
-#[test]
-fn aether_snap_triggers_protean_hydra_once_per_counter_removed() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let hydra = scenario
-        .add_creature_from_oracle(P0, "Protean Hydra", 0, 0, PROTEAN_HYDRA)
-        .id();
-    scenario.with_counter(hydra, CounterType::Plus1Plus1, 2);
-    scenario.add_enchantment_from_oracle(P0, "Glorious Anthem", GLORIOUS_ANTHEM);
-    let snap = scenario
-        .add_spell_to_hand_from_oracle(P0, "Aether Snap", false, AETHER_SNAP)
-        .with_mana_cost(ManaCost::generic(0))
-        .id();
-    let mut runner = scenario.build();
-
-    let outcome = runner.cast(snap).resolve();
-    let removed = removals(outcome.events());
-    assert_eq!(
-        removed,
-        vec![(hydra, CounterType::Plus1Plus1, 2)],
-        "the mass removal emits one aggregate event for the two counters"
-    );
-    assert_eq!(count_of(&runner, hydra, &CounterType::Plus1Plus1), 0);
-    assert!(
-        runner.state().objects.contains_key(&hydra)
-            && runner.state().objects[&hydra].zone == Zone::Battlefield,
-        "Glorious Anthem keeps the Hydra alive"
-    );
-    runner.advance_until_stack_empty();
-    assert_eq!(
-        runner.state().delayed_triggers.len(),
-        2,
-        "one Hydra firing per counter removed (CR 603.2c), each creating its own end-step delayed trigger"
-    );
-    drive_to_settled_end_step(&mut runner);
-    assert_eq!(
-        count_of(&runner, hydra, &CounterType::Plus1Plus1),
-        4,
-        "two delayed triggers each put two +1/+1 counters on the Hydra"
-    );
-}
-
-/// Drives the current turn from its main phase to its end step: declines to
-/// attack, passes priority, and orders simultaneously fired triggers (CR
-/// 603.3b; the Hydra's delayed triggers are identical, so any order is the
-/// same). Stops once the end step's stack is empty with no delayed trigger
-/// still waiting, or at cleanup, whatever the counters on the board.
-fn drive_to_settled_end_step(runner: &mut GameRunner) {
-    for _ in 0..80 {
-        let state = runner.state();
-        let settled_end_step = state.phase == Phase::End
-            && state.stack.is_empty()
-            && state.delayed_triggers.is_empty()
-            && matches!(state.waiting_for, WaitingFor::Priority { .. });
-        if settled_end_step || state.phase == Phase::Cleanup {
-            break;
-        }
-        match state.waiting_for.clone() {
-            WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
-            }
-            WaitingFor::DeclareAttackers { .. } => {
-                runner
-                    .act(GameAction::DeclareAttackers {
-                        attacks: vec![],
-                        bands: vec![],
-                    })
-                    .expect("declare no attackers");
-            }
-            WaitingFor::OrderTriggers { triggers, .. } => {
-                runner
-                    .act(GameAction::OrderTriggers {
-                        order: (0..triggers.len()).collect(),
-                    })
-                    .expect("order triggers");
-            }
-            other => panic!("unexpected prompt before the end step: {other:?}"),
-        }
-    }
-    let state = runner.state();
-    assert!(
-        matches!(state.phase, Phase::End | Phase::Cleanup),
-        "the drive must reach the end step; phase={:?}",
-        state.phase
-    );
-}
-
-const BOON_OF_SAFETY: &str = "Put a shield counter on target creature. (If it would be dealt damage or destroyed, remove a shield counter from it instead.)\nScry 1.";
-
-/// Protean Hydra (with `plus1` +1/+1 counters) kept alive by Glorious Anthem,
-/// given two shield counters by two Boon of Safety casts paid with real {W},
-/// then Aether Snap is cast. Returns the runner, the Hydra and the removal
-/// events of the Aether Snap resolution, after its triggers have resolved.
-fn hydra_with_two_shields_under_aether_snap(
-    plus1: u32,
-) -> (GameRunner, ObjectId, Vec<(ObjectId, CounterType, u32)>) {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let hydra = scenario
-        .add_creature_from_oracle(P0, "Protean Hydra", 0, 0, PROTEAN_HYDRA)
-        .id();
-    if plus1 > 0 {
-        scenario.with_counter(hydra, CounterType::Plus1Plus1, plus1);
-    }
-    scenario.add_enchantment_from_oracle(P0, "Glorious Anthem", GLORIOUS_ANTHEM);
-    let boons: Vec<ObjectId> = (0..2)
-        .map(|_| {
-            scenario
-                .add_spell_to_hand_from_oracle(P0, "Boon of Safety", true, BOON_OF_SAFETY)
-                .with_mana_cost(ManaCost::Cost {
-                    shards: vec![ManaCostShard::White],
-                    generic: 0,
-                })
-                .id()
-        })
-        .collect();
-    let snap = scenario
-        .add_spell_to_hand_from_oracle(P0, "Aether Snap", false, AETHER_SNAP)
-        .with_mana_cost(ManaCost::generic(0))
-        .id();
-    scenario.with_mana_pool(
-        P0,
-        (0..2)
-            .map(|_| ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]))
-            .collect(),
-    );
-    let mut runner = scenario.build();
-
-    for boon in boons {
-        runner.cast(boon).target_object(hydra).resolve();
-    }
-    // Reach guard: both kinds are on the Hydra before the mass removal.
-    assert_eq!(count_of(&runner, hydra, &CounterType::Shield), 2);
-    assert_eq!(count_of(&runner, hydra, &CounterType::Plus1Plus1), plus1);
-
-    let outcome = runner.cast(snap).resolve();
-    let removed = removals(outcome.events());
-    runner.advance_until_stack_empty();
-    assert_eq!(count_of(&runner, hydra, &CounterType::Shield), 0);
-    assert_eq!(count_of(&runner, hydra, &CounterType::Plus1Plus1), 0);
-    assert_eq!(
-        runner.state().objects[&hydra].zone,
-        Zone::Battlefield,
-        "Glorious Anthem keeps the Hydra alive"
-    );
-    (runner, hydra, removed)
-}
-
-/// F1 (CR 122.1 + CR 603.2c): Protean Hydra's "Whenever a +1/+1 counter is
-/// removed from this creature" fires once per +1/+1 counter removed, and never
-/// for a removed counter of another kind. With two +1/+1 and two shield
-/// counters, Aether Snap removes all four but the Hydra fires twice, so the
-/// next end step restores four +1/+1 counters, not eight.
-#[test]
-fn aether_snap_triggers_protean_hydra_only_for_its_plus_one_counters() {
-    let (mut runner, hydra, removed) = hydra_with_two_shields_under_aether_snap(2);
-    assert!(
-        removed.contains(&(hydra, CounterType::Shield, 2)),
-        "{removed:?}"
-    );
-    assert!(
-        removed.contains(&(hydra, CounterType::Plus1Plus1, 2)),
-        "{removed:?}"
-    );
-    let plus1_removed: u32 = removed
-        .iter()
-        .filter(|(id, kind, _)| *id == hydra && *kind == CounterType::Plus1Plus1)
-        .map(|(_, _, n)| n)
-        .sum();
-    assert_eq!(
-        runner.state().delayed_triggers.len(),
-        2,
-        "one Hydra firing per +1/+1 counter removed; the shield removals fire nothing"
-    );
-    assert_eq!(
-        runner.state().delayed_triggers.len() as u32,
-        plus1_removed,
-        "the firings match the +1/+1 counters removed"
-    );
-
-    drive_to_settled_end_step(&mut runner);
-    assert_eq!(
-        count_of(&runner, hydra, &CounterType::Plus1Plus1),
-        4,
-        "two delayed triggers each put two +1/+1 counters on the Hydra"
-    );
-}
-
-/// F1 (CR 122.1): removing only shield counters from Protean Hydra is not "a
-/// +1/+1 counter is removed", so it never fires and nothing returns.
-#[test]
-fn aether_snap_removing_only_shields_never_triggers_protean_hydra() {
-    let (mut runner, hydra, removed) = hydra_with_two_shields_under_aether_snap(0);
-    assert_eq!(
-        removed,
-        vec![(hydra, CounterType::Shield, 2)],
-        "reach guard: the shield counters are removed"
-    );
-    assert_eq!(
-        runner.state().delayed_triggers.len(),
-        0,
-        "a shield removal is not a +1/+1 removal"
-    );
-
-    drive_to_settled_end_step(&mut runner);
-    assert_eq!(runner.state().phase, Phase::End, "the end step is reached");
-    assert_eq!(count_of(&runner, hydra, &CounterType::Plus1Plus1), 0);
-}
 
 /// F2 (CR 608.2d): a finite untyped single removal ("Remove a counter from target
 /// nonland permanent", Thrull Parasite) removes exactly one counter, of one of
@@ -626,6 +412,148 @@ fn thrull_parasite_finite_removal_removes_exactly_one_counter() {
     assert!(
         (plus1, ice_left) == (1, 0) || (plus1, ice_left) == (0, 1),
         "the survivor is one of the two kinds: +1/+1={plus1}, ice={ice_left}"
+    );
+}
+
+const BENALISH_COMMANDER: &str = "Benalish Commander's power and toughness are each equal to the number of Soldiers you control.\n\
+Suspend X\u{2014}{X}{W}{W}. X can't be 0.\n\
+Whenever a time counter is removed from this card while it's exiled, create a 1/1 white Soldier creature token.";
+
+/// CR 702.62a + CR 603.2c: the suspend upkeep trigger removes one time counter
+/// per resolution, so Benalish Commander's "Whenever a time counter is removed
+/// from this card while it's exiled" fires once per upkeep removal. Two
+/// suspended copies each lose one counter and each create one Soldier.
+#[test]
+fn suspended_benalish_commander_fires_once_per_upkeep_removal() {
+    let mut scenario = GameScenario::new();
+    // Stock library so the draw step doesn't deck out.
+    scenario.with_library_top(P0, &["Plains", "Plains", "Plains"]);
+    let commanders: Vec<ObjectId> = (0..2)
+        .map(|_| {
+            scenario
+                .add_creature_to_exile(P0, "Benalish Commander", 0, 0)
+                // MTGJSON lists the Suspend keyword, which installs the
+                // CR 702.62a upkeep removal trigger.
+                .from_oracle_text_with_keywords(&["Suspend"], BENALISH_COMMANDER)
+                .id()
+        })
+        .collect();
+    for &commander in &commanders {
+        scenario.with_counter(commander, CounterType::Time, 2);
+    }
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.turn_number = 2;
+    state.phase = Phase::Untap;
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+
+    runner.auto_advance_to_main_phase();
+    runner.advance_until_stack_empty();
+
+    for &commander in &commanders {
+        // Reach guard: the upkeep removal happened, exactly one counter each.
+        assert_eq!(
+            count_of(&runner, commander, &CounterType::Time),
+            1,
+            "each suspended copy loses one time counter at upkeep"
+        );
+        assert_eq!(runner.state().objects[&commander].zone, Zone::Exile);
+    }
+    let soldiers = runner
+        .state()
+        .objects
+        .values()
+        .filter(|obj| {
+            obj.is_token
+                && obj.zone == Zone::Battlefield
+                && obj.controller == P0
+                && obj.card_types.subtypes.iter().any(|s| s == "Soldier")
+        })
+        .count();
+    assert_eq!(
+        soldiers, 2,
+        "one Soldier per single-counter removal, one per suspended copy"
+    );
+}
+
+const PROTEAN_HYDRA: &str = "This creature enters with X +1/+1 counters on it.\n\
+If damage would be dealt to this creature, prevent that damage and remove that many +1/+1 counters from it.\n\
+Whenever a +1/+1 counter is removed from this creature, put two +1/+1 counters on it at the beginning of the next end step.";
+const AEON_CHRONICLER: &str =
+    "Aeon Chronicler's power and toughness are each equal to the number of cards in your hand.\n\
+Suspend X\u{2014}{X}{3}{U}. X can't be 0.\n\
+Whenever a time counter is removed from this card while it's exiled, draw a card.";
+
+/// The parsed face of a creature card, as the coverage report sees it.
+fn creature_face(name: &str, text: &str, keywords: &[&str], subtypes: &[&str]) -> CardFace {
+    let keywords: Vec<String> = keywords.iter().map(|kw| (*kw).to_string()).collect();
+    let subtypes: Vec<String> = subtypes.iter().map(|ty| (*ty).to_string()).collect();
+    let parsed = parse_oracle_text(text, name, &keywords, &["Creature".to_string()], &subtypes);
+    CardFace {
+        name: name.to_string(),
+        oracle_text: Some(text.to_string()),
+        abilities: parsed.abilities,
+        triggers: parsed.triggers,
+        static_abilities: parsed.statics,
+        keywords: parsed.extracted_keywords,
+        replacements: parsed.replacements,
+        parse_warnings: parsed.parse_warnings,
+        ..Default::default()
+    }
+}
+
+/// CR 603.2c: Protean Hydra's "Whenever a +1/+1 counter is removed" must fire
+/// once per counter, and its own prevention clause removes several at once;
+/// the engine's removal event is aggregate, so the trigger is an honest
+/// unknown trigger and coverage does not claim it. Aeon Chronicler's
+/// time-counter trigger, the same passive head with the kind the suspend
+/// upkeep removes one at a time, stays modelled with no trigger gap.
+#[test]
+fn protean_hydra_trigger_is_not_claimed() {
+    let hydra = creature_face("Protean Hydra", PROTEAN_HYDRA, &[], &["Hydra"]);
+    let [trigger] = hydra.triggers.as_slice() else {
+        panic!("expected one trigger, got {:?}", hydra.triggers);
+    };
+    assert!(
+        matches!(trigger.mode, TriggerMode::Unknown(_)),
+        "{:?}",
+        trigger.mode
+    );
+    assert!(
+        !hydra.replacements.is_empty(),
+        "the damage-prevention replacement still parses"
+    );
+    let gaps = card_face_gaps(&hydra);
+    assert!(
+        gaps.iter().any(|gap| gap.starts_with("Trigger:")),
+        "the refused trigger is a coverage gap: {gaps:?}"
+    );
+
+    // Positive reach guard: the same head with the time kind is modelled.
+    let chronicler = creature_face(
+        "Aeon Chronicler",
+        AEON_CHRONICLER,
+        &["Suspend"],
+        &["Avatar"],
+    );
+    let removal = chronicler
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::CounterRemoved)
+        .unwrap_or_else(|| panic!("no CounterRemoved trigger: {:?}", chronicler.triggers));
+    assert_eq!(
+        removal.counter_filter,
+        Some(CounterTriggerFilter {
+            counter_type: CounterType::Time,
+            threshold: None,
+        })
+    );
+    let gaps = card_face_gaps(&chronicler);
+    assert!(
+        !gaps.iter().any(|gap| gap.starts_with("Trigger:")),
+        "the time-counter trigger is not a gap: {gaps:?}"
     );
 }
 

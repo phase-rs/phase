@@ -2879,45 +2879,6 @@ pub(super) fn match_counter_removed(
     }
 }
 
-/// CR 603.2c: "Whenever a counter is removed from <object>" triggers once per
-/// counter, so one aggregate `CounterRemoved { count: N }` event (a single
-/// removal edit of N counters of one kind) holds N occurrences. Expand it into
-/// N single-counter events; the aggregate count stays on the raw event for
-/// whole-event consumers. A "last counter" threshold filter (CR 310.12b) is
-/// evaluated once against the post-removal total, so it is not expanded.
-pub(super) fn matching_counter_removed_occurrences(
-    event: &GameEvent,
-    trigger: &TriggerDefinition,
-    source_context: &TriggerSourceContext,
-    state: &GameState,
-) -> Vec<GameEvent> {
-    let GameEvent::CounterRemoved {
-        object_id,
-        counter_type,
-        count,
-    } = event
-    else {
-        return Vec::new();
-    };
-    if !match_counter_removed(event, trigger, source_context, state) {
-        return Vec::new();
-    }
-    if trigger
-        .counter_filter
-        .as_ref()
-        .is_some_and(|filter| filter.threshold.is_some())
-    {
-        return vec![event.clone()];
-    }
-    (0..(*count).max(1))
-        .map(|_| GameEvent::CounterRemoved {
-            object_id: *object_id,
-            counter_type: counter_type.clone(),
-            count: 1,
-        })
-        .collect()
-}
-
 pub(super) fn match_taps(
     event: &GameEvent,
     trigger: &TriggerDefinition,

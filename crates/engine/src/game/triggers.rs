@@ -1900,12 +1900,6 @@ fn occurrence_trigger_events(
             .into_iter()
             .collect(),
         ),
-        // CR 603.2c: a removal edit of N counters is N occurrences, so the
-        // per-counter trigger fires N times (Protean Hydra ruling). The
-        // "one or more counters" `CounterRemovedOnce` mode fires once.
-        TriggerMode::CounterRemoved if matches!(event, GameEvent::CounterRemoved { .. }) => Some(
-            m::matching_counter_removed_occurrences(event, trig_def, source_context, state),
-        ),
         _ if m::listens_on_aggregate_combat_damage_done(trig_def)
             && matches!(event, GameEvent::CombatDamageDealtToPlayer { .. }) =>
         {
