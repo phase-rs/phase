@@ -147,6 +147,7 @@ fn run_state_based_actions(
 ) -> (DepartureResume, usize) {
     let mut departed = Vec::new();
     let mut iteration_starts = Vec::new();
+    let mut queued_by_earlier_iterations = 0;
     let resume = run_state_based_action_iterations(
         state,
         events,
@@ -154,6 +155,7 @@ fn run_state_based_actions(
         departures,
         &mut departed,
         &mut iteration_starts,
+        &mut queued_by_earlier_iterations,
     );
     // CR 704.3 + CR 603.10a: the state-based-action event is complete and stamped
     // as one simultaneous event, so the abilities a player's departure in it
@@ -161,7 +163,7 @@ fn run_state_based_actions(
     // that departure. A game that ended triggers nothing (`collect`, CR 104.1).
     // CR 704.3: a departure's simultaneous event ends where the next iteration
     // of the check began, or with the check.
-    let queued = departed
+    let queued: usize = departed
         .into_iter()
         .map(|departure| {
             let batch_end = iteration_starts
@@ -172,7 +174,7 @@ fn run_state_based_actions(
             departure.collect(state, events, batch_end)
         })
         .sum();
-    (resume, queued)
+    (resume, queued + queued_by_earlier_iterations)
 }
 
 fn run_state_based_action_iterations(
@@ -182,6 +184,7 @@ fn run_state_based_action_iterations(
     departures: DepartureTriggers,
     departed: &mut Vec<LookedBackDeparture>,
     iteration_starts: &mut Vec<usize>,
+    queued_by_earlier_iterations: &mut usize,
 ) -> DepartureResume {
     // CR 604.2: Re-evaluate layers so computed P/T reflects current static abilities.
     if state.layers_dirty.is_dirty() {
@@ -219,6 +222,14 @@ fn run_state_based_action_iterations(
     for _ in 0..MAX_SBA_ITERATIONS {
         let mut any_performed = false;
         let iteration_events_start = events.len();
+        // CR 704.3 + CR 603.10: each check is its own event, and what a
+        // departure in an earlier check triggered is read in the game
+        // immediately after that check, before this one changes it (a player
+        // this check removes takes their permanents with them).
+        *queued_by_earlier_iterations += std::mem::take(departed)
+            .into_iter()
+            .map(|departure| departure.collect(state, events, iteration_events_start))
+            .sum::<usize>();
         iteration_starts.push(iteration_events_start);
 
         // CR 704.3 + CR 104.4a + CR 704.5a-c + CR 704.6c: Every player-loss

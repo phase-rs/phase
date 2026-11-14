@@ -1675,6 +1675,87 @@ fn a_copy_of_a_from_anywhere_ability_does_not_trigger_from_the_graveyard() {
     assert_eq!(from(clone), 0, "the Clone card there does not");
 }
 
+/// CR 704.3 + CR 603.6c + CR 603.10 + CR 603.3a: each state-based-action check
+/// is its own event, and a "from anywhere" ability reads the game after the
+/// check that triggered it, not after later ones. P1's Platinum Angel ("You
+/// can't lose the game and your opponents can't win the game.") keeps P1 in
+/// the game while P2, also at 4 life, loses to P0's Hurricane for 4 ("Hurricane
+/// deals X damage to each creature with flying and each player."), which also
+/// destroys the Angel. P1 then loses in the next check, and their Profane
+/// Memento, which P0 controls through their own Steal Artifact, leaves with
+/// them. The Angel went to an opponent's graveyard in the first check, with
+/// the Memento still there under P0, so P0's trigger stays.
+#[test]
+fn a_from_anywhere_trigger_of_an_earlier_check_survives_its_source_leaving_in_the_next() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let memento = scenario.add_real_card(P1, "Profane Memento", Zone::Battlefield, db);
+    let steal = scenario.add_real_card(P0, "Steal Artifact", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Platinum Angel", Zone::Battlefield, db);
+    let hurricane = scenario.add_real_card(P0, "Hurricane", Zone::Hand, db);
+    let mut pool = (0..5)
+        .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+        .collect::<Vec<_>>();
+    pool.extend((0..2).map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![])));
+    scenario.with_mana_pool(P0, pool);
+    scenario.with_life(P1, 4);
+    scenario.with_life(P2, 4);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.objects.get_mut(&steal).unwrap().attached_to = Some(AttachTarget::Object(memento));
+        state
+            .objects
+            .get_mut(&memento)
+            .unwrap()
+            .attachments
+            .push(steal);
+        state.layers_dirty.mark_full();
+        engine::game::layers::flush_layers(state);
+    }
+    assert_eq!(
+        runner.state().objects[&memento].controller,
+        P0,
+        "reach guard: Steal Artifact gives P0 the Memento"
+    );
+    runner.cast(hurricane).x(4).commit();
+    for _ in 0..8 {
+        if runner.state().players[1].is_eliminated {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Hurricane resolves");
+    }
+    assert!(runner.state().players[2].is_eliminated);
+    assert!(
+        runner.state().players[1].is_eliminated,
+        "reach guard: P1 loses in the check after the Angel is destroyed"
+    );
+    assert!(!runner.state().players[0].is_eliminated);
+    assert!(!runner.state().players[3].is_eliminated);
+    let state = runner.state();
+    let mut controllers: Vec<PlayerId> = state
+        .pending_trigger_order
+        .iter()
+        .flat_map(|order| order.groups.iter())
+        .flat_map(|group| group.triggers.iter())
+        .chain(state.deferred_triggers.iter())
+        .filter(|context| context.pending.source_id == memento)
+        .map(|context| context.pending.controller)
+        .collect();
+    controllers.extend(
+        state
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == memento)
+            .map(|entry| entry.controller),
+    );
+    assert_eq!(controllers, vec![P0]);
+}
+
 /// Welcoming Vampire ("Whenever one or more other creatures you control with
 /// power 2 or less enter, draw a card. This ability triggers only once each
 /// turn.") and Sol Ring on P0's side; with `suppressor`, Hushbringer
