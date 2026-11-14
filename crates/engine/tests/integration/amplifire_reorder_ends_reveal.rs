@@ -25,7 +25,7 @@ use engine::game::visibility::{
 };
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -476,6 +476,12 @@ fn multi_card_identity_shuffle_retires_reveal_lease_and_conceals_library() {
             "library must be [L, C] before shuffle"
         );
         let nonland_incarnation_before = runner.state().objects[&nonland].incarnation;
+        let reflexive_entry = runner
+            .state()
+            .stack
+            .last()
+            .cloned()
+            .expect("reflexive on stack");
 
         // Activate Soldier of Fortune targeting P0 while the reflexive trigger waits.
         runner
@@ -500,9 +506,35 @@ fn multi_card_identity_shuffle_retires_reveal_lease_and_conceals_library() {
             "Soldier of Fortune ability on stack above reflexive"
         );
 
-        // Pass priority to resolve Soldier of Fortune's ability
-        runner.act(GameAction::PassPriority).expect("P0 passes");
-        runner.act(GameAction::PassPriority).expect("P1 passes");
+        // Pass priority to resolve Soldier of Fortune's ability and witness the shuffle
+        let p0_pass = runner.act(GameAction::PassPriority).expect("P0 passes");
+        let p1_pass = runner.act(GameAction::PassPriority).expect("P1 passes");
+
+        let mut events = p0_pass.events;
+        events.extend(p1_pass.events);
+
+        let witnessed_shuffle = events.iter().any(|e| {
+            matches!(
+                e,
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                } if *player_id == P0
+            )
+        });
+
+        // The original Calibrated Blast reflexive remains pending on the stack
+        assert_eq!(
+            runner.state().stack.len(),
+            1,
+            "original Calibrated Blast reflexive still on the stack when the shuffle completes"
+        );
+        assert_eq!(
+            runner.state().stack[0],
+            reflexive_entry,
+            "original Calibrated Blast reflexive unchanged on the stack"
+        );
 
         let library_after: Vec<ObjectId> =
             runner.state().players[0].library.iter().copied().collect();
@@ -510,6 +542,11 @@ fn multi_card_identity_shuffle_retires_reveal_lease_and_conceals_library() {
         // Check if the shuffle sampled the identity (unchanged) permutation
         if library_after == library_before {
             identity_witness_seen = true;
+
+            assert!(
+                witnessed_shuffle,
+                "seed {seed}: shuffle action event from library authority must be witnessed"
+            );
 
             // CR 701.24a + CR 701.20d: Even with an unchanged multi-card permutation,
             // the shuffle MUST retire reveals and make cards new objects.
