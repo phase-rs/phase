@@ -820,7 +820,7 @@ describe("LLM-driven AI seats", () => {
 describe("LLM seats on a message thread", () => {
   const THREAD_LOST: AiLlmProposalResult = {
     proposal: null,
-    error: "the provider would not continue this seat's message thread (thread_not_found)",
+    error: "the provider refused the message thread (thread_not_found)",
     errorKind: { kind: "threadUnavailable" },
   };
 

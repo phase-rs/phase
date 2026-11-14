@@ -33,10 +33,11 @@ pub enum LlmError {
     /// The decision the request was built for is no longer the decision the
     /// engine is waiting on. An ordinary race, not a failure of the model.
     StaleDecision,
-    /// The provider would not continue the seat's message thread. Threads are
-    /// best effort (one expires after five idle minutes), so this is not the
-    /// model failing: the seat's thread has been dropped, and the caller asks
-    /// the same decision once more as a fresh request.
+    /// The provider refused a message-thread request: it would not continue
+    /// the seat's thread, or cannot use threads at all. Threads are best effort
+    /// (one expires after five idle minutes), so this is not the model failing:
+    /// the seat's thread has been dropped, and a game decision is asked once
+    /// more as a fresh request.
     ThreadUnavailable { code: ThreadErrorCode },
 }
 
@@ -113,7 +114,7 @@ impl fmt::Display for LlmError {
             }
             LlmError::ThreadUnavailable { code } => write!(
                 f,
-                "the provider would not continue this seat's message thread ({})",
+                "the provider refused the message thread ({})",
                 code.api_code()
             ),
         }

@@ -20,8 +20,11 @@
 //!   continues from the id of the seat's last accepted reply.
 //! - **Commit on accept only.** A request is remembered as pending, keyed by
 //!   its decision fingerprint, and becomes the thread's new turn only when its
-//!   reply is accepted ([`LlmThreadMemory::answer_accepted`]). A failed or
-//!   cancelled decision leaves the thread at its last answered turn.
+//!   reply is accepted ([`LlmThreadMemory::record_reply`]). A failed or
+//!   cancelled decision leaves the thread at its last answered turn, with one
+//!   exception: a 2xx reply the engine refuses was still stored by the API,
+//!   and a reply id can be continued only once, so the thread cannot go on
+//!   from its last answered turn and the seat's next decision starts a new one.
 //! - **Start over.** A new thread is created, with the full request, when the
 //!   endpoint or model changes, when the system prompt changes (difficulty,
 //!   format, or the table itself), when the last reply reported more context
@@ -29,8 +32,8 @@
 //!   was rewound under the thread.
 //! - **Thread errors.** A thread is best effort: the API drops one after five
 //!   idle minutes, among other reasons. On a thread error the seat's thread is
-//!   dropped ([`LlmThreadMemory::thread_unavailable`]) and the caller asks the
-//!   same decision once more, which then goes out as a fresh create. An API
+//!   dropped ([`LlmThreadMemory::record_reply`]) and the caller asks the same
+//!   decision once more, which then goes out as a fresh create. An API
 //!   that refuses threads outright is answered with self-contained requests
 //!   for that endpoint from then on.
 //!
@@ -43,13 +46,13 @@ use std::collections::HashMap;
 use engine::types::log::GameLogEntry;
 use engine::types::player::PlayerId;
 
-use crate::error::{LlmResult, ThreadErrorCode};
+use crate::error::{LlmError, LlmResult, ThreadErrorCode};
 use crate::fingerprint::fingerprint_of;
 use crate::game_decision::GameDecisionRequest;
-use crate::provider::{HttpRequestSpec, LlmEndpointConfig, LlmProvider};
+use crate::provider::{HttpRequestSpec, LlmEndpointConfig};
 use crate::wire::{
-    build_chat_request, build_thread_request, continuable_message_id, token_usage, ThreadTurn,
-    TokenUsage,
+    build_chat_request, build_thread_request, continuable_message_id, token_usage, LlmReply,
+    ThreadTurn, TokenUsage,
 };
 
 /// The context a seat's thread may reach before its next decision starts a
@@ -178,7 +181,7 @@ impl LlmThreadMemory {
     /// [`build_chat_request`]'s request, and any thread the seat held is
     /// forgotten. Otherwise the request continues the seat's thread when it
     /// can and creates a new one when it cannot, and is remembered as pending
-    /// until [`Self::answer_accepted`] or [`Self::thread_unavailable`].
+    /// until [`Self::record_reply`].
     ///
     /// `history` is the log handed to the prompt builder; its newest entry is
     /// what the seat will have seen once this decision is answered.
@@ -239,53 +242,66 @@ impl LlmThreadMemory {
         Ok(request)
     }
 
-    /// Record that the reply to `seat`'s decision `fingerprint` was accepted:
-    /// it becomes the turn the seat's next decision continues from.
+    /// Record what became of the reply to `seat`'s decision `fingerprint`.
     ///
-    /// A reply that cannot be continued (a refusal, or no `id`) leaves the seat
-    /// with no thread, so its next decision starts a new one. Nothing happens
-    /// for a decision that was not sent through a thread.
-    pub fn answer_accepted(
+    /// `outcome` is the engine's verdict on the reply:
+    ///
+    /// - **Accepted.** The reply becomes the turn the seat's next decision
+    ///   continues from. One that cannot be continued (a refusal, or no `id`)
+    ///   leaves the seat with no thread, so its next decision starts a new one.
+    /// - **A thread error.** The seat's thread is dropped, so the same decision
+    ///   asked again goes out as a fresh create. When the API refuses threads
+    ///   outright (`thread_unsupported_request`), the endpoint is remembered and
+    ///   the seat's decisions to it are self-contained from then on, because a
+    ///   fresh create would only be refused again.
+    /// - **Any other refusal of a 2xx reply.** The API stored that turn after
+    ///   the seat's last answered one, and an id can be continued only once, so
+    ///   the seat's next decision starts a new thread instead of sending a
+    ///   continue the API would refuse.
+    /// - **Any other failure.** A non-2xx reply stored nothing, so the thread
+    ///   stays at the seat's last answered turn.
+    ///
+    /// Nothing happens for a reply to a decision that was not sent through a
+    /// thread, or to a decision other than the one pending.
+    pub fn record_reply(
         &mut self,
         seat: PlayerId,
         fingerprint: &str,
-        provider: LlmProvider,
-        body: &str,
+        reply: LlmReply<'_>,
+        outcome: Result<(), &LlmError>,
     ) {
         let Some(thread) = self.seats.get_mut(&seat) else {
             return;
         };
-        let Some(answered) = thread
+        let Some(turn) = thread
             .pending
             .take_if(|pending| pending.fingerprint == fingerprint)
         else {
             return;
         };
-        thread.open = continuable_message_id(provider, body).map(|message_id| OpenThread {
-            endpoint: answered.endpoint,
-            system: answered.system,
-            message_id,
-            seen_through: answered.seen_through,
-            context_tokens: token_usage(provider, body)
-                .as_ref()
-                .and_then(context_tokens),
-        });
-    }
-
-    /// Drop `seat`'s thread after the API refused to continue it, so the same
-    /// decision asked again goes out as a fresh create.
-    ///
-    /// When the API refuses threads outright (`thread_unsupported_request`), the
-    /// endpoint is remembered and the seat's decisions to it are self-contained
-    /// from then on, because a fresh create would only be refused again.
-    pub fn thread_unavailable(&mut self, seat: PlayerId, code: ThreadErrorCode) {
-        let Some(thread) = self.seats.get_mut(&seat) else {
-            return;
-        };
-        let failed = thread.pending.take();
-        thread.open = None;
-        if code == ThreadErrorCode::UnsupportedRequest {
-            thread.refused = failed.map(|turn| turn.endpoint);
+        match outcome {
+            Ok(()) => {
+                thread.open =
+                    continuable_message_id(reply.provider, reply.body).map(|message_id| {
+                        OpenThread {
+                            endpoint: turn.endpoint,
+                            system: turn.system,
+                            message_id,
+                            seen_through: turn.seen_through,
+                            context_tokens: token_usage(reply.provider, reply.body)
+                                .as_ref()
+                                .and_then(context_tokens),
+                        }
+                    });
+            }
+            Err(LlmError::ThreadUnavailable { code }) => {
+                thread.open = None;
+                if *code == ThreadErrorCode::UnsupportedRequest {
+                    thread.refused = Some(turn.endpoint);
+                }
+            }
+            Err(_) if (200..300).contains(&reply.status) => thread.open = None,
+            Err(_) => {}
         }
     }
 
@@ -322,7 +338,7 @@ fn context_tokens(usage: &TokenUsage) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::game_decision::build_game_decision_prompt;
-    use crate::provider::DecisionContext;
+    use crate::provider::{DecisionContext, LlmProvider};
     use engine::ai_support::{ActionMetadata, AiDecisionContract, CandidateAction, TacticalClass};
     use engine::types::actions::GameAction;
     use engine::types::game_state::GameState;
@@ -408,6 +424,32 @@ mod tests {
         .to_string()
     }
 
+    /// The engine accepted `body`, a 2xx reply, as the answer to `fingerprint`.
+    fn accept_reply(
+        memory: &mut LlmThreadMemory,
+        fingerprint: &str,
+        provider: LlmProvider,
+        body: &str,
+    ) {
+        let reply = LlmReply {
+            provider,
+            status: 200,
+            body,
+        };
+        memory.record_reply(SEAT, fingerprint, reply, Ok(()));
+    }
+
+    /// The API refused to continue the thread `fingerprint` was sent on.
+    fn lose_thread(memory: &mut LlmThreadMemory, fingerprint: &str, code: ThreadErrorCode) {
+        let reply = LlmReply {
+            provider: LlmProvider::Anthropic,
+            status: 404,
+            body: "{}",
+        };
+        let error = LlmError::ThreadUnavailable { code };
+        memory.record_reply(SEAT, fingerprint, reply, Err(&error));
+    }
+
     /// Build `decision` for the seat and accept `id` as its answer.
     fn answer(
         memory: &mut LlmThreadMemory,
@@ -420,8 +462,8 @@ mod tests {
             .decision_request(SEAT, config, decision, history)
             .unwrap()
             .request;
-        memory.answer_accepted(
-            SEAT,
+        accept_reply(
+            memory,
             &decision.fingerprint,
             LlmProvider::Anthropic,
             &reply(id, 900),
@@ -523,8 +565,8 @@ mod tests {
             .decision_request(SEAT, &threaded(), &first, &log(4))
             .unwrap();
         assert_eq!(create.prompt_chars, first.prompt.char_count());
-        memory.answer_accepted(
-            SEAT,
+        accept_reply(
+            &mut memory,
             &first.fingerprint,
             LlmProvider::Anthropic,
             &reply("msg_1", 900),
@@ -556,8 +598,8 @@ mod tests {
             .decision_request(SEAT, &threaded(), &unanswered, &log(6))
             .unwrap();
         // A reply to some other decision does not advance it either.
-        memory.answer_accepted(
-            SEAT,
+        accept_reply(
+            &mut memory,
             "not-this-decision",
             LlmProvider::Anthropic,
             &reply("msg_x", 900),
@@ -577,6 +619,82 @@ mod tests {
             "{message}"
         );
         assert!(!message.contains("event 3"), "{message}");
+    }
+
+    /// A non-2xx reply stored nothing, so the thread goes on from the seat's
+    /// last answered turn.
+    #[test]
+    fn a_reply_that_failed_before_the_api_stored_it_keeps_the_thread() {
+        let mut memory = LlmThreadMemory::new();
+        answer(
+            &mut memory,
+            &threaded(),
+            &decision(1, AiDifficulty::Medium),
+            &log(4),
+            "msg_1",
+        );
+        let second = decision(2, AiDifficulty::Medium);
+        memory
+            .decision_request(SEAT, &threaded(), &second, &log(6))
+            .unwrap();
+        let overloaded = LlmReply {
+            provider: LlmProvider::Anthropic,
+            status: 529,
+            body: r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+        };
+        let error = LlmError::Provider {
+            detail: "HTTP 529: Overloaded".to_string(),
+        };
+        memory.record_reply(SEAT, &second.fingerprint, overloaded, Err(&error));
+
+        let retry = memory
+            .decision_request(SEAT, &threaded(), &second, &log(6))
+            .unwrap()
+            .request;
+        assert_eq!(continued_from(&retry), Some("msg_1".to_string()));
+    }
+
+    /// A 2xx reply the engine refuses was still stored by the API, and an id
+    /// can be continued only once: continuing from the last answered turn
+    /// would be refused, so the next decision starts a new thread instead.
+    #[test]
+    fn a_stored_reply_the_engine_refuses_starts_a_new_thread() {
+        let mut memory = LlmThreadMemory::new();
+        answer(
+            &mut memory,
+            &threaded(),
+            &decision(1, AiDifficulty::Medium),
+            &log(4),
+            "msg_1",
+        );
+        let second = decision(2, AiDifficulty::Medium);
+        memory
+            .decision_request(SEAT, &threaded(), &second, &log(6))
+            .unwrap();
+        // Whatever the body says, the engine's verdict is what counts here.
+        let body = reply("msg_2", 900);
+        let stored = LlmReply {
+            provider: LlmProvider::Anthropic,
+            status: 200,
+            body: &body,
+        };
+        let error = LlmError::ChoiceOutOfRange {
+            choice: 9,
+            option_count: 2,
+        };
+        memory.record_reply(SEAT, &second.fingerprint, stored, Err(&error));
+        assert!(!memory.has_open_thread(SEAT));
+
+        let next = memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision(3, AiDifficulty::Medium),
+                &log(7),
+            )
+            .unwrap()
+            .request;
+        assert!(is_create(&next));
     }
 
     #[test]
@@ -602,7 +720,7 @@ mod tests {
                 .request;
             assert_eq!(continued_from(&lost), Some("msg_1".to_string()));
 
-            memory.thread_unavailable(SEAT, code);
+            lose_thread(&mut memory, &second.fingerprint, code);
             assert!(!memory.has_open_thread(SEAT), "{code:?}");
 
             let retry = memory
@@ -614,8 +732,8 @@ mod tests {
             assert_eq!(user_message(&retry), second.prompt.user, "{code:?}");
 
             // The recovered decision's reply starts the new thread.
-            memory.answer_accepted(
-                SEAT,
+            accept_reply(
+                &mut memory,
                 &second.fingerprint,
                 LlmProvider::Anthropic,
                 &reply("msg_2", 900),
@@ -646,7 +764,11 @@ mod tests {
         memory
             .decision_request(SEAT, &threaded(), &first, &log(2))
             .unwrap();
-        memory.thread_unavailable(SEAT, ThreadErrorCode::UnsupportedRequest);
+        lose_thread(
+            &mut memory,
+            &first.fingerprint,
+            ThreadErrorCode::UnsupportedRequest,
+        );
 
         let today = build_chat_request(&threaded(), &first.prompt).unwrap();
         let retry = memory
@@ -654,8 +776,8 @@ mod tests {
             .unwrap()
             .request;
         assert_eq!(retry, today);
-        memory.answer_accepted(
-            SEAT,
+        accept_reply(
+            &mut memory,
             &first.fingerprint,
             LlmProvider::Anthropic,
             &reply("msg_1", 900),
@@ -685,8 +807,8 @@ mod tests {
             memory
                 .decision_request(SEAT, &threaded(), &first, &log(2))
                 .unwrap();
-            memory.answer_accepted(
-                SEAT,
+            accept_reply(
+                &mut memory,
                 &first.fingerprint,
                 LlmProvider::Anthropic,
                 &reply("msg_1", input_tokens),
@@ -729,7 +851,12 @@ mod tests {
             },
         })
         .to_string();
-        memory.answer_accepted(SEAT, &first.fingerprint, LlmProvider::Anthropic, &cached);
+        accept_reply(
+            &mut memory,
+            &first.fingerprint,
+            LlmProvider::Anthropic,
+            &cached,
+        );
         let next = memory
             .decision_request(
                 SEAT,
@@ -755,8 +882,8 @@ mod tests {
             "content": [{ "type": "text", "text": "{\"choice\": 0}" }],
         })
         .to_string();
-        memory.answer_accepted(
-            SEAT,
+        accept_reply(
+            &mut memory,
             &first.fingerprint,
             LlmProvider::Anthropic,
             &unmeasured,
@@ -855,8 +982,8 @@ mod tests {
                     config.provider,
                     config.decision_context
                 );
-                memory.answer_accepted(
-                    SEAT,
+                accept_reply(
+                    &mut memory,
                     &decision.fingerprint,
                     config.provider,
                     &reply("msg", 900),
@@ -907,7 +1034,12 @@ mod tests {
             "usage": { "input_tokens": 10, "output_tokens": 1 },
         })
         .to_string();
-        memory.answer_accepted(SEAT, &first.fingerprint, LlmProvider::Anthropic, &refused);
+        accept_reply(
+            &mut memory,
+            &first.fingerprint,
+            LlmProvider::Anthropic,
+            &refused,
+        );
         assert!(!memory.has_open_thread(SEAT));
     }
 
