@@ -1499,6 +1499,7 @@ fn change_zone_choice(
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        performed_by: None,
     }
 }
 

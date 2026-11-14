@@ -791,9 +791,9 @@ fn coin_branch_stack_persistence_is_strict_and_current_bindings_execute() {
             .to_string();
         // CR 601.2c + CR 608.2b: every wire version that predates coin-branch
         // bindings (<= 10) cannot prove the outcome bindings announced at cast,
-        // so a carrier-less coin ability is refused as incompatible; v11 (bound
-        // coin branches, before the with-entry effect carrier) and the current version
-        // are malformed.
+        // so a carrier-less coin ability is refused as incompatible; every later
+        // version (v11 and v12 bound coin branches too, before the with-entry
+        // effect carrier, and the current version) is malformed.
         const LAST_UNBOUND_COIN_BRANCH_WIRE_VERSION: u64 = 10;
         let expected = if version <= LAST_UNBOUND_COIN_BRANCH_WIRE_VERSION {
             "RESTORE_INCOMPATIBLE_COIN_BRANCH_BINDINGS:"
