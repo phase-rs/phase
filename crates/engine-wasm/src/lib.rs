@@ -5091,7 +5091,7 @@ mod restored_card_db_requirements_tests {
 
     /// A message thread expires five idle minutes after its last request
     /// (Anthropic: "It expires 5 minutes after its last request"), timed on the
-    /// caller's wall clock, which both entry points hand on to the seat's
+    /// caller's clock, which both entry points hand on to the seat's
     /// thread: the build's clock stamps each request, and the reply's clock
     /// judges a loss. A recovery thread reported lost at its first continue
     /// after that expiry has simply expired, and the resend recovers it again,
@@ -7344,12 +7344,13 @@ pub fn validate_llm_probe_response(
 /// `endpoint_json` is the player's configured `LlmEndpointConfig`. `history_json`
 /// is the engine-authored game log the caller has accumulated from prior
 /// `ActionResult`s — engine data handed back for rendering, not a client
-/// derivation. `now_ms` is the caller's wall clock (`Date.now()`) as the
-/// request is built: a message thread expires after five idle minutes of real
-/// time, counted from its last request, which goes out no earlier than this.
-/// Returns `null` when the seat has no decision to make; throws only on a
-/// malformed argument, which is a programming error rather than a runtime
-/// outcome.
+/// derivation. `now_ms` is the caller's clock as the request is built, in
+/// milliseconds and never slower than real time: the AI controller's thread
+/// clock, the wall clock held from running slower than the monotonic clock. A
+/// message thread expires after five idle minutes of real time, counted from
+/// its last request, which goes out no earlier than this. Returns `null` when
+/// the seat has no decision to make; throws only on a malformed argument,
+/// which is a programming error rather than a runtime outcome.
 #[wasm_bindgen(js_name = buildLlmDecisionRequest)]
 pub fn build_llm_decision_request(
     difficulty: &str,
@@ -7473,10 +7474,10 @@ fn build_llm_decision_request_inner(
 ///
 /// `thread_turn` is the `threadTurn` the request was built with
 /// ([`build_llm_decision_request`]), absent for a self-contained request.
-/// `now_ms` is the caller's wall clock (`Date.now()`) as the reply arrived.
-/// The API read the request no later, so a thread the reply reports lost is
-/// judged by how long it had idled by then, sleep included, whatever the clock
-/// read when the request was built.
+/// `now_ms` is the same clock as the reply arrived. The API read the request
+/// no later, so a thread the reply reports lost is judged by how long it had
+/// idled by then, sleep included, whatever the clock read when the request was
+/// built.
 #[wasm_bindgen(js_name = getAiActionProposalFromLlmResponse)]
 pub fn get_ai_action_proposal_from_llm_response(
     player_id: u8,

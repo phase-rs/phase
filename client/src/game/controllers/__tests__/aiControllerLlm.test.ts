@@ -1006,6 +1006,55 @@ describe("LLM seats on a message thread", () => {
     controller.dispose();
   });
 
+  it("times a thread on a clock a wall-clock step back cannot slow", async () => {
+    bindSeatToProvider();
+    // The monotonic clock, which never steps back.
+    let monotonic = 1_000;
+    vi.spyOn(performance, "now").mockImplementation(() => monotonic);
+    const adapter = threadedAdapter(() => THREAD_LOST);
+    const replies = [THREAD_LOST, { proposal: proposal(CAST, "llm-after-step") }];
+    // Every clock reading handed to the engine, builds and replies in order.
+    const readings: number[] = [];
+    adapter.buildLlmDecisionRequest.mockImplementation(async (...args: unknown[]) => {
+      readings.push(Number(args[4]));
+      return {
+        fingerprint: "fp-1",
+        optionCount: 2,
+        promptChars: 100,
+        request: HTTP_SPEC,
+        threadTurn: THREAD_TURN,
+      };
+    });
+    adapter.getAiActionProposalFromLlmResponse.mockImplementation(async (...args: unknown[]) => {
+      readings.push(Number(args[6]));
+      return replies.shift() ?? THREAD_LOST;
+    });
+    // A minute passes while the first request is out, and a clock correction
+    // steps the wall clock back twenty seconds within it.
+    llmMocks.executeLlmRequest.mockImplementationOnce(async () => {
+      monotonic += 60_000;
+      vi.setSystemTime(Date.now() + 60_000 - 20_000);
+      return { status: 404, body: "{}" };
+    });
+    endGameOnDispatch();
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await runOnce();
+    await runOnce();
+
+    // The first build and reply, then the resend's build and reply.
+    expect(readings).toHaveLength(4);
+    const [builtAt, repliedAt] = readings;
+    expect(Number(repliedAt) - Number(builtAt)).toBeGreaterThanOrEqual(60_000);
+    for (let index = 1; index < readings.length; index += 1) {
+      expect(readings[index]).toBeGreaterThanOrEqual(Number(readings[index - 1]));
+    }
+    controller.dispose();
+  });
+
   it("does not ask again for a decision that moved on while its reply was read", async () => {
     bindSeatToProvider();
     const adapter = threadedAdapter(() => {

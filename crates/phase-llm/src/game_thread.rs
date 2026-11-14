@@ -149,16 +149,18 @@ enum Idle {
 
 impl Idle {
     /// How long a thread whose last request was built at `requested_at_ms`
-    /// had idled at `now_ms`, both on the caller's wall clock.
+    /// had idled at `now_ms`, both on the caller's clock.
     ///
-    /// The measure can only run long. The request went out no earlier than it
-    /// was built, and a loss is reported no earlier than the API read the
-    /// continue, so time the machine spent asleep while a request was built or
-    /// in flight is counted, never missed. Erring long costs one more create;
-    /// erring short would end threading for a conversation the API can keep.
+    /// On a clock that does not run slower than real time, as the caller's
+    /// must not ([`LlmThreadMemory::decision_request`]), the measure can only
+    /// run long. The request went out no earlier than it was built, and a loss
+    /// is reported no earlier than the API read the continue, so time the
+    /// machine spent asleep while a request was built or in flight is counted,
+    /// never missed. Erring long costs one more create; erring short would end
+    /// threading for a conversation the API can keep.
     fn between(requested_at_ms: u64, now_ms: u64) -> Idle {
-        // A wall clock can step back (a clock correction), which leaves the
-        // idle time unknown: that reads as the cheap case.
+        // A reading earlier than the request (a clock that stepped back)
+        // leaves the idle time unknown: that reads as the cheap case.
         match now_ms.checked_sub(requested_at_ms) {
             Some(elapsed) if elapsed < THREAD_IDLE_EXPIRY_MS => Idle::WithinExpiry,
             _ => Idle::PastExpiry,
@@ -261,7 +263,7 @@ struct OpenThread {
     /// `None` when it reported no usable usage.
     context_tokens: Option<u64>,
     origin: ThreadOrigin,
-    /// When the request whose reply this is was built, on the caller's wall
+    /// When the request whose reply this is was built, on the caller's
     /// clock. It went out no earlier, so the thread expires
     /// [`THREAD_IDLE_EXPIRY_MS`] after this at the earliest.
     requested_at_ms: u64,
@@ -276,7 +278,7 @@ struct PendingTurn {
     /// The newest log entry the request showed the seat.
     seen_through: Option<u32>,
     shape: PendingShape,
-    /// When the request was built, on the caller's wall clock.
+    /// When the request was built, on the caller's clock.
     requested_at_ms: u64,
 }
 
@@ -357,11 +359,13 @@ impl LlmThreadMemory {
     ///
     /// `history` is the log handed to the prompt builder; its newest entry is
     /// what the seat will have seen once this decision is answered. `now_ms`
-    /// is the caller's wall clock, in milliseconds, as the request is built:
-    /// the request goes out no earlier, and the idle time of the thread its
-    /// reply opens runs from it ([`Idle`]). It is a wall clock because the
-    /// API's expiry runs in real time, through a sleeping machine too, while a
-    /// monotonic clock can stop for as long as the machine sleeps.
+    /// is the caller's clock, in milliseconds, as the request is built: the
+    /// request goes out no earlier, and the idle time of the thread its reply
+    /// opens runs from it ([`Idle`]). The API's expiry runs in real time,
+    /// through a sleeping machine too, so the clock must not run slower than
+    /// that: a monotonic clock can stop while the machine sleeps, and a wall
+    /// clock can step back. The AI controller's thread clock is the wall
+    /// clock, held from running slower than the monotonic clock.
     ///
     /// # Errors
     ///
@@ -483,8 +487,8 @@ impl LlmThreadMemory {
     ///   thread could not yet have expired ([`Idle::WithinExpiry`]), the API
     ///   cannot store that conversation, and its decisions are self-contained
     ///   from then on. Lost after it could have expired, the conversation is
-    ///   recovered again like any other. `now_ms` is the caller's wall clock as
-    ///   the reply arrived, which the thread's idle time is measured to: the
+    ///   recovered again like any other. `now_ms` is the caller's clock as the
+    ///   reply arrived, which the thread's idle time is measured to: the
     ///   API read the continue no later, so a machine that slept while the
     ///   continue was built or in flight reads as idle that long.
     /// - **Any other refusal of a 2xx reply.** The API stored that turn after
@@ -1673,11 +1677,11 @@ mod tests {
         );
     }
 
-    /// The caller's clock is a wall clock, which a clock correction can step
-    /// back. A replacement thread reported lost at its first continue at a
-    /// time earlier than its create has an unknown idle time, which is read as
-    /// an ordinary expiry: the conversation is recovered again, not made
-    /// self-contained.
+    /// A caller's clock can read earlier than an earlier request (a wall clock
+    /// that stepped back). A replacement thread reported lost at its first
+    /// continue at a time earlier than its create has an unknown idle time,
+    /// which is read as an ordinary expiry: the conversation is recovered
+    /// again, not made self-contained.
     #[test]
     fn a_recovery_thread_lost_after_the_clock_stepped_back_is_recovered_again() {
         let mut memory = LlmThreadMemory::new();

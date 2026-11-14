@@ -146,6 +146,33 @@ const MAX_CONSECUTIVE_LLM_FAILURES = 3;
 const LLM_THREAD_RESENDS = 1;
 
 /**
+ * A clock to time a seat's message threads on, in milliseconds.
+ *
+ * The API expires a thread five idle minutes after its last request, in real
+ * time, and the engine tells that expiry apart from a conversation the API
+ * cannot store by the idle time between two readings. Neither platform clock
+ * measures real time alone: `Date.now()` keeps counting while the machine
+ * sleeps, but a clock correction can step it back, and `performance.now()`
+ * never steps back, but can stop while the machine sleeps. Each reading
+ * therefore advances by whichever of the two advanced more since the last
+ * one, so a sleep and a step back each leave a measured idle time no shorter
+ * than the real one; only both within one interval can shorten it, by no more
+ * than the step. The first reading is the wall clock.
+ */
+function createThreadClock(): () => number {
+  let last: { reading: number; wall: number; monotonic: number } | null = null;
+  return () => {
+    const wall = Date.now();
+    const monotonic = performance.now();
+    const reading = last === null
+      ? wall
+      : last.reading + Math.max(wall - last.wall, monotonic - last.monotonic);
+    last = { reading, wall, monotonic };
+    return reading;
+  };
+}
+
+/**
  * Run one LLM-driven decision for `playerId`.
  *
  * Returns `null` for EVERY failure — no configured profile, an adapter without
@@ -160,7 +187,8 @@ const LLM_THREAD_RESENDS = 1;
  *
  * `setCharged` says whether the outcome is the provider's: set once the
  * provider is in play, and withdrawn when the player's own settings change
- * ends the decision instead.
+ * ends the decision instead. `threadClock` times the seat's message threads
+ * ({@link createThreadClock}).
  */
 async function llmActionProposal(
   playerId: number,
@@ -169,6 +197,7 @@ async function llmActionProposal(
   signal: AbortSignal,
   isCurrent: () => boolean,
   setCharged: (charged: boolean) => void,
+  threadClock: () => number,
 ): Promise<AiActionProposal | null> {
   if (llmSeatIndex == null) return null;
   const catalog = await loadProviderCatalog();
@@ -203,10 +232,9 @@ async function llmActionProposal(
       playerId,
       endpointJson,
       historyJson,
-      // The wall clock, not `performance.now()`: a message thread's idle
-      // expiry runs in real time, and a monotonic clock can stop while the
-      // machine sleeps, which would make an expired thread look unstorable.
-      Date.now(),
+      // The thread clock as the request is built. The request goes out no
+      // earlier, so an idle time measured from this reading errs long.
+      threadClock(),
     );
     if (signal.aborted || !isCurrent()) return null;
     // A decision this provider cannot be asked at all (a forced move has no
@@ -244,12 +272,12 @@ async function llmActionProposal(
       profile.provider,
       status,
       body,
-      // The wall clock as the reply arrived, no earlier than the API read the
+      // The thread clock as the reply arrived, no earlier than the API read the
       // request. A thread the reply reports lost is judged by its idle time up
       // to now, so time the machine slept while the request was built or out
       // counts toward the thread's expiry, and an expired thread never reads
       // as a conversation the API cannot store.
-      Date.now(),
+      threadClock(),
     );
     // The call was paid for whether or not its reply is usable.
     recordLlmUsage("game", `seat ${llmSeatIndex}`, built.promptChars, resolved?.usage);
@@ -318,6 +346,11 @@ export function createAIController(config: AIControllerConfig): AIController {
   const llmFailures = new Map<number, number>();
   /** Seats whose provider has failed enough to be given up on this session. */
   const llmDisabled = new Set<number>();
+  /**
+   * One clock for every seat this controller drives, so the two readings an
+   * idle time is measured between always come from the same clock.
+   */
+  const threadClock = createThreadClock();
 
   function recordLlmOutcome(playerId: number, succeeded: boolean): void {
     if (succeeded) {
@@ -565,6 +598,7 @@ export function createAIController(config: AIControllerConfig): AIController {
         abort.signal,
         () => isAttemptCurrent(attempt),
         (charged) => { chargedToProvider = charged; },
+        threadClock,
       )
         .catch((error) => {
           if (abort.signal.aborted || !isAttemptCurrent(attempt)) return null;

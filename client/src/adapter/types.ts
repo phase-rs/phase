@@ -5946,9 +5946,10 @@ export interface EngineAdapter {
    * Optional capability: an adapter that omits it simply has no LLM seats, and
    * the AI controller uses the heuristic path. `historyJson` is the
    * engine-authored game log the caller has accumulated, handed back for
-   * rendering. `nowMs` is the caller's wall clock (`Date.now()`) as the
-   * request is built. A message thread's idle expiry runs in real time from
-   * its last request, which goes out no earlier than this.
+   * rendering. `nowMs` is the controller's thread clock as the request is
+   * built: the wall clock, held from running slower than the monotonic clock.
+   * A message thread's idle expiry runs in real time from its last request,
+   * which goes out no earlier than this.
    */
   buildLlmDecisionRequest?(
     difficulty: string,
@@ -5960,8 +5961,8 @@ export interface EngineAdapter {
   /**
    * Binds an LLM response to an engine-issued proposal, or reports why it could
    * not. `threadTurn` is the built request's `threadTurn`. `nowMs` is the
-   * caller's wall clock (`Date.now()`) as the reply arrived: the engine judges
-   * a message thread the reply reports lost by how long it had idled by then.
+   * same clock as the reply arrived: the engine judges a message thread the
+   * reply reports lost by how long it had idled by then.
    */
   getAiActionProposalFromLlmResponse?(
     playerId: number,
