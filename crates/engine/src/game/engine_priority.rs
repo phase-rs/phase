@@ -330,18 +330,6 @@ fn run_post_action_pipeline_core(
     // just-emitted `SpellCast` still has to join the terminal batch before B's
     // parked trigger drains.
     if !skip_trigger_scan || state.pending_resolution_completion.is_some() {
-        // CR 904.9 + CR 603.1: resolve "as you set this scheme in motion"
-        // choices from the raw scheme events. An "as" choice is part of the
-        // turn-based action, not a trigger: offering it here (rather than
-        // inside `finish_enter_phase`, whose prompt would not survive the
-        // pass pipeline's `sync_waiting_for`) reads the raw events. The
-        // scheme's "when" triggers were already held by the precombat-main
-        // arm (`turns::hold_turn_based_action_triggers`); no printed scheme
-        // has both an "as" and a "when" set-in-motion ability.
-        // Skipped when the scan itself is skipped.
-        if !skip_trigger_scan {
-            super::archenemy::resolve_pending_as_set_in_motion_choices(state, events, event_start);
-        }
         // A paused logical zone-change owner has already Segment-collected its
         // retained ZoneChanged occurrences into deferred trigger contexts. Do
         // not rediscover those records through the generic post-action scan;

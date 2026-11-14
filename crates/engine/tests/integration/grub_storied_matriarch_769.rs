@@ -8966,6 +8966,714 @@ fn horde_reveal_keeps_the_first_main_trigger() {
     assert_eq!(tally.iter().filter(|s| **s == grub).count(), 1);
 }
 
+// --- round 12: step-entry capture, the state-based check before a step's batch, the scheme action's choice ---
+
+const BOW_TO_MY_COMMAND: &str = "Bow to My Command";
+const BOW_TO_MY_COMMAND_ORACLE: &str = "(An ongoing scheme remains face up until it's abandoned.)\nAs you set this scheme in motion, choose an opponent.\nCreatures the chosen player controls can't attack you or planeswalkers you control.\nAt the beginning of your opponents' end step, they may tap any number of untapped creatures they control with total power 8 or greater. If they do, abandon this scheme.";
+const DARK_CONFIDANT: &str = "Dark Confidant";
+const DARK_CONFIDANT_ORACLE: &str = "At the beginning of your upkeep, reveal the top card of your library and put that card into your hand. You lose life equal to its mana value.";
+const MOX_AMBER: &str = "Mox Amber";
+const MOX_AMBER_ORACLE: &str =
+    "{T}: Add one mana of any color among legendary creatures and planeswalkers you control.";
+const NECROPOTENCE: &str = "Necropotence";
+const NECROPOTENCE_ORACLE: &str = "Skip your draw step.\nWhenever you discard a card, exile that card from your graveyard.\nPay 1 life: Exile the top card of your library face down. Put that card into your hand at the beginning of your next end step.";
+const DOOMED_TRAVELER: &str = "Doomed Traveler";
+const DOOMED_TRAVELER_ORACLE: &str =
+    "When this creature dies, create a 1/1 white Spirit creature token with flying.";
+const TWILIGHT_PROPHET: &str = "Twilight Prophet";
+const BIFUR: &str = "Bifur, Melodic Rider";
+const BIFUR_ORACLE: &str = "Storied (If you control three or more artifacts, legendaries, and/or Sagas, you have an enduring story for the rest of the game.)\nWhenever Bifur enters or attacks, put a +1/+1 counter on target creature.\nAs long as you have an enduring story, if a triggered ability of a Dwarf you control triggers, that ability triggers an additional time.";
+const RADIANT_SCROLLWIELDER: &str = "Radiant Scrollwielder";
+const RADIANT_SCROLLWIELDER_ORACLE: &str = "Instant and sorcery spells you control have lifelink.\nAt the beginning of your upkeep, exile an instant or sorcery card at random from your graveyard. You may cast it this turn. If a spell cast this way would be put into your graveyard, exile it instead.";
+const TWILIGHT_PROPHET_ORACLE: &str = "Flying\nAscend (If you control ten or more permanents, you get the city's blessing for the rest of the game.)\nAt the beginning of your upkeep, if you have the city's blessing, reveal the top card of your library and put it into your hand. Each opponent loses X life and you gain X life, where X is that card's mana value.";
+
+fn lore(runner: &GameRunner, saga: ObjectId) -> u32 {
+    runner.state().objects[&saga]
+        .counters
+        .get(&CounterType::Lore)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Archenemy P0 with Bow to My Command atop its scheme deck; `players` seats. P0 controls
+/// `with_grub` Grub, Storied Matriarch and History of Benalia (one lore counter). P0 is active
+/// in its draw step. Returns (runner, bow, saga, grub).
+fn bow_board(players: u8, with_grub: bool) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
+    let db = load_db().expect("card db");
+    assert_oracle(db, BOW_TO_MY_COMMAND, BOW_TO_MY_COMMAND_ORACLE);
+    assert_oracle(db, MATRIARCH, MATRIARCH_ORACLE);
+    assert_oracle(db, HISTORY_OF_BENALIA, HISTORY_OF_BENALIA_ORACLE);
+    let mut format = FormatConfig::archenemy();
+    format.archenemy_player = Some(P0);
+    let mut scenario = GameScenario::new_with_format(format, players, 42);
+    scenario.at_phase(Phase::Draw);
+    for i in 0..7 {
+        for p in 0..players {
+            scenario.add_card_to_library_top(PlayerId(p), &format!("P{p} Library {i}"));
+        }
+    }
+    let grub = with_grub.then(|| scenario.add_real_card(P0, MATRIARCH, Zone::Battlefield, db));
+    let saga = scenario.add_real_card(P0, HISTORY_OF_BENALIA, Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    // Setup only: stage the archenemy's scheme deck and active player.
+    let bow = create_scheme_deck_card(
+        runner.state_mut(),
+        &db.get_face_by_name(BOW_TO_MY_COMMAND).unwrap().clone(),
+        P0,
+    );
+    runner.state_mut().archenemy = Some(P0);
+    runner.state_mut().active_player = P0;
+    (runner, bow, saga, grub)
+}
+
+fn confidant_board(two_ambers: bool) -> (GameRunner, ObjectId, Option<(ObjectId, ObjectId)>) {
+    let (mut runner, (confidant, ambers)) = board(Phase::PreCombatMain, |s, db| {
+        assert_oracle(db, DARK_CONFIDANT, DARK_CONFIDANT_ORACLE);
+        assert_oracle(db, MOX_AMBER, MOX_AMBER_ORACLE);
+        assert_oracle(db, ELESH_NORN, ELESH_NORN_ORACLE);
+        s.add_real_card(P0, ELESH_NORN, Zone::Battlefield, db);
+        let confidant = s.add_real_card(P1, DARK_CONFIDANT, Zone::Battlefield, db);
+        let ambers = two_ambers.then(|| {
+            (
+                s.add_real_card(P1, MOX_AMBER, Zone::Battlefield, db),
+                s.add_real_card(P1, MOX_AMBER, Zone::Battlefield, db),
+            )
+        });
+        (confidant, ambers)
+    });
+    let mut out = Vec::new();
+    let mut ids = vec![confidant];
+    if let Some((_, b)) = ambers {
+        ids.push(b);
+    }
+    for id in ids {
+        engine::game::phasing::phase_out_object(
+            runner.state_mut(),
+            id,
+            engine::game::game_object::PhaseOutCause::Directly,
+            &mut out,
+        );
+    }
+    (runner, confidant, ambers)
+}
+
+/// CR 904.9 + CR 703.4e + CR 703.4f: Bow's "As you set this scheme in motion,
+/// choose an opponent" precedes History's lore counter. Grub's "At the beginning of your
+/// first main phase, you may pay {R}" and History's "II — Create a 2/2 white Knight
+/// creature token with vigilance" share one CR 603.3b batch, each exactly once (CR 500.6).
+#[test]
+fn bow_choice_precedes_the_lore_counter_and_both_triggers_share_one_prompt() {
+    let (mut runner, bow, saga, grub) = bow_board(3, true);
+    let grub = grub.unwrap();
+    let events = pass_until(&mut runner, |r| r.state().phase == Phase::PreCombatMain);
+    assert_eq!(
+        events
+            .iter()
+            .filter(
+                |e| matches!(e, GameEvent::SchemeSetInMotion { scheme_id, .. } if *scheme_id == bow)
+            )
+            .count(),
+        1
+    );
+    assert!(runner.state().scheme_deck.is_empty());
+    match &runner.state().waiting_for {
+        WaitingFor::NamedChoice {
+            player,
+            choice_type: engine::types::ability::ChoiceType::Opponent { .. },
+            options,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(options, &["1", "2"]);
+        }
+        other => panic!("Bow must choose before triggers are placed: {other:?}"),
+    }
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(lore(&runner, saga), 1);
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "2".to_string(),
+        })
+        .expect("choose P2");
+    assert_eq!(lore(&runner, saga), 2);
+    assert!(runner.state().objects[&bow]
+        .chosen_attributes
+        .contains(&ChosenAttribute::Player(PlayerId(2))));
+    let sources = order_prompt_sources(&runner, P0);
+    let mut sorted = sources.clone();
+    sorted.sort();
+    let mut expected = vec![grub, saga];
+    expected.sort();
+    assert_eq!(sorted, expected);
+    for first in [grub, saga] {
+        let mut branch = GameRunner::from_state(runner.state().clone());
+        let before = tokens(&branch).len();
+        order_first(&mut branch, &sources, first);
+        assert_eq!(
+            stack_sources(&branch),
+            vec![first, if first == grub { saga } else { grub }]
+        );
+        assert!(branch.state().deferred_triggers.is_empty());
+        let (mut seen, mut tally) = (Vec::new(), Vec::new());
+        tally_stack(&branch, &mut seen, &mut tally);
+        for _ in 0..12 {
+            let action = match branch.state().waiting_for {
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    GameAction::DecideOptionalEffect { accept: false }
+                }
+                WaitingFor::Priority { .. } if !branch.state().stack.is_empty() => {
+                    GameAction::PassPriority
+                }
+                _ => break,
+            };
+            branch.act(action).expect("resolve the batch");
+            tally_stack(&branch, &mut seen, &mut tally);
+        }
+        assert_settled(&branch);
+        assert_eq!(tally.iter().filter(|s| **s == grub).count(), 1);
+        assert_eq!(tally.iter().filter(|s| **s == saga).count(), 1);
+        assert_eq!(tokens(&branch).len(), before + 1);
+        assert_eq!(
+            tokens(&branch)
+                .iter()
+                .filter(|id| branch.state().objects[*id].name == "Knight")
+                .count(),
+            1
+        );
+    }
+}
+
+/// CR 904.9 + CR 703.4e + CR 703.4f: "As you set this scheme in motion, choose an
+/// opponent" precedes History's "II — Create a 2/2 white Knight creature token with vigilance",
+/// even when that chapter is the only trigger waiting (CR 603.3b).
+#[test]
+fn bow_choice_precedes_a_lone_chapter_trigger() {
+    let (mut runner, bow, saga, _) = bow_board(2, false);
+    pass_until(&mut runner, |r| r.state().phase == Phase::PreCombatMain);
+    match &runner.state().waiting_for {
+        WaitingFor::NamedChoice {
+            player,
+            choice_type: engine::types::ability::ChoiceType::Opponent { .. },
+            options,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(options, &["1"]);
+        }
+        other => panic!("Bow must choose first: {other:?}"),
+    }
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(lore(&runner, saga), 1);
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "1".to_string(),
+        })
+        .expect("choose P1");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(stack_sources(&runner), vec![saga]);
+    assert_eq!(lore(&runner, saga), 2);
+    assert!(runner.state().objects[&bow]
+        .chosen_attributes
+        .contains(&ChosenAttribute::Player(P1)));
+    let before = tokens(&runner).len();
+    resolve_stack(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(tokens(&runner).len(), before + 1);
+    assert_eq!(
+        tokens(&runner)
+            .iter()
+            .filter(|id| runner.state().objects[*id].name == "Knight")
+            .count(),
+        1
+    );
+}
+
+/// CR 117.5 + CR 704.3 + CR 704.5j: after Eon Hub's "Players skip their upkeep
+/// steps", the legend choice precedes the CR 603.3b batch of Pilferer's "Whenever this
+/// creature becomes untapped, you may pay {2}" and Sheoldred's "Whenever you draw a card,
+/// you gain 2 life." Both stack orders preserve exactly one of each trigger.
+#[test]
+fn draw_step_legend_choice_comes_before_the_order_prompt() {
+    let (mut runner, (a, b, pilferer, sheoldred)) = board(Phase::PreCombatMain, |s, db| {
+        for (name, oracle) in [
+            (EON_HUB, EON_HUB_ORACLE),
+            (GHOSTLY_PILFERER, GHOSTLY_PILFERER_ORACLE),
+            (SHEOLDRED, SHEOLDRED_ORACLE),
+        ] {
+            assert_oracle(db, name, oracle);
+        }
+        assert!(db.get_face_by_name(ISAMARU).unwrap().oracle_text.is_none());
+        s.add_real_card(P1, EON_HUB, Zone::Battlefield, db);
+        (
+            s.add_real_card(P1, ISAMARU, Zone::Battlefield, db),
+            s.add_real_card(P1, ISAMARU, Zone::Battlefield, db),
+            s.add_real_card(P1, GHOSTLY_PILFERER, Zone::Battlefield, db),
+            s.add_real_card(P1, SHEOLDRED, Zone::Battlefield, db),
+        )
+    });
+    // Setup only: B phases in alongside the untapping Pilferer next turn.
+    engine::game::phasing::phase_out_object(
+        runner.state_mut(),
+        b,
+        engine::game::game_object::PhaseOutCause::Directly,
+        &mut Vec::new(),
+    );
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&pilferer)
+        .unwrap()
+        .tapped = true;
+    let events = pass_until(&mut runner, |r| {
+        r.state().active_player == P1 && r.state().phase == Phase::Draw
+    });
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::PermanentPhasedIn { object_id } if *object_id == b))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::CardDrawn { player_id: P1, .. }))
+            .count(),
+        1
+    );
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseLegend {
+            player, candidates, ..
+        } => {
+            assert_eq!(*player, P1);
+            let mut actual = candidates.clone();
+            actual.sort();
+            let mut expected = vec![a, b];
+            expected.sort();
+            assert_eq!(actual, expected);
+        }
+        other => panic!("legend choice must precede ordering: {other:?}"),
+    }
+    assert!(runner.state().stack.is_empty());
+    runner
+        .act(GameAction::ChooseLegend { keep: a })
+        .expect("keep A");
+    assert_eq!(runner.state().objects[&b].zone, Zone::Graveyard);
+    let sources = order_prompt_sources(&runner, P1);
+    let mut actual = sources.clone();
+    actual.sort();
+    let mut expected = vec![pilferer, sheoldred];
+    expected.sort();
+    assert_eq!(actual, expected);
+    for first in [pilferer, sheoldred] {
+        let mut branch = GameRunner::from_state(runner.state().clone());
+        let life = branch.state().players[1].life;
+        order_first(&mut branch, &sources, first);
+        assert_eq!(
+            stack_sources(&branch),
+            vec![
+                first,
+                if first == pilferer {
+                    sheoldred
+                } else {
+                    pilferer
+                }
+            ]
+        );
+        let (mut seen, mut tally) = (Vec::new(), Vec::new());
+        tally_stack(&branch, &mut seen, &mut tally);
+        for _ in 0..12 {
+            let action = match branch.state().waiting_for {
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    GameAction::DecideOptionalEffect { accept: false }
+                }
+                WaitingFor::Priority { .. } if !branch.state().stack.is_empty() => {
+                    GameAction::PassPriority
+                }
+                _ => break,
+            };
+            branch.act(action).expect("resolve the batch");
+            tally_stack(&branch, &mut seen, &mut tally);
+        }
+        assert_settled(&branch);
+        assert_eq!(tally.iter().filter(|s| **s == pilferer).count(), 1);
+        assert_eq!(tally.iter().filter(|s| **s == sheoldred).count(), 1);
+        assert_eq!(branch.state().players[1].life, life + 2);
+    }
+}
+
+/// CR 117.5 + CR 704.3 + CR 704.5j: with "Players skip their upkeep steps" and
+/// "Skip your draw step", the first-main legend choice still precedes Pilferer's untap
+/// trigger and Grub's "At the beginning of your first main phase, you may pay {R}"
+/// in their shared CR 500.6 + CR 603.3b batch.
+#[test]
+fn first_main_legend_choice_comes_before_the_order_prompt() {
+    let (mut runner, (a, b, pilferer, grub)) = board(Phase::PreCombatMain, |s, db| {
+        for (name, oracle) in [
+            (EON_HUB, EON_HUB_ORACLE),
+            (NECROPOTENCE, NECROPOTENCE_ORACLE),
+            (GHOSTLY_PILFERER, GHOSTLY_PILFERER_ORACLE),
+            (MATRIARCH, MATRIARCH_ORACLE),
+        ] {
+            assert_oracle(db, name, oracle);
+        }
+        assert!(db.get_face_by_name(ISAMARU).unwrap().oracle_text.is_none());
+        s.add_real_card(P1, EON_HUB, Zone::Battlefield, db);
+        s.add_real_card(P1, NECROPOTENCE, Zone::Battlefield, db);
+        (
+            s.add_real_card(P1, ISAMARU, Zone::Battlefield, db),
+            s.add_real_card(P1, ISAMARU, Zone::Battlefield, db),
+            s.add_real_card(P1, GHOSTLY_PILFERER, Zone::Battlefield, db),
+            s.add_real_card(P1, MATRIARCH, Zone::Battlefield, db),
+        )
+    });
+    // Setup only: stage the phased-out second legend and tapped Pilferer.
+    engine::game::phasing::phase_out_object(
+        runner.state_mut(),
+        b,
+        engine::game::game_object::PhaseOutCause::Directly,
+        &mut Vec::new(),
+    );
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&pilferer)
+        .unwrap()
+        .tapped = true;
+    let events = pass_until(&mut runner, |r| {
+        r.state().active_player == P1 && r.state().phase == Phase::PreCombatMain
+    });
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e,GameEvent::PermanentPhasedIn {object_id} if *object_id==b))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::CardDrawn { player_id: P1, .. }))
+            .count(),
+        0
+    );
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseLegend {
+            player, candidates, ..
+        } => {
+            assert_eq!(*player, P1);
+            let mut actual = candidates.clone();
+            actual.sort();
+            let mut expected = vec![a, b];
+            expected.sort();
+            assert_eq!(actual, expected);
+        }
+        other => panic!("legend choice must precede ordering: {other:?}"),
+    }
+    assert!(runner.state().stack.is_empty());
+    runner
+        .act(GameAction::ChooseLegend { keep: a })
+        .expect("keep A");
+    assert_eq!(runner.state().objects[&b].zone, Zone::Graveyard);
+    let sources = order_prompt_sources(&runner, P1);
+    let mut actual = sources.clone();
+    actual.sort();
+    let mut expected = vec![pilferer, grub];
+    expected.sort();
+    assert_eq!(actual, expected);
+    for first in [pilferer, grub] {
+        let mut branch = GameRunner::from_state(runner.state().clone());
+        order_first(&mut branch, &sources, first);
+        assert_eq!(
+            stack_sources(&branch),
+            vec![first, if first == pilferer { grub } else { pilferer }]
+        );
+        resolve_stack(&mut branch);
+        assert_settled(&branch);
+    }
+}
+
+/// CR 500.6 + CR 704.3 + CR 704.5f + CR 603.3b: Dark Confidant's "At the beginning
+/// of your upkeep, reveal the top card of your library and put that card into your hand"
+/// waits with Doomed Traveler's "When this creature dies, create a 1/1 white Spirit creature
+/// token with flying" when Elesh Norn's "Creatures your opponents control get -2/-2" kills both.
+#[test]
+fn state_based_deaths_join_the_upkeep_batch() {
+    let (mut runner, (confidant, traveler)) = board(Phase::PreCombatMain, |s, db| {
+        for (name, oracle) in [
+            (DARK_CONFIDANT, DARK_CONFIDANT_ORACLE),
+            (DOOMED_TRAVELER, DOOMED_TRAVELER_ORACLE),
+            (ELESH_NORN, ELESH_NORN_ORACLE),
+        ] {
+            assert_oracle(db, name, oracle);
+        }
+        s.add_real_card(P0, ELESH_NORN, Zone::Battlefield, db);
+        (
+            s.add_real_card(P1, DARK_CONFIDANT, Zone::Battlefield, db),
+            s.add_real_card(P1, DOOMED_TRAVELER, Zone::Battlefield, db),
+        )
+    });
+    // Setup only: both sources phase in under the opposing Elesh Norn.
+    for id in [confidant, traveler] {
+        engine::game::phasing::phase_out_object(
+            runner.state_mut(),
+            id,
+            engine::game::game_object::PhaseOutCause::Directly,
+            &mut Vec::new(),
+        );
+    }
+    pass_until(&mut runner, |r| {
+        r.state().active_player == P1 && r.state().phase == Phase::Upkeep
+    });
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.state().objects[&confidant].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&traveler].zone, Zone::Graveyard);
+    let sources = order_prompt_sources(&runner, P1);
+    let mut actual = sources.clone();
+    actual.sort();
+    let mut expected = vec![confidant, traveler];
+    expected.sort();
+    assert_eq!(actual, expected);
+    for first in [confidant, traveler] {
+        let mut branch = GameRunner::from_state(runner.state().clone());
+        let hand = branch.state().players[1].hand.len();
+        order_first(&mut branch, &sources, first);
+        assert_eq!(
+            stack_sources(&branch),
+            vec![
+                first,
+                if first == confidant {
+                    traveler
+                } else {
+                    confidant
+                }
+            ]
+        );
+        let events = resolve_stack(&mut branch);
+        assert_settled(&branch);
+        assert_eq!(branch.state().players[1].hand.len(), hand + 1);
+        // CR 704.5f: Elesh Norn also kills the created 1/1 Spirit; count its creation,
+        // rather than requiring a token to survive the same opposing -2/-2 effect.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event,
+                    GameEvent::TokenCreated { name, source_id, .. }
+                        if name == "Spirit" && *source_id == traveler
+                ))
+                .count(),
+            1
+        );
+    }
+}
+
+/// CR 500.6 + CR 704.3 + CR 704.5f + CR 704.5j: Dark Confidant's "At the beginning
+/// of your upkeep, reveal the top card of your library and put that card into your hand"
+/// survives its source dying to Elesh Norn beside the Mox Amber legend choice (CR 603.3b).
+#[test]
+fn upkeep_trigger_survives_its_source_dying_beside_a_legend_choice() {
+    let (mut runner, confidant, ambers) = confidant_board(true);
+    let (a, b) = ambers.unwrap();
+    let hand = runner.state().players[1].hand.len();
+    let events = pass_until(&mut runner, |r| {
+        r.state().active_player == P1 && r.state().phase == Phase::Upkeep
+    });
+    assert_eq!(
+        events
+            .iter()
+            .filter(
+                |e| matches!(e,GameEvent::PermanentPhasedIn {object_id} if *object_id==confidant)
+            )
+            .count(),
+        1
+    );
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseLegend {
+            player, candidates, ..
+        } => {
+            assert_eq!(*player, P1);
+            let mut actual = candidates.clone();
+            actual.sort();
+            let mut expected = vec![a, b];
+            expected.sort();
+            assert_eq!(actual, expected);
+        }
+        other => panic!("the Ambers require a legend choice: {other:?}"),
+    }
+    assert_eq!(runner.state().objects[&confidant].zone, Zone::Graveyard);
+    assert!(runner.state().stack.is_empty());
+    runner
+        .act(GameAction::ChooseLegend { keep: a })
+        .expect("keep Amber A");
+    assert_eq!(stack_sources(&runner), vec![confidant]);
+    let (mut seen, mut tally) = (Vec::new(), Vec::new());
+    tally_stack(&runner, &mut seen, &mut tally);
+    resolve_stack(&mut runner);
+    tally_stack(&runner, &mut seen, &mut tally);
+    assert_settled(&runner);
+    assert_eq!(tally, vec![confidant]);
+    assert_eq!(runner.state().players[1].hand.len(), hand + 1);
+}
+
+/// CR 500.6 + CR 704.3 + CR 704.5f: "At the beginning of your upkeep, reveal the top
+/// card of your library and put that card into your hand" triggers before Elesh Norn's
+/// "Creatures your opponents control get -2/-2" kills Dark Confidant, with no choice to pause.
+#[test]
+fn upkeep_trigger_survives_its_source_dying_to_the_upkeep_check() {
+    let (mut runner, confidant, _) = confidant_board(false);
+    let hand = runner.state().players[1].hand.len();
+    let events = pass_until(&mut runner, |r| {
+        r.state().active_player == P1 && r.state().phase == Phase::Upkeep
+    });
+    assert_eq!(
+        events
+            .iter()
+            .filter(
+                |e| matches!(e,GameEvent::PermanentPhasedIn {object_id} if *object_id==confidant)
+            )
+            .count(),
+        1
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    assert_eq!(runner.state().objects[&confidant].zone, Zone::Graveyard);
+    assert_eq!(stack_sources(&runner), vec![confidant]);
+    let (mut seen, mut tally) = (Vec::new(), Vec::new());
+    tally_stack(&runner, &mut seen, &mut tally);
+    resolve_stack(&mut runner);
+    tally_stack(&runner, &mut seen, &mut tally);
+    assert_settled(&runner);
+    assert_eq!(tally, vec![confidant]);
+    assert_eq!(runner.state().players[1].hand.len(), hand + 1);
+}
+
+/// CR 702.131b + CR 500.6: Ascend grants the blessing before "At the beginning of
+/// your upkeep, if you have the city's blessing, reveal the top card of your library and
+/// put it into your hand" is checked for Twilight Prophet (CR 603.4).
+#[test]
+fn twilight_prophets_upkeep_trigger_sees_a_blessing_its_tenth_permanent_gives() {
+    let (mut runner, (prophet, memnite)) = board(Phase::PreCombatMain, |s, db| {
+        assert_oracle(db, TWILIGHT_PROPHET, TWILIGHT_PROPHET_ORACLE);
+        for _ in 0..8 {
+            s.add_real_card(P1, "Plains", Zone::Battlefield, db);
+        }
+        (
+            s.add_real_card(P1, TWILIGHT_PROPHET, Zone::Battlefield, db),
+            s.add_real_card(P1, "Memnite", Zone::Battlefield, db),
+        )
+    });
+    assert!(runner.state().objects[&prophet]
+        .keywords
+        .contains(&Keyword::Ascend));
+    // Setup only: nine permanents until Memnite phases in next untap.
+    engine::game::phasing::phase_out_object(
+        runner.state_mut(),
+        memnite,
+        engine::game::game_object::PhaseOutCause::Directly,
+        &mut Vec::new(),
+    );
+    assert!(!runner.state().city_blessing.contains(&P1));
+    let events = pass_until(&mut runner, |r| {
+        r.state().active_player == P1 && r.state().phase == Phase::Upkeep
+    });
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e,GameEvent::PermanentPhasedIn {object_id} if *object_id==memnite))
+            .count(),
+        1
+    );
+    assert!(runner.state().city_blessing.contains(&P1));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    assert_eq!(stack_sources(&runner), vec![prophet]);
+    let hand = runner.state().players[1].hand.len();
+    resolve_stack(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(runner.state().players[1].hand.len(), hand + 1);
+}
+
+/// CR 702.195a + CR 702.195c: Bifur's "As long as you have an enduring story, if a
+/// triggered ability of a Dwarf you control triggers, that ability triggers an additional
+/// time" applies to Scrollwielder's "At the beginning of your upkeep, exile an instant or
+/// sorcery card at random from your graveyard" as the step begins (CR 500.6).
+#[test]
+fn bifur_doubles_scrollwielders_upkeep_trigger_once_the_third_historic_permanent_phases_in() {
+    let (mut runner, (bifur, scroll, extra)) = board(Phase::PreCombatMain, |s, db| {
+        assert_oracle(db, BIFUR, BIFUR_ORACLE);
+        assert_oracle(db, RADIANT_SCROLLWIELDER, RADIANT_SCROLLWIELDER_ORACLE);
+        s.add_real_card(P1, "Memnite", Zone::Battlefield, db);
+        (
+            s.add_real_card(P1, BIFUR, Zone::Battlefield, db),
+            s.add_real_card(P1, RADIANT_SCROLLWIELDER, Zone::Battlefield, db),
+            s.add_real_card(P1, "Memnite", Zone::Battlefield, db),
+        )
+    });
+    // Setup only: Bifur and the first Memnite are the two historic permanents.
+    engine::game::phasing::phase_out_object(
+        runner.state_mut(),
+        extra,
+        engine::game::game_object::PhaseOutCause::Directly,
+        &mut Vec::new(),
+    );
+    assert!(runner.state().enduring_story.is_empty());
+    assert_eq!(runner.state().objects[&bifur].zone, Zone::Battlefield);
+    let events = pass_until(&mut runner, |r| {
+        r.state().active_player == P1 && r.state().phase == Phase::Upkeep
+    });
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e,GameEvent::PermanentPhasedIn {object_id} if *object_id==extra))
+            .count(),
+        1
+    );
+    assert!(runner.state().enduring_story.contains(&P1));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    assert_eq!(stack_sources(&runner), vec![scroll, scroll]);
+    resolve_stack(&mut runner);
+    assert_settled(&runner);
+}
+
+/// CR 702.195a + CR 500.6: below three historic permanents Bifur's "As long as you
+/// have an enduring story" doubling does not apply to Scrollwielder's "At the beginning
+/// of your upkeep, exile an instant or sorcery card at random from your graveyard."
+#[test]
+fn scrollwielders_upkeep_trigger_triggers_once_below_three_historic_permanents() {
+    let (mut runner, (bifur, scroll)) = board(Phase::PreCombatMain, |s, db| {
+        assert_oracle(db, BIFUR, BIFUR_ORACLE);
+        assert_oracle(db, RADIANT_SCROLLWIELDER, RADIANT_SCROLLWIELDER_ORACLE);
+        s.add_real_card(P1, "Memnite", Zone::Battlefield, db);
+        (
+            s.add_real_card(P1, BIFUR, Zone::Battlefield, db),
+            s.add_real_card(P1, RADIANT_SCROLLWIELDER, Zone::Battlefield, db),
+        )
+    });
+    assert_eq!(runner.state().objects[&bifur].zone, Zone::Battlefield);
+    assert!(runner.state().enduring_story.is_empty());
+    pass_until(&mut runner, |r| {
+        r.state().active_player == P1 && r.state().phase == Phase::Upkeep
+    });
+    assert!(runner.state().enduring_story.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    assert_eq!(stack_sources(&runner), vec![scroll]);
+    resolve_stack(&mut runner);
+    assert_settled(&runner);
+}
+
 /// CR 502.2 + CR 731.1a + CR 603.2c: The Celestus's "Whenever day becomes
 /// night or night becomes day" gains exactly 1 life on an untap-step change.
 #[test]

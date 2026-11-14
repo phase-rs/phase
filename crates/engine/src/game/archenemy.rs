@@ -32,7 +32,9 @@
 //!   entry event (`turns::hold_turn_based_action_triggers`), which claims the
 //!   `SchemeSetInMotion` occurrence for ordinary collection (CR 603.2c), so the post-action
 //!   scan does not collect it again. It goes on the stack with the phase's other first-main
-//!   triggers in one batch (CR 703.4e + CR 117.3a + CR 603.3b).
+//!   triggers in one batch (CR 703.4e + CR 117.3a + CR 603.3b). Its "as you set this scheme in motion"
+//!   choices are made by that arm right after the hold, before the lore counters (CR 703.4f), through
+//!   [`resolve_pending_as_set_in_motion_choices`].
 //! - [`abandon`] DOES self-collect (single authority), because an abandon effect
 //!   turns a face-up ongoing scheme face down and removes it from the command
 //!   zone. It collects the `SchemeAbandoned` trigger while the scheme is still
@@ -121,9 +123,9 @@ pub fn set_in_motion(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // CR 904.9 / CR 701.32b: announce that the scheme was set in motion. The
     // precombat-main arm holds the SetInMotion trigger (see the doc above), so this
-    // function must not self-collect it. The scheme's "as" choices are resolved later,
-    // by `resolve_pending_as_set_in_motion_choices` from the post-action scan
-    // (resolving here would not survive the pass pipeline's `sync_waiting_for`).
+    // function must not self-collect it. The scheme's "as" choices are made by the
+    // precombat-main arm of `turns::auto_advance_once`, which returns their prompt
+    // (a prompt raised here would not survive the pass pipeline's `sync_waiting_for`).
     let event = GameEvent::SchemeSetInMotion {
         player_id: archenemy,
         scheme_id,
@@ -133,17 +135,15 @@ pub fn set_in_motion(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
 /// CR 904.9 + CR 603.1: resolve "as you set this scheme in motion" choices
 /// (Bow to My Command) for the `SchemeSetInMotion` events in this scan batch.
-/// Called from the post-action scan, not from `set_in_motion` itself: a prompt
-/// raised inside `finish_enter_phase` would be overwritten by the pass pipeline's
-/// `sync_waiting_for`. It reads the raw events, so the precombat-main arm's claim
-/// on the occurrence does not hide it. The scheme's "when" triggers were already
-/// held and placed by that arm; no printed scheme has both an "as" and a "when"
-/// set-in-motion ability. The choice never touches the stack.
+/// Called by the precombat-main arm of `turns::auto_advance_once` right after the scheme
+/// action's triggers are held and before the lore counters (CR 703.4f); a prompt it raises
+/// pauses the phase, which resumes at the answer's priority boundary (`GameState::step_entry_resume`).
+/// It reads the raw events, so the precombat-main arm's claim on the occurrence does not
+/// hide it. The scheme's "when" triggers are already held by that arm; no printed scheme
+/// has both an "as" and a "when" set-in-motion ability. The choice never touches the stack.
 ///
-/// Stops at the first pause or pre-existing prompt: a second prompt would
-/// clobber the first. Unreachable in practice (one set-in-motion per phase
-/// entry, and phase entry never coincides with another prompt), but fail
-/// safe, not sorry: the earlier prompt is preserved.
+/// Stops at the first pause or pre-existing prompt: a second prompt would clobber the first.
+/// One set-in-motion per phase entry; the earlier prompt is preserved.
 ///
 /// Depth 0 is sound here: `set_in_motion` runs only from
 /// `finish_enter_phase`, and phase boundaries never occur mid-resolution, so

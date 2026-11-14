@@ -473,8 +473,8 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         // matcher dispatch returns `None` for them. Skip entirely — neither
         // a key nor unclassified routing.
         TriggerMode::StateCondition => return (SmallVec::new(), false),
-        // CR 904.9: resolved by the scan hook
-        // (`archenemy::resolve_pending_as_set_in_motion_choices`), never
+        // CR 904.9: choices are made by the scheme action (the precombat-main arm,
+        // `archenemy::resolve_pending_as_set_in_motion_choices`), never
         // through event-driven dispatch. Neither a key nor unclassified.
         TriggerMode::AsSetInMotion => return (SmallVec::new(), false),
         // No matcher registered; never fires through events.

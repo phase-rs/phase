@@ -290,8 +290,8 @@ fn trigger_route(mode: &TriggerMode) -> Option<TriggerRoute> {
         // CR 603.8: State triggers are not event-based — they are checked separately
         // in the priority pipeline, not through the event-matching trigger system.
         TriggerMode::StateCondition => return None,
-        // CR 904.9: "as" choices resolve via the scan hook
-        // (`archenemy::resolve_pending_as_set_in_motion_choices`), never
+        // CR 904.9: "as" choices are made by the scheme action (the precombat-main arm,
+        // `archenemy::resolve_pending_as_set_in_motion_choices`), never
         // through event matching.
         TriggerMode::AsSetInMotion => return None,
         TriggerMode::Unknown(_) => return None,

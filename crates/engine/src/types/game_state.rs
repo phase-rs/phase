@@ -17776,6 +17776,18 @@ pub struct PendingAttackExert {
     pub permission: TriggerDefinitionRef,
 }
 
+/// CR 703.3 + CR 703.4: where a step's beginning processing that paused on a choice inside one of its
+/// turn-based actions resumes. The answer's priority boundary re-enters the step
+/// (`turns::resume_deferred_step_triggers`); the step's beginning triggers are already held and are not
+/// collected again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StepEntryResume {
+    /// CR 703.4e + CR 703.4f + CR 904.9: the archenemy's scheme action, its "as you set this scheme in
+    /// motion" choices included (Bow to My Command), is done; the precombat main phase resumes at its lore
+    /// counters.
+    AfterSchemeAction,
+}
+
 /// CR 502.1 + CR 502.2 + CR 502.3: how far the untap step had run when one of its CR 502.3
 /// determinations (`WaitingFor::UntapChoice`, `WaitingFor::ChooseUntapSubset`) was raised.
 /// Serialized unconditionally (no `skip_serializing_if`) by every writer, so its absence on
@@ -26976,8 +26988,16 @@ declare_game_state! {
     /// deferred `enter_phase`). Cleared when `handle_replacement_choice`
     /// resumes `auto_advance` after the drain completes so beginning-of-step
     /// triggers (CR 513.1 + CR 603.3b) still fire.
+    /// Also set, with `step_entry_resume`, when the precombat main phase pauses on the
+    /// scheme action's "as" choice; the answer's boundary resumes the arm.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred_step_trigger_resume: Option<Phase>,
+
+    /// CR 703.3 + CR 703.4e: the point a paused step entry resumes from, set with
+    /// `deferred_step_trigger_resume` by the precombat main phase when the scheme action's "as" choice
+    /// prompts. Taken by the re-entered arm; cleared by every new step entry (`turns::finish_enter_phase`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_entry_resume: Option<StepEntryResume>,
 
     /// CR 805.4b: queue of players who still owe their turn-based draw-step
     /// draw THIS step. Seeded by `turns::enter_phase`'s `Phase::Draw` arm on
@@ -35128,6 +35148,7 @@ impl GameState {
             pending_step_end_mana_handlers: Vec::new(),
             pending_phase_transition_progress: None,
             deferred_step_trigger_resume: None,
+            step_entry_resume: None,
             pending_team_draw_step: Vec::new(),
             pending_untap_declines: Vec::new(),
             current_trigger_event: None,
@@ -38801,6 +38822,7 @@ impl GameState {
             pending_step_end_mana_handlers: _,
             pending_phase_transition_progress: _,
             deferred_step_trigger_resume: _,
+            step_entry_resume: _,
             pending_team_draw_step: _,
             pending_untap_declines: _,
             current_trigger_match_count: _,
@@ -40677,6 +40699,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_step_end_mana_handlers: _,
         pending_phase_transition_progress: _,
         deferred_step_trigger_resume: _,
+        step_entry_resume: _,
         pending_team_draw_step: _,
         pending_untap_declines: _,
         current_trigger_event: _,

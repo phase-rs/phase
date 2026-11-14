@@ -200,7 +200,9 @@ pub(crate) enum DeferredTriggerBatchOrigin {
     PriorityBoundary,
     /// CR 117.3a + CR 502.4 + CR 503.1a + CR 603.3b: an ability that triggered during a
     /// turn-based action performed as a step or phase begins (the untap step's actions, the
-    /// draw, the archenemy's scheme action, a Saga's lore counters), before any player
+    /// draw, the archenemy's scheme action, a Saga's lore counters), together with the step's
+    /// own beginning triggers, held as it begins (CR 500.6), and the abilities its state-based
+    /// check before that batch triggers (CR 704.3), before any player
     /// received priority in that step. It is held until the next time a player would receive
     /// priority and placed together with that boundary's own triggers in one CR 603.3b
     /// process — "the order in which they triggered doesn't matter" (CR 503.1a). `UntapStep`

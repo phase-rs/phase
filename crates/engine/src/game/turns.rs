@@ -13,7 +13,7 @@ use crate::types::format::GameFormat;
 use crate::types::game_state::{
     AutoPassMode, EmptyPoolLifeLossCause, ExtraPhase, ExtraTurn, GameState, InsertedPhaseResume,
     LoopCollapseAxis, PayableResource, PendingCounterAddition, PendingEffectResolved,
-    PendingEmptyPoolLifeLoss, TurnBoundary, UntapStepProgress, WaitingFor,
+    PendingEmptyPoolLifeLoss, StepEntryResume, TurnBoundary, UntapStepProgress, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
@@ -1348,6 +1348,9 @@ pub(super) fn drain_pending_phase_transition_progress(
 /// or not the beat was eligible to go back through the interpreter, and `stack.rs`'s quiescence
 /// predicate requires it clear.
 ///
+/// A second producer is the precombat main phase pausing on the scheme action's "as" choice;
+/// it records where the arm resumes in `step_entry_resume`.
+///
 /// A transition the resumed run defers is settled and retried once here, as after an
 /// untap-choice answer. Only a carrier that cannot settle leaves the provisional
 /// `Priority { active }` window standing (see `engine::settle_deferred_phase_transition`).
@@ -1458,6 +1461,8 @@ fn scan_step_end_mana_handlers(
 /// per-step draw counter (bookkeeping for `ExceptFirstDrawInDrawStep`
 /// condition machinery — not a CR rule itself), and emits `PhaseChanged`.
 fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameEvent>) {
+    // CR 703.4: a resume point belongs to the step entry that paused; a new entry ends it.
+    state.step_entry_resume = None;
     for player in state.players.iter_mut() {
         // Bookkeeping (not a CR rule): `cards_drawn_this_step` is the
         // counter the `ExceptFirstDrawInDrawStep` parser-level condition
@@ -2321,7 +2326,8 @@ pub fn execute_untap_with_choices(
 /// CR 117.3a + CR 502.4 + CR 503.1a: hold every ability that `events[event_start..]` triggered
 /// during a turn-based action performed as a step or phase begins — the untap step's actions
 /// (CR 502.1 + CR 502.2 + CR 502.3), the draw (CR 504.1 + CR 703.4d), the archenemy's scheme
-/// action (CR 703.4e + CR 904.9) and a Saga's lore counters (CR 703.4f + CR 714.3c). CR 603.3:
+/// action (CR 703.4e + CR 904.9), a Saga's lore counters (CR 703.4f + CR 714.3c),
+/// and the state-based check before a step's first batch (CR 704.3). CR 603.3:
 /// they go on the stack the next time a player would receive priority, together with that
 /// boundary's own triggers (`process_phase_triggers`). CR 603.2c: the occurrences are claimed,
 /// so the post-action ordinary scan does not collect them a second time. CR 800.4d is
@@ -3916,50 +3922,106 @@ fn step_entry_end(state: &GameState, events: &[GameEvent]) -> usize {
         .map_or(events.len(), |index| index + 1)
 }
 
-/// CR 500.6 + CR 117.3a + CR 503.1a + CR 603.3b: this step's first trigger batch, before
-/// it is put on the stack. The abilities that trigger "at the beginning of" this step are
-/// matched against the `PhaseChanged` this entry emitted for `state.phase`, or one
-/// fabricated for it when `events` holds none (an entry an earlier action finished). The
-/// held turn-based-action triggers (the untap step's, the draw's, the scheme's, a Saga's)
-/// join them in one APNAP batch; their controllers order them together, regardless of
-/// when they triggered. CR 502.4 + CR 614.10a: a skipped upkeep hands the untap step's
-/// batch to the first step that grants priority. A live resolution keeps that partition
-/// held for a later drain.
-///
-/// Returns the batch and the input of the step's delayed-trigger scan (the whole buffer
-/// when the entry event is present, else the fabricated entry). The single authority for
-/// this step's entry batch: [`process_phase_triggers`] places it and
-/// [`park_step_entry_triggers`] queues it behind a wait, so the two cannot disagree.
-fn step_entry_trigger_batch(
-    state: &mut GameState,
-    events: &[GameEvent],
-) -> (Vec<super::triggers::PendingTriggerContext>, Vec<GameEvent>) {
+/// CR 500.6: this step's entry events — the `PhaseChanged` this entry emitted for `state.phase`, or one
+/// fabricated for it when `events` holds none (an entry an earlier action finished) — and the input of the
+/// step's delayed-trigger scan (the whole buffer when the entry event is present, else the fabricated entry).
+fn step_entry_events(state: &GameState, events: &[GameEvent]) -> (Vec<GameEvent>, Vec<GameEvent>) {
     let phase_events: Vec<GameEvent> = events
         .iter()
         .filter(|event| matches!(event, GameEvent::PhaseChanged { phase } if *phase == state.phase))
         .cloned()
         .collect();
-    let (phase_events, delayed_events) = if phase_events.is_empty() {
+    if phase_events.is_empty() {
         let fallback = vec![GameEvent::PhaseChanged { phase: state.phase }];
         (fallback.clone(), fallback)
     } else {
         (phase_events, events.to_vec())
-    };
-    let mut contexts = if super::triggers::should_drain_deferred_triggers_now(state) {
+    }
+}
+
+/// CR 500.6 + CR 117.3a + CR 503.1a + CR 603.3b: this step's first trigger batch, before it is put on the stack:
+/// the held step-entry partition — the abilities that triggered as the step began
+/// ([`hold_step_beginning_triggers`]), during its turn-based actions and at its state-based check
+/// ([`hold_turn_based_action_triggers`]), and, after a skipped upkeep (CR 502.4 + CR 614.10a), the untap step's.
+/// Their controllers order them together in one APNAP batch, regardless of when they triggered. A live
+/// resolution keeps the partition held for a later drain.
+///
+/// Returns the batch and the input of the step's delayed-trigger scan ([`step_entry_events`]). The single
+/// authority for this step's entry batch: [`process_phase_triggers`] places it and [`park_step_entry_triggers`]
+/// queues it behind a wait, so the two cannot disagree.
+fn step_entry_trigger_batch(
+    state: &mut GameState,
+    events: &[GameEvent],
+) -> (Vec<super::triggers::PendingTriggerContext>, Vec<GameEvent>) {
+    let (_, delayed_events) = step_entry_events(state, events);
+    let contexts = if super::triggers::should_drain_deferred_triggers_now(state) {
         super::triggers::take_turn_based_action_trigger_batch(state)
     } else {
         Vec::new()
     };
-    contexts.extend(super::triggers::collect_triggers_for_batch(
-        state,
-        &phase_events,
-    ));
     (contexts, delayed_events)
+}
+
+/// CR 500.6 + CR 603.2 + CR 603.4: the abilities that trigger "at the beginning of" this step trigger as it
+/// begins — after the effects that last until it expire (CR 500.4) and before its turn-based actions (CR 703.3)
+/// and its state-based check (CR 117.5) can remove a source or change an intervening "if" condition. They are
+/// held for the step's first batch ([`step_entry_trigger_batch`]).
+///
+/// The designations static abilities grant "any time" are settled first, through their eager authorities:
+/// CR 702.131b (Ascend: a player who controls ten permanents has the city's blessing — Twilight Prophet) and
+/// CR 702.195a (Storied: a player who controls three artifacts, Sagas and/or legendary permanents has an
+/// enduring story — Bifur, Melodic Rider); CR 702.195c: continuous effects are reapplied before trigger
+/// conditions are checked (both helpers flush layers when they grant). Designations a state-based action grants
+/// (CR 704.5aa speed, CR 704.5t dungeon completion) come after the beginning, at the step's check.
+/// CR 613.1: the characteristics the triggers are matched against are current.
+fn hold_step_beginning_triggers(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    super::sba::apply_city_blessing_if_triggered(state, events);
+    super::sba::apply_enduring_story_if_triggered(state, events);
+    if state.layers_dirty.is_dirty() {
+        super::layers::flush_layers(state);
+    }
+    let (phase_events, _) = step_entry_events(state, events);
+    let contexts = super::triggers::collect_triggers_for_batch(state, &phase_events);
+    super::triggers::queue_parked_trigger_contexts(
+        state,
+        contexts,
+        super::triggers::DeferredTriggerBatchOrigin::TurnBasedAction,
+    );
+}
+
+/// CR 117.5 + CR 704.3: before this step's first batch is put on the stack, the game performs state-based
+/// actions — the untap step's phasing (CR 502.4: no player received priority since) or a skipped upkeep can have
+/// left one due. The abilities their events trigger wait with the step's batch (CR 603.3b). A state-based choice
+/// (`ChooseLegend`, CR 704.5j) parks the batch behind it ([`park_step_entry_triggers`]); a game that ended
+/// places nothing (CR 104.1). Returns the wait the step stops at, or `None` to place the batch.
+fn check_state_based_actions_before_step_batch(
+    state: &mut GameState,
+    events: &[GameEvent],
+    events_out: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    let waiting_before = state.waiting_for.clone();
+    let sba_start = events_out.len();
+    super::sba::check_state_based_actions(state, events_out);
+    // CR 104.1: a game the check ended places nothing; ending it already retired the queue
+    // (`elimination` → `retire_finished_game_triggers`, elimination.rs:502).
+    if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+        return Some(state.waiting_for.clone());
+    }
+    hold_turn_based_action_triggers(state, events_out, sba_start);
+    if state.waiting_for != waiting_before
+        && !matches!(state.waiting_for, WaitingFor::Priority { .. })
+    {
+        park_step_entry_triggers(state, events);
+        return Some(state.waiting_for.clone());
+    }
+    None
 }
 
 /// CR 503.1 / CR 504.2 / CR 507.1 / CR 513.1: Process phase triggers for the current step.
 /// Fabricates a PhaseChanged event for `state.phase` and runs trigger matching.
 /// CR 117.3a + CR 503.1a + CR 603.3b: the held turn-based-action triggers join this boundary's own triggers in one batch.
+///
+/// CR 117.5 + CR 704.3: state-based actions are performed first ([`check_state_based_actions_before_step_batch`]).
 ///
 /// Returns `(fired, ordering_prompt)`:
 /// * `fired` is `true` if any triggers were placed on the stack, are pending
@@ -3989,6 +4051,9 @@ fn process_phase_triggers(
     events: &[GameEvent],
     events_out: &mut Vec<GameEvent>,
 ) -> (bool, Option<WaitingFor>) {
+    if let Some(prompt) = check_state_based_actions_before_step_batch(state, events, events_out) {
+        return (false, Some(prompt));
+    }
     let (normal_pending, delayed_events) = step_entry_trigger_batch(state, events);
     let outcome = super::triggers::process_collected_triggers_with_delayed_phase_events(
         state,
@@ -4049,7 +4114,7 @@ fn process_phase_triggers(
 
 /// CR 500.6 + CR 117.5 + CR 603.3 + CR 603.3b: this step's beginning processing returned
 /// to a wait before [`process_phase_triggers`] put its first batch on the stack — a
-/// state-based choice (CR 704.3), a CR 616.1 replacement choice on the draw (CR 504.1) or
+/// state-based choice at the step's check before placement (CR 704.3), a CR 616.1 replacement choice on the draw (CR 504.1) or
 /// on a Saga's lore counter (CR 714.3c), the contraption prompt, the Paradigm offer, or a
 /// Horde reveal or post-combat activation. That batch has already triggered and no player
 /// receives priority for the wait, so it is queued behind it, stamped the way the
@@ -4256,9 +4321,8 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // first occurrence that isn't skipped, so an Eon-Hub-skipped
             // upkeep must NOT expire the effect.
             //
-            // CR 500.6: also ahead of the upkeep triggers below, so an
-            // expiring grant is already gone when a trigger sharing its
-            // deadline resolves (Cycle of Life).
+            // CR 500.6: ahead of the upkeep's beginning triggers, which are held right below,
+            // so an expiring grant is already gone (Cycle of Life).
             super::layers::prune_until_next_upkeep_effects(state, state.active_player);
             // CR 500.4 + CR 503.1: same deadline, casting-permission half —
             // Elkin Bottle / Grinning Totem lower "Until the beginning of
@@ -4267,20 +4331,8 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // effect. Mirrors the `prune_end_step_casting_permissions` +
             // `prune_until_next_end_step_effects` pairing at Phase::End.
             super::layers::prune_upkeep_step_casting_permissions(state, state.active_player);
-            // CR 704.3: Check SBAs before beginning-of-upkeep triggers so that
-            // city blessing (CR 702.131b) and other SBA-granted designations are
-            // applied before trigger conditions like "if you have the city's blessing"
-            // are evaluated (Twilight Prophet #1375).
-            let waiting_before_sba = state.waiting_for.clone();
-            super::sba::check_state_based_actions(state, events);
-            if state.waiting_for != waiting_before_sba
-                && !matches!(state.waiting_for, WaitingFor::Priority { .. })
-            {
-                // CR 500.6 + CR 503.1a + CR 704.3: the upkeep's triggers have triggered; they
-                // wait behind the state-based choice and join its answer's batch.
-                park_step_entry_triggers(state, events);
-                return AutoAdvanceStep::waiting(state.waiting_for.clone());
-            }
+            // CR 500.6 + CR 503.1a: the upkeep's beginning triggers trigger now, before its state-based check.
+            hold_step_beginning_triggers(state, events);
             if let Some(prompt) =
                 crate::game::contraptions::perform_contraption_upkeep_turn_based_action(
                     state, events,
@@ -4290,7 +4342,8 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 park_step_entry_triggers(state, events);
                 return AutoAdvanceStep::waiting(prompt);
             }
-            // CR 503.1a: "At the beginning of [your] upkeep" triggers fire here.
+            // CR 503.1a: the upkeep's held triggers are placed here. State-based actions
+            // are performed first, by `process_phase_triggers` (CR 117.5).
             // CR 603.3b: 2+ same-controller upkeep triggers (multiple suspended
             // cards, two Howling Mines) require an ordering choice that must be
             // surfaced before priority — see `process_phase_triggers`.
@@ -4321,10 +4374,12 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 return AutoAdvanceStep::Continue;
             }
             // CR 504.1 + CR 703.4d: the draw is a turn-based action. CR 117.3a + CR 603.3b: its
-            // triggers wait for this step's batch, with the draw step's own triggers (CR 500.6)
+            // triggers wait for this step's batch, with the draw step's own beginning triggers (CR 500.6), held first
             // and, after a skipped upkeep (CR 500.11), the untap step's held triggers (CR 502.4).
             // At a pause (a CR 616.1 replacement choice on the draw) the draw step's own
             // triggers and the held partition wait behind it together.
+            // CR 500.6 + CR 504.2: the draw step's beginning triggers trigger before its draw (CR 504.1 + CR 703.3).
+            hold_step_beginning_triggers(state, events);
             let draw_start = events.len();
             let paused = execute_draw(state, events);
             hold_turn_based_action_triggers(state, events, draw_start);
@@ -4346,15 +4401,43 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             });
         }
         Phase::PreCombatMain | Phase::PostCombatMain => {
+            // CR 703.3 + CR 703.4e: an entry that paused inside the scheme action resumes after it, with
+            // its beginning triggers already held.
+            let resume = state.step_entry_resume.take();
+            if resume.is_none() {
+                // CR 500.6: the main phase's beginning triggers trigger now.
+                hold_step_beginning_triggers(state, events);
+            }
             // CR 714.3c: As the precombat main phase begins, add a lore counter
             // to each Saga the active player controls (turn-based action).
             if state.phase == Phase::PreCombatMain {
-                // CR 703.4e + CR 904.9: the archenemy's scheme action ran as this phase began
-                // (`finish_enter_phase` sets the scheme in motion right after the entry event).
-                // CR 117.3a + CR 603.3b: its "When you set this scheme in motion" triggers wait
-                // for this phase's batch.
-                let scheme_start = step_entry_end(state, events);
-                hold_turn_based_action_triggers(state, events, scheme_start);
+                match resume {
+                    None => {
+                        // CR 703.4e + CR 904.9: the archenemy's scheme action ran as this phase began
+                        // (`finish_enter_phase` sets the scheme in motion right after the entry event).
+                        // CR 117.3a + CR 603.3b: its "When you set this scheme in motion" triggers wait
+                        // for this phase's batch.
+                        let scheme_start = step_entry_end(state, events);
+                        hold_turn_based_action_triggers(state, events, scheme_start);
+                        // CR 904.9 + CR 701.32b + CR 703.4f: its "as you set this scheme in motion"
+                        // choices (Bow to My Command) are part of the action, made before the lore
+                        // counters. A prompt pauses the phase; the answer's boundary resumes it here.
+                        let waiting_before = state.waiting_for.clone();
+                        super::archenemy::resolve_pending_as_set_in_motion_choices(
+                            state,
+                            events,
+                            scheme_start,
+                        );
+                        if state.waiting_for != waiting_before
+                            && !matches!(state.waiting_for, WaitingFor::Priority { .. })
+                        {
+                            state.step_entry_resume = Some(StepEntryResume::AfterSchemeAction);
+                            state.deferred_step_trigger_resume = Some(Phase::PreCombatMain);
+                            return AutoAdvanceStep::waiting(state.waiting_for.clone());
+                        }
+                    }
+                    Some(StepEntryResume::AfterSchemeAction) => {}
+                }
                 // CR 703.4f + CR 714.3c: the lore counters come next; their chapter triggers
                 // (CR 714.2b) wait the same way. At a CR 616.1 pause the phase's own triggers
                 // wait behind it with them (`park_step_entry_triggers`).
@@ -4424,6 +4507,8 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // processing triggers so it is available to every resulting prompt
             // and to abilities that later resolve from that trigger batch.
             state.combat = Some(crate::game::combat::CombatState::default());
+            // CR 500.6: the beginning-of-combat triggers trigger now.
+            hold_step_beginning_triggers(state, events);
             let event_snapshot = events.clone();
             let (_, ordering_prompt) = process_phase_triggers(state, &event_snapshot, events);
             // CR 603.3b: preserve a same-controller ordering prompt before
@@ -4506,15 +4591,12 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             });
         }
         Phase::EndCombat => {
-            // CR 511.1: "At end of combat" triggers fire here.
+            // CR 500.6 + CR 511.1: "At end of combat" triggers trigger now.
+            hold_step_beginning_triggers(state, events);
             let event_snapshot = events.clone();
-            let (triggers_fired, ordering_prompt) =
-                process_phase_triggers(state, &event_snapshot, events);
-            if triggers_fired {
-                // CR 603.3b: surface a same-controller ordering prompt before priority.
-                if let Some(prompt) = ordering_prompt {
-                    return AutoAdvanceStep::waiting(prompt);
-                }
+            // CR 603.3b + CR 704.3: surface an ordering prompt or a state-based choice before priority.
+            if let (_, Some(prompt)) = process_phase_triggers(state, &event_snapshot, events) {
+                return AutoAdvanceStep::waiting(prompt);
             }
             // CR 511.1: The active player receives priority as the End Combat step
             // begins, even when no ability triggered. Keeping the phase active until
@@ -4537,6 +4619,8 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // pump / control-change effect expires here rather than
             // outliving its scheduled step.
             super::layers::prune_until_next_end_step_effects(state, state.active_player);
+            // CR 500.6: the end step's beginning triggers trigger now.
+            hold_step_beginning_triggers(state, events);
             // CR 513.1: End step — active player receives priority.
             // CR 513.1a: "At the beginning of [your] end step" triggers fire here.
             // CR 603.3b: surface a same-controller ordering prompt before priority.
@@ -4896,6 +4980,15 @@ mod tests {
             "untap completion commits its successor but does not consume an upkeep skip"
         );
 
+        // CR 704.5b + CR 704.3: the draw step's check before its batch would end a game whose active player
+        // drew from an empty library; this row is about the phase hop, so the library holds a card.
+        create_object(
+            &mut state,
+            CardId(90),
+            PlayerId(0),
+            "Draw card".to_string(),
+            Zone::Library,
+        );
         let waiting = auto_advance(&mut state, &mut Vec::new());
         assert_eq!(state.phase, Phase::Draw);
         assert!(matches!(waiting, WaitingFor::Priority { .. }));
