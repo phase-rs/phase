@@ -266,6 +266,18 @@ fn torch_the_tower_replacement_expires_at_cleanup_through_production_actions() {
         runner.state().waiting_for,
         WaitingFor::Priority { player: P0 }
     ));
+    // CR 106.4: Mana pools empty at the end of every step and phase. Re-seed
+    // the Murder cost after crossing cleanup before testing the expired rider.
+    for mana in [ManaType::Black, ManaType::Black, ManaType::Colorless] {
+        runner
+            .state_mut()
+            .players
+            .iter_mut()
+            .find(|player| player.id == P0)
+            .unwrap()
+            .mana_pool
+            .add(ManaUnit::new(mana, ObjectId(0), false, vec![]));
+    }
     let hit_outcome = runner
         .cast(murder_after)
         .target_object(hit_after_cleanup)
