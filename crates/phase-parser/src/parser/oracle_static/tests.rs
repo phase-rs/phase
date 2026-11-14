@@ -27489,7 +27489,9 @@ fn compound_grant_and_ability_cost_line_splits_into_grant_and_cost_statics() {
 }
 
 /// The split is at the LAST conjunction, so a multi-keyword grant keeps its whole
-/// keyword list.
+/// keyword list. Synthetic: no printed card has a multi-keyword grant before the
+/// cost conjunct; Nahiri, Storm of Stone (single-keyword grant) is the nearest
+/// printed card.
 #[test]
 fn compound_grant_and_ability_cost_line_keeps_multi_keyword_grant() {
     let defs = parse_static_line_multi(
@@ -27516,6 +27518,8 @@ fn compound_grant_and_ability_cost_line_keeps_multi_keyword_grant() {
 /// Fail closed: once the grant-and-cost conjunct is recognized, a cost clause
 /// with text after "to activate" (which the cost parser would drop) or an
 /// untypeable cost half yields no statics rather than a grant with the conjunct lost.
+/// Synthetic: no printed card has either shape; Nahiri, Storm of Stone is the
+/// nearest printed card.
 #[test]
 fn compound_grant_and_ability_cost_line_fails_closed_on_untyped_half() {
     for line in [
