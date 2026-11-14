@@ -7260,6 +7260,40 @@ fn volcanic_vision_demonstrative_amount_does_not_rebind_damage_source() {
     assert_eq!(target.controller, Some(ControllerRef::Opponent));
 }
 
+/// SHAPE: Command the Dreadhorde's chosen graveyard cards determine the amount,
+/// but the named spell remains the source of damage to its controller.
+#[test]
+fn command_the_dreadhorde_amount_does_not_rebind_damage_source() {
+    const ORACLE: &str =
+        "Choose any number of target creature and/or planeswalker cards in graveyards. \
+        Command the Dreadhorde deals damage to you equal to the total mana value of those cards. \
+        Put them onto the battlefield under your control.";
+    let parsed = parse_oracle_text(
+        ORACLE,
+        "Command the Dreadhorde",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    let definition = &parsed.abilities[0];
+    assert!(
+        !ability_chain_has_unimplemented(definition),
+        "the printed ability must reach its damage clause: {definition:#?}"
+    );
+    let damage = effects_in_tree(definition)
+        .into_iter()
+        .find(|effect| matches!(effect, Effect::DealDamage { .. }))
+        .expect("the printed damage clause is parsed");
+    let Effect::DealDamage { damage_source, .. } = damage else {
+        unreachable!("the selected effect is damage")
+    };
+    assert_eq!(
+        *damage_source, None,
+        "the selected graveyard cards determine the amount, not the damage source"
+    );
+}
+
 /// CR 105.2 + CR 205.2a: the printed Essence Burn line applies each color
 /// alternative to both noun alternatives through the full Oracle parser.
 #[test]
