@@ -68110,5 +68110,4 @@ mod repeat_admission_tests {
             other => panic!("expected an effect cost: {other:?}"),
         }
     }
-    }
 }

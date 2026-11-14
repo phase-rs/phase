@@ -11058,6 +11058,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: Some(crate::types::ability::LibraryPosition::Bottom),
+            library_shuffle: Default::default(),
             mass_library_order: Some(batch),
             is_cost_payment: false,
             enters_modified_if: None,

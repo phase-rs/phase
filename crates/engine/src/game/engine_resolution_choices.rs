@@ -9758,7 +9758,7 @@ fn effect_zone_library_placement_order(
     }
 }
 
-/// CR 401.4 + CR 400.3: Reposition the selected members that a legacy
+/// CR 401.4 + CR 400.3 + CR 701.20d: Reposition the selected members that a legacy
 /// `EffectZonePutAtLibraryPositionComplete` left in their library instead of
 /// queuing as deliveries.
 ///
@@ -9768,16 +9768,15 @@ fn effect_zone_library_placement_order(
 /// so a non-empty restored set is exactly an old mixed-origin arrangement.
 /// Reconstruct each affected library with the newly delivered cards removed,
 /// replay the original placement order using the selected members that actually
-/// landed in a library, then move only the library-origin members into their
-/// resulting slots. Those raw in-library moves are reorders, not zone changes
-/// (CR 401.4 + CR 614.1), and `reorder_within_library` retires an occurrence
-/// whose position actually changes (CR 701.20d).
+/// landed in a library, then settle the complete arrangement atomically at
+/// the library placement authority. Those in-library moves are reorders, not
+/// zone changes (CR 401.4 + CR 614.1), and `settle_library_arrangement`
+/// retires occurrences whose positions changed (CR 701.20d).
 fn reposition_library_origins_after_batch_delivery(
     state: &mut GameState,
     chosen: &[ObjectId],
     library_origin: &[ObjectId],
     library_position: &LibraryPosition,
-    events: &mut Vec<GameEvent>,
 ) {
     let library_placed: Vec<_> = chosen
         .iter()
@@ -9804,12 +9803,9 @@ fn reposition_library_origins_after_batch_delivery(
             &library_placed,
             library_position,
         );
-        for (index, &card_id) in desired.iter().enumerate().rev() {
-            if library_origin.contains(&card_id) {
-                // allow-raw-zone: in-library reposition is not a zone-change event (CR 401.4 + CR 614.1).
-                zones::move_to_library_at_index(state, card_id, Some(index), events);
-            }
-        }
+        // allow-raw-zone: in-library reposition is not a zone-change event (CR 401.4 + CR 614.1).
+        // Settle the computed complete arrangement atomically at the library placement authority.
+        zones::settle_library_arrangement(state, holder, &desired);
     }
 }
 
@@ -10801,7 +10797,6 @@ pub(crate) fn run_batch_completion(
                     &chosen,
                     &library_origin,
                     &library_position,
-                    events,
                 );
             }
             finish_effect_zone_put_at_library_position(
@@ -16693,6 +16688,11 @@ mod random_result_resolution_context_tests {
     /// resuming the batch must produce the complete chosen arrangement and run
     /// the completion exactly once — not drain the non-library moves and leave
     /// the library-origin members in their old order.
+    ///
+    /// Exercises a non-bottom (Top) mixed-origin arrangement: library `[A, B, C]`,
+    /// hand card `H`, submitted top order `[A, B, H]`. The base delivery placed
+    /// `H` on top (`[H, A, B, C]`); settling atomically produces exact final order
+    /// `[A, B, H, C]`, emits no unintended shuffle, and runs one continuation.
     #[test]
     fn restored_legacy_mixed_origin_completion_repositions_library_members() {
         use crate::types::game_state::{
@@ -16721,15 +16721,22 @@ mod random_result_resolution_context_tests {
             "Library B".to_string(),
             Zone::Library,
         );
-        let hand_card = create_object(
+        let library_c = create_object(
             &mut state,
             CardId(4),
+            PlayerId(0),
+            "Library C".to_string(),
+            Zone::Library,
+        );
+        let hand_card = create_object(
+            &mut state,
+            CardId(5),
             PlayerId(0),
             "Hand Card".to_string(),
             Zone::Hand,
         );
         state.library_of_mut(PlayerId(0)).clear();
-        for card in [library_a, library_b] {
+        for card in [library_a, library_b, library_c] {
             state.library_of_mut(PlayerId(0)).push_back(card);
         }
         let logical_zone_change_group =
@@ -16742,13 +16749,13 @@ mod random_result_resolution_context_tests {
             source_id: Some(source),
             enter_tapped: EtbTapState::Unspecified,
             exile_tracking: ZoneDeliveryExileTracking::None,
-            library_placement: None,
+            library_placement: Some(LibraryPosition::Top),
             completion: Some(BatchCompletion::EffectZonePutAtLibraryPositionComplete {
                 player: PlayerId(0),
                 source_id: source,
-                chosen: vec![library_a, hand_card, library_b],
+                chosen: vec![library_a, library_b, hand_card],
                 library_origin: vec![library_a, library_b],
-                library_position: LibraryPosition::Bottom,
+                library_position: LibraryPosition::Top,
             }),
             replacement_applied: Default::default(),
             requests: Vec::new(),
@@ -16778,8 +16785,21 @@ mod random_result_resolution_context_tests {
                 .iter()
                 .copied()
                 .collect::<Vec<_>>(),
-            vec![library_a, hand_card, library_b],
-            "every selected member must occupy the complete chosen bottom order"
+            vec![library_a, library_b, hand_card, library_c],
+            "every selected member must occupy the complete chosen top order atomically"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                    ..
+                } | GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                }
+            )),
+            "repositioning legacy library members must not trigger an unintended shuffle"
         );
         assert_eq!(
             events
