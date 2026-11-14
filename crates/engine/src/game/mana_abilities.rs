@@ -13,12 +13,12 @@ use crate::types::ability::{
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::{ActivatedAbilityKind, BoundActivationCost, GameEvent, ManaTapState};
 use crate::types::game_state::{
-    CastPaymentMode, CostResume, GameState, ManaAbilityCostCursor, ManaAbilityCostParent,
-    ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume,
-    ManaAmountComposition, ManaChoice, ManaChoiceContext, ManaChoicePrompt, ManaColorChoiceResume,
-    ManaTriggerFixedPointResume, PausedCounterCostRemoval, PayCostKind, PayableResource,
-    PendingCostMoveResume, PendingCounterRemoval, PendingManaAbility, ProductionOverride,
-    WaitingFor,
+    CastPaymentMode, CostResume, GameState, ManaAbilityActivationStage, ManaAbilityCostCursor,
+    ManaAbilityCostParent, ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode,
+    ManaAbilityResume, ManaAmountComposition, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
+    ManaColorChoiceResume, ManaTriggerFixedPointResume, PausedCounterCostRemoval, PayCostKind,
+    PayableResource, PendingCostMoveResume, PendingCounterRemoval, PendingManaAbility,
+    ProductionOverride, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{ManaColor, ManaCost, ManaPipId, ManaPool, ManaType, PaymentContext};
@@ -603,7 +603,7 @@ pub(super) fn resolve_mana_ability_excluding(
 /// CR 608.2c: `ability` with the instructions before its production already
 /// performed — rooted at that `Effect::Mana` link, keeping the activation's cost
 /// and restrictions.
-fn ability_from_mana_production(ability: &AbilityDefinition) -> AbilityDefinition {
+pub(super) fn ability_from_mana_production(ability: &AbilityDefinition) -> AbilityDefinition {
     let Some(production) = crate::types::ability::inline_mana_preamble(ability) else {
         return ability.clone();
     };
@@ -627,6 +627,91 @@ fn resolved_before_mana(ability: &ResolvedAbility) -> Option<ResolvedAbility> {
         .and_then(resolved_before_mana)
         .map(Box::new);
     Some(head)
+}
+
+/// CR 605.3b + CR 608.2c: perform the instructions that precede a mana
+/// ability's production (Empowered Autogenerator's counter), in written order,
+/// as part of the ability's immediate resolution. The single authority shared
+/// by live activation and by capacity projection.
+fn resolve_inline_mana_preamble(
+    state: &mut GameState,
+    resolved: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) {
+    if let Some(preamble) = resolved_before_mana(resolved) {
+        run_inline_mana_subresolution(state, |state| {
+            let _ = super::effects::resolve_ability_chain(state, &preamble, events, 0);
+        });
+    }
+}
+
+/// Bound on chained replacement-ordering prompts a projection settles.
+const PROJECTED_REPLACEMENT_PROMPT_LIMIT: u8 = 4;
+
+/// CR 601.2g + CR 605.3b + CR 608.2c: the states a mana ability with an inline
+/// preamble could leave behind once that preamble has resolved, for sizing the
+/// mana it will add (an amount that reads the source's counters, Empowered
+/// Autogenerator). Each is a scratch clone; `state` is never mutated.
+///
+/// CR 616.1: replacement effects apply to the preamble exactly as they do live
+/// (Doubling Season doubles the counter). When competing replacements ask the
+/// controller to order them, every ordering is a reachable outcome, so one
+/// state is returned per ordering and the caller takes the one it needs (the
+/// maximum, for an announcement ceiling).
+pub(super) fn inline_preamble_outcomes(
+    state: &GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_def: &AbilityDefinition,
+) -> Vec<GameState> {
+    let mut scratch = state.clone();
+    // The projection answers its own ordering prompts. Detach the enclosing cast
+    // so answering one cannot resume that cast (whose X announcement is what
+    // asked for this projection) and re-enter the projection.
+    scratch.pending_cast = None;
+    let mut events = Vec::new();
+    with_bound_mana_activation(
+        &mut scratch,
+        source_id,
+        player,
+        ability_def,
+        None,
+        None,
+        None,
+        None,
+        |scratch, resolved| resolve_inline_mana_preamble(scratch, resolved, &mut events),
+    );
+    settle_projected_replacements(scratch, PROJECTED_REPLACEMENT_PROMPT_LIMIT)
+}
+
+/// CR 616.1: answer every ordering prompt a projection parked on, branching per
+/// option. Iterative (a worklist, not recursion) because a projection runs deep
+/// inside the casting flow's stack. A prompt chain longer than `limit` prompts
+/// yields no outcome (fails closed: the projection claims no mana it cannot
+/// show).
+fn settle_projected_replacements(state: GameState, limit: u8) -> Vec<GameState> {
+    let mut settled = Vec::new();
+    let mut work = vec![(Box::new(state), limit)];
+    while let Some((state, remaining)) = work.pop() {
+        let Some(pending) = state.pending_replacement.as_ref() else {
+            settled.push(*state);
+            continue;
+        };
+        if remaining == 0 {
+            continue;
+        }
+        let options = super::replacement::pending_replacement_option_count(&state, pending);
+        for index in 0..options {
+            let mut branch = state.clone();
+            let mut events = Vec::new();
+            if super::engine_replacement::handle_replacement_choice(&mut branch, index, &mut events)
+                .is_ok()
+            {
+                work.push((branch, remaining - 1));
+            }
+        }
+    }
+    settled
 }
 
 fn find_mana_effect(ability: &ResolvedAbility) -> Option<&ResolvedAbility> {
@@ -3024,6 +3109,7 @@ fn mana_ability_cost_cursor(
     excluded_sources.sort_unstable_by_key(|source_id| source_id.0);
     ManaAbilityCostCursor {
         remaining,
+        activation: ManaAbilityActivationStage::Unpublished,
         remaining_life_payments: Vec::new(),
         resolution_mode,
         excluded_sources,
@@ -3844,6 +3930,39 @@ fn finish_mana_ability_cost_payment(
     // this activation's final removed-counter count. It rides `pending` across
     // the colour prompt to production.
     pending.cost_removed_counters = cursor.cost_removed_counters;
+    // CR 602.2b + CR 601.2i + CR 605.3: every cost is paid, so the mana ability
+    // has become activated. Publish it here — before the colour prompt and
+    // before production — for every resolution mode (manual, auto-tap, nested
+    // sub-cost), and observe its triggers at this boundary (CR 603.10): the
+    // ability's own resolution may yet sacrifice or change its source.
+    // CR 605.1a: classified from the bound definition like every activation.
+    // This path is the mana-ability path, but an ability that fails a CR 605.1a
+    // criterion (Millikin's library-moving cost) can still be driven through
+    // it; it is then an ordinary activation, and "that isn't a mana ability"
+    // triggers must see it as one.
+    // CR 605.3b: it resolves immediately after activation, so the publication
+    // precedes the inline preamble below; a preamble paused on a replacement
+    // choice resumes past this boundary (`Published`) and never re-emits.
+    if cursor.activation == ManaAbilityActivationStage::Unpublished {
+        let activation_kind = ActivatedAbilityKind::of_definition(&ability_def);
+        // CR 605.3 + CR 602.1a: the activation cost of the definition bound when this
+        // activation began, before any cost; never `mana_ability_definition`'s
+        // post-payment live fallback (a pending without its snapshot is `Unknown`).
+        let activation_cost = BoundActivationCost::of_definition(pending.ability_snapshot.as_ref());
+        let activation_event = super::casting_targets::emit_ability_activated(
+            state,
+            pending.player,
+            pending.source_id,
+            activation_kind,
+            activation_cost,
+            None,
+            ability_def.activation_zone.unwrap_or(Zone::Battlefield),
+            events,
+        );
+        super::triggers::collect_activation_event_at_boundary(state, events, activation_event)
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+        cursor.activation = ManaAbilityActivationStage::Published;
+    }
     // CR 605.3b + CR 608.2c: a mana ability whose production follows other
     // instructions (Empowered Autogenerator's counter) performs them now, in
     // written order, once its costs are paid — before the colour prompt and
@@ -3858,13 +3977,7 @@ fn finish_mana_ability_cost_payment(
             pending.cost_paid_object.clone(),
             pending.announced_source_incarnation,
             pending.cost_removed_counters,
-            |state, resolved| {
-                if let Some(preamble) = resolved_before_mana(resolved) {
-                    run_inline_mana_subresolution(state, |state| {
-                        let _ = super::effects::resolve_ability_chain(state, &preamble, events, 0);
-                    });
-                }
-            },
+            |state, resolved| resolve_inline_mana_preamble(state, resolved, events),
         );
         // CR 616.1 + CR 608.2c: an instruction of the chain paused on a
         // replacement choice (competing counter replacements). Park the
@@ -3879,33 +3992,6 @@ fn finish_mana_ability_cost_payment(
             return Ok(state.waiting_for.clone());
         }
     }
-    // CR 602.2b + CR 601.2i + CR 605.3: every cost is paid, so the mana ability
-    // has become activated. Publish it here — before the colour prompt and
-    // before production — for every resolution mode (manual, auto-tap, nested
-    // sub-cost), and observe its triggers at this boundary (CR 603.10): the
-    // ability's own resolution may yet sacrifice or change its source.
-    // CR 605.1a: classified from the bound definition like every activation.
-    // This path is the mana-ability path, but an ability that fails a CR 605.1a
-    // criterion (Millikin's library-moving cost) can still be driven through
-    // it; it is then an ordinary activation, and "that isn't a mana ability"
-    // triggers must see it as one.
-    let activation_kind = ActivatedAbilityKind::of_definition(&ability_def);
-    // CR 605.3 + CR 602.1a: the activation cost of the definition bound when this
-    // activation began, before any cost; never `mana_ability_definition`'s
-    // post-payment live fallback (a pending without its snapshot is `Unknown`).
-    let activation_cost = BoundActivationCost::of_definition(pending.ability_snapshot.as_ref());
-    let activation_event = super::casting_targets::emit_ability_activated(
-        state,
-        pending.player,
-        pending.source_id,
-        activation_kind,
-        activation_cost,
-        None,
-        ability_def.activation_zone.unwrap_or(Zone::Battlefield),
-        events,
-    );
-    super::triggers::collect_activation_event_at_boundary(state, events, activation_event)
-        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
     if !resolves_automatically && pending.color_override.is_none() {
         // CR 605.3b + CR 608.2d: the colour choice this ability offers is sized
         // and gated by this activation's own paid count, under the same binding

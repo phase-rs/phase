@@ -1244,3 +1244,261 @@ fn auto_cast_matter_reshaper_counts_metalworker_for_the_colorless_shard() {
     assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
     assert!(runner.state().pending_cast.is_none(), "payment finalized");
 }
+
+fn activated_count(events: &[GameEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, GameEvent::AbilityActivated { .. }))
+        .count()
+}
+
+/// Empowered Autogenerator on P0's battlefield with `counters` charge counters,
+/// optionally with Winding Constrictor and/or Doubling Season, plus a Juggernaut
+/// ({3}) mid-way through a manual cast. Returns the runner at the payment prompt.
+fn autogenerator_mid_payment(
+    counters: u32,
+    constrictor: bool,
+    season: bool,
+) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let autogenerator = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Empowered Autogenerator",
+            EMPOWERED_AUTOGENERATOR_ORACLE,
+        )
+        .id();
+    if constrictor {
+        scenario.add_creature_from_oracle(
+            P0,
+            "Winding Constrictor",
+            2,
+            3,
+            WINDING_CONSTRICTOR_ORACLE,
+        );
+    }
+    if season {
+        scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE);
+    }
+    let spell = scenario
+        .add_spell_to_hand(P0, "Juggernaut", true)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let mut runner = scenario.build();
+    if counters > 0 {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&autogenerator)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("charge".to_string()), counters);
+    }
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("manual cast reaches the mana payment prompt");
+    (runner, autogenerator)
+}
+
+/// CR 602.2b + CR 605.3b: Empowered Autogenerator's activation is published at
+/// the paid-cost boundary, once, BEFORE its counter is placed (the ability
+/// resolves immediately after it is activated).
+#[test]
+fn autogenerator_activation_is_published_once_before_its_counter() {
+    let (mut runner, autogenerator) = autogenerator_mid_payment(0, false, false);
+    let result = runner
+        .act(GameAction::ActivateAbility {
+            source_id: autogenerator,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activation is legal during payment");
+    let mut events = result.events;
+    let result = runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Blue),
+            count: 1,
+        })
+        .expect("choosing the color is legal");
+    events.extend(result.events);
+    assert_eq!(activated_count(&events), 1, "exactly one activation event");
+    let activated = events
+        .iter()
+        .position(|event| matches!(event, GameEvent::AbilityActivated { .. }))
+        .unwrap();
+    let counter = events
+        .iter()
+        .position(|event| matches!(event, GameEvent::CounterAdded { .. }))
+        .expect("the charge counter was placed");
+    assert!(activated < counter, "activation precedes its resolution");
+}
+
+/// CR 605.3b + CR 616.1: when the preamble's counter is paused on a
+/// replacement-ordering choice (Winding Constrictor + Doubling Season), the
+/// activation has already been published at the cost boundary — before the
+/// pause — and the resume neither repeats nor drops it.
+#[test]
+fn autogenerator_activation_is_published_before_a_replacement_choice_and_not_repeated() {
+    let (mut runner, autogenerator) = autogenerator_mid_payment(0, true, true);
+    let result = runner
+        .act(GameAction::ActivateAbility {
+            source_id: autogenerator,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activation is legal during payment");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "expected the CR 616.1 ordering prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        activated_count(&result.events),
+        1,
+        "published before the pause"
+    );
+    let mut resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("ordering choice is legal")
+        .events;
+    resumed.extend(
+        runner
+            .act(GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Blue),
+                count: 1,
+            })
+            .expect("choosing the color is legal")
+            .events,
+    );
+    assert_eq!(
+        activated_count(&resumed),
+        0,
+        "the resume continues past the published boundary"
+    );
+}
+
+/// Walking Ballista ({X}{X}) cast with an untapped Empowered Autogenerator
+/// holding `counters` charge counters and an empty pool. Returns the runner at
+/// the X announcement and the announced maximum.
+fn ballista_with_autogenerator(
+    counters: u32,
+    constrictor: bool,
+    season: bool,
+) -> (GameRunner, ObjectId, ObjectId, u32) {
+    use engine::types::mana::ManaCostShard;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let autogenerator = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Empowered Autogenerator",
+            EMPOWERED_AUTOGENERATOR_ORACLE,
+        )
+        .id();
+    if constrictor {
+        scenario.add_creature_from_oracle(
+            P0,
+            "Winding Constrictor",
+            2,
+            3,
+            WINDING_CONSTRICTOR_ORACLE,
+        );
+    }
+    if season {
+        scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE);
+    }
+    let ballista = scenario
+        .add_creature_to_hand(P0, "Walking Ballista", 0, 0)
+        .as_artifact_creature()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::X],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&autogenerator)
+        .unwrap()
+        .counters
+        .insert(CounterType::Generic("charge".to_string()), counters);
+    let card_id = runner.state().objects[&ballista].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: ballista,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("casting reaches the X announcement");
+    let max = match &runner.state().waiting_for {
+        WaitingFor::ChooseXValue { max, .. } => *max,
+        other => panic!("expected the X announcement, got {other:?}"),
+    };
+    (runner, autogenerator, ballista, max)
+}
+
+/// CR 107.3 + CR 601.2b + CR 601.2g + CR 608.2c: an Autogenerator holding one
+/// counter really yields two mana (its own counter lands first), so {X}{X} can
+/// announce X=1 with an empty pool, and the payment completes. X=2 (four mana)
+/// is not admitted.
+#[test]
+fn announced_x_ceiling_counts_the_autogenerator_counter_its_activation_adds() {
+    let (mut runner, autogenerator, ballista, max) = ballista_with_autogenerator(1, false, false);
+    assert_eq!(max, 1, "one counter + the new one = two mana = X=1");
+    assert!(
+        runner.act(GameAction::ChooseX { value: 2 }).is_err(),
+        "X=2 needs four mana, which the Autogenerator cannot make"
+    );
+    runner
+        .act(GameAction::ChooseX { value: 1 })
+        .expect("announcing X=1 is legal");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: autogenerator,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activation is legal during payment");
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Blue),
+            count: 1,
+        })
+        .expect("choosing the color is legal");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the pooled mana pays the spell");
+    assert_eq!(runner.state().objects[&ballista].zone, Zone::Stack);
+    assert!(runner.state().pending_cast.is_none(), "payment finalized");
+}
+
+/// CR 616.1 + CR 601.2g: the ceiling sizes the preamble with the replacement
+/// effects that will apply to it. Doubling Season turns the one new counter
+/// into two, so two held counters yield 2 + 2 = 4 mana (X=2), not 3 (X=1).
+#[test]
+fn announced_x_ceiling_applies_counter_replacements_to_the_preamble() {
+    let (_runner, _autogenerator, _ballista, max) = ballista_with_autogenerator(2, false, true);
+    assert_eq!(max, 2);
+}
+
+/// CR 616.1: with Winding Constrictor and Doubling Season both replacing the
+/// counter, the controller chooses the order; the ceiling is the best reachable
+/// ordering. Two held counters: add-then-double gives 2 + 4 = 6 mana (X=3),
+/// double-then-add 2 + 3 = 5 mana (X=2).
+#[test]
+fn announced_x_ceiling_uses_the_best_replacement_ordering() {
+    let (_runner, _autogenerator, _ballista, max) = ballista_with_autogenerator(2, true, true);
+    assert_eq!(max, 3);
+}

@@ -2519,24 +2519,26 @@ fn mana_ability_usable_for_payment(
     }
     // CR 106.6: Restricted mana only counts toward this spell when
     // the restriction permits it (issue #2011: Eldrazi Temple).
-    match &*ability.effect {
-        Effect::Mana { restrictions, .. } => mana_ability_allowed_for_payment(
-            ability,
-            restrictions,
-            state,
-            object_id,
-            payment_context,
-        ),
+    payment_production_restrictions(ability).is_some_and(|restrictions| {
+        mana_ability_allowed_for_payment(ability, restrictions, state, object_id, payment_context)
+    })
+}
+
+/// CR 605.1a + CR 106.6: the spend restrictions of the mana an activated mana
+/// ability adds, for each shape whose production the payment planners size: a
+/// root `Effect::Mana`, a reveal-then-mana chain, or mana following an inline
+/// preamble. `None` for any other shape (not sized as payment capacity).
+fn payment_production_restrictions(ability: &AbilityDefinition) -> Option<&[ManaSpendRestriction]> {
+    let production = match &*ability.effect {
+        Effect::Mana { .. } => ability,
         _ => match reveal_then_mana_shape(ability) {
-            Some(shape) => mana_ability_allowed_for_payment(
-                ability,
-                shape.restrictions,
-                state,
-                object_id,
-                payment_context,
-            ),
-            None => false,
+            Some(shape) => return Some(shape.restrictions),
+            None => crate::types::ability::inline_mana_preamble(ability)?,
         },
+    };
+    match &*production.effect {
+        Effect::Mana { restrictions, .. } => Some(restrictions),
+        _ => None,
     }
 }
 
@@ -2709,6 +2711,28 @@ fn usable_mana_ability_net(
     casting_spell: Option<ObjectId>,
 ) -> Option<u32> {
     let Effect::Mana { produced, .. } = &*ability.effect else {
+        // CR 601.2g + CR 605.3b + CR 608.2c: mana that follows an inline
+        // preamble is sized as it will be once the preamble has resolved
+        // (Empowered Autogenerator's own counter counts), through the same
+        // authority as the ability's live resolution; each reachable outcome
+        // (CR 616.1 replacement orderings) is sized as the plain production it
+        // leaves, and the best one bounds the capacity.
+        if crate::types::ability::inline_mana_preamble(ability).is_some() {
+            let production = mana_abilities::ability_from_mana_production(ability);
+            return mana_abilities::inline_preamble_outcomes(state, object_id, controller, ability)
+                .iter()
+                .filter_map(|after| {
+                    usable_mana_ability_net(
+                        after,
+                        object_id,
+                        controller,
+                        &production,
+                        capacity_use,
+                        casting_spell,
+                    )
+                })
+                .max();
+        }
         let shape = reveal_then_mana_shape(ability)?;
         let gross =
             reveal_then_mana_gross(state, object_id, controller, ability, &shape, casting_spell);
@@ -2782,8 +2806,11 @@ pub(crate) fn has_activatable_player_choice_mana_ability_for_payment(
             // non-tap costs (KCI's "Sacrifice an artifact", discard, pay-life).
             // A reveal-then-mana ability (Metalworker) is never auto-tapped: its
             // reveal is the payer's choice at resolution (CR 107.1c), so it stays
-            // here even though its cost is a plain {T}.
-            let payer_chooses_at_resolution = reveal_then_mana_shape(ability).is_some();
+            // here even though its cost is a plain {T}. An inline-preamble ability
+            // (Empowered Autogenerator) likewise resolves its counter and colour
+            // choice live, which auto-tap does not drive.
+            let payer_chooses_at_resolution = reveal_then_mana_shape(ability).is_some()
+                || crate::types::ability::inline_mana_preamble(ability).is_some();
             if !payer_chooses_at_resolution
                 && ((has_tap_component(&ability.cost)
                     && !mana_abilities::cost_requires_object_choice(
@@ -2801,24 +2828,15 @@ pub(crate) fn has_activatable_player_choice_mana_ability_for_payment(
             if !activation_condition_satisfied(state, controller, object_id, idx, ability) {
                 return false;
             }
-            match &*ability.effect {
-                Effect::Mana { restrictions, .. } => mana_ability_allowed_for_payment(
+            payment_production_restrictions(ability).is_some_and(|restrictions| {
+                mana_ability_allowed_for_payment(
                     ability,
                     restrictions,
                     state,
                     object_id,
                     payment_context,
-                ),
-                _ => reveal_then_mana_shape(ability).is_some_and(|shape| {
-                    mana_ability_allowed_for_payment(
-                        ability,
-                        shape.restrictions,
-                        state,
-                        object_id,
-                        payment_context,
-                    )
-                }),
-            }
+                )
+            })
         })
     })
 }
@@ -3066,7 +3084,43 @@ fn activatable_mana_profiles_for_object(
             // follows its reveal, so it joins the shard profiles through the
             // same sizing as its capacity — else a colourless shard ({C}) is
             // rejected while the scalar capacity would have paid it.
-            if let Some(shape) = reveal_then_mana_shape(ability) {
+            // CR 605.3b + CR 608.2c: an inline-preamble ability joins the shard
+            // profiles with the production its preamble leaves, sized by the
+            // same projection as its capacity.
+            if crate::types::ability::inline_mana_preamble(ability).is_some() {
+                let production = mana_abilities::ability_from_mana_production(ability);
+                if let Some(net) = usable_mana_ability_net(
+                    state,
+                    object_id,
+                    controller,
+                    ability,
+                    CapacityUse::Castability,
+                    casting_spell,
+                ) {
+                    capacity = capacity.max(net);
+                }
+                if let Effect::Mana { produced, .. } = &*production.effect {
+                    for after in mana_abilities::inline_preamble_outcomes(
+                        state, object_id, controller, ability,
+                    ) {
+                        for kind in sizing_resolutions(&after, &production, object_id, controller)
+                            .iter()
+                            .filter_map(|resolved| {
+                                profile_kind_from_production(
+                                    &after, object_id, controller, produced, resolved,
+                                )
+                                .and_then(|kind| {
+                                    profile_kind_allowed_for_context(kind, payment_context)
+                                })
+                            })
+                        {
+                            if !kinds.contains(&kind) {
+                                kinds.push(kind);
+                            }
+                        }
+                    }
+                }
+            } else if let Some(shape) = reveal_then_mana_shape(ability) {
                 let revealed = reveal_then_mana_profile_kinds(
                     state,
                     object_id,

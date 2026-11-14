@@ -7744,6 +7744,7 @@ mod tests {
             pending: mana_ability(),
             cursor: ManaAbilityCostCursor {
                 remaining: Vec::new(),
+                activation: Default::default(),
                 remaining_life_payments: Vec::new(),
                 resolution_mode: ManaAbilityCostResolutionMode::Interactive,
                 excluded_sources: Vec::new(),
@@ -12607,6 +12608,7 @@ mod tests {
             pending: Box::new(pending),
             cursor: ManaAbilityCostCursor {
                 remaining: Vec::new(),
+                activation: Default::default(),
                 remaining_life_payments: Vec::new(),
                 resolution_mode: ManaAbilityCostResolutionMode::Interactive,
                 excluded_sources: Vec::new(),

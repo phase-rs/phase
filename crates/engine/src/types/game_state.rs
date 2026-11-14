@@ -9359,6 +9359,23 @@ pub struct FinalizePrePaymentChecks {
     pub cast_this_way_enters_mods: crate::types::ability::PendingEntersModifications,
 }
 
+/// CR 602.2b + CR 605.3b: progress of a mana ability's activation publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ManaAbilityActivationStage {
+    /// Costs are not yet fully paid; the activation has not been published.
+    #[default]
+    Unpublished,
+    /// The activation event was emitted and its triggers observed.
+    Published,
+}
+
+impl ManaAbilityActivationStage {
+    fn is_unpublished(&self) -> bool {
+        matches!(self, Self::Unpublished)
+    }
+}
+
 /// CR 605.3b: Selects whether completing a mana-ability cost payment may ask
 /// the activator to choose the produced mana. An auto-tap plan already selected
 /// production; a direct activation has not.
@@ -9412,6 +9429,14 @@ pub struct ManaAbilityCostParent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManaAbilityCostCursor {
     pub remaining: Vec<AbilityCost>,
+    /// CR 602.2b + CR 605.3b: whether this activation's `AbilityActivated` event
+    /// and trigger observation already happened at the paid-cost boundary. A
+    /// resume after a paused inline preamble continues past that boundary.
+    #[serde(
+        default,
+        skip_serializing_if = "ManaAbilityActivationStage::is_unpublished"
+    )]
+    pub activation: ManaAbilityActivationStage,
     /// CR 118.3b + CR 119.4 + CR 616.1: Selected Phyrexian life components
     /// that follow an already-paid component whose replacement post-effect
     /// paused. They complete before the cursor advances to mana production.
