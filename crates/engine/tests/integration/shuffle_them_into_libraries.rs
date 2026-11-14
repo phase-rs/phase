@@ -482,6 +482,74 @@ fn exiled_cost_self_shuffle_finds_the_public_successor() {
 /// CR 701.24c: Floodpits Drowner can be destroyed in response while its other
 /// owner's target remains legal. The stale source does not move, but its known
 /// owner still shuffles; the legal target's owner also shuffles.
+/// CR 608.2f: Floodpits Drowner's "shuffle this creature and target creature
+/// with a stun counter on it" is one simultaneous action. Dour Port-Mage's
+/// "one or more other creatures you control leave the battlefield without
+/// dying" must observe one co-departure, so it draws once and the shared owner
+/// shuffles once.
+#[test]
+fn drowner_compound_move_is_one_co_departure_for_dour_port_mage() {
+    const DOUR: &str = "Whenever one or more other creatures you control leave the battlefield without dying, draw a card.";
+    const DROWNER: &str = "Flash\nVigilance\nWhen this creature enters, tap target creature an opponent controls and put a stun counter on it.\n{1}{U}, {T}: Shuffle this creature and target creature with a stun counter on it into their owners' libraries.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let drowner = scenario
+        .add_creature_from_oracle(P0, "Floodpits Drowner", 2, 1, DROWNER)
+        .id();
+    let target = scenario.add_creature(P0, "Stunned Target", 1, 1).id();
+    scenario
+        .add_creature_from_oracle(P0, "Dour Port-Mage", 1, 3, DOUR)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, drowner, false, vec![]),
+            ManaUnit::new(ManaType::Blue, drowner, false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&target)
+        .unwrap()
+        .counters
+        .insert(CounterType::Stun, 1);
+    let hand_before = runner.state().players[P0.0 as usize].hand.len();
+
+    activate_onto_stack(&mut runner, drowner, 0, target);
+    let mut events = Vec::new();
+    let stack_len = runner.state().stack.len();
+    for _ in 0..20 {
+        if runner.state().stack.len() < stack_len {
+            break;
+        }
+        let result = runner
+            .act(GameAction::PassPriority)
+            .expect("priority can pass");
+        events.extend(result.events);
+    }
+
+    assert_ne!(runner.state().objects[&drowner].zone, Zone::Battlefield);
+    assert_ne!(runner.state().objects[&target].zone, Zone::Battlefield);
+    assert_eq!(
+        events
+            .iter()
+            .filter(
+                |event| matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == P0)
+            )
+            .count(),
+        1,
+        "one batched departure = one Dour trigger/draw: {events:?}"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].hand.len(),
+        hand_before + 1,
+        "Dour draws exactly once"
+    );
+    assert_eq!(shuffles_for(&events, P0), 1, "{events:?}");
+}
+
 #[test]
 fn drowner_destroyed_in_response_still_shuffles_both_owners() {
     let mut scenario = GameScenario::new();
@@ -600,7 +668,7 @@ fn owner_carried_draw_uses_the_source_owner_not_the_activator() {
         "the source owner draws the carried card: {events:?}"
     );
     assert_eq!(
-        outcome.state().players[P0.0 as usize].hand.len(),
+        runner.state().players[P0.0 as usize].hand.len(),
         p0_hand + 1,
         "the owner draws the carried card"
     );

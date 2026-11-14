@@ -23292,22 +23292,27 @@ fn serene_remembrance_second_subject_recovers_up_to_three() {
         "Shuffle ~ and up to three target cards from a single graveyard into their owners' libraries.",
         AbilityKind::Spell,
     );
-    // The head is SelfRef: a context reference, so it is never stamped.
-    assert_eq!(def.multi_target, None, "{def:#?}");
+    // The grouped root carries the second subject's multi-target spec.
+    assert_eq!(
+        def.multi_target,
+        Some(MultiTargetSpec::fixed(0, 3)),
+        "{def:#?}"
+    );
     assert_eq!(
         def.target_constraints,
         vec![TargetSelectionConstraint::SameZoneOwner {
             zone: Zone::Graveyard,
         }]
     );
-    let sub = def
-        .sub_ability
-        .as_deref()
-        .expect("second subject sub-ability");
-    assert_eq!(
-        sub.multi_target,
-        Some(MultiTargetSpec::fixed(0, 3)),
-        "{sub:#?}"
+    let terminal = def.sub_ability.as_deref().expect("terminal owner shuffle");
+    assert!(
+        matches!(
+            &*terminal.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            }
+        ),
+        "{terminal:#?}"
     );
 }
 
@@ -28303,20 +28308,29 @@ fn shuffle_compound_subject_into_owners_libraries() {
     match &clause.effect {
         Effect::ChangeZone {
             destination: Zone::Library,
-            target: TargetFilter::SelfRef,
+            target: TargetFilter::Or { filters },
             owner_library: true,
-            enter_transformed: false,
-            enters_under: None,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             ..
-        } => {}
+        } => assert!(
+            filters.iter().any(|f| matches!(f, TargetFilter::SelfRef)) && filters.len() == 2,
+            "one grouped Or pairs the source with the second subject: {filters:?}"
+        ),
         other => panic!(
-            "expected ChangeZone {{ SelfRef, Library, owner_library: true }}, got {:?}",
+            "expected one grouped ChangeZone {{ Or(SelfRef, target), Library }}, got {:?}",
             other
         ),
     }
+    let terminal = clause.sub_ability.as_deref().expect("terminal shuffle");
     assert!(
-        clause.sub_ability.is_some(),
-        "should have sub_ability for second subject"
+        matches!(
+            &*terminal.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            }
+        ),
+        "the grouped move settles both owners through ScopedPlayer: {:?}",
+        terminal.effect
     );
 }
 
@@ -47031,34 +47045,17 @@ fn owner_anchor_does_not_leak_into_following_search_or_shuffle() {
     );
     let mut node = Some(&def);
     let mut checked = 0;
-    let mut skipped_source_shuffle = false;
     while let Some(def) = node {
-        match &*def.effect {
-            Effect::SearchLibrary { target_player, .. } => {
-                assert!(
-                    matches!(*target_player, None | Some(TargetFilter::Controller)),
-                    "the caster's search keeps the activator: {target_player:?}"
-                );
-                checked += 1;
-            }
-            Effect::Shuffle { target }
-                if *target == TargetFilter::Owner && !skipped_source_shuffle =>
-            {
-                skipped_source_shuffle = true;
-            }
-            Effect::Shuffle { target } => {
-                assert_eq!(
-                    *target,
-                    TargetFilter::Controller,
-                    "the caster's shuffle keeps the activator"
-                );
-                checked += 1;
-            }
-            _ => {}
+        if let Effect::SearchLibrary { target_player, .. } = &*def.effect {
+            assert!(
+                matches!(*target_player, None | Some(TargetFilter::Controller)),
+                "the caster's search keeps the activator: {target_player:?}"
+            );
+            checked += 1;
         }
         node = def.sub_ability.as_deref();
     }
-    assert!(checked > 0, "reach guard: the search/shuffle parsed");
+    assert!(checked > 0, "reach guard: the search parsed");
 }
 
 /// CR 608.2c + CR 121.1: a source-owner anchor is not a resolvable Draw actor
@@ -47070,7 +47067,7 @@ fn owner_anchor_binds_draw_through_the_shared_resolver() {
         count: QuantityExpr::Fixed { value: 1 },
         target: TargetFilter::Controller,
     };
-    super::apply_anchor_subject(&mut draw, &TargetFilter::Owner, true, false);
+    super::apply_anchor_subject(&mut draw, &TargetFilter::Owner, true, false, false);
     assert_eq!(
         draw,
         Effect::Draw {
@@ -47093,8 +47090,8 @@ fn owner_anchor_binds_draw_through_the_shared_resolver() {
             found = true;
             assert_eq!(
                 *target,
-                TargetFilter::Owner,
-                "the carried owner subject binds Draw through the shared resolver"
+                TargetFilter::ScopedPlayer,
+                "the carried owner subject binds Draw through the shared scoped actor"
             );
         }
         node = def.sub_ability.as_deref();
@@ -47109,7 +47106,7 @@ fn owner_anchor_binds_draw_through_the_shared_resolver() {
 fn conjugated_reveal_keeps_explicit_library_possessor() {
     for (possessive, expected) in [
         ("your", TargetFilter::Controller),
-        ("their", TargetFilter::Owner),
+        ("their", TargetFilter::ParentTargetOwner),
     ] {
         let def = parse_effect_chain(
             &format!(
@@ -47144,7 +47141,7 @@ fn conjugated_reveal_keeps_explicit_library_possessor() {
 fn reveal_library_possessor_survives_the_owner_anchor() {
     for (possessive, expected) in [
         ("your", TargetFilter::Controller),
-        ("their", TargetFilter::Owner),
+        ("their", TargetFilter::ParentTargetOwner),
     ] {
         let def = parse_effect_chain(
             &format!(
@@ -47291,11 +47288,16 @@ fn explicit_you_reveal_after_owner_shuffle_keeps_the_controller() {
         "This creature's owner shuffles it into their library. You reveal cards from the top of your library until you reveal a creature card.",
         AbilityKind::Activated,
     );
-    let reveal = def
-        .sub_ability
-        .as_deref()
-        .and_then(|shuffle| shuffle.sub_ability.as_deref())
-        .expect("the reveal follows the owner shuffle");
+    let mut node = Some(&def);
+    let mut reveal = None;
+    while let Some(def) = node {
+        if matches!(&*def.effect, Effect::RevealUntil { .. }) {
+            reveal = Some(def);
+            break;
+        }
+        node = def.sub_ability.as_deref();
+    }
+    let reveal = reveal.expect("the reveal follows the owner shuffle");
     assert!(
         matches!(
             &*reveal.effect,
@@ -47346,16 +47348,26 @@ fn mirror_mad_reveal_uses_the_owner_chain_anchor() {
         "This creature's owner shuffles it into their library. If that player does, they reveal cards from the top of that library until a card named Mirror-Mad Phantasm is revealed.",
         AbilityKind::Activated,
     );
-    let shuffle = def
-        .sub_ability
-        .as_deref()
-        .expect("the terminal owner shuffle");
-    assert!(matches!(
-        &*shuffle.effect,
-        Effect::Shuffle {
-            target: TargetFilter::Owner
+    let mut node = Some(&def);
+    let mut shuffle = None;
+    while let Some(def) = node {
+        if matches!(&*def.effect, Effect::Shuffle { .. }) {
+            shuffle = Some(def);
+            break;
         }
-    ));
+        node = def.sub_ability.as_deref();
+    }
+    let shuffle = shuffle.expect("the terminal owner shuffle");
+    assert!(
+        matches!(
+            &*shuffle.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            }
+        ),
+        "the source-owner shuffle is the scoped actor: {:?}",
+        shuffle.effect
+    );
     let reveal = shuffle
         .sub_ability
         .as_deref()
@@ -47364,7 +47376,7 @@ fn mirror_mad_reveal_uses_the_owner_chain_anchor() {
         matches!(
             &*reveal.effect,
             Effect::RevealUntil {
-                player: TargetFilter::Owner,
+                player: TargetFilter::ParentTargetOwner,
                 ..
             }
         ),

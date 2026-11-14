@@ -321,6 +321,20 @@ pub(crate) fn resolved_effect_object_ids(
         TargetFilter::ParentTargetSlot { .. } => {
             crate::game::targeting::resolved_object_ids_for_filter(state, ability, target_filter)
         }
+        // CR 608.2f + CR 608.2c: an Or that includes SelfRef moves the source
+        // with its chosen targets in one zone-change group.
+        TargetFilter::Or { filters }
+            if filters.iter().any(|f| matches!(f, TargetFilter::SelfRef)) =>
+        {
+            let mut ids = effect_object_targets(
+                target_filter,
+                &crate::game::targeting::resolved_targets(ability, target_filter, state),
+            );
+            if ability.self_ref_is_current(state) && !ids.contains(&ability.source_id) {
+                ids.insert(0, ability.source_id);
+            }
+            ids
+        }
         _ => effect_object_targets(
             target_filter,
             &crate::game::targeting::resolved_targets(ability, target_filter, state),
