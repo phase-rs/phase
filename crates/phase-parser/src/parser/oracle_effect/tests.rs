@@ -100951,3 +100951,59 @@ fn each_player_search_then_shuffle_anchors_the_scoped_players_library() {
         "the shuffle runs inside the search's own iteration"
     );
 }
+
+/// CR 608.2c + CR 118.12a + CR 120.1: an accepting player is the recipient of
+/// a self-named damage instruction that says "to that player". The generic
+/// accepting-player binder must see the player anaphor as dependent, so the
+/// recipient changes under its seeded parse.
+#[test]
+fn self_named_damage_to_that_player_keeps_accepting_player_binding() {
+    let text = "At the beginning of your upkeep, reveal the top card of your library. Any opponent may have you put that card into your graveyard. If a player does, this creature deals damage to that player equal to that card's mana value. Otherwise, put that card into your hand.";
+    let parsed = parse_oracle_text(text, "Sin Prodder", &[], &["Creature".into()], &[]);
+    assert!(
+        parsed
+            .triggers
+            .first()
+            .is_some_and(|trigger| trigger.execute.is_some()),
+        "Sin Prodder's upkeep trigger must remain parsed"
+    );
+
+    let bindings = super::lower::accepting_player_bindings(
+        "this creature deals damage to that player equal to that card's mana value",
+        &ParseContext::default(),
+    );
+    assert_eq!(
+        bindings.len(),
+        1,
+        "the direct recipient operand must bind to the accepting player: {bindings:#?}"
+    );
+}
+
+/// CR 608.2c + CR 118.12a: the alternative's "that much damage" in a same-
+/// instruction unless-cost reads the primary damage amount. Craig Boone's
+/// primary amount is its current quest-counter count, not the attack-event count.
+#[test]
+fn unless_damage_that_much_binds_to_primary_damage_amount() {
+    let text = "Craig Boone deals damage equal to the number of quest counters on it to up to one target creature unless that creature's controller has Craig Boone deal that much damage to them.";
+    let def = parse_effect_chain(text, AbilityKind::Triggered);
+    let primary_amount = match def.effect.as_ref() {
+        Effect::DealDamage { amount, .. } => amount,
+        other => panic!("expected primary DealDamage, got {other:?}"),
+    };
+    let alternative_amount = match &def
+        .unless_pay
+        .as_ref()
+        .expect("the unless alternative")
+        .cost
+    {
+        AbilityCost::EffectCost { effect } => match effect.as_ref() {
+            Effect::DealDamage { amount, .. } => amount,
+            other => panic!("expected unless DealDamage, got {other:?}"),
+        },
+        other => panic!("expected unless EffectCost, got {other:?}"),
+    };
+    assert_eq!(
+        alternative_amount, primary_amount,
+        "the alternative's amount must share the primary damage quantity"
+    );
+}

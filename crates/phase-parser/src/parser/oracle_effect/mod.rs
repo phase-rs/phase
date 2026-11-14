@@ -27190,7 +27190,7 @@ fn self_damage_subject_has_independent_recipient(
         None => false,
         Some(None) => true,
         Some(Some(recipient)) => {
-            if has_anaphoric_reference(recipient) {
+            if has_anaphoric_reference(recipient) || has_player_anaphoric_reference(recipient) {
                 return false;
             }
 
@@ -27202,6 +27202,45 @@ fn self_damage_subject_has_independent_recipient(
             .is_ok();
             !declares_target || has_prior_typed_target
         }
+    }
+}
+
+/// CR 608.2c: In a same-instruction "unless ... have [source] deal that much
+/// damage" alternative, the demonstrative names the primary damage amount.
+/// The alternative is parsed before the primary effect is available, so bind
+/// its generic event-context placeholder after parsing the primary clause.
+fn bind_unless_pay_damage_event_context_amount(
+    primary_effect: &Effect,
+    unless_pay: Option<&mut UnlessPayModifier>,
+) {
+    let Some(unless_pay) = unless_pay else {
+        return;
+    };
+    let AbilityCost::EffectCost { effect } = &mut unless_pay.cost else {
+        return;
+    };
+    let Effect::DealDamage {
+        amount: alternative_amount,
+        ..
+    } = effect.as_mut()
+    else {
+        return;
+    };
+    let Effect::DealDamage {
+        amount: primary_amount,
+        ..
+    } = primary_effect
+    else {
+        return;
+    };
+
+    if let QuantityExpr::Ref {
+        qty: QuantityRef::EventContextAmount,
+    } = alternative_amount
+    {
+        *alternative_amount = primary_amount.clone();
+    } else if let QuantityExpr::Ref { qty } = primary_amount {
+        alternative_amount.rebind_event_context_amount(qty);
     }
 }
 
@@ -50397,6 +50436,7 @@ fn parse_effect_chain_ir_body(
             }
         };
         let mut clause = clause;
+        bind_unless_pay_damage_event_context_amount(&clause.effect, unless_pay.as_mut());
         if inherited_compound_owner_seed.is_some() {
             // CR 608.2c: every inherited owner instruction needs an announced
             // object, including a shuffle after a conditionally skipped draw.
