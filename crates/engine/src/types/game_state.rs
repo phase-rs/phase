@@ -38734,6 +38734,8 @@ impl GameState {
             ability_onset_record: _,
             active_payment_pins: _,
             active_rules_execution_node: _,
+            // A synchronous-window `ObjectId` list, never serialized and never compared.
+            active_copy_token_resolution_tokens: _,
             active_casting_permission_index: _,
             active_graveyard_permission_latch: _,
             active_paid_resolution_offer_tail: _,
