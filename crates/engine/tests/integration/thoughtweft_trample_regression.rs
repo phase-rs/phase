@@ -121,7 +121,7 @@ fn thoughtweft_buffed_trample_excess_reaches_player() {
     let events =
         run_combat_and_collect_events(&mut runner, vec![attacker], vec![(blocker, attacker)]);
 
-    // CR 510.1c: exactly lethal (2 = blocker toughness) is assigned to the
+    // CR 702.19b: exactly lethal (2 = blocker toughness) is assigned to the
     // blocker before the remaining point tramples over to P1.
     assert_damage_dealt(&events, attacker, TargetRef::Object(blocker), 2, true);
     assert_eq!(
