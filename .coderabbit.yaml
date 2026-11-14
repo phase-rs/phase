@@ -17,9 +17,20 @@ reviews:
   high_level_summary: true
   poem: false
   review_status: true
+  # Walkthrough: keep the summary, changed files and linked-issue assessment.
+  sequence_diagrams: false
+  related_issues: false
+  related_prs: false
+  suggested_labels: false
+  suggested_reviewers: false
+  estimate_code_review_effort: false
+  in_progress_fortune: false
   auto_review:
     enabled: true
     drafts: false
+    # One automatic review per PR, then pause; later heads' `CodeRabbit` check
+    # reads "Review paused". `@coderabbitai review` runs one more on request.
+    auto_pause_after_reviewed_commits: 1
   # Generated / vendored / binary artifacts — reviewing these is pure noise.
   # Ported from .gemini/config.yaml ignore_patterns for parity.
   path_filters:
@@ -58,9 +69,9 @@ reviews:
         rule and the existing authority or typed alternative that fits. Do not
         invent a runtime bug to justify it; a merely different implementation
         preference without that evidence is not a finding.
-        A latent bug behind a guard or unreached branch
-        is still a finding — rate it by what happens when the form is reached or the
-        guard is removed, not by today's reachability. Check edge cases when relevant:
+        A latent bug behind a guard or unreached branch is a finding only when a
+        printed card in a legal game reaches it, or the PR claims the card; otherwise
+        mention it once as a note naming the nearest printed card. Check edge cases when relevant:
         empty inputs (0 mana, 0 targets, empty filter), multi-target/modal/repeat-for
         interactions, simultaneous events (dies + ETB in one SBA pass, copy-of-copy,
         control change with summoning sickness), eliminated players still referenced,

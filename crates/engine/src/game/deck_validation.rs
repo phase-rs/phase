@@ -1314,6 +1314,7 @@ fn validate_scheme_deck(
     let mut counts: HashMap<String, u32> = HashMap::new();
     let mut non_scheme = BTreeSet::new();
     let mut unsupported = BTreeSet::new();
+    let valid_subtypes = db.valid_subtypes();
     for name in scheme_deck {
         let Some(face) = db.get_face_by_name(name) else {
             continue;
@@ -1322,7 +1323,9 @@ fn validate_scheme_deck(
         if !face.card_type.core_types.contains(&CoreType::Scheme) {
             non_scheme.insert(face.name.clone());
         }
-        if !crate::game::coverage::card_face_gaps(face).is_empty() {
+        if !crate::game::coverage::card_face_coverage_with_subtypes(face, valid_subtypes)
+            .is_supported()
+        {
             unsupported.insert(face.name.clone());
         }
     }
@@ -3693,21 +3696,24 @@ fn evaluate_deck_coverage(db: &CardDatabase, request: &DeckCompatibilityRequest)
     // it is excluded from the total instead. Unknown cards are surfaced to the
     // user separately, through `collect_unknown_cards`.
     let mut resolved_unique = 0usize;
+    // Same database-derived subtype lexicon `analyze_coverage` uses, so the
+    // deck verdict matches coverage-report for valid subtypes printed elsewhere.
+    let valid_subtypes = db.valid_subtypes();
 
     for (canonical, name) in &unique_names {
         if let Some(face) = db.get_face_by_name(name) {
             resolved_unique += 1;
-            let gaps = crate::game::coverage::card_face_gaps(face);
-            if gaps.is_empty() {
+            let coverage =
+                crate::game::coverage::card_face_coverage_with_subtypes(face, valid_subtypes);
+            if coverage.is_supported() {
                 supported_count += 1;
             } else {
                 let copies = copy_counts.get(canonical).copied().unwrap_or(1);
-                let parse_details = crate::game::coverage::build_parse_details_for_face(face);
                 unsupported_cards.push(UnsupportedCard {
                     name: face.name.clone(),
-                    gaps,
+                    gaps: coverage.gap_handlers(),
                     oracle_text: face.oracle_text.clone(),
-                    parse_details,
+                    parse_details: coverage.parse_details,
                     copies,
                 });
             }
@@ -11073,6 +11079,373 @@ mod tests {
         );
     }
 
+    /// Deck coverage and coverage-report share one per-face gap computation, so a
+    /// printed card whose only gaps are a parse warning or a silent drop is
+    /// unsupported in both (issue #9972). The witnesses are exported faces, not
+    /// stubs: Hinder's "top or bottom of its owner's library instead" rider raises
+    /// `Swallow:Replacement_Instead`, and Druid of the Emerald Grove's printed
+    /// pipe-form die table is flagged by silent-drop line accounting (the
+    /// exported RollDie still carries every result range).
+    #[test]
+    fn deck_coverage_matches_report_for_printed_warning_and_silent_drop_witnesses() {
+        const WARNING: &str = "Hinder";
+        const SILENT_DROP: &str = "Druid of the Emerald Grove";
+        let shared = crate::test_support::shared_card_db();
+        let printed = |name: &str| {
+            let face = shared
+                .get_face_by_name(name)
+                .unwrap_or_else(|| panic!("integration fixture carries {name}"));
+            serde_json::to_value(face).expect("printed face serializes")
+        };
+        // Reach guards: these are the printed shapes the gap labels name.
+        assert!(
+            printed(WARNING)["parse_warnings"]
+                .as_array()
+                .is_some_and(|warnings| !warnings.is_empty()),
+            "reach: {WARNING} carries the printed swallowed-clause warning"
+        );
+        assert!(
+            printed(SILENT_DROP)["oracle_text"]
+                .as_str()
+                .is_some_and(|text| text.lines().filter(|line| line.contains('|')).count() >= 2),
+            "reach: {SILENT_DROP} carries its printed die-result table"
+        );
+
+        let mut cards = Map::new();
+        insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
+        cards.insert(WARNING.to_lowercase(), printed(WARNING));
+        cards.insert(SILENT_DROP.to_lowercase(), printed(SILENT_DROP));
+        let db = CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap();
+
+        let request = DeckCompatibilityRequest {
+            main_deck: vec![
+                "Plains".to_string(),
+                WARNING.to_string(),
+                SILENT_DROP.to_string(),
+            ],
+            ..Default::default()
+        };
+        let coverage = evaluate_deck_compatibility(&db, &request)
+            .coverage
+            .expect("coverage present");
+        assert_eq!(coverage.total_unique, 3);
+        assert_eq!(coverage.supported_unique, 1);
+        assert_eq!(coverage.unsupported_cards.len(), 2);
+        let deck_gaps = |name: &str| -> Vec<String> {
+            coverage
+                .unsupported_cards
+                .iter()
+                .find(|card| card.name == name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{name} must reach the caller-facing gap list, got {:?}",
+                        coverage
+                            .unsupported_cards
+                            .iter()
+                            .map(|card| card.name.as_str())
+                            .collect::<Vec<_>>()
+                    )
+                })
+                .gaps
+                .clone()
+        };
+        assert_eq!(
+            deck_gaps(WARNING),
+            vec!["Swallow:Replacement_Instead".to_string()]
+        );
+        assert_eq!(
+            deck_gaps(SILENT_DROP),
+            vec!["SilentDrop:1_of_2".to_string()]
+        );
+
+        let report = crate::game::coverage::analyze_coverage(&db);
+        let report_gaps = |name: &str| -> Vec<String> {
+            report
+                .cards
+                .iter()
+                .find(|card| card.card_name == name)
+                .unwrap_or_else(|| panic!("{name} in the published report"))
+                .gap_details
+                .iter()
+                .map(|gap| gap.handler.clone())
+                .collect()
+        };
+        assert_eq!(report_gaps(WARNING), deck_gaps(WARNING));
+        assert_eq!(report_gaps(SILENT_DROP), deck_gaps(SILENT_DROP));
+    }
+
+    /// The one intentional report/deck divergence, exercised with printed card
+    /// data: Arcane Adaptation's "As this enchantment enters, choose a creature
+    /// type" is a CR 614.12 entry projection whose own static reads the chosen
+    /// type outside the entry-consumer allowlist, so the deck verdict fails
+    /// closed while the published report keeps its historical policy and passes
+    /// the card (issue #9972). Metallic Mimic, the same shape on the allowlist,
+    /// passes both surfaces.
+    #[test]
+    fn printed_arcane_adaptation_entry_gap_splits_deck_and_report() {
+        use crate::game::coverage::ENTRY_PROJECTION_GAP;
+        const ARCANE: &str = "Arcane Adaptation";
+        const ALLOWLISTED: &str = "Metallic Mimic";
+        let shared = crate::test_support::shared_card_db();
+        let printed = |name: &str| {
+            let face = shared
+                .get_face_by_name(name)
+                .unwrap_or_else(|| panic!("integration fixture carries {name}"));
+            serde_json::to_value(face).expect("printed face serializes")
+        };
+        let arcane: crate::types::card::CardFace =
+            serde_json::from_value(printed(ARCANE)).expect("printed face deserializes");
+        assert!(
+            arcane
+                .replacements
+                .iter()
+                .any(|def| crate::game::replacement::as_enters_choice_type(def).is_some()),
+            "reach: {ARCANE}'s printed as-enters choice is the entry projection"
+        );
+
+        let mut cards = Map::new();
+        insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
+        cards.insert(ARCANE.to_lowercase(), printed(ARCANE));
+        cards.insert(ALLOWLISTED.to_lowercase(), printed(ALLOWLISTED));
+        let db = CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap();
+
+        let request = DeckCompatibilityRequest {
+            main_deck: vec![
+                "Plains".to_string(),
+                ARCANE.to_string(),
+                ALLOWLISTED.to_string(),
+            ],
+            ..Default::default()
+        };
+        let coverage = evaluate_deck_compatibility(&db, &request)
+            .coverage
+            .expect("coverage present");
+        assert_eq!(coverage.total_unique, 3);
+        assert_eq!(
+            coverage.supported_unique, 2,
+            "the allowlisted printed face passes the deck verdict"
+        );
+        assert_eq!(coverage.unsupported_cards.len(), 1);
+        let unsupported = &coverage.unsupported_cards[0];
+        assert_eq!(unsupported.name, ARCANE);
+        assert_eq!(unsupported.gaps, vec![ENTRY_PROJECTION_GAP.to_string()]);
+
+        let report = crate::game::coverage::analyze_coverage(&db);
+        let report_card = report
+            .cards
+            .iter()
+            .find(|card| card.card_name == ARCANE)
+            .expect("printed Arcane Adaptation in the published report");
+        assert!(
+            report_card.supported,
+            "the report excludes the entry-projection check: {:?}",
+            report_card.gap_details
+        );
+        assert!(
+            !report_card
+                .gap_details
+                .iter()
+                .any(|gap| gap.handler == ENTRY_PROJECTION_GAP),
+            "the entry gap is deck-only by policy"
+        );
+        let mimic = report
+            .cards
+            .iter()
+            .find(|card| card.card_name == ALLOWLISTED)
+            .expect("printed Metallic Mimic in the published report");
+        assert!(mimic.supported && mimic.gap_details.is_empty());
+    }
+
+    /// CR 608.2c + CR 614.1a: Transcendent Dragon's ", then you may cast it without
+    /// paying its mana cost" tail on its counter-rider is parsed but dropped at
+    /// runtime. Loaded from the checked-in export, so the face carries its printed
+    /// Flash, Flying and Dragon subtype, the deck coverage summary lists it as
+    /// unsupported for exactly that resolver gap (issue #9972).
+    #[test]
+    fn deck_coverage_marks_transcendent_dragon_resolver_gap_unsupported() {
+        use crate::game::coverage::ParseCategory;
+
+        let db = crate::test_support::shared_card_db();
+        let face = db
+            .get_face_by_name("Transcendent Dragon")
+            .expect("integration fixture carries Transcendent Dragon");
+        // Reach guard: the exported face is the production shape, not a stub.
+        assert!(face.card_type.subtypes.iter().any(|s| s == "Dragon"));
+
+        let request = DeckCompatibilityRequest {
+            main_deck: vec!["Plains".to_string(), "Transcendent Dragon".to_string()],
+            ..Default::default()
+        };
+        let coverage = evaluate_deck_compatibility(db, &request)
+            .coverage
+            .expect("coverage present");
+        assert_eq!(coverage.total_unique, 2);
+        assert_eq!(coverage.supported_unique, 1);
+        assert_eq!(coverage.unsupported_cards.len(), 1);
+        let unsupported = &coverage.unsupported_cards[0];
+        assert_eq!(unsupported.name, "Transcendent Dragon");
+        assert_eq!(
+            unsupported.gaps,
+            vec!["ResolverFeature:structural:counter_exile_rider_tail_dropped".to_string()],
+            "the dropped tail is the only gap"
+        );
+        // Reach guard: the public row carries the printed Flash and Flying.
+        for keyword in ["Flash", "Flying"] {
+            assert!(
+                unsupported.parse_details.iter().any(|item| {
+                    item.category == ParseCategory::Keyword
+                        && item.label == keyword
+                        && item.supported
+                }),
+                "{keyword} must reach the public parse details"
+            );
+        }
+        // The nested Counter item sits under the enters trigger.
+        assert!(
+            unsupported.parse_details.iter().any(|item| {
+                item.category == ParseCategory::Trigger
+                    && item.label == "ChangesZone"
+                    && item.children.iter().any(|child| {
+                        child.category == ParseCategory::Ability && child.label == "Counter"
+                    })
+            }),
+            "the enters trigger and its counter must reach the parse details"
+        );
+    }
+
+    /// Deck coverage reads the database subtype lexicon, the same one the report
+    /// builds. Mishra's Factory "becomes a 2/2 Assembly-Worker artifact creature";
+    /// Assembly-Worker is a creature type (CR 205.3m) printed on no face of a
+    /// database holding only the Factory, so both the report and the deck flag
+    /// the animation. Loading Cogwork Assembler, an Assembly-Worker, clears the
+    /// gap in both (issue #9972).
+    #[test]
+    fn deck_coverage_uses_database_subtype_lexicon() {
+        const FACTORY: &str = "Mishra's Factory";
+        const INVALID: &str = "ParserMisfire:InvalidSubtype(Assembly-Worker)";
+        let shared = crate::test_support::shared_card_db();
+        let database = |names: &[&str]| {
+            let mut cards = Map::new();
+            for name in names {
+                let face = shared
+                    .get_face_by_name(name)
+                    .unwrap_or_else(|| panic!("integration fixture carries {name}"));
+                cards.insert(
+                    name.to_lowercase(),
+                    serde_json::to_value(face).expect("printed face serializes"),
+                );
+            }
+            CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap()
+        };
+        let deck_gaps = |db: &CardDatabase| -> Vec<String> {
+            let request = DeckCompatibilityRequest {
+                main_deck: vec![FACTORY.to_string()],
+                ..Default::default()
+            };
+            let coverage = evaluate_deck_compatibility(db, &request)
+                .coverage
+                .expect("coverage present");
+            assert_eq!(coverage.total_unique, 1);
+            coverage
+                .unsupported_cards
+                .into_iter()
+                .find(|card| card.name == FACTORY)
+                .map(|card| card.gaps)
+                .unwrap_or_default()
+        };
+        let report_gaps = |db: &CardDatabase| -> Vec<String> {
+            crate::game::coverage::analyze_coverage(db)
+                .cards
+                .into_iter()
+                .find(|card| card.card_name == FACTORY)
+                .expect("factory in report")
+                .gap_details
+                .into_iter()
+                .map(|gap| gap.handler)
+                .collect()
+        };
+
+        // Reach guard: the default Oracle vocabulary lists Assembly-Worker, so a
+        // deck verdict built on it would pass the Factory alone.
+        assert!(crate::game::coverage::default_valid_subtypes().contains("Assembly-Worker"));
+
+        let factory_only = database(&[FACTORY]);
+        assert_eq!(report_gaps(&factory_only), vec![INVALID.to_string()]);
+        assert_eq!(deck_gaps(&factory_only), report_gaps(&factory_only));
+
+        let with_worker = database(&[FACTORY, "Cogwork Assembler"]);
+        assert!(report_gaps(&with_worker).is_empty());
+        assert!(deck_gaps(&with_worker).is_empty());
+    }
+
+    /// A printed warning-only Scheme is unsupported for submitted-scheme
+    /// validation on the public format-validation path and is skipped by default
+    /// scheme selection, while clean Schemes in the same database are accepted
+    /// (issue #9972). Your Inescapable Doom's only gap is the parse warning its
+    /// "the opponent with the highest life total among your opponents" recipient
+    /// raises.
+    #[test]
+    fn warning_only_scheme_is_unsupported_in_validation_and_default_selection() {
+        const DOOM: &str = "Your Inescapable Doom";
+        let printed = crate::test_support::shared_card_db()
+            .get_face_by_name(DOOM)
+            .expect("integration fixture carries Your Inescapable Doom");
+
+        let mut cards = Map::new();
+        insert_planechase_card(&mut cards, "Legal Standard", &[], &[]);
+        insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
+        // Every clean filler sorts after the printed scheme, so default selection
+        // would take the printed scheme first if coverage did not exclude it.
+        let fillers: Vec<String> = (1..=20).map(|index| format!("Zz Scheme {index}")).collect();
+        for name in &fillers {
+            insert_scheme_card(&mut cards, name);
+        }
+        cards.insert(
+            DOOM.to_lowercase(),
+            serde_json::to_value(printed).expect("printed face serializes"),
+        );
+        let db = CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap();
+
+        // Reach guard: the printed face is a Scheme whose only gaps are parse
+        // warnings.
+        let face = db.get_face_by_name(DOOM).unwrap();
+        assert!(face.card_type.core_types.contains(&CoreType::Scheme));
+        assert!(!face.parse_warnings.is_empty());
+        let coverage =
+            crate::game::coverage::card_face_coverage_with_subtypes(face, db.valid_subtypes());
+        assert!(coverage.supported_before_parse_warnings());
+        assert!(!coverage.is_supported());
+
+        let mut scheme_deck = fillers[..19].to_vec();
+        scheme_deck.push(DOOM.to_string());
+        let warned = evaluate_deck_compatibility(&db, &archenemy_request(scheme_deck));
+        assert_eq!(
+            warned.selected_format_compatible,
+            Some(false),
+            "reasons: {:?}",
+            warned.selected_format_reasons
+        );
+        assert!(
+            warned
+                .selected_format_reasons
+                .iter()
+                .any(|reason| reason == &format!("Unsupported scheme cards: {DOOM}")),
+            "reasons: {:?}",
+            warned.selected_format_reasons
+        );
+        let clean = evaluate_deck_compatibility(&db, &archenemy_request(fillers.clone()));
+        assert_eq!(
+            clean.selected_format_compatible,
+            Some(true),
+            "reasons: {:?}",
+            clean.selected_format_reasons
+        );
+
+        let selected = crate::game::deck_loading::default_scheme_deck_entries(&db);
+        assert_eq!(selected.len(), 20);
+        assert!(selected.iter().all(|entry| entry.card.name != DOOM));
+    }
+
     /// A DFC commander whose two faces are each indexed under their own key,
     /// the way `data/card-data.json` stores every multi-face card (it holds no
     /// composite `"A // B"` keys at all). Both faces are mono-red so the deck's
@@ -11554,6 +11927,7 @@ mod tests {
                 team_based: false,
                 sideboard_policy: SideboardPolicy::Unlimited,
                 default_deck_copy_limit,
+                poison_counter_threshold: 10,
             },
             legality: LegalityRules {
                 legal_sets: None,

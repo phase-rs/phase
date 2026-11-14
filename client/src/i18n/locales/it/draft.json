@@ -567,9 +567,11 @@
     "tournamentEliminationDesc": "I giocatori vengono eliminati dopo una sconfitta finché non rimane un vincitore.",
     "podPolicy": "Politica del pod",
     "policyCompetitive": "Competitivo",
-    "policyCompetitiveDesc": "Scelte a tempo, scelte automatiche allo scadere e avanzamento automatico dei round.",
+    "policyCompetitiveDesc": "Scelte a tempo, scelte automatiche allo scadere e avanzamento automatico dei round. I mazzi inviati sono definitivi; puoi usare la sideboard solo tra le partite di un match.",
+    "policyCompetitiveNoRoundsDesc": "Scelte a tempo e scelte automatiche allo scadere.",
     "policyCasual": "Casuale",
-    "policyCasualDesc": "Scelte senza tempo, avanzamento manuale dei round e controlli host per risolvere i problemi.",
+    "policyCasualDesc": "Scelte senza tempo, avanzamento manuale dei round, controlli host per risolvere i problemi e modifiche al mazzo tra i round.",
+    "policyCasualNoRoundsDesc": "Scelte senza tempo e controlli host per risolvere i problemi.",
     "podSize": "Dimensione del pod",
     "podSizeDesc": "{{count}} posti totali. I posti vuoti possono essere riempiti con i bot dalla lobby prima che inizi il draft.",
     "playerCount": "{{count}} giocatori",
@@ -615,11 +617,21 @@
     "roundComplete": "Round completato",
     "waitingNextRound": "In attesa che l'host inizi il prossimo round...",
     "nextRoundShortly": "Il prossimo round inizierà a breve...",
+    "editDeck": "Modifica mazzo",
+    "backToStandings": "Torna alla classifica",
+    "editDeckHint": "Pod casuale: puoi modificare il mazzo prima che inizi il prossimo round.",
     "pauseReason": {
       "PlayerDisconnected": "Draft paused — a player disconnected.",
       "PausedByHost": "Draft paused by host.",
       "DisconnectGraceExpired": "A player did not return in time."
     }
+  },
+  "deckSubmitConfirm": {
+    "title": "Inviare questo mazzo?",
+    "confirm": "Conferma invio",
+    "competitive": "Questo è un pod competitivo: il mazzo inviato è definitivo per tutti i round. Puoi comunque usare la sideboard tra le partite di un match Bo3.",
+    "casual": "Potrai ancora modificare il mazzo tra i round.",
+    "final": "Il mazzo inviato è definitivo."
   },
   "betweenGames": {
     "game": "Partita {{number}}",

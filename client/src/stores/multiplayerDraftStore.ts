@@ -1367,6 +1367,24 @@ function localLaunchDeck(launch: DraftMatchLaunch) {
   }
 }
 
+/**
+ * The pod-level state a match launch installs. The between-games seed is
+ * per-match: a new match's game-2 sideboarding starts from the deck
+ * registered for THAT match (the latest accepted submission, which a Casual
+ * pod may have revised between rounds — MTR 7.3), never from a prior match's
+ * sideboard configuration. A re-delivered start for the SAME match
+ * (reconnect) keeps the in-match configuration for the next game.
+ */
+function matchStartState(state: MultiplayerDraftState, launch: DraftMatchLaunch): Partial<MultiplayerDraftState> {
+  return {
+    matchPairing: launch,
+    phase: "matchInProgress",
+    intergameWorkspaceState: state.matchPairing?.matchId === launch.matchId
+      ? state.intergameWorkspaceState
+      : null,
+  };
+}
+
 function nameMultiset(names: readonly string[]): Map<string, number> {
   const counts = new Map<string, number>();
   for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1);
@@ -3708,7 +3726,7 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
     case "matchStart":
       // A pairing replaced by another match ends the start bound to the old one.
       if (matchStartInFlight?.matchId !== event.launch.matchId) abandonMatchStart();
-      set({ matchPairing: event.launch, phase: "matchInProgress" });
+      set((state) => matchStartState(state, event.launch));
       void retryDraftSettlement(event.launch, "host");
       break;
     case "commanderLaunch":
@@ -3858,10 +3876,7 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
     case "matchStart":
       // A pairing replaced by another match ends the start bound to the old one.
       if (matchStartInFlight?.matchId !== event.launch.matchId) abandonMatchStart();
-      set({
-        matchPairing: event.launch,
-        phase: "matchInProgress",
-      });
+      set((state) => matchStartState(state, event.launch));
       void retryDraftSettlement(event.launch, "guest");
       break;
     case "commanderLaunch":

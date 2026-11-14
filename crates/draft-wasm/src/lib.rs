@@ -3681,15 +3681,14 @@ mod create_multiplayer_draft_tests {
     /// pod whose fetch failed drafts in exactly this degraded mode. If the deck
     /// is playable here it is playable with the database too.
     ///
-    /// DELIBERATELY NOT ASSERTED HERE: that the deck is focused on two colours,
-    /// and that the same pool builds the same deck twice. Both hold only once
-    /// `find_best_colors` sorts on a total order -- it sorts on score alone, and
+    /// DELIBERATELY NOT ASSERTED HERE: that the deck is focused on two colours.
     /// `rarity_prior` scores a common at 0.0, so without a card database every
-    /// colour holding no rare or uncommon ties at exactly 0.0 and the second
-    /// colour falls out of `HashMap` iteration order. That is a defect in the
-    /// deckbuilding suggester, which is shared by every draft kind and is not
-    /// Winston's to fix; it is carried in its own change. The three claims
-    /// below are the ones that hold either way, measured green over 13 runs.
+    /// colour holding no rare or uncommon ties at exactly 0.0 in
+    /// `find_best_colors`. Those ties resolve by colour key, so the same pool
+    /// builds the same deck every time (see `suggest.rs`'s
+    /// `repeated_suggestions_break_equal_color_scores_by_color_key`), but the
+    /// chosen pair need not be the colours this bot drafted most. The three
+    /// claims below are the ones this test asserts, measured green over 13 runs.
     #[test]
     fn a_bot_that_drafted_a_whole_winston_pod_can_build_a_playable_deck() {
         let session = winston_drafted_by_bots(None);

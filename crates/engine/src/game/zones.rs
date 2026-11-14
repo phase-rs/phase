@@ -144,16 +144,15 @@ fn counters_persist_on_move(state: &GameState, object_id: ObjectId, to: Zone) ->
 /// controller and kind (Aura/Equipment) so that look-back triggers of the form
 /// "for each Aura you controlled that was attached to it" (Hateful Eidolon)
 /// can resolve their quantity after the departure has already unattached the
-/// Auras (CR 701.3d).
+/// Auras (CR 701.3d). A phased-out attachment did not exist, so it is omitted
+/// (CR 702.26b).
 pub(crate) fn capture_attachment_snapshot(
     state: &GameState,
     obj: &GameObject,
 ) -> Vec<crate::types::game_state::AttachmentSnapshot> {
     use crate::types::ability::AttachmentKind;
-    obj.attachments
-        .iter()
-        .filter_map(|id| {
-            let att = state.objects.get(id)?;
+    crate::game::filter::phased_in_attachments(state, obj)
+        .filter_map(|att| {
             let kind = if att.card_types.subtypes.iter().any(|s| s == "Aura") {
                 AttachmentKind::Aura
             } else if att.card_types.subtypes.iter().any(|s| s == "Equipment") {
@@ -164,7 +163,7 @@ pub(crate) fn capture_attachment_snapshot(
                 return None;
             };
             Some(crate::types::game_state::AttachmentSnapshot {
-                object_id: *id,
+                object_id: att.id,
                 identity: Some(ObjectIncarnationRef::from_object(att)),
                 controller: att.controller,
                 kind,

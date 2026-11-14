@@ -80,6 +80,7 @@ import type {
 import type { BracketDeckRequest } from "../types/bracketEstimate";
 import { classifyInitFailure, type InitFailure } from "./init-envelope";
 import { ENGINE_QUERIES, runEngineQuery, type EngineQueryName } from "./engine-queries";
+import { StateCodecRuntime } from "./state-codec-runtime";
 
 // ── Message Protocol ─────────────────────────────────────────────────────
 
@@ -176,6 +177,9 @@ type EngineRequest =
   | { type: "setMultiplayerMode"; id: number; enabled: boolean }
   | { type: "ping"; id: number }
   | { type: "takeLastPanic"; id: number }
+  | { type: "openStateCodec"; id: number }
+  | { type: "decodeStateCodec"; id: number; sessionId: number; frame: Uint8Array }
+  | { type: "closeStateCodec"; id: number; sessionId: number }
   | { type: "applySeatMutation"; id: number; stateJson: string; mutationJson: string }
   | { type: "projectSeatView"; id: number; stateJson: string }
   | { type: "estimateBracketForDeck"; id: number; deck: BracketDeckRequest }
@@ -201,6 +205,13 @@ type EngineResponse =
 // ── State ────────────────────────────────────────────────────────────────
 
 let cardDbLoaded = false;
+/** Set once the WASM module is instantiated by the `init` handler. */
+let wasmInitialized = false;
+/**
+ * Negotiated state-codec sessions for this worker's WASM instance. Decoder
+ * baselines live here, never on the main thread; see `state-codec-runtime.ts`.
+ */
+let stateCodecRuntime: StateCodecRuntime | null = null;
 
 function respond(msg: EngineResponse): void {
   self.postMessage(msg);
@@ -259,6 +270,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         } else {
           await init();
         }
+        wasmInitialized = true;
         result(msg.id, null);
         break;
       }
@@ -780,6 +792,37 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "ping": {
         result(msg.id, ping());
+        break;
+      }
+
+      // ── Negotiated state-codec sessions ──────────────────────────────
+      // Decoder sessions are transport plumbing: they read frames and retain
+      // their own baselines. They never load card data, touch GAME_STATE, or
+      // expose game state on the main thread.
+
+      case "openStateCodec": {
+        if (!wasmInitialized) {
+          error(msg.id, "Engine is not initialized.");
+          break;
+        }
+        stateCodecRuntime ??= new StateCodecRuntime(engineWasm);
+        result(msg.id, stateCodecRuntime.open());
+        break;
+      }
+
+      case "decodeStateCodec": {
+        const runtime = stateCodecRuntime;
+        if (!runtime) {
+          error(msg.id, "State codec session was never opened.");
+          break;
+        }
+        result(msg.id, runtime.decode(msg.sessionId, msg.frame));
+        break;
+      }
+
+      case "closeStateCodec": {
+        stateCodecRuntime?.close(msg.sessionId);
+        result(msg.id, null);
         break;
       }
 

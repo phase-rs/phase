@@ -95,6 +95,12 @@ required-features = ["scenario-benches"]
 test = false
 
 [[bin]]
+name = "priority-scaling-bench"
+path = "src/bin/priority_scaling_bench.rs"
+required-features = ["scenario-benches"]
+test = false
+
+[[bin]]
 name = "candelabra-target-walk-bench"
 path = "src/bin/candelabra_target_walk_bench.rs"
 required-features = ["scenario-benches"]

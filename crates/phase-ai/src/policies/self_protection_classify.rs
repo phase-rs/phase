@@ -1387,6 +1387,7 @@ mod tests {
         let put_in_play = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,

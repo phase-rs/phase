@@ -163,51 +163,53 @@ vi.mock("../../game/dispatch.ts", () => ({
   currentSnapshot: new Map(),
 }));
 
-vi.mock("../../stores/gameStore", async () => ({
-  useGameStore: Object.assign(
-    vi.fn((selector: (s: Record<string, unknown>) => unknown) =>
-      selector({
-        gameState: storeOverrides.gameState,
-        gameMode: storeOverrides.gameMode,
-        waitingFor: storeOverrides.waitingFor,
-        legalActions: [],
-        endContinuousEffectOffers: [],
-        autoPassRecommended: false,
-        spellCosts: {},
-        legalActionsByObject: {},
-        // CR 118.3: the acting-player "can't pay this cost right now" read-out.
-        // Mutable so a test can seed it; reset in `beforeEach` alongside the
-        // other `storeOverrides` fields.
-        activationBlockReasons: storeOverrides.activationBlockReasons,
-        events: [],
-        eventHistory: [],
-        logHistory: [],
-        adapter: storeOverrides.adapter,
-        lobbyProgress: null,
-      }),
+vi.mock("../../stores/gameStore", async () => {
+  const snapshot = (): Record<string, unknown> => ({
+    gameState: storeOverrides.gameState,
+    gameMode: storeOverrides.gameMode,
+    waitingFor: storeOverrides.waitingFor,
+    legalActions: [],
+    endContinuousEffectOffers: [],
+    autoPassRecommended: false,
+    spellCosts: {},
+    legalActionsByObject: {},
+    // CR 118.3: the acting-player "can't pay this cost right now" read-out.
+    // Mutable so a test can seed it; reset in `beforeEach` alongside the
+    // other `storeOverrides` fields.
+    activationBlockReasons: storeOverrides.activationBlockReasons,
+    events: [],
+    eventHistory: [],
+    logHistory: [],
+    adapter: storeOverrides.adapter,
+    lobbyProgress: null,
+  });
+  return {
+    useGameStore: Object.assign(
+      vi.fn((selector: (s: Record<string, unknown>) => unknown) => selector(snapshot())),
+      // The real `useKeyboardShortcuts` listener reads the store imperatively.
+      { getState: snapshot, setState: mockSetGameState },
     ),
-    { setState: mockSetGameState },
-  ),
-  clearGame: vi.fn(),
-  // The real predicate, and `importActual` is what makes that claim true.
-  // `hasRemoteHumans` reads `GAME_MODE_TRAITS`, a frozen taxonomy that lives
-  // only in this module; re-deriving it here as `mode === "online" || …` would
-  // pass while the real predicate classified a mode differently — exactly the
-  // failure the `takebackAudience` assertions below exist to catch. Only the
-  // predicate is taken: `useGameStore` stays the mock above, so the real
-  // zustand store is imported but never rendered against.
-  hasRemoteHumans: (
-    await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")
-  ).hasRemoteHumans,
-  canExportAuthoritativeState: (
-    await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")
-  ).canExportAuthoritativeState,
-  loadActiveGame: vi.fn(() => null),
-  saveActiveGame: vi.fn(),
-  clearActiveGame: vi.fn(),
-  loadGame: vi.fn(() => Promise.resolve(null)),
-  loadCheckpoints: vi.fn(() => Promise.resolve([])),
-}));
+    clearGame: vi.fn(),
+    // The real predicate, and `importActual` is what makes that claim true.
+    // `hasRemoteHumans` reads `GAME_MODE_TRAITS`, a frozen taxonomy that lives
+    // only in this module; re-deriving it here as `mode === "online" || …` would
+    // pass while the real predicate classified a mode differently — exactly the
+    // failure the `takebackAudience` assertions below exist to catch. Only the
+    // predicate is taken: `useGameStore` stays the mock above, so the real
+    // zustand store is imported but never rendered against.
+    hasRemoteHumans: (
+      await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")
+    ).hasRemoteHumans,
+    canExportAuthoritativeState: (
+      await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")
+    ).canExportAuthoritativeState,
+    loadActiveGame: vi.fn(() => null),
+    saveActiveGame: vi.fn(),
+    clearActiveGame: vi.fn(),
+    loadGame: vi.fn(() => Promise.resolve(null)),
+    loadCheckpoints: vi.fn(() => Promise.resolve([])),
+  };
+});
 
 // `FORMAT_DEFAULTS` is consumed at module top-level by multiplayerDraftStore
 // (and indexed by GamePage). This test mocks the whole store to avoid its
@@ -1702,6 +1704,49 @@ describe("GamePage — desktop solo sandbox tools without the banner", () => {
     renderGamePage("/game/test-game-123?mode=ai");
 
     expect(screen.getByRole("status", { name: "Sandbox mode banner" })).toBeInTheDocument();
+  });
+});
+
+/**
+ * GamePage is the authority on where Click Mode is offered: one
+ * `sandboxToolsAvailable` decision feeds both the K hotkey and the Game-menu
+ * toggle. The hook and the menu are tested below that seam with the flag or
+ * handler passed in directly, so these cases pin the decision itself through
+ * the real `useKeyboardShortcuts` listener GamePage mounts.
+ */
+describe("GamePage — Click Mode is offered only where sandbox tools are", () => {
+  beforeEach(() => {
+    useUiStore.setState({ debugInteractionMode: false, helpSheetOpen: false });
+  });
+  afterEach(() => {
+    useUiStore.setState({ debugInteractionMode: false, helpSheetOpen: false });
+  });
+
+  it("offers the menu toggle and the K hotkey in a game against the AI", () => {
+    renderGamePage("/game/test-game-123?mode=ai");
+
+    expect(capturedGameMenuProps?.onToggleDebugInteractionMode).toBeTypeOf("function");
+
+    fireEvent.keyDown(window, { key: "k" });
+
+    expect(useUiStore.getState().debugInteractionMode).toBe(true);
+  });
+
+  it("withholds both from an online seat in a game that is not sandbox-flagged", () => {
+    renderGamePage("/game/test-game-123?mode=host");
+
+    // Reach guard: GameMenu really was rendered, so the undefined prop is the
+    // gate rather than an unmounted menu.
+    expect(capturedGameMenuProps).toBeDefined();
+    expect(capturedGameMenuProps?.onToggleDebugInteractionMode).toBeUndefined();
+
+    fireEvent.keyDown(window, { key: "k" });
+    expect(useUiStore.getState().debugInteractionMode).toBe(false);
+
+    // Reach guard for the inert K: the same listener is live and reaches its
+    // `switch`. Dispatched last, because an open help sheet swallows keys.
+    fireEvent.keyDown(window, { key: "?" });
+    expect(useUiStore.getState().helpSheetOpen).toBe(true);
   });
 });
 

@@ -3807,6 +3807,7 @@ fn legacy_effect(x: &Effect) -> bool {
                 || legacy_quantity_expr(count)
         }
         Effect::ChangeZone {
+            actor,
             target,
             enters_under,
             enter_with_counters,
@@ -3814,7 +3815,8 @@ fn legacy_effect(x: &Effect) -> bool {
             enters_modified_if,
             ..
         } => {
-            legacy_target_filter(target)
+            legacy_library_instruction_actor(actor)
+                || legacy_target_filter(target)
                 || ocr(enters_under)
                 || enter_with_counters
                     .iter()
@@ -3825,12 +3827,14 @@ fn legacy_effect(x: &Effect) -> bool {
                 || otf(enters_modified_if)
         }
         Effect::ChangeZoneAll {
+            actor,
             target,
             enters_under,
             enter_with_counters,
             ..
         } => {
-            legacy_target_filter(target)
+            legacy_library_instruction_actor(actor)
+                || legacy_target_filter(target)
                 || ocr(enters_under)
                 || enter_with_counters
                     .iter()
@@ -3960,8 +3964,9 @@ fn legacy_effect(x: &Effect) -> bool {
     }
 }
 
-/// D5: the frozen tags a library instruction's performing player can carry
-/// (`Effect::ExileTop.actor`, CR 608.2c).
+/// D5: the frozen tags an instruction's performing player can carry
+/// (`Effect::ExileTop.actor`, `Effect::ChangeZone.actor`,
+/// `Effect::ChangeZoneAll.actor`; CR 608.2c).
 fn legacy_library_instruction_actor(x: &LibraryInstructionActor) -> bool {
     match x {
         // Fieldless: the controller and the library's owner (the instruction's
@@ -5456,6 +5461,7 @@ fn rw_effect(
             (p, sc)
         }
         Effect::ChangeZone {
+            actor,
             origin,
             destination,
             target,
@@ -5502,9 +5508,11 @@ fn rw_effect(
             for (_f, _ct, q) in conditional_enter_with_counters {
                 p.merge(rw_quantity_expr(q));
             }
+            p.merge(rw_library_instruction_actor(actor));
             (p, sc)
         }
         Effect::ChangeZoneAll {
+            actor,
             origin,
             destination,
             target,
@@ -5521,6 +5529,7 @@ fn rw_effect(
             for (_ct, q) in enter_with_counters {
                 p.merge(rw_quantity_expr(q));
             }
+            p.merge(rw_library_instruction_actor(actor));
             (p, sc)
         }
         Effect::Mill {
@@ -7875,9 +7884,11 @@ fn rw_player_scope(x: &PlayerScope) -> RwProfile {
     }
 }
 
-/// CR 608.2c: the reads of the player who performs a library instruction
-/// (`Effect::ExileTop.actor`); the resolver (`effects/exile_top.rs`) resolves a
-/// named subject's player filter at resolution.
+/// CR 608.2c: the reads of the player who performs an instruction
+/// (`Effect::ExileTop.actor`, `Effect::ChangeZone.actor`,
+/// `Effect::ChangeZoneAll.actor`); the resolvers (`effects/exile_top.rs`,
+/// `effects/change_zone.rs`) resolve a named subject's player filter at
+/// resolution.
 fn rw_library_instruction_actor(x: &LibraryInstructionActor) -> RwProfile {
     match x {
         // The spell or ability's controller — a `ResolvedAbility` field, not a
@@ -8729,8 +8740,83 @@ mod tests {
         assert!(ability_rw_profile(&with_exile(tagged)).legacy_batch_prompt());
     }
 
+    fn zone_moves_performed_by(actor: LibraryInstructionActor) -> [Effect; 2] {
+        let pick = Effect::ChangeZone {
+            actor: actor.clone(),
+            library_shuffle: Default::default(),
+            origin: Some(Zone::Hand),
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::default(),
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        };
+        let mass = Effect::ChangeZoneAll {
+            actor,
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            library_shuffle: Default::default(),
+            random_order: false,
+        };
+        [pick, mass]
+    }
+
+    /// CR 608.2c: a zone move's performer is profiled through its player
+    /// filter on both zone-move variants, as `ExileTop`'s is: the controller
+    /// adds nothing, a chosen-label subject adds a player read.
+    /// Revert-probe: bind `actor: _` in either `rw_effect` zone-move arm ⇒
+    /// that variant's chosen-label row equals its controller row.
+    #[test]
+    fn zone_move_actor_is_profiled_as_its_player_filter() {
+        let controller = zone_moves_performed_by(LibraryInstructionActor::Controller);
+        let named = zone_moves_performed_by(LibraryInstructionActor::Player {
+            player: TargetFilter::PlayerWhoChoseLabel {
+                label: "chosen".to_string(),
+            },
+        });
+        for (controller, named) in controller.into_iter().zip(named) {
+            assert_ne!(
+                ability_rw_profile(&ra(named)),
+                ability_rw_profile(&ra(controller)),
+                "a chosen-label performer is a player read the controller form is not"
+            );
+        }
+    }
+
+    /// D5 (CR 603.10a): a frozen event-context tag on a zone move's performer
+    /// ("that player exiles …" bound to the triggering player) sets
+    /// `legacy_batch_prompt`; the controller does not.
+    /// Revert-probe: bind `actor: _` (or restore `..`) in either
+    /// `legacy_effect` zone-move arm ⇒ that variant's tagged row reads `false`.
+    #[test]
+    fn zone_move_actor_frozen_tag_reaches_legacy_visitor() {
+        for effect in zone_moves_performed_by(LibraryInstructionActor::Controller) {
+            assert!(!legacy_effect(&effect));
+        }
+        for effect in zone_moves_performed_by(LibraryInstructionActor::Player {
+            player: TargetFilter::TriggeringPlayer,
+        }) {
+            assert!(legacy_effect(&effect));
+        }
+    }
+
     fn change_zone(origin: Option<Zone>, dest: Zone, target: TargetFilter) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin,
             destination: dest,
@@ -10441,6 +10527,7 @@ mod tests {
     }
     fn change_zone_under(target: TargetFilter, enters_under: Option<ControllerRef>) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
