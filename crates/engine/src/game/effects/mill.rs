@@ -185,7 +185,7 @@ fn apply_library_edge_move(
     let cards_to_mill: Vec<_> = match position {
         LibraryPosition::Top => library.iter().take(count).copied().collect(),
         LibraryPosition::Bottom => library.iter().rev().take(count).copied().collect(),
-        // CR 401.7: a placement-only position names no edge to take cards from.
+        // A placement-only position names no edge to take cards from.
         LibraryPosition::NthFromTop { .. }
         | LibraryPosition::BeneathTop { .. }
         | LibraryPosition::RandomWithinTop { .. } => Vec::new(),
@@ -285,9 +285,7 @@ pub(crate) fn complete_mill_delivery(
     // CR 608.2c + CR 400.7j: Bind the settled moved cards so subsequent riders
     // (such as Grenzo, Dungeon Warden; Cellar Door) can find them on both the
     // synchronous and resumed-after-replacement paths.
-    if !moved.is_empty() {
-        state.last_zone_changed_ids = moved;
-    }
+    state.last_zone_changed_ids = moved;
     BatchMoveResult::Done
 }
 

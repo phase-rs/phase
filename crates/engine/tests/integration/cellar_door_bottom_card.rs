@@ -126,7 +126,7 @@ fn activate_cellar_door(
             WaitingFor::TargetSelection { target_slots, .. } => {
                 // Find the player target slot and select the target player
                 let mut found = false;
-                for (_slot_idx, slot) in target_slots.iter().enumerate() {
+                for slot in &target_slots {
                     // Look for a player target slot
                     for legal_target in &slot.legal_targets {
                         if let TargetRef::Player(pid) = legal_target {

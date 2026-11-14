@@ -7913,12 +7913,31 @@ fn object_replacement_candidate_applies(
         } => Some(*object_id),
         _ => None,
     };
+    // CR 614.1a + CR 614.15: a card put into a graveyard from anywhere can carry its own
+    // self-scoped replacement (e.g. Blightsteel Colossus / Darksteel Colossus / Progenitus
+    // shuffle-back redirect).
+    let graveyard_self_moving_object_id = match event {
+        ProposedEvent::ZoneChange {
+            object_id,
+            to: Zone::Graveyard,
+            ..
+        } if repl_def.destination_zone == Some(Zone::Graveyard)
+            && matches!(
+                repl_def.valid_card.as_ref(),
+                Some(crate::types::ability::TargetFilter::SelfRef)
+            ) =>
+        {
+            Some(*object_id)
+        }
+        _ => None,
+    };
 
     let is_liminal_source = state.liminal_entries.contains_key(&obj.id);
     let declares_zones = !repl_def.active_zones.is_empty();
     let is_entering = entering_object_id == Some(obj.id);
     let is_being_discarded = discarding_object_id == Some(obj.id);
     let is_stack_self_move = stack_self_moving_object_id == Some(obj.id);
+    let is_graveyard_self_move = graveyard_self_moving_object_id == Some(obj.id);
     let replacement_player = replacement_source_player(obj);
 
     // "Is this definition functioning from the zone its source is in RIGHT NOW?"
@@ -7958,14 +7977,19 @@ fn object_replacement_candidate_applies(
             Zone::Battlefield,
         );
 
-    // CR 614.12 / CR 702.35a / CR 608.2n: an object outside the scanned zones
+    // CR 614.12 / CR 702.35a / CR 608.2n / CR 614.1a: an object outside the scanned zones
     // still applies its OWN self-replacement as it enters, as it is discarded,
-    // or as it leaves the stack. These carve-outs extend the CR 113.6 DEFAULT
+    // as it leaves the stack, or as it would be put into a graveyard from anywhere.
+    // These carve-outs extend the CR 113.6 DEFAULT
     // only — a definition that has stated its zones gets them solely through the
     // CR 113.6h entry match above, never on the strength of being mid-move.
     if !in_scanned_zone
         && !declared_zone_admits_own_entry
-        && (declares_zones || (!is_entering && !is_being_discarded && !is_stack_self_move))
+        && (declares_zones
+            || (!is_entering
+                && !is_being_discarded
+                && !is_stack_self_move
+                && !is_graveyard_self_move))
     {
         return false;
     }
@@ -8042,6 +8066,14 @@ fn object_replacement_candidate_applies(
     // CR 608.2n + CR 614.1a: stack self-move replacements are scoped to the
     // moving spell's own SelfRef replacement.
     if is_stack_self_move
+        && !in_scanned_zone
+        && repl_def.valid_card != Some(crate::types::ability::TargetFilter::SelfRef)
+    {
+        return false;
+    }
+    // CR 614.1a + CR 614.15: graveyard self-move replacements are scoped to the
+    // moving card's own SelfRef replacement.
+    if is_graveyard_self_move
         && !in_scanned_zone
         && repl_def.valid_card != Some(crate::types::ability::TargetFilter::SelfRef)
     {

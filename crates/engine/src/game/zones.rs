@@ -1722,15 +1722,15 @@ pub(crate) fn move_to_zone_with_entry_flags(
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
 
-    // CR 603.2g + CR 603.6a: A Battlefield → Battlefield no-op does not put a
+    // CR 400.1 + CR 400.7: A move to the same zone does not change zones; no new
+    // object is created and no ZoneChanged event is emitted.
+    // (CR 603.2g + CR 603.6a: A Battlefield → Battlefield no-op does not put a
     // permanent onto the battlefield, so no trigger event occurs and no ETB
-    // ability can trigger. No new object is created and no ZoneChanged event is
-    // emitted.
-    // Without this guard, move_to_zone(coiling_id, Battlefield) while Coiling
-    // Oracle is already on the battlefield removes then re-adds it, emits a
-    // spurious ZoneChanged{from:Battlefield, to:Battlefield} event, and fires
-    // its own ETB trigger again — causing an infinite loop.
-    if from == Zone::Battlefield && to == Zone::Battlefield {
+    // ability can trigger. Without this guard, move_to_zone(coiling_id, Battlefield)
+    // while Coiling Oracle is already on the battlefield removes then re-adds it,
+    // emits a spurious ZoneChanged{from:Battlefield, to:Battlefield} event, and
+    // fires its own ETB trigger again — causing an infinite loop.)
+    if from == to {
         return;
     }
 
