@@ -970,6 +970,7 @@ fn classify(action: &GameAction, prompt: &WaitingFor) -> Choice {
         | GameAction::TurnFaceUp { .. }
         | GameAction::SubmitSideboard { .. }
         | GameAction::ChoosePlayDraw { .. }
+        | GameAction::ChooseStartingPlayer { .. }
         | GameAction::ChooseOption { .. }
         | GameAction::SubmitVoteCandidate { .. }
         | GameAction::SubmitSpellbookDraft { .. }
@@ -1187,6 +1188,7 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         | WaitingFor::ManifestDreadChoice { .. }
         | WaitingFor::BetweenGamesSideboard { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. }
         | WaitingFor::NamedChoice { .. }
         | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }

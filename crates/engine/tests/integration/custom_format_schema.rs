@@ -10,6 +10,8 @@
 //! in that module's own `#[cfg(test)]` unit tests, which can reach those
 //! private items directly.
 
+use engine::game::replay::ReplayPlayer;
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::custom_format::{
     assert_no_lobby_save_sentinel_collision, bundled_presets, old_school_93_94, old_school_95,
     passes_legacy_axis_gate, passes_reprint_fidelity_gate, swedish_old_school,
@@ -22,7 +24,10 @@ use engine::types::format::{
     DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, RangeOfInfluenceConfig, SelectedFormat,
     SideboardPolicy,
 };
+use engine::types::game_state::{GameState, PersistedGameState};
+use engine::types::match_config::MatchConfig;
 use engine::types::player::PlayerId;
+use engine::types::replay::{ReplayHeader, ReplayLog};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn sample_structural() -> StructuralRules {
@@ -37,6 +42,7 @@ fn sample_structural() -> StructuralRules {
         team_based: false,
         sideboard_policy: SideboardPolicy::Unlimited,
         default_deck_copy_limit: DeckCopyLimit::UpTo(4),
+        poison_counter_threshold: 10,
     }
 }
 
@@ -1994,8 +2000,7 @@ fn format_config_deserialization_accepts_commander_damage_threshold_house_rules(
 }
 
 /// (b) `None` is rejected on a format that uses the SBA (paired with a
-/// self-consistent forgery that also flips `uses_commander: false`, which the
-/// `Derived` `uses_commander` row alone does NOT catch); `Some` is rejected
+/// forgery that also flips `uses_commander: false`); `Some` is rejected
 /// on a format that does not use the SBA at all.
 #[test]
 fn format_config_deserialization_rejects_commander_damage_threshold_shape_mismatches() {
@@ -2004,8 +2009,7 @@ fn format_config_deserialization_rejects_commander_damage_threshold_shape_mismat
     none_but_still_commander.uses_commander = false;
     let json = serde_json::to_value(&none_but_still_commander).unwrap();
     let error = serde_json::from_value::<FormatConfig>(json).expect_err(
-        "a self-consistent forgery (None threshold AND uses_commander: false) must still be \
-         rejected on Commander",
+        "a None threshold with uses_commander: false must still be rejected on Commander",
     );
     assert!(
         error.to_string().contains("commander_damage_threshold"),
@@ -2040,6 +2044,149 @@ fn format_config_deserialization_commander_damage_threshold_floor_is_exactly_one
     assert!(
         serde_json::from_value::<FormatConfig>(json).is_ok(),
         "commander_damage_threshold Some(1) must be accepted"
+    );
+}
+
+/// V4: the built-in arm admits house-ruled poison thresholds (CR 704.5c's
+/// magnitude is a host dial) and rejects zero, pinning the floor at 1.
+#[test]
+fn format_config_deserialization_poison_counter_threshold_house_rules_and_floor() {
+    for magnitude in [1u8, 15, 255] {
+        let mut config = FormatConfig::commander();
+        config.poison_counter_threshold = Some(magnitude);
+        let json = serde_json::to_value(&config).unwrap();
+        let restored = serde_json::from_value::<FormatConfig>(json).unwrap_or_else(|error| {
+            panic!("Commander poison_counter_threshold Some({magnitude}) must be accepted: {error}")
+        });
+        assert_eq!(restored.poison_counter_threshold, Some(magnitude));
+    }
+
+    let mut zero = FormatConfig::commander();
+    zero.poison_counter_threshold = Some(0);
+    let json = serde_json::to_value(&zero).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("poison_counter_threshold Some(0) must be rejected");
+    assert!(
+        error.to_string().contains("poison_counter_threshold"),
+        "got: {error}"
+    );
+}
+
+/// V4b: the Custom arm rejects a self-consistent zero threshold — its blanket
+/// equality against `for_custom_rules` alone would admit it.
+#[test]
+fn format_config_deserialization_custom_poison_counter_threshold_floor() {
+    let mut rules = sample_rules(77);
+    rules.structural.poison_counter_threshold = 0;
+    let json = serde_json::to_value(FormatConfig::for_custom_rules(&rules)).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("a Custom structural poison_counter_threshold of 0 must be rejected");
+    assert!(
+        error.to_string().contains("poison_counter_threshold"),
+        "got: {error}"
+    );
+
+    // Reach guard: the same rules at 1 deserialize.
+    rules.structural.poison_counter_threshold = 1;
+    let json = serde_json::to_value(FormatConfig::for_custom_rules(&rules)).unwrap();
+    let restored = serde_json::from_value::<FormatConfig>(json)
+        .expect("a Custom structural poison_counter_threshold of 1 must be accepted");
+    assert_eq!(restored.poison_counter_threshold, Some(1));
+}
+
+/// V5: the `Option` shape is locked in both directions — the Two-Headed Giant
+/// family ignores CR 704.5c (CR 704.6b) — and payloads that predate the field
+/// migrate to the registry value.
+#[test]
+fn format_config_deserialization_poison_counter_threshold_shape_and_legacy_migration() {
+    let mut thg_with_threshold = FormatConfig::two_headed_giant();
+    thg_with_threshold.poison_counter_threshold = Some(10);
+    let json = serde_json::to_value(&thg_with_threshold).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("Two-Headed Giant ignores CR 704.5c and may not declare a threshold");
+    assert!(
+        error.to_string().contains("poison_counter_threshold"),
+        "got: {error}"
+    );
+
+    let without_key = |config: &FormatConfig| {
+        let mut json = serde_json::to_value(config).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("poison_counter_threshold")
+            .expect("the field serializes");
+        serde_json::from_value::<FormatConfig>(json).expect("a pre-field payload deserializes")
+    };
+    assert_eq!(
+        without_key(&FormatConfig::commander()).poison_counter_threshold,
+        Some(10)
+    );
+    assert_eq!(
+        without_key(&FormatConfig::two_headed_giant()).poison_counter_threshold,
+        None
+    );
+
+    // An explicit `null` on a format with an individual rule migrates the same
+    // way, to the CR 704.5c value.
+    let mut json = serde_json::to_value(FormatConfig::commander()).unwrap();
+    json["poison_counter_threshold"] = serde_json::Value::Null;
+    assert_eq!(
+        serde_json::from_value::<FormatConfig>(json)
+            .unwrap()
+            .poison_counter_threshold,
+        Some(10)
+    );
+
+    // A committed save written before the field existed restores at ten.
+    let state = serde_json::from_str::<PersistedGameState>(include_str!(
+        "fixtures/p1_9354_task33_a_stable_raw_v3.json"
+    ))
+    .expect("a pre-field save deserializes")
+    .into_game_state()
+    .expect("a pre-field save restores");
+    assert_eq!(state.format_config.format, GameFormat::Standard);
+    assert_eq!(state.format_config.poison_counter_threshold, Some(10));
+}
+
+/// V6: saving a lobby config as a custom format keeps the host's threshold
+/// through the resolver and the Custom arm; a custom definition persisted
+/// before the field existed loads at ten, as does a Two-Headed Giant source
+/// (a custom format never shares poison, so CR 704.5c governs it).
+#[test]
+fn custom_format_round_trip_keeps_the_poison_counter_threshold() {
+    let mut commander_with_15 = FormatConfig::commander();
+    commander_with_15.poison_counter_threshold = Some(15);
+    let def = CustomFormatDef::from_lobby_config("House".to_string(), &commander_with_15)
+        .expect("Commander is saveable as a custom format");
+    assert_eq!(def.rules.structural.poison_counter_threshold, 15);
+    let json = serde_json::to_value(FormatConfig::for_custom_rules(&def.rules)).unwrap();
+    let restored = serde_json::from_value::<FormatConfig>(json)
+        .expect("the Custom arm's equality check passes");
+    assert_eq!(restored.poison_counter_threshold, Some(15));
+
+    // Legacy custom payload: neither the top-level field nor the structural
+    // mirror is present.
+    let mut json = serde_json::to_value(FormatConfig::for_custom_rules(&sample_rules(78))).unwrap();
+    json.as_object_mut()
+        .unwrap()
+        .remove("poison_counter_threshold")
+        .expect("the field serializes");
+    json["custom_rules"]["structural"]
+        .as_object_mut()
+        .unwrap()
+        .remove("poison_counter_threshold")
+        .expect("the structural mirror serializes");
+    let restored = serde_json::from_value::<FormatConfig>(json)
+        .expect("a pre-field custom payload deserializes");
+    assert_eq!(restored.poison_counter_threshold, Some(10));
+
+    let thg =
+        CustomFormatDef::from_lobby_config("Heads".to_string(), &FormatConfig::two_headed_giant())
+            .expect("Two-Headed Giant is saveable as a custom format");
+    assert_eq!(thg.rules.structural.poison_counter_threshold, 10);
+    assert_eq!(
+        FormatConfig::for_custom_rules(&thg.rules).poison_counter_threshold,
+        Some(10)
     );
 }
 
@@ -2565,9 +2712,8 @@ fn lobby_save_round_trips_every_structural_field_back_through_the_resolver() {
     assert_eq!(resolved.range_of_influence, source.range_of_influence);
     assert_eq!(resolved.sideboard_policy, SideboardPolicy::Limited(10));
     assert_eq!(resolved.default_deck_copy_limit, DeckCopyLimit::UpTo(1));
-    // CR 903.10a / CR 704.6c: a command zone with no commander-damage
-    // threshold is a real format class — uses_commander must stay false
-    // rather than being forced true by `Enabled` alone.
+    // Tiny Leaders is not a CR 903 format, so its eligibility rule keeps
+    // uses_commander false rather than `Enabled` forcing it true.
     assert!(resolved.command_zone);
     assert_eq!(resolved.commander_damage_threshold, None);
     assert!(!resolved.uses_commander);
@@ -2583,19 +2729,32 @@ fn lobby_save_round_trips_every_structural_field_back_through_the_resolver() {
 }
 
 #[test]
-fn resolver_derives_uses_commander_from_the_declared_damage_threshold() {
-    // The paired half of the Tiny-Leaders case above: the same Enabled
-    // variant WITH a threshold must resolve to uses_commander: true, so the
-    // assertion above cannot be satisfied by hardcoding false.
+fn resolver_derives_uses_commander_from_the_eligibility_rule() {
     let mut rules = sample_rules(5);
-    rules.structural.command_zone_mode = CommandZoneMode::Enabled {
-        commander_damage_threshold: Some(21),
-        eligibility_rule: CommanderEligibilityRule::Standard,
-    };
-    let resolved = FormatConfig::for_custom_rules(&rules);
-    assert!(resolved.command_zone);
-    assert_eq!(resolved.commander_damage_threshold, Some(21));
-    assert!(resolved.uses_commander);
+    for (threshold, eligibility_rule, expected) in [
+        (Some(21), CommanderEligibilityRule::Standard, true),
+        // CR 903.12h: a Commander variant without the CR 704.6c loss.
+        (None, CommanderEligibilityRule::Standard, true),
+        (None, CommanderEligibilityRule::BrawlColorIdentity, true),
+        (Some(21), CommanderEligibilityRule::TinyLeaders, false),
+        (
+            Some(21),
+            CommanderEligibilityRule::OathbreakerSignatureSpell,
+            false,
+        ),
+    ] {
+        rules.structural.command_zone_mode = CommandZoneMode::Enabled {
+            commander_damage_threshold: threshold,
+            eligibility_rule,
+        };
+        let resolved = FormatConfig::for_custom_rules(&rules);
+        assert!(resolved.command_zone);
+        assert_eq!(resolved.commander_damage_threshold, threshold);
+        assert_eq!(
+            resolved.uses_commander, expected,
+            "{eligibility_rule:?} with {threshold:?}"
+        );
+    }
 
     rules.structural.command_zone_mode = CommandZoneMode::Disabled;
     let resolved = FormatConfig::for_custom_rules(&rules);
@@ -2618,6 +2777,8 @@ fn a_lobby_save_resolves_to_a_config_the_deserialize_boundary_accepts() {
         // structural shape none of the other sources below exercise.
         FormatConfig::commander_draft(),
         FormatConfig::tiny_leaders(),
+        FormatConfig::brawl(),
+        FormatConfig::historic_brawl(),
         FormatConfig::two_headed_giant(),
         FormatConfig::limited(),
     ] {
@@ -2771,4 +2932,153 @@ fn presets_with_ordinary_ids_pass_the_sentinel_guard() {
     // now over real entries rather than an empty vector, which is what makes
     // this a live check on the shipped presets.
     assert!(!engine::types::custom_format::custom_format_registry().is_empty());
+}
+
+fn custom_with_command_zone(
+    commander_damage_threshold: Option<u8>,
+    eligibility_rule: CommanderEligibilityRule,
+) -> FormatConfig {
+    let mut rules = sample_rules(91);
+    rules.structural.command_zone_mode = CommandZoneMode::Enabled {
+        commander_damage_threshold,
+        eligibility_rule,
+    };
+    FormatConfig::for_custom_rules(&rules)
+}
+
+/// Every Custom shape whose derived `uses_commander` changed, with the value an
+/// earlier engine wrote for it (`command_zone && threshold.is_some()`).
+fn legacy_custom_rows() -> Vec<(FormatConfig, bool)> {
+    [
+        (None, CommanderEligibilityRule::Standard, false),
+        (
+            None,
+            CommanderEligibilityRule::FreeformAnyCastableCard,
+            false,
+        ),
+        (None, CommanderEligibilityRule::BrawlColorIdentity, false),
+        (Some(21), CommanderEligibilityRule::TinyLeaders, true),
+        (
+            Some(30),
+            CommanderEligibilityRule::OathbreakerSignatureSpell,
+            true,
+        ),
+    ]
+    .into_iter()
+    .map(|(threshold, rule, previous)| {
+        let config = custom_with_command_zone(threshold, rule);
+        assert_ne!(config.uses_commander, previous, "{rule:?}");
+        (config, previous)
+    })
+    .collect()
+}
+
+/// A forged Custom config whose stored `uses_commander` matches neither derivation.
+fn forged_custom_config() -> serde_json::Value {
+    let config = custom_with_command_zone(Some(21), CommanderEligibilityRule::Standard);
+    assert!(config.uses_commander);
+    let mut json = serde_json::to_value(config).unwrap();
+    json["uses_commander"] = false.into();
+    json
+}
+
+fn with_uses_commander(config: &FormatConfig, uses_commander: bool) -> serde_json::Value {
+    let mut json = serde_json::to_value(config).unwrap();
+    json["uses_commander"] = uses_commander.into();
+    json
+}
+
+fn restore_save(save: serde_json::Value) -> Result<GameState, String> {
+    serde_json::from_value::<PersistedGameState>(save)
+        .map_err(|err| err.to_string())?
+        .into_game_state()
+        .map_err(|err| err.to_string())
+}
+
+#[test]
+fn legacy_custom_save_restores_under_either_commander_predicate() {
+    for (config, previous) in legacy_custom_rows() {
+        let label = format!(
+            "{:?}",
+            config
+                .custom_rules
+                .as_ref()
+                .map(|rules| &rules.structural.command_zone_mode)
+        );
+        let mut scenario = GameScenario::new_with_format(config.clone(), 2, 42);
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        scenario.with_life(P1, 17);
+        let saved = scenario.build().state().clone();
+        let trusted = serde_json::to_value(PersistedGameState::capture(saved.clone())).unwrap();
+        let raw = trusted["state"].clone();
+
+        for (shape, save) in [("trusted", trusted), ("raw", raw)] {
+            let label = format!("{label} {shape}");
+            let pointer = if shape == "trusted" {
+                "/state/format_config"
+            } else {
+                "/format_config"
+            };
+            assert!(restore_save(save.clone()).is_ok(), "{label}");
+
+            let mut legacy = save.clone();
+            *legacy.pointer_mut(pointer).unwrap() = with_uses_commander(&config, previous);
+            let restored = restore_save(legacy).unwrap_or_else(|err| panic!("{label}: {err}"));
+            assert_eq!(restored.format_config, config, "{label}");
+            assert!(restored.battlefield.contains(&bears), "{label}");
+            assert_eq!(restored.players[1].life, 17, "{label}");
+            assert_eq!(restored.turn_number, saved.turn_number, "{label}");
+            assert_eq!(restored.phase, saved.phase, "{label}");
+
+            let mut forged = save;
+            *forged.pointer_mut(pointer).unwrap() = forged_custom_config();
+            assert!(restore_save(forged).is_err(), "{label}: forgery");
+        }
+
+        let mut raw = serde_json::to_value(&saved).unwrap();
+        assert!(serde_json::from_value::<FormatConfig>(raw["format_config"].clone()).is_ok());
+        assert!(serde_json::from_value::<GameState>(raw.clone()).is_ok());
+        raw["format_config"] = with_uses_commander(&config, previous);
+        for err in [
+            serde_json::from_value::<FormatConfig>(raw["format_config"].clone())
+                .map(drop)
+                .unwrap_err(),
+            serde_json::from_value::<GameState>(raw)
+                .map(drop)
+                .unwrap_err(),
+        ] {
+            assert!(err.to_string().contains("custom_rules"), "{label}: {err}");
+        }
+    }
+}
+
+fn custom_replay_json(format_config: serde_json::Value) -> String {
+    let log = ReplayLog::new(ReplayHeader {
+        format_config: FormatConfig::standard(),
+        match_config: MatchConfig::default(),
+        player_count: 2,
+        first_player: Some(0),
+        seed: 7,
+        deck_data: None,
+    });
+    let mut json = serde_json::to_value(log).unwrap();
+    json["header"]["format_config"] = format_config;
+    json.to_string()
+}
+
+#[test]
+fn legacy_custom_replay_keeps_its_recorded_commander_predicate() {
+    let config = custom_with_command_zone(None, CommanderEligibilityRule::Standard);
+    for (stored, expected) in [(true, true), (false, false)] {
+        let log: ReplayLog =
+            serde_json::from_str(&custom_replay_json(with_uses_commander(&config, stored)))
+                .unwrap_or_else(|err| panic!("stored {stored}: {err}"));
+        let mut player = ReplayPlayer::load(log, None).unwrap();
+        let recorded = &player.seek(0).unwrap().format_config;
+        assert_eq!(recorded.uses_commander, expected);
+        assert_eq!(recorded.commander_damage_threshold, None);
+    }
+    assert!(
+        serde_json::from_str::<ReplayLog>(&custom_replay_json(forged_custom_config())).is_err()
+    );
 }

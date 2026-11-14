@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    ContinuousModification, StaticCondition, TargetFilter, TriggerDefinitionRef,
-    TriggerProducerOrigin,
+    ContinuousModification, ProtectionDoesNotRemove, StaticCondition, TargetFilter,
+    TriggerDefinitionRef, TriggerProducerOrigin,
 };
 use super::identifiers::{ObjectId, ObjectIncarnationRef};
 use super::player::PlayerId;
@@ -254,6 +254,48 @@ pub struct ActiveContinuousEffect {
     pub characteristic_defining: bool,
     /// CR 201.5a: the granter stamped on the static this effect comes from.
     pub granter: Option<ObjectIncarnationRef>,
+    /// CR 702.16n: the rider of the definition that produced this effect.
+    pub protection_rider: Option<ProtectionRiderGrant>,
+}
+
+/// CR 702.16n + CR 702.16p: the "this effect doesn't remove …" rider of the
+/// exact static that produced one protection grant. `source` is the object that
+/// has that static: the object "this Aura" names (CR 702.16n), and the holder of
+/// the CR 702.16p start snapshot. For a synthesized granted-static child that is
+/// the recipient (CR 113.7: an ability's source is the object that generated
+/// it), never the granting host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtectionRiderGrant {
+    pub source: ObjectId,
+    pub occurrence: ProtectionGrantOccurrence,
+    /// Index of the protection modification within that static.
+    pub mod_index: usize,
+    pub does_not_remove: ProtectionDoesNotRemove,
+}
+
+/// CR 702.16p: which effect occurrence on `ProtectionRiderGrant::source`
+/// produced a protection grant. It names the effect, never the slot a granted
+/// static happens to occupy after a layer pass, so an unrelated grant starting
+/// or ending on the same object cannot make the effect look newly started.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ProtectionGrantOccurrence {
+    /// The source's own printed or copiable static, by its index in the static
+    /// list a full pass gathers. That list is the object's base statics (after
+    /// the copy layer): each full pass resets `static_definitions` to
+    /// `base_static_definitions`, and layer 6 only appends granted statics
+    /// after them. So the index names the same own static however many grants
+    /// start or end, which is why it can key a snapshot. Only a change to the
+    /// base statics themselves (a copy effect starting or ending) can move it.
+    /// The engine test `own_static_index_is_a_base_prefix_index` pins that
+    /// prefix property; a change to how grants are installed must keep it or
+    /// key this occurrence by something else.
+    Static { definition_index: usize },
+    /// CR 613.1f: a static granted to the source by this exact layer grant
+    /// occurrence (the producing `GrantStaticAbility`), whichever slot layer 6
+    /// installs it in. Byte-identical grants from different producers stay
+    /// distinct (CR 113.2c).
+    Granted { origin: TriggerProducerOrigin },
 }
 
 #[cfg(test)]

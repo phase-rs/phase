@@ -57,6 +57,7 @@ fn build_exile_target_opponent_creature_trigger() -> TriggerDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Database,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 enters_modified_if: None,
                 origin: Some(Zone::Battlefield),
