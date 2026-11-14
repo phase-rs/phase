@@ -2634,7 +2634,6 @@ mod tests {
             PersistedGameState, PersistedRestoreFinalization, TrustedGameStateEnvelope,
         };
         use crate::types::phase::Phase;
-        use crate::types::player::PlayerId;
 
         // Two seats: one survivor plus the Horde (`FormatConfig::horde`
         // admits min 2). The full normal setup hook: emblem, Boss pile,
