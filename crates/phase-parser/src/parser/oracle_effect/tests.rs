@@ -82852,8 +82852,9 @@ fn valki_x_shape_choose_linked_creature_with_mana_value_x() {
         &*copy.effect,
         Effect::BecomeCopy {
             target: TargetFilter::ParentTarget,
+            additional_modifications: ref mods,
             ..
-        }
+        } if mods.is_empty()
     ));
 }
 
