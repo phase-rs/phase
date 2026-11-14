@@ -8149,14 +8149,16 @@ pub enum ThisWayCause {
     /// wider blast radius than adding one new leaf — out of scope for a
     /// single-card bug fix (issue #8159).
     PutIntoGraveyard,
+    /// CR 613.1b + CR 608.2c: the member's control changed to the recipient this way — only an actual controller change counts; a target the recipient already controlled is not "gained" (Coveted Falcon: "Draw a card for each one they gained control of this way.").
+    ControlGained,
 }
 
 impl ThisWayCause {
     /// The origin zone the producing transition must have departed, when the
     /// action determines one. `None` for destination-named actions (Exiled,
     /// Returned, Bounced, PutIntoGraveyard, OwnerLibraryShuffleSubject),
-    /// which arrive from anywhere, and for `Tapped`, which names no transition
-    /// at all (callers gate on [`Self::is_zone_transition`] first). The
+    /// which arrive from anywhere, and for `Tapped` and `ControlGained`, which
+    /// name no transition at all (callers gate on [`Self::is_zone_transition`] first). The
     /// origin-stamp site requires the
     /// member's latest zone-change record to agree; a mismatch means the
     /// record is not the producing transition and no origin is stamped.
@@ -8169,8 +8171,9 @@ impl ThisWayCause {
             // CR 701.9a: discard moves hand cards to the graveyard.
             ThisWayCause::Discarded => Some(Zone::Hand),
             // CR 701.26a: tapping is not a zone transition (see
-            // `is_zone_transition`), so it determines no departed zone.
-            ThisWayCause::Tapped => None,
+            // `is_zone_transition`), so it determines no departed zone; a
+            // control change, like a tap, is not a zone transition either.
+            ThisWayCause::Tapped | ThisWayCause::ControlGained => None,
             ThisWayCause::Exiled
             | ThisWayCause::Returned
             | ThisWayCause::Bounced
@@ -8180,13 +8183,13 @@ impl ThisWayCause {
     }
 
     /// CR 400.7 + CR 701.26a: does the producing action move the member between
-    /// zones? Every cause but `Tapped` names a zone-moving action; tapping
-    /// turns a permanent sideways where it is, so a tapped member's latest
-    /// zone-change record is an earlier, unrelated transition and must never be
+    /// zones? Every cause but `Tapped` and `ControlGained` names a zone-moving
+    /// action; tapping turns a permanent sideways where it is, so a tapped
+    /// member's latest zone-change record is an earlier, unrelated transition and must never be
     /// stamped as its producing origin.
     pub fn is_zone_transition(self) -> bool {
         match self {
-            ThisWayCause::Tapped => false,
+            ThisWayCause::Tapped | ThisWayCause::ControlGained => false,
             ThisWayCause::OwnerLibraryShuffleSubject
             | ThisWayCause::Discarded
             | ThisWayCause::Returned
@@ -19816,8 +19819,9 @@ impl AbilityCost {
         match self {
             // The dry run has a real arm for exactly the shapes
             // `supports_effect_cost_payment` admits (PutCounter{SelfRef} /
-            // Mana{Fixed}); every other shape hits the payment-path fallback and
-            // is refused on every board. `supports_cumulative_upkeep_payment`
+            // Mana{Fixed} / Draw by a context-ref player); every other shape hits
+            // the payment-path fallback and is refused on every board.
+            // `supports_cumulative_upkeep_payment`
             // below delegates to the same predicate, but as a MATCH GUARD
             // (`EffectCost { .. } if self.supports_effect_cost_payment() => true`)
             // because that function has a `_ => false` fallthrough to absorb the
@@ -19953,22 +19957,56 @@ impl AbilityCost {
     /// a player choice. This is shared by cumulative-upkeep synthesis and the
     /// resolution-time payment gate so supported cards never install a trigger
     /// whose cost will later be rejected.
+    ///
+    /// CR 118.1 + CR 121.1: the deterministic effect-as-cost forms are source
+    /// counters, fixed mana, and a draw by the cost's context-ref player (the
+    /// controller, or the original controller for "has you draw a card").
+    ///
+    /// - An `UpTo` draw count is excluded: it is a CR 608.2d announcement the
+    ///   payment authority has no payment-time arm for.
+    /// - The draw target set is closed to the two context-ref players. An
+    ///   object reference never draws, and an announced player target is not a
+    ///   cost the payer can carry out without a choice.
+    /// - An effect-cost `Draw { count: N }` is ONE N-card draw instruction wherever it is paid (CR 121.2 +
+    ///   CR 121.2a: an instruction-level replacement such as Alms Collector sees N). Repetition, such as
+    ///   cumulative upkeep's "for each age counter" (CR 702.24a), is a `Composite` of that instruction, never a
+    ///   scaled count.
     pub fn supports_effect_cost_payment(&self) -> bool {
-        matches!(
-            self,
-            AbilityCost::EffectCost { effect }
-                if matches!(
-                    effect.as_ref(),
-                    Effect::PutCounter {
-                        target: TargetFilter::SelfRef,
-                        ..
-                    } | Effect::Mana {
-                        produced: ManaProduction::Fixed { .. },
-                        target: None,
-                        ..
-                    }
-                )
-        )
+        let AbilityCost::EffectCost { effect } = self else {
+            return false;
+        };
+        match effect.as_ref() {
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                ..
+            } => true,
+            Effect::Mana {
+                produced: ManaProduction::Fixed { .. },
+                target: None,
+                ..
+            } => true,
+            Effect::Draw {
+                count,
+                target: TargetFilter::Controller | TargetFilter::OriginalController,
+            } => !count.is_up_to(),
+            _ => false,
+        }
+    }
+
+    /// CR 118.1 + CR 702.24a: a cost every leg of which is a deterministic effect cost
+    /// (`supports_effect_cost_payment`) — the leaf itself, or the `Composite` that `expand_per_counter` builds from an
+    /// effect-cost base. The single resolution payment authority pays it with no prompt; a replacement choice on one
+    /// leg pauses the payment, and the unpaid later legs are paid when it resumes.
+    pub fn supports_deterministic_effect_cost_payment(&self) -> bool {
+        match self {
+            AbilityCost::Composite { costs } => {
+                !costs.is_empty()
+                    && costs
+                        .iter()
+                        .all(Self::supports_deterministic_effect_cost_payment)
+            }
+            leaf => leaf.supports_effect_cost_payment(),
+        }
     }
 
     /// CR 118: Classify this cost into one or more `CostCategory` buckets.
@@ -46540,6 +46578,77 @@ mod tests {
             filter: None,
         }
         .supports_cumulative_upkeep_payment());
+
+        // CR 118.1 + CR 121.1: a draw by the cost's context-ref player is a
+        // deterministic effect cost (Psychic Vortex: you; Decoy Gambit: the
+        // spell's original controller).
+        let draw_cost = |count: QuantityExpr, target: TargetFilter| AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw { count, target }),
+        };
+        assert!(
+            draw_cost(QuantityExpr::Fixed { value: 1 }, TargetFilter::Controller)
+                .supports_cumulative_upkeep_payment()
+        );
+        assert!(draw_cost(
+            QuantityExpr::Fixed { value: 1 },
+            TargetFilter::OriginalController
+        )
+        .supports_cumulative_upkeep_payment());
+        // CR 608.2d: an "up to" count is an announcement with no payment arm.
+        assert!(!draw_cost(
+            QuantityExpr::UpTo {
+                max: Box::new(QuantityExpr::Fixed { value: 1 }),
+            },
+            TargetFilter::Controller,
+        )
+        .supports_cumulative_upkeep_payment());
+        // An announced player target, or an object reference, is not a
+        // context-ref drawer.
+        assert!(
+            !draw_cost(QuantityExpr::Fixed { value: 1 }, TargetFilter::Player)
+                .supports_cumulative_upkeep_payment()
+        );
+        assert!(
+            !draw_cost(QuantityExpr::Fixed { value: 1 }, TargetFilter::SelfRef)
+                .supports_cumulative_upkeep_payment()
+        );
+    }
+
+    /// CR 118.1 + CR 702.24a: the routing predicate admits a deterministic effect-cost leaf and any non-empty
+    /// `Composite` (nested or not) whose every leg is one; a single unsupported leg refuses the whole.
+    #[test]
+    fn deterministic_effect_cost_composites_are_supported() {
+        let draw = |target: TargetFilter| AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target,
+            }),
+        };
+        let draw_one = draw(TargetFilter::Controller);
+        let composite = |costs: Vec<AbilityCost>| AbilityCost::Composite { costs };
+
+        assert!(draw_one.supports_deterministic_effect_cost_payment());
+        assert!(composite(vec![draw_one.clone(), draw_one.clone()])
+            .supports_deterministic_effect_cost_payment());
+        assert!(
+            composite(vec![draw_one.clone(), composite(vec![draw_one.clone()])])
+                .supports_deterministic_effect_cost_payment()
+        );
+        assert!(!composite(vec![]).supports_deterministic_effect_cost_payment());
+        // A mana leaf is not an effect cost.
+        let mana_one = AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        };
+        assert!(!composite(vec![draw_one.clone(), mana_one])
+            .supports_deterministic_effect_cost_payment());
+        // One unsupported leg (an announced player target) refuses the whole.
+        assert!(
+            !composite(vec![draw_one.clone(), draw(TargetFilter::Player)])
+                .supports_deterministic_effect_cost_payment()
+        );
+        // CR 702.24a: the printed base is the leaf; the expanded Composite is judged by the routing predicate, not
+        // the synthesis predicate.
+        assert!(!composite(vec![draw_one.clone(), draw_one]).supports_cumulative_upkeep_payment());
     }
 
     #[test]

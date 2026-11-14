@@ -171,6 +171,51 @@ pub(crate) fn drain_pending_connive_reentry(
     }
 }
 
+/// CR 121.2 + CR 614.11a: drive every resumable draw instruction to completion
+/// or to its next pause. Returns the new `WaitingFor` when a resumed draw
+/// surfaces a choice, else `None`. Callers check for a Priority wait before
+/// calling; this helper has no entry check of its own.
+///
+/// `resume_draw_sequence` leaves a frame parked and sets `state.waiting_for`
+/// when its next draw surfaces its own choice, so any number of sequential
+/// re-pauses compose — each resume re-addresses the same frame by ID.
+///
+/// A completed draw frame also retires the emptied post-replacement frame it
+/// exposes, so the stack top seen by every caller is the frame that was beneath
+/// the draw's substitute.
+pub(super) fn resume_active_draw_sequences(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    while let Some(frame_id) = state.active_draw_sequence().map(|frame| frame.frame_id) {
+        let _ = crate::game::effects::draw::resume_draw_sequence(state, frame_id, events);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return Some(state.waiting_for.clone());
+        }
+        if state
+            .active_draw_sequence()
+            .is_some_and(|frame| frame.frame_id == frame_id)
+        {
+            // No frame completed or paused; avoid retrying a stalled frame.
+            break;
+        }
+        // CR 614.11a + CR 121.6b: a draw replaced by a substitute (Dredge's
+        // mill-and-return) dispatched that substitute from a post-replacement
+        // frame installed beneath this draw frame. Its dispatch finished while
+        // the draw frame was on top, so the top-only retirement could not
+        // remove it; the completed draw now exposes it, and it is retired here
+        // rather than at the next priority sweep, so a parked entry MayCost
+        // finds its permanent's `SpellResolution` on top again. The retirement
+        // never exposes another draw frame: a draw has one `MultiDraw` frame (the
+        // stack validator rejects a second one as a split draw authority), and a
+        // nested draw instruction (Teferi's Ageless Insight's "draw two cards
+        // instead") is a sequence inside that frame, which the loop's top
+        // re-read already resumes without any retirement.
+        state.remove_empty_active_post_replacement_frame();
+    }
+    None
+}
+
 /// CR 616.1 + CR 510.2 + CR 702.15b: the CR 616.1 round trip, plus the one turn-based
 /// action that can be parked waiting on it.
 ///
@@ -238,10 +283,13 @@ pub(crate) struct InterruptedReplacement {
     actor: Option<PlayerId>,
     cost_payer: Option<PlayerId>,
     replacement_choice: Option<ReplacementChoiceKind>,
+    /// The players this transaction removes.
+    leaving: std::collections::HashSet<PlayerId>,
 }
 
 pub(crate) fn capture_replacement_before_departure(
     state: &GameState,
+    leaving: &std::collections::HashSet<PlayerId>,
 ) -> Option<InterruptedReplacement> {
     let pending = state.pending_replacement.as_ref()?;
     let pin = |id| {
@@ -275,6 +323,7 @@ pub(crate) fn capture_replacement_before_departure(
         } else {
             None
         },
+        leaving: leaving.clone(),
     })
 }
 
@@ -364,13 +413,56 @@ fn settle_replacement_after_departure_inner(
         .all(|subject| subject.is_current(state))
         && super::replacement::replacement_event_survives(state, &pending.proposed);
     if !survives {
+        // CR 800.4a + CR 121.6b + CR 614.17c: this is the one place that decides
+        // what becomes of a parked replacement whose event left with a player.
+        // Under a parked draw unless payment that outlives the departure, the
+        // choice the leaver was asked is their own draw inside the payer's draw
+        // sequence (a substitute: Notion Thief's "you draw a card"). The record
+        // is kept for the concession's action boundary, which settles it as a
+        // draw that can no longer happen
+        // (`engine::reconcile_parked_unless_payment_after_departure`): the
+        // sequences above it resume, so the payer's own remaining draws
+        // (Thought Reflection's second card) are not abandoned with the
+        // leaver's.
+        if super::engine_payment_choices::departed_draw_settles_with_parked_payment(
+            state,
+            &interrupted.leaving,
+        ) {
+            return Ok(DepartureSettlement::NotSettled);
+        }
         state.pending_replacement = None;
         state.pending_single_discard = None;
         state.replacement_may_cost_paused = false;
-        super::replacement::abandon_post_replacement_continuation(state);
+        // CR 121.6b: under a surviving parked draw payment the abandoned choice
+        // sat inside a substitute for one of the payer's draws, so only the
+        // leaver's part of the draw authority goes with it.
+        if super::engine_payment_choices::draw_payment_is_parked(state) {
+            super::replacement::abandon_departed_substitute_continuation(
+                state,
+                &interrupted.leaving,
+            );
+        } else {
+            super::replacement::abandon_post_replacement_continuation(state);
+        }
         let waiting = finish_abandoned_replacement(state, &interrupted.boundary, events)?;
         state.waiting_for = waiting;
         return Ok(replacement_departure_settlement(state));
+    }
+    // CR 800.4a + CR 118.12 + CR 616.1: a replacement that a surviving payment
+    // owns (a staged payment transaction, the replay of one that mirrors the
+    // departure onto its recovery checkpoint, or a parked draw unless payment) is
+    // not settled by the departure. The concession's action boundary settles
+    // it with the payment: a staged payment re-materializes on the base the
+    // departure changed, a parked prompt that no longer describes its event is
+    // reconciled (`engine::reconcile_parked_unless_payment_after_departure`),
+    // and a reconciliation that fails returns to the departure with the
+    // payment retired, so no draw the payment staged is committed on the
+    // departed board.
+    if state.payment_transaction.is_some()
+        || state.payment_transaction_replay
+        || super::engine_payment_choices::draw_payment_is_parked(state)
+    {
+        return Ok(DepartureSettlement::NotSettled);
     }
     if interrupted
         .cost_payer
@@ -486,9 +578,20 @@ fn handle_replacement_choice_body(
     // CR 616.1f: a second ordering choice, or any nested prompt, leaves the record
     // parked for the next answer; only a settled round trip may close the batch.
     // Nothing is left behind on this path — the anchor is a local that dies here.
-    if !matches!(waiting_for, WaitingFor::Priority { .. }) {
+    let WaitingFor::Priority { player } = waiting_for else {
         return Ok(waiting_for);
-    }
+    };
+    // CR 800.4j: the handler hands a settled choice back to the active player's
+    // priority. A choice answered after that player left the game (another
+    // player's draw, parked on their own choice while the active player
+    // conceded) hands it to the next player in turn order still in the game.
+    let waiting_for = WaitingFor::Priority {
+        player: if super::players::is_alive(state, player) {
+            player
+        } else {
+            super::engine::living_priority_seat(state)
+        },
+    };
     state.waiting_for = waiting_for.clone();
     Ok(
         super::combat_damage::resume_pending_combat_lifelink(state, action_event_start, events)
@@ -701,21 +804,9 @@ fn finish_replacement_execute_epilogue(
     // if the next unit surfaces its own choice, so an arbitrary number of
     // sequential re-pauses compose — each resume re-addresses the same
     // frame by ID.
-    while matches!(waiting_for, WaitingFor::Priority { .. }) {
-        let Some(frame_id) = state.active_draw_sequence().map(|frame| frame.frame_id) else {
-            break;
-        };
-        let _ = crate::game::effects::draw::resume_draw_sequence(state, frame_id, events);
-        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-            waiting_for = state.waiting_for.clone();
-            break;
-        }
-        if state
-            .active_draw_sequence()
-            .is_some_and(|frame| frame.frame_id == frame_id)
-        {
-            // No frame completed or paused; avoid retrying a stalled frame.
-            break;
+    if matches!(waiting_for, WaitingFor::Priority { .. }) {
+        if let Some(wf) = resume_active_draw_sequences(state, events) {
+            waiting_for = wf;
         }
     }
 
@@ -906,12 +997,20 @@ fn finish_replacement_execute_epilogue(
     if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.active_ability_continuation().is_some()
                     || state.active_change_zone_frame().is_some())
-                // CR 118.12 + CR 605.3b + CR 616.1: A mana-source cost pause
-                // owns the unpaid cost suffix.  Do not drain the ordinary
-                // effect rider before that typed root has settled it.
+                // CR 118.12 + CR 605.3b + CR 616.1 + CR 614.12a + CR 608.2c: a
+                // typed cost root that owns the unpaid cost suffix (a mana-source
+                // pause), or that owns an entry whose cost is mid-payment (both
+                // entry-MayCost roots), settles before the ordinary effect rider.
+                // An entry replacement's cost is paid, and the permanent enters,
+                // before the effect's later instructions continue; the nested
+                // resume drains that rider after the entry.
                 && !matches!(
                     state.pending_cost_move_resume,
-                    Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+                    Some(
+                        PendingCostMoveResume::ManaAbilityPayment { .. }
+                            | PendingCostMoveResume::ReplacementMayCost { .. }
+                            | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+                    )
                 )
     {
         // CR 614.12b + CR 614.1c + CR 614.13: drain BOTH the chained
@@ -1078,6 +1177,13 @@ fn handle_replacement_choice_inner(
     events: &mut Vec<GameEvent>,
     operation: impl FnOnce(&mut GameState, &mut Vec<GameEvent>) -> super::replacement::ReplacementResult,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 614.17c: a parked replacement (optional or a mandatory ordering
+    // candidate) for a draw that can no longer happen cannot be applied. Settle
+    // the event with no replacement: the draw is clamped and its payment
+    // resumes without milling or returning the replacement's card.
+    let impossible_parked_draw = state.pending_replacement.as_ref().is_some_and(|pending| {
+        super::replacement::proposed_draw_cannot_happen(state, &pending.proposed)
+    });
     let replacement_action_event_start = events.len();
     let parked_search_found_replacement = state
         .pending_replacement
@@ -1235,7 +1341,18 @@ fn handle_replacement_choice_inner(
         .pending_replacement
         .as_ref()
         .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::BeginPhase { .. }));
-    let result = operation(state, events);
+    let result = if impossible_parked_draw {
+        let proposed = state
+            .pending_replacement
+            .as_ref()
+            .expect("the impossible parked draw is still live")
+            .proposed
+            .clone();
+        state.pending_replacement = None;
+        super::replacement::ReplacementResult::Execute(proposed)
+    } else {
+        operation(state, events)
+    };
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
     // multiple eligible lands) re-parked the pending replacement with
@@ -2546,6 +2663,55 @@ fn handle_replacement_choice_inner(
                 };
                 super::engine::resume_pending_continuation_if_priority(state, events)?;
                 return Ok(state.waiting_for.clone());
+            }
+            // CR 121.2 + CR 614.11a + CR 121.6b: a skipped draw inside a draw
+            // instruction that a parked unless-cost or a parked entry MayCost
+            // owns finishes that instruction before the owning payment settles,
+            // pays its later legs or issues its next instruction, mirroring the
+            // delivered arm's ordering. Gated to those parks: the CR 608.3e
+            // teardown below reads only the stack top, so completing an ordinary
+            // effect's draw frame here would expose, then clear, a continuation
+            // that today survives under the frame. Non-cost draws keep their
+            // existing priority-boundary resume.
+            if matches!(
+                state.pending_cost_move_resume,
+                Some(
+                    PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+                        | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+                )
+            ) {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                if let Some(wf) = resume_active_draw_sequences(state, events) {
+                    return Ok(wf);
+                }
+            }
+            // CR 118.11 + CR 614.11a: a skipped draw that interrupted a bare
+            // cast or activation cost payment resumes through the same authority
+            // the delivered arm uses; a prevented event still leaves the cost
+            // paid.
+            if (state.pending_cast.is_some() || state.pending_discard_for_cost.is_some())
+                && state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
+            {
+                // CR 614.11a: finish the whole draw instruction (its remaining
+                // units and their substitutes) before the interrupted payer
+                // resumes; only then does the cost count as settled.
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                if let Some(wf) = resume_active_draw_sequences(state, events) {
+                    return Ok(wf);
+                }
+                let resume_cost_event_start = state
+                    .pending_discard_for_cost
+                    .is_some()
+                    .then_some(replacement_action_event_start);
+                state.waiting_for = super::casting_costs::resume_interrupted_cost_payment(
+                    state,
+                    events,
+                    resume_cost_event_start,
+                )?;
             }
             if let Some(waiting_for) = resume_cost_move_root_after_prevention(
                 state,
@@ -5666,6 +5832,7 @@ mod tests {
                 index: 0,
             }],
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: true,
             choice_player: Some(PlayerId(0)),
@@ -6345,6 +6512,7 @@ mod tests {
                 index: 0,
             }],
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,

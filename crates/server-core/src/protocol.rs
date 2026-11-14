@@ -404,7 +404,12 @@ pub enum ClientMessage {
         match_config: MatchConfig,
         #[serde(default)]
         ai_seats: Vec<AiSeatRequest>,
-        #[serde(default)]
+        /// Decoded as its writer recorded it for the lobby relay; Full mode re-checks it
+        /// strictly (`guard_client_message_before_dispatch`).
+        #[serde(
+            default,
+            deserialize_with = "FormatConfig::deserialize_recorded_option"
+        )]
         format_config: Option<FormatConfig>,
         /// Optional distinct label for this room, separate from the host's
         /// player name. Routed into `LobbyGame.room_name`.
