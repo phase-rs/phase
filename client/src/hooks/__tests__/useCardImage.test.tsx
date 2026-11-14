@@ -576,6 +576,11 @@ describe("useCardImage", () => {
   });
 
   it("shows TTMC #20 through real graveyard image props after the restore ref recovery (#10861 R4-F1)", async () => {
+    // Its corrected-ref input below is the first-viewer-snapshot shape the
+    // engine production-path test
+    // `production_restore_repairs_revealed_smackdown_ref_for_first_viewer_snapshot`
+    // pins (save -> deferred-rehydration restore -> `filter_state_for_viewer`),
+    // so the restore-to-snapshot-to-pixels seam is covered end to end.
     // A pre-PR save pins Smackdown's ORIGINAL typo'd printing id
     // (`...b2fb-444-...`, `444` for `4a44`); the restore repair replaces
     // the whole ref through the stored preset identity, so the projected

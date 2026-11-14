@@ -2592,6 +2592,259 @@ mod tests {
         );
     }
 
+    /// Production-restore pin for the Smackdown ref repair (PR #10861 R7-F1):
+    /// the predicate-level test above starts from a hand-built graveyard Event
+    /// and immediate rehydration, so a regression between the production
+    /// save-to-snapshot path and the repair would leave it green. This test
+    /// drives the whole production seam instead: normal Turtle Team-Up setup,
+    /// a normal wave reveal, the `TrustedGameStateEnvelope` save envelope with
+    /// the historical typo'd ref and omitted display routes spliced in at the
+    /// serialized boundary, then the shared restore chokepoint both production
+    /// owners funnel through (`PersistedGameState` ->
+    /// `prepare_for_restore(DeferUntilRehydrated)` ->
+    /// `finalize_after_rehydration` with deferred card-DB rehydration +
+    /// `install_card_db`), and the first viewer snapshot both owners expose
+    /// via `filter_state_for_viewer`.
+    ///
+    /// Real card: Event: Leatherhead's Smackdown, TTMC #20 (verbatim Oracle
+    /// text quoted in the test above; preset
+    /// f13c9091-91b6-51b4-91d5-214180ff03ee, oracle
+    /// 4e7833c7-e9ff-4550-b2fd-36afe6087e0f; CR 111.3 art-vs-characteristics).
+    /// The old-save shape is exact, not hand-waved: the stripped JSON carries
+    /// the ORIGINAL typo'd scryfall_id (444 for 4a44) with no `face_name`, and
+    /// no `display_source` key anywhere. The expectation is computed through
+    /// `horde_token_image_ref` (the repair's own authority), never re-typed.
+    ///
+    /// Discrimination: reverting the ref-recovery half of the repair leaves
+    /// the projected graveyard Event carrying the typo'd ref, so the
+    /// corrected-ref equality on the first viewer snapshot flips; the
+    /// predicate-level test above stays green in that scenario because its
+    /// fixture bypasses this path. Every concealment assertion pairs with a
+    /// positive reach-guard (revealed pre-serialize; corrected ref exposed
+    /// post-restore).
+    #[test]
+    fn production_restore_repairs_revealed_smackdown_ref_for_first_viewer_snapshot() {
+        use crate::game::deck_loading::{
+            horde_token_image_ref, load_deck_into_state, load_horde_library, DeckPayload,
+        };
+        use crate::game::game_object::DisplaySource;
+        use crate::game::token_presets::known_token_preset_by_id;
+        use crate::types::format::{ChallengeDeck, FormatConfig};
+        use crate::types::game_state::{
+            PersistedGameState, PersistedRestoreFinalization, TrustedGameStateEnvelope,
+        };
+        use crate::types::phase::Phase;
+        use crate::types::player::PlayerId;
+
+        // Two seats: one survivor plus the Horde (`FormatConfig::horde`
+        // admits min 2). The full normal setup hook: emblem, Boss pile,
+        // stage-1 deploy (`load_deck_into_state`), then the 27-card event
+        // library (`load_horde_library`, token-layout so no card DB is
+        // needed — the same calls `boss.rs::turtle_teamup_game` makes).
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::TurtleTeamUpHorde.default_ruleset()),
+            2,
+            42,
+        );
+        let horde = state.format_config.archenemy_player().expect("Horde seat");
+        load_deck_into_state(&mut state, &DeckPayload::default());
+        load_horde_library(
+            &mut state,
+            &CardDatabase::default(),
+            horde,
+            ChallengeDeck::TurtleTeamUpHorde,
+        );
+        let hero = state
+            .players
+            .iter()
+            .map(|p| p.id)
+            .find(|&id| id != horde)
+            .expect("a survivor seat");
+
+        // The repair's own authority for the expectation: preset identity in,
+        // corrected ref out.
+        let expected_smackdown_ref = horde_token_image_ref(
+            known_token_preset_by_id("f13c9091-91b6-51b4-91d5-214180ff03ee")
+                .expect("Smackdown preset resolves"),
+        );
+
+        // Rig the Smackdown on top of the event deck (the established
+        // `boss.rs` reveal-driver pattern) and reveal through the normal wave
+        // path. The board is bare, so the team choice has an empty offer
+        // (`single_pick_offer` Skips) and the Event settles synchronously —
+        // no hero prompt parks.
+        let library: Vec<ObjectId> = state
+            .players
+            .iter()
+            .find(|p| p.id == horde)
+            .expect("horde seat")
+            .library
+            .iter()
+            .copied()
+            .collect();
+        let smackdown = library
+            .into_iter()
+            .find(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|o| o.name == "Event: Leatherhead's Smackdown")
+            })
+            .expect("the event deck must contain Leatherhead's Smackdown");
+        {
+            let seat = state
+                .players
+                .iter_mut()
+                .find(|p| p.id == horde)
+                .expect("horde seat");
+            seat.library.retain(|id| *id != smackdown);
+            seat.library.push_front(smackdown);
+        }
+        state.phase = Phase::PreCombatMain;
+        state.active_player = horde;
+        state.horde_wave_remaining = 1;
+        let waiting = crate::game::horde::maybe_reveal_next(&mut state, &mut Vec::new());
+        assert!(
+            waiting.is_none(),
+            "the bare-board Smackdown reveal settles synchronously, got {waiting:?}"
+        );
+        // Positive reach-guard: the revealed Event is in the Boss graveyard
+        // BEFORE serializing, so the later assertions cannot pass vacuously.
+        assert!(
+            state
+                .players
+                .iter()
+                .find(|p| p.id == horde)
+                .expect("horde seat")
+                .graveyard
+                .contains(&smackdown),
+            "the revealed Smackdown must sit in the Boss graveyard pre-serialize"
+        );
+        // The live object already carries the corrected ref through the
+        // creation stamp — the save boundary below is what regresses it.
+        assert_eq!(
+            state
+                .objects
+                .get(&smackdown)
+                .expect("revealed Event")
+                .token_image_ref,
+            Some(expected_smackdown_ref.clone()),
+            "precondition: the live reveal stamps the corrected ref"
+        );
+        // Concealment reach-guards: there is something hidden to conceal.
+        let hidden_library = *state
+            .players
+            .iter()
+            .find(|p| p.id == horde)
+            .expect("horde seat")
+            .library
+            .front()
+            .expect("the event deck still holds cards after one reveal");
+        let pile_boss = *state
+            .boss_deck
+            .front()
+            .expect("the Boss pile survives setup");
+
+        // Production envelope (`engine-wasm export_game_state_json` shape),
+        // then the pre-PR regression spliced in AT THE SERIALIZED BOUNDARY:
+        // every display route omitted, and every Smackdown ref rewritten to
+        // the historical typo'd printing (444 for 4a44, no face_name) — the
+        // whole-save shape, not just the revealed copy.
+        let json = serde_json::to_string(&TrustedGameStateEnvelope::capture(state))
+            .expect("serialize the production envelope");
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse the envelope");
+        let objects = value
+            .get_mut("state")
+            .and_then(|s| s.get_mut("objects"))
+            .and_then(|o| o.as_object_mut())
+            .expect("the envelope carries the objects map");
+        for obj in objects.values_mut() {
+            obj.as_object_mut()
+                .expect("saved object")
+                .remove("display_source");
+        }
+        let mut rewrote = 0;
+        for obj in objects.values_mut() {
+            let is_smackdown = obj
+                .get("token_image_ref")
+                .and_then(|r| r.get("preset_id"))
+                .and_then(serde_json::Value::as_str)
+                == Some("f13c9091-91b6-51b4-91d5-214180ff03ee");
+            if is_smackdown {
+                obj["token_image_ref"] = serde_json::json!({
+                    "scryfall_id": "fac36345-b2fb-444-a499-f68bbe87e736",
+                    "scryfall_oracle_id": "4e7833c7-e9ff-4550-b2fd-36afe6087e0f",
+                    "preset_id": "f13c9091-91b6-51b4-91d5-214180ff03ee",
+                });
+                rewrote += 1;
+            }
+        }
+        assert!(
+            rewrote >= 1,
+            "the boundary splice must regress at least the revealed Smackdown"
+        );
+        let stripped = serde_json::to_string(&value).expect("re-serialize the old save");
+        assert!(
+            !stripped.contains("display_source"),
+            "precondition: the old save omits every display route"
+        );
+
+        // The production restore chokepoint both owners share (engine-wasm
+        // `prepare_restored_game_state` + `rehydrate_restored_state_from_card_db`,
+        // server-core `GameSession::from_persisted` minus server-only fields):
+        // serde to `PersistedGameState`, deferred finalization, then the
+        // engine-owned finalizer after the deferred card-DB rehydration and
+        // `install_card_db` reinstall.
+        let db = std::sync::Arc::new(CardDatabase::default());
+        let restored: GameState = serde_json::from_str::<PersistedGameState>(&stripped)
+            .expect("a compatible old save loads")
+            .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+            .expect("the restore prepares")
+            .finalize_after_rehydration(|state| {
+                state
+                    .format_config
+                    .validate_for_player_count(state.players.len() as u8)?;
+                state.all_card_names = db.card_names().into();
+                rehydrate_game_from_card_db_with_finalization(
+                    state,
+                    &db,
+                    CardDbRehydrationFinalization::Defer,
+                );
+                install_card_db(state, std::sync::Arc::clone(&db));
+                Ok(())
+            })
+            .expect("the restore finalizes");
+
+        // The FIRST viewer snapshot from the survivor seat — the exact
+        // `filter_state_for_viewer` call both production owners expose.
+        let shown = crate::game::visibility::filter_state_for_viewer(&restored, hero);
+
+        // THE discriminating assertion: the projected graveyard Event exposes
+        // the corrected ref. A restore that drops the ref repair between this
+        // path and the snapshot fails here (the typo'd ref survives).
+        let shown_event = shown.objects.get(&smackdown).expect("projected Event");
+        assert_eq!(shown_event.display_source, DisplaySource::Token);
+        assert_eq!(
+            shown_event.token_image_ref,
+            Some(expected_smackdown_ref.clone()),
+            "the first viewer snapshot must show the corrected ref for the graveyard Event"
+        );
+
+        // Hidden piles stay concealed in the same snapshot: the remaining
+        // event library and the face-down Boss pile.
+        for (id, what) in [(hidden_library, "library card"), (pile_boss, "pile Boss")] {
+            let hidden = shown.objects.get(&id).expect(what);
+            assert_eq!(hidden.name, "Hidden Card", "{what} name concealed");
+            assert_eq!(
+                hidden.display_source,
+                DisplaySource::Card,
+                "{what} routing concealed"
+            );
+            assert!(hidden.token_image_ref.is_none(), "{what} art ref concealed");
+            assert!(!hidden.is_horde_deck_token, "{what} Horde flag concealed");
+        }
+    }
+
     /// CR 611.2c + CR 613.1 (issue #8485, round-5 HIGH-1): a transform ROUND TRIP
     /// must not seed `base_replacement_definitions` with a resolution-created
     /// shield, and must not multiply it once per layer pass.
