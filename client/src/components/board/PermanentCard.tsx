@@ -7,7 +7,7 @@ import type { GameObject, Keyword, ObjectId } from "../../adapter/types.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
-import { retainTouchTracking, UN_TOUCH_ATTRIBUTE } from "../../game/unTouch.ts";
+import { ATTACHMENT_CONTROL_ATTRIBUTE, retainTouchTracking, UN_TOUCH_ATTRIBUTE } from "../../game/unTouch.ts";
 import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
@@ -901,6 +901,7 @@ export const PermanentCard = memo(function PermanentCard({
       {hiddenAttachmentCount > 0 && (
         <button
           type="button"
+          {...{ [ATTACHMENT_CONTROL_ATTRIBUTE]: "true" }}
           className="absolute -right-3 top-6 z-30 flex h-6 min-w-6 items-center justify-center rounded-full bg-amber-300 px-1.5 text-[11px] font-black leading-none text-amber-950 ring-2 ring-amber-950/80 shadow transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
           title={t("permanent.hiddenAttachmentsAria", { count: hiddenAttachmentCount })}
           aria-label={t("permanent.hiddenAttachmentsAria", { count: hiddenAttachmentCount })}
@@ -1222,6 +1223,7 @@ export const PermanentCard = memo(function PermanentCard({
       {attachmentFanCardCount > 0 && attachmentsExpanded && (
         <button
           type="button"
+          {...{ [ATTACHMENT_CONTROL_ATTRIBUTE]: "true" }}
           className="absolute -left-2.5 -top-2.5 z-40 flex items-center justify-center rounded-full bg-black/90 leading-none text-amber-200 ring-2 ring-amber-200/80 shadow-[0_2px_8px_rgba(0,0,0,0.65)] transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
           style={{
             width: attachmentBadgeSize,

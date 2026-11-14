@@ -8,6 +8,12 @@ import { dispatchAction } from "./dispatch.ts";
  */
 export const UN_TOUCH_ATTRIBUTE = "data-un-touch-object-id";
 
+/**
+ * Carried by an attachment control (e.g. collapsed-count or fan button) rendered
+ * within a permanent's DOM tree but outside its physical card face.
+ */
+export const ATTACHMENT_CONTROL_ATTRIBUTE = "data-attachment-control";
+
 /** Carried by every rendered permanent, touchable or not. */
 const PERMANENT_CARD_ATTRIBUTE = "data-permanent-card";
 
@@ -34,9 +40,12 @@ function pointerOverTouchable(pointerId: number, objectId: number | null): void 
  * The touchable object at `element`: the innermost permanent containing it, if
  * that permanent is marked touchable. An attachment is rendered inside its
  * host's element but is its own card, so a pointer on an attachment's exposed
- * edge touches the attachment, never the host beneath it.
+ * edge touches the attachment, never the host beneath it. An attachment
+ * control (such as the collapsed `+N` button or the attachment fan button) is
+ * outside the host's touch region.
  */
 function touchableAt(element: Element | null | undefined): number | null {
+  if (element?.closest(`[${ATTACHMENT_CONTROL_ATTRIBUTE}]`)) return null;
   const card = element?.closest(`[${PERMANENT_CARD_ATTRIBUTE}]`);
   const marked = card?.getAttribute(UN_TOUCH_ATTRIBUTE);
   if (marked == null) return null;

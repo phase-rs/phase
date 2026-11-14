@@ -935,6 +935,64 @@ describe("PermanentCard", () => {
       expect(touches()).toEqual([[touchAction], [touchAction]]);
     });
 
+    it("never touches the host through its collapsed attachment control, on either pointer route", () => {
+      // Vile Bile (1) is touchable; it has two attachments ([2, 4]) so the
+      // collapsed `+1` attachment button is rendered.
+      const gameState = makeState();
+      gameState.objects[1].attachments = [2, 4];
+      gameState.objects[4] = makeObject({
+        id: 4,
+        card_id: 400,
+        attached_to: { type: "Object", data: 1 },
+        attachments: [],
+        name: "Second Attachment",
+        power: null,
+        toughness: null,
+        base_power: null,
+        base_toughness: null,
+        card_types: { supertypes: [], core_types: ["Enchantment"], subtypes: ["Aura"] },
+        color: ["Green"],
+        base_color: ["Green"],
+      });
+      gameState.battlefield = [1, 2, 3, 4];
+      gameState.un_actions = { enabled_players: [0], touchable: [1] };
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+      const { container } = renderPermanent();
+      const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+      const button = screen.getByRole("button", { name: "Show 1 hidden attached card" });
+      expect(host.contains(button)).toBe(true);
+
+      // Route 1: an uncaptured pointer crossing onto the collapsed button, then the host face.
+      fireEvent.pointerOver(button, { pointerId: 1, pointerType: "mouse" });
+      expect(touches()).toEqual([]);
+      fireEvent.pointerOver(host, { pointerId: 1, pointerType: "mouse" });
+      expect(touches()).toEqual([[touchAction]]);
+
+      // Moving back to the control sends zero new touches; re-entering the host face touches again.
+      fireEvent.pointerOver(button, { pointerId: 1, pointerType: "mouse" });
+      expect(touches()).toHaveLength(1);
+      fireEvent.pointerOver(host, { pointerId: 1, pointerType: "mouse" });
+      expect(touches()).toEqual([[touchAction], [touchAction]]);
+
+      // Route 2: a captured pointer hit-tested onto the collapsed button, then the host face.
+      let under: Element = button;
+      stubElementFromPoint(() => under);
+      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
+      expect(touches()).toHaveLength(2);
+      under = host;
+      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
+      expect(touches()).toEqual([[touchAction], [touchAction], [touchAction]]);
+
+      // Moving back to the control on the captured route sends zero new touches; re-entering touches.
+      under = button;
+      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
+      expect(touches()).toHaveLength(3);
+      under = host;
+      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
+      expect(touches()).toEqual([[touchAction], [touchAction], [touchAction], [touchAction]]);
+    });
+
     it("touches a touchable attachment itself, not its host", () => {
       setUnActions([0], [1, 2]);
       const { container } = renderPermanent();

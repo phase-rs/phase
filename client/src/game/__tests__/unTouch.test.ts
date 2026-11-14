@@ -14,7 +14,7 @@ vi.mock("../dispatch.ts", () => ({
   },
 }));
 
-const { retainTouchTracking, UN_TOUCH_ATTRIBUTE } = await import("../unTouch.ts");
+const { ATTACHMENT_CONTROL_ATTRIBUTE, retainTouchTracking, UN_TOUCH_ATTRIBUTE } = await import("../unTouch.ts");
 
 /** A refused dispatch that records whether anyone handles its rejection. */
 class Refusal extends Promise<void> {
@@ -89,5 +89,26 @@ describe("Un-card touch pointer boundary", () => {
     under = card;
     capturedMove(5);
     expect(dispatched).toEqual([touchAction, touchAction, touchAction, touchAction]);
+  });
+
+  it("treats an attachment control inside a touchable card as outside the touch region", () => {
+    const control = document.createElement("button");
+    control.setAttribute(ATTACHMENT_CONTROL_ATTRIBUTE, "true");
+    card.append(control);
+
+    // Uncaptured pointer route: over control, then over card face
+    over(control, 1);
+    expect(dispatched).toEqual([]);
+    over(card, 1);
+    expect(dispatched).toEqual([touchAction]);
+
+    // Captured pointer route: move onto control, then card face
+    let under: Element = control;
+    Object.defineProperty(document, "elementFromPoint", { value: () => under, configurable: true });
+    capturedMove(5);
+    expect(dispatched).toEqual([touchAction]);
+    under = card;
+    capturedMove(5);
+    expect(dispatched).toEqual([touchAction, touchAction]);
   });
 });
