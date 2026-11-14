@@ -17236,6 +17236,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: ai,
             cards,
             count,
@@ -18246,6 +18247,7 @@ mod tests {
         push("EffectZoneChoice", &|state| {
             let source = vanilla_in_hand(state, PlayerId(0));
             WaitingFor::EffectZoneChoice {
+                performed_by: None,
                 player: PlayerId(0),
                 cards: hand_pool(state, PlayerId(0), 3),
                 count: 1,
@@ -18708,6 +18710,7 @@ mod tests {
         ];
         let change_zone = Box::new(ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Graveyard,
