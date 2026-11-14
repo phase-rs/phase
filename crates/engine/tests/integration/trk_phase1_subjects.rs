@@ -1777,7 +1777,8 @@ fn unification_second_chapter_accepts_each_zone_and_declines() {
 }
 
 // CR 608.2d: accepting a singleton union choice uses that object's actual
-// origin; accepting an empty population finishes without inventing a target.
+// origin. With an empty population the "you may" is not offered (the player
+// can't choose an impossible option), so the chapter finishes without a prompt.
 #[test]
 fn unification_second_chapter_singletons_and_empty_population() {
     for origin in [Some(Zone::Hand), Some(Zone::Graveyard), None] {
@@ -1798,23 +1799,29 @@ fn unification_second_chapter_singletons_and_empty_population() {
             WaitingFor::TriggerTargetSelection { .. }
         ));
         runner.advance_until_stack_empty();
+        let Some(id) = selected else {
+            finished(&runner);
+            assert!(!runner
+                .state()
+                .battlefield
+                .iter()
+                .any(|id| runner.state().objects[id].name == DEFIANT_NAME));
+            assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+            continue;
+        };
         assert!(
             matches!(runner.state().waiting_for, WaitingFor::OptionalEffectChoice { player: P0, source_id, .. } if source_id == source)
         );
         let result = runner
             .act(GameAction::DecideOptionalEffect { accept: true })
             .unwrap();
-        if let Some(id) = selected {
-            assert!(result.events.iter().any(|event| matches!(event,
-                GameEvent::ZoneChanged { object_id, from, to: Zone::Battlefield, .. }
-                if *object_id == id && *from == origin)));
-            assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
-        }
+        assert!(result.events.iter().any(|event| matches!(event,
+            GameEvent::ZoneChanged { object_id, from, to: Zone::Battlefield, .. }
+            if *object_id == id && *from == origin)));
+        assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
         runner.advance_until_stack_empty();
         finished(&runner);
-        if let Some(id) = selected {
-            assert!(runner.state().objects[&id].is_phased_out());
-        }
+        assert!(runner.state().objects[&id].is_phased_out());
         assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
     }
 }
