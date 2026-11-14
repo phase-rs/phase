@@ -1081,6 +1081,16 @@ fn release_entering_block_history_is_repaired_for_raw_and_trusted_saves() {
             "a clean current save preserves declarations"
         );
         let mut legacy = runner.state().clone();
+        assert_eq!(
+            legacy.steps_started_this_turn.count(Phase::DeclareBlockers),
+            1
+        );
+        legacy.creatures_blocked_this_turn.insert(token);
+        let unary_only = restore_block_history(&legacy, trusted);
+        assert!(
+            unary_only.creatures_blocked_this_turn.contains(&token),
+            "a receipt alone does not erase unary history when no pair was removed"
+        );
         legacy.creature_blocked_attackers_this_turn.insert(entrant);
         legacy
             .combat
@@ -1175,14 +1185,21 @@ fn release_entering_block_history_is_repaired_for_raw_and_trusted_saves() {
 }
 
 /// Keep Mirror Match's token past end of combat using the printed Stifle,
-/// then actually declare it as a blocker in Full Throttle's second combat.
-/// Different-attacker contributions survive. Current trusted saves preserve the
-/// identical pair too; only legacy saves retain the lossy compatibility contract.
-fn check_restored_entering_receipt(same_attacker: bool, check_returned_incarnation: bool) {
+/// then optionally declare it as a blocker in Full Throttle's second combat.
+/// Legacy saves preserve possibly genuine declarations once two declare-blockers
+/// steps have begun; current marked saves preserve precisely the recorded history.
+fn check_restored_entering_receipt(
+    same_attacker: bool,
+    check_returned_incarnation: bool,
+    declare_later: bool,
+) {
     for trusted in [false, true] {
         let mut s = GameScenario::new();
         s.at_phase(Phase::PreCombatMain);
-        let a = s.add_creature(P0, "First attacker", 0, 6).id();
+        let a = s
+            .add_creature_from_oracle(P0, "Ornithopter", 0, 2, "Flying")
+            .as_artifact_creature()
+            .id();
         let a2 = s.add_creature(P0, "Second attacker", 0, 6).id();
         let mirror = free_spell(&mut s, P1, "Mirror Match", MIRROR_MATCH);
         let throttle = s
@@ -1235,16 +1252,29 @@ fn check_restored_entering_receipt(same_attacker: bool, check_returned_incarnati
         let next = if same_attacker { a } else { a2 };
         attack(&mut runner, &[next]);
         to_block_prompt(&mut runner);
-        block(&mut runner, &[(token, next)]);
+        if declare_later {
+            block(&mut runner, &[(token, next)]);
+        } else {
+            block(&mut runner, &[]);
+        }
         let declared_pair = history_pair(runner.state(), token, next);
-        assert!(
+        assert_eq!(
             runner
                 .state()
                 .creature_blocked_attackers_this_turn
                 .contains(&declared_pair),
-            "reach: a genuine second-combat declaration"
+            declare_later,
+            "reach: whether the token genuinely declared a second-combat block"
         );
-        if same_attacker {
+        assert_eq!(
+            runner
+                .state()
+                .steps_started_this_turn
+                .count(Phase::DeclareBlockers),
+            2,
+            "reach: both declare-blockers steps began through the turn pipeline"
+        );
+        if same_attacker && declare_later {
             let current = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
                 .expect("capture current");
             assert_eq!(current["block_history_format"], 1);
@@ -1269,12 +1299,16 @@ fn check_restored_entering_receipt(same_attacker: bool, check_returned_incarnati
             {
                 pass_priority_to(&mut current_runner, P0);
             }
-            current_runner
+            let outcome = current_runner
                 .cast(barrage)
                 .target_objects(&[token])
                 .resolve();
+            assert!(outcome.events().iter().any(|event| matches!(
+                event,
+                GameEvent::DamageDealt { source_id, target: TargetRef::Object(id), amount: 4, .. }
+                    if *source_id == barrage && *id == token
+            )), "Barrage resolved on the current-save token");
             drain(&mut current_runner);
-            assert_eq!(current_runner.state().objects[&token].damage_marked, 4);
             assert!(current_runner.state().stack.is_empty());
             assert!(matches!(
                 current_runner.state().waiting_for,
@@ -1282,22 +1316,23 @@ fn check_restored_entering_receipt(same_attacker: bool, check_returned_incarnati
             ));
         }
         let mut saved = runner.state().clone();
-        if !same_attacker {
-            // Release contribution from combat one; combat two must be
-            // repaired independently rather than copied from the turn set.
+        if !same_attacker || !declare_later {
+            // Reconstruct the release writer's entering-only contribution.
+            // With two steps the migration cannot prove it was entering-only.
             saved
                 .creature_blocked_attackers_this_turn
                 .insert(entered_pair);
+            saved.creatures_blocked_this_turn.insert(token);
         }
         let restored = restore_block_history(&saved, trusted);
-        assert!(!restored
+        assert!(restored
             .creature_blocked_attackers_this_turn
             .contains(&entered_pair));
         assert_eq!(
             restored
                 .creature_blocked_attackers_this_turn
                 .contains(&declared_pair),
-            !same_attacker
+            declare_later || same_attacker
         );
         assert_eq!(
             restored
@@ -1306,17 +1341,37 @@ fn check_restored_entering_receipt(same_attacker: bool, check_returned_incarnati
                 .unwrap()
                 .creature_blocked_attackers_this_combat
                 .contains(&declared_pair),
-            !same_attacker
+            declare_later
         );
-        assert_eq!(
-            restored.creatures_blocked_this_turn.contains(&token),
-            !same_attacker
-        );
+        assert!(restored.creatures_blocked_this_turn.contains(&token));
         assert_eq!(
             restored.combat.as_ref().unwrap().blocker_to_attacker,
             saved.combat.as_ref().unwrap().blocker_to_attacker,
             "live assignments survive even a collision"
         );
+        let mut legacy_runner = GameRunner::from_state(restored);
+        if !matches!(legacy_runner.state().waiting_for, WaitingFor::Priority { player } if player == P0)
+        {
+            pass_priority_to(&mut legacy_runner, P0);
+        }
+        let outcome = legacy_runner
+            .cast(barrage)
+            .target_objects(&[token])
+            .resolve();
+        assert!(
+            outcome.events().iter().any(|event| matches!(
+                event,
+                GameEvent::DamageDealt { source_id, target: TargetRef::Object(id), amount: 4, .. }
+                    if *source_id == barrage && *id == token
+            )),
+            "Barrage can target the preserved legacy history"
+        );
+        drain(&mut legacy_runner);
+        assert!(legacy_runner.state().stack.is_empty());
+        assert!(matches!(
+            legacy_runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
 
         if check_returned_incarnation {
             // Persistence compatibility fixture: the old receipt must not
@@ -1358,17 +1413,25 @@ fn check_restored_entering_receipt(same_attacker: bool, check_returned_incarnati
 
 #[test]
 fn restored_entering_receipts_preserve_independent_declarations() {
-    check_restored_entering_receipt(false, false);
+    check_restored_entering_receipt(false, false, true);
 }
 
 #[test]
 fn restored_entering_receipts_preserve_later_blocker_incarnations() {
-    check_restored_entering_receipt(true, true);
+    check_restored_entering_receipt(true, true, true);
 }
 
 #[test]
-fn current_saves_preserve_same_pair_declarations_while_legacy_saves_lose_them() {
-    check_restored_entering_receipt(true, false);
+fn current_and_legacy_saves_preserve_same_pair_declarations() {
+    check_restored_entering_receipt(true, false, true);
+}
+
+/// CR 509.4: entering blocking alone is not a block declaration. Legacy data
+/// cannot distinguish that erroneous contribution from a genuine later block
+/// once two declare-blockers steps have begun, so it conservatively survives.
+#[test]
+fn legacy_two_step_history_preserves_an_ambiguous_entering_only_contribution() {
+    check_restored_entering_receipt(true, false, false);
 }
 
 /// CR 702.12b: an indestructible target survives, and Ride Down's grant still

@@ -1076,11 +1076,17 @@ fn record_block_history(
 /// CR 509.4: entering blocking never counts as having blocked. Repair saves
 /// in the legacy release/pre-marker format, before declaration history was versioned.
 /// Receipts identify the blocker incarnation but only the attacker's storage id.
-/// Consequently a later genuine declaration of the same pair is also removed
-/// from legacy saves: that representation cannot distinguish those contributions.
+/// With at most one declare-blockers step begun this turn, no later declaration
+/// (CR 509.1g) could have followed the entering block, so its history is removed.
+/// With two or more such steps, the receipt cannot exclude a genuine later block:
+/// preserve both windows and the unary entry, even if it only entered blocking.
 /// Current trusted saves bypass this repair and preserve genuine declarations.
 pub(crate) fn migrate_restored_entering_block_history(state: &mut GameState) {
     use crate::types::resolved_commands::ResolvedRulesCommand;
+
+    if state.steps_started_this_turn.count(Phase::DeclareBlockers) > 1 {
+        return;
+    }
 
     let entering: HashSet<_> = state
         .resolved_rules_journal
@@ -1102,16 +1108,22 @@ pub(crate) fn migrate_restored_entering_block_history(state: &mut GameState) {
             }
         })
         .collect();
-    let keep =
-        |pair: &BlockHistoryPair| !entering.contains(&(pair.blocker, pair.attacker.object_id));
-    state.creature_blocked_attackers_this_turn.retain(keep);
+    let mut removed_blockers = HashSet::new();
+    let mut keep = |pair: &BlockHistoryPair| {
+        let remove = entering.contains(&(pair.blocker, pair.attacker.object_id));
+        if remove {
+            removed_blockers.insert(pair.blocker);
+        }
+        !remove
+    };
+    state.creature_blocked_attackers_this_turn.retain(&mut keep);
     if let Some(combat) = state.combat.as_mut() {
         combat.creature_blocked_attackers_this_combat.retain(keep);
     }
     state.creatures_blocked_this_turn.retain(|id| {
         let entering_live = state.objects.get(id).is_some_and(|object| {
             let live = ObjectIncarnationRef::from_object(object);
-            entering.iter().any(|(blocker, _)| *blocker == live)
+            removed_blockers.contains(&live)
         });
         !entering_live
             || state
