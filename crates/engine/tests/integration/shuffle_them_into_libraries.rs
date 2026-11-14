@@ -4,7 +4,8 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter, TargetRef,
+    AbilityDefinition, AbilityKind, Effect, LibraryInstructionActor, ReplacementDefinition,
+    TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -140,6 +141,7 @@ fn turn_the_earth_replaced_deliveries_still_shuffle_the_owner() {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
