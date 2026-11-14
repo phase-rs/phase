@@ -16476,6 +16476,56 @@ mod tests {
     /// target"), Swans of Bryn Argoll (the source's controller draws), Weeping Angel (the creature
     /// it would damage is shuffled into its owner's library) and Wolverine, Fierce Fighter (its
     /// other damage is healed). Purity's shield is noncombat-only, so combat never meets it.
+    /// CR 614.9 + CR 616.1: a capped redirect ("The next N damage ... is dealt to ... instead")
+    /// is fenced as `capped_redirect_recipient_choice_incomplete`, as an activated ability
+    /// (Nomads en-Kor), a spell (Harm's Way) and a granted ability (Martyrdom). An uncapped
+    /// redirect (Pariah: "All damage that would be dealt to you is dealt to enchanted creature
+    /// instead.") is not.
+    #[test]
+    fn a_capped_redirect_is_a_coverage_gap() {
+        const TAG: &str = "structural:capped_redirect_recipient_choice_incomplete";
+        let cards: [(&str, &str, &[&str], &[&str], bool); 4] = [
+            (
+                "Nomads en-Kor",
+                "{0}: The next 1 damage that would be dealt to this creature this turn is dealt to target creature you control instead.",
+                &[],
+                &["Creature"],
+                true,
+            ),
+            (
+                "Harm's Way",
+                "The next 2 damage that a source of your choice would deal to you and/or permanents you control this turn is dealt to any target instead.",
+                &[],
+                &["Instant"],
+                true,
+            ),
+            (
+                "Martyrdom",
+                "Until end of turn, target creature you control gains \"{0}: The next 1 damage that would be dealt to target creature, planeswalker, or player this turn is dealt to this creature instead.\" Only you may activate this ability.",
+                &[],
+                &["Instant"],
+                true,
+            ),
+            (
+                "Pariah",
+                "Enchant creature\nAll damage that would be dealt to you is dealt to enchanted creature instead.",
+                &["Enchant"],
+                &["Enchantment"],
+                false,
+            ),
+        ];
+        for (name, oracle, keywords, types, fenced) in cards {
+            let face = counter_rider_face(name, oracle, keywords, types);
+            let mut features = HashMap::new();
+            extract_card_features(&face, &mut features);
+            assert_eq!(
+                features.get(TAG),
+                fenced.then_some(&FeatureSupport::Unhandled),
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn a_damage_replacement_choice_combat_cant_ask_is_a_coverage_gap() {
         const TAG: &str = "structural:damage_replacement_choice_unasked_in_combat";
