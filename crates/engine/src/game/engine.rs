@@ -6934,8 +6934,9 @@ fn hand_back_shortcut(state: &mut GameState, result: &mut ActionResult, proposer
 }
 
 /// What a refusal of a loop-shortcut answer may read (CR 732.2a/b). `Measured` reads the offer's
-/// recorded performances and the proposal alone, so it never performs a repetition; `Performed`
-/// also performs the answer itself, which only the committed answer pays for.
+/// recorded performances, the open window's receipts and the proposal, so it never performs a
+/// repetition; `Performed` also performs the answer when neither holds it, which
+/// `record_answer_receipt` pays for once per position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShortcutEvidence {
     Measured,

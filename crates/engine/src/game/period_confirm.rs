@@ -126,14 +126,14 @@ pub struct ConfirmedPeriod {
     /// the replay that certified the period did.
     #[serde(default, skip_serializing_if = "Outcomes::is_refused")]
     outcomes: Outcomes,
-    /// CR 732.2a + CR 732.2b: what committed answers to the offer have already performed, read
+    /// CR 732.2a + CR 732.2b: what submitted answers to the offer have already performed, read
     /// beside the offer's own records so a resubmitted answer performs nothing. Never serialized:
     /// `state_revision`, which keys them, is not either.
     #[serde(skip)]
     pub(crate) receipts: AnswerReceipts,
 }
 
-/// CR 732.2a + CR 732.2b: the performances committed answers to one offer made.
+/// CR 732.2a + CR 732.2b: the performances submitted answers to one offer made.
 #[derive(Debug, Clone, Default, Eq)]
 pub(crate) struct AnswerReceipts {
     /// The `state_revision` they were taken at, carried only to a revision of the same position.
@@ -310,7 +310,7 @@ impl ConfirmedPeriod {
     }
 
     /// CR 732.2a: how far `decisions` reaches performed from the offer frame, when the offer or a
-    /// committed answer at `revision` already performed it.
+    /// submitted answer at `revision` already performed it.
     pub(crate) fn declared_reach(
         &self,
         decisions: &[PinnedDecision],
