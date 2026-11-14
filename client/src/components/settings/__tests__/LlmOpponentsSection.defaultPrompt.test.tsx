@@ -17,9 +17,9 @@ import { profileForSeat, useLlmStore } from "../../../stores/llmStore";
 import type { LlmProviderCatalogEntry } from "../../../services/llm/types";
 
 const CATALOG_ROWS = [
-  { provider: "Anthropic", value: "Anthropic", displayName: "Anthropic", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [], supportsMessageThreads: true },
-  { provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null, defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [], supportsMessageThreads: false },
-  { provider: "OpenAiCompatible", value: "OpenAiCompatible", displayName: "Compatible", defaultBaseUrl: null, defaultModel: "llama3", requiresApiKey: false, apiKeyUrl: "", models: [], supportsMessageThreads: false },
+  { provider: "Anthropic", value: "Anthropic", displayName: "Anthropic", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained", "messageThread"] },
+  { provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null, defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"] },
+  { provider: "OpenAiCompatible", value: "OpenAiCompatible", displayName: "Compatible", defaultBaseUrl: null, defaultModel: "llama3", requiresApiKey: false, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"] },
 ] satisfies LlmProviderCatalogEntry[];
 
 const PROMPT = /use this provider as your default opponent\?/i;
@@ -59,7 +59,7 @@ describe("default-opponent prompt on a provider card", () => {
     fireEvent.click(await screen.findByRole("button", { name: /use as default/i }));
 
     expect(useLlmStore.getState().defaultOpponentProfileId).toBe(id);
-    expect(profileForSeat(useLlmStore.getState(), 0, [{ provider: "Anthropic", value: "Anthropic", displayName: "Anthropic", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [], supportsMessageThreads: true }])?.id).toBe(id);
+    expect(profileForSeat(useLlmStore.getState(), 0, [{ provider: "Anthropic", value: "Anthropic", displayName: "Anthropic", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained", "messageThread"] }])?.id).toBe(id);
   });
 
   it("collapses to a badge once the provider is the default", async () => {

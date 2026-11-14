@@ -25,7 +25,9 @@ use crate::prompt::{
 };
 use crate::render::action::{describe_action, describe_waiting_for, primary_object_name};
 use crate::render::game::{render_board, GameRenderOptions};
-use crate::render::history::{push_history, push_since_last_decision, HistoryBudget, TurnCycle};
+use crate::render::history::{
+    push_history, push_since_last_decision, unseen_timeline_entries, HistoryBudget, TurnCycle,
+};
 use crate::wire::{completion_from_response, LlmReply};
 
 /// Everything a transport needs to run one LLM decision round trip.
@@ -51,31 +53,48 @@ struct ThreadUpdateParts {
     live_position: String,
     /// The numbered option list, exactly as the full prompt carries it.
     options: String,
-    /// The seat's difficulty-driven history window, which also caps how much
-    /// of what happened since its last answer a continue shows.
+    /// The seat's difficulty-driven history window, which also bounds how much
+    /// of what happened since its last answer a continue may carry.
     history: HistoryBudget,
 }
 
 impl GameDecisionRequest {
+    /// Whether this decision's seat may keep its game in a message thread.
+    ///
+    /// Only a difficulty whose history window already reaches past the turn
+    /// cycle in progress may. The two lowest difficulties deliberately reason
+    /// from a near-term window ([`crate::prompt::history_budget`]), and a
+    /// thread, which holds every earlier turn, would undo that.
+    pub fn allows_message_thread(&self) -> bool {
+        self.update.history.summarized_cycles > 0
+    }
+
     /// The one user message that continues a seat's message thread with this
-    /// decision.
+    /// decision, or `None` when a continue cannot carry everything since the
+    /// seat's last answer.
     ///
     /// `since` is the newest log entry the thread has already been shown (see
-    /// [`crate::game_thread`]). The message carries what was logged after it,
-    /// the live position and the options, fenced exactly as the full prompt
-    /// fences them, with the engine-issued option domain stated outside the
-    /// fence. The reply contract is not repeated: it is in the system prompt
-    /// the thread was created with.
-    pub fn thread_update(&self, history: &[GameLogEntry], since: Option<u32>) -> String {
-        let mut data = String::new();
-        push_since_last_decision(&mut data, history, since, self.update.history);
-        if !data.is_empty() {
-            data.push('\n');
+    /// [`crate::game_thread`]). The message carries every timeline entry
+    /// logged after it, the live position and the options, fenced exactly as
+    /// the full prompt fences them, with the engine-issued option domain
+    /// stated outside the fence. The reply contract is not repeated: it is in
+    /// the system prompt the thread was created with.
+    ///
+    /// When more was logged than the seat's history window shows, a continue
+    /// would have to drop the oldest of it, where the full request summarizes
+    /// it per turn; `None` tells the caller to start a new thread instead.
+    pub fn thread_update(&self, history: &[GameLogEntry], since: Option<u32>) -> Option<String> {
+        let unseen = unseen_timeline_entries(history, since);
+        if unseen.len() > self.update.history.current_cycle_entries {
+            return None;
         }
+        let mut data = String::new();
+        push_since_last_decision(&mut data, &unseen);
+        data.push('\n');
         data.push_str(&self.update.live_position);
         data.push_str("\n\n");
         data.push_str(&self.update.options);
-        decision_message(&data, self.option_count)
+        Some(decision_message(&data, self.option_count))
     }
 }
 
@@ -1898,7 +1917,9 @@ mod tests {
             &history,
         )
         .unwrap();
-        let update = request.thread_update(&history, Some(0));
+        let update = request
+            .thread_update(&history, Some(0))
+            .expect("two new entries fit the window");
 
         assert!(update.starts_with(UNTRUSTED_DATA_BEGIN), "{update}");
         assert_eq!(update.matches(UNTRUSTED_DATA_END).count(), 1, "{update}");
@@ -1922,21 +1943,48 @@ mod tests {
         assert!(outside.contains("Choose exactly one option by its number."));
     }
 
-    /// The lowest difficulty reasons without history, in a thread as well.
+    /// More was logged since the last answer than the seat's window shows: a
+    /// continue would drop the oldest of it, so none is built.
     #[test]
-    fn a_thread_update_for_a_seat_without_history_carries_none() {
-        let history = vec![logged(5, "Player 0 casts Shock", LogCategory::Stack)];
+    fn a_thread_update_never_drops_what_happened_since_the_last_answer() {
+        let window = history_budget(AiDifficulty::Medium).current_cycle_entries;
+        let history: Vec<GameLogEntry> = (0..=window as u32)
+            .map(|seq| logged(seq, &format!("event {seq}"), LogCategory::Stack))
+            .collect();
         let request = build_game_decision_prompt(
             &GameState::default(),
             &two_option_contract(),
-            AiDifficulty::VeryEasy,
+            AiDifficulty::Medium,
             None,
             &history,
         )
         .unwrap();
-        let update = request.thread_update(&history, None);
-        assert!(!update.contains("SINCE YOUR LAST DECISION"), "{update}");
-        assert!(!update.contains("casts Shock"), "{update}");
-        assert!(update.contains("[0] Pass Priority"), "{update}");
+        // The full window fits...
+        assert!(request.thread_update(&history, Some(0)).is_some());
+        // ...one entry more does not.
+        assert_eq!(request.thread_update(&history, None), None);
+    }
+
+    /// The two near-term difficulties never keep a thread; every other one may.
+    #[test]
+    fn only_a_difficulty_that_reaches_earlier_turns_allows_a_thread() {
+        for (difficulty, allowed) in [
+            (AiDifficulty::VeryEasy, false),
+            (AiDifficulty::Easy, false),
+            (AiDifficulty::Medium, true),
+            (AiDifficulty::Hard, true),
+            (AiDifficulty::VeryHard, true),
+            (AiDifficulty::CEDH, true),
+        ] {
+            let request = build_game_decision_prompt(
+                &GameState::default(),
+                &two_option_contract(),
+                difficulty,
+                None,
+                &[],
+            )
+            .unwrap();
+            assert_eq!(request.allows_message_thread(), allowed, "{difficulty:?}");
+        }
     }
 }

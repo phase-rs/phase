@@ -16,8 +16,8 @@ import { useLlmStore } from "../../../stores/llmStore";
 import type { LlmProviderCatalogEntry } from "../../../services/llm/types";
 
 const CATALOG_ROWS = [
-  { provider: "Anthropic", value: "Anthropic", displayName: "Anthropic (Claude)", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [], supportsMessageThreads: true },
-  { provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null, defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [], supportsMessageThreads: false },
+  { provider: "Anthropic", value: "Anthropic", displayName: "Anthropic (Claude)", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained", "messageThread"] },
+  { provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null, defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"] },
 ] satisfies LlmProviderCatalogEntry[];
 
 const TOGGLE = { name: "Remember earlier decisions" };

@@ -28,8 +28,13 @@
 //! - **Start over.** A new thread is created, with the full request, when the
 //!   endpoint or model changes, when the system prompt changes (difficulty,
 //!   format, or the table itself), when the last reply reported more context
-//!   than [`THREAD_CONTEXT_BUDGET_TOKENS`] or no usage at all, and when the log
-//!   was rewound under the thread.
+//!   than [`THREAD_CONTEXT_BUDGET_TOKENS`] or no usage at all, when the log
+//!   was rewound under the thread, and when more was logged since the seat's
+//!   last answer than its history window shows (the full request summarizes
+//!   older turns, which a continue cannot).
+//! - **Difficulty.** The two lowest difficulties never use a thread: they
+//!   deliberately reason from a near-term window, which a thread would undo
+//!   ([`GameDecisionRequest::allows_message_thread`]).
 //! - **Thread errors.** A thread is best effort: the API drops one after five
 //!   idle minutes, among other reasons. On a thread error the seat's thread is
 //!   dropped ([`LlmThreadMemory::record_reply`]) and the caller asks the same
@@ -177,9 +182,9 @@ impl LlmThreadMemory {
     /// Build the HTTP request for one game decision by `seat`.
     ///
     /// An endpoint that does not use message threads — every profile that did
-    /// not opt in, and every protocol but Anthropic Messages — gets exactly
-    /// [`build_chat_request`]'s request, and any thread the seat held is
-    /// forgotten. Otherwise the request continues the seat's thread when it
+    /// not opt in, and every protocol but Anthropic Messages — and a seat whose
+    /// difficulty does not allow one get exactly [`build_chat_request`]'s
+    /// request, and any thread the seat held is forgotten. Otherwise the request continues the seat's thread when it
     /// can and creates a new one when it cannot, and is remembered as pending
     /// until [`Self::record_reply`].
     ///
@@ -200,7 +205,7 @@ impl LlmThreadMemory {
             request,
             prompt_chars: decision.prompt.char_count(),
         };
-        if !endpoint.uses_message_threads() {
+        if !endpoint.uses_message_threads() || !decision.allows_message_thread() {
             self.seats.remove(&seat);
             return build_chat_request(endpoint, &decision.prompt).map(full);
         }
@@ -217,20 +222,26 @@ impl LlmThreadMemory {
             system: fingerprint_of([decision.prompt.system.as_str()]),
             seen_through: history.iter().map(|entry| entry.seq).max(),
         };
-        let request = match thread.open.as_ref().filter(|open| open.continues(&next)) {
-            Some(open) => {
-                let update = decision.thread_update(history, open.seen_through);
-                DecisionHttpRequest {
-                    request: build_thread_request(
-                        endpoint,
-                        ThreadTurn::Continue {
-                            previous_message_id: &open.message_id,
-                            user: &update,
-                        },
-                    )?,
-                    prompt_chars: update.chars().count(),
-                }
-            }
+        let continuation = thread
+            .open
+            .as_ref()
+            .filter(|open| open.continues(&next))
+            .and_then(|open| {
+                decision
+                    .thread_update(history, open.seen_through)
+                    .map(|update| (open, update))
+            });
+        let request = match continuation {
+            Some((open, update)) => DecisionHttpRequest {
+                request: build_thread_request(
+                    endpoint,
+                    ThreadTurn::Continue {
+                        previous_message_id: &open.message_id,
+                        user: &update,
+                    },
+                )?,
+                prompt_chars: update.chars().count(),
+            },
             None => full(build_thread_request(
                 endpoint,
                 ThreadTurn::Create {
@@ -543,7 +554,10 @@ mod tests {
             .request;
 
         assert_eq!(continued_from(&spec), Some("msg_1".to_string()));
-        assert_eq!(user_message(&spec), second.thread_update(&log(7), Some(3)));
+        assert_eq!(
+            Some(user_message(&spec)),
+            second.thread_update(&log(7), Some(3))
+        );
         let body = body(&spec);
         assert!(body.get("system").is_none(), "{body}");
         let message = user_message(&spec);
@@ -576,7 +590,7 @@ mod tests {
         let continuation = memory
             .decision_request(SEAT, &threaded(), &second, &log(6))
             .unwrap();
-        let update = second.thread_update(&log(6), Some(3));
+        let update = second.thread_update(&log(6), Some(3)).unwrap();
         assert_eq!(continuation.prompt_chars, update.chars().count());
         assert!(continuation.prompt_chars < second.prompt.char_count());
     }
@@ -948,6 +962,63 @@ mod tests {
             .unwrap()
             .request;
         assert_eq!(continued_from(&next), Some("msg_1".to_string()));
+    }
+
+    /// The two near-term difficulties keep reasoning from their window: their
+    /// decisions are today's request, whatever the profile's setting.
+    #[test]
+    fn the_two_near_term_difficulties_never_use_a_thread() {
+        for difficulty in [AiDifficulty::VeryEasy, AiDifficulty::Easy] {
+            let mut memory = LlmThreadMemory::new();
+            for revision in 1..=2 {
+                let decision = decision(revision, difficulty);
+                let sent = memory
+                    .decision_request(SEAT, &threaded(), &decision, &log(4))
+                    .unwrap();
+                assert_eq!(
+                    sent.request,
+                    build_chat_request(&threaded(), &decision.prompt).unwrap(),
+                    "{difficulty:?}"
+                );
+                accept_reply(
+                    &mut memory,
+                    &decision.fingerprint,
+                    LlmProvider::Anthropic,
+                    &reply("msg", 900),
+                );
+                assert!(!memory.has_open_thread(SEAT), "{difficulty:?}");
+            }
+        }
+    }
+
+    /// When more was logged since the last answer than the seat's window
+    /// shows, a continue would drop the oldest of it; the full request, which
+    /// summarizes earlier turns, goes out as a new thread instead.
+    #[test]
+    fn a_continue_that_cannot_carry_everything_since_the_last_answer_is_a_create() {
+        let window =
+            crate::prompt::history_budget(AiDifficulty::Medium).current_cycle_entries as u32;
+        let after = |unseen: u32| {
+            let mut memory = LlmThreadMemory::new();
+            answer(
+                &mut memory,
+                &threaded(),
+                &decision(1, AiDifficulty::Medium),
+                &log(4),
+                "msg_1",
+            );
+            memory
+                .decision_request(
+                    SEAT,
+                    &threaded(),
+                    &decision(2, AiDifficulty::Medium),
+                    &log(4 + unseen),
+                )
+                .unwrap()
+                .request
+        };
+        assert_eq!(continued_from(&after(window)), Some("msg_1".to_string()));
+        assert!(is_create(&after(window + 1)));
     }
 
     /// The thread setting off, or any protocol but Anthropic Messages, sends

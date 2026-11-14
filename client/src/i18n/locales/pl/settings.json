@@ -526,7 +526,7 @@
     "apiKeyGet": "Zdobądź klucz",
     "messageThreads": {
       "label": "Pamiętaj wcześniejsze decyzje",
-      "hint": "Każde miejsce AI prowadzi przez całą grę jeden wątek wiadomości Anthropic, więc model opiera się na swoim wcześniejszym rozumowaniu."
+      "hint": "Miejsca AI na poziomie trudności Średni i wyższym prowadzą przez całą grę jeden wątek wiadomości Anthropic, więc model opiera się na swoim wcześniejszym rozumowaniu."
     },
     "test": "Testuj połączenie",
     "testing": "Testowanie…",

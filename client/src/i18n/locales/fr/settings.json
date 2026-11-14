@@ -526,7 +526,7 @@
     "apiKeyGet": "Obtenir une clé",
     "messageThreads": {
       "label": "Se souvenir des décisions précédentes",
-      "hint": "Chaque siège IA garde un fil de messages Anthropic pendant toute la partie, pour que le modèle s'appuie sur son raisonnement précédent."
+      "hint": "Les sièges IA de difficulté Moyen ou plus gardent un fil de messages Anthropic pendant toute la partie, pour que le modèle s'appuie sur son raisonnement précédent."
     },
     "test": "Tester la connexion",
     "testing": "Test en cours…",

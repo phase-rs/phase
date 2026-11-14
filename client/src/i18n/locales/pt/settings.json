@@ -526,7 +526,7 @@
     "apiKeyGet": "Obter uma chave",
     "messageThreads": {
       "label": "Lembrar decisões anteriores",
-      "hint": "Cada lugar de IA mantém um fio de mensagens da Anthropic durante toda a partida, para que o modelo parta do seu raciocínio anterior."
+      "hint": "Os lugares de IA com dificuldade Médio ou superior mantêm um fio de mensagens da Anthropic durante toda a partida, para que o modelo parta do seu raciocínio anterior."
     },
     "test": "Testar ligação",
     "testing": "A testar…",

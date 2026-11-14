@@ -48,14 +48,28 @@ pub enum WireProtocol {
 }
 
 impl WireProtocol {
-    /// Whether this protocol can keep a seat's game in one server-side
-    /// conversation ([`DecisionContext::MessageThread`]).
+    /// Every [`DecisionContext`] this protocol can carry a seat's game in.
     ///
     /// Only the Anthropic Messages API has message threads. The other protocols
     /// would need the client to replay its own multi-turn history, which is a
     /// different feature with a different cost profile.
-    pub const fn supports_message_threads(self) -> bool {
-        matches!(self, WireProtocol::AnthropicMessages)
+    pub const fn decision_contexts(self) -> &'static [DecisionContext] {
+        match self {
+            WireProtocol::AnthropicMessages => &[
+                DecisionContext::SelfContained,
+                DecisionContext::MessageThread,
+            ],
+            WireProtocol::OpenAiChat
+            | WireProtocol::GeminiGenerateContent
+            | WireProtocol::SystemOneRelay => &[DecisionContext::SelfContained],
+        }
+    }
+
+    /// Whether this protocol can keep a seat's game in one server-side
+    /// conversation ([`DecisionContext::MessageThread`]).
+    pub fn supports_message_threads(self) -> bool {
+        self.decision_contexts()
+            .contains(&DecisionContext::MessageThread)
     }
 }
 

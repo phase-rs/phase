@@ -16,8 +16,8 @@ import { profileForSeat, useLlmStore } from "../../../stores/llmStore";
 import type { LlmProviderCatalogEntry } from "../../../services/llm/types";
 
 const CATALOG_ROWS = [
-  { provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: "https://api.openai.com/v1", defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [], supportsMessageThreads: false },
-  { provider: "Jev", value: "Jev", displayName: "Jev (TypeSafe)", defaultBaseUrl: null, defaultModel: "jev-latest", requiresApiKey: true, apiKeyUrl: "https://docs.typesafe.ai/api", models: [{ id: "jev-latest", label: "Jev (latest)" }], supportsMessageThreads: false },
+  { provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: "https://api.openai.com/v1", defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"] },
+  { provider: "Jev", value: "Jev", displayName: "Jev (TypeSafe)", defaultBaseUrl: null, defaultModel: "jev-latest", requiresApiKey: true, apiKeyUrl: "https://docs.typesafe.ai/api", models: [{ id: "jev-latest", label: "Jev (latest)" }], decisionContexts: ["selfContained"] },
 ] satisfies LlmProviderCatalogEntry[];
 
 afterEach(cleanup);

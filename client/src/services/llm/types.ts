@@ -33,10 +33,10 @@ export interface LlmProviderCatalogEntry {
   apiKeyUrl: string;
   models: LlmModelOption[];
   /**
-   * Whether the engine can keep each seat's game in one message thread for
-   * this provider, so the settings toggle appears exactly where it is honoured.
+   * Every decision context the engine honours for this provider, so the
+   * message-thread toggle appears exactly where it is honoured.
    */
-  supportsMessageThreads: boolean;
+  decisionContexts: LlmDecisionContext[];
 }
 
 /**
@@ -46,7 +46,7 @@ export interface LlmProviderCatalogEntry {
  * - `selfContained` (the default): every decision is a complete request.
  * - `messageThread`: each seat's game is one Anthropic message thread, so the
  *   model keeps its earlier turns. The engine ignores it for any provider whose
- *   catalog row does not set `supportsMessageThreads`.
+ *   catalog row does not list it in `decisionContexts`.
  */
 export type LlmDecisionContext = "selfContained" | "messageThread";
 

@@ -384,7 +384,7 @@ function ProfileCard({
 
       {/* Offered only where the engine's catalog says the protocol has message
           threads; the label is part of the click target, like the switch. */}
-      {entry?.supportsMessageThreads ? (
+      {entry?.decisionContexts.includes("messageThread") ? (
         <div className="flex items-center justify-between gap-3 rounded-lg border border-white/8 bg-black/20 px-3 py-2.5">
           <label htmlFor={threadSwitchId} className="flex min-w-0 cursor-pointer flex-col">
             <span className="text-xs font-semibold text-slate-200">{t("llm.messageThreads.label")}</span>

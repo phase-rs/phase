@@ -9,9 +9,9 @@ import { draftProfile, isMissingApiKey, isProfileUsable, profileForSeat, useLlmS
 import type { LlmProfile, LlmProviderCatalogEntry } from "../../services/llm/types";
 
 const CATALOG: readonly LlmProviderCatalogEntry[] = [
-  { provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null, defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [], supportsMessageThreads: false },
-  { provider: "Anthropic", value: "Anthropic", displayName: "Anthropic", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [], supportsMessageThreads: true },
-  { provider: "OpenAiCompatible", value: "OpenAiCompatible", displayName: "Compatible", defaultBaseUrl: null, defaultModel: "llama3", requiresApiKey: false, apiKeyUrl: "", models: [], supportsMessageThreads: false },
+  { provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null, defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"] },
+  { provider: "Anthropic", value: "Anthropic", displayName: "Anthropic", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained", "messageThread"] },
+  { provider: "OpenAiCompatible", value: "OpenAiCompatible", displayName: "Compatible", defaultBaseUrl: null, defaultModel: "llama3", requiresApiKey: false, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"] },
 ];
 
 function reset(): void {
@@ -126,7 +126,7 @@ describe("llmStore", () => {
   it("requires a key for OpenRouter like the other hosted providers", () => {
     const catalog: LlmProviderCatalogEntry[] = [
       ...CATALOG,
-      { provider: "OpenRouter", value: "OpenRouter", displayName: "OpenRouter", defaultBaseUrl: "https://openrouter.ai/api/v1", defaultModel: "openrouter/auto", requiresApiKey: true, apiKeyUrl: "", models: [], supportsMessageThreads: false },
+      { provider: "OpenRouter", value: "OpenRouter", displayName: "OpenRouter", defaultBaseUrl: "https://openrouter.ai/api/v1", defaultModel: "openrouter/auto", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"] },
     ];
     const id = useLlmStore.getState().addProfile({ provider: "OpenRouter", model: "openrouter/auto", enabled: true });
     const profile = () => useLlmStore.getState().profiles.find((p) => p.id === id);
