@@ -104,7 +104,7 @@ fn etrata_shuffles_the_source_not_its_earlier_exile_target() {
     if let Some(loss) = events.iter().position(|event| {
         matches!(
             event,
-            GameEvent::PlayerLost { player_id } | GameEvent::PlayerEliminated { player_id }
+            GameEvent::PlayerLost { player_id, reasons: _ } | GameEvent::PlayerEliminated { player_id }
                 if *player_id == P1
         )
     }) {
