@@ -5189,6 +5189,39 @@ pub struct PendingCopyTokenResolution {
     pub remaining: VecDeque<PendingCopyTokenBatch>,
     pub effect_kind: EffectKind,
     pub source_id: ObjectId,
+    /// CR 608.2c + CR 603.7a: the tracked set the producing instruction published when it
+    /// paused with this owner parked ("those tokens"). On completion the owner extends exactly
+    /// this set with every token it created and re-establishes it as the chain's set, so the
+    /// parked tail binds it even when a nested resolution reset the chain scope. `None` for an
+    /// owner that never paused under a tracked-set consumer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referent_set: Option<TrackedSetId>,
+    /// CR 614.6 + CR 608.2c: see [`OfferedBatchCustody`]. Set only by the owner's own
+    /// replacement-prompt park; settled by the delivery that hands the batch's tokens over,
+    /// or by the owner's adoption on resume.
+    #[serde(default, skip_serializing_if = "OfferedBatchCustody::is_settled")]
+    pub offered_batch: OfferedBatchCustody,
+}
+
+/// CR 614.6 + CR 608.2c: whether the batch a CopyToken owner offered to the replacement
+/// pipeline still owes the owner its tokens.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OfferedBatchCustody {
+    /// Every batch the owner offered has handed it its tokens (or none is outstanding).
+    #[default]
+    Settled,
+    /// The offered batch's creation event paused on a replacement prompt, and no delivery
+    /// has handed its tokens over yet. If the answer replaces the event with a different
+    /// creation (Jinnie Fay's Cats or Dogs, Moonlit Meditation's or Esix's copies), that
+    /// creation's tokens are this batch's tokens (CR 614.6), and the owner adopts them when
+    /// it resumes.
+    AtReplacementPrompt,
+}
+
+impl OfferedBatchCustody {
+    pub fn is_settled(&self) -> bool {
+        matches!(self, Self::Settled)
+    }
 }
 
 /// Private, face-complete source for a debug-created card that has not yet
@@ -43300,6 +43333,8 @@ mod tests {
                 }]),
                 effect_kind: EffectKind::CopyTokenOf,
                 source_id: ObjectId(42),
+                referent_set: None,
+                offered_batch: OfferedBatchCustody::Settled,
             });
         state
     }

@@ -14,8 +14,8 @@ use crate::types::card::PrintedLoyalty;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CopyTokenEntryTail, GameState, LiminalEntry, PendingCopyTokenBatch, PendingCopyTokenResolution,
-    PendingCounterPostAction, PendingLiminalEntryResume, WaitingFor,
+    CopyTokenEntryTail, GameState, LiminalEntry, OfferedBatchCustody, PendingCopyTokenBatch,
+    PendingCopyTokenResolution, PendingCounterPostAction, PendingLiminalEntryResume, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::proposed_event::{
@@ -465,6 +465,8 @@ pub(crate) fn drive_copy_token_batches(
             remaining,
             effect_kind,
             source_id,
+            referent_set: None,
+            offered_batch: OfferedBatchCustody::Settled,
         },
         events,
     );
@@ -497,6 +499,18 @@ fn drain_copy_token_resolution(
     mut pending: PendingCopyTokenResolution,
     events: &mut Vec<GameEvent>,
 ) {
+    // CR 614.6 + CR 608.2c: the batch this owner offered was answered, and no delivery handed
+    // its tokens over. The answer replaced its creation with a different one, which has now run
+    // above this owner, so this owner's batch tokens are the tokens that creation published.
+    // Ledger contract: only the batch's own replacement work runs above a parked owner, and
+    // every CreateToken continuation is a substitute, so nothing else wrote the ledger since
+    // that creation completed. Settled first, so a later batch's prompt marks afresh.
+    if !pending.offered_batch.is_settled() {
+        pending.offered_batch = OfferedBatchCustody::Settled;
+        pending
+            .created_ids
+            .extend(state.last_created_token_ids.clone());
+    }
     while let Some(batch) = pending.remaining.pop_front() {
         if batch.count == 0 {
             continue;
@@ -532,6 +546,11 @@ fn drain_copy_token_resolution(
                 .unwrap_or_default(),
         };
 
+        // CR 614.6 + CR 608.2c: this offered batch owns only its creation's
+        // ledger. Its earlier batches are already in `pending.created_ids`.
+        // Reset before replacements run so prevention publishes nothing, while
+        // a substitute creation may still publish the ids this owner adopts.
+        state.last_created_token_ids.clear();
         match crate::game::replacement::replace_event(state, proposed, events) {
             crate::game::replacement::ReplacementResult::Execute(event) => {
                 // CR 614.1a + CR 608.2c: the frame is taken, so the delivery
@@ -563,12 +582,30 @@ fn drain_copy_token_resolution(
             }
             crate::game::replacement::ReplacementResult::Prevented => {}
             crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
+                // CR 614.6 + CR 608.2c: this batch's creation event waits on a replacement
+                // answer. Its tokens are owed to this owner: handed over by the delivery that
+                // creates them, or, when the answer replaces the event with a different
+                // creation, adopted from that creation when this owner resumes.
+                pending.offered_batch = OfferedBatchCustody::AtReplacementPrompt;
                 park_copy_token_after_current_batch(state, pending, stack_depth_before_batch);
                 state.waiting_for =
                     crate::game::replacement::replacement_choice_waiting_for(player, state);
                 return;
             }
         }
+    }
+
+    // CR 608.2c + CR 603.7a: the producing instruction's "those tokens" is every token this
+    // resolution created, across every pause. Re-enter the producer's chain set and publish
+    // the whole referent through the one tracked-set authority, so the tail parked beneath
+    // this owner binds it.
+    if let Some(set) = pending.referent_set {
+        state.chain_tracked_set_id = Some(set);
+        let cause = super::this_way_cause_for_action(pending.effect_kind, None);
+        super::publish_tracked_set_with_causes(
+            state,
+            pending.created_ids.iter().map(|id| (*id, cause)).collect(),
+        );
     }
 
     // CR 603.7 + CR 701.36a: Record created token IDs so sub-abilities can
@@ -1196,14 +1233,18 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         state.waiting_for = crate::types::game_state::WaitingFor::Priority {
             player: state.active_player,
         };
-        let created_ids_for_pending = state.last_created_token_ids.clone();
-        if let Some(pending) = state.active_copy_token_mut() {
-            pending.created_ids = created_ids_for_pending;
-        }
+        super::token::record_copy_batch_ledger_on_active_copy_token(state);
         if state.active_copy_token().is_some() {
             drain_pending_copy_token_resolution(state, events);
+            // The drain assigned the owner's referent to the ledger (or
+            // re-parked it on a later batch).
+            created_ids = state.last_created_token_ids.clone();
         }
-        created_ids = state.last_created_token_ids.clone();
+        // CR 614.6 + CR 609.3: otherwise `created_ids` is already this batch's
+        // list — the prefix plus each committed copy, re-read from the ledger
+        // after every commit. A batch that committed nothing (a replacement
+        // made it zero tokens, or every entry was prevented) created nothing,
+        // so it must not republish the ledger an earlier creation left.
 
         // C1: do NOT hardcode Completed. Reproduce the replaced
         // continue_liminal_copy_token_batch tail (old ~1196-1197): the whole
@@ -1238,6 +1279,7 @@ pub(crate) struct CopyTokenApplyStatus {
     pub(crate) completion: CopyTokenApplyCompletion,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CopyTokenApplyCompletion {
     Completed,
     Paused,
@@ -6461,5 +6503,491 @@ mod tests {
             state.battlefield.contains(&squirrel),
             "the Squirrel survives the end step"
         );
+    }
+
+    /// CR 608.2c + CR 614.6: declined replacements preserve each batch's tokens
+    /// in instruction order. Constructed custody fixture, independent of
+    /// the printed spell's event grouping. Both answers use the engine action path.
+    #[test]
+    fn r15_parked_owner_hands_off_two_offered_batches_once() {
+        use crate::game::scenario::{GameScenario, P0};
+        let mut scenario = GameScenario::new();
+        scenario.add_creature_from_oracle(P0, "Jinnie Fay, Jetmir's Second", 3, 3,
+            "If you would create one or more tokens, you may instead create that many 2/2 green Cat creature tokens with haste or that many 3/1 green Dog creature tokens with vigilance.");
+        let mut runner = scenario.build();
+        let source_id = add_copy_source(runner.state_mut(), "Grizzly Bears");
+        let mut copy = named_attack_copy_spec(runner.state(), source_id, Vec::new());
+        copy.tapped = false;
+        copy.enters_attacking = false;
+        copy.attack_request = crate::types::proposed_event::TokenAttackRequest::Unspecified;
+        runner
+            .state_mut()
+            .push_copy_token(PendingCopyTokenResolution {
+                created_ids: Vec::new(),
+                remaining: (0..2)
+                    .map(|_| PendingCopyTokenBatch {
+                        owner: P0,
+                        copy: Box::new(copy.clone()),
+                        count: 1,
+                    })
+                    .collect(),
+                effect_kind: EffectKind::CopyTokenOf,
+                source_id,
+                referent_set: None,
+                offered_batch: OfferedBatchCustody::Settled,
+            });
+        let mut events = Vec::new();
+        drain_pending_copy_token_resolution(runner.state_mut(), &mut events);
+        let created = |events: &[GameEvent]| {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for prompt in 0..2 {
+            let WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "required Jinnie Fay prompt {prompt}: {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            assert_eq!(*player, P0);
+            assert!(candidates
+                .iter()
+                .any(|candidate| candidate.source_name == "Jinnie Fay, Jetmir's Second"));
+            let decline = candidates
+                .iter()
+                .position(|candidate| candidate.description == "Decline")
+                .expect("Decline offered");
+            let tokens = created(&events);
+            assert_eq!(tokens.len(), prompt, "one token per answered batch");
+            assert_eq!(
+                runner
+                    .state()
+                    .active_copy_token()
+                    .expect("parked owner")
+                    .created_ids,
+                tokens,
+                "second-prompt owner prefix contains the first token exactly once"
+            );
+            events.extend(
+                runner
+                    .act(GameAction::ChooseReplacement { index: decline })
+                    .expect("decline accepted")
+                    .events,
+            );
+        }
+        let tokens = created(&events);
+        assert_eq!(tokens.len(), 2);
+        assert_ne!(tokens[0], tokens[1]);
+        assert_eq!(runner.state().last_created_token_ids, tokens);
+        assert!(runner.state().active_copy_token().is_none());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+
+    /// CR 614.6 + CR 608.2c: a wholly prevented offered batch contributes
+    /// nothing, even when the global ledger still names an earlier creation.
+    /// Constructed fixture: no printed CreateToken replacement uses Prevent.
+    #[test]
+    fn prevented_offered_copy_batch_does_not_adopt_a_prior_ledger() {
+        use crate::game::scenario::{GameScenario, P0};
+        for owner_has_earlier in [false, true] {
+            let mut runner = GameScenario::new().build();
+            let state = runner.state_mut();
+            let source_id = add_copy_source(state, "Ledger donor");
+            let earlier = add_copy_source(state, "Earlier creation");
+            state.last_created_token_ids = vec![earlier];
+            let preventer = add_copy_source(state, "Constructed token preventer");
+            let mut definition = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .quantity_modification(QuantityModification::Prevent);
+            definition.mode = crate::types::ability::ReplacementMode::Optional { decline: None };
+            let object = state.objects.get_mut(&preventer).unwrap();
+            object.base_replacement_definitions = Arc::new(vec![definition.clone()]);
+            object.replacement_definitions = vec![definition].into();
+            let mut copy = named_attack_copy_spec(state, source_id, Vec::new());
+            copy.tapped = false;
+            copy.enters_attacking = false;
+            copy.attack_request = crate::types::proposed_event::TokenAttackRequest::Unspecified;
+            let want = if owner_has_earlier {
+                vec![earlier]
+            } else {
+                Vec::new()
+            };
+            let set = TrackedSetId(100);
+            state.tracked_object_sets.insert(set, want.clone());
+            state.push_copy_token(PendingCopyTokenResolution {
+                created_ids: want.clone(),
+                remaining: VecDeque::from([PendingCopyTokenBatch {
+                    owner: P0,
+                    copy: Box::new(copy),
+                    count: 1,
+                }]),
+                effect_kind: EffectKind::CopyTokenOf,
+                source_id,
+                referent_set: Some(set),
+                offered_batch: OfferedBatchCustody::Settled,
+            });
+            let mut events = Vec::new();
+            drain_pending_copy_token_resolution(state, &mut events);
+            let WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "required prevention prompt: {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            assert_eq!(*player, P0);
+            let accept = candidates
+                .iter()
+                .position(|candidate| candidate.description != "Decline")
+                .expect("prevention offered");
+            assert_eq!(
+                runner
+                    .state()
+                    .active_copy_token()
+                    .expect("parked owner")
+                    .offered_batch,
+                OfferedBatchCustody::AtReplacementPrompt
+            );
+            events.extend(
+                runner
+                    .act(GameAction::ChooseReplacement { index: accept })
+                    .expect("prevention accepted")
+                    .events,
+            );
+            assert!(runner.state().resolution_stack.is_empty());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert_eq!(copy_token_of_resolved(&events), 1);
+            assert!(!events
+                .iter()
+                .any(|event| matches!(event, GameEvent::TokenCreated { .. })));
+            assert_eq!(
+                runner.state().last_created_token_ids,
+                want,
+                "prevented batch adds no stale or duplicate ids"
+            );
+            assert_eq!(runner.state().tracked_object_sets[&set], want);
+        }
+    }
+
+    /// CR 608.2c + CR 111.1: the liminal batch terminal of
+    /// `apply_copy_token_after_replacement_with_created_ids` re-syncs the batch ledger onto an
+    /// ACTIVE CopyToken owner (a resumed batch's route) by merging, so the token an earlier batch
+    /// created stays in the owner's referent and reaches `LastCreated` when the owner drains.
+    #[test]
+    fn liminal_batch_terminal_merges_its_ledger_into_the_active_copy_token_owner() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = add_copy_source(&mut state, "Grizzly Bears");
+        let earlier = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Earlier Copy".to_string(),
+            Zone::Battlefield,
+        );
+        state.push_copy_token(PendingCopyTokenResolution {
+            created_ids: vec![earlier],
+            remaining: VecDeque::new(),
+            effect_kind: EffectKind::CopyTokenOf,
+            source_id,
+            referent_set: None,
+            offered_batch: OfferedBatchCustody::Settled,
+        });
+        let copy = CopyTokenSpec {
+            values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
+                &state.objects[&source_id],
+            )),
+            display: DisplayIdentity {
+                display_source: DisplaySource::Token,
+                ..Default::default()
+            },
+            extra_keywords: Vec::new(),
+            additional_modifications: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
+            sacrifice_at: None,
+            source_id,
+            controller: PlayerId(0),
+            donor: None,
+        };
+        let mut events = Vec::new();
+        let status = apply_copy_token_after_replacement_with_created_ids(
+            &mut state,
+            PlayerId(0),
+            copy,
+            EtbTapState::from_seeded_tapped(false),
+            Vec::new(),
+            1,
+            Vec::new(),
+            &mut events,
+        );
+        assert!(matches!(
+            status.completion,
+            CopyTokenApplyCompletion::Completed
+        ));
+        let created: Vec<ObjectId> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(created.len(), 1, "REACH-GUARD: the batch created its token");
+        assert!(
+            state.active_copy_token().is_none(),
+            "REACH-GUARD: the liminal terminal drained the active owner"
+        );
+        assert_eq!(copy_token_of_resolved(&events), 1);
+        assert_eq!(
+            state.last_created_token_ids,
+            vec![earlier, created[0]],
+            "the owner's earlier-batch token survives the batch ledger's re-sync"
+        );
+    }
+
+    /// R16 constructed ledger fixture, independent of any spell's batch grouping.
+    /// The earlier batch and owner are seeded; only the next batch is delivered.
+    /// CR 614.6 + CR 609.3: a batch halved to zero creates nothing and cannot
+    /// report an earlier batch's ids as its own.
+    #[test]
+    fn ledger_fixture_zero_commit_copy_batch_reports_no_stale_ids() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = add_copy_source(&mut state, "Ledger donor");
+        let earlier = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Earlier copy".to_string(),
+            Zone::Battlefield,
+        );
+        state.push_copy_token(PendingCopyTokenResolution {
+            created_ids: vec![earlier],
+            remaining: VecDeque::new(),
+            effect_kind: EffectKind::CopyTokenOf,
+            source_id,
+            referent_set: None,
+            offered_batch: OfferedBatchCustody::Settled,
+        });
+        state.last_created_token_ids = vec![earlier];
+        // Construct the token-count replacement directly: this is a ledger
+        // unit fixture, not a printed-card or parser-support claim.
+        let halver = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Ledger halver".to_string(),
+            Zone::Battlefield,
+        );
+        let definition = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .token_owner_scope(ControllerRef::Opponent)
+            .quantity_modification(QuantityModification::Half);
+        let object = state.objects.get_mut(&halver).unwrap();
+        object.base_replacement_definitions = Arc::new(vec![definition.clone()]);
+        object.replacement_definitions = vec![definition].into();
+        let mut copy = named_attack_copy_spec(&state, source_id, Vec::new());
+        copy.tapped = false;
+        copy.enters_attacking = false;
+        copy.attack_request = crate::types::proposed_event::TokenAttackRequest::Unspecified;
+        let spec =
+            super::super::token::copy_probe_spec_for(source_id, PlayerId(0), None, &copy.values);
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            copy: Some(Box::new(copy)),
+            enter_tapped: EtbTapState::from_seeded_tapped(false),
+            count: 1,
+            appended: Vec::new(),
+            applied: Default::default(),
+        };
+        let mut events = Vec::new();
+        let crate::game::replacement::ReplacementResult::Execute(event) =
+            crate::game::replacement::replace_event(&mut state, proposed, &mut events)
+        else {
+            panic!("the constructed halver must settle without a choice");
+        };
+        assert!(
+            matches!(
+                &event,
+                ProposedEvent::CreateToken {
+                    count: 0,
+                    copy: Some(_),
+                    ..
+                }
+            ),
+            "REACH-GUARD: replacement delivers a zero-count copy batch"
+        );
+        assert!(
+            super::super::token::apply_create_token_after_replacement_with_created_ids(
+                &mut state,
+                event,
+                Vec::new(),
+                crate::types::game_state::PendingEffectResolutionEvent::Suppress,
+                &mut events,
+            )
+        );
+        assert!(
+            state.last_created_token_ids.is_empty(),
+            "the zero-commit batch must not republish the earlier batch's ledger"
+        );
+        assert_eq!(
+            state
+                .active_copy_token()
+                .expect("the owner remains parked")
+                .created_ids,
+            vec![earlier],
+            "the owner receives no duplicate or stale ids"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GameEvent::TokenCreated { .. })),
+            "the zero-count batch commits no tokens"
+        );
+    }
+
+    /// H1 state: a parked, unbound owner holding `[t1, t2]`, a referent `A`
+    /// that already lists `t1`, and an unrelated chain set `B = [x]` current.
+    fn completing_owner_under_a_foreign_chain_set() -> (GameState, [ObjectId; 3], [TrackedSetId; 2])
+    {
+        let mut state = GameState::new_two_player(42);
+        let (t1, t2, x) = (ObjectId(901), ObjectId(902), ObjectId(903));
+        let (a, b) = (TrackedSetId(7), TrackedSetId(8));
+        state.tracked_object_sets.insert(a, vec![t1]);
+        state.tracked_object_sets.insert(b, vec![x]);
+        state.next_tracked_set_id = 9;
+        state.chain_tracked_set_id = Some(b);
+        state.push_copy_token(PendingCopyTokenResolution {
+            created_ids: vec![t1, t2],
+            remaining: VecDeque::new(),
+            effect_kind: EffectKind::CopyTokenOf,
+            source_id: ObjectId(900),
+            referent_set: None,
+            offered_batch: OfferedBatchCustody::Settled,
+        });
+        (state, [t1, t2, x], [a, b])
+    }
+
+    fn copy_token_of_resolved(events: &[GameEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::CopyTokenOf,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    /// H1 — CR 608.2c + CR 603.7a: a completing CopyToken owner publishes every
+    /// token it created into the set it was bound to at its pause, and makes
+    /// that set the chain's again; the chain set current at completion (here a
+    /// foreign `B`) is left untouched.
+    #[test]
+    fn completing_copy_token_owner_publishes_into_its_bound_referent() {
+        let (mut state, [t1, t2, x], [a, b]) = completing_owner_under_a_foreign_chain_set();
+        state
+            .active_copy_token_mut()
+            .expect("REACH-GUARD: the owner is the active frame")
+            .referent_set = Some(a);
+        let mut events = Vec::new();
+        drain_pending_copy_token_resolution(&mut state, &mut events);
+
+        assert!(state.active_copy_token().is_none(), "the owner is consumed");
+        assert_eq!(copy_token_of_resolved(&events), 1);
+        assert_eq!(
+            state.tracked_object_sets[&a],
+            vec![t1, t2],
+            "the bound referent gains the post-pause token, and t1 is not duplicated"
+        );
+        assert_eq!(
+            state.tracked_object_sets[&b],
+            vec![x],
+            "the foreign chain set is untouched"
+        );
+        assert_eq!(state.chain_tracked_set_id, Some(a));
+        assert_eq!(state.last_created_token_ids, vec![t1, t2]);
+    }
+
+    /// H1 paired guard: an owner that never paused under a tracked-set consumer
+    /// (`referent_set: None`) publishes nothing and leaves the chain alone, but
+    /// still completes its instruction.
+    #[test]
+    fn completing_copy_token_owner_without_referent_publishes_nothing() {
+        let (mut state, [t1, t2, x], [a, b]) = completing_owner_under_a_foreign_chain_set();
+        let mut events = Vec::new();
+        drain_pending_copy_token_resolution(&mut state, &mut events);
+
+        assert!(state.active_copy_token().is_none(), "the owner is consumed");
+        assert_eq!(copy_token_of_resolved(&events), 1);
+        assert_eq!(state.tracked_object_sets[&a], vec![t1]);
+        assert_eq!(state.tracked_object_sets[&b], vec![x]);
+        assert_eq!(state.chain_tracked_set_id, Some(b));
+        assert_eq!(state.last_created_token_ids, vec![t1, t2]);
+    }
+
+    /// CR 614.6 + CR 608.2c: an owner that resumes with its offered batch still marked
+    /// adopts the tokens the replacing creation left in the ledger, after the ones it
+    /// already lists, and settles. A settled owner adopts nothing, and a marked owner whose
+    /// batch was replaced by nothing adopts nothing.
+    #[test]
+    fn resumed_owner_adopts_a_substituted_batch_only_while_marked() {
+        let [earlier, s1, s2] = [ObjectId(31), ObjectId(32), ObjectId(33)];
+        let cases = [
+            (
+                OfferedBatchCustody::AtReplacementPrompt,
+                vec![s1, s2],
+                vec![earlier, s1, s2],
+            ),
+            (OfferedBatchCustody::Settled, vec![s1, s2], vec![earlier]),
+            (
+                OfferedBatchCustody::AtReplacementPrompt,
+                Vec::new(),
+                vec![earlier],
+            ),
+        ];
+        for (offered, ledger, want) in cases {
+            let mut state = GameState::new_two_player(45);
+            state.push_copy_token(PendingCopyTokenResolution {
+                created_ids: vec![earlier],
+                remaining: VecDeque::new(),
+                effect_kind: EffectKind::CopyTokenOf,
+                source_id: ObjectId(900),
+                referent_set: None,
+                offered_batch: offered,
+            });
+            state.last_created_token_ids = ledger.clone();
+            let mut events = Vec::new();
+            drain_pending_copy_token_resolution(&mut state, &mut events);
+
+            assert!(state.active_copy_token().is_none(), "the owner is consumed");
+            assert_eq!(
+                copy_token_of_resolved(&events),
+                1,
+                "REACH-GUARD: the owner completes its instruction"
+            );
+            assert_eq!(
+                state.last_created_token_ids, want,
+                "{offered:?} owner resumed over the ledger {ledger:?}"
+            );
+        }
     }
 }
