@@ -86,7 +86,7 @@ use super::oracle_effect::{
     try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::ast::parsed_clause;
-use super::oracle_ir::context::{ParseContext, SpellAnaphorBinding};
+use super::oracle_ir::context::{ParseContext, ResolvedChainRoot, SpellAnaphorBinding};
 use super::oracle_ir::diagnostic::ClauseGapKind;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::doc::{
@@ -5921,6 +5921,17 @@ fn oneshot_damage_replacement_requires_direct_spell_route(effect: &Effect) -> bo
     }
 }
 
+/// Parse one spell line as a spell ability, handing its chain parse the
+/// resolved-root proof `root` ([`ResolvedChainRoot`]). The proof is cleared
+/// afterwards even when the parse never reached a chain body, because the
+/// pipeline reuses `ctx` for later lines.
+fn parse_spell_line_ir(text: &str, ctx: &mut ParseContext, root: ResolvedChainRoot) -> AbilityIr {
+    ctx.resolved_chain_root = root;
+    let ir = parse_ability_ir_with_context(text, AbilityKind::Spell, ctx);
+    ctx.resolved_chain_root = ResolvedChainRoot::Unproven;
+    ir
+}
+
 fn parse_normalized_oracle_ir(
     original_oracle_text: &str,
     normalized_oracle_text: &str,
@@ -5974,6 +5985,77 @@ fn parse_normalized_oracle_ir(
     {
         ctx.host_self_reference = Some(crate::types::ability::TargetFilter::AttachedTo);
     }
+    // CR 608.2c: a card's spell line is proven to be its spell's resolved root,
+    // with its printed targets and nothing the cast adds below it, only when
+    // the card's spell is not rewritten at cast:
+    // - fuse (CR 702.102d): the right half follows the left half;
+    // - splice (CR 702.47a): the card's text is added to another spell;
+    // - gift (CR 702.174j for a spell: the gift effect happens first): the
+    //   engine wraps the card's first ability, a spell or an activated ability
+    //   (triggers are kept apart in `face.triggers`), under a `GiftDelivery`
+    //   root (`synthesize_gift`, an engine behaviour rather than a rule). It keys on the MTGJSON gift keyword, and the keyword router
+    //   cannot type every printed gift line ("Gift an Octopus", "Gift a Rhystic
+    //   Study"), so a gift card is read from either source;
+    // - overload (CR 702.96b): the overloaded spell requires no targets;
+    // - awaken (CR 702.113a): the awaken spell ability is appended below it;
+    // - an Arcane spell (CR 702.47b): the spliced text is appended below it.
+    //   The engine splices only onto a spell sharing the splice card's subtype
+    //   (`eligible_splice_cards`), and Arcane is the only subtype a printed
+    //   splice names; the "instant or sorcery" and "Anything" qualities are not
+    //   subtypes, so the engine offers them no host. Supporting them would make
+    //   every instant and sorcery a host;
+    // - any second non-keyword line: a second spell paragraph is appended
+    //   below the first by the engine (`combined_spell_ability_def`), with any
+    //   condition of its own; a static or triggered line is declined with it,
+    //   conservatively, because the parser does not classify it here.
+    // The keywords are read from the card's own printed keyword lines, typed by
+    // the strict keyword router: a split card's halves reach this parser without
+    // their MTGJSON keyword names, but each half prints its "Fuse" line.
+    let printed_keyword_lines: Vec<Option<Keyword>> = normalized_oracle_text
+        .split('\n')
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let lower = strip_reminder_text(line).trim().to_lowercase();
+            super::oracle_keyword::parse_router_keyword_fragment(&lower)
+        })
+        .collect();
+    let gift_card = mtgjson_keyword_names
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case("gift"))
+        || printed_keyword_lines
+            .iter()
+            .flatten()
+            .any(|keyword| matches!(keyword, Keyword::Gift(_)));
+    let rewritten_at_cast = gift_card
+        || printed_keyword_lines.iter().flatten().any(|keyword| {
+            matches!(
+                keyword,
+                Keyword::Fuse
+                    | Keyword::Splice { .. }
+                    | Keyword::Overload(_)
+                    | Keyword::Awaken { .. }
+            )
+        });
+    let splice_host = subtypes.iter().any(|s| s.eq_ignore_ascii_case("Arcane"));
+    let other_lines = printed_keyword_lines
+        .iter()
+        .filter(|line| line.is_none())
+        .count()
+        > 1;
+    let card_spell_root = if rewritten_at_cast || splice_host || other_lines {
+        ResolvedChainRoot::Unproven
+    } else {
+        ResolvedChainRoot::Proven
+    };
+    // The engine wraps a gift card's FIRST ability, a spell or an activated
+    // ability, under a `GiftDelivery` root (`synthesize_gift`), so a gift
+    // card's activated ability is no resolved root either. The other rewrites
+    // above touch only the spell ability.
+    ctx.activated_chain_root = if gift_card {
+        ResolvedChainRoot::Unproven
+    } else {
+        ResolvedChainRoot::Proven
+    };
 
     // CR 201.4b: A card's Oracle text uses its name to refer to itself.
     // Normalize self-references to `~` once, at the single parser entry point,
@@ -8043,7 +8125,7 @@ fn parse_normalized_oracle_ir(
             // is a pure `&AbilityIr -> AbilityDefinition`, so lowering here and
             // again in `ability_ir_at` repeats one computation rather than
             // performing two different ones.
-            let ir = parse_ability_ir_with_context(&line, AbilityKind::Spell, &mut ctx);
+            let ir = parse_spell_line_ir(&line, &mut ctx, card_spell_root);
             let lowered = lower_ability_ir(&ir);
             // A prevention with a target role or a dynamic quantity this route
             // cannot bind faithfully stays here as its gap: falling through would
@@ -8684,7 +8766,7 @@ fn parse_normalized_oracle_ir(
                     modal: None,
                 }
             } else {
-                parse_ability_ir_with_context(parse_line, AbilityKind::Spell, &mut ctx)
+                parse_spell_line_ir(parse_line, &mut ctx, card_spell_root)
             };
 
             // CR 614.15 + CR 608.2c: a PARTIAL cross-line self-replacement whose
@@ -9065,7 +9147,7 @@ fn parse_normalized_oracle_ir(
             // The one site in the family whose shell stays `default()`: it stamps
             // no root field at all, not even `description`, so the conversion is
             // the bare entry-point swap with nothing to carry.
-            let ir = parse_ability_ir_with_context(&effect_text, AbilityKind::Spell, &mut ctx);
+            let ir = parse_spell_line_ir(&effect_text, &mut ctx, card_spell_root);
             // Whether to emit *at all* is control flow, not a property of the
             // definition, so the guard stays here rather than becoming a shell
             // field. `has_unimplemented` reads a lowered root, and an
@@ -13641,6 +13723,19 @@ fn any_unimplemented(def: &AbilityDefinition, matches_name: &dyn Fn(&str) -> boo
             .is_some_and(|d| any_unimplemented(d, matches_name))
 }
 
+/// CR 602.2 + CR 608.2c: parse an activated ability's effect, which resolves
+/// as that ability's root node, handing the chain parse the card's
+/// resolved-root proof for activated abilities
+/// ([`ParseContext::activated_chain_root`]). The proof is cleared afterwards
+/// even when the parse never reached a chain body, because `ctx` outlives this
+/// one parse.
+fn parse_activated_effect_ir(text: &str, ctx: &mut ParseContext) -> AbilityIr {
+    ctx.resolved_chain_root = ctx.activated_chain_root;
+    let ir = parse_ability_ir_with_context(text, AbilityKind::Activated, ctx);
+    ctx.resolved_chain_root = ResolvedChainRoot::Unproven;
+    ir
+}
+
 /// Parse an activated-ability effect chain with self-reference fallback.
 ///
 /// Tries the raw text first so patterns that depend on the literal card name
@@ -13661,7 +13756,7 @@ pub(super) fn parse_activated_ability_ir_with_self_ref_fallback(
 
     ctx.subject = None;
     ctx.actor = None;
-    let ir = parse_ability_ir_with_context(effect_text, AbilityKind::Activated, ctx);
+    let ir = parse_activated_effect_ir(effect_text, ctx);
     let first_has_target_fallback = ctx.diagnostics[pre_snapshot..]
         .iter()
         .any(|d| matches!(d, OracleDiagnostic::TargetFallback { .. }));
@@ -13684,7 +13779,7 @@ pub(super) fn parse_activated_ability_ir_with_self_ref_fallback(
 
     ctx.subject = None;
     ctx.actor = None;
-    let alt = parse_ability_ir_with_context(&normalized, AbilityKind::Activated, ctx);
+    let alt = parse_activated_effect_ir(&normalized, ctx);
     let alt_has_target_fallback = ctx.diagnostics[pre_snapshot..]
         .iter()
         .any(|d| matches!(d, OracleDiagnostic::TargetFallback { .. }));

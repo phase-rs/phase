@@ -50,8 +50,8 @@ use crate::types::game_state::{
     PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
     PendingPlayerScopeTail, RepeatIterationChoice, RepeatIterationMovement, RepeatProcessRequest,
     RepeatUntilIterationWitness, RepeatUntilStopWitness, ResolutionOptionalPaymentOption,
-    ReturnResultOccurrenceId, SeatCreatedTokens, TrackedMemberOrigin, WaitingFor, ZoneChangeRecord,
-    ZoneOpponentChooserPurpose,
+    ResolutionPaymentOrigin, ReturnResultOccurrenceId, SeatCreatedTokens, TrackedMemberOrigin,
+    WaitingFor, ZoneChangeRecord, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{DiscardFrameId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -1603,6 +1603,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             attachment_remainder: _,
             player_scope_tail,
             player_scope_queue_end,
+            head_payment_origin,
             // Consumed by the payment answer that announced X, before this drain.
             x_announcement: _,
         } = cont;
@@ -1653,6 +1654,12 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                         chain.context.forwarded_result_context.clone();
                     // CR 603.10 + CR 608.2c: the choice-driven instruction just completed; its entries are observed before the resumed chain runs.
                     settle_entries_before_instruction(state, events, &remaining, None);
+                    // CR 118.12 + CR 608.2c: the latch belongs to the head; it
+                    // travels into the pruned chain only when the head survives
+                    // the prune (it is then `remaining`'s first node).
+                    if !effect_chain_depends_on_missing_forward_result(&chain.effect) {
+                        state.resolving_head_payment_origin = head_payment_origin;
+                    }
                     chain_progress = resolve_ability_chain_step(state, &remaining, events, 1)
                         .inspect_err(|_| execution_failed = true)
                         .ok();
@@ -1660,6 +1667,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             } else {
                 // CR 603.10 + CR 608.2c: the choice-driven instruction just completed; its entries are observed before the resumed chain runs.
                 settle_entries_before_instruction(state, events, &chain, None);
+                state.resolving_head_payment_origin = head_payment_origin;
                 chain_progress = resolve_ability_chain_step(state, &chain, events, 1)
                     .inspect_err(|_| execution_failed = true)
                     .ok();
@@ -1676,6 +1684,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         let completed_scope = std::mem::take(&mut state.resolving_player_scope_tail);
         state.resolving_player_scope_tail = previous_scope;
         state.resolving_continuation_attach_host = None;
+        state.resolving_head_payment_origin = ResolutionPaymentOrigin::FreshChoice;
         if !waits_for_resolution_choice(&state.waiting_for)
             && state.active_ability_continuation().is_none()
         {
@@ -3220,7 +3229,13 @@ pub(crate) fn active_player_action_completion_requires(
 }
 
 pub(crate) fn prepend_to_pending_continuation(state: &mut GameState, head: ResolvedAbility) {
-    prepend_to_pending_continuation_with_producer(state, head, None, None);
+    prepend_to_pending_continuation_with_producer(
+        state,
+        head,
+        None,
+        None,
+        ResolutionPaymentOrigin::FreshChoice,
+    );
 }
 
 /// `x_announcement` marks `head` as the rider of a paused payment (see
@@ -3233,6 +3248,11 @@ pub(crate) fn prepend_to_pending_continuation(state: &mut GameState, head: Resol
 /// The two early inserts (outside a post-replacement draw pair, beneath an active
 /// direct-choice child) leave it unset because `head` does not become the active
 /// frame there.
+///
+/// `head_payment_origin` is how `head`'s own `PayCost` enters the payment
+/// authority (CR 118.12): `LatchedSuffix` only for a paused payment's unpaid
+/// remainder. A latched record is never merged into, so its latch stays bound
+/// to its own head.
 fn prepend_to_pending_continuation_with_producer(
     state: &mut GameState,
     mut head: ResolvedAbility,
@@ -3241,10 +3261,12 @@ fn prepend_to_pending_continuation_with_producer(
         crate::types::ability::ReturnResultId,
     )>,
     x_announcement: Option<ContinuationXAnnouncement>,
+    head_payment_origin: ResolutionPaymentOrigin,
 ) {
     let make_pending = |state: &GameState, chain: Box<ResolvedAbility>| {
         let mut pending = PendingContinuation::new(chain, state);
         pending.pending_return_result_producer = pending_return_result_producer;
+        pending.head_payment_origin = head_payment_origin;
         pending
     };
     if state
@@ -3263,6 +3285,25 @@ fn prepend_to_pending_continuation_with_producer(
         state
             .insert_ability_continuation_parent_of_active(make_pending(state, Box::new(head)))
             .expect("paused child operation must retain its continuation as an immediate parent");
+        return;
+    }
+
+    // CR 118.12 + CR 608.2c: a latched record's head is a choice already made,
+    // bound to that head alone. Splicing a later instruction ahead of it would
+    // move the latch onto that instruction (or re-gate the latched head as a
+    // tail node). Park the new head as its own record instead: it still
+    // resolves first, and the latched record drains right after it, so the
+    // order written is unchanged.
+    if state
+        .active_ability_continuation()
+        .is_some_and(|existing| !existing.head_payment_origin.is_fresh_choice())
+    {
+        tracing::debug!(
+            "parking a later instruction above a latched PayCost remainder instead of splicing"
+        );
+        let mut pending = make_pending(state, Box::new(head));
+        pending.x_announcement = x_announcement;
+        state.park_ability_continuation(pending);
         return;
     }
 
@@ -3293,6 +3334,8 @@ fn prepend_to_pending_continuation_with_producer(
             player_scope_tail,
             player_scope_queue_end,
             x_announcement: existing_x_announcement,
+            // The existing record is fresh: a latched one was parked above.
+            head_payment_origin: _,
         } = existing;
         assert!(
             pending_return_result_producer.is_none() || existing_return_result_producer.is_none(),
@@ -3321,6 +3364,9 @@ fn prepend_to_pending_continuation_with_producer(
                 player_scope_tail,
                 player_scope_queue_end,
                 x_announcement: None,
+                // CR 118.12: the latch belongs to the chain's head, which is
+                // now the spliced instruction.
+                head_payment_origin,
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
         });
@@ -3363,22 +3409,50 @@ pub(crate) fn resolve_effect_pay_cost_rider(
     resolve_ability_chain(state, &rider, events, 1)
 }
 
-pub(crate) fn prepend_remaining_pay_cost_continuation(
-    state: &mut GameState,
+/// CR 118.12 + CR 608.2c: The head node of a paused `PayCost`'s queued
+/// remainder — the unpaid cost suffix, as one already-admitted instruction.
+///
+/// The root passed every one of its execution gates before payment began: its
+/// condition, its "you may", its unless-cost, its repeat count or repeat-until
+/// loop, and its player fan-out. The remainder carries none of them. A gate
+/// left on it would be re-evaluated live when the remainder drains, and could
+/// skip the head, run it again, or fan it out to other players — each a way to
+/// pay a different cost than the one already chosen. The root's other
+/// iterations and fan-out legs are owned by their own parked frames (the
+/// repeat-for and repeat-until frames, the player-scope queue), never by this
+/// node.
+fn pay_cost_remainder_head(
     ability: &ResolvedAbility,
     payer: PlayerId,
     remaining_cost: AbilityCost,
-) {
+) -> ResolvedAbility {
     let mut remaining_payment = ability.clone();
     remaining_payment.controller = payer;
+    remaining_payment.condition = None;
     remaining_payment.optional = false;
     remaining_payment.optional_for = None;
+    remaining_payment.unless_pay = None;
+    remaining_payment.repeat_for = None;
+    remaining_payment.repeat_until = None;
+    remaining_payment.player_scope = None;
+    // CR 101.4: the turn-order anchor exists only for `player_scope` iteration.
+    remaining_payment.starting_with = None;
     remaining_payment.effect = Effect::PayCost {
         cost: remaining_cost,
         scale: None,
         payer: TargetFilter::Controller,
     };
     remaining_payment.sub_ability = None;
+    remaining_payment
+}
+
+pub(crate) fn prepend_remaining_pay_cost_continuation(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    payer: PlayerId,
+    remaining_cost: AbilityCost,
+) {
+    let mut remaining_payment = pay_cost_remainder_head(ability, payer, remaining_cost);
 
     if let Some(sub) = ability.sub_ability.as_ref() {
         let mut sub_clone = sub.as_ref().clone();
@@ -3391,7 +3465,8 @@ pub(crate) fn prepend_remaining_pay_cost_continuation(
 
     // CR 118.12 + CR 608.2c: when payment pauses before later sub-costs are
     // paid, resume by paying those costs before following the original
-    // sub-ability chain.
+    // sub-ability chain, through the authority's latched entry — the choice to
+    // pay was already made.
     //
     // CR 107.3f: this remaining-cost frame carries no `x_announcement`, so an
     // X announced by the paused sub-cost binds nothing here; a later sub-cost
@@ -3399,7 +3474,13 @@ pub(crate) fn prepend_remaining_pay_cost_continuation(
     // No printed card has a combined resolution cost with an X component (the
     // five resolution-time `PayCost { Composite }` nodes in card-data.json are
     // all fixed), so there is no class to carry the mark through yet.
-    prepend_to_pending_continuation(state, remaining_payment);
+    prepend_to_pending_continuation_with_producer(
+        state,
+        remaining_payment,
+        None,
+        None,
+        ResolutionPaymentOrigin::LatchedSuffix,
+    );
 }
 
 /// CR 118.12 + CR 608.2c: A deferred life-payment root resumes after the
@@ -3411,17 +3492,15 @@ pub(crate) fn prepend_remaining_pay_cost_before_parked_rider(
     payer: PlayerId,
     remaining_cost: AbilityCost,
 ) {
-    let mut remaining_payment = ability.clone();
-    remaining_payment.controller = payer;
-    remaining_payment.optional = false;
-    remaining_payment.optional_for = None;
-    remaining_payment.effect = Effect::PayCost {
-        cost: remaining_cost,
-        scale: None,
-        payer: TargetFilter::Controller,
-    };
-    remaining_payment.sub_ability = None;
-    prepend_to_pending_continuation(state, remaining_payment);
+    // CR 118.12: the unpaid suffix resumes through the authority's latched
+    // entry — the choice to pay was already made.
+    prepend_to_pending_continuation_with_producer(
+        state,
+        pay_cost_remainder_head(ability, payer, remaining_cost),
+        None,
+        None,
+        ResolutionPaymentOrigin::LatchedSuffix,
+    );
 }
 
 pub(crate) fn parent_referent_context_from_events(
@@ -9480,7 +9559,7 @@ fn effect_fields_read_filter_population(
 }
 
 /// CR 611.2b: a "for as long as" duration is tested when the effect would
-/// begin (`GameState::transient_duration_begins` →
+/// begin (`GameState::transient_effect_begins` →
 /// `layers::resolved_duration_begins`) and on each later settled board, so its
 /// condition is read. An `UntilEvent` deadline's trigger matchers are matched
 /// against the live ledger when a later event fires, so they are read too. The
@@ -14464,6 +14543,10 @@ fn affected_objects_with_causes(
 /// member that emitted `PermanentTapped` in `events` — this resolution's own
 /// tap — so a fallback member carries `None` and never becomes a
 /// "<type> tapped this way" source.
+///
+/// `Effect::GiveControl` is per-member on the same terms: only a member whose
+/// `ControllerChanged` this resolution emitted is stamped `ControlGained`; the
+/// declared targets remain the members (see `give_control_object_targets`).
 fn this_way_cause_for_resolved(
     state: &GameState,
     effect: &Effect,
@@ -14491,6 +14574,17 @@ fn this_way_cause_for_resolved(
             })
             .then(|| this_way_cause_for_effect(effect))
             .flatten(),
+        // CR 613.1b + CR 608.2c: only a member whose controller this resolution changed was
+        // "gained control of this way".
+        Effect::GiveControl { .. } => events
+            .iter()
+            .any(|event| {
+                matches!(
+                    event,
+                    GameEvent::ControllerChanged { object_id, .. } if *object_id == member
+                )
+            })
+            .then_some(ThisWayCause::ControlGained),
         other => this_way_cause_for_effect(other),
     }
 }
@@ -15357,18 +15451,15 @@ pub(crate) fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameE
                 }
             )
         }),
-        // CR 110.2 + CR 608.2c: "that player gains control of ~. If they do, …"
-        // gates the rider on whether control actually changed (Kain, Traitorous
-        // Dragoon). `resolve_give` emits `EffectResolved` and, when the
-        // recipient differs from the object's current controller,
-        // `ControllerChanged`.
+        // CR 118.12 + CR 613.1b: "If they do" holds once a control effect was installed, even for a recipient who already controls the object.
         Effect::GiveControl { .. } => events.iter().any(|event| {
             matches!(
                 event,
                 GameEvent::EffectResolved {
-                    kind: crate::types::ability::EffectKind::GiveControl,
+                    kind: EffectKind::GiveControl,
+                    subject: Some(_),
                     ..
-                } | GameEvent::ControllerChanged { .. }
+                }
             )
         }),
         // CR 701.12a + CR 701.12b + CR 608.2c: an exchange whose subjects can't both
@@ -16885,9 +16976,11 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                 payer,
                 ability.source_id,
                 cost,
+                // CR 614.17b: an offer is by definition a fresh choice to pay.
                 &crate::game::costs::PaymentScope::Resolution {
                     ability: &payment_ability,
                     cost_move_root: crate::game::costs::ResolutionCostMoveRoot::EffectPayCost,
+                    origin: ResolutionPaymentOrigin::FreshChoice,
                 },
             )
         }
@@ -17217,9 +17310,11 @@ pub(crate) fn resolution_optional_payment_options(
         return None;
     };
     let payer = crate::game::targeting::resolve_effect_player_ref(state, ability, payer)?;
+    // CR 614.17b: an offered option is by definition a fresh choice to pay.
     let scope = crate::game::costs::PaymentScope::Resolution {
         ability,
         cost_move_root: crate::game::costs::ResolutionCostMoveRoot::EffectPayCost,
+        origin: ResolutionPaymentOrigin::FreshChoice,
     };
     let options = costs
         .iter()
@@ -22030,6 +22125,50 @@ pub(crate) fn counter_exile_rider_runs_tail(link: SubAbilityLink, effect: &Effec
     link == SubAbilityLink::SequentialSibling && counter_tail_family_has_runtime_evidence(effect)
 }
 
+/// CR 118.12: the payment origin a chain body took from its drained head.
+///
+/// The body has many early returns (fan-outs, skips, prompts, `?`), and all but
+/// one of them lose a latched origin. Holding it here gives that loss a single
+/// exit point: dropping the latch without handing it to the head's own
+/// `PayCost` logs once, wherever the body returned.
+struct HeadPaymentLatch<'a> {
+    origin: ResolutionPaymentOrigin,
+    ability: &'a ResolvedAbility,
+    depth: u32,
+}
+
+impl<'a> HeadPaymentLatch<'a> {
+    fn take(state: &mut GameState, ability: &'a ResolvedAbility, depth: u32) -> Self {
+        Self {
+            origin: std::mem::take(&mut state.resolving_head_payment_origin),
+            ability,
+            depth,
+        }
+    }
+
+    fn is_latched(&self) -> bool {
+        !self.origin.is_fresh_choice()
+    }
+
+    /// Hands the origin to its consumer, leaving this latch fresh and silent.
+    fn hand_back(&mut self) -> ResolutionPaymentOrigin {
+        std::mem::take(&mut self.origin)
+    }
+}
+
+impl Drop for HeadPaymentLatch<'_> {
+    fn drop(&mut self) {
+        if self.is_latched() {
+            tracing::debug!(
+                source = ?self.ability.source_id,
+                effect = ?EffectKind::from(&self.ability.effect),
+                depth = self.depth,
+                "dropping a latched payment origin: the chain body ended without handing it to its head PayCost"
+            );
+        }
+    }
+}
+
 /// One full pass of an ability's resolution chain — the parent effect (with its
 /// `repeat_for` count loop) and the entire `sub_ability` chain. This is one
 /// "process" for the purposes of "repeat this process" (CR 608.2c). Extracted
@@ -22088,6 +22227,13 @@ fn resolve_chain_body(
     // value catches the replace case correctly (issue #491).
     let pending_continuation_before = state.active_ability_continuation().cloned();
     let child_stack_start = state.resolution_stack.capture_child_boundary();
+    // CR 118.12: a latched payment origin belongs to this node — the drained
+    // chain's head — and to no other. Take it before any fan-out, skip, or
+    // descent below can reach another node; only this node's own `PayCost`
+    // step receives it back (see the effect loop), so a head that is skipped or
+    // replaced leaves every later `PayCost` in the chain a fresh choice. A latch
+    // the body never hands back is logged when the guard drops.
+    let mut head_payment_origin = HeadPaymentLatch::take(state, ability, depth);
 
     // CR 608.2c + CR 701.20b + CR 603.3d: A multi-target reveal-all producer whose
     // per-target referent (the revealed card) is consumed by later co-instructions
@@ -22367,25 +22513,25 @@ fn resolve_chain_body(
     // CR 608.2c: "Instead" kicker — check if a sub overrides the parent.
     // When condition is met, replace the current ability's effect with the sub's
     // effect, preserving the full resolution flow (tracked sets, continuations).
-    let ability = if let Some(ref sub) = ability.sub_ability {
-        // CR 608.2c: "Instead" kicker — swap parent effect with override sub's effect.
+    // The verdict outlives the swap: the effect loop reads it to keep this
+    // node's payment latch away from a swapped-in override.
+    let head_was_swapped = ability.sub_ability.as_deref().is_some_and(|sub| {
         let own_clash_outcome = matches!(ability.effect, Effect::Clash)
             && matches!(&sub.condition, Some(AbilityCondition::ConditionInstead { inner }) if matches!(inner.as_ref(), AbilityCondition::EventOutcomeWon));
-        let should_swap = !own_clash_outcome && instead_swap_applies(state, ability, sub);
-        if should_swap {
-            // CR 608.2c: Single-authority swap helper preserves
-            // every effect-shape field on the sub (player_scope, optional,
-            // multi_target, repeat_for, …) and every runtime-context field on
-            // the parent (controller, targets, chosen_x, …). See
-            // `ability_utils::apply_instead_swap` for the full field map.
-            // Issue #310: a hand-rolled clone here previously dropped
-            // `sub.player_scope`.
+        !own_clash_outcome && instead_swap_applies(state, ability, sub)
+    });
+    let ability = match ability.sub_ability.as_deref() {
+        // CR 608.2c: "Instead" kicker — swap parent effect with override sub's
+        // effect. Single-authority swap helper preserves every effect-shape
+        // field on the sub (player_scope, optional, multi_target, repeat_for,
+        // …) and every runtime-context field on the parent (controller,
+        // targets, chosen_x, …). See `ability_utils::apply_instead_swap` for
+        // the full field map. Issue #310: a hand-rolled clone here previously
+        // dropped `sub.player_scope`.
+        Some(sub) if head_was_swapped => {
             Cow::Owned(super::ability_utils::apply_instead_swap(ability, sub))
-        } else {
-            Cow::Borrowed(ability)
         }
-    } else {
-        Cow::Borrowed(ability)
+        _ => Cow::Borrowed(ability),
     };
     let ability = ability.as_ref();
 
@@ -23537,7 +23683,26 @@ fn resolve_chain_body(
             // CR 118.4 + CR 107.3c: Resolve a dynamic-generic mana cost into a
             // fixed `Mana { cost }` BEFORE entering the prompt — the runtime
             // payment site only handles static AbilityCost variants.
-            let resolved_cost = resolved_unless_cost(state, ability, &unless_pay.cost);
+            // CR 702.24a + CR 118.12a: the compact repeated form (the printed
+            // draw instruction plus a count) is the contract of ONE payer's
+            // repeated draw, which `engine_payment_choices` pays instruction by
+            // instruction. An "unless any player pays" poll re-offers the cost
+            // to each later payer, so it carries the whole expanded cost through
+            // the general path instead. No printed card polls a repeated cost.
+            let (resolved_cost, repeat) =
+                match resolved_unless_cost(state, ability, &unless_pay.cost) {
+                    (base, Some(count)) if unless_payers.len() > 1 => {
+                        (expand_per_counter(&base, count), None)
+                    }
+                    compact => compact,
+                };
+            // CR 121.2b + CR 614.17b: judge the whole repeated payment, not
+            // just the compact first instruction, before offering it — without
+            // allocating one leg per age counter.
+            let checked_cost = match repeat {
+                Some(count) if count > 0 => repeated_draw_check_cost(&resolved_cost, count),
+                _ => resolved_cost.clone(),
+            };
             // CR 118.6 + CR 202.1b: A cost based on the mana cost of an object
             // that has no mana cost (lands, tokens, other costless permanents)
             // is UNPAYABLE — attempting to pay it is an illegal action. No
@@ -23555,18 +23720,24 @@ fn resolve_chain_body(
                     !crate::game::costs::resolution_cost_includes_impossible_event(
                         state,
                         *p,
-                        &resolved_cost,
+                        &checked_cost,
                         ability,
                     ) && !crate::game::un_actions::cost_requires_unavailable_speech(
                         state,
                         *p,
-                        &resolved_cost,
+                        &checked_cost,
                     )
                 })
                 .and_then(|head| unless_payers[head..].split_first())
             {
-                state.waiting_for =
-                    unless_payment_prompt(state, ability, payer, remaining_payers, resolved_cost);
+                state.waiting_for = unless_payment_prompt(
+                    state,
+                    ability,
+                    payer,
+                    remaining_payers,
+                    resolved_cost,
+                    repeat,
+                );
                 return Ok(ResolutionProgress::Waiting);
             }
         }
@@ -24212,6 +24383,21 @@ fn resolve_chain_body(
                         ) {
                             bounded_move_refusals += 1;
                         }
+                    }
+                    // CR 118.12: this node's latch goes to its own `PayCost`
+                    // step, once. `pay::resolve` takes it as its first act,
+                    // before anything it causes can resolve a nested chain. A
+                    // head an "instead" override replaced never receives it,
+                    // even when the override pays a cost of its own: nobody
+                    // chose to pay that cost, so CR 614.17b gates it as a fresh
+                    // choice, and the unclaimed latch drops (and logs) with its
+                    // guard.
+                    if iteration == 0
+                        && !head_was_swapped
+                        && head_payment_origin.is_latched()
+                        && matches!(iter_effective.effect, Effect::PayCost { .. })
+                    {
+                        state.resolving_head_payment_origin = head_payment_origin.hand_back();
                     }
                     let resolved = if ability.repeat_for.is_some() {
                         with_iteration_return_result_occurrence(state, iter_effective, |state| {
@@ -25696,6 +25882,7 @@ fn resolve_chain_body(
                     sub_clone,
                     pending_return_result_producer,
                     x_announcement,
+                    ResolutionPaymentOrigin::FreshChoice,
                 );
             }
             // CR 701.57c + CR 608.2h: a Discover follow-up stashed
@@ -26842,8 +27029,8 @@ fn resolved_unless_cost(
     state: &GameState,
     ability: &ResolvedAbility,
     cost: &AbilityCost,
-) -> AbilityCost {
-    let expanded = match cost {
+) -> (AbilityCost, Option<u32>) {
+    let (expanded, repeat) = match cost {
         AbilityCost::PerCounter {
             counter,
             target,
@@ -26875,7 +27062,20 @@ fn resolved_unless_cost(
                     0
                 }
             };
-            expand_per_counter(base, n)
+            // CR 702.24a: a Draw base stays one instruction per age counter.
+            // Keep the printed base plus the count compact here and expand
+            // only at payment time, so declining a large upkeep never
+            // allocates every leg.
+            if n > 0
+                && matches!(
+                    base.as_ref(),
+                    AbilityCost::EffectCost { effect } if matches!(effect.as_ref(), Effect::Draw { .. })
+                )
+            {
+                (base.as_ref().clone(), Some(n))
+            } else {
+                (expand_per_counter(base, n), None)
+            }
         }
         AbilityCost::ManaDynamic { quantity } => {
             // CR 107.3a: thread ResolvedAbility.chosen_x so the announced
@@ -26885,11 +27085,14 @@ fn resolved_unless_cost(
             // of the announced X.
             let amount =
                 crate::game::quantity::resolve_quantity_with_targets(state, quantity, ability);
-            AbilityCost::Mana {
-                cost: ManaCost::generic(amount.max(0) as u32),
-            }
+            (
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(amount.max(0) as u32),
+                },
+                None,
+            )
         }
-        other => other.clone(),
+        other => (other.clone(), None),
     };
     // CR 118.12 + CR 202.1: "unless you pay its mana cost" — materialize
     // the ability source's OWN printed mana cost at resolution time. The
@@ -26899,7 +27102,12 @@ fn resolved_unless_cost(
     // resolves to `ManaCost::NoCost`, which CR 118.6 / CR 202.1b define
     // as an UNPAYABLE cost; the dedicated unpayable branch in `resolve_chain_body` handles
     // it (kept distinct from a payable `{0}`).
-    crate::game::keywords::resolve_self_mana_in_ability_cost(state, ability.source_id, &expanded)
+    let expanded = crate::game::keywords::resolve_self_mana_in_ability_cost(
+        state,
+        ability.source_id,
+        &expanded,
+    );
+    (expanded, repeat)
 }
 
 /// The prompt an unless-cost puts to `payer`, with `remaining_payers` next in line.
@@ -26911,6 +27119,7 @@ fn unless_payment_prompt(
     payer: PlayerId,
     remaining_payers: &[PlayerId],
     resolved_cost: AbilityCost,
+    repeat: Option<u32>,
 ) -> WaitingFor {
     let mut pending = ability.clone();
     pending.unless_pay = None;
@@ -26935,6 +27144,7 @@ fn unless_payment_prompt(
                     trigger_event: state.current_trigger_event.clone(),
                     effect_description: ability.description.clone(),
                     remaining: remaining_payers.to_vec(),
+                    repeat,
                 }
             } else {
                 WaitingFor::UnlessPaymentChooseCost {
@@ -26995,6 +27205,7 @@ fn unless_payment_prompt(
             trigger_event: state.current_trigger_event.clone(),
             effect_description: ability.description.clone(),
             remaining: remaining_payers.to_vec(),
+            repeat,
         },
     }
 }
@@ -28884,12 +29095,44 @@ fn resolve_unless_payers(
     }
 }
 
+/// CR 121.2b + CR 702.24a: a compact repeated draw admission check. The whole
+/// repeated payment is impossible exactly when a single draw of the total size
+/// is, so no per-leg allocation is needed; non-fixed quantities fall back to the
+/// concrete expansion.
+pub(crate) fn repeated_draw_check_cost(base: &AbilityCost, count: u32) -> AbilityCost {
+    if let AbilityCost::EffectCost { effect } = base {
+        if let Effect::Draw { count: qty, target } = effect.as_ref() {
+            // CR 614.17b + CR 702.24a: carry the whole unsigned repetition into
+            // the admission check. `count as i32` wrapped to a negative value
+            // for 2^31 and was clamped to zero draws, admitting a payment the
+            // board cannot make.
+            let repetitions = i32::try_from(count).unwrap_or(i32::MAX);
+            let total = match qty {
+                QuantityExpr::Fixed { value } => QuantityExpr::Fixed {
+                    value: value.saturating_mul(repetitions),
+                },
+                other => QuantityExpr::Multiply {
+                    factor: repetitions,
+                    inner: Box::new(other.clone()),
+                },
+            };
+            return AbilityCost::EffectCost {
+                effect: Box::new(Effect::Draw {
+                    count: total,
+                    target: target.clone(),
+                }),
+            };
+        }
+    }
+    expand_per_counter(base, count)
+}
+
 /// CR 702.24a: Expand `pay [base] for each counter on it` into the
 /// concrete N-fold cost the player actually pays. N=0 yields a {0} cost
 /// (CR 118.3a), which is still asked (CR 118.5). `OneOf`
 /// unfolds into a `Composite` of N independent disjunctive choices
 /// (CR 702.24a: each choice is made separately).
-fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
+pub(crate) fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
     if n == 0 {
         return AbilityCost::Mana {
             cost: ManaCost::zero(),
@@ -28966,6 +29209,13 @@ fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
                     count: count.scaled_by(n),
                     target: TargetFilter::SelfRef,
                 }),
+            },
+            // CR 702.24a: "pay [cost] for each age counter" is N separate payments of the printed draw instruction, so
+            // repetition is the Composite's arity. CR 121.2a: each leg keeps its printed size, so an instruction-level
+            // replacement (Alms Collector) sees that instruction, never the repetition. Unlike the `PutCounter` arm
+            // above, scaling the count would merge N instructions into one.
+            Effect::Draw { .. } => AbilityCost::Composite {
+                costs: vec![base.clone(); n as usize],
             },
             // CR 702.24a: Every age counter requires a separate instance of
             // the fixed mana-producing cost. Combining its fixed color vector
@@ -33867,6 +34117,31 @@ mod tests {
         assert!(state.pending_search_found_batch.is_none());
     }
 
+    /// CR 118.12: a chain body's latch is taken off the state, handed back to
+    /// its consumer exactly once, and is fresh (so its drop is silent) after.
+    #[test]
+    fn head_payment_latch_hands_back_its_origin_once() {
+        let mut state = GameState::new_two_player(42);
+        state.resolving_head_payment_origin = ResolutionPaymentOrigin::LatchedSuffix;
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        let mut latch = HeadPaymentLatch::take(&mut state, &ability, 0);
+        assert!(state.resolving_head_payment_origin.is_fresh_choice());
+        assert!(latch.is_latched());
+
+        assert_eq!(latch.hand_back(), ResolutionPaymentOrigin::LatchedSuffix);
+        assert!(!latch.is_latched());
+        assert_eq!(latch.hand_back(), ResolutionPaymentOrigin::FreshChoice);
+    }
+
     /// CR 608.2c: the pile placement after a reveal-only until-loop is bound to the
     /// exact cards that reveal looked at, on the continuation itself — so an
     /// instruction resolving in between (a replacement's own reveal) cannot change
@@ -35445,6 +35720,32 @@ mod tests {
             this_way_cause_for_resolved(&state, &with_rider.effect, &[], instant),
             None,
             "an empty ledger stamps nothing, whatever the rider's form"
+        );
+    }
+
+    /// CR 613.1b + CR 608.2c: `GiveControl` stamps `ControlGained` only on the
+    /// member whose `ControllerChanged` this resolution emitted.
+    #[test]
+    fn give_control_stamps_only_the_member_whose_controller_changed() {
+        let state = GameState::new_two_player(42);
+        let give = Effect::GiveControl {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            recipient: TargetFilter::TriggeringPlayer,
+        };
+        let (moved, unmoved) = (ObjectId(1), ObjectId(2));
+        let events = [GameEvent::ControllerChanged {
+            object_id: moved,
+            old_controller: PlayerId(0),
+            new_controller: PlayerId(1),
+            evidence: crate::types::events::ControlChangeEvidence::Unrecorded,
+        }];
+        assert_eq!(
+            this_way_cause_for_resolved(&state, &give, &events, moved),
+            Some(ThisWayCause::ControlGained)
+        );
+        assert_eq!(
+            this_way_cause_for_resolved(&state, &give, &events, unmoved),
+            None
         );
     }
 
@@ -40215,6 +40516,63 @@ mod tests {
         }
     }
 
+    /// CR 702.24a + CR 118.12a: the compact repeated draw form is offered only
+    /// to a single payer. A poll ("unless any player pays") carries the whole
+    /// expanded cost, so the next payer it re-offers to is asked for every
+    /// instruction rather than one.
+    #[test]
+    fn a_repeated_draw_cost_is_compact_only_for_a_single_payer() {
+        let prompt_for = |payer: TargetFilter| {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Repeated Draw Source".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&source)
+                .expect("source exists")
+                .counters
+                .insert(crate::types::counter::CounterType::Age, 3);
+            let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], source, PlayerId(0));
+            ability.unless_pay = Some(UnlessPayModifier {
+                cost: AbilityCost::PerCounter {
+                    counter: crate::types::counter::CounterType::Age,
+                    target: TargetFilter::SelfRef,
+                    base: Box::new(AbilityCost::EffectCost {
+                        effect: Box::new(Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        }),
+                    }),
+                },
+                payer,
+            });
+            resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+                .expect("the unless payment is offered");
+            match state.waiting_for {
+                WaitingFor::UnlessPayment {
+                    cost,
+                    repeat,
+                    remaining,
+                    ..
+                } => (cost, repeat, remaining.len()),
+                other => panic!("expected the unless prompt, got {other:?}"),
+            }
+        };
+        let (_, repeat, remaining) = prompt_for(TargetFilter::Controller);
+        assert_eq!((repeat, remaining), (Some(3), 0), "one payer: compact");
+        let (cost, repeat, remaining) = prompt_for(TargetFilter::AllPlayers);
+        assert_eq!((repeat, remaining), (None, 1), "a poll: expanded");
+        assert!(
+            matches!(&cost, AbilityCost::Composite { costs } if costs.len() == 3),
+            "the poll offers every instruction: {cost:?}"
+        );
+    }
+
     /// CR 118.12a + CR 701.9: Wrench Mind — "unless they discard an artifact
     /// card" must surface `UnlessPayment` before the two-card discard (issue
     /// #2361).
@@ -42196,6 +42554,44 @@ mod tests {
         }
     }
 
+    /// CR 702.24a + CR 121.2a: a draw cost repeats its printed instruction once per age counter; zero counters still
+    /// short-circuit to a zero mana cost.
+    #[test]
+    fn expand_per_counter_draw_repeats_the_instruction() {
+        let draw = |value: i32| AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count: QuantityExpr::Fixed { value },
+                target: TargetFilter::Controller,
+            }),
+        };
+        let base = draw(1);
+        assert_eq!(
+            expand_per_counter(&base, 3),
+            AbilityCost::Composite {
+                costs: vec![draw(1), draw(1), draw(1)],
+            }
+        );
+        // The instruction keeps its printed size; repetition never scales it.
+        assert_eq!(
+            expand_per_counter(&draw(2), 2),
+            AbilityCost::Composite {
+                costs: vec![draw(2), draw(2)],
+            }
+        );
+        assert_eq!(
+            expand_per_counter(&base, 1),
+            AbilityCost::Composite {
+                costs: vec![draw(1)],
+            }
+        );
+        assert_eq!(
+            expand_per_counter(&base, 0),
+            AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            }
+        );
+    }
+
     #[test]
     fn forwarded_generic_self_ref_keeps_event_order_and_nested_result_ownership() {
         for stale_first in [false, true] {
@@ -43275,7 +43671,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            resolved_unless_cost(&state, &ability, &cost),
+            resolved_unless_cost(&state, &ability, &cost).0,
             AbilityCost::Composite {
                 costs: vec![
                     AbilityCost::Mana {
@@ -61093,33 +61489,38 @@ mod tests {
         );
     }
 
-    /// CR 110.2 + CR 608.2c (issue #1335): Kain's "that player gains control of
-    /// Kain. If they do, …" gates the rider on whether control actually
-    /// transferred. `GiveControl` counts as performed only when
-    /// `ControllerChanged` or a `GiveControl` `EffectResolved` is emitted.
+    /// CR 118.12 + CR 613.1b (issue #1335): `GiveControl` counts as performed only when its resolver installed a control effect, which it reports as an `EffectResolved` subject.
     #[test]
-    fn give_control_performed_tracks_controller_changed_event() {
+    fn give_control_performed_tracks_installed_control_effect() {
         let give = Effect::GiveControl {
             target: TargetFilter::SelfRef,
             recipient: TargetFilter::TriggeringPlayer,
         };
 
-        let transferred = [GameEvent::ControllerChanged {
-            object_id: ObjectId(1),
-            old_controller: PlayerId(0),
-            new_controller: PlayerId(1),
-            // The rider gate reads only that control moved, never the evidence.
-            evidence: crate::types::events::ControlChangeEvidence::Unrecorded,
+        let mut scenario = GameScenario::new();
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let runner = scenario.build();
+        let snapshot = runner.state().capture_event_object_snapshot(bears);
+        assert!(snapshot.is_some(), "Grizzly Bears must yield a snapshot");
+
+        let installed = [GameEvent::EffectResolved {
+            kind: EffectKind::GiveControl,
+            source_id: bears,
+            subject: snapshot.map(Box::new),
         }];
         assert!(
-            mandatory_parent_effect_performed(&give, &transferred),
-            "GiveControl that changed controllers is 'performed'"
+            mandatory_parent_effect_performed(&give, &installed),
+            "GiveControl that installed a control effect is 'performed'"
         );
 
-        let not_transferred: [GameEvent; 0] = [];
+        let not_installed = [GameEvent::EffectResolved {
+            kind: EffectKind::GiveControl,
+            source_id: ObjectId(9),
+            subject: None,
+        }];
         assert!(
-            !mandatory_parent_effect_performed(&give, &not_transferred),
-            "GiveControl that failed must not seed the if-they-do rider"
+            !mandatory_parent_effect_performed(&give, &not_installed),
+            "GiveControl that installed nothing must not seed the if-they-do rider"
         );
     }
 
@@ -61186,9 +61587,8 @@ mod tests {
     ///
     /// NOTE the negative slice: it is the event trail the resolver ACTUALLY
     /// emits on a no-op (a lone `EffectResolved { ExchangeControl }`), not an
-    /// empty slice. An empty slice is never produced in production, and using
-    /// one would let a regression that keys on `EffectResolved` — the exact
-    /// defect that makes the `GiveControl` arm above vacuous — pass here.
+    /// empty slice. An empty slice is never produced in production, and using one would let a
+    /// regression that keys on `EffectResolved` pass here.
     #[test]
     fn exchange_control_performed_tracks_controller_changed_event() {
         let exchange = exchange_control_effect();
@@ -68045,5 +68445,51 @@ mod parser_oracle_effect_tests {
             !evaluate_condition(&cond, &state, &ability_for(strong)),
             "3/3 is not least power"
         );
+    }
+}
+
+#[cfg(test)]
+mod repeat_admission_tests {
+    use super::repeated_draw_check_cost;
+    use crate::types::ability::{AbilityCost, Effect, QuantityExpr, TargetFilter};
+
+    /// CR 614.17b: the whole unsigned repetition reaches the admission check;
+    /// 2^31 must not wrap negative and admit zero draws.
+    #[test]
+    fn the_repeat_check_carries_the_large_unsigned_count() {
+        let draw = |count| AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count,
+                target: TargetFilter::Controller,
+            }),
+        };
+        let fixed = repeated_draw_check_cost(&draw(QuantityExpr::Fixed { value: 1 }), 1 << 31);
+        match fixed {
+            AbilityCost::EffectCost { effect } => match effect.as_ref() {
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value },
+                    ..
+                } => assert_eq!(*value, i32::MAX),
+                other => panic!("expected the compact fixed draw: {other:?}"),
+            },
+            other => panic!("expected an effect cost: {other:?}"),
+        }
+
+        let non_fixed = repeated_draw_check_cost(
+            &draw(QuantityExpr::Sum {
+                exprs: vec![QuantityExpr::Fixed { value: 1 }],
+            }),
+            1 << 31,
+        );
+        match non_fixed {
+            AbilityCost::EffectCost { effect } => match effect.as_ref() {
+                Effect::Draw {
+                    count: QuantityExpr::Multiply { factor, .. },
+                    ..
+                } => assert_eq!(*factor, i32::MAX),
+                other => panic!("expected a symbolic product: {other:?}"),
+            },
+            other => panic!("expected an effect cost: {other:?}"),
+        }
     }
 }

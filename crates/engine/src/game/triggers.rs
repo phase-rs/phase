@@ -9555,18 +9555,101 @@ pub(crate) fn park_observer_triggers_if_paused(
     // CR 601.2h + CR 602.2b + CR 603.3: under a live announcement these events
     // wait in its carrier; only the span it does not own is parked here.
     let owned = super::announcement_triggers::take_inline_trigger_span(state, events, slice_start);
-    // CR 603.2c: logical zone-change owners can queue observers without claiming
-    // the consumed ledger; honor their queued contexts as collection witnesses.
-    let candidates = filter_already_collected_trigger_events_from(
-        state,
-        &events[..owned.end],
-        slice_start,
+    collect_unclaimed_ordinary_observers(state, &events[..owned.end], slice_start);
+}
+
+/// CR 603.2c + CR 603.3b: the paused-exit collector. An action that ends at a
+/// further prompt inside a payment leaves its events to no later scan, so their
+/// ordinary and delayed triggers are queued here, once: occurrences another
+/// collector already claimed are skipped, and the ones collected here are
+/// claimed in turn, so no later collector over the same buffer repeats them.
+pub(crate) fn collect_paused_exit_triggers(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+) {
+    collect_unclaimed_ordinary_observers(state, events, event_start);
+    let retained = paused_exit_retained_events(state);
+    let mut delayed = unclaimed_trigger_events_from(
+        events,
+        event_start,
+        TriggerCollectionRequester::Delayed,
         &state.consumed_before_priority_trigger_events,
     );
-    let trigger_events = paused_observer_trigger_events(state, candidates);
-    if !trigger_events.is_empty() {
-        collect_triggers_into_deferred(state, &trigger_events);
+    delayed.retain(|event| !retained.contains(event));
+    collect_unclaimed_delayed_triggers_into_deferred(state, events, &delayed);
+}
+
+/// Events a live owner still holds and collects itself: logical zone moves,
+/// parked entries and cost events (CR 603.2c + CR 603.10a + CR 614.12a).
+fn paused_exit_retained_events(state: &GameState) -> Vec<GameEvent> {
+    let mut retained = super::engine_priority::retained_logical_zone_events(state);
+    retained.extend(state.deferred_entry_events.iter().cloned());
+    retained.extend(super::engine_priority::retained_cost_events(state));
+    retained
+}
+
+/// CR 603.2c: the ordinary half of every paused exit. Collects the observer
+/// triggers of `events[event_start..]` that no collector has claimed and no
+/// live owner retains, then claims exactly those occurrences for ordinary
+/// collectors. Logical zone-change owners can queue observers without claiming
+/// the ledger, so their queued contexts are honored as collection witnesses.
+fn collect_unclaimed_ordinary_observers(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+) {
+    let retained = paused_exit_retained_events(state);
+    let mut zone_change_witnesses: Vec<GameEvent> = state
+        .deferred_triggers
+        .iter()
+        .flat_map(|context| context.trigger_events.iter())
+        .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+        .cloned()
+        .collect();
+    let mut ordinary = unclaimed_trigger_events_from(
+        events,
+        event_start,
+        TriggerCollectionRequester::Ordinary,
+        &state.consumed_before_priority_trigger_events,
+    );
+    ordinary.retain(|event| {
+        // CR 707.10: `copy_spell` collects `SpellCopied` observers at
+        // announcement and drains them after CopyRetarget finalization.
+        if matches!(
+            event,
+            GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
+        ) || retained.contains(event)
+        {
+            return false;
+        }
+        if let Some(index) = zone_change_witnesses
+            .iter()
+            .position(|witness| witness == event)
+        {
+            zone_change_witnesses.remove(index);
+            return false;
+        }
+        true
+    });
+    if ordinary.events.is_empty() {
+        return;
     }
+    collect_triggers_into_deferred(state, &ordinary.events);
+    let occurrences = ordinary
+        .positions
+        .iter()
+        .map(|&position| ConsumedTriggerEventOccurrence {
+            event: events[position].clone(),
+            occurrence: trigger_event_occurrence(events, position),
+            scope: ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+        })
+        .collect();
+    resolve_and_apply_trigger_collection(
+        state,
+        ResolvedTriggerCollection::ConsumeBeforePriority { occurrences },
+    )
+    .expect("a paused-exit claim must have a live journal cause");
 }
 
 /// CR 603.2 + CR 603.7: Park delayed observer triggers if the action paused
@@ -46051,10 +46134,24 @@ pub mod tests {
                 collected, 1,
                 "settled={settled}: exactly the unclaimed second occurrence is collected"
             );
+            // The settled helper borrows the journal. The paused exit claims
+            // exactly the occurrence it collected, so no later collector over
+            // the same buffer repeats it.
+            let mut expected = vec![ConsumedTriggerEventOccurrence {
+                event: repeated.clone(),
+                occurrence: trigger_event_occurrence(&events, 0),
+                scope: ConsumedTriggerEventScope::AllCollectors,
+            }];
+            if !settled {
+                expected.push(ConsumedTriggerEventOccurrence {
+                    event: repeated.clone(),
+                    occurrence: trigger_event_occurrence(&events, events.len() - 1),
+                    scope: ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+                });
+            }
             assert_eq!(
-                state.consumed_before_priority_trigger_events.len(),
-                1,
-                "settled={settled}: the helper borrows the journal, it never takes it"
+                state.consumed_before_priority_trigger_events, expected,
+                "settled={settled}: the journal holds the prior claim and only what this exit collected"
             );
         }
     }

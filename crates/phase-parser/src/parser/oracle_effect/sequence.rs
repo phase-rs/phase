@@ -9164,8 +9164,12 @@ fn is_anaphoric_entry_counters_clause(sentence: &str) -> bool {
     if let (Some(cond), body) = super::conditions::strip_card_type_conditional(sentence) {
         return represented(&cond, &body);
     }
-    match super::conditions::strip_routed_suffix_conditional(sentence, &mut ParseContext::default())
-    {
+    // The entry-counter rider follows the instruction that moved the permanent.
+    match super::conditions::strip_routed_suffix_conditional(
+        sentence,
+        &mut ParseContext::default(),
+        super::conditions::GatedInstructionPosition::AfterInstruction,
+    ) {
         (Some((cond, _)), body) => represented(&cond, &body),
         (None, _) => false,
     }

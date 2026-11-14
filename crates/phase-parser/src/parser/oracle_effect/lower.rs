@@ -8660,6 +8660,27 @@ pub(crate) fn extract_optional_target_multi_target(
     (lower.len() - rest.len() == first_target).then_some(spec)
 }
 
+/// CR 115.6 + CR 601.2c: whether the printed text carries an optional-count
+/// quantifier ("up to N", "any number of") in front of any target phrase,
+/// independent of the effect kind. `extract_optional_target_multi_target`
+/// declines the eight effects that cannot represent a declined optional target
+/// (`Counter`, `Attach`, …), so `ParsedEffectClause::multi_target` is `None`
+/// for them even though zero targets is legal; a caller that must know whether
+/// the target is optional reads this instead of the stamped field. Shares
+/// `strip_optional_target_prefix` with the stamping path, so the two cannot
+/// disagree about what counts as a quantifier.
+pub(crate) fn text_declares_optional_target_count(text: &str) -> bool {
+    let masked = nom_primitives::mask_double_quoted_spans_preserving_len(text);
+    let lower = masked.to_ascii_lowercase();
+    nom_primitives::scan_preceded(lower.as_str(), |input| {
+        match strip_optional_target_prefix(input) {
+            (rest, Some(spec)) => Ok((rest, spec)),
+            _ => Err(oracle_err(input)),
+        }
+    })
+    .is_some()
+}
+
 /// CR 115.1 + CR 115.6 + CR 601.2c + CR 602.2b + CR 603.3d: The single
 /// clause-level owner of the optional target-count fixup.
 ///
