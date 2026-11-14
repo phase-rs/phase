@@ -38840,6 +38840,7 @@ impl GameState {
             entering_aura_authority: _,
             last_discover_value: _,
             pending_player_scope_sacrifice_choice: _,
+            pending_player_scope_bounce_choice: _,
             pending_player_scope_unless_payment: _,
             pending_discard_batch: _,
             pending_exile_from_top_until: _,

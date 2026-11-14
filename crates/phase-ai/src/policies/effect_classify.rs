@@ -3594,10 +3594,13 @@ mod grant_trigger_polarity_tests {
         let pump = wrap(Effect::Pump {
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
-            target: TargetFilter::Any,
+            target: TargetFilter::Typed(TypedFilter::creature()),
         });
         assert_eq!(effect_polarity(&pump), EffectPolarity::Beneficial);
-        assert_eq!(extract_target_filter(&pump), Some(&TargetFilter::Any));
+        assert_eq!(
+            extract_target_filter(&pump),
+            Some(&TargetFilter::Typed(TypedFilter::creature()))
+        );
         assert_eq!(extract_target_filter(&wrap(Effect::NoOp)), None);
         // Words of Wind: an untargeted per-player return names no target, even
         // though the bounce carries a resolution-time filter.
@@ -3613,13 +3616,13 @@ mod grant_trigger_polarity_tests {
         assert_eq!(extract_target_filter(&wind), None);
         // Reach-guard: a Bounce that does say "target" keeps its slot.
         let targeted_bounce = wrap(Effect::Bounce {
-            target: TargetFilter::Any,
+            target: TargetFilter::Typed(TypedFilter::creature()),
             destination: None,
             selection: engine::types::ability::BounceSelection::Targeted,
         });
         assert_eq!(
             extract_target_filter(&targeted_bounce),
-            Some(&TargetFilter::Any)
+            Some(&TargetFilter::Typed(TypedFilter::creature()))
         );
     }
 

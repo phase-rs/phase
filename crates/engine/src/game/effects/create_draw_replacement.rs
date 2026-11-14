@@ -53,27 +53,20 @@ pub fn resolve(
     //
     // CR 115.1c + CR 602.2b: a "target" in the substitute (Words of War's "any
     // target") was chosen as this ability was activated and surfaced as this
-    // node's target slot; hand those chosen targets to the substitute.
+    // node's target slot; the substitute inherits those announced occurrences
+    // together with their announcement pins (CR 400.7), position for position,
+    // through the occurrence authority. A later draw therefore does not affect a
+    // new object after the chosen one changed zones.
     let mut substitute = build_resolved_from_def_with_targets(
         replacement_effect,
         ability.source_id,
         ability.controller,
-        ability.targets.clone(),
+        Vec::new(),
     );
-    // CR 400.7: freeze the announced object identities in the stored substitute.
-    // The substitute resolves outside the stack, long after the announcement, so
-    // each announced occurrence pin becomes a keyed referent pin (alongside any
-    // the creating ability inherited): a later draw must not affect a new object
-    // after the chosen one changed zones.
-    substitute.set_target_incarnations_recursive(
-        ability
-            .target_incarnations
-            .iter()
-            .copied()
-            .chain(ability.aligned_target_pins().into_iter().flatten())
-            .collect(),
-    );
-    crate::game::ability_utils::materialize_coin_branches(&mut substitute);
+    substitute.mirror_targets_from(ability);
+    // CR 400.7 + CR 603.7c: referent pins the creating ability inherited stay
+    // keyed on the substitute's non-declaring riders.
+    substitute.set_target_incarnations_recursive(ability.target_incarnations.clone());
 
     // CR 614.1a + CR 113.7a: anchor the installing controller at resolution
     // time so the shield outlives the source permanent's zone/controller.

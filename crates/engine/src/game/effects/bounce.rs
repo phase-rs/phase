@@ -572,10 +572,12 @@ fn set_scoped_bounce_waiting_for(
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        performed_by: None,
     };
 }
 
@@ -1071,7 +1073,8 @@ mod tests {
             &scoped_return_template()
         ));
 
-        let gated: Vec<(&str, Box<dyn Fn(&mut ResolvedAbility)>)> = vec![
+        type Gate = Box<dyn Fn(&mut ResolvedAbility)>;
+        let gated: Vec<(&str, Gate)> = vec![
             (
                 "unless_pay",
                 Box::new(|a| {
