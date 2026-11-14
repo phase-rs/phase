@@ -4948,8 +4948,12 @@ mod restored_card_db_requirements_tests {
     }
 
     /// Build the seat's decision request through the production entry point.
-    fn build_llm_decision(seat: PlayerId) -> serde_json::Value {
-        let built = build_llm_decision_request_inner("Medium", seat.0, THREADED_ENDPOINT, "[]")
+    fn build_llm_decision(
+        seat: PlayerId,
+        history: &[engine::types::log::GameLogEntry],
+    ) -> serde_json::Value {
+        let history = serde_json::to_string(history).expect("the log serializes");
+        let built = build_llm_decision_request_inner("Medium", seat.0, THREADED_ENDPOINT, &history)
             .expect("the decision request builds");
         assert!(
             built["request"].is_object(),
@@ -5020,13 +5024,13 @@ mod restored_card_db_requirements_tests {
         let choice = non_pass_choice(seat);
 
         // The first decision creates the thread.
-        let first = build_llm_decision(seat);
+        let first = build_llm_decision(seat, &[]);
         assert_eq!(thread_of(&first), serde_json::json!({ "type": "create" }));
 
         // An admitted reply is the turn the next decision continues from.
         let admitted = resolve_llm_reply(seat, &first, 200, &anthropic_reply("msg_1", choice));
         assert!(admitted["proposal"].is_object(), "{admitted}");
-        let second = build_llm_decision(seat);
+        let second = build_llm_decision(seat, &[]);
         assert_eq!(
             thread_of(&second),
             serde_json::json!({ "type": "continue", "previous_message_id": "msg_1" })
@@ -5047,12 +5051,12 @@ mod restored_card_db_requirements_tests {
             refused["errorKind"]["kind"], "threadUnavailable",
             "{refused}"
         );
-        let resent = build_llm_decision(seat);
+        let resent = build_llm_decision(seat, &[]);
         assert_eq!(thread_of(&resent), serde_json::json!({ "type": "create" }));
 
         // The resend's admitted reply starts the new thread...
         resolve_llm_reply(seat, &resent, 200, &anthropic_reply("msg_2", choice));
-        let third = build_llm_decision(seat);
+        let third = build_llm_decision(seat, &[]);
         assert_eq!(
             thread_of(&third),
             serde_json::json!({ "type": "continue", "previous_message_id": "msg_2" })
@@ -5062,7 +5066,7 @@ mod restored_card_db_requirements_tests {
         // advances it to that reply nor leaves a continue the API would refuse.
         let out_of_range = resolve_llm_reply(seat, &third, 200, &anthropic_reply("msg_3", 99));
         assert!(out_of_range["proposal"].is_null(), "{out_of_range}");
-        let after_refusal = build_llm_decision(seat);
+        let after_refusal = build_llm_decision(seat, &[]);
         assert_eq!(
             thread_of(&after_refusal),
             serde_json::json!({ "type": "create" })
@@ -5071,80 +5075,232 @@ mod restored_card_db_requirements_tests {
         clear_game_state();
     }
 
-    /// Open a thread for `seat` in game 1, then move the match between games
-    /// the way `handle_game_over_transition` does, with `chooser` to choose
-    /// whether to play or draw game 2.
-    fn finish_game_one_with_an_open_thread(seat: PlayerId, chooser: PlayerId) {
-        install_llm_decision(seat);
-        let choice = non_pass_choice(seat);
-        let first = build_llm_decision(seat);
-        resolve_llm_reply(seat, &first, 200, &anthropic_reply("msg_1", choice));
-        assert_eq!(
-            thread_of(&build_llm_decision(seat)),
-            serde_json::json!({ "type": "continue", "previous_message_id": "msg_1" })
-        );
-        with_installed_state_mut(|state| {
-            state.match_phase = engine::types::match_config::MatchPhase::BetweenGames;
-            state.game_number += 1;
-            state.waiting_for = WaitingFor::BetweenGamesChoosePlayDraw {
-                player: chooser,
-                game_number: state.game_number,
-                score: state.match_score,
-            };
-            state.priority_player = chooser;
-        })
-        .expect("the game is installed");
+    /// Start game 1 of a legal two-player best-of-three through the public
+    /// initializer: 60 Forests and a 15-card sideboard a seat, P0 on the play,
+    /// both seats at their mulligan decision. Returns the log as the client
+    /// accumulates it.
+    fn start_a_best_of_three() -> Vec<engine::types::log::GameLogEntry> {
+        use engine::types::card_type::{CardType, CoreType, Supertype};
+
+        clear_game_state();
+        set_multiplayer_mode(false);
+        let forest = engine::types::card::CardFace {
+            name: "Forest".to_string(),
+            card_type: CardType {
+                supertypes: vec![Supertype::Basic],
+                core_types: vec![CoreType::Land],
+                subtypes: vec!["Forest".to_string()],
+            },
+            color_identity: vec![engine::types::mana::ManaColor::Green],
+            ..Default::default()
+        };
+        let mut printed = serde_json::to_value(&forest).expect("a face serializes");
+        printed["legalities"] = serde_json::json!({ "standard": "legal" });
+        let database = serde_json::json!({ "forest": printed }).to_string();
+        CARD_DB.with(|cell| {
+            *cell.borrow_mut() = Some(Arc::new(
+                CardDatabase::from_json_str(&database).expect("the card database loads"),
+            ));
+        });
+        let seat = || PlayerDeckList {
+            main_deck: vec!["Forest".to_string(); 60],
+            sideboard: vec!["Forest".to_string(); 15],
+            ..Default::default()
+        };
+        let decks = DeckList {
+            player: seat(),
+            opponent: seat(),
+            ..Default::default()
+        };
+        let started = initialize_game_inner(
+            Some(Ok(decks)),
+            42,
+            None,
+            MatchConfig {
+                match_type: MatchType::Bo3,
+                ..MatchConfig::default()
+            },
+            2,
+            Some(0),
+            InitSessionKind::Local,
+        )
+        .expect("game 1 starts");
+        let mut log = Vec::new();
+        keep_log(&mut log, &started.log_entries);
+        log
     }
 
-    /// `restart_between_games_with_starting_player` replaces the game in place
-    /// and the next game begins; `seat` holds priority in it.
-    fn start_game_two(seat: PlayerId) {
-        with_installed_state_mut(|state| {
-            state.match_phase = engine::types::match_config::MatchPhase::InGame;
-            state.waiting_for = WaitingFor::Priority { player: seat };
-            state.priority_player = seat;
+    /// Append `entries` to `log`, numbered on the way the client numbers them.
+    fn keep_log(
+        log: &mut Vec<engine::types::log::GameLogEntry>,
+        entries: &[engine::types::log::GameLogEntry],
+    ) {
+        for entry in entries {
+            let mut entry = entry.clone();
+            entry.seq = u32::try_from(log.len()).expect("a short log");
+            log.push(entry);
+        }
+    }
+
+    /// Submit `action` through the public entry point, as the client does.
+    fn submit_logged(
+        log: &mut Vec<engine::types::log::GameLogEntry>,
+        actor: PlayerId,
+        action: GameAction,
+    ) {
+        let shown = format!("{action:?}");
+        match submit_action_inner(actor, action).expect("a game is installed") {
+            SubmittedAction::Applied { result, .. } => keep_log(log, &result.log_entries),
+            SubmittedAction::Rejected { rejection } => {
+                panic!("{actor:?} {shown} was rejected: {rejection:?}")
+            }
+        }
+    }
+
+    /// Give `seat` an open thread in game 1: its mulligan decision creates the
+    /// thread, and keeping its hand is the accepted reply.
+    fn open_a_thread_in_game_one(seat: PlayerId, log: &[engine::types::log::GameLogEntry]) {
+        let first = build_llm_decision(seat, log);
+        assert_eq!(thread_of(&first), serde_json::json!({ "type": "create" }));
+        let kept = resolve_llm_reply(seat, &first, 200, &anthropic_reply("msg_1", 0));
+        assert!(kept["proposal"].is_object(), "{kept}");
+        assert_eq!(
+            thread_of(&build_llm_decision(seat, log)),
+            serde_json::json!({ "type": "continue", "previous_message_id": "msg_1" })
+        );
+    }
+
+    /// P0 concedes game 1 during the mulligans and both seats keep their
+    /// decks, which leaves P0, who lost, to choose whether to play or draw.
+    fn end_game_one(log: &mut Vec<engine::types::log::GameLogEntry>) {
+        let unchanged = || GameAction::SubmitSideboard {
+            main: vec![engine::types::match_config::DeckCardCount {
+                name: "Forest".to_string(),
+                count: 60,
+            }],
+            sideboard: vec![engine::types::match_config::DeckCardCount {
+                name: "Forest".to_string(),
+                count: 15,
+            }],
+        };
+        submit_logged(
+            log,
+            PlayerId(0),
+            GameAction::Concede {
+                player_id: PlayerId(0),
+            },
+        );
+        submit_logged(log, PlayerId(0), unchanged());
+        submit_logged(log, PlayerId(1), unchanged());
+        let waiting_for =
+            with_state(|state| state.waiting_for.clone()).expect("the game is installed");
+        assert!(
+            matches!(
+                waiting_for,
+                WaitingFor::BetweenGamesChoosePlayDraw {
+                    player: PlayerId(0),
+                    ..
+                }
+            ),
+            "game 1 is over and P0 chooses next: {waiting_for:?}"
+        );
+    }
+
+    /// Whether any of `entries` carries `text`.
+    fn logs_text(entries: &[engine::types::log::GameLogEntry], text: &str) -> bool {
+        entries.iter().any(|entry| {
+            entry.segments.iter().any(|segment| {
+                matches!(segment, engine::types::log::LogSegment::Text(shown) if shown.contains(text))
+            })
         })
-        .expect("the game is installed");
+    }
+
+    /// The user message a built request sends.
+    fn user_prompt_of(built: &serde_json::Value) -> String {
+        let body: serde_json::Value =
+            serde_json::from_str(built["request"]["body"].as_str().expect("a request body"))
+                .expect("the body is JSON");
+        body["messages"][0]["content"]
+            .as_str()
+            .expect("a user message")
+            .to_string()
     }
 
     /// A best-of-three moves on to its next game without a new-game boundary:
-    /// game over raises the game number and opens the between-games choices,
-    /// and the restart replaces the game in place. A seat that makes no
-    /// decision between games still carries its game-1 thread into game 2,
-    /// and only the game number keeps its first game-2 decision from
-    /// continuing it.
+    /// the public restart (`ChoosePlayDraw`) replaces the game in place, and
+    /// the client's log runs on across it. The seat's first game-2 decision
+    /// creates a new thread, and that thread is shown game 2's history only.
     #[test]
-    fn the_next_game_of_a_match_never_continues_the_last_games_thread() {
+    fn the_next_game_of_a_match_starts_a_fresh_thread_with_its_own_history() {
         let seat = PlayerId(1);
-        finish_game_one_with_an_open_thread(seat, PlayerId(0));
-        start_game_two(seat);
-        let next_game = build_llm_decision(seat);
+        let mut log = start_a_best_of_three();
+        open_a_thread_in_game_one(seat, &log);
+        end_game_one(&mut log);
+        let game_two_from = log.len();
+        submit_logged(
+            &mut log,
+            PlayerId(0),
+            GameAction::ChoosePlayDraw { play_first: true },
+        );
+        let game_number = with_state(|state| state.game_number).expect("the game is installed");
+        assert_eq!(game_number, 2);
+
+        // Both games log their start; only game 1 logs its end.
+        let (game_one, game_two) = log.split_at(game_two_from);
+        assert!(logs_text(game_one, "Game started") && logs_text(game_two, "Game started"));
+        assert!(logs_text(game_one, "Game over") && !logs_text(game_two, "Game over"));
+
+        let next_game = build_llm_decision(seat, &log);
         assert_eq!(
             thread_of(&next_game),
             serde_json::json!({ "type": "create" })
         );
+        let prompt = user_prompt_of(&next_game);
+        assert_eq!(prompt.matches("Game started").count(), 1, "{prompt}");
+        assert!(!prompt.contains("Game over"), "game 1 leaked: {prompt}");
 
         clear_game_state();
     }
 
     /// A seat that chooses whether to play or draw the next game makes that
-    /// choice outside any game: it is today's request, which opens no thread,
-    /// and the next game's first decision starts a new one.
+    /// choice outside any game: it is today's request, which opens no thread.
+    /// Its proposal is the restart, submitted the way the client submits an AI
+    /// seat's action, and the next game's first decision starts a new thread.
     #[test]
     fn the_play_draw_choice_between_games_uses_no_thread() {
-        let seat = PlayerId(1);
-        finish_game_one_with_an_open_thread(seat, seat);
-        let play_draw = build_llm_decision(seat);
+        let seat = PlayerId(0);
+        let mut log = start_a_best_of_three();
+        open_a_thread_in_game_one(seat, &log);
+        end_game_one(&mut log);
+
+        let play_draw = build_llm_decision(seat, &log);
         assert_eq!(
             thread_of(&play_draw),
             serde_json::Value::Null,
             "{play_draw}"
         );
+        assert!(play_draw["threadTurn"].is_null(), "{play_draw}");
         let chosen = resolve_llm_reply(seat, &play_draw, 200, &anthropic_reply("msg_2", 0));
-        assert!(chosen["proposal"].is_object(), "{chosen}");
+        let proposal = &chosen["proposal"];
+        let action: GameAction =
+            serde_json::from_value(proposal["action"].clone()).expect("a proposed action");
+        assert!(
+            matches!(action, GameAction::ChoosePlayDraw { .. }),
+            "{chosen}"
+        );
+        let restarted = submit_ai_action_proposal_inner(
+            proposal["token"].as_str().expect("a proposal token"),
+            seat,
+            action,
+        );
+        let AiProposalSubmission::Applied { result } = restarted else {
+            panic!("the restart was not applied");
+        };
+        keep_log(&mut log, &result.log_entries);
+        let game_number = with_state(|state| state.game_number).expect("the game is installed");
+        assert_eq!(game_number, 2);
 
-        start_game_two(seat);
-        let next_game = build_llm_decision(seat);
+        let next_game = build_llm_decision(seat, &log);
         assert_eq!(
             thread_of(&next_game),
             serde_json::json!({ "type": "create" })
@@ -5163,7 +5319,7 @@ mod restored_card_db_requirements_tests {
         let controller = PlayerId(0);
         install_llm_decision(seat);
         let choice = non_pass_choice(seat);
-        let first = build_llm_decision(seat);
+        let first = build_llm_decision(seat, &[]);
         resolve_llm_reply(seat, &first, 200, &anthropic_reply("msg_1", choice));
 
         let set_controller = |turn_controller: Option<PlayerId>| {
@@ -5174,7 +5330,7 @@ mod restored_card_db_requirements_tests {
             .expect("the game is installed");
         };
         set_controller(Some(controller));
-        let controlled = build_llm_decision(seat);
+        let controlled = build_llm_decision(seat, &[]);
         assert_eq!(
             thread_of(&controlled),
             serde_json::Value::Null,
@@ -5183,7 +5339,7 @@ mod restored_card_db_requirements_tests {
         assert!(controlled["threadTurn"].is_null(), "{controlled}");
 
         set_controller(None);
-        let own = build_llm_decision(seat);
+        let own = build_llm_decision(seat, &[]);
         assert_eq!(thread_of(&own), serde_json::json!({ "type": "create" }));
 
         clear_game_state();

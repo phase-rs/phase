@@ -112,11 +112,12 @@ pub struct ThreadTurnId(pub u32);
 enum ThreadOrigin {
     /// Created by an ordinary decision.
     Fresh,
-    /// Created to replace a thread the API had just lost (`thread_not_found`),
-    /// and not continued since. Anthropic: "If a continue request still returns a 404 error right
-    /// after you replay, the API might be unable to store that conversation …
-    /// Send it without `thread`." A seat whose recovery thread is lost at its
-    /// first continue therefore sends self-contained requests from then on.
+    /// Created to replace, in the same conversation, a thread the API had just
+    /// lost (`thread_not_found`), and not continued since. Anthropic: "If a
+    /// continue request still returns a 404 error right after you replay, the
+    /// API might be unable to store that conversation … Send it without
+    /// `thread`." A seat whose recovery thread is lost at its first continue
+    /// therefore sends self-contained requests from then on.
     Recovery,
     /// Continued at least once.
     Continued,
@@ -136,34 +137,25 @@ pub struct LlmThreadMemory {
 }
 
 /// One seat's thread state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct SeatThread {
     /// The thread the seat's next decision may continue.
     open: Option<OpenThread>,
     /// The threaded request in flight, committed only when its own reply is
     /// accepted.
     pending: Option<PendingTurn>,
-    /// What the seat's next create is: [`ThreadOrigin::Recovery`] right after
-    /// the API lost the seat's thread (`thread_not_found`),
-    /// [`ThreadOrigin::Fresh`] otherwise.
-    next_create: ThreadOrigin,
+    /// The conversation whose thread the API lost (`thread_not_found`) and
+    /// that no accepted reply has replaced yet. The seat's next create for
+    /// that same conversation is a recovery ([`ThreadOrigin::Recovery`]); a
+    /// create for any other conversation (another account, game or system
+    /// prompt) is an ordinary one, with a first recovery of its own to come.
+    lost: Option<Conversation>,
     /// An endpoint the seat sends self-contained requests to for as long as
     /// this memory lasts: the rest of the match, unless a restore (an undo or
     /// a resume) clears it first. Its API refused threads
     /// (`thread_unsupported_request`), or lost a recovery thread at its first
     /// continue. A fresh create would only be refused, or lost, again.
     refused: Option<ThreadEndpoint>,
-}
-
-impl Default for SeatThread {
-    fn default() -> Self {
-        SeatThread {
-            open: None,
-            pending: None,
-            next_create: ThreadOrigin::Fresh,
-            refused: None,
-        }
-    }
 }
 
 /// The endpoint and account a thread lives on. A thread is stored by the
@@ -189,17 +181,24 @@ impl ThreadEndpoint {
     }
 }
 
-/// A thread the API holds for a seat, as of the seat's last accepted reply.
+/// The conversation a thread carries: one game of the match, on one endpoint
+/// and account, under one system prompt. A thread is continued only within
+/// its conversation, and a recovery belongs to the conversation it replaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct OpenThread {
-    /// The game of the match the thread belongs to
-    /// ([`GameDecisionRequest::thread_game`]). A thread never continues into
-    /// the next game.
+struct Conversation {
+    /// The game of the match ([`GameDecisionRequest::thread_game`]). A thread
+    /// never continues into the next game.
     game_number: u8,
     endpoint: ThreadEndpoint,
     /// Fingerprint of the system prompt the thread was created with. A
     /// continue cannot send a new one, so a change starts a new thread.
     system: String,
+}
+
+/// A thread the API holds for a seat, as of the seat's last accepted reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenThread {
+    conversation: Conversation,
     /// The id of the seat's last accepted reply, which the next decision
     /// continues from.
     message_id: String,
@@ -217,9 +216,7 @@ struct OpenThread {
 struct PendingTurn {
     /// The request this is. A reply is committed only against its own request.
     turn: ThreadTurnId,
-    game_number: u8,
-    endpoint: ThreadEndpoint,
-    system: String,
+    conversation: Conversation,
     /// The newest log entry the request showed the seat.
     seen_through: Option<u32>,
     shape: PendingShape,
@@ -244,9 +241,7 @@ impl OpenThread {
             (Some(_), None) => false,
             (None, _) => true,
         };
-        self.game_number == next.game_number
-            && self.endpoint == next.endpoint
-            && self.system == next.system
+        self.conversation == next.conversation
             && self
                 .context_tokens
                 .is_some_and(|tokens| tokens <= THREAD_CONTEXT_BUDGET_TOKENS)
@@ -291,11 +286,13 @@ impl LlmThreadMemory {
         let game_number = match decision.thread_game() {
             Some(game_number) if endpoint.uses_message_threads() => game_number,
             _ => {
-                // The seat's thread is forgotten; an endpoint's refusal of
-                // threads is not, because it outlasts any one thread.
+                // The seat's thread, and any recovery owed to it, is
+                // forgotten; an endpoint's refusal of threads is not, because
+                // it outlasts any one thread.
                 if let Some(thread) = self.seats.get_mut(&seat) {
                     thread.open = None;
                     thread.pending = None;
+                    thread.lost = None;
                 }
                 return build_chat_request(endpoint, &decision.prompt).map(full);
             }
@@ -307,15 +304,23 @@ impl LlmThreadMemory {
             return build_chat_request(endpoint, &decision.prompt).map(full);
         }
 
+        let conversation = Conversation {
+            game_number,
+            endpoint: target,
+            system: fingerprint_of([decision.prompt.system.as_str()]),
+        };
+        let create_origin = if thread.lost.as_ref() == Some(&conversation) {
+            ThreadOrigin::Recovery
+        } else {
+            ThreadOrigin::Fresh
+        };
         let turn = ThreadTurnId(self.next_turn);
         self.next_turn = self.next_turn.wrapping_add(1);
         let mut next = PendingTurn {
             turn,
-            game_number,
-            endpoint: target,
-            system: fingerprint_of([decision.prompt.system.as_str()]),
+            conversation,
             seen_through: history.iter().map(|entry| entry.seq).max(),
-            shape: PendingShape::Create(thread.next_create),
+            shape: PendingShape::Create(create_origin),
         };
         let continuation = thread
             .open
@@ -364,8 +369,9 @@ impl LlmThreadMemory {
     ///   continues from. One that cannot be continued (a refusal, or no `id`)
     ///   leaves the seat with no thread, so its next decision starts a new one.
     /// - **A thread error.** The seat's thread is dropped, so the same decision
-    ///   asked again goes out as a fresh create; after `thread_not_found` that
-    ///   create is a recovery. When the API
+    ///   asked again goes out as a fresh create. After `thread_not_found` that
+    ///   create is a recovery of the lost conversation; a create for another
+    ///   one (a new account, game or system prompt) is not. When the API
     ///   refuses threads outright (`thread_unsupported_request`), or loses a
     ///   recovery thread at its first continue (`thread_not_found`), the
     ///   endpoint is remembered and the seat's decisions to it are
@@ -406,13 +412,13 @@ impl LlmThreadMemory {
                     PendingShape::Create(origin) => origin,
                     PendingShape::Continue(_) => ThreadOrigin::Continued,
                 };
-                thread.next_create = ThreadOrigin::Fresh;
+                // The seat has an answered turn again: no conversation is
+                // waiting on a recovery any more.
+                thread.lost = None;
                 thread.open =
                     continuable_message_id(reply.provider, reply.body).map(|message_id| {
                         OpenThread {
-                            game_number: answered.game_number,
-                            endpoint: answered.endpoint,
-                            system: answered.system,
+                            conversation: answered.conversation,
                             message_id,
                             seen_through: answered.seen_through,
                             context_tokens: token_usage(reply.provider, reply.body)
@@ -426,24 +432,23 @@ impl LlmThreadMemory {
                 thread.open = None;
                 match code {
                     ThreadErrorCode::UnsupportedRequest => {
-                        thread.refused = Some(answered.endpoint);
+                        thread.refused = Some(answered.conversation.endpoint);
                     }
                     ThreadErrorCode::NotFound
                         if answered.shape == PendingShape::Continue(ThreadOrigin::Recovery) =>
                     {
-                        thread.refused = Some(answered.endpoint);
+                        thread.refused = Some(answered.conversation.endpoint);
                     }
                     // Anthropic's replay rule is about a thread the API lost:
-                    // the create that replaces one is a recovery.
-                    ThreadErrorCode::NotFound => thread.next_create = ThreadOrigin::Recovery,
+                    // the create that replaces it, in the same conversation,
+                    // is a recovery.
+                    ThreadErrorCode::NotFound => thread.lost = Some(answered.conversation),
                     // The API still holds this thread, or holds it with other
-                    // fixed fields; nothing was lost, so the create that
+                    // fixed fields. Nothing was lost, so the create that
                     // replaces it is an ordinary one.
                     ThreadErrorCode::AlreadyContinued
                     | ThreadErrorCode::ContinueInFlight
-                    | ThreadErrorCode::FingerprintMismatch => {
-                        thread.next_create = ThreadOrigin::Fresh;
-                    }
+                    | ThreadErrorCode::FingerprintMismatch => {}
                 }
             }
             Err(
@@ -1211,9 +1216,9 @@ mod tests {
             "msg_1",
         );
 
-        // Game two's pregame is logged at turn 0, then its first turn begins.
+        // Game two's start is logged at turn 0, then its first turn begins.
         let mut history = game_one;
-        for (seq, turn, text) in [(4, 0, "game two mulligan"), (5, 1, "game two land")] {
+        for (seq, turn, text) in [(4, 0, "game two started"), (5, 1, "game two land")] {
             let mut entry = log(seq + 1).pop().unwrap();
             entry.turn = turn;
             entry.segments = vec![LogSegment::Text(text.to_string())];
@@ -1412,6 +1417,73 @@ mod tests {
                 build_chat_request(&threaded(), &decision.prompt).unwrap()
             );
         }
+    }
+
+    /// A recovery belongs to the conversation it replaces. The seat's thread
+    /// on one account is lost and the create replacing it fails before the
+    /// API stores anything; a create for another account, or for the next
+    /// game, is then an ordinary thread with a first recovery of its own, while
+    /// the lost conversation itself still falls back after a second loss.
+    #[test]
+    fn a_recovery_belongs_to_the_conversation_it_replaces() {
+        let mut other_account = threaded();
+        other_account.api_key = "other-secret".to_string();
+        let game_one = |revision| decision_in_game(revision, AiDifficulty::Medium, 1);
+        let game_two = |revision| decision_in_game(revision, AiDifficulty::Medium, 2);
+        let lose_and_fail_the_recovery = |memory: &mut LlmThreadMemory| {
+            answer(memory, &threaded(), &game_one(1), &log(2), "msg_1");
+            memory
+                .decision_request(SEAT, &threaded(), &game_one(2), &log(3))
+                .unwrap();
+            lose_thread(memory, ThreadErrorCode::NotFound);
+            let recovery = memory
+                .decision_request(SEAT, &threaded(), &game_one(2), &log(3))
+                .unwrap()
+                .request;
+            assert!(is_create(&recovery));
+            let unavailable = LlmReply {
+                provider: LlmProvider::Anthropic,
+                status: 503,
+                body: "{}",
+            };
+            let error = LlmError::Provider {
+                detail: "overloaded".to_string(),
+            };
+            memory.record_reply(SEAT, pending_turn(memory), unavailable, Err(&error));
+        };
+
+        for (config, next) in [(&other_account, game_one(3)), (&threaded(), game_two(3))] {
+            let mut memory = LlmThreadMemory::new();
+            lose_and_fail_the_recovery(&mut memory);
+            answer(&mut memory, config, &next, &log(4), "msg_2");
+            memory
+                .decision_request(SEAT, config, &next, &log(5))
+                .unwrap();
+            lose_thread(&mut memory, ThreadErrorCode::NotFound);
+            let recovered = memory
+                .decision_request(SEAT, config, &next, &log(5))
+                .unwrap()
+                .request;
+            assert!(is_create(&recovered), "{}", body(&recovered));
+        }
+
+        // The lost conversation's own recovery still falls back when its
+        // first continue is lost too.
+        let mut memory = LlmThreadMemory::new();
+        lose_and_fail_the_recovery(&mut memory);
+        answer(&mut memory, &threaded(), &game_one(2), &log(3), "msg_2");
+        memory
+            .decision_request(SEAT, &threaded(), &game_one(3), &log(4))
+            .unwrap();
+        lose_thread(&mut memory, ThreadErrorCode::NotFound);
+        let after = memory
+            .decision_request(SEAT, &threaded(), &game_one(3), &log(4))
+            .unwrap()
+            .request;
+        assert_eq!(
+            after,
+            build_chat_request(&threaded(), &game_one(3).prompt).unwrap()
+        );
     }
 
     /// Only a recovery thread's first continue counts: a thread that has been

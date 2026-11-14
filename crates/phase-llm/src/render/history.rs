@@ -668,13 +668,15 @@ mod tests {
 
     #[test]
     fn a_best_of_three_log_is_cut_where_the_game_in_progress_began() {
-        let mut game_one_pregame = entry(0, "game one mulligan", LogImportance::Essential);
-        game_one_pregame.seq = 0;
-        let mut history = vec![game_one_pregame];
+        // As the engine logs it: a game's start at turn 0, and its first turn,
+        // mulligans included, from turn 1.
+        let mut game_one_start = entry(0, "game one started", LogImportance::Essential);
+        game_one_start.seq = 0;
+        let mut history = vec![game_one_start];
         history.extend(game(3));
         let mut game_two_start = entry(0, "game two started", LogImportance::Essential);
         game_two_start.seq = 100;
-        let game_two_mulligan = entry(0, "game two mulligan", LogImportance::Essential);
+        let game_two_mulligan = entry(1, "game two mulligan", LogImportance::Essential);
         let game_two_turn = entry(1, "game two cast", LogImportance::Essential);
         history.extend([game_two_start, game_two_mulligan, game_two_turn]);
 
