@@ -59,7 +59,9 @@ pub use game_decision::{
     build_game_decision_prompt, decision_fingerprint, information_fingerprint, select_action,
     select_action_from_response, GameDecisionRequest, LlmActionSelection, LlmDecisionMemory,
 };
-pub use game_thread::{DecisionHttpRequest, LlmThreadMemory, THREAD_CONTEXT_BUDGET_TOKENS};
+pub use game_thread::{
+    DecisionHttpRequest, LlmThreadMemory, ThreadTurnId, THREAD_CONTEXT_BUDGET_TOKENS,
+};
 pub use probe::{build_probe_request, connection_probe_prompt, validate_probe_response};
 pub use prompt::{difficulty_brief, LlmChoice, LlmPrompt};
 pub use provider::{

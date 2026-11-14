@@ -27,7 +27,8 @@ use crate::prompt::{
 use crate::render::action::{describe_action, describe_waiting_for, primary_object_name};
 use crate::render::game::{render_board, GameRenderOptions};
 use crate::render::history::{
-    push_history, push_since_last_decision, unseen_timeline_entries, HistoryBudget, TurnCycle,
+    current_game, push_history, push_since_last_decision, unseen_timeline_entries, HistoryBudget,
+    TurnCycle,
 };
 use crate::wire::{completion_from_response, LlmReply};
 
@@ -58,8 +59,9 @@ struct ThreadUpdateParts {
     /// The seat's difficulty-driven history window, which also bounds how much
     /// of what happened since its last answer a continue may carry.
     history: HistoryBudget,
-    /// The game of the match the decision is part of, or `None` for a
-    /// decision between games (sideboarding, the play/draw choice).
+    /// The game of the match a message thread for this decision belongs to, or
+    /// `None` for a decision that belongs to no seat's game: one between games
+    /// (the play/draw choice), or one another player makes for this seat.
     game: Option<u8>,
 }
 
@@ -67,13 +69,16 @@ impl GameDecisionRequest {
     /// The game of the match a message thread for this decision belongs to,
     /// or `None` when the decision may not use a thread at all.
     ///
-    /// Two kinds of decision may not:
+    /// Three kinds of decision may not:
     ///
     /// - one by the two lowest difficulties, which deliberately reason from a
     ///   near-term window ([`crate::prompt::history_budget`]) that a thread,
-    ///   holding every earlier turn, would undo; and
-    /// - one between games (sideboarding, the play/draw choice), which belongs
-    ///   to no game.
+    ///   holding every earlier turn, would undo;
+    /// - one between games (the play/draw choice), which belongs to no game;
+    ///   and
+    /// - one another player makes for this seat, while they control its turn:
+    ///   a thread holds the seat's own reasoning, which the controller must
+    ///   neither read nor add to.
     ///
     /// A thread never continues across games. The next game of a match
     /// replaces the game in place without clearing any memory, so the game
@@ -95,19 +100,25 @@ impl GameDecisionRequest {
     /// stated outside the fence. The reply contract is not repeated: it is in
     /// the system prompt the thread was created with.
     ///
-    /// When the log handed over no longer reaches back to `since`, or more was
+    /// When the log handed over no longer reaches back past `since`, or more was
     /// logged than the seat's history window shows, a continue would have to
     /// drop some of it, where the full request summarizes it per turn; `None`
     /// tells the caller to start a new thread instead.
     pub fn thread_update(&self, history: &[GameLogEntry], since: Option<u32>) -> Option<String> {
-        // The client hands over only its newest entries, so the log must still
-        // reach back to the entry after `since`: a gap would lose events
-        // without a trace, and only the full request can stand in for them.
-        if let Some(seen) = since {
-            let oldest = history.iter().map(|entry| entry.seq).min();
-            if !oldest.is_some_and(|oldest| oldest <= seen.saturating_add(1)) {
-                return None;
-            }
+        // The client numbers its log from 0 and hands over only its newest
+        // entries, so the log must still reach back to the first entry the
+        // thread has not seen: a gap would lose events without a trace, and
+        // only the full request can stand in for them.
+        let first_unseen = since.map_or(0, |seen| seen.saturating_add(1));
+        let reaches_back = match history.iter().map(|entry| entry.seq).min() {
+            Some(oldest) => oldest <= first_unseen,
+            // Nothing handed over: nothing can be missing from a thread that
+            // has seen nothing, but a thread that has seen entries has lost
+            // its place.
+            None => since.is_none(),
+        };
+        if !reaches_back {
+            return None;
         }
         let unseen = unseen_timeline_entries(history, since);
         if unseen.len() > self.update.history.current_cycle_entries {
@@ -404,6 +415,9 @@ pub fn build_game_decision_prompt(
         });
     }
 
+    // A best-of-three's next game replaces the game in place while the log
+    // runs on; the prompt describes the game in progress only.
+    let history = current_game(history);
     let viewer = contract.semantic_owner;
     // The engine's own visibility authority decides what this seat may read.
     let visible = filter_state_for_viewer(state, viewer);
@@ -473,7 +487,9 @@ pub fn build_game_decision_prompt(
             live_position: format!("{live_board}\n{waiting_for}"),
             options: options_section,
             history: render.history,
-            game: (state.match_phase == MatchPhase::InGame).then_some(state.game_number),
+            game: (state.match_phase == MatchPhase::InGame
+                && contract.authorized_actor == contract.semantic_owner)
+                .then_some(state.game_number),
         },
     })
 }

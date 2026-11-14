@@ -63,6 +63,7 @@ interface TestAdapter {
   getAiActionProposalFromLlmResponse?: (
     playerId: number,
     fingerprint: string,
+    threadTurn: number | null,
     provider: string,
     status: number,
     responseBody: string,
@@ -425,7 +426,7 @@ describe("LLM-driven AI seats", () => {
     expect(JSON.parse(endpointJson)).toMatchObject({ provider: "OpenAi", apiKey: "default-key" });
     expect(llmMocks.executeLlmRequest).toHaveBeenCalledWith(HTTP_SPEC, expect.anything());
     expect(getAiActionProposalFromLlmResponse).toHaveBeenCalledWith(
-      1, "default-fp", "OpenAi", 200, '{"choice":1}',
+      1, "default-fp", null, "OpenAi", 200, '{"choice":1}',
     );
     expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(llmProposal);
     controller.dispose();
@@ -489,6 +490,7 @@ describe("LLM-driven AI seats", () => {
     expect(getAiActionProposalFromLlmResponse).toHaveBeenCalledWith(
       1,
       "fp-1",
+      null,
       "OpenAi",
       200,
       '{"choice":1}',
@@ -726,6 +728,7 @@ describe("LLM-driven AI seats", () => {
     expect(getAiActionProposalFromLlmResponse).toHaveBeenCalledWith(
       1,
       "fp-1",
+      null,
       "OpenAi",
       429,
       expect.any(String),
@@ -823,6 +826,7 @@ describe("LLM seats on a message thread", () => {
     error: "the provider refused the message thread (thread_not_found)",
     errorKind: { kind: "threadUnavailable" },
   };
+  const THREAD_TURN = 7;
 
   function threadedAdapter(resolve: () => AiLlmProposalResult) {
     const heuristic = proposal(PASS, "heuristic");
@@ -831,6 +835,7 @@ describe("LLM seats on a message thread", () => {
       optionCount: 2,
       promptChars: 100,
       request: HTTP_SPEC,
+      threadTurn: THREAD_TURN,
     }));
     const getAiActionProposalFromLlmResponse = vi.fn(async () => resolve());
     storeState.adapter = {
@@ -885,6 +890,48 @@ describe("LLM seats on a message thread", () => {
       expect.stringContaining("reply was refused"),
       expect.anything(),
     );
+    controller.dispose();
+  });
+
+  it("hands the engine back the thread turn the request was built as", async () => {
+    bindSeatToProvider();
+    const adapter = threadedAdapter(() => ({ proposal: proposal(CAST, "llm-bound") }));
+    endGameOnDispatch();
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await runOnce();
+
+    expect(adapter.getAiActionProposalFromLlmResponse).toHaveBeenCalledWith(
+      1,
+      "fp-1",
+      THREAD_TURN,
+      "OpenAi",
+      200,
+      "{}",
+    );
+    controller.dispose();
+  });
+
+  it("does not ask again for a decision that moved on while its reply was read", async () => {
+    bindSeatToProvider();
+    const adapter = threadedAdapter(() => {
+      // The game moves on while the engine reads the reply.
+      storeState.gameSessionGeneration += 1;
+      return THREAD_LOST;
+    });
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await runOnce();
+
+    expect(adapter.getAiActionProposalFromLlmResponse).toHaveBeenCalledTimes(1);
+    expect(adapter.buildLlmDecisionRequest).toHaveBeenCalledTimes(1);
+    expect(llmMocks.executeLlmRequest).toHaveBeenCalledTimes(1);
     controller.dispose();
   });
 

@@ -4878,10 +4878,10 @@ mod restored_card_db_requirements_tests {
         };
         LLM_THREAD_MEMORY.with(|cell| {
             let mut memory = cell.borrow_mut();
-            memory
+            let built = memory
                 .decision_request(player, &endpoint, &decision, &[])
                 .expect("a threaded request builds");
-            memory.record_reply(player, &decision.fingerprint, reply, Ok(()));
+            memory.record_reply(player, built.thread_turn, reply, Ok(()));
             assert!(memory.has_open_thread(player));
         });
     }
@@ -4973,9 +4973,13 @@ mod restored_card_db_requirements_tests {
         status: u16,
         body: &serde_json::Value,
     ) -> serde_json::Value {
+        let thread_turn = built["threadTurn"]
+            .as_u64()
+            .map(|turn| u32::try_from(turn).expect("a thread turn id"));
         get_ai_action_proposal_from_llm_response_inner(
             seat.0,
             built["fingerprint"].as_str().expect("a fingerprint"),
+            thread_turn,
             "Anthropic",
             status,
             &body.to_string(),
@@ -5145,6 +5149,42 @@ mod restored_card_db_requirements_tests {
             thread_of(&next_game),
             serde_json::json!({ "type": "create" })
         );
+
+        clear_game_state();
+    }
+
+    /// CR 723.5: while another player controls the seat's turn, they make the
+    /// seat's decisions. Those go out as today's request, so the controller
+    /// neither reads nor adds to the seat's conversation, and once control
+    /// ends the seat starts a new thread.
+    #[test]
+    fn a_turn_another_player_controls_uses_no_thread() {
+        let seat = PlayerId(1);
+        let controller = PlayerId(0);
+        install_llm_decision(seat);
+        let choice = non_pass_choice(seat);
+        let first = build_llm_decision(seat);
+        resolve_llm_reply(seat, &first, 200, &anthropic_reply("msg_1", choice));
+
+        let set_controller = |turn_controller: Option<PlayerId>| {
+            with_installed_state_mut(|state| {
+                state.turn_decision_controller = turn_controller;
+                state.priority_player = turn_controller.unwrap_or(seat);
+            })
+            .expect("the game is installed");
+        };
+        set_controller(Some(controller));
+        let controlled = build_llm_decision(seat);
+        assert_eq!(
+            thread_of(&controlled),
+            serde_json::Value::Null,
+            "{controlled}"
+        );
+        assert!(controlled["threadTurn"].is_null(), "{controlled}");
+
+        set_controller(None);
+        let own = build_llm_decision(seat);
+        assert_eq!(thread_of(&own), serde_json::json!({ "type": "create" }));
 
         clear_game_state();
     }
@@ -6791,6 +6831,9 @@ fn build_llm_decision_request_inner(
             // provider, including those that report no token counts.
             "promptChars": http.prompt_chars,
             "request": http.request,
+            // Handed back with the reply, so the reply is recorded against
+            // the request that produced it and no other.
+            "threadTurn": http.thread_turn,
         })
     })
 }
@@ -6802,10 +6845,14 @@ fn build_llm_decision_request_inner(
 /// selected action is admitted only if that contract contains it. There is
 /// intentionally no endpoint by which model text becomes a `GameAction` without
 /// this check.
+///
+/// `thread_turn` is the `threadTurn` the request was built with
+/// ([`build_llm_decision_request`]), absent for a self-contained request.
 #[wasm_bindgen(js_name = getAiActionProposalFromLlmResponse)]
 pub fn get_ai_action_proposal_from_llm_response(
     player_id: u8,
     fingerprint: &str,
+    thread_turn: Option<u32>,
     provider_label: &str,
     status: u16,
     response_body: &str,
@@ -6813,6 +6860,7 @@ pub fn get_ai_action_proposal_from_llm_response(
     get_ai_action_proposal_from_llm_response_inner(
         player_id,
         fingerprint,
+        thread_turn,
         provider_label,
         status,
         response_body,
@@ -6825,6 +6873,7 @@ pub fn get_ai_action_proposal_from_llm_response(
 fn get_ai_action_proposal_from_llm_response_inner(
     player_id: u8,
     fingerprint: &str,
+    thread_turn: Option<u32>,
     provider_label: &str,
     status: u16,
     response_body: &str,
@@ -6835,7 +6884,8 @@ fn get_ai_action_proposal_from_llm_response_inner(
         body: response_body,
     };
     // What the provider reports having spent, whether or not the reply is
-    // usable: a refused reply still consumed the prompt. Diagnostic only.
+    // usable: a refused reply still consumed the prompt. Reported for
+    // measurement; the thread memory reads its own copy from the reply.
     let usage = phase_llm::token_usage(reply.provider, response_body);
     with_installed_state_mut(|state| {
         engine::game::layers::flush_layers(state);
@@ -6847,7 +6897,7 @@ fn get_ai_action_proposal_from_llm_response_inner(
         LLM_THREAD_MEMORY.with(|cell| {
             cell.borrow_mut().record_reply(
                 semantic_owner,
-                fingerprint,
+                thread_turn.map(phase_llm::ThreadTurnId),
                 reply,
                 admitted.as_ref().map(|_| ()),
             )

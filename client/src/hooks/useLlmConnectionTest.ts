@@ -40,11 +40,20 @@ export function useLlmConnectionTest(
   }, []);
 
   // Any change to what is being tested invalidates a probe already running, and
-  // unmounting abandons it outright.
+  // unmounting abandons it outright. The decision context is part of it: an
+  // opted-in profile is probed with the message-thread request a game sends.
   useEffect(() => {
     abandon();
     setTest({ status: "idle" });
-  }, [profile.provider, profile.baseUrl, profile.model, profile.apiKey, abandon, setTest]);
+  }, [
+    profile.provider,
+    profile.baseUrl,
+    profile.model,
+    profile.apiKey,
+    profile.decisionContext,
+    abandon,
+    setTest,
+  ]);
   useEffect(() => abandon, [abandon]);
 
   return useCallback(() => {

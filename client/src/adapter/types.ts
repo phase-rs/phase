@@ -5833,6 +5833,12 @@ export interface LlmDecisionRequestResult {
   /** Characters of prompt the request carries (system + user). */
   promptChars?: number;
   request?: LlmHttpRequestSpec;
+  /**
+   * The message-thread turn this request is, or `null` for a self-contained
+   * request. Handed back with the reply, so the engine records the reply
+   * against the request that produced it and no other.
+   */
+  threadTurn?: number | null;
   error?: string;
   /** The engine's typed refusal (`phase_llm::LlmError`), when it carries one. */
   errorKind?: { kind: string };
@@ -5939,10 +5945,14 @@ export interface EngineAdapter {
     endpointJson: string,
     historyJson: string,
   ): Promise<LlmDecisionRequestResult | null>;
-  /** Binds an LLM response to an engine-issued proposal, or reports why it could not. */
+  /**
+   * Binds an LLM response to an engine-issued proposal, or reports why it could
+   * not. `threadTurn` is the built request's `threadTurn`.
+   */
   getAiActionProposalFromLlmResponse?(
     playerId: number,
     fingerprint: string,
+    threadTurn: number | null,
     provider: string,
     status: number,
     responseBody: string,

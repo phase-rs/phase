@@ -18,15 +18,18 @@
 //!   [`GameDecisionRequest::thread_update`]: what was logged since the seat's
 //!   last answered decision, the live position, and the options — and
 //!   continues from the id of the seat's last accepted reply.
-//! - **Commit on accept only.** A request is remembered as pending, keyed by
-//!   its decision fingerprint, and becomes the thread's new turn only when its
-//!   reply is accepted ([`LlmThreadMemory::record_reply`]). A failed or
+//! - **Commit on accept only.** A request is remembered as pending under its
+//!   own turn id ([`ThreadTurnId`]), and becomes the thread's new turn only
+//!   when its own reply is accepted ([`LlmThreadMemory::record_reply`]), so a
+//!   cancelled attempt's late reply never touches the request that replaced
+//!   it. A failed or
 //!   cancelled decision leaves the thread at its last answered turn, with one
 //!   exception: a 2xx reply the engine refuses was still stored by the API,
 //!   and a reply id can be continued only once, so the thread cannot go on
 //!   from its last answered turn and the seat's next decision starts a new one.
 //! - **Start over.** A new thread is created, with the full request, when the
-//!   match moves on to its next game, when the endpoint or model changes,
+//!   match moves on to its next game, when the endpoint, API key or model
+//!   changes,
 //!   when the system prompt changes (difficulty, format, or the table itself),
 //!   when the last reply reported more context than
 //!   [`THREAD_CONTEXT_BUDGET_TOKENS`] or no usage at all, when the log was
@@ -37,13 +40,16 @@
 //! - **No thread at all.** The two lowest difficulties never use one: they
 //!   deliberately reason from a near-term window, which a thread would undo.
 //!   Neither does a decision between games (the play/draw choice), which
-//!   belongs to no game ([`GameDecisionRequest::thread_game`]).
+//!   belongs to no game, nor one another player makes for the seat while they
+//!   control its turn, which must neither read nor add to the seat's own
+//!   reasoning ([`GameDecisionRequest::thread_game`]).
 //! - **Thread errors.** A thread is best effort: the API drops one after five
 //!   idle minutes, among other reasons. On a thread error the seat's thread is
 //!   dropped ([`LlmThreadMemory::record_reply`]) and the caller asks the same
 //!   decision once more, which then goes out as a fresh create. An API
-//!   that refuses threads outright is answered with self-contained requests
-//!   for that endpoint for as long as this memory lasts.
+//!   that refuses threads outright, or loses the recovery thread at its first
+//!   continue, is answered with self-contained requests for that endpoint for
+//!   as long as this memory lasts.
 //!
 //! A thread belongs to one seat of one game. Nothing in it reaches another seat
 //! or the shared game log. The owner of this memory clears it when a new game
@@ -51,6 +57,8 @@
 //! game in place without a clear, and the game number keeps its threads apart.
 
 use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
 
 use engine::types::log::GameLogEntry;
 use engine::types::player::PlayerId;
@@ -85,6 +93,33 @@ pub struct DecisionHttpRequest {
     /// is measured by, for every provider, including those that report no
     /// token counts.
     pub prompt_chars: usize,
+    /// The thread turn this request is, for a request sent through a thread.
+    /// The transport hands it back with the reply ([`LlmThreadMemory::record_reply`]),
+    /// so a reply is only ever recorded against the request that produced it.
+    pub thread_turn: Option<ThreadTurnId>,
+}
+
+/// Identifies one threaded request among a seat's, so a reply can be bound to
+/// the request that produced it rather than to whichever request was built
+/// last for the same decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ThreadTurnId(pub u32);
+
+/// How the thread a request creates or continues came to be, which decides
+/// what losing it means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThreadOrigin {
+    /// Created by an ordinary decision.
+    Fresh,
+    /// Created to replace a thread the API had just lost, and not continued
+    /// since. Anthropic: "If a continue request still returns a 404 error right
+    /// after you replay, the API might be unable to store that conversation …
+    /// Send it without `thread`." A seat whose recovery thread is lost at its
+    /// first continue therefore sends self-contained requests from then on.
+    Recovery,
+    /// Continued at least once.
+    Continued,
 }
 
 /// Every LLM seat's message thread for the game in progress.
@@ -96,30 +131,50 @@ pub struct DecisionHttpRequest {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LlmThreadMemory {
     seats: HashMap<PlayerId, SeatThread>,
+    /// The id the next threaded request gets.
+    next_turn: u32,
 }
 
 /// One seat's thread state.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SeatThread {
     /// The thread the seat's next decision may continue.
     open: Option<OpenThread>,
-    /// The threaded request in flight, committed only when its reply is
+    /// The threaded request in flight, committed only when its own reply is
     /// accepted.
     pending: Option<PendingTurn>,
-    /// An endpoint whose API refused threads (`thread_unsupported_request`).
-    /// The seat's decisions to it are self-contained for as long as this
-    /// memory lasts (the rest of the match), because a fresh create would only
-    /// be refused again.
+    /// What the seat's next create is: [`ThreadOrigin::Recovery`] right after
+    /// the API lost the seat's thread, [`ThreadOrigin::Fresh`] otherwise.
+    next_create: ThreadOrigin,
+    /// An endpoint the seat sends self-contained requests to for as long as
+    /// this memory lasts (the rest of the match): its API refused threads
+    /// (`thread_unsupported_request`), or lost a recovery thread at its first
+    /// continue. A fresh create would only be refused, or lost, again.
     refused: Option<ThreadEndpoint>,
 }
 
-/// The endpoint a thread lives on. A thread is stored by the account that
-/// created it and keeps one model, so a different endpoint or model is a
-/// different thread.
+impl Default for SeatThread {
+    fn default() -> Self {
+        SeatThread {
+            open: None,
+            pending: None,
+            next_create: ThreadOrigin::Fresh,
+            refused: None,
+        }
+    }
+}
+
+/// The endpoint and account a thread lives on. A thread is stored by the
+/// account that created it and keeps one model, so a different endpoint, key
+/// or model is a different thread, and an account's refusal of threads says
+/// nothing about another account's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ThreadEndpoint {
     base_url: String,
     model: String,
+    /// A fingerprint of the API key, never the key itself. It tells two
+    /// credentials apart and is never serialized, logged or sent anywhere.
+    credential: String,
 }
 
 impl ThreadEndpoint {
@@ -127,6 +182,7 @@ impl ThreadEndpoint {
         Ok(ThreadEndpoint {
             base_url: config.resolved_base_url()?,
             model: config.model.trim().to_string(),
+            credential: fingerprint_of([config.api_key.trim()]),
         })
     }
 }
@@ -149,21 +205,31 @@ struct OpenThread {
     /// was empty.
     seen_through: Option<u32>,
     /// How much context the last reply reported ([`context_tokens`]), or
-    /// `None` when it reported no usage.
+    /// `None` when it reported no usable usage.
     context_tokens: Option<u64>,
+    origin: ThreadOrigin,
 }
 
 /// A threaded request awaiting its reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingTurn {
-    /// The decision the request was built for. A reply is committed only for
-    /// this decision.
-    fingerprint: String,
+    /// The request this is. A reply is committed only against its own request.
+    turn: ThreadTurnId,
     game_number: u8,
     endpoint: ThreadEndpoint,
     system: String,
     /// The newest log entry the request showed the seat.
     seen_through: Option<u32>,
+    shape: PendingShape,
+}
+
+/// Whether a pending request creates a thread or continues one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingShape {
+    /// A create, and the origin the thread it creates will have.
+    Create(ThreadOrigin),
+    /// A continue of a thread of this origin.
+    Continue(ThreadOrigin),
 }
 
 impl OpenThread {
@@ -197,9 +263,10 @@ impl LlmThreadMemory {
     /// not opt in, and every protocol but Anthropic Messages — and a seat whose
     /// decision may not use one ([`GameDecisionRequest::thread_game`]) get
     /// exactly [`build_chat_request`]'s request, and any thread the seat held
-    /// is forgotten (an endpoint's refusal of threads is kept). Otherwise the request continues the seat's thread when it
-    /// can and creates a new one when it cannot, and is remembered as pending
-    /// until [`Self::record_reply`].
+    /// is forgotten (an endpoint's refusal of threads is kept). Otherwise the
+    /// request continues the seat's thread when it can and creates a new one
+    /// when it cannot, and is remembered as pending until
+    /// [`Self::record_reply`].
     ///
     /// `history` is the log handed to the prompt builder; its newest entry is
     /// what the seat will have seen once this decision is answered.
@@ -217,6 +284,7 @@ impl LlmThreadMemory {
         let full = |request| DecisionHttpRequest {
             request,
             prompt_chars: decision.prompt.char_count(),
+            thread_turn: None,
         };
         let game_number = match decision.thread_game() {
             Some(game_number) if endpoint.uses_message_threads() => game_number,
@@ -237,12 +305,15 @@ impl LlmThreadMemory {
             return build_chat_request(endpoint, &decision.prompt).map(full);
         }
 
-        let next = PendingTurn {
-            fingerprint: decision.fingerprint.clone(),
+        let turn = ThreadTurnId(self.next_turn);
+        self.next_turn = self.next_turn.wrapping_add(1);
+        let mut next = PendingTurn {
+            turn,
             game_number,
             endpoint: target,
             system: fingerprint_of([decision.prompt.system.as_str()]),
             seen_through: history.iter().map(|entry| entry.seq).max(),
+            shape: PendingShape::Create(thread.next_create),
         };
         let continuation = thread
             .open
@@ -254,28 +325,36 @@ impl LlmThreadMemory {
                     .map(|update| (open, update))
             });
         let request = match continuation {
-            Some((open, update)) => DecisionHttpRequest {
-                request: build_thread_request(
+            Some((open, update)) => {
+                next.shape = PendingShape::Continue(open.origin);
+                DecisionHttpRequest {
+                    request: build_thread_request(
+                        endpoint,
+                        ThreadTurn::Continue {
+                            previous_message_id: &open.message_id,
+                            user: &update,
+                        },
+                    )?,
+                    prompt_chars: update.chars().count(),
+                    thread_turn: Some(turn),
+                }
+            }
+            None => DecisionHttpRequest {
+                thread_turn: Some(turn),
+                ..full(build_thread_request(
                     endpoint,
-                    ThreadTurn::Continue {
-                        previous_message_id: &open.message_id,
-                        user: &update,
+                    ThreadTurn::Create {
+                        prompt: &decision.prompt,
                     },
-                )?,
-                prompt_chars: update.chars().count(),
+                )?)
             },
-            None => full(build_thread_request(
-                endpoint,
-                ThreadTurn::Create {
-                    prompt: &decision.prompt,
-                },
-            )?),
         };
         thread.pending = Some(next);
         Ok(request)
     }
 
-    /// Record what became of the reply to `seat`'s decision `fingerprint`.
+    /// Record what became of the reply to `seat`'s threaded request `turn`
+    /// (the [`DecisionHttpRequest::thread_turn`] it was built with).
     ///
     /// `outcome` is the engine's verdict on the reply:
     ///
@@ -283,10 +362,15 @@ impl LlmThreadMemory {
     ///   continues from. One that cannot be continued (a refusal, or no `id`)
     ///   leaves the seat with no thread, so its next decision starts a new one.
     /// - **A thread error.** The seat's thread is dropped, so the same decision
-    ///   asked again goes out as a fresh create. When the API refuses threads
-    ///   outright (`thread_unsupported_request`), the endpoint is remembered and
-    ///   the seat's decisions to it are self-contained from then on, because a
-    ///   fresh create would only be refused again.
+    ///   asked again goes out as a fresh create, a recovery. When the API
+    ///   refuses threads outright (`thread_unsupported_request`), or loses a
+    ///   recovery thread at its first continue (`thread_not_found`), the
+    ///   endpoint is remembered and the seat's decisions to it are
+    ///   self-contained from then on, because a fresh create would only be
+    ///   refused, or lost, again. That second rule cannot tell a conversation
+    ///   the API cannot store from a recovery thread that aged out before its
+    ///   first continue; either way the seat then costs what it costs without
+    ///   threads.
     /// - **Any other refusal of a 2xx reply.** The API stored that turn after
     ///   the seat's last answered one, and an id can be continued only once, so
     ///   the seat's next decision starts a new thread instead of sending a
@@ -294,44 +378,55 @@ impl LlmThreadMemory {
     /// - **Any other failure.** A non-2xx reply stored nothing, so the thread
     ///   stays at the seat's last answered turn.
     ///
-    /// Nothing happens for a reply to a decision that was not sent through a
-    /// thread, or to a decision other than the one pending.
+    /// Nothing happens for a self-contained request (`turn` is `None`), or for
+    /// a reply to any request but the seat's pending one: a cancelled
+    /// attempt's late reply never touches the request that replaced it.
     pub fn record_reply(
         &mut self,
         seat: PlayerId,
-        fingerprint: &str,
+        turn: Option<ThreadTurnId>,
         reply: LlmReply<'_>,
         outcome: Result<(), &LlmError>,
     ) {
+        let Some(turn) = turn else {
+            return;
+        };
         let Some(thread) = self.seats.get_mut(&seat) else {
             return;
         };
-        let Some(turn) = thread
-            .pending
-            .take_if(|pending| pending.fingerprint == fingerprint)
-        else {
+        let Some(answered) = thread.pending.take_if(|pending| pending.turn == turn) else {
             return;
         };
         match outcome {
             Ok(()) => {
+                let origin = match answered.shape {
+                    PendingShape::Create(origin) => origin,
+                    PendingShape::Continue(_) => ThreadOrigin::Continued,
+                };
+                thread.next_create = ThreadOrigin::Fresh;
                 thread.open =
                     continuable_message_id(reply.provider, reply.body).map(|message_id| {
                         OpenThread {
-                            game_number: turn.game_number,
-                            endpoint: turn.endpoint,
-                            system: turn.system,
+                            game_number: answered.game_number,
+                            endpoint: answered.endpoint,
+                            system: answered.system,
                             message_id,
-                            seen_through: turn.seen_through,
+                            seen_through: answered.seen_through,
                             context_tokens: token_usage(reply.provider, reply.body)
                                 .as_ref()
                                 .and_then(context_tokens),
+                            origin,
                         }
                     });
             }
             Err(LlmError::ThreadUnavailable { code }) => {
                 thread.open = None;
-                if *code == ThreadErrorCode::UnsupportedRequest {
-                    thread.refused = Some(turn.endpoint);
+                let recovery_lost = *code == ThreadErrorCode::NotFound
+                    && answered.shape == PendingShape::Continue(ThreadOrigin::Recovery);
+                if *code == ThreadErrorCode::UnsupportedRequest || recovery_lost {
+                    thread.refused = Some(answered.endpoint);
+                } else {
+                    thread.next_create = ThreadOrigin::Recovery;
                 }
             }
             Err(
@@ -372,14 +467,14 @@ impl LlmThreadMemory {
 /// Anthropic's `input_tokens` is only the uncached remainder of the prompt,
 /// so the cache reads and cache writes are added back, and the reply itself is
 /// part of what the next turn carries. A reply that reports no input or output
-/// count cannot be measured, and its thread is not continued.
+/// count cannot be measured, and neither can one whose counts overflow (they
+/// come from across the network): its thread is not continued.
 fn context_tokens(usage: &TokenUsage) -> Option<u64> {
-    Some(
-        usage.input_tokens?
-            + usage.cached_input_tokens.unwrap_or(0)
-            + usage.cache_creation_input_tokens.unwrap_or(0)
-            + usage.output_tokens?,
-    )
+    usage
+        .input_tokens?
+        .checked_add(usage.cached_input_tokens.unwrap_or(0))?
+        .checked_add(usage.cache_creation_input_tokens.unwrap_or(0))?
+        .checked_add(usage.output_tokens?)
 }
 
 #[cfg(test)]
@@ -436,7 +531,13 @@ mod tests {
         revision: u64,
         difficulty: AiDifficulty,
     ) -> GameDecisionRequest {
-        let contract = AiDecisionContract {
+        build_game_decision_prompt(state, &decision_contract(revision), difficulty, None, &[])
+            .unwrap()
+    }
+
+    /// The seat's own two-option contract at `revision`.
+    fn decision_contract(revision: u64) -> AiDecisionContract {
+        AiDecisionContract {
             semantic_owner: SEAT,
             authorized_actor: SEAT,
             state_revision: revision,
@@ -450,8 +551,7 @@ mod tests {
                 metadata: ActionMetadata::for_actor(Some(SEAT), TacticalClass::Utility),
             })
             .collect(),
-        };
-        build_game_decision_prompt(state, &contract, difficulty, None, &[]).unwrap()
+        }
     }
 
     /// A log of `count` public events numbered `0..count`, as the client
@@ -492,30 +592,37 @@ mod tests {
         .to_string()
     }
 
-    /// The engine accepted `body`, a 2xx reply, as the answer to `fingerprint`.
-    fn accept_reply(
-        memory: &mut LlmThreadMemory,
-        fingerprint: &str,
-        provider: LlmProvider,
-        body: &str,
-    ) {
+    /// The seat's pending request, as the transport would hand it back.
+    fn pending_turn(memory: &LlmThreadMemory) -> Option<ThreadTurnId> {
+        memory
+            .seats
+            .get(&SEAT)
+            .and_then(|thread| thread.pending.as_ref())
+            .map(|pending| pending.turn)
+    }
+
+    /// The engine accepted `body`, a 2xx reply to the seat's pending request.
+    fn accept_reply(memory: &mut LlmThreadMemory, provider: LlmProvider, body: &str) {
+        let turn = pending_turn(memory);
         let reply = LlmReply {
             provider,
             status: 200,
             body,
         };
-        memory.record_reply(SEAT, fingerprint, reply, Ok(()));
+        memory.record_reply(SEAT, turn, reply, Ok(()));
     }
 
-    /// The API refused to continue the thread `fingerprint` was sent on.
-    fn lose_thread(memory: &mut LlmThreadMemory, fingerprint: &str, code: ThreadErrorCode) {
+    /// The API refused to continue the thread the seat's pending request was
+    /// sent on.
+    fn lose_thread(memory: &mut LlmThreadMemory, code: ThreadErrorCode) {
+        let turn = pending_turn(memory);
         let reply = LlmReply {
             provider: LlmProvider::Anthropic,
             status: 404,
             body: "{}",
         };
         let error = LlmError::ThreadUnavailable { code };
-        memory.record_reply(SEAT, fingerprint, reply, Err(&error));
+        memory.record_reply(SEAT, turn, reply, Err(&error));
     }
 
     /// Build `decision` for the seat and accept `id` as its answer.
@@ -530,12 +637,7 @@ mod tests {
             .decision_request(SEAT, config, decision, history)
             .unwrap()
             .request;
-        accept_reply(
-            memory,
-            &decision.fingerprint,
-            LlmProvider::Anthropic,
-            &reply(id, 900),
-        );
+        accept_reply(memory, LlmProvider::Anthropic, &reply(id, 900));
         spec
     }
 
@@ -636,12 +738,7 @@ mod tests {
             .decision_request(SEAT, &threaded(), &first, &log(4))
             .unwrap();
         assert_eq!(create.prompt_chars, first.prompt.char_count());
-        accept_reply(
-            &mut memory,
-            &first.fingerprint,
-            LlmProvider::Anthropic,
-            &reply("msg_1", 900),
-        );
+        accept_reply(&mut memory, LlmProvider::Anthropic, &reply("msg_1", 900));
 
         let second = decision(2, AiDifficulty::Medium);
         let continuation = memory
@@ -669,12 +766,12 @@ mod tests {
             .decision_request(SEAT, &threaded(), &unanswered, &log(6))
             .unwrap();
         // A reply to some other decision does not advance it either.
-        accept_reply(
-            &mut memory,
-            "not-this-decision",
-            LlmProvider::Anthropic,
-            &reply("msg_x", 900),
-        );
+        let elsewhere = LlmReply {
+            provider: LlmProvider::Anthropic,
+            status: 200,
+            body: &reply("msg_x", 900),
+        };
+        memory.record_reply(SEAT, Some(ThreadTurnId(u32::MAX)), elsewhere, Ok(()));
 
         let third = decision(3, AiDifficulty::Medium);
         let spec = memory
@@ -716,7 +813,8 @@ mod tests {
         let error = LlmError::Provider {
             detail: "HTTP 529: Overloaded".to_string(),
         };
-        memory.record_reply(SEAT, &second.fingerprint, overloaded, Err(&error));
+        let turn = pending_turn(&memory);
+        memory.record_reply(SEAT, turn, overloaded, Err(&error));
 
         let retry = memory
             .decision_request(SEAT, &threaded(), &second, &log(6))
@@ -753,7 +851,8 @@ mod tests {
             choice: 9,
             option_count: 2,
         };
-        memory.record_reply(SEAT, &second.fingerprint, stored, Err(&error));
+        let turn = pending_turn(&memory);
+        memory.record_reply(SEAT, turn, stored, Err(&error));
         assert!(!memory.has_open_thread(SEAT));
 
         let next = memory
@@ -791,7 +890,7 @@ mod tests {
                 .request;
             assert_eq!(continued_from(&lost), Some("msg_1".to_string()));
 
-            lose_thread(&mut memory, &second.fingerprint, code);
+            lose_thread(&mut memory, code);
             assert!(!memory.has_open_thread(SEAT), "{code:?}");
 
             let retry = memory
@@ -803,12 +902,7 @@ mod tests {
             assert_eq!(user_message(&retry), second.prompt.user, "{code:?}");
 
             // The recovered decision's reply starts the new thread.
-            accept_reply(
-                &mut memory,
-                &second.fingerprint,
-                LlmProvider::Anthropic,
-                &reply("msg_2", 900),
-            );
+            accept_reply(&mut memory, LlmProvider::Anthropic, &reply("msg_2", 900));
             let third = memory
                 .decision_request(
                     SEAT,
@@ -835,11 +929,7 @@ mod tests {
         memory
             .decision_request(SEAT, &threaded(), &first, &log(2))
             .unwrap();
-        lose_thread(
-            &mut memory,
-            &first.fingerprint,
-            ThreadErrorCode::UnsupportedRequest,
-        );
+        lose_thread(&mut memory, ThreadErrorCode::UnsupportedRequest);
 
         let today = build_chat_request(&threaded(), &first.prompt).unwrap();
         let retry = memory
@@ -847,12 +937,7 @@ mod tests {
             .unwrap()
             .request;
         assert_eq!(retry, today);
-        accept_reply(
-            &mut memory,
-            &first.fingerprint,
-            LlmProvider::Anthropic,
-            &reply("msg_1", 900),
-        );
+        accept_reply(&mut memory, LlmProvider::Anthropic, &reply("msg_1", 900));
         assert!(!memory.has_open_thread(SEAT));
 
         // Another endpoint is not covered by that refusal.
@@ -880,7 +965,6 @@ mod tests {
                 .unwrap();
             accept_reply(
                 &mut memory,
-                &first.fingerprint,
                 LlmProvider::Anthropic,
                 &reply("msg_1", input_tokens),
             );
@@ -922,12 +1006,7 @@ mod tests {
             },
         })
         .to_string();
-        accept_reply(
-            &mut memory,
-            &first.fingerprint,
-            LlmProvider::Anthropic,
-            &cached,
-        );
+        accept_reply(&mut memory, LlmProvider::Anthropic, &cached);
         let next = memory
             .decision_request(
                 SEAT,
@@ -953,12 +1032,7 @@ mod tests {
             "content": [{ "type": "text", "text": "{\"choice\": 0}" }],
         })
         .to_string();
-        accept_reply(
-            &mut memory,
-            &first.fingerprint,
-            LlmProvider::Anthropic,
-            &unmeasured,
-        );
+        accept_reply(&mut memory, LlmProvider::Anthropic, &unmeasured);
         let next = memory
             .decision_request(
                 SEAT,
@@ -1037,12 +1111,7 @@ mod tests {
                     build_chat_request(&threaded(), &decision.prompt).unwrap(),
                     "{difficulty:?}"
                 );
-                accept_reply(
-                    &mut memory,
-                    &decision.fingerprint,
-                    LlmProvider::Anthropic,
-                    &reply("msg", 900),
-                );
+                accept_reply(&mut memory, LlmProvider::Anthropic, &reply("msg", 900));
                 assert!(!memory.has_open_thread(SEAT), "{difficulty:?}");
             }
         }
@@ -1110,6 +1179,50 @@ mod tests {
         assert!(is_create(&next_game));
     }
 
+    /// The client's log runs on across the games of a match, so the next
+    /// game's first decision is handed the last game's entries too. Its new
+    /// thread is created with the game in progress only.
+    #[test]
+    fn the_next_games_thread_is_created_with_that_games_history_only() {
+        let game_one = log(4);
+        let mut memory = LlmThreadMemory::new();
+        answer(
+            &mut memory,
+            &threaded(),
+            &decision_in_game(1, AiDifficulty::Medium, 1),
+            &game_one,
+            "msg_1",
+        );
+
+        // Game two's pregame is logged at turn 0, then its first turn begins.
+        let mut history = game_one;
+        for (seq, turn, text) in [(4, 0, "game two mulligan"), (5, 1, "game two land")] {
+            let mut entry = log(seq + 1).pop().unwrap();
+            entry.turn = turn;
+            entry.segments = vec![LogSegment::Text(text.to_string())];
+            history.push(entry);
+        }
+        let mut state = GameState::default();
+        state.game_number = 2;
+        state.turn_number = 1;
+        let game_two = build_game_decision_prompt(
+            &state,
+            &decision_contract(2),
+            AiDifficulty::Medium,
+            None,
+            &history,
+        )
+        .unwrap();
+        let sent = memory
+            .decision_request(SEAT, &threaded(), &game_two, &history)
+            .unwrap()
+            .request;
+        assert!(is_create(&sent));
+        let prompt = user_message(&sent);
+        assert!(prompt.contains("game two land"), "{prompt}");
+        assert!(!prompt.contains("event 1"), "game one leaked: {prompt}");
+    }
+
     /// A decision between games belongs to no game: it is today's request,
     /// and it leaves no thread for the next game to continue.
     #[test]
@@ -1135,12 +1248,7 @@ mod tests {
             sent,
             build_chat_request(&threaded(), &play_draw.prompt).unwrap()
         );
-        accept_reply(
-            &mut memory,
-            &play_draw.fingerprint,
-            LlmProvider::Anthropic,
-            &reply("msg_2", 900),
-        );
+        accept_reply(&mut memory, LlmProvider::Anthropic, &reply("msg_2", 900));
         assert!(!memory.has_open_thread(SEAT));
 
         let next_game = memory
@@ -1164,11 +1272,7 @@ mod tests {
         memory
             .decision_request(SEAT, &threaded(), &first, &log(2))
             .unwrap();
-        lose_thread(
-            &mut memory,
-            &first.fingerprint,
-            ThreadErrorCode::UnsupportedRequest,
-        );
+        lose_thread(&mut memory, ThreadErrorCode::UnsupportedRequest);
 
         let mut between = GameState::default();
         between.game_number = 2;
@@ -1191,6 +1295,324 @@ mod tests {
             sent,
             build_chat_request(&threaded(), &next_game.prompt).unwrap()
         );
+    }
+
+    /// A thread is stored by the account that created it: a new key at the
+    /// same endpoint and model starts a new thread, and an account's refusal
+    /// of threads says nothing about another account's.
+    #[test]
+    fn a_new_api_key_starts_a_new_thread_and_forgets_the_old_accounts_refusal() {
+        let mut new_key = threaded();
+        new_key.api_key = "other-secret".to_string();
+
+        let mut memory = LlmThreadMemory::new();
+        answer(
+            &mut memory,
+            &threaded(),
+            &decision(1, AiDifficulty::Medium),
+            &log(2),
+            "msg_1",
+        );
+        let after_accept = memory
+            .decision_request(SEAT, &new_key, &decision(2, AiDifficulty::Medium), &log(3))
+            .unwrap()
+            .request;
+        assert!(is_create(&after_accept));
+
+        let mut memory = LlmThreadMemory::new();
+        memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision(1, AiDifficulty::Medium),
+                &log(2),
+            )
+            .unwrap();
+        lose_thread(&mut memory, ThreadErrorCode::UnsupportedRequest);
+        let after_refusal = memory
+            .decision_request(SEAT, &new_key, &decision(2, AiDifficulty::Medium), &log(3))
+            .unwrap()
+            .request;
+        assert!(is_create(&after_refusal));
+    }
+
+    /// The recovery contract: when the first continue of a thread created to
+    /// recover a lost one is lost too, the seat goes self-contained instead
+    /// of paying a lost continue and a create on every decision.
+    #[test]
+    fn a_recovery_thread_lost_at_its_first_continue_makes_the_seat_self_contained() {
+        let mut memory = LlmThreadMemory::new();
+        answer(
+            &mut memory,
+            &threaded(),
+            &decision(1, AiDifficulty::Medium),
+            &log(2),
+            "msg_1",
+        );
+        // A thread lost after ordinary use is recovered with a create.
+        memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision(2, AiDifficulty::Medium),
+                &log(3),
+            )
+            .unwrap();
+        lose_thread(&mut memory, ThreadErrorCode::NotFound);
+        let recovery = memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision(2, AiDifficulty::Medium),
+                &log(3),
+            )
+            .unwrap()
+            .request;
+        assert!(is_create(&recovery));
+        accept_reply(&mut memory, LlmProvider::Anthropic, &reply("msg_2", 900));
+
+        // Its first continue is lost as well: the API cannot keep this
+        // conversation, and every later decision is today's request.
+        let first_continue = memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision(3, AiDifficulty::Medium),
+                &log(4),
+            )
+            .unwrap()
+            .request;
+        assert_eq!(continued_from(&first_continue), Some("msg_2".to_string()));
+        lose_thread(&mut memory, ThreadErrorCode::NotFound);
+        for revision in 3..=5 {
+            let decision = decision(revision, AiDifficulty::Medium);
+            let sent = memory
+                .decision_request(SEAT, &threaded(), &decision, &log(revision as u32 + 2))
+                .unwrap()
+                .request;
+            assert_eq!(
+                sent,
+                build_chat_request(&threaded(), &decision.prompt).unwrap()
+            );
+        }
+    }
+
+    /// Only a recovery thread's first continue counts: a thread that has been
+    /// continued, and is later lost, is recovered again.
+    #[test]
+    fn a_thread_lost_after_it_was_continued_is_recovered_again() {
+        let mut memory = LlmThreadMemory::new();
+        answer(
+            &mut memory,
+            &threaded(),
+            &decision(1, AiDifficulty::Medium),
+            &log(2),
+            "msg_1",
+        );
+        memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision(2, AiDifficulty::Medium),
+                &log(3),
+            )
+            .unwrap();
+        lose_thread(&mut memory, ThreadErrorCode::NotFound);
+        memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision(2, AiDifficulty::Medium),
+                &log(3),
+            )
+            .unwrap();
+        accept_reply(&mut memory, LlmProvider::Anthropic, &reply("msg_2", 900));
+        // The recovery thread's first continue succeeds...
+        answer(
+            &mut memory,
+            &threaded(),
+            &decision(3, AiDifficulty::Medium),
+            &log(4),
+            "msg_3",
+        );
+        // ...so a later loss is an ordinary one.
+        memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision(4, AiDifficulty::Medium),
+                &log(5),
+            )
+            .unwrap();
+        lose_thread(&mut memory, ThreadErrorCode::NotFound);
+        let recovered = memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision(4, AiDifficulty::Medium),
+                &log(5),
+            )
+            .unwrap()
+            .request;
+        assert!(is_create(&recovered));
+    }
+
+    /// A cancelled attempt's late reply belongs to its own request: it never
+    /// touches the request that replaced it for the same decision.
+    #[test]
+    fn a_late_reply_to_a_replaced_request_leaves_the_new_one_pending() {
+        let mut memory = LlmThreadMemory::new();
+        answer(
+            &mut memory,
+            &threaded(),
+            &decision(1, AiDifficulty::Medium),
+            &log(2),
+            "msg_1",
+        );
+        let second = decision(2, AiDifficulty::Medium);
+        let cancelled = memory
+            .decision_request(SEAT, &threaded(), &second, &log(3))
+            .unwrap()
+            .thread_turn;
+        let live = memory
+            .decision_request(SEAT, &threaded(), &second, &log(3))
+            .unwrap()
+            .thread_turn;
+        assert_ne!(cancelled, live);
+
+        let lost = LlmReply {
+            provider: LlmProvider::Anthropic,
+            status: 400,
+            body: "{}",
+        };
+        let error = LlmError::ThreadUnavailable {
+            code: ThreadErrorCode::ContinueInFlight,
+        };
+        memory.record_reply(SEAT, cancelled, lost, Err(&error));
+        assert!(
+            memory.has_open_thread(SEAT),
+            "the late reply dropped the thread"
+        );
+
+        accept_reply(&mut memory, LlmProvider::Anthropic, &reply("msg_2", 900));
+        let next = memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision(3, AiDifficulty::Medium),
+                &log(4),
+            )
+            .unwrap()
+            .request;
+        assert_eq!(continued_from(&next), Some("msg_2".to_string()));
+    }
+
+    /// Usage counts come from across the network: an oversized report is not
+    /// a measurement, and its thread is not continued.
+    #[test]
+    fn an_oversized_usage_report_is_not_continued() {
+        let mut memory = LlmThreadMemory::new();
+        memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision(1, AiDifficulty::Medium),
+                &log(2),
+            )
+            .unwrap();
+        let oversized = json!({
+            "id": "msg_1",
+            "stop_reason": "end_turn",
+            "content": [{ "type": "text", "text": "{\"choice\": 0}" }],
+            "usage": { "input_tokens": u64::MAX, "output_tokens": 2 },
+        })
+        .to_string();
+        accept_reply(&mut memory, LlmProvider::Anthropic, &oversized);
+        let next = memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision(2, AiDifficulty::Medium),
+                &log(3),
+            )
+            .unwrap()
+            .request;
+        assert!(is_create(&next));
+    }
+
+    /// A thread created on an empty log has seen nothing, so it may continue
+    /// only with a log that starts at the client's first entry.
+    #[test]
+    fn a_thread_created_on_an_empty_log_needs_the_log_from_its_first_entry() {
+        let after = |history: Vec<GameLogEntry>| {
+            let mut memory = LlmThreadMemory::new();
+            answer(
+                &mut memory,
+                &threaded(),
+                &decision(1, AiDifficulty::Medium),
+                &[],
+                "msg_1",
+            );
+            memory
+                .decision_request(
+                    SEAT,
+                    &threaded(),
+                    &decision(2, AiDifficulty::Medium),
+                    &history,
+                )
+                .unwrap()
+                .request
+        };
+        assert_eq!(continued_from(&after(log(3))), Some("msg_1".to_string()));
+        // Entries 0 to 699 were trimmed off the hand-over.
+        let trimmed: Vec<GameLogEntry> = log(703).split_off(700);
+        assert!(is_create(&after(trimmed)));
+    }
+
+    /// While another player controls the seat's turn, the decisions they make
+    /// for it never touch the seat's own thread, in either direction.
+    #[test]
+    fn a_decision_another_player_makes_for_the_seat_uses_no_thread() {
+        let mut memory = LlmThreadMemory::new();
+        answer(
+            &mut memory,
+            &threaded(),
+            &decision(1, AiDifficulty::Medium),
+            &log(2),
+            "msg_1",
+        );
+
+        let mut delegated = decision_contract(2);
+        delegated.authorized_actor = PlayerId(2);
+        let controlled = build_game_decision_prompt(
+            &GameState::default(),
+            &delegated,
+            AiDifficulty::Medium,
+            None,
+            &[],
+        )
+        .unwrap();
+        let sent = memory
+            .decision_request(SEAT, &threaded(), &controlled, &log(3))
+            .unwrap()
+            .request;
+        assert_eq!(
+            sent,
+            build_chat_request(&threaded(), &controlled.prompt).unwrap()
+        );
+
+        // Control ends: like every decision that may not use a thread, the
+        // controlled one ended the seat's thread, so the seat starts afresh.
+        let own = memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision(3, AiDifficulty::Medium),
+                &log(4),
+            )
+            .unwrap()
+            .request;
+        assert!(is_create(&own));
     }
 
     /// The thread setting off, or any protocol but Anthropic Messages, sends
@@ -1225,12 +1647,7 @@ mod tests {
                     config.provider,
                     config.decision_context
                 );
-                accept_reply(
-                    &mut memory,
-                    &decision.fingerprint,
-                    config.provider,
-                    &reply("msg", 900),
-                );
+                accept_reply(&mut memory, config.provider, &reply("msg", 900));
                 assert!(!memory.has_open_thread(SEAT));
             }
         }
@@ -1277,12 +1694,7 @@ mod tests {
             "usage": { "input_tokens": 10, "output_tokens": 1 },
         })
         .to_string();
-        accept_reply(
-            &mut memory,
-            &first.fingerprint,
-            LlmProvider::Anthropic,
-            &refused,
-        );
+        accept_reply(&mut memory, LlmProvider::Anthropic, &refused);
         assert!(!memory.has_open_thread(SEAT));
     }
 

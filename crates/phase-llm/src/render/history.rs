@@ -94,6 +94,29 @@ impl TurnCycle {
     }
 }
 
+/// The part of `history` that belongs to the game in progress.
+///
+/// The next game of a best-of-three replaces the game in place while the
+/// client's log runs on, so the log handed over can still hold the last game's
+/// entries, under turn numbers the new game reuses. Every game opens with its
+/// pregame (the starting-player choice and the mulligans), which the engine
+/// logs at turn 0, before any turn begins. So the game in progress begins with
+/// the last run of turn-0 entries that follows an entry from a numbered turn.
+/// A log with no such run (the first game, or one whose earlier games were
+/// trimmed away) belongs to the game in progress throughout.
+pub fn current_game(history: &[GameLogEntry]) -> &[GameLogEntry] {
+    let Some(last_pregame) = history.iter().rposition(|entry| entry.turn == 0) else {
+        return history;
+    };
+    match history[..last_pregame]
+        .iter()
+        .rposition(|entry| entry.turn > 0)
+    {
+        Some(last_of_earlier_game) => &history[last_of_earlier_game + 1..],
+        None => history,
+    }
+}
+
 /// Render the history section into `out`.
 pub fn push_history(
     out: &mut String,
@@ -635,5 +658,39 @@ mod tests {
         secret.seq = 500;
         assert!(unseen_timeline_entries(&[secret.clone()], None).is_empty());
         assert!(!since(&[secret], None).contains("Black Lotus"));
+    }
+    // ── The game in progress ─────────────────────────────────────────────
+
+    #[test]
+    fn a_best_of_three_log_is_cut_where_the_game_in_progress_began() {
+        let mut game_one_pregame = entry(0, "game one mulligan", LogImportance::Essential);
+        game_one_pregame.seq = 0;
+        let mut history = vec![game_one_pregame];
+        history.extend(game(3));
+        let mut game_two_start = entry(0, "game two started", LogImportance::Essential);
+        game_two_start.seq = 100;
+        let game_two_mulligan = entry(0, "game two mulligan", LogImportance::Essential);
+        let game_two_turn = entry(1, "game two cast", LogImportance::Essential);
+        history.extend([game_two_start, game_two_mulligan, game_two_turn]);
+
+        let current = current_game(&history);
+        assert_eq!(current.len(), 3, "{current:?}");
+        assert_eq!(current[0].seq, 100);
+        let out = render(current, two_seats(1), BUDGET);
+        assert!(out.contains("game two cast"), "{out}");
+        assert!(!out.contains("cast on 3"), "the last game leaked: {out}");
+    }
+
+    #[test]
+    fn a_log_from_the_first_game_is_kept_whole() {
+        let mut pregame = entry(0, "mulligan", LogImportance::Essential);
+        pregame.seq = 0;
+        let mut history = vec![pregame];
+        history.extend(game(4));
+        assert_eq!(current_game(&history).len(), history.len());
+        // A window that starts after the pregame was trimmed away.
+        let trimmed = game(4);
+        assert_eq!(current_game(&trimmed).len(), trimmed.len());
+        assert!(current_game(&[]).is_empty());
     }
 }

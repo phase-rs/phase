@@ -585,8 +585,10 @@ pub struct TokenUsage {
 /// The token usage a response body reports, if it reports any.
 ///
 /// Status-blind on purpose: a refused or undecodable reply still consumed the
-/// prompt, and that spend is exactly what a measurement needs to see. Purely
-/// diagnostic — nothing about a decision depends on it.
+/// prompt, and that spend is exactly what a measurement needs to see. No
+/// decision's choice depends on it; the only thing that does is whether a
+/// seat's message thread has room for another turn
+/// ([`LlmThreadMemory::record_reply`](crate::LlmThreadMemory::record_reply)).
 pub fn token_usage(provider: LlmProvider, body: &str) -> Option<TokenUsage> {
     let value: Value = serde_json::from_str(body).ok()?;
     let count = |container: Option<&Value>, field: &str| {

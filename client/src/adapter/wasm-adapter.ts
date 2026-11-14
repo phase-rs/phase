@@ -930,6 +930,7 @@ export class WasmAdapter
   async getAiActionProposalFromLlmResponse(
     playerId: number,
     fingerprint: string,
+    threadTurn: number | null,
     provider: string,
     status: number,
     responseBody: string,
@@ -940,6 +941,7 @@ export class WasmAdapter
         return await this.engine.getAiActionProposalFromLlmResponse(
           playerId,
           fingerprint,
+          threadTurn,
           provider,
           status,
           responseBody,
@@ -948,6 +950,7 @@ export class WasmAdapter
       return await this.fallback!.getAiActionProposalFromLlmResponse(
         playerId,
         fingerprint,
+        threadTurn,
         provider,
         status,
         responseBody,
@@ -1738,6 +1741,7 @@ interface MainThreadFallback {
   getAiActionProposalFromLlmResponse(
     playerId: number,
     fingerprint: string,
+    threadTurn: number | null,
     provider: string,
     status: number,
     responseBody: string,
@@ -1979,6 +1983,7 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
     getAiActionProposalFromLlmResponse: (
       playerId: number,
       fingerprint: string,
+      threadTurn: number | null,
       provider: string,
       status: number,
       responseBody: string,
@@ -1988,6 +1993,7 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
           (wasm.getAiActionProposalFromLlmResponse(
             playerId,
             fingerprint,
+            threadTurn,
             provider,
             status,
             responseBody,

@@ -213,15 +213,21 @@ async function llmActionProposal(
     // Status travels with the body so the engine can refuse a non-2xx reply
     // however it parses — an error page or gateway failure must never be bound to
     // a game action.
+    // The thread turn travels back too, so the engine records the reply
+    // against the request that produced it and no other.
     const resolved = await adapter.getAiActionProposalFromLlmResponse(
       playerId,
       built.fingerprint,
+      built.threadTurn ?? null,
       profile.provider,
       status,
       body,
     );
     // The call was paid for whether or not its reply is usable.
     recordLlmUsage("game", `seat ${llmSeatIndex}`, built.promptChars, resolved?.usage);
+    // A decision that moved on while its reply was being read is never asked
+    // again: a resend would build a request for whatever is current now.
+    if (signal.aborted || !isCurrent()) return null;
     if (resolved?.proposal) {
       // The model's reasoning is deliberately NOT logged. `debugLog` writes a
       // `visibility: "Public"` entry into `logHistory` -- the shared game log,
