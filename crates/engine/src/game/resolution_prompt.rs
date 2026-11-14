@@ -1595,6 +1595,7 @@ mod tests {
                     amount: count,
                     is_combat: false,
                     source_name: None,
+                    source_incarnation: None,
                     applied: Default::default(),
                 }),
                 accounted,

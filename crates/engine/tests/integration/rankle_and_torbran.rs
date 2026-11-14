@@ -65,6 +65,7 @@ fn damage(source: ObjectId, target: TargetRef, amount: u32) -> ProposedEvent {
         amount,
         is_combat: false,
         source_name: None,
+        source_incarnation: None,
         applied: Default::default(),
     }
 }

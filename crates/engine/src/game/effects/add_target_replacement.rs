@@ -838,6 +838,7 @@ mod tests {
             amount,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: Default::default(),
         }
     }
@@ -1709,6 +1710,7 @@ mod tests {
             amount: 2,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: Default::default(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -1727,6 +1729,7 @@ mod tests {
             amount: 2,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: Default::default(),
         };
         let result = replace_event(&mut state, proposed, &mut events);

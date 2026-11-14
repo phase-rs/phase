@@ -533,6 +533,7 @@ fn replacement_applies(
             amount,
             is_combat: true,
             source_name: None,
+            source_incarnation: None,
             applied: Default::default(),
         },
         replacement_registry(),

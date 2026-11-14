@@ -4386,6 +4386,11 @@ fn disjoint_protections_publish_separate_applications() {
             runner.state(),
             P0,
             Some(gingerbrute),
+            runner
+                .state()
+                .objects
+                .get(&gingerbrute)
+                .map(|o| o.incarnation),
             None,
         ),
         Some(MatchedProtectionQuality::CardType(CoreType::Artifact)),
@@ -4396,6 +4401,11 @@ fn disjoint_protections_publish_separate_applications() {
             runner.state(),
             P0,
             Some(rollicker),
+            runner
+                .state()
+                .objects
+                .get(&rollicker)
+                .map(|o| o.incarnation),
             None,
         ),
         Some(MatchedProtectionQuality::CardType(CoreType::Enchantment)),

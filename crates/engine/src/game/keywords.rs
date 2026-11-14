@@ -805,6 +805,42 @@ impl ProtectionSourceRef<'_> {
     }
 }
 
+/// CR 400.7 + CR 608.2h: the source a damage event's protection matching
+/// reads — the single live-or-exit authority shared by the object-recipient
+/// collector (`replacement::find_applicable_replacements`) and the
+/// player-recipient collector (`static_abilities`), so the two paths can
+/// never disagree about which incarnation shelters a recipient.
+///
+/// The live object answers only while it is still the event's incarnation: a
+/// later object under the id (a Clone back in the graveyard, a flickered
+/// permanent) is a different object and must not supply characteristics.
+/// Otherwise that incarnation's exit last-known information answers (CR
+/// 608.2h: "its last known information is used"); with no surviving exit
+/// record the read is name-only and characteristic arms fail closed. Events
+/// that predate the incarnation field (legacy saves, synthetic events) keep
+/// the legacy live-first read with the broad by-id LKI cache.
+pub fn damage_protection_source(
+    state: &GameState,
+    source: Option<ObjectId>,
+    incarnation: Option<u64>,
+) -> ProtectionSourceRef<'_> {
+    let live = source
+        .and_then(|id| state.objects.get(&id))
+        .filter(|object| incarnation.is_none_or(|n| object.incarnation == n));
+    if let Some(object) = live {
+        return ProtectionSourceRef::Live(object);
+    }
+    let lki = match (source, incarnation) {
+        (Some(id), Some(n)) => crate::game::filter::exit_lki_for_incarnation(state, id, n),
+        (Some(id), None) => state.lki_cache.get(&id),
+        (None, _) => None,
+    };
+    match lki {
+        Some(lki) => ProtectionSourceRef::Lki(lki),
+        None => ProtectionSourceRef::NameOnly,
+    }
+}
+
 impl ProtectionBearer<'_> {
     /// CR 702.16k: the protected side of a "protection from [a player]" quality.
     fn controller(&self) -> PlayerId {
@@ -931,11 +967,15 @@ pub fn matching_protection_quality(
         // CR 702.16a + CR 202.3: Filter-based protection — the source matches if
         // it satisfies every FilterProp in the typed filter. Only supports
         // object-intrinsic properties (Cmc, HasColor, PowerLE/GE, etc.) that can
-        // be evaluated from the source alone without game state. LKI carries
-        // no mana value, so a departed source fails this arm closed.
+        // be evaluated from the source alone without game state. A departed
+        // source answers from its exact last-known mana value (CR 608.2h); a
+        // source with no known value fails this arm closed.
         ProtectionTarget::Filter(filter) => match &source {
-            ProtectionSourceRef::Live(object) => matching_filter_fingerprint(object, filter),
-            ProtectionSourceRef::Lki(_) | ProtectionSourceRef::NameOnly => None,
+            ProtectionSourceRef::Live(object) => {
+                matching_filter_fingerprint(object.effective_mana_value(), filter)
+            }
+            ProtectionSourceRef::Lki(lki) => matching_filter_fingerprint(lki.mana_value, filter),
+            ProtectionSourceRef::NameOnly => None,
         },
         // CR 702.16k: "Protection from [a player]" — the source matches if it is
         // controlled by the scoped player(s) relative to the protected side,
@@ -1204,7 +1244,7 @@ pub(crate) fn fnv1a_64(bytes: &[u8]) -> u64 {
 /// ability, same filter value, same key). The bool matcher above delegates,
 /// so this walk is the one authority.
 fn matching_filter_fingerprint(
-    source: &GameObject,
+    source_mana_value: u32,
     filter: &crate::types::ability::TargetFilter,
 ) -> Option<MatchedProtectionQuality> {
     use crate::types::ability::{Comparator, FilterProp, QuantityExpr, TargetFilter};
@@ -1224,7 +1264,9 @@ fn matching_filter_fingerprint(
             return None;
         };
         // CR 202.3d + CR 709.4b: combined MV off the stack for a split source.
-        if !comparator.evaluate(source.effective_mana_value() as i32, *threshold) {
+        // The caller supplies the already-effective value: the live object's
+        // `effective_mana_value`, or the departed source's captured LKI value.
+        if !comparator.evaluate(source_mana_value as i32, *threshold) {
             return None;
         }
         let discriminant = match comparator {

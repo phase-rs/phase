@@ -6254,6 +6254,7 @@ mod tests {
             amount: 0,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: std::collections::HashSet::new(),
         };
         let mut events = Vec::new();

@@ -2599,6 +2599,7 @@ mod tests {
                 amount: 3,
                 is_combat: true,
                 source_name: None,
+                source_incarnation: None,
                 applied: std::collections::HashSet::new(),
             })
         }
@@ -2653,6 +2654,7 @@ mod tests {
                     amount: 3,
                     is_combat: true,
                     source_name: None,
+                    source_incarnation: None,
                     applied: std::collections::HashSet::new(),
                 }],
                 phase_a_tally: Vec::new(),
@@ -2890,6 +2892,7 @@ mod tests {
                 amount: 3,
                 is_combat: true,
                 source_name: None,
+                source_incarnation: None,
                 applied: std::collections::HashSet::new(),
             }
         }

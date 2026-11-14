@@ -587,6 +587,7 @@ pub(crate) fn pre_replacement_damage_gate(
         amount,
         is_combat,
         source_name: ctx.source_name.clone(),
+        source_incarnation: ctx.source_incarnation,
         applied: HashSet::new(),
     })
 }
@@ -1863,6 +1864,7 @@ pub fn resolve_post_replacement(
         // (`apply_damage_after_replacement` applies directly), so the
         // snapshot-restored context — which carries no name — is exact here.
         source_name: ctx.source_name.clone(),
+        source_incarnation: ctx.source_incarnation,
         applied: HashSet::new(),
     };
 
@@ -5316,6 +5318,7 @@ mod tests {
                 amount: 1,
                 is_combat: true,
                 source_name: None,
+                source_incarnation: None,
                 applied: HashSet::new(),
             };
             let mut events = Vec::new();
@@ -5388,6 +5391,7 @@ mod tests {
                 amount: 1,
                 is_combat: false,
                 source_name: None,
+                source_incarnation: None,
                 applied: HashSet::new(),
             };
             let mut events = Vec::new();
@@ -5459,6 +5463,7 @@ mod tests {
             amount: 2,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let mut events = Vec::new();
@@ -5506,6 +5511,7 @@ mod tests {
             amount: 1,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let mut events = Vec::new();
@@ -5545,6 +5551,7 @@ mod tests {
             amount: 2,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let mut events = Vec::new();
@@ -5575,6 +5582,7 @@ mod tests {
             amount: 2,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let mut events = Vec::new();

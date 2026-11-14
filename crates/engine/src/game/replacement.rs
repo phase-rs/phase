@@ -2757,6 +2757,7 @@ fn redirect_damage_event(
     is_combat: bool,
     applied: HashSet<AppliedReplacementKey>,
     source_name: Option<String>,
+    source_incarnation: Option<u64>,
     lifetime: RedirectionLifetime,
     events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
@@ -2772,6 +2773,7 @@ fn redirect_damage_event(
             amount: damage_amount,
             is_combat,
             source_name,
+            source_incarnation,
             applied,
         });
     }
@@ -2788,6 +2790,7 @@ fn redirect_damage_event(
             amount: damage_amount,
             is_combat,
             source_name,
+            source_incarnation,
             applied,
         });
     }
@@ -2809,6 +2812,7 @@ fn redirect_damage_event(
                 amount: damage_amount,
                 is_combat,
                 source_name: source_name.clone(),
+                source_incarnation,
                 applied,
             };
             // CR 614.5: The one-shot opportunity is spent on this event whether
@@ -2878,6 +2882,7 @@ fn redirect_damage_event(
                     amount: redirected_amount,
                     is_combat,
                     source_name: source_name.clone(),
+                    source_incarnation,
                     applied: applied.clone(),
                 };
                 match replace_event(state, redirected_event, events) {
@@ -2911,6 +2916,7 @@ fn redirect_damage_event(
                     amount: damage_amount,
                     is_combat,
                     source_name,
+                    source_incarnation,
                     applied,
                 });
             }
@@ -2924,6 +2930,7 @@ fn redirect_damage_event(
                 amount: remaining_amount,
                 is_combat,
                 source_name,
+                source_incarnation,
                 applied,
             })
         }
@@ -2948,6 +2955,7 @@ fn damage_done_applier(
             amount,
             is_combat,
             source_name,
+            source_incarnation,
             applied,
         } = event
         {
@@ -3017,6 +3025,7 @@ fn damage_done_applier(
                                 amount,
                                 is_combat,
                                 source_name,
+                                source_incarnation,
                                 applied,
                             })
                         }
@@ -3131,6 +3140,7 @@ fn damage_done_applier(
                 amount: new_amount,
                 is_combat,
                 source_name,
+                source_incarnation,
                 applied,
             });
         }
@@ -3154,6 +3164,7 @@ fn damage_done_applier(
             amount: damage_amount,
             is_combat,
             source_name,
+            source_incarnation,
             applied,
         } = event
         {
@@ -3174,6 +3185,7 @@ fn damage_done_applier(
                 is_combat,
                 applied,
                 source_name,
+                source_incarnation,
                 lifetime,
                 events,
             );
@@ -3215,6 +3227,7 @@ fn damage_done_applier(
             amount: dmg,
             is_combat,
             source_name,
+            source_incarnation,
             applied,
         } = event
         {
@@ -3251,6 +3264,7 @@ fn damage_done_applier(
                         is_combat,
                         applied,
                         source_name,
+                        source_incarnation,
                         RedirectionLifetime::Continuous,
                         events,
                     );
@@ -3269,6 +3283,7 @@ fn damage_done_applier(
                         amount: dmg,
                         is_combat,
                         source_name,
+                        source_incarnation,
                         applied,
                     });
                 }
@@ -3335,6 +3350,7 @@ fn damage_done_applier(
                             amount: dmg,
                             is_combat,
                             source_name,
+                            source_incarnation,
                             applied,
                         });
                     } else {
@@ -3344,6 +3360,7 @@ fn damage_done_applier(
                             amount: remaining_damage,
                             is_combat,
                             source_name,
+                            source_incarnation,
                             applied,
                         });
                     }
@@ -3383,6 +3400,7 @@ fn damage_done_applier(
                             amount: remaining_damage,
                             is_combat,
                             source_name,
+                            source_incarnation,
                             applied,
                         });
                     }
@@ -3484,6 +3502,7 @@ fn damage_done_applier(
             amount: dmg,
             is_combat,
             source_name,
+            source_incarnation,
             applied,
         } = event
         {
@@ -3494,6 +3513,7 @@ fn damage_done_applier(
                     amount: dmg,
                     is_combat,
                     source_name,
+                    source_incarnation,
                     applied,
                 });
             }
@@ -3790,6 +3810,7 @@ fn apply_shield_counter_replacement(
                 amount,
                 is_combat,
                 source_name,
+                source_incarnation,
                 applied,
             },
         ) if matches!(target, TargetRef::Object(object_id) if object_id == rid.source) => {
@@ -3799,6 +3820,7 @@ fn apply_shield_counter_replacement(
                 amount,
                 is_combat,
                 source_name,
+                source_incarnation,
                 applied,
             };
 
@@ -3870,6 +3892,7 @@ fn apply_protection_replacement(
             amount,
             is_combat,
             source_name,
+            source_incarnation,
             applied,
         } => {
             // CR 120.8: a 0-damage event is not damage at all — no
@@ -3881,6 +3904,7 @@ fn apply_protection_replacement(
                     amount,
                     is_combat,
                     source_name,
+                    source_incarnation,
                     applied,
                 });
             }
@@ -9239,31 +9263,26 @@ pub fn find_applicable_replacements(
         amount,
         source_id,
         source_name,
+        source_incarnation,
         ..
     } = event
     {
         if *amount > 0 {
             let applicable = match target {
                 TargetRef::Object(object_id) => {
-                    use crate::game::keywords::ProtectionSourceRef;
                     match state.objects.get(object_id) {
                         Some(target_obj) => {
-                            // CR 702.16 + CR 608.2h: match against the live
-                            // source when present, its last-known
-                            // characteristics when it has left, or the event's
-                            // latched name alone. A departed target still
+                            // CR 702.16 + CR 608.2h + CR 400.7: match against
+                            // the source's original incarnation — the live
+                            // object only while it is still that incarnation,
+                            // else its exit last-known information, else the
+                            // event's latched name alone. A departed target still
                             // binds nothing (no bearer to shelter).
-                            let live = state.objects.get(source_id);
-                            let lki = if live.is_none() {
-                                state.lki_cache.get(source_id)
-                            } else {
-                                None
-                            };
-                            let source_ref = match (live, lki) {
-                                (Some(object), _) => ProtectionSourceRef::Live(object),
-                                (None, Some(lki)) => ProtectionSourceRef::Lki(lki),
-                                (None, None) => ProtectionSourceRef::NameOnly,
-                            };
+                            let source_ref = crate::game::keywords::damage_protection_source(
+                                state,
+                                Some(*source_id),
+                                *source_incarnation,
+                            );
                             crate::game::keywords::all_preventing_protection_qualities(
                                 target_obj,
                                 source_ref,
@@ -9278,6 +9297,7 @@ pub fn find_applicable_replacements(
                         state,
                         *player_id,
                         Some(*source_id),
+                        *source_incarnation,
                         source_name.as_deref(),
                     )
                 }
@@ -14810,6 +14830,7 @@ mod tests {
                     amount: 2,
                     is_combat: false,
                     source_name: None,
+                    source_incarnation: None,
                     applied: HashSet::new(),
                 }
             };
@@ -15110,6 +15131,7 @@ mod tests {
                 amount: 3,
                 is_combat: false,
                 source_name: None,
+                source_incarnation: None,
                 applied: HashSet::new(),
             },
             &mut events,
@@ -16099,6 +16121,7 @@ mod tests {
                     amount: 1,
                     is_combat: false,
                     source_name: None,
+                    source_incarnation: None,
                     applied: HashSet::new(),
                 },
                 vec![ReplacementEvent::DamageDone, ReplacementEvent::DealtDamage],
@@ -16967,6 +16990,7 @@ mod tests {
             amount: 2,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let dmg_candidates = vec![
@@ -17290,6 +17314,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -17336,6 +17361,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -17387,6 +17413,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -17469,6 +17496,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -18772,6 +18800,7 @@ mod tests {
                 amount,
                 is_combat: false,
                 source_name: None,
+                source_incarnation: None,
                 applied: HashSet::new(),
             };
             // CR 120.4b + CR 616.1f: only the current proposed damage amount
@@ -20624,6 +20653,7 @@ mod tests {
                 amount: 2,
                 is_combat: false,
                 source_name: None,
+                source_incarnation: None,
                 applied: HashSet::new(),
             },
             sacrifice_provenance: None,
@@ -20760,6 +20790,7 @@ mod tests {
             amount: 5,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
 
@@ -20825,6 +20856,7 @@ mod tests {
             amount: 5,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
 
@@ -20853,6 +20885,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
 
@@ -20939,6 +20972,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
 
@@ -20976,6 +21010,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
 
@@ -21033,6 +21068,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
 
@@ -21086,6 +21122,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let rid = ReplacementId {
@@ -22489,6 +22526,7 @@ mod tests {
             amount,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         }
     }
@@ -22629,6 +22667,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
 
@@ -22657,6 +22696,7 @@ mod tests {
             amount: 3,
             is_combat: true,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         match replace_event(&mut state, combat, &mut events) {
@@ -22684,6 +22724,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         match replace_event(&mut state, to_own, &mut events) {
@@ -23084,6 +23125,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let registry = build_replacement_registry();
@@ -23110,6 +23152,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let registry = build_replacement_registry();
@@ -23148,6 +23191,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let registry = build_replacement_registry();
@@ -23182,6 +23226,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -23195,6 +23240,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -23247,6 +23293,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -23260,6 +23307,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -24246,6 +24294,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let registry = build_replacement_registry();
@@ -24261,6 +24310,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -24287,6 +24337,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -24312,6 +24363,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -24325,6 +24377,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -27747,6 +27800,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         assert!(!empty_mana_pool_matcher(&damage, ObjectId(0), &state));
@@ -27774,6 +27828,7 @@ mod tests {
             amount: 1,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         assert!(!(entry.matcher)(&damage, ObjectId(0), &state));
@@ -28066,6 +28121,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         assert_eq!(
@@ -28084,6 +28140,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -28136,6 +28193,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -28150,6 +28208,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         assert_eq!(
@@ -28180,6 +28239,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         assert!(
@@ -28198,6 +28258,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         assert_eq!(
@@ -28358,6 +28419,7 @@ mod tests {
             amount: 3,
             is_combat: true,
             source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let is_our_damage = |event: &ProposedEvent| {
@@ -28451,6 +28513,7 @@ mod tests {
                 amount: 3,
                 is_combat: true,
                 source_name: None,
+                source_incarnation: None,
                 applied: HashSet::new(),
             }
         }

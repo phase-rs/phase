@@ -144,6 +144,7 @@ fn awe_strike_zero_damage_event_does_not_consume_shield_or_fire_rider() {
             amount: 0,
             is_combat: false,
             source_name: None,
+            source_incarnation: None,
             applied: std::collections::HashSet::new(),
         },
         &mut events,

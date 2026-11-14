@@ -44769,6 +44769,7 @@ mod tests {
                 amount: 3,
                 is_combat: true,
                 source_name: None,
+                source_incarnation: None,
                 applied: HashSet::new(),
             })],
             paused_entry: 1,

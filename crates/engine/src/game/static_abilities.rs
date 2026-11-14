@@ -2090,11 +2090,18 @@ pub fn preventing_player_protection_quality(
     state: &GameState,
     player_id: PlayerId,
     source: Option<ObjectId>,
+    source_incarnation: Option<u64>,
     source_name: Option<&str>,
 ) -> Option<crate::types::keywords::MatchedProtectionQuality> {
-    all_preventing_player_protection_qualities(state, player_id, source, source_name)
-        .into_iter()
-        .next()
+    all_preventing_player_protection_qualities(
+        state,
+        player_id,
+        source,
+        source_incarnation,
+        source_name,
+    )
+    .into_iter()
+    .next()
 }
 
 /// CR 616.1 (Matt R10-F1): EVERY resolved quality sheltering `player_id`
@@ -2105,9 +2112,10 @@ pub fn all_preventing_player_protection_qualities(
     state: &GameState,
     player_id: PlayerId,
     source: Option<ObjectId>,
+    source_incarnation: Option<u64>,
     source_name: Option<&str>,
 ) -> Vec<crate::types::keywords::MatchedProtectionQuality> {
-    all_matching_player_protections(state, player_id, source, source_name)
+    all_matching_player_protections(state, player_id, source, source_incarnation, source_name)
 }
 
 /// Collecting authority behind the single-match fns: every resolved
@@ -2117,6 +2125,7 @@ fn all_matching_player_protections(
     state: &GameState,
     player_id: PlayerId,
     source: Option<ObjectId>,
+    source_incarnation: Option<u64>,
     source_name: Option<&str>,
 ) -> Vec<crate::types::keywords::MatchedProtectionQuality> {
     use crate::game::keywords::matching_card_type_quality;
@@ -2131,22 +2140,15 @@ fn all_matching_player_protections(
     if player_has_protection_from_everything(state, player_id) {
         out.push(MatchedProtectionQuality::Everything);
     }
-    // CR 702.16 + CR 608.2h: match against the live source when present, its
-    // last-known characteristics when it has left (a ceased token still has a
-    // name, colors, types, and controller), or the event's latched name alone.
+    // CR 702.16 + CR 608.2h + CR 400.7: match against the source's
+    // original incarnation — the live object only while it is still that
+    // incarnation, else its exit last-known information (a ceased token
+    // still has a name, colors, types, and controller), else the event's
+    // latched name alone.
     // A departed source must never silently lose name protection (Runed Halo
     // over a dead Clone keeps stopping that name).
-    let live_source = source.and_then(|id| state.objects.get(&id));
-    let lki = if live_source.is_none() {
-        source.and_then(|id| state.lki_cache.get(&id))
-    } else {
-        None
-    };
-    let source_ref = match (live_source, lki) {
-        (Some(object), _) => ProtectionSourceRef::Live(object),
-        (None, Some(lki)) => ProtectionSourceRef::Lki(lki),
-        (None, None) => ProtectionSourceRef::NameOnly,
-    };
+    let source_ref =
+        crate::game::keywords::damage_protection_source(state, source, source_incarnation);
     // CR 702.16b + CR 702.16e: resolution-created "you gain protection from
     // [quality]" (Seht's Tiger, Faith's Shield) and "protection from that
     // player" (Eon Frolicker) are player-bound transient grants, not

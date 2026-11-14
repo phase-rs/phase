@@ -592,6 +592,15 @@ pub enum ProposedEvent {
         /// object, exactly the pre-override behavior.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_name: Option<String>,
+        /// CR 400.7 + CR 608.2h: the source incarnation observed when the
+        /// damage event was created. Protection matching reads the live object
+        /// only while it is still this incarnation; a later object under the
+        /// id (a Clone back in the graveyard) is a different object and the
+        /// match falls to this incarnation's exit last-known information
+        /// instead. `None` (including payloads written before the field
+        /// existed) keeps the legacy live-first read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_incarnation: Option<u64>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },

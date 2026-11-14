@@ -32,6 +32,7 @@ use engine::types::game_state::{
     CastPaymentMode, CastingVariant, CastingVariantFace, GameRng, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::{Keyword, ProtectionTarget};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaPool, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -1442,4 +1443,266 @@ fn runed_halo_prevents_artillery_self_damage_when_named() {
 #[test]
 fn runed_halo_does_not_prevent_artillery_self_damage_for_other_name() {
     assert_eq!(activate_artillery("Shock"), (17, 18));
+}
+
+const TEL_JILAD_CHOSEN_ORACLE: &str = "Protection from artifacts";
+
+/// CR 608.2h + CR 702.16b + CR 400.7: protection matches the damage source's
+/// ORIGINAL incarnation, not whatever object now sits under its id. A Clone
+/// copying Volatile Rig (an artifact) is Murdered; in the graveyard it has
+/// reverted to an ordinary Clone (non-artifact creature), but the lost flip's
+/// damage is still dealt by the Rig incarnation. Tel-Jilad Chosen
+/// ("Protection from artifacts") takes zero; the unprotected Grizzly Bears
+/// control takes the full 4 and dies.
+#[test]
+fn tel_jilad_chosen_blocks_departed_clone_rig_via_exit_types() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let halo = halo_on_battlefield(&mut scenario);
+    let rig = scenario
+        .add_creature_from_oracle(P1, "Volatile Rig", 4, 4, VOLATILE_RIG_ORACLE)
+        .as_artifact_creature()
+        .id();
+    let chosen = scenario
+        .add_creature(P0, "Tel-Jilad Chosen", 2, 1)
+        .from_oracle_text_with_keywords(&["Protection"], TEL_JILAD_CHOSEN_ORACLE)
+        .with_subtypes(vec!["Elf", "Archer"])
+        .id();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let clone = scenario
+        .add_spell_to_hand_from_oracle(P1, "Clone", false, CLONE_ORACLE)
+        .as_creature()
+        .with_subtypes(vec!["Shapeshifter"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 3,
+        })
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", false, MURDER_ORACLE)
+        .as_instant()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            generic: 1,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P1,
+        vec![
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+    // Seed the coin flip so the flip loses (deals 4 damage). Seed 1 produces false on first flip.
+    runner.state_mut().rng = GameRng::seed_from_u64(1);
+    name_halo_choice(&mut runner, halo, "Volatile Rig");
+    assert!(
+        runner.state().objects[&chosen]
+            .keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Protection(ProtectionTarget::CardType(_)))),
+        "reach guard: Tel-Jilad Chosen must parse protection from artifacts"
+    );
+
+    // 1. P1 casts Clone, choosing to copy Volatile Rig.
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    runner
+        .cast(clone)
+        .replacement_choice(0)
+        .copy_target(rig)
+        .resolve();
+    assert_eq!(
+        runner.state().objects[&clone].name,
+        "Volatile Rig",
+        "Clone entered copying Volatile Rig"
+    );
+
+    // 2. P0 casts Murder targeting the Clone.
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+    runner.cast(murder).target_object(clone).commit();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 pass Murder");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P1 pass Murder");
+    assert_eq!(runner.state().objects[&clone].zone, Zone::Graveyard);
+    // In the graveyard, Clone has reverted to its printed characteristics:
+    // a non-artifact creature named "Clone" — the protection match must NOT
+    // read this husk.
+    assert_eq!(runner.state().objects[&clone].name, "Clone");
+    assert_eq!(runner.state().stack.len(), 1, "dies trigger on stack");
+
+    // 3. Resolve the dies trigger.
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty(), "stack is empty");
+
+    // CR 608.2h: the damage is dealt by the Rig incarnation (an artifact),
+    // so Tel-Jilad Chosen takes zero and survives while the Bears take 4.
+    assert_eq!(
+        runner.state().objects[&chosen].zone,
+        Zone::Battlefield,
+        "Tel-Jilad Chosen survives the artifact source's 4 damage"
+    );
+    assert_eq!(
+        runner.state().objects[&chosen].damage_marked,
+        0,
+        "protection from artifacts prevents all 4 damage"
+    );
+    assert_eq!(
+        runner.state().objects[&bears].zone,
+        Zone::Graveyard,
+        "unprotected Bears control takes the lethal 4"
+    );
+    assert_eq!(runner.state().players[0].life, 20);
+    assert_eq!(runner.state().players[1].life, 16);
+}
+
+const MISTMEADOW_SKULK_ORACLE: &str = "Protection from mana value 3 or greater";
+
+/// CR 608.2h + CR 702.16e + CR 202.3: filter-based protection answers from
+/// the departed source's stored last-known mana value. A Cackling Counterpart
+/// token copy of Volatile Rig (mana value 4) dies and ceases to exist; its
+/// lost flip still deals 4. Mistmeadow Skulk ("protection from mana value 3
+/// or greater") takes zero; the unprotected Grizzly Bears control takes the
+/// full 4 and dies.
+#[test]
+fn mistmeadow_skulk_blocks_ceased_token_rig_via_exit_mana_value() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let halo = halo_on_battlefield(&mut scenario);
+    let rig = scenario
+        .add_creature_from_oracle(P1, "Volatile Rig", 4, 4, VOLATILE_RIG_ORACLE)
+        .as_artifact_creature()
+        // Volatile Rig costs {4}: the token copy inherits this mana value
+        // (CR 707.2), and the exit LKI records it for the Skulk's filter.
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 4,
+        })
+        .id();
+    let skulk = scenario
+        .add_creature(P0, "Mistmeadow Skulk", 1, 1)
+        .from_oracle_text_with_keywords(&["Protection"], MISTMEADOW_SKULK_ORACLE)
+        .with_subtypes(vec!["Merfolk", "Rogue"])
+        .id();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let counterpart = scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "Cackling Counterpart",
+            true,
+            CACKLING_COUNTERPART_ORACLE,
+        )
+        .as_instant()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            generic: 1,
+        })
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", false, MURDER_ORACLE)
+        .as_instant()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            generic: 1,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P1,
+        vec![
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+    // Seed the coin flip so the token's flip loses (deals 4 damage). Seed 1
+    // produces false on first flip; the Rig's own later flip wins.
+    runner.state_mut().rng = GameRng::seed_from_u64(1);
+    name_halo_choice(&mut runner, halo, "Volatile Rig");
+    assert!(
+        runner.state().objects[&skulk]
+            .keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Protection(ProtectionTarget::Filter(_)))),
+        "reach guard: Mistmeadow Skulk must parse filter-based protection"
+    );
+
+    // 1. P1 casts Counterpart copying the Rig.
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    runner.cast(counterpart).target_object(rig).resolve();
+    let token = runner
+        .state()
+        .objects
+        .iter()
+        .find(|(_, o)| o.is_token && o.name == "Volatile Rig" && o.controller == P1)
+        .map(|(id, _)| *id)
+        .expect("Counterpart token copy of Volatile Rig");
+
+    // 2. P0 Murders the token; it ceases to exist (no graveyard husk).
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+    runner.cast(murder).target_object(token).commit();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 pass Murder");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P1 pass Murder");
+    assert!(
+        !runner.state().objects.contains_key(&token),
+        "CR 111.7: the token must cease to exist after dying"
+    );
+    assert_eq!(runner.state().stack.len(), 1, "dies trigger on stack");
+
+    // 3. Resolve the dies trigger.
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty(), "stack is empty");
+
+    // CR 608.2h: the ceased token's last-known mana value is 4, so the
+    // Skulk takes zero and survives while the Bears take 4.
+    assert_eq!(
+        runner.state().objects[&skulk].zone,
+        Zone::Battlefield,
+        "Mistmeadow Skulk survives the MV-4 source's damage"
+    );
+    assert_eq!(
+        runner.state().objects[&skulk].damage_marked,
+        0,
+        "protection from MV 3+ prevents all 4 damage"
+    );
+    assert_eq!(
+        runner.state().objects[&bears].zone,
+        Zone::Graveyard,
+        "unprotected Bears control takes the lethal 4"
+    );
+    assert_eq!(runner.state().players[0].life, 20);
+    assert_eq!(runner.state().players[1].life, 16);
 }
