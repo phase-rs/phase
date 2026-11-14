@@ -22,9 +22,8 @@
 //!      target instead of the source).
 //!
 //! This test drives the real `apply` pipeline (activate `{T}`, select target,
-//! resolve) and asserts both damage prongs. It FAILS on revert of either half
-//! (the Yeti takes 0 without the resolver half; the fought creature is hit
-//! twice and the Yeti takes 0 without the parser half).
+//! resolve) and asserts both damage prongs. It FAILS on revert of the parser
+//! half (the fought creature is hit twice and the Yeti takes 0).
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
@@ -56,6 +55,7 @@ fn karplusan_yeti_fight_back_deals_fought_creatures_power() {
         .act(GameAction::ActivateAbility {
             source_id: yeti,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Karplusan Yeti's {T} ability must succeed");
 

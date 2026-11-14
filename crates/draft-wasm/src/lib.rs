@@ -12,19 +12,21 @@ use draft_core::pack_generator::PackGenerator;
 use draft_core::session;
 use draft_core::set_pool::LimitedSetPool;
 use draft_core::types::*;
-use draft_core::view::filter_for_player;
+use draft_core::view::{filter_for_player, DraftPlayerView};
 use engine::database::CardDatabase;
 use phase_ai::config::AiDifficulty;
 
 mod bot_ai;
+mod session_cell;
 mod suggest;
 
 thread_local! {
-    /// Draft session state uses Cell<Option<T>> with take/set to avoid RefCell
-    /// borrow poisoning — same panic-resilient pattern as engine-wasm.
-    static DRAFT_SESSION: Cell<Option<DraftSession>> = const { Cell::new(None) };
     static PACK_GEN: Cell<Option<PackGenerator>> = const { Cell::new(None) };
     static DIFFICULTY: Cell<AiDifficulty> = const { Cell::new(AiDifficulty::Medium) };
+    /// Whether bots (and auto-pick) apply the built-in draft guides. Opt-in and
+    /// set by the caller via [`set_draft_pick_enhancements`]; defaults off.
+    static PICK_ENHANCEMENT: Cell<bot_ai::PickEnhancement> =
+        const { Cell::new(bot_ai::PickEnhancement::Off) };
     static RNG: Cell<Option<ChaCha20Rng>> = const { Cell::new(None) };
     /// Per RESEARCH Pitfall 2: draft-wasm has its own CardDatabase, separate
     /// from engine-wasm's thread-local. The frontend loads card-data.json into
@@ -40,59 +42,39 @@ fn to_js<T: Serialize + ?Sized>(value: &T) -> JsValue {
     js_sys::JSON::parse(&json).unwrap_or_else(|e| panic!("JSON.parse failed: {e:?}"))
 }
 
-/// Take the draft session out of the Cell, pass it to a closure, then put it back.
-fn with_draft<R>(f: impl FnOnce(&DraftSession) -> R) -> Result<R, JsValue> {
-    DRAFT_SESSION.with(|cell| {
-        let session = cell
-            .take()
-            .ok_or_else(|| JsValue::from_str("Draft not initialized"))?;
-        let result = f(&session);
-        cell.set(Some(session));
-        Ok(result)
+/// The installed session's flow is checked before any closure runs, so the dormant
+/// runtime never serializes, mutates or consumes RNG for a FIFO session.
+fn admit_legacy_runtime(session: &DraftSession) -> Result<(), String> {
+    session
+        .validate_legacy_admission()
+        .map_err(|_| FIFO_UNSUPPORTED_BY_RUNTIME.to_string())
+}
+
+fn with_draft_inner<R>(f: impl FnOnce(&DraftSession) -> Result<R, String>) -> Result<R, String> {
+    session_cell::with_draft_inner(|session| {
+        admit_legacy_runtime(session).and_then(|()| f(session))
     })
 }
 
-/// Take the draft session out of the Cell, pass it mutably, then put it back.
-fn with_draft_mut<R>(
-    f: impl FnOnce(&mut DraftSession) -> Result<R, JsValue>,
-) -> Result<R, JsValue> {
-    DRAFT_SESSION.with(|cell| {
-        let mut session = cell
-            .take()
-            .ok_or_else(|| JsValue::from_str("Draft not initialized"))?;
-        let result = f(&mut session);
-        cell.set(Some(session));
-        result
-    })
-}
-
-/// `with_draft_mut` for the pure-Rust `_inner` cores: identical take/run/put
-/// dance, but `String` errors so the core is callable from `cargo test` on a
-/// native target, where every `JsValue` operation is unavailable.
 fn with_draft_mut_inner<R>(
     f: impl FnOnce(&mut DraftSession) -> Result<R, String>,
 ) -> Result<R, String> {
-    DRAFT_SESSION.with(|cell| {
-        let mut session = cell.take().ok_or("Draft not initialized")?;
-        let result = f(&mut session);
-        cell.set(Some(session));
-        result
+    session_cell::with_draft_mut_inner(|session| {
+        admit_legacy_runtime(session).and_then(|()| f(session))
     })
 }
 
-/// `with_draft` for the pure-Rust `_inner` cores: identical take/run/put dance
-/// over a SHARED borrow, but `String` errors so the core is callable from
-/// `cargo test` on a native target.
-///
-/// The shared sibling of `with_draft_mut_inner`. A read-only `_inner` core must
-/// not reach for the `&mut` helper instead: taking `&mut` for a body that only
-/// reads is the kind of borrow the type system is there to state honestly.
-fn with_draft_inner<R>(f: impl FnOnce(&DraftSession) -> Result<R, String>) -> Result<R, String> {
-    DRAFT_SESSION.with(|cell| {
-        let session = cell.take().ok_or("Draft not initialized")?;
-        let result = f(&session);
-        cell.set(Some(session));
-        result
+fn with_draft<R>(f: impl FnOnce(&DraftSession) -> R) -> Result<R, JsValue> {
+    session_cell::with_draft(|session| admit_legacy_runtime(session).map(|()| f(session)))?
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+fn with_draft_mut<R>(
+    f: impl FnOnce(&mut DraftSession) -> Result<R, JsValue>,
+) -> Result<R, JsValue> {
+    session_cell::with_draft_mut(|session| {
+        admit_legacy_runtime(session).map_err(|error| JsValue::from_str(&error))?;
+        f(session)
     })
 }
 
@@ -107,6 +89,19 @@ fn deck_submission_message(error: DraftError) -> String {
             .join("; "),
         error => error.to_string(),
     }
+}
+
+/// Opt bots and auto-pick in or out of the built-in draft-guide pick
+/// enhancements. Independent of difficulty; the frontend sets it from the
+/// player's setting before starting or resuming a draft.
+#[wasm_bindgen]
+pub fn set_draft_pick_enhancements(enabled: bool) {
+    let enhancement = if enabled {
+        bot_ai::PickEnhancement::DraftGuides
+    } else {
+        bot_ai::PickEnhancement::Off
+    };
+    PICK_ENHANCEMENT.with(|cell| cell.set(enhancement));
 }
 
 /// Map a u8 difficulty value to AiDifficulty.
@@ -167,6 +162,9 @@ fn build_quick_cube_config(
     seed: u64,
 ) -> DraftConfig {
     enforce_procedure_minimum_deck_size(DraftConfig {
+        flow: draft_core::types::DraftFlow::LegacyBarrier,
+        selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+        clock_policy: draft_core::types::DraftClockPolicy::default(),
         source: DraftSource::Cube {
             id: "custom-cube".to_string(),
             name: cube_name.to_string(),
@@ -428,6 +426,9 @@ pub fn start_quick_draft(
     let ai_difficulty = map_difficulty(difficulty);
 
     let config = enforce_procedure_minimum_deck_size(DraftConfig {
+        flow: draft_core::types::DraftFlow::LegacyBarrier,
+        selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+        clock_policy: draft_core::types::DraftClockPolicy::default(),
         set_code: selection.source.set_code(),
         source: selection.source,
         kind: DraftKind::Quick,
@@ -462,7 +463,7 @@ pub fn start_quick_draft(
     let view = filter_for_player(&draft_session, 0);
 
     // Store state in thread-locals
-    DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
+    session_cell::install(draft_session);
     PACK_GEN.with(|cell| cell.set(Some(pack_gen)));
     DIFFICULTY.with(|cell| cell.set(ai_difficulty));
     RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
@@ -487,6 +488,9 @@ pub fn start_sealed_draft(
         ResolvedSetSelection::parse(selection_json, Some(sealed_procedure.packs_per_player))
             .map_err(|e| JsValue::from_str(&e))?;
     let config = DraftConfig {
+        flow: draft_core::types::DraftFlow::LegacyBarrier,
+        selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+        clock_policy: draft_core::types::DraftClockPolicy::default(),
         set_code: selection.source.set_code(),
         source: selection.source,
         kind: DraftKind::Sealed,
@@ -516,7 +520,7 @@ pub fn start_sealed_draft(
         .map_err(|e| JsValue::from_str(&format!("Failed to start sealed event: {e}")))?;
     let view = filter_for_player(&draft_session, 0);
 
-    DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
+    session_cell::install(draft_session);
     PACK_GEN.with(|cell| cell.set(Some(pack_gen)));
     DIFFICULTY.with(|cell| cell.set(map_difficulty(difficulty)));
     RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
@@ -601,7 +605,7 @@ pub fn start_quick_cube_draft(
 
     let view = filter_for_player(&draft_session, 0);
 
-    DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
+    session_cell::install(draft_session);
     PACK_GEN.with(|cell| cell.set(None));
     DIFFICULTY.with(|cell| cell.set(ai_difficulty));
     RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
@@ -619,7 +623,7 @@ pub fn start_quick_cube_draft(
 fn apply_human_pick_and_resolve_bots(
     draft_session: &mut DraftSession,
     human_card_id: String,
-) -> Result<(), JsValue> {
+) -> Result<(), String> {
     apply_human_pick_and_resolve_bots_with_action(
         draft_session,
         DraftAction::Pick {
@@ -632,20 +636,38 @@ fn apply_human_pick_and_resolve_bots(
 fn apply_human_pick_and_resolve_bots_with_action(
     draft_session: &mut DraftSession,
     human_action: DraftAction,
-) -> Result<(), JsValue> {
+) -> Result<(), String> {
+    apply_human_pick_and_resolve_bots_with_overrides(
+        draft_session,
+        human_action,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+/// Resolve the bot seats, letting `overrides` supply the pick for any seat an
+/// LLM drafter already chose for.
+///
+/// An override is a list of `instance_id`s, never indices: the ids were resolved
+/// against the same pack this loop reads, and `session::apply` re-validates them
+/// against the live pack regardless. A seat with no override — or whose override
+/// the reducer refuses — falls through to the heuristic bot in the same pass, so
+/// a failed LLM call costs a seat its flavour, never its pick.
+fn apply_human_pick_and_resolve_bots_with_overrides(
+    draft_session: &mut DraftSession,
+    human_action: DraftAction,
+    overrides: &std::collections::BTreeMap<u8, Vec<String>>,
+) -> Result<(), String> {
     if !matches!(draft_session.config.kind, DraftKind::Quick) {
-        return Err(JsValue::from_str(
-            "apply_human_pick_and_resolve_bots is only valid for Quick Draft",
-        ));
+        return Err("apply_human_pick_and_resolve_bots is only valid for Quick Draft".to_string());
     }
 
     session::apply(draft_session, human_action, None)
-        .map_err(|e| JsValue::from_str(&format!("Human pick failed: {}", e)))?;
+        .map_err(|e| format!("Human pick failed: {e}"))?;
 
     let difficulty = DIFFICULTY.with(|cell| cell.get());
     let mut rng = RNG
         .with(|cell| cell.take())
-        .ok_or_else(|| JsValue::from_str("RNG not initialized"))?;
+        .ok_or_else(|| "RNG not initialized".to_string())?;
 
     let result = CARD_DB.with(|cell| {
         let db_borrow = cell.borrow();
@@ -659,26 +681,42 @@ fn apply_human_pick_and_resolve_bots_with_action(
                 continue;
             }
 
-            // CR 903.13b: a bot owes its kind's whole pick step. This loop is
+            // CR 905.1a: a bot owes its kind's one-card Quick Draft pick step. This loop is
             // `Quick`-gated above, so `cards_per_pick` is 1 here today; reading
             // it from the procedure is what keeps that true by construction
             // rather than by coincidence.
             let cards_per_pick =
                 usize::from(draft_session.config.kind.procedure().cards_per_pick).min(pack.0.len());
-            let pick_indices = bot_ai::bot_picks(
-                &pack.0,
-                cards_per_pick,
-                difficulty,
-                &draft_session.pools[seat as usize],
-                card_db,
-                &mut rng,
-            );
-            // Map indices to ids BEFORE applying — the apply mutates the pack
-            // the indices refer to.
-            let card_instance_ids: Vec<String> = pick_indices
-                .into_iter()
-                .map(|index| pack.0[index].instance_id.clone())
-                .collect();
+            let pack_shape = bot_ai::PackShape::current(draft_session);
+            let chosen = overrides
+                .get(&seat)
+                .filter(|ids| {
+                    // Only honour an override that names the exact step and
+                    // cards this pack still holds; anything else is stale.
+                    ids.len() == cards_per_pick
+                        && ids
+                            .iter()
+                            .all(|id| pack.0.iter().any(|card| &card.instance_id == id))
+                })
+                .cloned();
+            let card_instance_ids = chosen.unwrap_or_else(|| {
+                let pick_indices = bot_ai::bot_picks(
+                    &pack.0,
+                    cards_per_pick,
+                    difficulty,
+                    &draft_session.pools[seat as usize],
+                    card_db,
+                    PICK_ENHANCEMENT.with(|cell| cell.get()),
+                    pack_shape,
+                    &mut rng,
+                );
+                // Map indices to ids BEFORE applying — the apply mutates the pack
+                // the indices refer to.
+                pick_indices
+                    .into_iter()
+                    .map(|index| pack.0[index].instance_id.clone())
+                    .collect()
+            });
 
             session::apply(
                 draft_session,
@@ -688,10 +726,10 @@ fn apply_human_pick_and_resolve_bots_with_action(
                 },
                 None,
             )
-            .map_err(|e| JsValue::from_str(&format!("Bot {seat} pick failed: {}", e)))?;
+            .map_err(|e| format!("Bot {seat} pick failed: {e}"))?;
         }
 
-        Ok::<(), JsValue>(())
+        Ok::<(), String>(())
     });
 
     RNG.with(|cell| cell.set(Some(rng)));
@@ -705,7 +743,8 @@ fn apply_human_pick_and_resolve_bots_with_action(
 pub fn submit_pick(card_instance_id: &str) -> Result<JsValue, JsValue> {
     let card_id = card_instance_id.to_string();
     with_draft_mut(|draft_session| {
-        apply_human_pick_and_resolve_bots(draft_session, card_id)?;
+        apply_human_pick_and_resolve_bots(draft_session, card_id)
+            .map_err(|e| JsValue::from_str(&e))?;
         Ok(to_js(&filter_for_player(draft_session, 0)))
     })
 }
@@ -728,7 +767,8 @@ pub fn submit_pick_with_draft_effect(
                 effect_card_instance_id,
                 card_instance_ids,
             },
-        )?;
+        )
+        .map_err(|e| JsValue::from_str(&e))?;
         Ok(to_js(&filter_for_player(draft_session, 0)))
     })
 }
@@ -753,6 +793,7 @@ pub fn auto_pick() -> Result<JsValue, JsValue> {
         let mut rng = RNG
             .with(|cell| cell.take())
             .ok_or_else(|| JsValue::from_str("RNG not initialized"))?;
+        let pack_shape = bot_ai::PackShape::current(draft_session);
         let card_id = CARD_DB.with(|cell| {
             let db_borrow = cell.borrow();
             let pick_idx = bot_ai::bot_pick(
@@ -760,15 +801,283 @@ pub fn auto_pick() -> Result<JsValue, JsValue> {
                 difficulty,
                 &draft_session.pools[0],
                 db_borrow.as_ref(),
+                PICK_ENHANCEMENT.with(|cell| cell.get()),
+                pack_shape,
                 &mut rng,
             );
             pack.0[pick_idx].instance_id.clone()
         });
         RNG.with(|cell| cell.set(Some(rng)));
 
-        apply_human_pick_and_resolve_bots(draft_session, card_id)?;
+        apply_human_pick_and_resolve_bots(draft_session, card_id)
+            .map_err(|e| JsValue::from_str(&e))?;
         Ok(to_js(&filter_for_player(draft_session, 0)))
     })
+}
+
+// ── LLM-driven draft seats ───────────────────────────────────────────────────
+//
+// Strictly opt-in, exactly as in `engine-wasm`: with no configured endpoint the
+// heuristic bot in `bot_ai` drives every seat, unchanged.
+//
+// The two calls bracket the network round trip. `buildLlmDraftPickRequests`
+// renders each LLM seat's own `DraftPlayerView` — the same per-seat projection
+// the heuristic bot is handed, which is what keeps an LLM drafter blind to other
+// seats' pools — and stamps the pack with a fingerprint.
+// `submitPickWithLlmBotPicks` applies the human's pick and then hands each
+// resolved pick to the bot loop as an override, falling back per seat.
+
+/// The per-seat inputs a caller supplies to resolve LLM picks: which seat, the
+/// pack fingerprint the prompt was built over, which provider answered, and the
+/// raw response body.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmDraftResponse {
+    seat: u8,
+    fingerprint: String,
+    provider: String,
+    /// HTTP status of the provider response. Carried so the engine can refuse a
+    /// non-2xx reply whatever its body looks like.
+    status: u16,
+    body: String,
+}
+
+/// What happened to one seat's LLM pick, so the UI can report a misconfigured
+/// endpoint instead of silently drafting like a bot forever.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmDraftOutcome {
+    seat: u8,
+    used: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    /// What the provider reported spending on this reply, used or not.
+    /// Diagnostic only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<phase_llm::TokenUsage>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmDraftPickRequest {
+    seat: u8,
+    fingerprint: String,
+    option_count: usize,
+    required_pick_count: usize,
+    /// Size of the prompt this request carries, for measuring prompt growth.
+    prompt_chars: usize,
+    request: phase_llm::HttpRequestSpec,
+}
+
+/// The seats an LLM drafter may act for: the BOT seats of this pod, and nothing
+/// else.
+///
+/// Derived from the session's own roster rather than filtering a caller's list,
+/// so there is exactly one answer to "which seats may an LLM draft for" and no
+/// way to ask for a different one. `DraftSeat::Human` is legal at ANY index — an
+/// 8-player Premier or Traditional pod seats humans at 1..7 — so a seat number
+/// carries no permission on its own. Rendering a seat's `filter_for_player`
+/// view builds a prompt out of that seat's private pool and unpassed pack and
+/// ships it to a third-party provider; for a human seat that would disclose
+/// another player's hidden information to an outside service.
+fn llm_eligible_bot_seats(draft_session: &DraftSession) -> Vec<u8> {
+    draft_session
+        .seats
+        .iter()
+        .enumerate()
+        .filter(|(_, seat)| matches!(seat, DraftSeat::Bot { .. }))
+        .filter_map(|(index, _)| u8::try_from(index).ok())
+        .collect()
+}
+
+/// Build one LLM pick request per eligible bot seat.
+///
+/// Takes NO seat list. Which seats an LLM may draft for is an authority
+/// question this crate already owns ([`llm_eligible_bot_seats`]), and accepting
+/// a caller's list made the display layer a second classifier of the same
+/// thing -- one free to drift toward naming a human seat, whose private pool
+/// and unpassed pack would then be rendered into a third-party prompt.
+///
+/// `set_names_json` is an optional set-code -> name map so the format brief
+/// reads "Triple Mirrodin" rather than "Triple MRD"; codes are used verbatim
+/// when it is absent.
+#[wasm_bindgen(js_name = buildLlmDraftPickRequests)]
+pub fn build_llm_draft_pick_requests(
+    endpoint_json: &str,
+    set_names_json: &str,
+) -> Result<JsValue, JsValue> {
+    let requests = build_llm_draft_pick_requests_inner(endpoint_json, set_names_json)
+        .map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(&requests))
+}
+
+fn build_llm_draft_pick_requests_inner(
+    endpoint_json: &str,
+    set_names_json: &str,
+) -> Result<Vec<LlmDraftPickRequest>, String> {
+    let endpoint: phase_llm::LlmEndpointConfig = serde_json::from_str(endpoint_json)
+        .map_err(|e| format!("Invalid LLM endpoint config: {e}"))?;
+    // A missing or unparsable name map degrades the brief to set codes; it is
+    // never a reason to refuse a pick.
+    let set_names: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(set_names_json).unwrap_or_default();
+    let set_names = phase_llm::draft_decision::set_names_from_pairs(set_names);
+    let difficulty = DIFFICULTY.with(|cell| cell.get());
+
+    with_draft_inner(|draft_session| {
+        let requests = CARD_DB.with(|cell| {
+            let db_borrow = cell.borrow();
+            let card_db = db_borrow.as_ref();
+            llm_eligible_bot_seats(draft_session)
+                .into_iter()
+                .filter_map(|seat| {
+                    let view = filter_for_player(draft_session, seat);
+                    // A seat with no prompt asks nothing: notably a forced pick
+                    // (the last card of a pack), which the bot path takes and
+                    // records without a provider round trip.
+                    let request = phase_llm::build_draft_pick_prompt(
+                        seat, &view, difficulty, card_db, &set_names,
+                    )
+                    .ok()?;
+                    let http = phase_llm::build_chat_request(&endpoint, &request.prompt).ok()?;
+                    Some(LlmDraftPickRequest {
+                        seat,
+                        fingerprint: request.fingerprint,
+                        option_count: request.option_count,
+                        required_pick_count: request.required_pick_count,
+                        prompt_chars: request.prompt.char_count(),
+                        request: http,
+                    })
+                })
+                .collect()
+        });
+        Ok(requests)
+    })
+}
+
+/// Submit the human's pick, resolving any LLM seat's pick from its response.
+///
+/// Returns `{ view, llmOutcomes }`: the same `DraftPlayerView` `submit_pick`
+/// returns, plus a per-seat record of whether the LLM pick was used.
+#[wasm_bindgen(js_name = submitPickWithLlmBotPicks)]
+pub fn submit_pick_with_llm_bot_picks(
+    card_instance_id: &str,
+    responses_json: &str,
+) -> Result<JsValue, JsValue> {
+    let (view, outcomes) = submit_pick_with_llm_bot_picks_inner(card_instance_id, responses_json)
+        .map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(
+        &serde_json::json!({ "view": view, "llmOutcomes": outcomes }),
+    ))
+}
+
+fn submit_pick_with_llm_bot_picks_inner(
+    card_instance_id: &str,
+    responses_json: &str,
+) -> Result<(DraftPlayerView, Vec<LlmDraftOutcome>), String> {
+    let responses: Vec<LlmDraftResponse> = serde_json::from_str(responses_json)
+        .map_err(|e| format!("Invalid LLM draft responses: {e}"))?;
+    let card_id = card_instance_id.to_string();
+
+    with_draft_mut_inner(|draft_session| {
+        let mut overrides: std::collections::BTreeMap<u8, Vec<String>> =
+            std::collections::BTreeMap::new();
+        let mut outcomes: Vec<LlmDraftOutcome> = Vec::with_capacity(responses.len());
+
+        for response in &responses {
+            let usage = phase_llm::token_usage(
+                phase_llm::LlmProvider::from_label(&response.provider),
+                &response.body,
+            );
+            match resolve_llm_draft_pick(draft_session, response) {
+                Ok(selection) => {
+                    overrides.insert(response.seat, selection.card_instance_ids);
+                    outcomes.push(LlmDraftOutcome {
+                        seat: response.seat,
+                        used: true,
+                        reasoning: selection.reasoning,
+                        error: None,
+                        usage,
+                    });
+                }
+                Err(error) => outcomes.push(LlmDraftOutcome {
+                    seat: response.seat,
+                    used: false,
+                    reasoning: None,
+                    error: Some(error.to_string()),
+                    usage,
+                }),
+            }
+        }
+
+        apply_human_pick_and_resolve_bots_with_overrides(
+            draft_session,
+            DraftAction::Pick {
+                seat: 0,
+                card_instance_ids: vec![card_id],
+            },
+            &overrides,
+        )?;
+
+        Ok((filter_for_player(draft_session, 0), outcomes))
+    })
+}
+
+/// Decode one seat's LLM response against the pack it is actually holding.
+fn resolve_llm_draft_pick(
+    draft_session: &DraftSession,
+    response: &LlmDraftResponse,
+) -> Result<phase_llm::LlmPickSelection, phase_llm::LlmError> {
+    // Same authority as the request side. A response naming a human seat cannot
+    // have come from a request this bridge issued, so it is refused rather than
+    // used to pick for that player.
+    if !matches!(
+        draft_session.seats.get(usize::from(response.seat)),
+        Some(DraftSeat::Bot { .. })
+    ) {
+        return Err(phase_llm::LlmError::StaleDecision);
+    }
+    // The pack is read through the same per-seat projection the request was
+    // built from, never from `session.current_pack`. The projection can reorder
+    // a pack for presentation (a set draft lists it by rarity), and the prompt's
+    // numbered options, the fingerprint and the model's reply all speak in THAT
+    // order. Fingerprinting or indexing the raw pack instead would refuse every
+    // reply as stale, and where it did match would resolve the model's option
+    // number to a different card.
+    let view = filter_for_player(draft_session, response.seat);
+    let Some(pack) = view.current_pack.as_deref().filter(|pack| !pack.is_empty()) else {
+        return Err(phase_llm::LlmError::StaleDecision);
+    };
+    let provider = phase_llm::LlmProvider::from_label(&response.provider);
+    // CR 905.1a / CR 903.13b: the configured procedure supplies the ordinary or Commander Draft pick-step count.
+    let required = usize::from(draft_session.config.kind.procedure().cards_per_pick);
+    // The reply is read against the option lines the REQUEST rendered: the same
+    // pack, card database and difficulty `build_llm_draft_pick_requests` used.
+    let difficulty = DIFFICULTY.with(|cell| cell.get());
+    CARD_DB.with(|cell| {
+        let db_borrow = cell.borrow();
+        phase_llm::select_picks_from_response(
+            response.seat,
+            pack,
+            required,
+            &response.fingerprint,
+            (db_borrow.as_ref(), difficulty),
+            phase_llm::LlmReply {
+                provider,
+                status: response.status,
+                body: &response.body,
+            },
+        )
+    })
+}
+
+/// The engine-owned LLM provider catalog, mirrored here so a draft-only client
+/// surface does not have to load the game engine to render the settings UI.
+#[wasm_bindgen(js_name = llmProviderCatalog)]
+pub fn llm_provider_catalog() -> JsValue {
+    to_js(phase_llm::catalog::provider_catalog())
 }
 
 /// Get the current DraftPlayerView without mutation.
@@ -842,6 +1151,8 @@ fn submit_deck_inner(
                 seat: 0,
                 main_deck,
                 commanders,
+                // Dedicated local/P2P wrappers remain name-only.
+                printings: Vec::new(),
             },
             None,
         )
@@ -941,7 +1252,9 @@ fn suggest_lands_for_seat_inner(
 /// picks): every card the seat drafts this step, as a JSON array of instance
 /// ids. `apply_pick_inner` owns the count contract — one id for the four CR
 /// 905.1a kinds, two for CommanderDraft, dropping to the remainder on an odd
-/// final pick.
+/// final pick. `Winston` has NO PICK STEP AT ALL and never reaches this
+/// function: a shared-stack turn is a whole-pile
+/// `DraftAction::SharedStackDecision`.
 ///
 /// The JSON encoding mirrors `submit_pick_with_draft_effect_for_seat` below
 /// byte for byte. It is deliberately NOT tolerant of a bare id: a bare string
@@ -1073,6 +1386,7 @@ fn submit_deck_for_seat_inner(
                 seat,
                 main_deck,
                 commanders,
+                printings: Vec::new(),
             },
             None,
         )
@@ -1102,19 +1416,80 @@ pub fn export_draft_session() -> Result<String, JsValue> {
     })?
 }
 
+/// Why a saved session cannot be restored under the legacy admission.
+enum RestoreRefusal {
+    /// The text does not deserialize as a draft session.
+    Unreadable(serde_json::Error),
+    /// The session deserializes and the legacy admission refuses it, with the
+    /// admission's own message.
+    Incompatible(String),
+}
+
+/// The first two steps of restoring a saved session, shared by the restore and
+/// the check: deserialize the text as a draft session, then apply the legacy
+/// admission.
+fn admitted_session_from_json(json: &str) -> Result<DraftSession, RestoreRefusal> {
+    let session: DraftSession = serde_json::from_str(json).map_err(RestoreRefusal::Unreadable)?;
+    admit_legacy_runtime(&session).map_err(RestoreRefusal::Incompatible)?;
+    Ok(session)
+}
+
 /// Decode only snapshot shapes this client can safely present after a restore.
 ///
 /// Player and spectator projections own the privacy boundary for a Chaos
 /// layout: the persisted snapshot remains host-local, while all ordinary views
 /// expose only `DraftSourceView`'s redacted metadata.
 fn restorable_draft_session_from_json(json: &str) -> Result<DraftSession, String> {
-    let mut session: DraftSession = serde_json::from_str(json)
-        .map_err(|error| format!("Failed to deserialize draft session: {error}"))?;
+    let mut session = admitted_session_from_json(json).map_err(|refusal| match refusal {
+        RestoreRefusal::Unreadable(error) => {
+            format!("Failed to deserialize draft session: {error}")
+        }
+        RestoreRefusal::Incompatible(error) => error,
+    })?;
     session.config = enforce_procedure_minimum_deck_size(session.config);
     session
         .validate_persisted_snapshot()
         .map_err(|error| format!("Invalid draft snapshot: {error}"))?;
     Ok(session)
+}
+
+/// The draft engine's answer to whether a saved session could be restored
+/// under its legacy admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "type")]
+enum RestorableDraftSessionVerdict {
+    /// The session deserializes and the legacy admission accepts it.
+    Admitted,
+    /// The session deserializes and the legacy admission refuses it.
+    Incompatible,
+    /// The text does not deserialize as a draft session.
+    Unreadable,
+}
+
+/// Pure-Rust core for `check_restorable_draft_session`, so the verdict is
+/// reachable from `cargo test` without `js_sys::JSON::parse`. It takes the
+/// restore's first two steps from `admitted_session_from_json` and nothing
+/// else: the procedure minimum and the snapshot validation stay the import's.
+fn restorable_draft_session_verdict(json: &str) -> RestorableDraftSessionVerdict {
+    match admitted_session_from_json(json) {
+        Ok(_) => RestorableDraftSessionVerdict::Admitted,
+        Err(RestoreRefusal::Incompatible(_)) => RestorableDraftSessionVerdict::Incompatible,
+        Err(RestoreRefusal::Unreadable(_)) => RestorableDraftSessionVerdict::Unreadable,
+    }
+}
+
+/// Check a saved draft session against the draft engine's legacy admission
+/// without restoring it.
+///
+/// Returns `{ type: "Admitted" }` when the session deserializes and the
+/// admission accepts it, `{ type: "Incompatible" }` when it deserializes and
+/// the admission refuses it, and `{ type: "Unreadable" }` when it does not
+/// deserialize as a draft session. It never throws, and it reads and writes no
+/// installed session, random state, pack generator, difficulty or card
+/// database.
+#[wasm_bindgen]
+pub fn check_restorable_draft_session(json: &str) -> JsValue {
+    to_js(&restorable_draft_session_verdict(json))
 }
 
 /// Restore a DraftSession from a persisted JSON snapshot.
@@ -1126,9 +1501,24 @@ fn restorable_draft_session_from_json(json: &str) -> Result<DraftSession, String
 /// original session's RNG stream, which is fine.
 #[wasm_bindgen]
 pub fn import_draft_session(json: &str, difficulty: u8) -> Result<JsValue, JsValue> {
-    let session =
-        restorable_draft_session_from_json(json).map_err(|error| JsValue::from_str(&error))?;
+    import_draft_session_inner(json, difficulty)
+        .map(|view| to_js(&view))
+        .map_err(|error| JsValue::from_str(&error))
+}
 
+fn import_draft_session_inner(
+    json: &str,
+    difficulty: u8,
+) -> Result<draft_core::view::DraftPlayerView, String> {
+    let session = restorable_draft_session_from_json(json)?;
+
+    // The resume-seed offset is derived from `cards_in_pack` /
+    // `current_pack_number` / `pick_number`, all of which stay `0` for a
+    // shared-stack session (it moves none of them). That is harmless: this RNG
+    // seeds the PICK-AND-PASS bot, and a shared-stack bot seat never reaches
+    // it. `winston_decision` is deliberately RNG-free -- "same projection =>
+    // same decision" is meant literally -- so a resumed Winston pod's bot
+    // behaviour does not depend on this stream at all.
     let offset = u64::from(session.cards_in_pack(session.current_pack_number))
         * u64::from(session.current_pack_number)
         + u64::from(session.pick_number);
@@ -1138,9 +1528,9 @@ pub fn import_draft_session(json: &str, difficulty: u8) -> Result<JsValue, JsVal
     RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(resume_seed))));
 
     let view = filter_for_player(&session, 0);
-    DRAFT_SESSION.with(|cell| cell.set(Some(session)));
+    session_cell::install(session);
 
-    Ok(to_js(&view))
+    Ok(view)
 }
 
 /// Check whether all seats with pending packs have submitted their picks.
@@ -1186,18 +1576,16 @@ fn get_bot_deck_inner(bot_seat: u8) -> Result<suggest::SuggestedDeck, String> {
             let db_borrow = cell.borrow();
             let card_db = db_borrow.as_ref();
 
-            // CR 903.3 + CR 903.6: eligibility and colour identity are both read
-            // off a `CardFace`, so with no card database this crate cannot
-            // designate a commander -- and a 60-card pile with no commander is
-            // not a Commander deck. Refuse rather than return a deck whose
-            // legality was never judged: the caller loads the database at host
-            // setup, and a silent empty designation would put three of four seats
-            // into a game CR 903.6 cannot start. The four CR 905.1a kinds report
-            // `0` here and are unaffected.
-            if session.config.kind.commanders_required() > 0 && card_db.is_none() {
-                return Err(
-                    "Card database must be loaded before a Commander Draft bot deck".to_string(),
-                );
+            // CR 407.3 + CR 903.3: Cube addables and Commander designations
+            // require typed faces. Ordinary set-backed pods can propose a
+            // deck without this optional database; game admission still
+            // checks every submitted name and excludes ante cards.
+            let requires_card_db = match &session.config.source {
+                DraftSource::Set { .. } => session.config.kind.commanders_required() > 0,
+                DraftSource::Cube { .. } => true,
+            };
+            if requires_card_db && card_db.is_none() {
+                return Err("Card database must be loaded before a draft bot deck".to_string());
             }
 
             let deck = suggest::suggest_deck(
@@ -1209,35 +1597,16 @@ fn get_bot_deck_inner(bot_seat: u8) -> Result<suggest::SuggestedDeck, String> {
                 &session.config.addable_cards,
             );
 
-            // CR 903.13f(1): "A player's deck must contain at least 60 cards".
-            // New and restored Commander Cube sessions clamp configured
-            // `min_deck_size` to the engine-published Cube floor, so this guard
-            // enforces at least 60 for every session.
-            //
-            // `min_deck_size` is also the same value `apply_submit_deck` hands
-            // `validate_limited_deck` for the human on this pod
-            // (`draft-core/src/session.rs`), which is what makes the two
-            // authorities on this session agree. That validator rejects a short
-            // deck with `LimitedDeckError::TooFewCards`
-            // (`draft-core/src/validation.rs`, CR 100.2b); a bot deck reaches no
-            // such gate, so the postcondition is asserted here instead. It fires
-            // when `suggest_addable_cards`'s CustomOnly arm finds no addable card
-            // inside the commander's colour identity (CR 903.5c) and returns
-            // nothing to fill the land slots with. Refuse rather than ship a deck
-            // this engine would refuse from a human on the same session: the
-            // alternative is a CR 903.13f(1) violation nobody can see without
-            // counting the bot's cards. The four CR 905.1a kinds report `0` here
-            // and are unaffected -- without that gate this would change their
-            // behaviour, which is outside this phase's scope; the general case
-            // belongs to `validate_limited_deck`, which already owns it on every
-            // path a human deck takes.
+            // Enforce the session-configured floor for the bot, as
+            // `validate_limited_deck` does for human decks. CR 100.2b sets
+            // ordinary Limited at 40 cards; CR 903.13f(1) sets Commander Draft
+            // at 60. Custom Cube floors are configuration, not CR 100.2b.
+            // Never publish an undersized proposal if the bot runs out of cards.
             let deck_total: usize =
                 deck.main_deck.len() + deck.lands.values().map(|&n| n as usize).sum::<usize>();
-            if session.config.kind.commanders_required() > 0
-                && deck_total < session.config.min_deck_size
-            {
+            if deck_total < session.config.min_deck_size {
                 return Err(format!(
-                    "Commander Draft bot deck reached {deck_total} cards, minimum is {}",
+                    "Draft bot deck reached {deck_total} cards, minimum is {}",
                     session.config.min_deck_size
                 ));
             }
@@ -1334,6 +1703,9 @@ struct DraftProcedureDto {
     cards_per_pick: u8,
     pick_selection_mode: draft_core::types::PickSelectionMode,
     distribution: draft_core::types::PackDistribution,
+    /// Which set-layout shapes this kind admits. The setup page renders exactly
+    /// this list; it does not derive layout legality from `distribution`.
+    allowed_set_layouts: Vec<draft_core::types::SetLayoutKind>,
     min_deck_size: usize,
     cube_min_deck_size: usize,
     commanders_required: u8,
@@ -1377,6 +1749,7 @@ fn draft_procedure_dto(
         cards_per_pick: procedure.cards_per_pick,
         pick_selection_mode: procedure.pick_selection_mode,
         distribution: procedure.distribution,
+        allowed_set_layouts: procedure.allowed_set_layouts().to_vec(),
         min_deck_size: procedure.min_deck_size,
         cube_min_deck_size: procedure.cube_min_deck_size,
         commanders_required: procedure.commanders_required,
@@ -1408,6 +1781,9 @@ fn draft_kind_wire_number(kind: DraftKind) -> u8 {
         DraftKind::Sealed => 3,
         // CR 903.13a: the fifth kind.
         DraftKind::CommanderDraft => 4,
+        // The sixth kind. No CR: Winston Draft has no Comprehensive Rules
+        // section -- see `PackDistribution::SharedStackPiles`.
+        DraftKind::Winston => 5,
     }
 }
 
@@ -1429,22 +1805,45 @@ fn draft_kind_from_wire(kind: u8) -> Result<DraftKind, String> {
 }
 
 /// Create a multiplayer draft session. Used by the P2P host to initialize a
-/// Premier, Traditional, Sealed, or Commander draft with human + bot seats from
-/// a Set pool, host-local Chaos candidate pools, or a custom Cube list.
+/// multiplayer draft of any `DraftKind` with a wire number, with human + bot
+/// seats from a Set pool, host-local Chaos candidate pools, or a custom Cube
+/// list. A shared-stack kind admits bot seats like any other; their turns are
+/// driven by `resolve_shared_stack_bot_turns`, which the host calls after each
+/// human decision.
 ///
 /// - `pool_input_json`: serialized `PoolInput` discriminated union
 ///   (`{ "type": "Set" | "Chaos" | "Cube", "data": { ... } }`)
 /// - `seats_json`: JSON array of SeatDescriptors
-/// - `kind`: 0=Quick, 1=Premier, 2=Traditional, 3=Sealed, 4=CommanderDraft
-///   (CR 903.13a). The mapping's single authority is `draft_kind_wire_number`.
-///   Flows through to `DraftConfig.kind` unchanged. Tournament match format is
-///   identical to set drafts.
+/// - `kind`: the wire number for a `DraftKind`. The mapping's single authority
+///   is `draft_kind_wire_number` — read it there rather than restating it here,
+///   which is what keeps a widening from leaving this list stale. Flows through
+///   to `DraftConfig.kind` unchanged. Tournament match format is identical to
+///   set drafts.
 /// - `seed`: RNG seed for deterministic pack generation
 /// - `draft_code`: unique room identifier
+/// - `difficulty`: the bot strength this pod's bot seats play at, through
+///   `map_difficulty` (0..=4, anything else is `Medium`). APPENDED LAST, and it
+///   must stay last: the client's call sites and their test mocks read this
+///   boundary positionally.
+///
+///   It is not cosmetic. `DIFFICULTY` is a per-thread `Cell` with no reset that
+///   outlives the draft that set it, and until now this entry point never wrote
+///   it — so a player who finished a Quick draft at `VeryHard` and then hosted
+///   a pod in the same tab got a `VeryHard` pod bot, silently, with no UI
+///   saying so. Every other entry point that creates a session writes this cell
+///   (`start_quick_draft`, `start_sealed_draft`, `start_quick_cube_draft`,
+///   `import_draft_session`); this one now does too, so the strength a pod
+///   plays at is the strength its host asked for.
 ///
 /// Stores the session in the same thread-local as Quick Draft (one active
 /// draft at a time per WASM instance). Returns the initial DraftPlayerView
 /// for seat 0.
+// The wasm boundary is positional by construction: `#[wasm_bindgen]` maps each
+// parameter to one JS argument, and the host's `.d.ts` and its tests read this
+// call by position. Bundling these eight into a struct would mean serializing a
+// payload across the boundary just to satisfy an arity lint, and would move
+// every existing argument — exactly what appending `difficulty` LAST avoids.
+#[allow(clippy::too_many_arguments)]
 #[wasm_bindgen]
 pub fn create_multiplayer_draft(
     pool_input_json: &str,
@@ -1454,6 +1853,7 @@ pub fn create_multiplayer_draft(
     draft_code: &str,
     tournament_format: &str,
     pod_policy: &str,
+    difficulty: u8,
 ) -> Result<JsValue, JsValue> {
     let view = create_multiplayer_draft_inner(
         pool_input_json,
@@ -1463,6 +1863,7 @@ pub fn create_multiplayer_draft(
         draft_code,
         tournament_format,
         pod_policy,
+        difficulty,
     )
     .map_err(|e| JsValue::from_str(&e))?;
     Ok(to_js(&view))
@@ -1485,6 +1886,18 @@ fn booster_pack_pool_for_game_inner() -> Result<Option<Vec<String>>, String> {
 /// `DraftPlayerView` so this branch is reachable from `cargo test` without
 /// going through `js_sys::JSON::parse`. The WASM export wraps this with
 /// `to_js` and `JsValue::from_str` error mapping.
+///
+/// `difficulty` is written to the `DIFFICULTY` thread-local beside
+/// `session_cell::install` in each pool arm, exactly where `start_sealed_draft`
+/// and the other session-creating entry points write it — ON THE SUCCESS PATH
+/// ONLY. A failed creation leaves any previously installed session in place, so
+/// writing the cell earlier would hand THAT session's bots a strength nobody
+/// chose for it, which is the same cross-draft contamination this parameter
+/// exists to end.
+///
+/// The parameter list mirrors the export's one-for-one; see the note there for
+/// why the arity lint is allowed rather than designed around.
+#[allow(clippy::too_many_arguments)]
 fn create_multiplayer_draft_inner(
     pool_input_json: &str,
     seats_json: &str,
@@ -1493,6 +1906,7 @@ fn create_multiplayer_draft_inner(
     draft_code: &str,
     tournament_format: &str,
     pod_policy: &str,
+    difficulty: u8,
 ) -> Result<draft_core::view::DraftPlayerView, String> {
     let pool_input: PoolInput = serde_json::from_str(pool_input_json)
         .map_err(|e| format!("Failed to parse pool input: {}", e))?;
@@ -1557,6 +1971,9 @@ fn create_multiplayer_draft_inner(
             )?;
 
             let config = DraftConfig {
+                flow: draft_core::types::DraftFlow::LegacyBarrier,
+                selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+                clock_policy: draft_core::types::DraftClockPolicy::default(),
                 set_code: selection.source.set_code(),
                 source: selection.source,
                 kind: draft_kind,
@@ -1579,8 +1996,9 @@ fn create_multiplayer_draft_inner(
 
             let view = filter_for_player(&draft_session, 0);
 
-            DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
+            session_cell::install(draft_session);
             PACK_GEN.with(|cell| cell.set(Some(pack_gen)));
+            DIFFICULTY.with(|cell| cell.set(map_difficulty(difficulty)));
             RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
 
             Ok(view)
@@ -1594,6 +2012,9 @@ fn create_multiplayer_draft_inner(
             )?;
 
             let config = DraftConfig {
+                flow: draft_core::types::DraftFlow::LegacyBarrier,
+                selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+                clock_policy: draft_core::types::DraftClockPolicy::default(),
                 set_code: selection.source.set_code(),
                 source: selection.source,
                 kind: draft_kind,
@@ -1616,8 +2037,9 @@ fn create_multiplayer_draft_inner(
 
             let view = filter_for_player(&draft_session, 0);
 
-            DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
+            session_cell::install(draft_session);
             PACK_GEN.with(|cell| cell.set(Some(pack_gen)));
+            DIFFICULTY.with(|cell| cell.set(map_difficulty(difficulty)));
             RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
 
             Ok(view)
@@ -1633,7 +2055,11 @@ fn create_multiplayer_draft_inner(
                 PackDistribution::AllAtOnce => {
                     return Err("Sealed events require a Set pool".to_string());
                 }
-                PackDistribution::PickAndPass => {}
+                // A shared stack is built by shuffling every opened pack
+                // together, and a cube source generates packs just as a set
+                // source does — so Winston-from-cube is permitted and this arm
+                // falls through with the pick-and-pass one.
+                PackDistribution::PickAndPass | PackDistribution::SharedStackPiles { .. } => {}
             }
             let entries = parse_cube_list(&cube_list_text).map_err(|errors| {
                 format!(
@@ -1666,6 +2092,9 @@ fn create_multiplayer_draft_inner(
 
             // pod_size from settings is overridden by seats.len() — MP authoritative source
             let config = enforce_procedure_minimum_deck_size(DraftConfig {
+                flow: draft_core::types::DraftFlow::LegacyBarrier,
+                selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+                clock_policy: draft_core::types::DraftClockPolicy::default(),
                 source: DraftSource::Cube {
                     id: "custom-cube".to_string(),
                     name: cube_name.clone(),
@@ -1695,8 +2124,9 @@ fn create_multiplayer_draft_inner(
 
             let view = filter_for_player(&draft_session, 0);
 
-            DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
+            session_cell::install(draft_session);
             PACK_GEN.with(|cell| cell.set(None));
+            DIFFICULTY.with(|cell| cell.set(map_difficulty(difficulty)));
             RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
 
             Ok(view)
@@ -1713,13 +2143,199 @@ fn create_multiplayer_draft_inner(
 /// Returns the list of DraftDeltas produced (serialized as a JS array).
 #[wasm_bindgen]
 pub fn apply_draft_action(action_json: &str) -> Result<JsValue, JsValue> {
-    let action: DraftAction = serde_json::from_str(action_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse action: {}", e)))?;
+    apply_draft_action_inner(action_json)
+        .map(|deltas| to_js(&deltas))
+        .map_err(|error| JsValue::from_str(&error))
+}
 
-    with_draft_mut(|draft_session| {
-        let deltas = session::apply(draft_session, action, None)
-            .map_err(|e| JsValue::from_str(&format!("Draft action failed: {}", e)))?;
-        Ok(to_js(&deltas))
+fn apply_draft_action_inner(action_json: &str) -> Result<Vec<DraftDelta>, String> {
+    let action: DraftAction =
+        serde_json::from_str(action_json).map_err(|e| format!("Failed to parse action: {}", e))?;
+    if action.is_fifo_only() {
+        return Err(FIFO_UNSUPPORTED_BY_RUNTIME.to_string());
+    }
+
+    with_draft_mut_inner(|draft_session| {
+        session::apply(draft_session, action, None)
+            .map_err(|e| format!("Draft action failed: {}", e))
+    })
+}
+
+/// The termination bound for one shared-stack bot run, DERIVED from the state
+/// rather than chosen, so it tracks the real board instead of a magic constant.
+///
+/// With `U` undrafted cards (main stack plus every pile) and `n` piles, the
+/// bound is `U * (n + 1) + 1`. The proof it comes from, read off
+/// `shared_stack::apply_shared_stack_decision`:
+///
+/// * `Phi = U * (n + 1) + (n - c)` is a non-negative integer (`c <= n - 1`, so
+///   `n - c >= 1`) and STRICTLY DECREASES on every applied decision. A `Take` or
+///   a final-pile `Decline` drops `U` by at least 1, costing at least `n + 1`,
+///   while `(n - c)` can rise by at most `n - 1`; a non-final `Decline` leaves
+///   `U` alone and drops `(n - c)` by exactly 1. So the loop terminates.
+/// * The `Err` branch is unreachable, by a tighter per-turn count: a turn's
+///   cursor starts at 0 and advances by exactly 1 per non-final `Decline`, which
+///   requires `cursor + 1 < n`, so a turn holds at most `n - 1` non-final
+///   declines plus exactly one turn-ender -- **at most `n` decisions per turn**.
+///   Every turn-ender drops `U` by at least 1 and the session leaves `Drafting`
+///   the instant `U` reaches 0, so there are at most `U` turns. Therefore
+///   `applied <= U * n < U * (n + 1) + 1`, with slack `U + 1`.
+///
+/// MEASURED, for scale: a 2-seat 90-card pod gives `U = 90`, `n = 3`, a bound of
+/// 361, a theoretical ceiling of 270 and 74-77 actual decisions; a 4-seat pod's
+/// longest consecutive bot run was 9 decisions against a bound of 720.
+///
+/// Returns 0 for a session with no shared stack -- there is nothing to drive,
+/// and the loop's own `break` handles that case before the bound is consulted.
+fn shared_stack_bot_turn_bound(session: &DraftSession) -> usize {
+    let Some(state) = session.shared_stack.as_ref() else {
+        return 0;
+    };
+    let undrafted = state.main_stack.len() + state.piles.iter().map(Vec::len).sum::<usize>();
+    undrafted
+        .saturating_mul(state.piles.len() + 1)
+        .saturating_add(1)
+}
+
+/// Drive every consecutive shared-stack turn that belongs to a bot seat, from
+/// whatever state the session is in, and stop at the first turn that does not.
+///
+/// A bot's turn is up to `pile_count` decisions and a 3-4 seat pod can have
+/// several bot turns back to back (MEASURED: the longest consecutive run in a
+/// 4-seat/3-bot pod was 9 decisions across three turns), so this re-reads
+/// `active_seat` every iteration. A one-decision-per-call driver would strand
+/// the pod mid-run.
+///
+/// `bound` is a parameter rather than an inline expression ONLY so
+/// `the_loop_fails_loudly_rather_than_spinning` can drive the failure branch
+/// without mutating the production arithmetic; the production caller passes
+/// [`shared_stack_bot_turn_bound`], computed once at entry from the state.
+///
+/// **Loud on violation, never silent.** Three distinct failures get three
+/// distinct `Err`s and none of them is a `break`:
+///
+/// * the bound trips -- an engine invariant broke, and the termination proof
+///   above says this is unreachable from any legal state;
+/// * `winston_decision` returns `None` for the active seat while drafting,
+///   which `some_decision_is_always_legal_for_the_active_seat_while_drafting`
+///   proves cannot happen, so it is a defect rather than a state;
+/// * `session::apply` refuses the decision -- the bot disagreed with the single
+///   legality authority, which `winston_decision_never_returns_a_refused_decision`
+///   says it cannot.
+///
+/// The `break`s are for the three LEGITIMATE exits only: the session is not
+/// drafting, it has no shared stack, or the active seat is human. A `break` on
+/// the bound would strand the pod on a bot's turn with no error anywhere.
+fn drive_shared_stack_bot_turns(
+    session: &mut DraftSession,
+    difficulty: AiDifficulty,
+    card_db: Option<&CardDatabase>,
+    bound: usize,
+) -> Result<Vec<DraftDelta>, String> {
+    let mut deltas = Vec::new();
+    let mut applied = 0usize;
+
+    while session.status == DraftStatus::Drafting {
+        let Some(state) = session.shared_stack.as_ref() else {
+            break;
+        };
+        let seat = state.active_seat;
+        if !matches!(
+            session.seats.get(usize::from(seat)),
+            Some(DraftSeat::Bot { .. })
+        ) {
+            break;
+        }
+
+        applied += 1;
+        if applied > bound {
+            return Err(format!(
+                "shared-stack bot loop exceeded its termination bound of {bound} decisions \
+                 (seat {seat}); the session's undrafted count is not decreasing"
+            ));
+        }
+
+        // THE ONLY INPUT the bot gets. Not the session, not the cell: the same
+        // projection the human seat across the table receives.
+        let view = filter_for_player(session, seat);
+        let (pile, decision) = bot_ai::winston_decision(&view, difficulty, card_db)
+            .ok_or_else(|| format!("no legal shared-stack decision for bot seat {seat}"))?;
+
+        deltas.extend(
+            session::apply(
+                session,
+                DraftAction::SharedStackDecision {
+                    seat,
+                    pile,
+                    decision,
+                },
+                None,
+            )
+            .map_err(|e| format!("bot seat {seat} decision refused: {e}"))?,
+        );
+    }
+
+    Ok(deltas)
+}
+
+/// Pure-Rust core for `resolve_shared_stack_bot_turns`, so the loop, its bound
+/// and its three `Err`s are reachable from `cargo test` without wasm-bindgen --
+/// the same `_inner` split `create_multiplayer_draft_inner` and
+/// `booster_pack_pool_for_game_inner` use.
+fn resolve_shared_stack_bot_turns_inner() -> Result<Vec<DraftDelta>, String> {
+    let difficulty = DIFFICULTY.with(|cell| cell.get());
+    with_draft_mut_inner(|session| {
+        let bound = shared_stack_bot_turn_bound(session);
+        CARD_DB.with(|cell| {
+            let db_borrow = cell.borrow();
+            drive_shared_stack_bot_turns(session, difficulty, db_borrow.as_ref(), bound)
+        })
+    })
+}
+
+/// Resolve every consecutive shared-stack turn owned by a bot seat, and return
+/// the `DraftDelta`s produced (an empty array when the active seat is human, the
+/// draft is over, or the session has no shared stack).
+///
+/// The host calls this after applying a human seat's decision and after starting
+/// a pod whose first seat is a bot. It is a WASM export because the loop, its
+/// bound and its termination proof are engine concerns: the client calls it and
+/// renders what comes back, and computes nothing.
+#[wasm_bindgen]
+pub fn resolve_shared_stack_bot_turns() -> Result<JsValue, JsValue> {
+    let deltas = resolve_shared_stack_bot_turns_inner().map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(&deltas))
+}
+
+/// The decision the ENGINE would apply for a seat whose turn must be resolved
+/// without that seat choosing — a pick-timer expiry, or a disconnect.
+///
+/// `None` when there is no shared stack, or when the seat has no legal move
+/// (which for the ACTIVE seat while drafting is unreachable, and proved so by
+/// `some_decision_is_always_legal_for_the_active_seat_while_drafting`).
+///
+/// WHY THIS EXISTS AS AN EXPORT. The host used to scan the published
+/// `legality` vector itself — `legality.find(entry => entry.refusal === null)`
+/// — and take the first entry with no refusal. That is the same algorithm
+/// `shared_stack::forced_decision` runs, but over a DIFFERENT ordering source:
+/// the engine folds `SharedStackPileDecision::ALL` in declaration order, while
+/// the client folded whatever order the view happened to serialize. The two
+/// agreed by coincidence rather than by construction, and a reordering of
+/// either would have silently changed which move a timed-out seat makes.
+///
+/// Choosing a rules outcome is the reducer's job. The host may ASK for the
+/// forced resolution — that is a timeout, which is a host concern — but the
+/// answer comes from here, and the host only dispatches it through the ordinary
+/// decision path so the timed-out turn is persisted, acknowledged, broadcast and
+/// re-armed by exactly the code a player-driven one is.
+#[wasm_bindgen]
+pub fn shared_stack_forced_decision(seat_index: u8) -> Result<JsValue, JsValue> {
+    with_draft(|session| {
+        let decision = session
+            .shared_stack
+            .as_ref()
+            .and_then(|state| draft_core::shared_stack::forced_decision(state, seat_index));
+        to_js(&decision)
     })
 }
 
@@ -1738,6 +2354,696 @@ pub fn get_draft_view_for_seat(seat_index: u8) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub fn get_draft_status() -> Result<JsValue, JsValue> {
     with_draft(|session| to_js(&session.status))
+}
+
+#[cfg(test)]
+mod shared_stack_bot_loop_tests {
+    use super::*;
+    use draft_core::pack_source::FixturePackSource;
+    use engine::types::player::PlayerId;
+
+    const CARDS_PER_PACK: u8 = 15;
+
+    /// A pod of `pod_size` seats where `bot_seats` are bots, started and dealt.
+    ///
+    /// `FixturePackSource`'s cards carry no colours and no database face, which
+    /// is deliberate here: these tests are about the LOOP -- its span, its
+    /// bound and its failure mode -- and the valuation is exercised by
+    /// `bot_ai`'s own tests against a real card database.
+    fn started_pod(pod_size: u8, bot_seats: &[u8], rng_seed: u64) -> DraftSession {
+        let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Winston,
+            pod_size,
+            cards_per_pack: CARDS_PER_PACK,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats: Vec<DraftSeat> = (0..pod_size)
+            .map(|i| {
+                if bot_seats.contains(&i) {
+                    DraftSeat::Bot {
+                        name: format!("Bot {i}"),
+                    }
+                } else {
+                    DraftSeat::Human {
+                        player_id: PlayerId(i),
+                        display_name: format!("Player {i}"),
+                    }
+                }
+            })
+            .collect();
+        let mut session = DraftSession::new(config, seats, "WIN-LOOP".to_string());
+        session::apply(
+            &mut session,
+            DraftAction::StartDraft,
+            Some(&FixturePackSource {
+                set_code: "TST".to_string(),
+                cards_per_pack: CARDS_PER_PACK,
+            }),
+        )
+        .expect("a Winston pod with bot seats starts");
+        session
+    }
+
+    fn active_seat(session: &DraftSession) -> u8 {
+        session
+            .shared_stack
+            .as_ref()
+            .expect("a live pile turn")
+            .active_seat
+    }
+
+    /// Hand the human seat's turn back to the bots, so the fixture is the shape
+    /// production is in when the host calls the driver: a human decision has
+    /// just been applied and the next seat is a bot.
+    fn end_the_humans_turn(session: &mut DraftSession) {
+        let seat = active_seat(session);
+        let pile = session
+            .shared_stack
+            .as_ref()
+            .expect("a live pile turn")
+            .cursor;
+        session::apply(
+            session,
+            DraftAction::SharedStackDecision {
+                seat,
+                pile,
+                decision: SharedStackPileDecision::Take,
+            },
+            None,
+        )
+        .expect("taking a dealt pile is legal at turn start");
+    }
+
+    fn decisions_in(deltas: &[DraftDelta]) -> Vec<u8> {
+        deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                DraftDelta::SharedStackDecisionApplied { seat, .. } => Some(*seat),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One call spans EVERY consecutive bot turn, not one decision and not one
+    /// turn: a 4-seat pod with three bots hands the driver several turns back to
+    /// back, and a one-decision-per-call driver would strand the pod.
+    ///
+    /// Driven through `resolve_shared_stack_bot_turns_inner`, the production
+    /// core, so the thread-local read and the bound derivation are covered too.
+    #[test]
+    fn the_loop_spans_consecutive_bot_turns_and_terminates() {
+        let mut session = started_pod(4, &[1, 2, 3], 20_260_913);
+        if active_seat(&session) == 0 {
+            end_the_humans_turn(&mut session);
+        }
+        assert_ne!(active_seat(&session), 0, "the fixture must start on a bot");
+
+        session_cell::install(session);
+        let deltas = resolve_shared_stack_bot_turns_inner().expect("the loop runs");
+        let seats = decisions_in(&deltas);
+
+        assert!(
+            seats.len() > 3,
+            "one call must cross a turn boundary; it applied {} decisions",
+            seats.len()
+        );
+        let mut distinct: Vec<u8> = seats.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert!(
+            distinct.len() >= 2,
+            "the run must span more than one seat, got {distinct:?}"
+        );
+        assert!(
+            !seats.contains(&0),
+            "the driver must never act for the human seat"
+        );
+
+        // It STOPPED, and stopped for the right reason: the human's turn.
+        let stopped_on_human = session_cell::with_installed(|session| {
+            session.status != DraftStatus::Drafting || active_seat(session) == 0
+        });
+        assert!(stopped_on_human);
+
+        // A second call from the same state produces nothing at all.
+        let again = resolve_shared_stack_bot_turns_inner().expect("a second call is a no-op");
+        assert!(decisions_in(&again).is_empty());
+
+        session_cell::clear();
+    }
+
+    /// The bound trip is an `Err`, never a `break` and never a hang. A silent
+    /// `break` would strand the pod mid-run with no error anywhere.
+    #[test]
+    fn the_loop_fails_loudly_rather_than_spinning() {
+        let mut session = started_pod(4, &[1, 2, 3], 20_260_913);
+        if active_seat(&session) == 0 {
+            end_the_humans_turn(&mut session);
+        }
+
+        // The bound is DERIVED: `U * (n + 1) + 1` over the undrafted cards.
+        let state = session.shared_stack.as_ref().expect("a live pile turn");
+        let undrafted = state.main_stack.len() + state.piles.iter().map(Vec::len).sum::<usize>();
+        let piles = state.piles.len();
+        assert_eq!(
+            shared_stack_bot_turn_bound(&session),
+            undrafted * (piles + 1) + 1
+        );
+
+        let mut starved = session.clone();
+        let error = drive_shared_stack_bot_turns(&mut starved, AiDifficulty::Medium, None, 1)
+            .expect_err("a bound of 1 must trip on a multi-decision run");
+        assert!(
+            error.contains("termination bound"),
+            "the error must name the bound: {error}"
+        );
+
+        // Paired positive: the SAME state runs clean under the derived bound,
+        // so the `Err` above is the bound tripping and not a broken fixture.
+        let mut healthy = session;
+        let bound = shared_stack_bot_turn_bound(&healthy);
+        let deltas = drive_shared_stack_bot_turns(&mut healthy, AiDifficulty::Medium, None, bound)
+            .expect("the derived bound is not reachable from a legal state");
+        assert!(decisions_in(&deltas).len() > 1);
+    }
+}
+
+#[cfg(test)]
+mod llm_draft_resolution_tests {
+    use super::*;
+    use draft_core::pack_source::FixturePackSource;
+    use engine::types::player::PlayerId;
+
+    /// A Quick pod (seat 0 human, seats 1..8 bots), started and dealt.
+    fn started_quick_pod() -> DraftSession {
+        let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Quick,
+            pod_size: 8,
+            cards_per_pack: 15,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 20_261_004,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats: Vec<DraftSeat> = (0..8)
+            .map(|i| {
+                if i == 0 {
+                    DraftSeat::Human {
+                        player_id: PlayerId(0),
+                        display_name: "Player".to_string(),
+                    }
+                } else {
+                    DraftSeat::Bot {
+                        name: format!("Bot {i}"),
+                    }
+                }
+            })
+            .collect();
+        let mut session = DraftSession::new(config, seats, "LLM-RES".to_string());
+        session::apply(
+            &mut session,
+            DraftAction::StartDraft,
+            Some(&FixturePackSource {
+                set_code: "TST".to_string(),
+                cards_per_pack: 15,
+            }),
+        )
+        .expect("a Quick pod starts");
+        session
+    }
+
+    /// A well-formed OpenAI-compatible reply choosing option `choice`.
+    fn reply_choosing(choice: usize) -> String {
+        let content = format!(r#"{{"choice": {choice}, "reason": "test"}}"#);
+        serde_json::json!({ "choices": [{ "message": { "role": "assistant", "content": content } }] })
+            .to_string()
+    }
+
+    /// The request side's own recipe: the seat's projected view, rendered into a
+    /// prompt whose fingerprint the reply will carry back.
+    fn issued_fingerprint(session: &DraftSession, seat: u8) -> String {
+        let view = filter_for_player(session, seat);
+        phase_llm::build_draft_pick_prompt(
+            seat,
+            &view,
+            AiDifficulty::Medium,
+            None,
+            &phase_llm::draft_decision::set_names_from_pairs(Vec::new()),
+        )
+        .expect("a dealt pack renders")
+        .fingerprint
+    }
+
+    fn response(session: &DraftSession, seat: u8, choice: usize) -> LlmDraftResponse {
+        LlmDraftResponse {
+            seat,
+            fingerprint: issued_fingerprint(session, seat),
+            provider: "OpenAiCompatible".to_string(),
+            status: 200,
+            body: reply_choosing(choice),
+        }
+    }
+
+    /// A set draft presents each pack by rarity, so the order the model reads
+    /// its options in is not the order the session stores the pack in. A reply
+    /// to a request this bridge issued must resolve against the order the
+    /// prompt used: refused as stale, or bound to a different card, would mean
+    /// the LLM never drafts for a set pod at all.
+    #[test]
+    fn a_reply_resolves_against_the_pack_in_the_order_the_prompt_presented() {
+        let mut session = started_quick_pod();
+        // Store seat 1's pack in the reverse of its presented (rarity) order.
+        session.current_pack[1]
+            .as_mut()
+            .expect("seat 1 holds a pack")
+            .0
+            .reverse();
+        let view_pack = filter_for_player(&session, 1)
+            .current_pack
+            .expect("seat 1 is shown its pack");
+        let raw_pack = session.current_pack[1].as_ref().unwrap().0.clone();
+        assert_ne!(
+            view_pack.iter().map(|c| &c.instance_id).collect::<Vec<_>>(),
+            raw_pack.iter().map(|c| &c.instance_id).collect::<Vec<_>>(),
+            "fixture must make the presented order differ from the stored order"
+        );
+
+        let selection = resolve_llm_draft_pick(&session, &response(&session, 1, 0))
+            .expect("a reply to an issued request is not stale");
+
+        assert_eq!(
+            selection.card_instance_ids,
+            vec![view_pack[0].instance_id.clone()],
+            "option 0 is the first card the model was shown"
+        );
+    }
+
+    #[test]
+    fn a_reply_for_a_pack_that_has_moved_on_is_refused_as_stale() {
+        let mut session = started_quick_pod();
+        let stale = response(&session, 1, 0);
+        // The seat's pack changes under the in-flight request.
+        session.current_pack[1].as_mut().unwrap().0.pop();
+
+        assert!(matches!(
+            resolve_llm_draft_pick(&session, &stale),
+            Err(phase_llm::LlmError::StaleDecision)
+        ));
+    }
+
+    #[test]
+    fn an_emptied_pack_is_refused_rather_than_resolved() {
+        let mut session = started_quick_pod();
+        let reply = response(&session, 1, 0);
+        session.current_pack[1].as_mut().unwrap().0.clear();
+
+        assert!(matches!(
+            resolve_llm_draft_pick(&session, &reply),
+            Err(phase_llm::LlmError::StaleDecision)
+        ));
+    }
+
+    /// CR 905.1a: the last card of a pack is not a choice. No seat holding one
+    /// is put to a provider, and the bot path still takes and records it.
+    #[test]
+    fn a_forced_last_pick_builds_no_request_and_is_still_recorded() {
+        let mut session = started_quick_pod();
+        for pack in session.current_pack.iter_mut().flatten() {
+            pack.0.truncate(1);
+        }
+        let human_card = session.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        let pools_before: Vec<usize> = session.pools.iter().map(Vec::len).collect();
+
+        session_cell::install(session.clone());
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        let requests = build_llm_draft_pick_requests_inner(
+            r#"{"provider":"OpenAiCompatible","baseUrl":"https://provider.test/v1","model":"test"}"#,
+            "{}",
+        )
+        .unwrap();
+        session_cell::clear();
+        assert!(requests.is_empty(), "a forced pick was put to a provider");
+
+        RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(42))));
+        apply_human_pick_and_resolve_bots(&mut session, human_card).unwrap();
+        for (seat, before) in pools_before.iter().enumerate() {
+            assert_eq!(session.pools[seat].len(), before + 1, "seat {seat}");
+        }
+    }
+
+    /// The production response-to-pick path for Jev: the reply is read against
+    /// the criterion names the REQUEST carried for this seat's pack, so a valid
+    /// option number with a label the pack never offered is not that card.
+    #[test]
+    fn a_jev_reply_resolves_only_through_the_criteria_the_request_issued() {
+        let session = started_quick_pod();
+        session_cell::install(session.clone());
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        let requests = build_llm_draft_pick_requests_inner(
+            r#"{"provider":"Jev","baseUrl":"https://relay.test","apiKey":"k","model":"jev-latest"}"#,
+            "{}",
+        )
+        .unwrap();
+        session_cell::clear();
+        let issued = requests.iter().find(|request| request.seat == 1).unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&issued.request.body).unwrap();
+        let keys: Vec<String> = envelope["request"]["questions"]["pick"]["criteria"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(keys.len(), issued.option_count);
+
+        let reply = |choice: &str, probabilities: serde_json::Value| LlmDraftResponse {
+            seat: 1,
+            fingerprint: issued.fingerprint.clone(),
+            provider: "Jev".to_string(),
+            status: 200,
+            body: serde_json::json!({
+                "answers": { "pick": {
+                    "type": "choice",
+                    "choice": choice,
+                    "probabilities": probabilities,
+                    "confidence": 0.9,
+                }},
+            })
+            .to_string(),
+        };
+        let projected = filter_for_player(&session, 1).current_pack.unwrap();
+
+        let good = reply(
+            &keys[1],
+            serde_json::json!({ &keys[0]: 0.1, &keys[1]: 0.9 }),
+        );
+        let selection = resolve_llm_draft_pick(&session, &good).unwrap();
+        assert_eq!(
+            selection.card_instance_ids,
+            vec![projected[1].instance_id.clone()]
+        );
+
+        let unissued_label = "01: A card that is not in this pack";
+        let wrong_choice = reply(
+            unissued_label,
+            serde_json::json!({ &keys[0]: 0.1, unissued_label: 0.9 }),
+        );
+        let wrong_probability = reply(
+            &keys[1],
+            serde_json::json!({ &keys[1]: 0.8, "00: Invented": 0.2 }),
+        );
+        for bad in [wrong_choice, wrong_probability] {
+            assert!(matches!(
+                resolve_llm_draft_pick(&session, &bad),
+                Err(phase_llm::LlmError::MalformedResponse { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn a_reply_naming_the_human_seat_is_refused() {
+        let session = started_quick_pod();
+        assert!(matches!(
+            resolve_llm_draft_pick(&session, &response(&session, 0, 0)),
+            Err(phase_llm::LlmError::StaleDecision)
+        ));
+    }
+
+    #[test]
+    fn issued_rarity_ordered_request_selects_the_specific_bot_pool_card() {
+        let mut start = started_quick_pod();
+        start.current_pack[1].as_mut().unwrap().0.reverse();
+        let projected = filter_for_player(&start, 1).current_pack.unwrap();
+        let stored = &start.current_pack[1].as_ref().unwrap().0;
+        assert_ne!(projected[0].instance_id, stored[0].instance_id);
+        let human_id = start.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(42))));
+        let mut ordinary = start.clone();
+        apply_human_pick_and_resolve_bots(&mut ordinary, human_id.clone()).unwrap();
+        let ordinary_id = ordinary.pools[1][0].instance_id.clone();
+        let (choice, chosen) = projected
+            .iter()
+            .enumerate()
+            .find(|(_, card)| card.instance_id != ordinary_id)
+            .expect("the displayed pack offers a non-heuristic option");
+
+        session_cell::install(start);
+        RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(42))));
+        let requests = build_llm_draft_pick_requests_inner(
+            r#"{"provider":"OpenAiCompatible","baseUrl":"https://provider.test/v1","model":"test"}"#,
+            "{}",
+        )
+        .unwrap();
+        assert_eq!(requests.len(), 7);
+        let issued = requests.iter().find(|request| request.seat == 1).unwrap();
+        assert_eq!(issued.option_count, projected.len());
+        assert_eq!(issued.required_pick_count, 1);
+        assert!(issued
+            .request
+            .body
+            .contains(&format!("[{choice}] {}", chosen.name)));
+        let wire = serde_json::to_value(issued).unwrap();
+        assert_eq!(wire["seat"].as_u64(), Some(1));
+        assert_eq!(
+            wire["fingerprint"].as_str(),
+            Some(issued.fingerprint.as_str())
+        );
+        assert_eq!(wire["optionCount"].as_u64(), Some(projected.len() as u64));
+        assert_eq!(wire["requiredPickCount"].as_u64(), Some(1));
+        assert_eq!(wire["request"]["method"].as_str(), Some("POST"));
+        let responses = serde_json::json!([{
+            "seat": 1,
+            "fingerprint": issued.fingerprint,
+            "provider": "OpenAiCompatible",
+            "status": 200,
+            "body": reply_choosing(choice),
+        }]);
+        let (view, outcomes) =
+            submit_pick_with_llm_bot_picks_inner(&human_id, &responses.to_string())
+                .expect("the issued response submits through the installed draft");
+        assert!(outcomes[0].used);
+        assert!(view.pool.iter().any(|card| card.instance_id == human_id));
+        session_cell::with_installed(|session| {
+            assert_eq!(session.pools[1][0].instance_id, chosen.instance_id);
+            assert_ne!(session.pools[1][0].instance_id, ordinary_id);
+            assert!(session.pools[0]
+                .iter()
+                .any(|card| card.instance_id == human_id));
+        });
+        session_cell::clear();
+    }
+
+    #[test]
+    fn submit_core_refuses_human_and_stale_responses_while_valid_bot_and_fallback_advance() {
+        let start = started_quick_pod();
+        let human_id = start.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        session_cell::install(start);
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(43))));
+        let requests = build_llm_draft_pick_requests_inner(
+            r#"{"provider":"OpenAiCompatible","baseUrl":"https://provider.test/v1","model":"test"}"#,
+            "{}",
+        )
+        .unwrap();
+        assert!(requests.iter().all(|request| request.seat != 0));
+        let stale = requests.iter().find(|request| request.seat == 1).unwrap();
+        let valid = requests.iter().find(|request| request.seat == 2).unwrap();
+        session_cell::with_installed_mut(|session| {
+            session.current_pack[1].as_mut().unwrap().0.pop();
+        });
+        let responses = serde_json::json!([
+            { "seat": 0, "fingerprint": "forged", "provider": "OpenAiCompatible", "status": 200, "body": reply_choosing(0) },
+            { "seat": 1, "fingerprint": stale.fingerprint, "provider": "OpenAiCompatible", "status": 200, "body": reply_choosing(0) },
+            { "seat": 2, "fingerprint": valid.fingerprint, "provider": "OpenAiCompatible", "status": 200, "body": reply_choosing(0) },
+        ]);
+        let (view, outcomes) =
+            submit_pick_with_llm_bot_picks_inner(&human_id, &responses.to_string())
+                .expect("invalid LLM responses fall back without blocking the human pick");
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|outcome| outcome.used)
+                .collect::<Vec<_>>(),
+            vec![false, false, true]
+        );
+        assert_eq!(view.pool.len(), 1);
+        session_cell::with_installed(|session| {
+            assert_eq!(session.pools[0].len(), 1);
+            assert_eq!(session.pools[0][0].instance_id, human_id);
+            assert_eq!(session.pools[1].len(), 1);
+            assert_eq!(session.pools[2].len(), 1);
+        });
+        session_cell::clear();
+    }
+
+    struct MixedBoosterPackSource;
+
+    impl draft_core::pack_source::PackSource for MixedBoosterPackSource {
+        fn generate_pack(
+            &self,
+            _rng: &mut dyn rand::RngCore,
+            seat: u8,
+            pack_number: u8,
+        ) -> draft_core::types::DraftPack {
+            let size = match pack_number {
+                0 => 2,
+                1 => 3,
+                _ => 2,
+            };
+            let cards = (0..size)
+                .map(|i| DraftCardInstance {
+                    instance_id: format!("card-{seat}-{pack_number}-{i}"),
+                    name: format!("Card {i}"),
+                    set_code: "TST".to_string(),
+                    collector_number: format!("{i}"),
+                    rarity: "common".to_string(),
+                    colors: Vec::new(),
+                    cmc: 1,
+                    type_line: String::new(),
+                    draft_effect: None,
+                })
+                .collect();
+            draft_core::types::DraftPack(cards)
+        }
+    }
+
+    #[test]
+    fn session_with_mixed_booster_sizes_wires_cards_in_pack_through_bot_resolution() {
+        let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Quick,
+            pod_size: 8,
+            cards_per_pack: 15, // uniform default overridden by pack source
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 20_261_004,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats: Vec<DraftSeat> = (0..8)
+            .map(|i| {
+                if i == 0 {
+                    DraftSeat::Human {
+                        player_id: PlayerId(0),
+                        display_name: "Player".to_string(),
+                    }
+                } else {
+                    DraftSeat::Bot {
+                        name: format!("Bot {i}"),
+                    }
+                }
+            })
+            .collect();
+        let mut session = DraftSession::new(config, seats, "MIXED-SIZES".to_string());
+        session::apply(
+            &mut session,
+            DraftAction::StartDraft,
+            Some(&MixedBoosterPackSource),
+        )
+        .expect("mixed-size Quick pod starts");
+
+        assert_eq!(session.pack_sizes, vec![2, 3, 2]);
+        assert_eq!(session.current_pack_number, 0);
+        assert_eq!(session.cards_in_pack(0), 2);
+
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(42))));
+
+        // The shape every pick site builds, and the pick-in-pack it yields for
+        // the pack seat 0 is holding. The uniform `cards_per_pack` (15) would put
+        // these picks deep in the late stage; the recorded sizes must win.
+        let shape_and_pick = |session: &DraftSession| {
+            let shape = bot_ai::PackShape::current(session);
+            let remaining = session.current_pack[0].as_ref().unwrap().0.len();
+            (shape, shape.position(remaining))
+        };
+        let expect = |pack_number: u8, cards_in_pack: u8, pick_in_pack: usize| {
+            (
+                bot_ai::PackShape {
+                    pack_number,
+                    cards_in_pack,
+                },
+                phase_ai::draft_profile::PackPosition {
+                    pack_number: usize::from(pack_number),
+                    pick_in_pack,
+                },
+            )
+        };
+
+        // Pack 0, pick 1 of 2.
+        assert_eq!(shape_and_pick(&session), expect(0, 2, 1));
+        let human_card_0 = session.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        apply_human_pick_and_resolve_bots(&mut session, human_card_0).unwrap();
+        assert_eq!(session.current_pack_number, 0);
+        assert_eq!(session.current_pack[0].as_ref().unwrap().0.len(), 1);
+        assert_eq!(shape_and_pick(&session), expect(0, 2, 2));
+
+        // Pack 0, pick 2 of 2. Exhausts pack 0 and transitions to pack 1.
+        let human_card_1 = session.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        apply_human_pick_and_resolve_bots(&mut session, human_card_1).unwrap();
+
+        // Now in pack 1: size is 3, cards_in_pack(1) is 3.
+        assert_eq!(session.current_pack_number, 1);
+        assert_eq!(session.cards_in_pack(session.current_pack_number), 3);
+        assert_eq!(session.current_pack[0].as_ref().unwrap().0.len(), 3);
+        assert_eq!(shape_and_pick(&session), expect(1, 3, 1));
+
+        // Pack 1, pick 1 of 3: bots resolve using PackShape with cards_in_pack = 3.
+        let human_card_2 = session.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        apply_human_pick_and_resolve_bots(&mut session, human_card_2).unwrap();
+
+        for seat in 0..8 {
+            assert_eq!(
+                session.pools[seat].len(),
+                3,
+                "seat {seat} took 2 cards from pack 0 and 1 from pack 1"
+            );
+        }
+        assert_eq!(session.current_pack[0].as_ref().unwrap().0.len(), 2);
+        assert_eq!(shape_and_pick(&session), expect(1, 3, 2));
+    }
 }
 
 #[cfg(test)]
@@ -2116,7 +3422,7 @@ mod create_multiplayer_draft_tests {
     }
 
     fn clear_state() {
-        DRAFT_SESSION.with(|cell| cell.set(None));
+        session_cell::clear();
         PACK_GEN.with(|cell| cell.set(None));
         RNG.with(|cell| cell.set(None));
         CARD_DB.with(|cell| *cell.borrow_mut() = None);
@@ -2125,6 +3431,9 @@ mod create_multiplayer_draft_tests {
     fn persisted_premier_session(layout: SetLayout) -> DraftSession {
         let source = DraftSource::Set { layout };
         let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             set_code: source.set_code(),
             source,
             kind: DraftKind::Premier,
@@ -2169,7 +3478,7 @@ mod create_multiplayer_draft_tests {
         });
         session.pools[0] = vec![colored_spell("Host Blue", "U")];
         session.pools[1] = vec![colored_spell("Guest Red", "R")];
-        DRAFT_SESSION.with(|cell| cell.set(Some(session)));
+        session_cell::install(session);
 
         let lands = suggest_lands_for_seat_inner(1, r#"["Guest Red"]"#)
             .expect("seat-one suggestion should succeed");
@@ -2200,7 +3509,7 @@ mod create_multiplayer_draft_tests {
         let session = persisted_premier_session(SetLayout::UniformByRound {
             codes: vec!["TST".to_string()],
         });
-        DRAFT_SESSION.with(|cell| cell.set(Some(session)));
+        session_cell::install(session);
 
         let error =
             suggest_lands_for_seat_inner(8, "[]").expect_err("out-of-range seat must be rejected");
@@ -2245,7 +3554,818 @@ mod create_multiplayer_draft_tests {
             serialized.pointer("/source/data/layout/Chaos/candidate_codes"),
             Some(&serde_json::json!(["TST"])),
         );
-        DRAFT_SESSION.with(|cell| assert!(cell.take().is_none()));
+        assert!(!session_cell::is_installed());
+    }
+
+    /// A started, drafting 2-seat Winston session, built through the REAL
+    /// reducer so its `shared_stack` is the shape the reducer produces rather
+    /// than one this test invented.
+    /// A booster shaped like a real one: five colours, a mana curve, and type
+    /// lines. `FixturePackSource` makes colourless, typeless, mana-value-zero
+    /// cards, which is right for the reducer's conservation and legality tests
+    /// and useless here — a deck suggested from that pool has no colours to
+    /// choose between and no curve to build, so a playability claim over it
+    /// would assert nothing.
+    struct WinstonDeckFixtureSource;
+
+    impl draft_core::pack_source::PackSource for WinstonDeckFixtureSource {
+        fn generate_pack(
+            &self,
+            _rng: &mut dyn rand::RngCore,
+            seat: u8,
+            pack_number: u8,
+        ) -> draft_core::types::DraftPack {
+            // Five colours plus COLOURLESS, because every real booster has
+            // artifacts and a pool with none of them is a worst case no set
+            // produces: with nothing colourless to play, a two-colour build can
+            // never reach the suggester's 23-playable target and its documented
+            // top-up splashes the whole pool. Roughly one in five here, which is
+            // the low end of a real booster's artifact count.
+            const COLORS: [Option<&str>; 6] =
+                [Some("W"), Some("U"), Some("B"), Some("R"), Some("G"), None];
+            let cards = (0..15u8)
+                .map(|i| {
+                    let color = COLORS[usize::from(i) % COLORS.len()];
+                    // A curve, not a flat cost: 1..=5, so the land count the
+                    // suggester derives is a real answer rather than a constant.
+                    let cmc: u8 = 1 + (i % 5);
+                    let creature = i % 3 != 0;
+                    DraftCardInstance {
+                        instance_id: format!("FIX-{seat}-{pack_number}-{i}"),
+                        // The colour is IN THE NAME on purpose: `SuggestedDeck`
+                        // carries names only, so this is how the assertions read
+                        // a finished deck's colours back.
+                        name: format!(
+                            "Fixture {} {cmc} {seat}-{pack_number}-{i}",
+                            color.unwrap_or("C")
+                        ),
+                        set_code: "FIX".to_string(),
+                        collector_number: format!("{}", i + 1),
+                        rarity: if i == 0 { "rare" } else { "common" }.to_string(),
+                        colors: color.map(|c| vec![c.to_string()]).unwrap_or_default(),
+                        cmc,
+                        type_line: match (color, creature) {
+                            (None, _) => "Artifact".to_string(),
+                            (Some(_), true) => "Creature — Fixture".to_string(),
+                            (Some(_), false) => "Instant".to_string(),
+                        },
+                        draft_effect: None,
+                    }
+                })
+                .collect();
+            draft_core::types::DraftPack(cards)
+        }
+    }
+
+    /// A complete two-BOT Winston draft, driven by the same loop production
+    /// uses, returning the finished session.
+    fn winston_drafted_by_bots(card_db: Option<&CardDatabase>) -> DraftSession {
+        let source = DraftSource::single_set("FIX".to_string());
+        let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
+            set_code: source.set_code(),
+            source,
+            kind: DraftKind::Winston,
+            pod_size: 2,
+            cards_per_pack: 15,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 20_260_913,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        // BOTH seats are bots, so the driver runs the whole draft rather than
+        // stopping at the first human turn.
+        let seats = (0..2)
+            .map(|seat| DraftSeat::Bot {
+                name: format!("Bot {seat}"),
+            })
+            .collect();
+        let mut session = DraftSession::new(config, seats, "winston-bots".to_string());
+        draft_core::session::apply(
+            &mut session,
+            draft_core::types::DraftAction::StartDraft,
+            Some(&WinstonDeckFixtureSource),
+        )
+        .expect("a Winston pod starts");
+        drive_shared_stack_bot_turns(&mut session, AiDifficulty::Medium, card_db, 10_000)
+            .expect("the bot loop drives a whole draft");
+        assert_eq!(
+            session.status,
+            DraftStatus::Deckbuilding,
+            "the draft must actually finish before a deck can be judged"
+        );
+        session
+    }
+
+    /// The colour a fixture card's name encodes.
+    fn fixture_color(name: &str) -> Option<&'static str> {
+        ["W", "U", "B", "R", "G"]
+            .into_iter()
+            .find(|color| name.starts_with(&format!("Fixture {color} ")))
+    }
+
+    /// THE BAR: A BOT MUST END UP WITH A DECK IT COULD ACTUALLY PLAY.
+    ///
+    /// Not "a bot that drafts like a human" — it is not expected to. This is the
+    /// weaker, and the only load-bearing, claim: a bot seat drafts a pool, and
+    /// the suggester turns that pool into a legal, castable, sensibly shaped
+    /// deck. Everything the draft heuristics do above that is quality of play.
+    ///
+    /// Run WITHOUT a card database, which is the worst case and now a reachable
+    /// one: `resumeDraftingAfterRestore` fails open on a card-data fetch, so a
+    /// pod whose fetch failed drafts in exactly this degraded mode. If the deck
+    /// is playable here it is playable with the database too.
+    ///
+    /// DELIBERATELY NOT ASSERTED HERE: that the deck is focused on two colours.
+    /// `rarity_prior` scores a common at 0.0, so without a card database every
+    /// colour holding no rare or uncommon ties at exactly 0.0 in
+    /// `find_best_colors`. Those ties resolve by colour key, so the same pool
+    /// builds the same deck every time (see `suggest.rs`'s
+    /// `repeated_suggestions_break_equal_color_scores_by_color_key`), but the
+    /// chosen pair need not be the colours this bot drafted most. The three
+    /// claims below are the ones this test asserts, measured green over 13 runs.
+    #[test]
+    fn a_bot_that_drafted_a_whole_winston_pod_can_build_a_playable_deck() {
+        let session = winston_drafted_by_bots(None);
+
+        for seat in 0..2usize {
+            let pool = &session.pools[seat];
+            // Reach guard: the draft really dealt this seat a pool to build from.
+            assert!(
+                pool.len() >= 40,
+                "seat {seat} drafted {} cards, which is not a limited pool",
+                pool.len()
+            );
+
+            let deck = suggest::suggest_deck(
+                pool,
+                AiDifficulty::Medium,
+                None,
+                session.config.min_deck_size,
+                0,
+                &session.config.addable_cards,
+            );
+
+            let basics: u32 = deck.lands.values().map(|count| u32::from(*count)).sum();
+            let spells = deck.main_deck.len() as u32;
+
+            // (1) LEGAL. CR 100.2b: a limited deck is at least 40 cards, and the
+            // engine's own `validate_limited_deck` counts spells plus basics.
+            assert!(
+                spells + basics >= session.config.min_deck_size as u32,
+                "seat {seat}: {spells} spells + {basics} basics is short of 40"
+            );
+
+            // (2) CASTABLE. Every colour the chosen spells need is produced by a
+            // basic the suggester actually added. A deck with red spells and no
+            // Mountains is legal and unplayable, which is the distinction this
+            // whole test exists to draw.
+            let needed: std::collections::HashSet<&str> = deck
+                .main_deck
+                .iter()
+                .filter_map(|name| fixture_color(name))
+                .collect();
+            let produced: std::collections::HashSet<&str> = deck
+                .lands
+                .iter()
+                .filter(|(_, count)| **count > 0)
+                .filter_map(|(name, _)| match name.as_str() {
+                    "Plains" => Some("W"),
+                    "Island" => Some("U"),
+                    "Swamp" => Some("B"),
+                    "Mountain" => Some("R"),
+                    "Forest" => Some("G"),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                needed.is_subset(&produced),
+                "seat {seat}: spells need {needed:?} but the manabase produces {produced:?}"
+            );
+
+            // (3) A DECK, not a pile of lands. A 40-card limited deck is about
+            // seventeen lands and twenty-three spells; this floor is deliberately
+            // well below that, because the claim is playability and not quality.
+            assert!(
+                spells >= 15,
+                "seat {seat}: {spells} spells is a land pile, not a deck"
+            );
+        }
+    }
+
+    fn started_winston_session() -> DraftSession {
+        let source = DraftSource::single_set("TST".to_string());
+        let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
+            set_code: source.set_code(),
+            source,
+            kind: DraftKind::Winston,
+            pod_size: 2,
+            cards_per_pack: 15,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 42,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats = (0..2)
+            .map(|seat| DraftSeat::Human {
+                player_id: engine::types::player::PlayerId(seat),
+                display_name: format!("Player {seat}"),
+            })
+            .collect();
+        let mut session = DraftSession::new(config, seats, "winston-draft".to_string());
+        let pack_source = draft_core::pack_source::FixturePackSource {
+            set_code: "TST".to_string(),
+            cards_per_pack: 15,
+        };
+        draft_core::session::apply(
+            &mut session,
+            draft_core::types::DraftAction::StartDraft,
+            Some(&pack_source),
+        )
+        .expect("a human-only Winston pod starts");
+        session
+    }
+
+    fn dormant_fixture(flow: DraftFlow, status: DraftStatus) -> DraftSession {
+        use draft_core::pack_source::FixturePackSource;
+        let template = persisted_premier_session(SetLayout::UniformByRound {
+            codes: vec!["TST".into()],
+        });
+        let mut config = template.config;
+        config.pod_size = 4;
+        config.cards_per_pack = 2;
+        config.flow = flow;
+        if flow == DraftFlow::FifoAsync {
+            config.clock_policy = DraftClockPolicy {
+                pick: PickClockPolicy::Fixed { duration_ms: 1000 },
+                review_duration_ms: 1000,
+            };
+        }
+        let seats = template.seats.into_iter().take(4).collect();
+        let mut draft = match flow {
+            DraftFlow::LegacyBarrier => DraftSession::new(config, seats, "guard-fixture".into()),
+            DraftFlow::FifoAsync => DraftSession::new_fifo(
+                config,
+                seats,
+                "guard-fixture".into(),
+                DraftSessionId("guard-incarnation".into()),
+            )
+            .unwrap(),
+        };
+        session::apply_at(
+            &mut draft,
+            DraftAction::StartDraft,
+            Some(&FixturePackSource {
+                set_code: "TST".into(),
+                cards_per_pack: 2,
+            }),
+            1000,
+        )
+        .unwrap();
+        if status == DraftStatus::Review || status == DraftStatus::Paused {
+            for _ in 0..2 {
+                for seat in 0..4 {
+                    let action = draft_core::pick_pass::legal_auto_selection(&draft, seat).unwrap();
+                    session::apply_at(&mut draft, action, None, 1100).unwrap();
+                }
+            }
+            assert_eq!(draft.status, DraftStatus::Review);
+            if status == DraftStatus::Paused {
+                session::apply_at(
+                    &mut draft,
+                    DraftAction::Control {
+                        control: DraftControl::Pause {
+                            reason: DraftPauseReason::PausedByHost,
+                        },
+                    },
+                    None,
+                    1500,
+                )
+                .unwrap();
+            }
+        }
+        draft.validate_persisted_snapshot().unwrap();
+        assert_eq!(draft.status, status);
+        if flow == DraftFlow::FifoAsync && status == DraftStatus::Drafting {
+            let mut positive = draft.clone();
+            let action = draft_core::pick_pass::legal_auto_selection(&positive, 0).unwrap();
+            session::apply_at(&mut positive, action, None, 1100).unwrap();
+            assert_eq!(positive.pools[0].len(), 1);
+        }
+        draft
+    }
+
+    fn install_guard_cells(draft: DraftSession) {
+        clear_state();
+        install_fixture_db();
+        session_cell::install(draft);
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::VeryHard));
+        RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(8765))));
+        let pool: LimitedSetPool = serde_json::from_str(&pod_pool_json("TST")).unwrap();
+        PACK_GEN.with(|cell| cell.set(Some(PackGenerator::new(pool))));
+    }
+
+    fn guard_cells_snapshot() -> serde_json::Value {
+        use draft_core::pack_source::PackSource;
+        use rand::RngCore;
+        let session = if session_cell::is_installed() {
+            session_cell::with_installed(|draft| serde_json::to_value(draft).unwrap())
+        } else {
+            serde_json::Value::Null
+        };
+        let rng = RNG.with(|cell| {
+            let value = cell.take();
+            let words = value.as_ref().map(|rng| {
+                let mut copy = rng.clone();
+                (0..4).map(|_| copy.next_u64()).collect::<Vec<_>>()
+            });
+            cell.set(value);
+            words
+        });
+        let generated = PACK_GEN.with(|cell| {
+            let value = cell.take();
+            let cards = value.as_ref().map(|generator| {
+                generator.generate_pack(&mut ChaCha20Rng::seed_from_u64(42), 0, 0)
+            });
+            cell.set(value);
+            cards
+        });
+        let database = CARD_DB.with(|cell| { let value=cell.borrow();value.as_ref().map(|db| serde_json::json!({"count":db.card_count(),"alpha":db.get_face_by_name("Alpha")})) });
+        serde_json::json!({"session":session,"difficulty":DIFFICULTY.with(|cell|format!("{:?}",cell.get())),"rng":rng,"generator":generated,"database":database})
+    }
+
+    #[test]
+    fn dormant_wasm_live_fifo_read_guard_precedes_serialization() {
+        for status in [
+            DraftStatus::Drafting,
+            DraftStatus::Review,
+            DraftStatus::Paused,
+        ] {
+            install_guard_cells(dormant_fixture(DraftFlow::FifoAsync, status));
+            let before = guard_cells_snapshot();
+            let entered = Cell::new(0);
+            let result = with_draft_inner(|draft| {
+                entered.set(entered.get() + 1);
+                serde_json::to_value(filter_for_player(draft, 0)).map_err(|error| error.to_string())
+            });
+            assert_eq!(
+                result,
+                Err("FIFO drafting is not supported by this runtime".into())
+            );
+            assert_eq!(entered.get(), 0);
+            assert_eq!(guard_cells_snapshot(), before);
+        }
+        install_guard_cells(dormant_fixture(
+            DraftFlow::LegacyBarrier,
+            DraftStatus::Drafting,
+        ));
+        let before = guard_cells_snapshot();
+        let entered = Cell::new(0);
+        let result = with_draft_inner(|draft| {
+            entered.set(entered.get() + 1);
+            serde_json::to_value(filter_for_player(draft, 0)).map_err(|error| error.to_string())
+        })
+        .unwrap();
+        assert_eq!(entered.get(), 1);
+        assert_eq!(result["current_pack"].as_array().unwrap().len(), 2);
+        assert_eq!(guard_cells_snapshot(), before);
+        assert_eq!(
+            with_draft_inner::<()>(|_| Err("operation error".into())),
+            Err("operation error".into())
+        );
+        assert_eq!(guard_cells_snapshot(), before);
+        clear_state();
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+    }
+
+    #[test]
+    fn dormant_wasm_live_fifo_mutable_guard_precedes_effects() {
+        use rand::RngCore;
+        for status in [
+            DraftStatus::Drafting,
+            DraftStatus::Review,
+            DraftStatus::Paused,
+        ] {
+            install_guard_cells(dormant_fixture(DraftFlow::FifoAsync, status));
+            let before = guard_cells_snapshot();
+            let entered = Cell::new(0);
+            let result = with_draft_mut_inner(|draft| {
+                entered.set(entered.get() + 1);
+                if status == DraftStatus::Drafting {
+                    let action = draft_core::pick_pass::legal_auto_selection(draft, 0).unwrap();
+                    session::apply_at(draft, action, None, 1100)
+                        .map_err(|error| error.to_string())?;
+                }
+                RNG.with(|cell| {
+                    let mut rng = cell.take().unwrap();
+                    rng.next_u64();
+                    cell.set(Some(rng));
+                });
+                Ok(())
+            });
+            assert_eq!(
+                result,
+                Err("FIFO drafting is not supported by this runtime".into())
+            );
+            assert_eq!(entered.get(), 0);
+            assert_eq!(guard_cells_snapshot(), before);
+            assert_eq!(
+                submit_pick_for_seat_inner(0, "[\"TST-0-0-0\"]").unwrap_err(),
+                "FIFO drafting is not supported by this runtime"
+            );
+            assert_eq!(guard_cells_snapshot(), before);
+        }
+        install_guard_cells(dormant_fixture(
+            DraftFlow::LegacyBarrier,
+            DraftStatus::Drafting,
+        ));
+        let entered = Cell::new(0);
+        with_draft_mut_inner(|draft| {
+            entered.set(entered.get() + 1);
+            session::apply(
+                draft,
+                DraftAction::Pick {
+                    seat: 0,
+                    card_instance_ids: vec!["TST-0-0-0".into()],
+                },
+                None,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .unwrap();
+        assert_eq!(entered.get(), 1);
+        assert_eq!(
+            guard_cells_snapshot()["session"]["pools"][0]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        install_guard_cells(dormant_fixture(
+            DraftFlow::LegacyBarrier,
+            DraftStatus::Drafting,
+        ));
+        assert_eq!(
+            submit_pick_for_seat_inner(0, "[\"TST-0-0-0\"]")
+                .unwrap()
+                .pool
+                .len(),
+            1
+        );
+        let before = guard_cells_snapshot();
+        let entered = Cell::new(0);
+        assert_eq!(
+            with_draft_mut_inner::<()>(|_| {
+                entered.set(entered.get() + 1);
+                Err("operation error".into())
+            }),
+            Err("operation error".into())
+        );
+        assert_eq!(entered.get(), 1);
+        assert_eq!(guard_cells_snapshot(), before);
+        clear_state();
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+    }
+
+    #[test]
+    fn dormant_transports_refuse_fifo_before_install() {
+        let legacy = dormant_fixture(DraftFlow::LegacyBarrier, DraftStatus::Drafting);
+        install_guard_cells(legacy.clone());
+        let legacy_json = serde_json::to_string(&legacy).unwrap();
+        assert!(import_draft_session_inner(&legacy_json, 4).is_ok());
+        assert_eq!(
+            submit_pick_for_seat_inner(0, "[\"TST-0-0-0\"]")
+                .unwrap()
+                .pool
+                .len(),
+            1
+        );
+        for status in [
+            DraftStatus::Drafting,
+            DraftStatus::Review,
+            DraftStatus::Paused,
+        ] {
+            let draft = dormant_fixture(DraftFlow::FifoAsync, status);
+            let before = guard_cells_snapshot();
+            assert_eq!(
+                import_draft_session_inner(&serde_json::to_string(&draft).unwrap(), 0).unwrap_err(),
+                "FIFO drafting is not supported by this runtime"
+            );
+            assert_eq!(guard_cells_snapshot(), before);
+        }
+        let fifo = dormant_fixture(DraftFlow::FifoAsync, DraftStatus::Drafting);
+        for malformed in ["missing-flow", "unknown-flow", "unknown-status"] {
+            let mut json = serde_json::to_value(&fifo).unwrap();
+            match malformed {
+                "missing-flow" => {
+                    json["config"].as_object_mut().unwrap().remove("flow");
+                }
+                "unknown-flow" => json["config"]["flow"] = "FutureFlow".into(),
+                "unknown-status" => json["status"] = "FutureStatus".into(),
+                _ => unreachable!(),
+            }
+            let before = guard_cells_snapshot();
+            let error = import_draft_session_inner(&json.to_string(), 0).unwrap_err();
+            if malformed == "missing-flow" {
+                assert_eq!(error, "FIFO drafting is not supported by this runtime");
+            } else {
+                assert!(error.contains("unknown variant"));
+            }
+            assert_eq!(guard_cells_snapshot(), before);
+        }
+        for action in [
+            draft_core::pick_pass::legal_auto_selection(&fifo, 0).unwrap(),
+            DraftAction::Control {
+                control: DraftControl::Resume,
+            },
+            DraftAction::AdvanceClock,
+        ] {
+            let before = guard_cells_snapshot();
+            assert_eq!(
+                apply_draft_action_inner(&serde_json::to_string(&action).unwrap()).unwrap_err(),
+                "FIFO drafting is not supported by this runtime"
+            );
+            assert_eq!(guard_cells_snapshot(), before);
+        }
+        clear_state();
+        let before = guard_cells_snapshot();
+        assert!(import_draft_session_inner(&serde_json::to_string(&fifo).unwrap(), 0).is_err());
+        assert_eq!(guard_cells_snapshot(), before);
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+    }
+
+    /// A legacy session, as draft-core serializes it, passes the check.
+    #[test]
+    fn restorable_session_check_admits_a_legacy_session() {
+        let legacy = dormant_fixture(DraftFlow::LegacyBarrier, DraftStatus::Drafting);
+        let json = serde_json::to_string(&legacy).unwrap();
+        // Reach: the text deserializes to the same session, which the legacy
+        // admission itself accepts.
+        assert_eq!(serde_json::from_str::<DraftSession>(&json).unwrap(), legacy);
+        assert!(legacy.validate_legacy_admission().is_ok());
+        assert_eq!(
+            restorable_draft_session_verdict(&json),
+            RestorableDraftSessionVerdict::Admitted
+        );
+    }
+
+    /// Every session the legacy admission refuses, as draft-core serializes
+    /// it, is reported incompatible rather than unreadable.
+    #[test]
+    fn restorable_session_check_refuses_what_the_legacy_admission_refuses() {
+        let legacy = dormant_fixture(DraftFlow::LegacyBarrier, DraftStatus::Drafting);
+        let mut legacy_review = legacy.clone();
+        legacy_review.status = DraftStatus::Review;
+        let mut burn_policy = legacy.clone();
+        burn_policy.config.selection_policy = DraftSelectionPolicy {
+            burns_per_pick: 1,
+            discard_threshold: 0,
+        };
+        let mut pick_clock = legacy.clone();
+        pick_clock.config.clock_policy = DraftClockPolicy {
+            pick: PickClockPolicy::Fixed { duration_ms: 1000 },
+            review_duration_ms: 0,
+        };
+        let mut review_duration = legacy;
+        review_duration.config.clock_policy = DraftClockPolicy {
+            pick: PickClockPolicy::Off,
+            review_duration_ms: 1000,
+        };
+        let refused = [
+            dormant_fixture(DraftFlow::FifoAsync, DraftStatus::Drafting),
+            dormant_fixture(DraftFlow::FifoAsync, DraftStatus::Review),
+            legacy_review,
+            burn_policy,
+            pick_clock,
+            review_duration,
+        ];
+        let verdicts: Vec<_> = refused
+            .iter()
+            .map(|session| {
+                let json = serde_json::to_string(session).unwrap();
+                // Reach: the text deserializes to the same session, which the
+                // legacy admission itself refuses.
+                assert_eq!(
+                    &serde_json::from_str::<DraftSession>(&json).unwrap(),
+                    session
+                );
+                assert!(session.validate_legacy_admission().is_err());
+                restorable_draft_session_verdict(&json)
+            })
+            .collect();
+        assert_eq!(verdicts, [RestorableDraftSessionVerdict::Incompatible; 6]);
+    }
+
+    /// Text that does not deserialize as a draft session is unreadable, not a
+    /// refusal.
+    #[test]
+    fn restorable_session_check_reports_text_that_is_not_a_session_as_unreadable() {
+        let legacy = serde_json::to_value(dormant_fixture(
+            DraftFlow::LegacyBarrier,
+            DraftStatus::Drafting,
+        ))
+        .unwrap();
+        // Paired positive: the unedited session deserializes, so the refusal
+        // below is about the unknown flow.
+        assert!(serde_json::from_value::<DraftSession>(legacy.clone()).is_ok());
+        let mut unknown_flow = legacy;
+        unknown_flow["config"]["flow"] = "FutureFlow".into();
+        let unreadable = ["{".to_string(), "[]".to_string(), unknown_flow.to_string()];
+        let verdicts: Vec<_> = unreadable
+            .iter()
+            .map(|json| {
+                assert!(serde_json::from_str::<DraftSession>(json).is_err());
+                restorable_draft_session_verdict(json)
+            })
+            .collect();
+        assert_eq!(verdicts, [RestorableDraftSessionVerdict::Unreadable; 3]);
+    }
+
+    #[test]
+    fn restorable_session_check_verdicts_are_type_tagged_objects() {
+        for (verdict, tag) in [
+            (RestorableDraftSessionVerdict::Admitted, "Admitted"),
+            (RestorableDraftSessionVerdict::Incompatible, "Incompatible"),
+            (RestorableDraftSessionVerdict::Unreadable, "Unreadable"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(verdict).unwrap(),
+                serde_json::json!({ "type": tag })
+            );
+        }
+    }
+
+    /// The check installs nothing, and leaves an installed session, the random
+    /// state, the pack generator, the difficulty and the card database as they
+    /// were.
+    #[test]
+    fn restorable_session_check_reads_and_writes_no_thread_local() {
+        let installed = dormant_fixture(DraftFlow::LegacyBarrier, DraftStatus::Drafting);
+        let mut checked = installed.clone();
+        checked.draft_code = "checked-draft".into();
+        let inputs = [
+            serde_json::to_string(&checked).unwrap(),
+            serde_json::to_string(&dormant_fixture(
+                DraftFlow::FifoAsync,
+                DraftStatus::Drafting,
+            ))
+            .unwrap(),
+            "{".to_string(),
+        ];
+        let check_inputs = || {
+            let verdicts: Vec<_> = inputs
+                .iter()
+                .map(String::as_str)
+                .map(restorable_draft_session_verdict)
+                .collect();
+            // Reach: the legacy text is admitted, the FIFO text reaches the
+            // admission, and the malformed text is unreadable.
+            assert_eq!(verdicts[0], RestorableDraftSessionVerdict::Admitted);
+            assert_ne!(verdicts[1], RestorableDraftSessionVerdict::Unreadable);
+            assert_eq!(verdicts[2], RestorableDraftSessionVerdict::Unreadable);
+        };
+
+        clear_state();
+        let empty = guard_cells_snapshot();
+        check_inputs();
+        assert!(!session_cell::is_installed());
+        assert_eq!(guard_cells_snapshot(), empty);
+
+        install_guard_cells(installed);
+        let export = session_cell::with_installed(|draft| serde_json::to_string(draft).unwrap());
+        let before = guard_cells_snapshot();
+        check_inputs();
+        assert_eq!(
+            session_cell::with_installed(|draft| serde_json::to_string(draft).unwrap()),
+            export
+        );
+        assert_eq!(guard_cells_snapshot(), before);
+        clear_state();
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+    }
+
+    /// The shared fixture's saved sessions, which the client's saved-host tests
+    /// read with the draft engine's recorded answers.
+    fn shared_saved_sessions() -> serde_json::Value {
+        let shared: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/draft-contract/fifo_legacy_admission.json"
+        ))
+        .unwrap();
+        shared["saved_sessions"].clone()
+    }
+
+    /// Each saved session in the shared fixture is draft-core's serialization of
+    /// a session built here, or of one with a field set to a value draft-core
+    /// cannot read, and the check gives it the verdict the fixture records.
+    #[test]
+    fn shared_fixture_saved_sessions_are_draft_core_sessions_with_their_verdicts() {
+        let legacy = dormant_fixture(DraftFlow::LegacyBarrier, DraftStatus::Drafting);
+        let fifo = dormant_fixture(DraftFlow::FifoAsync, DraftStatus::Drafting);
+        let mut legacy_review = legacy.clone();
+        legacy_review.status = DraftStatus::Review;
+        let mut legacy_carrying_fifo = legacy;
+        legacy_carrying_fifo.fifo = fifo.fifo.clone();
+        let mut fifo_complete = fifo.clone();
+        fifo_complete.status = DraftStatus::Complete;
+        let mut fifo_abandoned = fifo.clone();
+        fifo_abandoned.status = DraftStatus::Abandoned;
+        let value = |session: &DraftSession| serde_json::to_value(session).unwrap();
+        let mut legacy_review_unknown_flow = value(&legacy_review);
+        legacy_review_unknown_flow["config"]["flow"] = "FutureFlow".into();
+        let built = [
+            ("fifo_drafting", value(&fifo)),
+            ("legacy_review", value(&legacy_review)),
+            ("legacy_carrying_fifo", value(&legacy_carrying_fifo)),
+            ("fifo_complete", value(&fifo_complete)),
+            ("fifo_abandoned", value(&fifo_abandoned)),
+            ("legacy_review_unknown_flow", legacy_review_unknown_flow),
+        ];
+        let shared = shared_saved_sessions();
+        // Reach: the fixture holds exactly these saved sessions.
+        let mut names: Vec<&str> = shared
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        names.sort_unstable();
+        let mut expected: Vec<&str> = built.iter().map(|(name, _)| *name).collect();
+        expected.sort_unstable();
+        assert_eq!(names, expected);
+        for (name, session) in &built {
+            let saved = &shared[*name];
+            assert_eq!(&saved["session"], session, "{name}");
+            let verdict = restorable_draft_session_verdict(&saved["session"].to_string());
+            assert_eq!(
+                serde_json::to_value(verdict).unwrap(),
+                saved["verdict"],
+                "{name}"
+            );
+        }
+    }
+
+    /// V26. A public backup strips `shared_stack` at the trust boundary, and
+    /// the result is DELIBERATELY not a restorable Winston snapshot -- the same
+    /// discipline `import_rejects_redacted_chaos_snapshot_that_claims_a_uniform_layout`
+    /// applies to a redacted Chaos layout. The authoritative, resumable copy is
+    /// the host's IndexedDB snapshot.
+    #[test]
+    fn import_rejects_redacted_winston_snapshot_missing_its_stack() {
+        clear_state();
+
+        let session = started_winston_session();
+        assert_eq!(session.status, draft_core::types::DraftStatus::Drafting);
+        let mut snapshot = serde_json::to_value(&session).expect("serialize Winston snapshot");
+        assert!(
+            snapshot.get("shared_stack").is_some(),
+            "the unredacted snapshot carries its stack"
+        );
+
+        // Paired positive FIRST, so the refusal below is demonstrably about the
+        // redaction and not about Winston.
+        restorable_draft_session_from_json(&snapshot.to_string())
+            .expect("an unredacted Winston snapshot restores");
+
+        snapshot
+            .as_object_mut()
+            .expect("a session serializes to an object")
+            .remove("shared_stack");
+        let error = restorable_draft_session_from_json(&snapshot.to_string())
+            .expect_err("a public redaction is not a restorable Winston snapshot");
+        assert!(
+            error.contains("must carry its stack"),
+            "unexpected error: {error}"
+        );
+        assert!(!session_cell::is_installed());
+    }
+
+    /// V20's own leg. `draft_kind_wire_numbers_round_trip` and
+    /// `draft_procedure_dto_copies_every_axis_unmoved` carry the rest.
+    #[test]
+    fn winston_round_trips_through_the_wire_number() {
+        assert_eq!(draft_kind_wire_number(DraftKind::Winston), 5);
+        assert_eq!(draft_kind_from_wire(5), Ok(DraftKind::Winston));
+        // Negative sibling: an unmapped number is an `Err` naming every known
+        // kind, never a default.
+        let error = draft_kind_from_wire(6).expect_err("6 is unmapped");
+        assert!(error.contains("unknown draft kind 6"), "{error}");
+        for kind in DraftKind::ALL {
+            assert!(
+                error.contains(&format!("{kind:?}")),
+                "{error} omits {kind:?}"
+            );
+        }
     }
 
     #[test]
@@ -2268,7 +4388,7 @@ mod create_multiplayer_draft_tests {
         let error = restorable_draft_session_from_json(&snapshot.to_string())
             .expect_err("a public redaction is not a restorable Chaos snapshot");
         assert!(error.contains("Failed to deserialize draft session"));
-        DRAFT_SESSION.with(|cell| assert!(cell.take().is_none()));
+        assert!(!session_cell::is_installed());
     }
 
     #[test]
@@ -2278,14 +4398,14 @@ mod create_multiplayer_draft_tests {
         start_commander_pod(4);
         seat_into_deckbuilding(0, 60);
 
-        let mut snapshot = with_installed_session(|session| {
+        let mut snapshot = session_cell::with_installed(|session| {
             serde_json::to_value(session).expect("serialize Commander snapshot")
         });
         snapshot["config"]["min_deck_size"] = serde_json::json!(59);
         let restored = restorable_draft_session_from_json(&snapshot.to_string())
             .expect("a legacy Commander snapshot restores");
         assert_eq!(restored.config.min_deck_size, 60);
-        DRAFT_SESSION.with(|cell| cell.set(Some(restored)));
+        session_cell::install(restored);
 
         let human_deck = seat_deck(0, 59);
         let error = submit_deck_inner(&json(&human_deck), &json(&["Seat 0 Card 0".to_string()]))
@@ -2340,6 +4460,7 @@ mod create_multiplayer_draft_tests {
             "test-room",
             "Swiss",
             "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect("cube draft should start");
 
@@ -2373,22 +4494,17 @@ mod create_multiplayer_draft_tests {
             seat: 0,
             card_instance_ids: vec![picked.clone()],
         };
-        DRAFT_SESSION.with(|cell| {
-            let mut session = cell.take().expect("session populated");
-            let deltas = session::apply(&mut session, action, None).expect("pick applies");
+        session_cell::with_installed_mut(|session| {
+            let deltas = session::apply(session, action, None).expect("pick applies");
             assert!(!deltas.is_empty(), "pick should produce deltas");
-            cell.set(Some(session));
         });
 
         // After the human pick, seat 0's pack should no longer contain the picked card
         // (it has been passed; pack will not be visible again until the rotation lands).
-        let post_view = DRAFT_SESSION.with(|cell| {
-            let session = cell.take().expect("session populated");
-            let json = serde_json::to_string(&session).unwrap();
+        let post_view = session_cell::with_installed(|session| {
+            let json = serde_json::to_string(session).unwrap();
             let restored = restorable_draft_session_from_json(&json).unwrap();
-            let v = filter_for_player(&restored, 0);
-            cell.set(Some(session));
-            v
+            filter_for_player(&restored, 0)
         });
         assert_eq!(post_view.pool.len(), 1);
         assert!(serde_json::to_value(&post_view)
@@ -2438,6 +4554,7 @@ mod create_multiplayer_draft_tests {
             "test-room",
             "Swiss",
             "Casual",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect("cube draft should start");
 
@@ -2497,6 +4614,7 @@ mod create_multiplayer_draft_tests {
             "test-room",
             "Swiss",
             "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect("set draft should start");
         assert_eq!(draft_view.cards_per_pack, 3);
@@ -2511,6 +4629,7 @@ mod create_multiplayer_draft_tests {
             "test-room",
             "Swiss",
             "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect("set sealed should start");
         assert_eq!(sealed_view.cards_per_pack, 3);
@@ -2520,6 +4639,125 @@ mod create_multiplayer_draft_tests {
             .expect("sealed pack boundaries")
             .iter()
             .all(|pack| pack.len() == 3));
+
+        clear_state();
+    }
+
+    #[test]
+    fn unglued_set_pool_loads_ten_cards_per_pack_for_draft_and_sealed() {
+        let set_pool_json = r#"{
+            "code": "UGL",
+            "name": "Unglued",
+            "release_date": null,
+            "pack_variants": [
+                {
+                    "contents": [
+                        { "slot": "basic", "count": 1, "choices": [{ "sheet": "basic", "weight": 1 }] },
+                        { "slot": "common", "count": 6, "choices": [{ "sheet": "common", "weight": 1 }] },
+                        { "slot": "rare", "count": 1, "choices": [{ "sheet": "rare", "weight": 1 }] },
+                        { "slot": "uncommon", "count": 2, "choices": [{ "sheet": "uncommon", "weight": 1 }] }
+                    ],
+                    "weight": 3
+                },
+                {
+                    "contents": [
+                        { "slot": "basic", "count": 1, "choices": [{ "sheet": "basic", "weight": 1 }] },
+                        { "slot": "common", "count": 6, "choices": [{ "sheet": "common", "weight": 1 }] },
+                        { "slot": "rare", "count": 1, "choices": [{ "sheet": "rare", "weight": 1 }] },
+                        { "slot": "uncommon", "count": 1, "choices": [{ "sheet": "uncommon", "weight": 1 }] }
+                    ],
+                    "weight": 2
+                }
+            ],
+            "pack_variants_total_weight": 5,
+            "sheets": {
+                "basic": {
+                    "cards": [
+                        { "name": "Forest", "set_code": "UGL", "collector_number": "1", "rarity": "common", "weight": 1 }
+                    ],
+                    "total_weight": 1,
+                    "foil": false,
+                    "balance_colors": false
+                },
+                "common": {
+                    "cards": [
+                        { "name": "C1", "set_code": "UGL", "collector_number": "2", "rarity": "common", "weight": 1 },
+                        { "name": "C2", "set_code": "UGL", "collector_number": "3", "rarity": "common", "weight": 1 },
+                        { "name": "C3", "set_code": "UGL", "collector_number": "4", "rarity": "common", "weight": 1 },
+                        { "name": "C4", "set_code": "UGL", "collector_number": "5", "rarity": "common", "weight": 1 },
+                        { "name": "C5", "set_code": "UGL", "collector_number": "6", "rarity": "common", "weight": 1 },
+                        { "name": "C6", "set_code": "UGL", "collector_number": "7", "rarity": "common", "weight": 1 }
+                    ],
+                    "total_weight": 6,
+                    "foil": false,
+                    "balance_colors": false
+                },
+                "uncommon": {
+                    "cards": [
+                        { "name": "U1", "set_code": "UGL", "collector_number": "8", "rarity": "uncommon", "weight": 1 },
+                        { "name": "U2", "set_code": "UGL", "collector_number": "9", "rarity": "uncommon", "weight": 1 }
+                    ],
+                    "total_weight": 2,
+                    "foil": false,
+                    "balance_colors": false
+                },
+                "rare": {
+                    "cards": [
+                        { "name": "R1", "set_code": "UGL", "collector_number": "10", "rarity": "rare", "weight": 1 }
+                    ],
+                    "total_weight": 1,
+                    "foil": false,
+                    "balance_colors": false
+                }
+            },
+            "prints": [],
+            "basic_lands": ["Forest"]
+        }"#;
+
+        let pool_input_json = serde_json::json!({
+            "type": "Set",
+            "data": { "set_pool_json": set_pool_json }
+        })
+        .to_string();
+        let seats_json = r#"[
+            { "type": "Human", "player_id": 0, "display_name": "Host" },
+            { "type": "Human", "player_id": 1, "display_name": "Guest" }
+        ]"#;
+
+        clear_state();
+        let draft_view = create_multiplayer_draft_inner(
+            &pool_input_json,
+            seats_json,
+            1,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2,
+        )
+        .expect("Unglued draft should start");
+        assert_eq!(draft_view.cards_per_pack, 10);
+        assert_eq!(draft_view.current_pack.expect("current pack").len(), 10);
+
+        clear_state();
+        let sealed_view = create_multiplayer_draft_inner(
+            &pool_input_json,
+            seats_json,
+            3,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2,
+        )
+        .expect("Unglued sealed should start");
+        assert_eq!(sealed_view.cards_per_pack, 10);
+        assert_eq!(sealed_view.pool.len(), 60);
+        assert!(sealed_view
+            .sealed_packs
+            .expect("sealed pack boundaries")
+            .iter()
+            .all(|pack| pack.len() == 10));
 
         clear_state();
     }
@@ -2609,6 +4847,7 @@ mod create_multiplayer_draft_tests {
                 "test-room",
                 "Swiss",
                 "Competitive",
+                2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
             )
             .expect_err("remote Quick Draft must use its public 2..=8 pod range");
 
@@ -2633,6 +4872,7 @@ mod create_multiplayer_draft_tests {
             "test-room",
             "Swiss",
             "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect("a three-booster Premier pod is a valid multi-set selection");
 
@@ -2663,6 +4903,7 @@ mod create_multiplayer_draft_tests {
             "test-room",
             "Swiss",
             "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect("a Chaos pod should resolve host-local assignments");
 
@@ -2704,6 +4945,7 @@ mod create_multiplayer_draft_tests {
             "test-room",
             "Swiss",
             "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect_err("four sets name a booster Premier never opens");
         assert!(err.contains('4'), "unexpected error: {err}");
@@ -2716,6 +4958,7 @@ mod create_multiplayer_draft_tests {
             "test-room",
             "Swiss",
             "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect("six boosters is a valid Sealed pod selection");
         assert_eq!(sealed.pack_set_codes.len(), 6);
@@ -2735,6 +4978,7 @@ mod create_multiplayer_draft_tests {
             "test-room",
             "Swiss",
             "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect_err("the sequence names a set with no pool data");
         assert!(err.contains("MISSING"), "unexpected error: {err}");
@@ -2761,6 +5005,7 @@ mod create_multiplayer_draft_tests {
             "test-room",
             "Swiss",
             "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect("a legacy single-pool pod still starts");
 
@@ -2830,6 +5075,7 @@ mod create_multiplayer_draft_tests {
             "test-room",
             "Swiss",
             "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect("commander draft should start");
 
@@ -2851,19 +5097,81 @@ mod create_multiplayer_draft_tests {
         let err = create_multiplayer_draft_inner(
             &commander_pool_input_json(),
             COMMANDER_SEATS_JSON,
-            5,
+            // THE RULE, stated durably so the next widening does not repeat
+            // this: the unmapped-kind hostile fixture must name a number BEYOND
+            // the widened table. `5` is `DraftKind::Winston` now.
+            6,
             42,
             "test-room",
             "Swiss",
             "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
-        .expect_err("kind 5 is unmapped");
+        .expect_err("kind 6 is unmapped");
         assert!(
-            err.contains("unknown draft kind 5"),
+            err.contains("unknown draft kind 6"),
             "unexpected error: {err}"
         );
 
         clear_state();
+    }
+
+    /// Phase D's discriminating test: a pod bot plays at the strength THIS pod
+    /// asked for, not at whatever the last draft in this tab left behind.
+    ///
+    /// `DIFFICULTY` is a per-thread `Cell` with no reset, and
+    /// `create_multiplayer_draft_inner` never wrote it before this change. So a
+    /// player who ran a Quick draft at `VeryHard` and then hosted a pod in the
+    /// same worker got a `VeryHard` pod bot, silently. That is the contamination
+    /// this asserts against, seeded here exactly as `start_quick_draft` would
+    /// have seeded it.
+    ///
+    /// TWO legs, because one is satisfiable by a function that always writes
+    /// `Medium`: the second call asks for `Hard` from the same contaminated
+    /// starting point and must get it.
+    #[test]
+    fn a_pod_bot_ignores_a_previous_drafts_difficulty() {
+        clear_state();
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::VeryHard));
+        // Positive control that the seeding took. Without it, a test whose
+        // seeding silently failed would pass on a cell that was already
+        // `Medium` by default.
+        assert_eq!(DIFFICULTY.with(|cell| cell.get()), AiDifficulty::VeryHard);
+
+        create_multiplayer_draft_inner(
+            &commander_pool_input_json(),
+            COMMANDER_SEATS_JSON,
+            4, // CommanderDraft
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2, // Medium — what this pod's host asked for.
+        )
+        .expect("the pod should start");
+
+        // REVERT-FAILING: delete the `DIFFICULTY.with(..set..)` line from the
+        // pool arm and this reads `VeryHard`, the previous draft's answer.
+        assert_eq!(DIFFICULTY.with(|cell| cell.get()), AiDifficulty::Medium);
+
+        // The paired leg, from the same contaminated start, asking for a
+        // DIFFERENT rung: an implementation that hardcodes `Medium` reds here.
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::VeryHard));
+        create_multiplayer_draft_inner(
+            &commander_pool_input_json(),
+            COMMANDER_SEATS_JSON,
+            4, // CommanderDraft
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            3, // Hard
+        )
+        .expect("the pod should start");
+        assert_eq!(DIFFICULTY.with(|cell| cell.get()), AiDifficulty::Hard);
+
+        clear_state();
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
     }
 
     /// The numeric table is total and injective over every kind, and the decode
@@ -2907,6 +5215,7 @@ mod create_multiplayer_draft_tests {
             "test-room",
             "Swiss",
             "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect("commander draft should start");
         let pack = view.current_pack.as_ref().expect("seat 0 has a pack");
@@ -2937,6 +5246,7 @@ mod create_multiplayer_draft_tests {
             "test-room",
             "Swiss",
             "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect("commander draft should start");
         let pack = view.current_pack.as_ref().expect("seat 0 has a pack");
@@ -2989,11 +5299,18 @@ mod create_multiplayer_draft_tests {
     /// `packs_per_player` are BOTH `3`, so a single-kind test — field by field
     /// or not — stays green with exactly those two swapped. Over the whole
     /// table the `u8` columns are pairwise distinct AS COLUMNS, so every
-    /// transposition reddens here. `commanders_required` is `[0, 0, 0, 0, 1]`
-    /// over `DraftKind::ALL` and equals no other column (`pod_size`
-    /// `[8, 8, 8, 8, 4]`, `human_seats` `[1, 8, 8, 8, 1]`, `min_pod_size`
-    /// `[2, 2, 2, 2, 3]`, `packs_per_player` `[3, 3, 3, 6, 3]`, `cards_per_pick`
-    /// `[1, 1, 1, 1, 2]`), so the argument survives its addition.
+    /// transposition reddens here. Recomputed with the `Winston` row:
+    /// `commanders_required` is `[0, 0, 0, 0, 1, 0]` over `DraftKind::ALL` and
+    /// equals no other column (`pod_size` `[8, 8, 8, 8, 4, 2]`, `human_seats`
+    /// `[1, 8, 8, 8, 1, 2]`, `min_pod_size` `[2, 2, 2, 2, 3, 2]`,
+    /// `packs_per_player` `[3, 3, 3, 6, 3, 3]`, `cards_per_pick`
+    /// `[1, 1, 1, 1, 2, 1]`), so the pairwise-distinctness conclusion holds and
+    /// the argument survives the sixth kind.
+    ///
+    /// The `Winston` row has `pod_size == human_seats == min_pod_size == 2`, so
+    /// a single-kind test on that row could not catch a transposition among
+    /// those three. The fold over `ALL` is what keeps that within-row
+    /// transposition red — the same reason the Commander row gave.
     #[test]
     fn draft_procedure_dto_copies_every_axis_unmoved() {
         for kind in DraftKind::ALL {
@@ -3149,8 +5466,7 @@ mod create_multiplayer_draft_tests {
     /// not be validatable against seat 0's pool, so a wrong-pool read is a hard
     /// `Err` rather than a silent pass.
     fn seat_into_deckbuilding(seat: u8, pool_size: usize) {
-        DRAFT_SESSION.with(|cell| {
-            let mut session = cell.take().expect("a draft session is installed");
+        session_cell::with_installed_mut(|session| {
             session.status = DraftStatus::Deckbuilding;
             session.pools[seat as usize] = (0..pool_size)
                 .map(|i| DraftCardInstance {
@@ -3165,19 +5481,7 @@ mod create_multiplayer_draft_tests {
                     draft_effect: None,
                 })
                 .collect();
-            cell.set(Some(session));
         });
-    }
-
-    /// Read the installed session without disturbing it -- the same take/put
-    /// dance `with_draft_mut_inner` runs.
-    fn with_installed_session<R>(f: impl FnOnce(&DraftSession) -> R) -> R {
-        DRAFT_SESSION.with(|cell| {
-            let session = cell.take().expect("a draft session is installed");
-            let out = f(&session);
-            cell.set(Some(session));
-            out
-        })
     }
 
     /// Start a granting 4-seat Commander pod and put `seat` into deckbuilding.
@@ -3190,6 +5494,7 @@ mod create_multiplayer_draft_tests {
             "test-room",
             "Swiss",
             "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect("commander draft should start");
         seat_into_deckbuilding(seat, pool_size);
@@ -3215,6 +5520,7 @@ mod create_multiplayer_draft_tests {
             "test-room",
             "Swiss",
             "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect("premier draft should start");
         seat_into_deckbuilding(seat, pool_size);
@@ -3247,7 +5553,7 @@ mod create_multiplayer_draft_tests {
         let commanders = vec!["Seat 0 Card 7".to_string(), "Seat 0 Card 3".to_string()];
         submit_deck_inner(&json(&deck), &json(&commanders)).expect("a legal deck submits");
 
-        with_installed_session(|session| {
+        session_cell::with_installed(|session| {
             // Paired positive reach-guard: the submission INSERTED. A refusal
             // cannot satisfy the assertion below vacuously.
             assert_eq!(
@@ -3263,6 +5569,11 @@ mod create_multiplayer_draft_tests {
                 submission.commanders, commanders,
                 "CR 903.3: the designation arrives verbatim and in order"
             );
+            assert!(submission.printings.is_empty());
+            assert!(serde_json::to_value(submission)
+                .unwrap()
+                .get("printings")
+                .is_none());
         });
 
         clear_state();
@@ -3297,7 +5608,7 @@ mod create_multiplayer_draft_tests {
         let deck = seat_deck(0, 60);
         submit_deck_inner(&json(&deck), "[]").expect("an undesignated deck submits");
 
-        with_installed_session(|session| {
+        session_cell::with_installed(|session| {
             assert_eq!(
                 session.submitted_decks.len(),
                 1,
@@ -3397,7 +5708,7 @@ mod create_multiplayer_draft_tests {
         // by the deck and the pool, so nothing but the floor changes.
         submit_deck_inner(&json(&deck), &json(&["Seat 0 Card 0".to_string()]))
             .expect("a well-formed payload applies");
-        with_installed_session(|session| {
+        session_cell::with_installed(|session| {
             assert_eq!(session.submitted_decks.len(), 1);
         });
 
@@ -3429,7 +5740,7 @@ mod create_multiplayer_draft_tests {
         // Accepted: two added copies, both designated.
         submit_deck_inner(&json(&deck), &json(&designated))
             .expect("CR 903.13e: added filler copies designated as commanders are legal");
-        with_installed_session(|session| {
+        session_cell::with_installed(|session| {
             let submission = session
                 .submitted_decks
                 .get(&engine::types::player::PlayerId(0))
@@ -3518,7 +5829,7 @@ mod create_multiplayer_draft_tests {
         submit_deck_for_seat_inner(2, &json(&seat2_deck), &json(&seat2_commanders))
             .expect("seat 2 submits from its own pool");
 
-        with_installed_session(|session| {
+        session_cell::with_installed(|session| {
             // Paired positive reach-guard: BOTH submissions inserted. A refused
             // seat-2 call cannot satisfy the assertions below.
             assert_eq!(
@@ -3533,6 +5844,11 @@ mod create_multiplayer_draft_tests {
                 .expect("seat 2's submission is keyed by its own player id");
             assert_eq!(seat2.seat, 2);
             assert_eq!(seat2.commanders, seat2_commanders);
+            assert!(seat2.printings.is_empty());
+            assert!(serde_json::to_value(seat2)
+                .unwrap()
+                .get("printings")
+                .is_none());
 
             let seat0 = session
                 .submitted_decks
@@ -3543,6 +5859,11 @@ mod create_multiplayer_draft_tests {
                 seat0.commanders, seat0_commanders,
                 "a later seat's designation must not be attributed to an earlier one"
             );
+            assert!(seat0.printings.is_empty());
+            assert!(serde_json::to_value(seat0)
+                .unwrap()
+                .get("printings")
+                .is_none());
         });
 
         clear_state();
@@ -3598,6 +5919,24 @@ mod create_multiplayer_draft_tests {
         CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
     }
 
+    fn install_ante_fixture_db() {
+        let mut cards: serde_json::Value =
+            serde_json::from_str(&commander_fixture_db_json()).unwrap();
+        let mut contract = cards["beta"].clone();
+        contract["name"] = serde_json::json!("Contract from Below");
+        contract["card_type"]["core_types"] = serde_json::json!(["Sorcery"]);
+        contract["oracle_text"] = serde_json::json!(
+            "Remove this card from your deck before playing if you're not playing for ante.\nDiscard your hand, ante the top card of your library, then draw seven cards."
+        );
+        cards["contract from below"] = contract;
+        let mut forest = cards["plains"].clone();
+        forest["name"] = serde_json::json!("Forest");
+        forest["color_identity"] = serde_json::json!(["Green"]);
+        cards["forest"] = forest;
+        let db = CardDatabase::from_json_str(&cards.to_string()).unwrap();
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
+    }
+
     #[test]
     fn quick_cube_config_raises_zero_to_one_without_lowering_higher_requests() {
         let settings = |min_deck_size| CubeDraftSettings {
@@ -3638,7 +5977,7 @@ mod create_multiplayer_draft_tests {
         assert_eq!(session.current_pack[0].as_ref().unwrap().0.len(), 15);
         let restored =
             restorable_draft_session_from_json(&serde_json::to_string(&session).unwrap()).unwrap();
-        DRAFT_SESSION.with(|cell| cell.set(Some(restored)));
+        session_cell::install(restored);
         let pool = booster_pack_pool_for_game_inner().unwrap().unwrap();
         assert_eq!(pool.len(), 401);
         assert_eq!(pool.last().unwrap(), "Delta");
@@ -3676,6 +6015,7 @@ mod create_multiplayer_draft_tests {
             "commander-cube",
             "Swiss",
             "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect("Commander cube should start");
 
@@ -3688,10 +6028,8 @@ mod create_multiplayer_draft_tests {
             booster_pack_pool_for_game_inner(),
             Ok(Some(vec!["Alpha".to_string(); 200]))
         );
-        DRAFT_SESSION.with(|cell| {
-            let session = cell.take().expect("Commander cube session is stored");
+        session_cell::with_installed(|session| {
             assert_eq!(session.config.min_deck_size, 60);
-            cell.set(Some(session));
         });
         clear_state();
     }
@@ -3699,10 +6037,8 @@ mod create_multiplayer_draft_tests {
     /// `DraftSession.pools` is `pub`, and seeding a bot seat's pool directly is
     /// the same shape `draft-core`'s own session tests use.
     fn seed_bot_pool(seat: usize, pool: Vec<DraftCardInstance>) {
-        DRAFT_SESSION.with(|cell| {
-            let mut session = cell.take().expect("a session must be installed");
+        session_cell::with_installed_mut(|session| {
             session.pools[seat] = pool;
-            cell.set(Some(session));
         });
     }
 
@@ -3713,10 +6049,8 @@ mod create_multiplayer_draft_tests {
     /// directly on a Set session, so it must not be read as implying the Set
     /// path can produce this configuration.
     fn set_addable_cards(addable: DeckAddableCards) {
-        DRAFT_SESSION.with(|cell| {
-            let mut session = cell.take().expect("a session must be installed");
+        session_cell::with_installed_mut(|session| {
             session.config.addable_cards = addable;
-            cell.set(Some(session));
         });
     }
 
@@ -3750,6 +6084,7 @@ mod create_multiplayer_draft_tests {
             "test-room",
             "Swiss",
             "Competitive",
+            2, // Medium; see `a_pod_bot_ignores_a_previous_drafts_difficulty`
         )
         .expect("the pod should start");
         seed_bot_pool(1, mono_white_bot_pool());
@@ -3790,8 +6125,7 @@ mod create_multiplayer_draft_tests {
         clear_state();
     }
 
-    /// VM-4e — [B1] the PRECONDITION refusal: a Commander pod whose host never
-    /// loaded `CARD_DB`.
+    /// VM-4e — the source/kind gate when the host has no `CARD_DB`.
     ///
     /// `install_commander_fixture_db()` is deliberately NOT called. Do not add
     /// it back as an oversight — the whole subject of this row is the database's
@@ -3799,7 +6133,7 @@ mod create_multiplayer_draft_tests {
     /// a SET pool, so session creation itself needs no database, which is what
     /// makes the fixture constructible.
     #[test]
-    fn get_bot_deck_inner_refuses_a_commander_pod_with_no_card_database() {
+    fn get_bot_deck_inner_requires_faces_for_commander_and_cube_but_not_set_premier() {
         clear_state();
         start_commander_pod(4);
 
@@ -3809,16 +6143,149 @@ mod create_multiplayer_draft_tests {
             "the message must name the card database: {err}"
         );
 
-        // Paired control ON THE SAME no-database state: `Premier` still builds a
-        // deck. This is the reach guard — it proves the fixture reaches
-        // `suggest_deck` at all — and it isolates the `commanders_required() > 0`
-        // conjunct, so the four CR 905.1a kinds provably keep today's behaviour.
+        // The normal Set-backed Premier host does not fetch CARD_DB. Its bot
+        // still proposes a complete deck from the drafted pool and basics.
         clear_state();
         start_commander_pod(1);
+        let deck = get_bot_deck_inner(1).expect("Set Premier builds without CARD_DB");
+        assert!(!deck.main_deck.is_empty(), "deck = {:?}", deck.main_deck);
+        assert_eq!(
+            deck.main_deck.len() + deck.lands.values().map(|&n| n as usize).sum::<usize>(),
+            40
+        );
+        assert!(deck.commander.is_empty());
 
-        let deck = get_bot_deck_inner(1).expect("Premier needs no designation");
+        assert!(get_bot_deck_inner(8).unwrap_err().contains("out of range"));
+
+        // Positive reach: the same Premier seat builds with its database.
+        install_commander_fixture_db();
+        let deck = get_bot_deck_inner(1).expect("Premier builds with typed faces");
         assert!(!deck.main_deck.is_empty(), "deck = {:?}", deck.main_deck);
 
+        // Cube's host loads faces at creation. Clearing them after creation
+        // models a resumed Cube whose database is missing at bot proposal.
+        clear_state();
+        install_fixture_db();
+        let cube_input = serde_json::json!({
+            "type": "Cube",
+            "data": {
+                "cube_list_text": "20 Alpha\n20 Beta",
+                "cube_name": "Test Cube",
+                "cube_draft_settings": {
+                    "pod_size": 2,
+                    "pack_count": 1,
+                    "cards_per_pack": 2,
+                    "min_deck_size": 4,
+                    "addable_cards": { "policy": "StandardBasics", "custom": [] }
+                }
+            }
+        });
+        let seats = serde_json::json!([
+            { "type": "Human", "player_id": 0, "display_name": "Host" },
+            { "type": "Bot", "name": "Bot 1" }
+        ]);
+        create_multiplayer_draft_inner(
+            &cube_input.to_string(),
+            &seats.to_string(),
+            1,
+            42,
+            "cube-room",
+            "Swiss",
+            "Competitive",
+            2,
+        )
+        .expect("Cube session must be installed before testing missing faces");
+        seed_bot_pool(1, mono_white_bot_pool());
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        let err = get_bot_deck_inner(1).expect_err("Cube requires typed faces");
+        assert!(err.contains("Card database"), "{err}");
+
+        clear_state();
+    }
+
+    #[test]
+    fn limited_bot_entry_admits_only_a_typed_ante_free_full_deck() {
+        clear_state();
+        install_ante_fixture_db();
+        let cube_input = serde_json::json!({
+            "type": "Cube",
+            "data": {
+                "cube_list_text": "100 Alpha\n100 Beta\n1 Contract from Below",
+                "cube_name": "Ante Cube",
+                "cube_draft_settings": {
+                    "pod_size": 2,
+                    "pack_count": 1,
+                    "cards_per_pack": 2,
+                    "min_deck_size": 40,
+                    "addable_cards": {
+                        "policy": "CustomOnly",
+                        "custom": ["Contract from Below", "Forest"]
+                    }
+                }
+            }
+        });
+        let seats = serde_json::json!([
+            { "type": "Human", "player_id": 0, "display_name": "Host" },
+            { "type": "Bot", "name": "Bot 1" }
+        ]);
+        create_multiplayer_draft_inner(
+            &cube_input.to_string(),
+            &seats.to_string(),
+            1,
+            42,
+            "ante-cube",
+            "Swiss",
+            "Competitive",
+            2,
+        )
+        .expect("Cube with typed addable faces must start");
+        let mut pool = mono_white_bot_pool();
+        pool.insert(
+            0,
+            DraftCardInstance {
+                instance_id: "ante-first".to_string(),
+                name: "Contract from Below".to_string(),
+                set_code: "TST".to_string(),
+                collector_number: "0".to_string(),
+                rarity: "rare".to_string(),
+                colors: vec!["B".to_string()],
+                cmc: 1,
+                type_line: "Sorcery".to_string(),
+                draft_effect: None,
+            },
+        );
+        seed_bot_pool(1, pool.clone());
+        CARD_DB.with(|cell| {
+            let db = cell.borrow();
+            let db = db.as_ref().unwrap();
+            assert!(db
+                .get_face_by_name("Contract from Below")
+                .is_some_and(engine::game::face_uses_ante));
+            assert!(db
+                .get_face_by_name("Forest")
+                .is_some_and(|face| !engine::game::face_uses_ante(face)));
+        });
+
+        let deck = get_bot_deck_inner(1).expect("the legal land fills the proposal");
+        assert!(deck.main_deck.contains(&"Alpha".to_string()));
+        assert!(!deck.main_deck.contains(&"Contract from Below".to_string()));
+        assert_eq!(deck.lands.get("Forest"), Some(&36));
+        assert_eq!(
+            deck.main_deck.len() + deck.lands.values().map(|&n| n as usize).sum::<usize>(),
+            40
+        );
+
+        set_addable_cards(DeckAddableCards {
+            policy: DeckAddableCardPolicy::CustomOnly,
+            custom: vec!["Contract from Below".to_string()],
+        });
+        let err = get_bot_deck_inner(1).expect_err("ante-only fill is short");
+        assert!(err.contains("minimum is 40"), "{err}");
+
+        seed_bot_pool(1, vec![pool[0].clone()]);
+        set_addable_cards(DeckAddableCards::standard_basics());
+        let err = get_bot_deck_inner(1).expect_err("all-ante pool is exhausted");
+        assert!(err.contains("reached 0 cards"), "{err}");
         clear_state();
     }
 
@@ -3885,5 +6352,80 @@ mod create_multiplayer_draft_tests {
         assert!(!deck.main_deck.is_empty(), "deck = {:?}", deck.main_deck);
 
         clear_state();
+    }
+}
+
+#[cfg(test)]
+mod llm_seat_authority_tests {
+    use super::*;
+
+    /// A pod whose seat roster is explicit about which indices are bots, so the
+    /// test never leans on the "seat 0 is the human" convention that the
+    /// authority check exists to stop trusting.
+    fn pod(bot_seats: &[u8], pod_size: u8) -> DraftSession {
+        let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Premier,
+            pod_size,
+            cards_per_pack: 15,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 7,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats: Vec<DraftSeat> = (0..pod_size)
+            .map(|index| {
+                if bot_seats.contains(&index) {
+                    DraftSeat::Bot {
+                        name: format!("Bot {index}"),
+                    }
+                } else {
+                    DraftSeat::Human {
+                        player_id: engine::types::player::PlayerId(index),
+                        display_name: format!("Player {index}"),
+                    }
+                }
+            })
+            .collect();
+        DraftSession::new(config, seats, "LLM-AUTH".to_string())
+    }
+
+    /// The motivating case: an 8-human Premier pod. Every index is in range, so
+    /// a bounds check would admit all of them, but none may have its private
+    /// pool and pack rendered into a third-party prompt.
+    #[test]
+    fn a_pod_of_humans_yields_no_llm_seat() {
+        assert_eq!(llm_eligible_bot_seats(&pod(&[], 8)), Vec::<u8>::new());
+    }
+
+    /// A human at a NONZERO index is excluded while its bot neighbours are
+    /// admitted. This is the disclosure the seat-number convention allowed:
+    /// seat 3 is in range and is not seat 0.
+    #[test]
+    fn only_bot_seats_are_eligible_whatever_their_index() {
+        assert_eq!(llm_eligible_bot_seats(&pod(&[1, 2, 4], 5)), vec![1, 2, 4]);
+    }
+
+    /// Seat 0 carries no special status in either direction: eligible when it
+    /// is a bot, excluded when it is not.
+    #[test]
+    fn seat_zero_is_governed_by_its_role_not_its_number() {
+        assert_eq!(llm_eligible_bot_seats(&pod(&[0], 2)), vec![0]);
+        assert_eq!(llm_eligible_bot_seats(&pod(&[1], 2)), vec![1]);
+        assert!(!llm_eligible_bot_seats(&pod(&[1], 2)).contains(&0));
+    }
+
+    /// There is no caller-supplied list to disagree with, so the roster is the
+    /// only answer: a pod of all bots yields exactly its seats, in order.
+    #[test]
+    fn the_roster_is_the_only_source_of_eligibility() {
+        assert_eq!(llm_eligible_bot_seats(&pod(&[0, 1, 2], 3)), vec![0, 1, 2]);
     }
 }

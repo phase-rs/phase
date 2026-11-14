@@ -707,6 +707,17 @@ fn a_free_cast_bound_the_window_cannot_represent_is_refused_not_fabricated() {
         // it here is what keeps the runtime row below non-vacuous — an unrelated
         // upstream parse loss would also produce "no permission", but it would
         // not produce this name.
+        //
+        // Exactly ONE name, deliberately. The printed rider ("If those spells
+        // would be put into your graveyard, exile them instead") is orphaned by
+        // the head's refusal and reaches `oracle::guard_owner` with the refusal
+        // node as its parent, where R-a suppresses a second gap over it. That
+        // suppression is load-bearing for HONESTY, not for this assertion: the
+        // reach-guard above measures the same surface with a representable cap
+        // parsing with zero gaps, so the rider is fully represented whenever the
+        // cap is — its gap here would be derived from the cap's, and fixing the
+        // cap fixes both. Loosening this to `contains` would cost the row its
+        // discrimination without buying any coverage signal.
         assert_eq!(
             gap_names(&oracle_for(bound)),
             vec!["unrepresentable_cast_cap".to_string()],
@@ -722,4 +733,89 @@ fn a_free_cast_bound_the_window_cannot_represent_is_refused_not_fabricated() {
              are strictly more permissive than the printed instruction (CR 608.2c)."
         );
     }
+}
+
+/// CR 608.2g: a spell cast during the resolution is cast "except no player
+/// receives priority after it's cast". When the window's last chosen spell
+/// needs a target, answering that target finishes Invoke Calamity — it is
+/// exiled — before its caster gets priority with the spell on the stack.
+#[test]
+fn a_targeted_last_cast_finishes_invoke_calamity_before_priority() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let invoke_id = scenario
+        .add_spell_to_hand_from_oracle(P0, "Invoke Calamity", true, INVOKE_CALAMITY_TEXT)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    let shock = scenario
+        .add_spell_to_graveyard(P0, "Graveyard Shock", true)
+        .with_mana_cost(ManaCost::generic(2))
+        .from_oracle_text("This spell deals 2 damage to target player.")
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&invoke_id].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: invoke_id,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Invoke Calamity must succeed");
+    for _ in 0..6 {
+        match runner.state().waiting_for {
+            WaitingFor::Priority { .. }
+                if runner.state().stack.iter().any(|e| e.id == invoke_id) =>
+            {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept the free casts");
+            }
+            _ => break,
+        }
+    }
+    runner
+        .act(GameAction::FreeCastWindowChoice {
+            selection: Some(shock),
+        })
+        .expect("choosing the Shock must succeed");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P1)),
+        })
+        .expect("targeting P1 must succeed");
+
+    assert_eq!(
+        runner.state().objects[&invoke_id].zone,
+        Zone::Exile,
+        "Invoke Calamity finished resolving before priority"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .map(|e| e.id)
+            .collect::<Vec<_>>(),
+        vec![shock]
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().players[1].life, 18);
+    assert_eq!(runner.state().objects[&shock].zone, Zone::Exile);
 }

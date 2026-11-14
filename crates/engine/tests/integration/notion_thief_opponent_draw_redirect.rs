@@ -10,26 +10,24 @@
 //! 504.1: the exception is the active player's first draw of their own draw
 //! step (the turn-based draw), which Notion Thief must leave alone.
 //!
-//! The card's parsed `execute` chain is a two-link ability: the head is an
-//! `Effect::Unimplemented { name: "draw" }` standing for the "that player skips
-//! that draw" clause, and `sub_ability` is `Effect::Draw { count: Fixed(1),
-//! target: Controller }` for "and you draw a card". The head being non-`Draw`
-//! is what makes `draw_is_substituted_away` (`game/replacement.rs`) zero the
-//! opponent's draw count, so the head is load-bearing for the suppression half.
+//! The card's parsed `execute` is a single `Effect::Draw { count: Fixed(1),
+//! target: Controller }` for "and you draw a card". The "that player skips that
+//! draw" clause has no effect representation of its own: the replacement IS the
+//! skip (CR 614.6), so the parser drops it. Because the head is a `Draw` aimed
+//! at the replacement's controller, `draw_is_substituted_away`
+//! (`game/replacement.rs`) treats it as a substitution for an opponent's draw
+//! and zeroes that draw.
 //!
-//! The parser-level test in `oracle_replacement.rs` asserts only that
-//! `execute.is_some()` — true of any non-empty chain, including one whose
-//! no-op head never reaches the `sub_ability`. These tests drive the real draw
-//! pipeline through `GameAction`s to prove BOTH halves at runtime:
+//! These tests drive the real draw pipeline through `GameAction`s to prove BOTH
+//! halves at runtime:
 //!
 //!   1. Control (no Notion Thief): the opponent's draw proceeds normally, so
 //!      the fixture demonstrably reaches a real draw. Without this the deltas
 //!      in (2) could be produced by a draw that never happened at all.
 //!   2. With Notion Thief: the opponent's hand and library are UNCHANGED (their
 //!      draw was skipped) and the Notion Thief controller's hand is +1, taken
-//!      from the controller's own library. Fails if the chain stops at the
-//!      no-op `Unimplemented` head and never reaches `sub_ability` — the
-//!      opponent would lose the draw and the controller would gain nothing.
+//!      from the controller's own library. Fails if the skip is not applied
+//!      (the opponent still draws) or the controller's draw is lost.
 //!   3. The draw-step exception: the active player's FIRST draw in their own
 //!      draw step is untouched, and the SECOND draw in that same step is
 //!      redirected. This proves (2) is not sitting in the excluded regime and
@@ -87,16 +85,6 @@ fn zone_names(state: &GameState, player: PlayerId, zone: Zone) -> Vec<String> {
         .collect()
 }
 
-/// The Notion Thief on the battlefield.
-fn notion_thief_id(state: &GameState) -> engine::types::identifiers::ObjectId {
-    state
-        .battlefield
-        .iter()
-        .copied()
-        .find(|id| state.objects[id].name == "Notion Thief")
-        .expect("Notion Thief must be on the battlefield")
-}
-
 fn draw_one(runner: &mut GameRunner, player: PlayerId) {
     runner
         .act(GameAction::Debug(DebugAction::DrawCards {
@@ -137,11 +125,7 @@ fn without_notion_thief_opponent_draw_proceeds_normally() {
 /// Thief controller draws a card from their own library instead.
 ///
 /// This is the load-bearing test. The suppression half (P1 +0) and the
-/// acquisition half (P0 +1) are asserted independently: if the parsed chain
-/// stops at its no-op `Effect::Unimplemented` head and never reaches
-/// `sub_ability`, P1 still loses the draw but P0 gains nothing — strictly worse
-/// than the card not existing — and the P0 assertions fail while the P1
-/// assertions still pass.
+/// acquisition half (P0 +1) are asserted independently.
 #[test]
 fn notion_thief_redirects_opponent_draw_to_its_controller() {
     let Some(db) = load_db() else {
@@ -179,13 +163,11 @@ fn notion_thief_redirects_opponent_draw_to_its_controller() {
     );
 
     // ── Half 2: the controller draws instead. ───────────────────────────────
-    // This is what the parser-level `execute.is_some()` assertion cannot see.
     assert_eq!(
         zone_names(runner.state(), P0, Zone::Hand),
         vec!["Sol Ring".to_string()],
         "P0 must draw exactly one card — their OWN top card (Sol Ring) — in place \
-         of P1's skipped draw; an empty hand means the execute chain stopped at \
-         its no-op Unimplemented head and never reached sub_ability"
+         of P1's skipped draw"
     );
     assert_eq!(
         zone_names(runner.state(), P0, Zone::Library),
@@ -243,66 +225,5 @@ fn notion_thief_exempts_only_the_first_draw_of_the_opponents_draw_step() {
         zone_names(runner.state(), P0, Zone::Hand),
         vec!["Sol Ring".to_string()],
         "the second draw redirects to P0, who draws their own top card"
-    );
-}
-
-/// Discrimination probe for the `+1` half of
-/// [`notion_thief_redirects_opponent_draw_to_its_controller`].
-///
-/// Severing `execute.sub_ability` reproduces exactly the regression that test is
-/// there to catch — the parser dropping the "and you draw a card" link, or the
-/// resolver never walking past the no-op `Effect::Unimplemented` head. In that
-/// world the suppression half still holds (P1's draw is zeroed, because
-/// `draw_is_substituted_away` keys only on the non-`Draw` head) but the
-/// acquisition half vanishes, leaving a card strictly worse than not existing.
-///
-/// Asserting the mutant's outcome here proves the real test's `P0 == ["Sol
-/// Ring"]` assertion discriminates that regression rather than restating a
-/// value the pipeline would produce either way.
-#[test]
-fn severing_the_sub_ability_strands_the_draw_and_the_probe_sees_it() {
-    let Some(db) = load_db() else {
-        return;
-    };
-    let mut runner = scenario(db, true);
-
-    let thief = notion_thief_id(runner.state());
-    let object = runner
-        .state_mut()
-        .objects
-        .get_mut(&thief)
-        .expect("Notion Thief object");
-    // `Definitions<T>` is copy-on-write and exposes no `iter_mut`; index through
-    // its `IndexMut` impl instead.
-    for i in 0..object.replacement_definitions.len() {
-        let execute = object.replacement_definitions[i]
-            .execute
-            .as_mut()
-            .expect("Notion Thief has an execute");
-        assert!(
-            execute.sub_ability.take().is_some(),
-            "the mutation must actually remove a sub_ability — an already-None \
-             chain would make this probe vacuous"
-        );
-    }
-    for def in std::sync::Arc::make_mut(&mut object.base_replacement_definitions).iter_mut() {
-        if let Some(execute) = def.execute.as_mut() {
-            execute.sub_ability = None;
-        }
-    }
-
-    draw_one(&mut runner, P1);
-
-    assert!(
-        zone_names(runner.state(), P1, Zone::Hand).is_empty(),
-        "the mutant still suppresses P1's draw — suppression keys on the head, \
-         not the tail; got {:?}",
-        zone_names(runner.state(), P1, Zone::Hand)
-    );
-    assert!(
-        zone_names(runner.state(), P0, Zone::Hand).is_empty(),
-        "with the sub_ability severed P0 must draw NOTHING; this is the failure \
-         the real test rejects. Got {:?}",
-        zone_names(runner.state(), P0, Zone::Hand)
     );
 }

@@ -103,6 +103,8 @@ fn redirect_self_moved_to(destination: Zone, redirected_to: Zone) -> Replacement
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 destination: redirected_to,
                 origin: None,
                 target: TargetFilter::SelfRef,
@@ -332,6 +334,8 @@ fn real_change_zone_resolver_journals_its_collected_trigger_occurrences() {
 
     let ability = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Graveyard,
             target: TargetFilter::Any,
@@ -414,6 +418,7 @@ fn paused_mana_cost_settlement_journals_consumed_occurrences_without_recollectin
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the mana cost reaches its real replacement choice after its tap prefix");
     assert!(matches!(
@@ -510,6 +515,7 @@ fn paused_sacrifice_cost_settlement_journals_consumed_occurrences_without_recoll
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the sacrifice-cost activation begins");
     let paused = runner

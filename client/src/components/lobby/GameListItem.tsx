@@ -20,12 +20,6 @@ interface GameListItemProps {
   entry: LobbyGameEntry;
   onJoin: (entry: LobbyGameEntry) => void;
   /**
-   * When false, the row is visible but disabled with a tooltip explaining
-   * the mismatch. Computed by the parent from the server's `build_commit`
-   * vs the client's `__BUILD_HASH__`.
-   */
-  compatible?: boolean;
-  /**
    * Game code of the current player's hosted game. Used to prevent the host
    * from joining their own hosted game.
    */
@@ -65,7 +59,6 @@ function formatWaitTime(createdAt: number, t: TFunction<"multiplayer">): string 
 export function GameListItem({
   entry,
   onJoin,
-  compatible = true,
   hostGameCode,
   healthHint,
 }: GameListItemProps) {
@@ -89,7 +82,7 @@ export function GameListItem({
 
   const isCurrentPlayerHost = Boolean(hostGameCode && game.game_code === hostGameCode);
 
-  const disabled = !compatible || isFull || isCurrentPlayerHost;
+  const disabled = isFull || isCurrentPlayerHost;
 
   // Built-in sources show their picker label ("Official", "Self-hosted") so
   // an official row reads the same as it did before the list became
@@ -105,16 +98,11 @@ export function GameListItem({
         ? t("gameListItem.kindLobbyOnly")
         : "";
 
-  const disabledTitle = !compatible
-    ? t("gameListItem.buildMismatchTitle", {
-        version: game.host_version || "?",
-        commit: game.host_build_commit || "?",
-      })
-    : isFull
-      ? t("gameListItem.gameFull")
-      : isCurrentPlayerHost
-        ? t("gameListItem.youAreHosting")
-        : undefined;
+  const disabledTitle = isFull
+    ? t("gameListItem.gameFull")
+    : isCurrentPlayerHost
+      ? t("gameListItem.youAreHosting")
+      : undefined;
 
   return (
     <>
@@ -137,22 +125,33 @@ export function GameListItem({
       }
     >
       <div className="col-span-2 flex min-w-0 flex-wrap items-center gap-1.5 sm:col-span-1 sm:flex-nowrap">
-        {/* Format badge */}
-        <span className={`flex-shrink-0 rounded-[5px] border px-1.5 py-0.5 text-xs font-semibold ${badgeClass}`}>
-          {formatLabel}
-        </span>
+        {/* Format badge — a draft row's kind badge below is its only kind
+            badge; the constructed format fallback would misstate a pod as
+            the "Standard" registry entry it defaults to when unset. */}
+        {game.draft_metadata == null && (
+          <span className={`flex-shrink-0 rounded-[5px] border px-1.5 py-0.5 text-xs font-semibold ${badgeClass}`}>
+            {formatLabel}
+          </span>
+        )}
 
-      {/* Draft badge — rendered when the lobby entry is a draft pod.
-          Shows set code and draft kind for quick identification. */}
         {game.draft_metadata && (
           <span
             className="flex-shrink-0 rounded-[5px] border border-purple-300/20 bg-purple-500/15 px-1.5 py-0.5 text-xs font-semibold text-purple-200"
-            title={t("gameListItem.draftBadgeTitle", {
-              kind: game.draft_metadata.draftKind,
-              setCode: game.draft_metadata.setCode,
-            })}
+            title={
+              game.draft_metadata.cubeName
+                ? t("gameListItem.cubeDraftBadgeTitle", {
+                    kind: game.draft_metadata.draftKind,
+                    cubeName: game.draft_metadata.cubeName,
+                  })
+                : t("gameListItem.draftBadgeTitle", {
+                    kind: game.draft_metadata.draftKind,
+                    setCode: game.draft_metadata.setCode,
+                  })
+            }
           >
-            {t("gameListItem.draftBadge", { setCode: game.draft_metadata.setCode })}
+            {game.draft_metadata.cubeName
+              ? t("gameListItem.cubeDraftBadge", { cubeName: game.draft_metadata.cubeName })
+              : t("gameListItem.draftBadge", { setCode: game.draft_metadata.setCode })}
           </span>
         )}
 

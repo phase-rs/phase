@@ -2,7 +2,7 @@ import { useCallback } from "react";
 
 import { useLongPress } from "./useLongPress.ts";
 import { useIsMobile } from "./useIsMobile.ts";
-import { useUiStore } from "../stores/uiStore.ts";
+import { useUiStore, type PreviewSource } from "../stores/uiStore.ts";
 
 /**
  * Combined mouse hover + touch long-press handlers for card preview.
@@ -14,7 +14,7 @@ import { useUiStore } from "../stores/uiStore.ts";
  *   const { handlers, firedRef } = useCardHover(objectId);
  *   <div {...handlers} onClick={() => { if (!firedRef.current) doClick(); }} />
  */
-export function useCardHover(objectId: number | null) {
+export function useCardHover(objectId: number | null, previewSource?: PreviewSource) {
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const isMobile = useIsMobile();
@@ -25,10 +25,10 @@ export function useCardHover(objectId: number | null) {
         // Long-press is an explicit-intent gesture (already a 400ms hold), so it
         // bypasses the configurable hover latency and shows the sticky preview now
         // — and setting it synchronously avoids orphaning previewSticky.
-        inspectObject(objectId, undefined, "immediate");
+        inspectObject(objectId, undefined, "immediate", "cursor", previewSource);
         setPreviewSticky(true);
       }
-    }, [inspectObject, setPreviewSticky, objectId]),
+    }, [inspectObject, setPreviewSticky, objectId, previewSource]),
   );
 
   // Gate on the event's own `pointerType`, not on a `(any-hover: hover)` media
@@ -45,8 +45,8 @@ export function useCardHover(objectId: number | null) {
   // device should hover rather than be silently locked out again.
   const onPointerEnter = useCallback((e: React.PointerEvent) => {
     if (e.pointerType === "touch") return;
-    if (objectId != null) inspectObject(objectId);
-  }, [inspectObject, objectId]);
+    if (objectId != null) inspectObject(objectId, undefined, "hover", "cursor", previewSource);
+  }, [inspectObject, objectId, previewSource]);
 
   // `useLongPress` owns an `onPointerLeave` of its own, so this must compose
   // with it rather than replace it — otherwise the long-press timer never

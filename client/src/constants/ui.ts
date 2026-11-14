@@ -14,6 +14,7 @@ export const DEFAULT_ANIMATION_DURATION_MS = 200;
  */
 export const GAME_Z = {
   board: 10,
+  combatArrow: 30,
   hudRail: 30,
   boardChoiceGrid: 35,
   dialogHost: 40,
@@ -25,6 +26,7 @@ export const GAME_Z = {
 
 export const GAME_Z_LAYER = {
   board: "z-10",
+  combatArrow: "z-30",
   hudRail: "z-30",
   boardChoiceGrid: "z-[35]",
   dialogHost: "z-40",

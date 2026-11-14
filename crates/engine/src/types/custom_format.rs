@@ -1,21 +1,24 @@
 //! Schema for engine-validated custom formats: types, validation, the
 //! registration gates, and the bundled Axis-B preset constructors.
 //!
-//! `IMPLEMENTED_LEGACY_AXES` is still empty, so no `LegacyRuleSet` axis has
-//! runtime behavior yet — later phases (2a/2b/2cd) wire them in (mana pool
-//! cleanup, combat damage step, etc.). The one exception is
+//! `IMPLEMENTED_LEGACY_AXES` lists the axes whose runtime behavior is wired in.
+//! Mana burn joined in Phase 2b (`game::mana_burn`); the Wish scope and the
+//! legend-rule scope joined in Phase 2cd (`game::wish_scope`,
+//! `game::legend_scope`). `CombatDamageTiming` is the one that remains, and it
+//! gates the Middle School and Classic Magic presets. A separate case is
 //! [`AntePolicy::Excluded`], whose CR 407.3 deck-construction consequence
 //! `game::deck_validation` enforces today; it is a default rather than a
 //! declared axis, which is why it needs no entry in that list.
 //!
-//! `custom_format_registry()` still returns `Vec::new()`, but no longer for
-//! want of a preset: [`swedish_old_school`] exists and passes both gates, and
-//! is withheld for the sourcing reason its own doc comment gives.
+//! [`swedish_old_school`] passes both gates and is nonetheless withheld, for
+//! the sourcing reason its own doc comment gives — a documentation blocker that
+//! no gate expresses.
 
 use serde::{Deserialize, Serialize};
 
 use crate::types::format::{
     DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, RangeOfInfluenceConfig, SideboardPolicy,
+    INDIVIDUAL_POISON_LOSS_THRESHOLD,
 };
 
 /// Lightweight, `Copy`, per-`GameState` transport tag for a custom format.
@@ -77,11 +80,14 @@ pub enum ManaBurnPolicy {
 
 /// CR 510 (Combat Damage Step): the modern rules deal all combat damage —
 /// first strike and regular — in one unified damage step per combat-damage
-/// sub-step, not using the stack (CR 510.2). `OnStack` reproduces the older
-/// pre-6th-edition procedure, where assigned combat damage was itself placed
-/// on the stack as a stack object rather than a triggered ability, giving
-/// players a priority window between assignment and dealing before it
-/// resolved. Variant names match `docs/proposals/custom-format-engine/
+/// sub-step, not using the stack (CR 510.2). `OnStack` reproduces the pre-M10
+/// procedure — introduced by the Classic Sixth Edition rules in 1999 and
+/// removed by Magic 2010 in July 2009 — where assigned combat damage was
+/// itself placed on the stack as a stack object rather than a triggered
+/// ability, giving players a priority window between assignment and dealing
+/// before it resolved. (An earlier revision of this comment called that
+/// "pre-6th-edition", which is backwards: Sixth Edition is what introduced it.)
+/// Variant names match `docs/proposals/custom-format-engine/
 /// PLAN.md`'s canonical schema exactly. Schema only in this phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum CombatDamageTiming {
@@ -111,18 +117,21 @@ pub enum WishOutsideGameScope {
     /// replaced by exile.
     #[default]
     PostM10SideboardOnly,
-    /// Pre-M10: a Wish could retrieve an owned card that had been removed
-    /// from the game (today's exile).
+    /// Pre-M10 zone model: a card "removed from the game" (today's owned,
+    /// face-up exile) counts as outside the game, for EVERY effect that
+    /// reaches outside the game — Wish-class, Learn, or anything else. A
+    /// whole-game zone-model choice, not a per-card historical property:
+    /// Oracle wording cannot identify a card's era. See `game::wish_scope`.
     PreM10ReachesExile,
 }
 
 /// CR 704.5j: the "legend rule" state-based action. `PreM14AnyController`
-/// reproduces a historical ruling some casual formats use (the Legends
-/// 1994 / pre-M14 "both die" form): same-named legendary permanents go to
-/// their owners' graveyards across ALL controllers combined, choicelessly,
+/// reproduces the rule M14 replaced — the "nullification" form in force from
+/// Champions of Kamigawa (2004) until 2013: same-named legendary permanents go
+/// to their owners' graveyards across ALL controllers combined, choicelessly,
 /// rather than per-controller. Variant names match `docs/proposals/
-/// custom-format-engine/PLAN.md`'s canonical schema exactly. Schema only in
-/// this phase.
+/// custom-format-engine/PLAN.md`'s canonical schema exactly. Runtime behavior
+/// lives in `game::legend_scope` and `game::sba` (Phase 2cd).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum LegendRuleScope {
     /// Per-controller + choice (post-2013-07 M14). All four EC presets use
@@ -163,9 +172,9 @@ pub enum AntePolicy {
 }
 
 /// `Default` is every axis at its modern value — the rule set an Axis-A
-/// lobby save always declares (it models no historical paper ruleset), and
-/// the only one `passes_legacy_axis_gate` accepts while
-/// `IMPLEMENTED_LEGACY_AXES` is empty.
+/// lobby save always declares (it models no historical paper ruleset), and the
+/// one `passes_legacy_axis_gate` accepts unconditionally. A non-default value
+/// is accepted only for an axis listed in `IMPLEMENTED_LEGACY_AXES`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LegacyRuleSet {
     pub mana_burn: ManaBurnPolicy,
@@ -193,6 +202,10 @@ pub enum CommanderEligibilityRule {
     TinyLeaders,
     OathbreakerSignatureSpell,
     BrawlColorIdentity,
+    /// `GameFormat::FreeformCommander`'s rule: any card that can be cast.
+    /// See `deck_validation::is_freeform_commander_eligible` for which
+    /// `CoreType`s it admits.
+    FreeformAnyCastableCard,
 }
 
 impl CommanderEligibilityRule {
@@ -212,12 +225,22 @@ impl CommanderEligibilityRule {
             // CR 903.13f routes its deck construction through CR 903.5 — so
             // CR 903.3's commander eligibility test applies unchanged.
             GameFormat::Commander
+            | GameFormat::TwoHeadedGiantCommander
+            | GameFormat::ArchenemyCommander
+            // CR 903.3's commander eligibility test applies unchanged —
+            // planar doesn't change eligibility.
+            | GameFormat::PlanechaseCommander
             | GameFormat::DuelCommander
             | GameFormat::PauperCommander
             | GameFormat::CommanderDraft => Ok(Some(Self::Standard)),
             GameFormat::TinyLeaders => Ok(Some(Self::TinyLeaders)),
             GameFormat::Oathbreaker => Ok(Some(Self::OathbreakerSignatureSpell)),
             GameFormat::Brawl | GameFormat::HistoricBrawl => Ok(Some(Self::BrawlColorIdentity)),
+            // Departure from CR 903.3: `Ok(None)` would
+            // claim this format has no commander-eligibility concept, and
+            // `Ok(Some(Standard))` would claim it applies CR 903.3's test —
+            // the rule this format departs from. Neither is true.
+            GameFormat::FreeformCommander => Ok(Some(Self::FreeformAnyCastableCard)),
             GameFormat::Standard
             | GameFormat::Limited
             | GameFormat::Pioneer
@@ -232,11 +255,29 @@ impl CommanderEligibilityRule {
             | GameFormat::TwoHeadedGiant
             | GameFormat::Archenemy
             | GameFormat::Planechase
-            | GameFormat::Momir => Ok(None),
+            | GameFormat::Momir
+            // Like Momir, the command zone holds an engine object (the Horde
+            // emblem), not a decklist commander — Commander-format hordes whose
+            // survivors run commanders are a config-level axis, not a
+            // format-level eligibility rule.
+            | GameFormat::Horde
+            | GameFormat::Freeform
+            | GameFormat::Dandan => Ok(None),
             GameFormat::Custom(id) => Err(FormatConfigError(format!(
                 "from_source_format: source must be a built-in GameFormat, never Custom({})",
                 id.0
             ))),
+        }
+    }
+
+    /// Whether a custom format modeled on this rule's source is a Commander
+    /// variant (CR 903), mirroring `GameFormat::uses_commander`.
+    pub fn uses_commander(self) -> bool {
+        match self {
+            Self::Standard | Self::FreeformAnyCastableCard => true,
+            // CR 903.12a: Brawl is a Commander variant.
+            Self::BrawlColorIdentity => true,
+            Self::TinyLeaders | Self::OathbreakerSignatureSpell => false,
         }
     }
 }
@@ -297,6 +338,19 @@ pub struct StructuralRules {
     /// `UpTo(1)` fallback — the same silent-data-loss bug `sideboard_policy`
     /// exists to prevent.
     pub default_deck_copy_limit: DeckCopyLimit,
+    /// CR 704.5c: the DECLARED individual poison loss threshold, mirroring
+    /// `FormatConfig.poison_counter_threshold`. A bare `u8`: a custom format never
+    /// takes the Two-Headed Giant shared-poison topology (`has_shared_poison` keys
+    /// on the built-in 2HG family), so CR 704.5c always applies to it.
+    /// Defaulted so definitions persisted before this field keep loading.
+    #[serde(default = "default_structural_poison_counter_threshold")]
+    pub poison_counter_threshold: u8,
+}
+
+/// Serde default for `StructuralRules.poison_counter_threshold`: a definition
+/// persisted before the field existed was written under CR 704.5c's ten.
+fn default_structural_poison_counter_threshold() -> u8 {
+    INDIVIDUAL_POISON_LOSS_THRESHOLD
 }
 
 impl StructuralRules {
@@ -329,6 +383,12 @@ impl StructuralRules {
             team_based: config.team_based,
             sideboard_policy: config.sideboard_policy,
             default_deck_copy_limit: config.default_deck_copy_limit,
+            // A Two-Headed Giant-family source has no individual rule (`None`),
+            // but the custom format it becomes never shares poison, so CR
+            // 704.5c's value is the rule that will govern it.
+            poison_counter_threshold: config
+                .poison_counter_threshold
+                .unwrap_or(INDIVIDUAL_POISON_LOSS_THRESHOLD),
         }
     }
 }
@@ -526,8 +586,8 @@ impl CustomFormatDef {
     /// state, not a format rule (and the only format that sets it is
     /// rejected below anyway), and `supplies_fixed_deck` is always `false`
     /// for every custom format — no custom-format use case for an
-    /// engine-supplied fixed deck exists, and the only built-in that sets it
-    /// (Momir) is likewise rejected below.
+    /// engine-supplied fixed deck exists, and the built-ins that set it
+    /// (Momir and Dandân) are likewise rejected below.
     pub fn from_lobby_config(
         name: String,
         config: &FormatConfig,
@@ -564,10 +624,10 @@ impl CustomFormatDef {
         // Closes the general defect class documented on
         // `GameFormat::has_unrepresentable_auxiliary_deck_component`: Planechase
         // (CR 901.15a, shared planar deck), Archenemy (CR 904.3, scheme deck),
-        // and Momir (CR 109.4c / CR 114.1, game-start emblem) each get an
-        // auxiliary deck/component from `deck_loading.rs` keyed on this exact
-        // `GameFormat` literal, with no `StructuralRules` field able to carry
-        // it forward. Checked ahead of the command-zone/eligibility match
+        // Momir (CR 109.4c / CR 114.1, game-start emblem), and Dandân (CR 400.1,
+        // shared library and graveyard) each rely on an auxiliary deck/component
+        // keyed on this exact `GameFormat` literal, with no `StructuralRules`
+        // field able to carry it forward. Checked ahead of the command-zone/eligibility match
         // below because Planechase's `command_zone` is `false` — it would
         // otherwise fall straight through to `CommandZoneMode::Disabled` and
         // save "successfully," silently losing the planar deck. Archenemy and
@@ -579,7 +639,7 @@ impl CustomFormatDef {
             return Err(FormatConfigError(format!(
                 "from_lobby_config cannot save {} as a custom format — its deck_loading.rs \
                  behavior grants an auxiliary deck or component (a shared planar deck, a scheme \
-                 deck, or a game-start emblem) keyed on this literal format, and StructuralRules \
+                 deck, a game-start emblem, or a shared library and graveyard) keyed on this literal format, and StructuralRules \
                  has no representation for it",
                 config.format
             )));
@@ -680,7 +740,21 @@ pub enum LegacyAxis {
 /// School presets selectable — they were listed in `custom_format_registry`
 /// and rejected here from the moment they existed, and this one entry is the
 /// whole of what changed for them. See `game::mana_burn`.
-pub const IMPLEMENTED_LEGACY_AXES: &[LegacyAxis] = &[LegacyAxis::ManaBurn];
+///
+/// `WishOutsideGameScope` and `LegendRuleScope` joined in Phase 2cd (see
+/// `game::wish_scope` and `game::legend_scope`). Unlike `ManaBurn`, neither
+/// releases a bundled preset — no Eternal Central ruleset declares either —
+/// so what they release is the ability of a *lobby-saved* custom format to
+/// declare them. Adding an axis here widens what is reachable, which is the
+/// thing to re-check when reasoning about any behavior as unreachable.
+///
+/// `CombatDamageTiming` is the axis still absent, and it is the one gating the
+/// Middle School and Classic Magic presets.
+pub const IMPLEMENTED_LEGACY_AXES: &[LegacyAxis] = &[
+    LegacyAxis::ManaBurn,
+    LegacyAxis::WishOutsideGameScope,
+    LegacyAxis::LegendRuleScope,
+];
 
 fn declared_legacy_axes(rules: &LegacyRuleSet) -> Vec<LegacyAxis> {
     let mut axes = Vec::new();
@@ -1108,4 +1182,24 @@ pub fn custom_format_registry() -> Vec<CustomFormatDef> {
             passes_legacy_axis_gate(&def.rules.legality.legacy) && passes_reprint_fidelity_gate(def)
         })
         .collect()
+}
+
+/// A minimal, valid [`CustomFormatRules`] declaring exactly `legacy` — the test
+/// fixture for exercising a single `LegacyRuleSet` axis.
+///
+/// Built through [`CustomFormatDef::from_lobby_config`], the real Axis-A save
+/// path, rather than from a struct literal: a literal has to name every field of
+/// `StructuralRules` and `LegalityRules`, so it silently rots the moment either
+/// schema grows one, and each test that wrote its own would rot separately.
+/// Going through the production constructor also guarantees the fixture is a
+/// ruleset the engine would actually accept.
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_rules_with_legacy(legacy: LegacyRuleSet) -> CustomFormatRules {
+    let mut def = CustomFormatDef::from_lobby_config(
+        "Legacy axis fixture".to_string(),
+        &FormatConfig::standard(),
+    )
+    .expect("a Standard lobby save is a valid custom format");
+    def.rules.legality.legacy = legacy;
+    def.rules
 }

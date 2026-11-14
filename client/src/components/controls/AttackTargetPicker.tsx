@@ -1,14 +1,17 @@
+import type { TFunction } from "i18next";
 import { useCallback, useMemo, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import { Trans, useTranslation } from "react-i18next";
 
-import type { AttackTarget, GameObject, ObjectId, PlayerId } from "../../adapter/types.ts";
+import type { AttackTarget, GameObject, ObjectId } from "../../adapter/types.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
+import { formatLifeReadout, lifeReadout } from "../../hooks/useDisplayedLife.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import {
   type AttackerStack,
@@ -76,7 +79,7 @@ export function AttackTargetPicker({
   onConfirm,
   onCancel,
 }: AttackTargetPickerProps) {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const [mode, setMode] = useState<"all" | "distribute">("all");
   const [peeked, setPeeked] = useState(false);
   // Every attacker starts in the Unassigned bucket (null). Keyed by attacker
@@ -89,6 +92,7 @@ export function AttackTargetPicker({
 
   const gameState = useGameStore((s) => s.gameState);
   const playerNames = useMultiplayerStore((s) => s.playerNames);
+  const showOwnerPrintings = usePreferencesStore((s) => s.showOwnerPrintings);
   const myId = usePlayerId();
   const hoverProps = useInspectHoverProps();
   const seatOrder = gameState?.seat_order;
@@ -131,8 +135,8 @@ export function AttackTargetPicker({
   // split so identically-named attackers with different legal-target sets are
   // not treated as one interchangeable stack.
   const stacks = useMemo(
-    () => groupAttackers(selectedAttackers, gameState, targetsFor),
-    [selectedAttackers, gameState, targetsFor],
+    () => groupAttackers(selectedAttackers, gameState, showOwnerPrintings, targetsFor),
+    [selectedAttackers, gameState, showOwnerPrintings, targetsFor],
   );
 
   // Distribute-mode columns: the union of legal targets across the selected
@@ -145,18 +149,26 @@ export function AttackTargetPicker({
     return sortTargets([...seen.values()]);
   }, [stacks, sortTargets]);
 
-  // The board state supplies each creature's current evaluated power. This is
-  // intentionally only an unblocked, at-this-moment life estimate: blockers
-  // and later game actions still determine the actual combat result.
-  const assignedDamageByPlayer = useMemo(() => {
-    const damageByPlayer = new Map<PlayerId, number>();
+  // Per-target totals over the player's unsubmitted draft. Each attacker's
+  // damage and life loss is the engine's unblocked projection (CR 510.1a +
+  // CR 702.4b + CR 120.3a/b); blockers and later game actions still determine
+  // the actual combat result.
+  const assignedTotalsByTarget = useMemo(() => {
+    const previews = gameState?.derived?.unblocked_attack_previews;
+    const totals = new Map<string, { attackers: number; damage: number; lifeLoss: number }>();
     for (const attackerId of selectedAttackers) {
       const target = assignments.get(attackerId);
-      if (target?.type !== "Player") continue;
-      const damage = Math.max(0, gameState?.objects[attackerId]?.power ?? 0);
-      damageByPlayer.set(target.data, (damageByPlayer.get(target.data) ?? 0) + damage);
+      if (target == null) continue;
+      const key = attackTargetKey(target);
+      const preview = previews?.[String(attackerId)];
+      const current = totals.get(key) ?? { attackers: 0, damage: 0, lifeLoss: 0 };
+      totals.set(key, {
+        attackers: current.attackers + 1,
+        damage: current.damage + (preview?.damage ?? 0),
+        lifeLoss: current.lifeLoss + (preview?.life_loss ?? 0),
+      });
     }
-    return damageByPlayer;
+    return totals;
   }, [assignments, gameState, selectedAttackers]);
 
   // Total attackers still in the Unassigned bucket — gates Confirm.
@@ -167,15 +179,18 @@ export function AttackTargetPicker({
 
   function getTargetLabel(target: AttackTarget, showProjectedLife = false): string {
     if (target.type === "Player") {
-      const life = gameState?.players.find((player) => player.id === target.data)?.life;
+      const readout = lifeReadout(gameState, target.data);
       const name = target.data === myId
         ? t("attackTargetPicker.you")
         : teamBased && Math.floor(target.data / 2) === Math.floor(myId / 2)
           ? t("attackTargetPicker.ally")
           : playerNames.get(target.data) ?? `Opp ${target.data + 1}`;
-      const currentLife = life ?? 0;
+      if (readout.magnitude === "Unbounded") {
+        return t("attackTargetPicker.playerTarget", { name, life: formatLifeReadout(readout) });
+      }
+      const currentLife = readout.life;
       const assignedDamage = showProjectedLife
-        ? (assignedDamageByPlayer.get(target.data) ?? 0)
+        ? (assignedTotalsByTarget.get(attackTargetKey(target))?.lifeLoss ?? 0)
         : 0;
       if (assignedDamage > 0) {
         const projectedLife = Math.max(0, currentLife - assignedDamage);
@@ -449,6 +464,31 @@ export function AttackTargetPicker({
                     </div>
                   </div>
 
+                  {/* Per-target totals of the draft assignment (both layouts) */}
+                  <ul aria-label={t("attackTargetPicker.totalsHeading")} className="flex flex-wrap gap-x-3 gap-y-1">
+                    {distributeColumns.map((target) => {
+                      const color = getTargetSeatColor(target);
+                      const totals = assignedTotalsByTarget.get(attackTargetKey(target));
+                      return (
+                        <li
+                          key={attackTargetKey(target)}
+                          className="inline-flex items-center gap-1.5 text-xs text-gray-300"
+                        >
+                          <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: color ?? "#6b7280" }} />
+                          <span className="font-semibold" style={color ? { color } : undefined}>
+                            {getTargetLabel(target, true)}
+                          </span>
+                          <span>
+                            {t("attackTargetPicker.targetTotal", {
+                              count: totals?.attackers ?? 0,
+                              damage: totals?.damage ?? 0,
+                            })}
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+
                   {/* Desktop: stacks (rows) × buckets (columns) matrix */}
                   <div className="hidden overflow-x-auto overscroll-x-contain thin-scrollbar md:block">
                     <table className="w-full border-separate border-spacing-0 text-sm">
@@ -470,7 +510,7 @@ export function AttackTargetPicker({
                                     style={color ? { color } : undefined}
                                   >
                                     <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: color ?? "#6b7280" }} />
-                                    <span className="max-w-[7rem] truncate">{getTargetLabel(target, true)}</span>
+                                    <span className="max-w-[7rem] truncate">{getTargetLabel(target)}</span>
                                   </span>
                                   <button
                                     type="button"
@@ -526,7 +566,7 @@ export function AttackTargetPicker({
                                   );
                                 }
                                 const count = countOnTarget(stack, target);
-                                const label = getTargetLabel(target, true);
+                                const label = getTargetLabel(target);
                                 return (
                                   <td key={attackTargetKey(target)} className="px-2 py-1.5">
                                     <StepperCell
@@ -606,7 +646,7 @@ export function AttackTargetPicker({
                               {stack.targets.map((target) => {
                                 const color = getTargetSeatColor(target);
                                 const count = countOnTarget(stack, target);
-                                const label = getTargetLabel(target, true);
+                                const label = getTargetLabel(target);
                                 return (
                                   <div key={attackTargetKey(target)} className="flex items-center justify-between gap-2 rounded px-1 py-1">
                                     <span className="inline-flex min-w-0 items-center gap-1.5 text-sm" style={color ? { color } : undefined}>
@@ -817,7 +857,7 @@ function StepperCell({ count, color, canInc, canDec, onDec, onInc, onAll, decTit
 
 interface StackLabelProps {
   stack: AttackerStack;
-  t: ReturnType<typeof useTranslation>["t"];
+  t: TFunction<"game">;
   hoverProps: ReturnType<typeof useInspectHoverProps>;
 }
 

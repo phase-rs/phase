@@ -62,7 +62,10 @@ fn raubahn_full_oracle_text_parses_ward_and_attack_attachment() {
         "Raubahn must have exactly one attack trigger"
     );
     assert_no_unimplemented(&attack_trigger.effect, "Raubahn's attack trigger");
-    let Effect::Attach { attachment, target } = attack_trigger.effect.as_ref() else {
+    let Effect::Attach {
+        attachment, target, ..
+    } = attack_trigger.effect.as_ref()
+    else {
         panic!(
             "Raubahn's attack trigger must attach an Equipment: {:?}",
             attack_trigger.effect

@@ -7,21 +7,18 @@
 //! steps; anything describing HOW the granted spell is cast belongs to the grant
 //! and must be live before the cast, not fired after it.
 //!
-//! Both cards here grant a LINGERING cast permission (`Effect::CastFromZone`
-//! with the default `CastFromZoneDriver::LingeringPermission`, which the corpus
-//! parse dump shows as an absent `driver` key), so the granted spell is cast
-//! later under priority — never inside the granting resolution.
-//! Lowering the consequent as a sequential instruction therefore applied it the
-//! moment the permission was granted, whether or not the player ever cast
-//! anything.
+//! Both cards here cast the chosen graveyard card AS THE TRIGGER RESOLVES
+//! (CR 608.2g; `Effect::CastFromZone` with `CastFromZoneDriver::DuringResolution`,
+//! issue #8775): the resolution opens a `CastOffer::GraveyardPaidCast`, and
+//! accepting it casts the card at once, at its printed cost. Declining "you
+//! may", or declining the offer, casts nothing. Lowering the consequent as a
+//! sequential instruction applied it whether or not the player cast anything.
 //!
 //! Both wordings are tested in both directions. Helmut Zemo carries the first;
-//! the second is carried by a labelled stand-in, because Ogre Battlecaster — the
-//! only printed card that reaches this recognizer with that wording — cannot
-//! discriminate: its "+X/+0 … where X is that spell's mana value" binds X against
-//! a spell not yet cast and resolves to 0 either way (a separate open defect).
-//! Said here rather than left to be discovered: one direction alone would also
-//! pass if the consequent were dropped entirely.
+//! the second is carried by a labelled stand-in with an observable consequent,
+//! and by Ogre Battlecaster itself in `ogre_battlecaster_8775.rs` (X = the cast
+//! spell's mana value). Said here rather than left to be discovered: one
+//! direction alone would also pass if the consequent were dropped entirely.
 //!
 //! Corpus reach: two cards change parse — Helmut Zemo and Ogre Battlecaster.
 //!
@@ -36,12 +33,14 @@
 //! `oracle_effect::tests::a_targetless_cast_permission_keeps_its_consequent_unwrapped`.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::actions::GameAction;
+use engine::types::actions::{CastChoice, GameAction};
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
-use engine::types::mana::ManaColor;
+use engine::types::game_state::{CastOfferKind, WaitingFor};
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 
 use super::rules::AttackTarget;
 
@@ -58,7 +57,7 @@ by paying {R}{R} in addition to its other costs. If that spell would be put into
 exile it instead. When you cast that spell, this creature gets +X/+0 until end of turn, where X \
 is that spell's mana value.";
 
-fn to_declare_attackers(runner: &mut GameRunner, attacker: PlayerId) {
+pub(crate) fn to_declare_attackers(runner: &mut GameRunner, attacker: PlayerId) {
     runner.state_mut().active_player = attacker;
     runner.state_mut().priority_player = attacker;
     runner.state_mut().waiting_for = WaitingFor::Priority { player: attacker };
@@ -78,12 +77,18 @@ fn to_declare_attackers(runner: &mut GameRunner, attacker: PlayerId) {
     }
 }
 
-/// Drive the attack trigger to completion, answering its "you may cast" prompt
-/// with `accept`. Accepting GRANTS the permission; it does not cast anything —
-/// that separation is the whole point of these tests.
-fn settle_attack_trigger(runner: &mut GameRunner, accept: bool) {
+/// Drive the attack trigger, answering its "you may cast" prompt with
+/// `accept`. Accepting OPENS the during-resolution cast offer
+/// (`CastOffer::GraveyardPaidCast`) and returns with it open; it does not cast
+/// anything — the offer's answer is the cast, and that separation is the whole
+/// point of these tests. Declining lets the trigger finish.
+pub(crate) fn settle_attack_trigger(runner: &mut GameRunner, accept: bool) {
     for _ in 0..40 {
         match runner.state().waiting_for.clone() {
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::GraveyardPaidCast { .. },
+                ..
+            } => return,
             WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
                 if runner.choose_first_legal_target().is_err() {
                     break;
@@ -115,7 +120,53 @@ fn settle_attack_trigger(runner: &mut GameRunner, accept: bool) {
     runner.advance_until_stack_empty();
 }
 
-fn p1p1(runner: &GameRunner, id: engine::types::identifiers::ObjectId) -> u32 {
+/// The open during-resolution offer's card, or `None` when no such offer is
+/// open.
+pub(crate) fn offered_card(runner: &GameRunner) -> Option<ObjectId> {
+    match &runner.state().waiting_for {
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::GraveyardPaidCast { hit_card, .. },
+            ..
+        } => Some(*hit_card),
+        _ => None,
+    }
+}
+
+/// Accept the open offer and pay the cost from the caster's lands: the card
+/// goes onto the stack while the granting trigger is still resolving
+/// (CR 608.2g). Returns with the spell on the stack, not yet resolved.
+pub(crate) fn accept_offer_and_pay(runner: &mut GameRunner) {
+    runner
+        .act(GameAction::GraveyardPaidCastChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("accept the during-resolution cast offer");
+    for _ in 0..8 {
+        if !matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pay the offered cast from lands");
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "reach guard: the offered cast is paid and on the stack, found {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Decline the open offer: nothing is cast, the trigger finishes.
+pub(crate) fn decline_offer(runner: &mut GameRunner) {
+    runner
+        .act(GameAction::GraveyardPaidCastChoice {
+            choice: CastChoice::Decline,
+        })
+        .expect("decline the during-resolution cast offer");
+    runner.advance_until_stack_empty();
+}
+
+pub(crate) fn p1p1(runner: &GameRunner, id: ObjectId) -> u32 {
     runner.state().objects[&id]
         .counters
         .get(&CounterType::Plus1Plus1)
@@ -123,11 +174,13 @@ fn p1p1(runner: &GameRunner, id: engine::types::identifiers::ObjectId) -> u32 {
         .unwrap_or(0)
 }
 
-/// CR 603.7 (issue #8721): granting the permission is not casting. "If you cast
-/// a spell this way, put a +1/+1 counter on Helmut Zemo" must not pay out for a
-/// permission the player never used.
+/// CR 603.7 + CR 608.2g (issues #8721, #8775): offering the cast is not casting.
+/// "If you cast a spell this way, put a +1/+1 counter on Helmut Zemo" must not
+/// pay out for an offer the player declined — and declining leaves no lingering
+/// permission behind: the card stays in the graveyard with nothing to cast it
+/// later.
 #[test]
-fn zemo_grants_the_permission_without_paying_out_the_counter() {
+fn zemo_declining_the_offer_pays_out_no_counter_and_leaves_no_permission() {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -149,15 +202,90 @@ fn zemo_grants_the_permission_without_paying_out_the_counter() {
     // resolved at all — which is exactly how an earlier draft of it measured
     // nothing.
     assert_eq!(
-        runner.state().objects[&bolt].casting_permissions.len(),
-        1,
-        "reach guard: the trigger must have granted its cast permission, or nothing \
-         downstream of it was exercised"
+        offered_card(&runner),
+        Some(bolt),
+        "reach guard: the trigger must have offered the chosen card for casting as it \
+         resolves, or nothing downstream of it was exercised"
+    );
+    decline_offer(&mut runner);
+
+    assert_eq!(
+        p1p1(&runner, zemo),
+        0,
+        "no spell was cast, so the gated counter must not be placed"
+    );
+    assert_eq!(
+        runner.state().objects[&bolt].zone,
+        Zone::Graveyard,
+        "a declined offer leaves the card where it was"
+    );
+    assert!(
+        runner.state().objects[&bolt].casting_permissions.is_empty(),
+        "a declined offer leaves no lingering permission: the cast happens as the trigger \
+         resolves or not at all (CR 608.2g)"
+    );
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "the \"if you cast a spell this way\" trigger installed ahead of the offer is \
+         withdrawn with the decline — it is keyed to the card, and would otherwise fire on \
+         a cast of that card by another route this turn"
+    );
+}
+
+/// The route the withdrawal exists for: Zemo's offer declined, the same Bolt
+/// then cast this turn under Kess, Dissident Mage's standing permission. That
+/// cast was NOT made "this way" (CR 608.2c), so no counter — a trigger left
+/// armed on the card would have placed one.
+#[test]
+fn a_card_cast_by_another_route_after_the_declined_offer_pays_out_no_counter() {
+    const KESS: &str = "Flying\nOnce during each of your turns, you may cast an instant or \
+sorcery spell from your graveyard. If a spell cast this way would be put into your graveyard, \
+exile it instead.";
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let zemo = scenario
+        .add_creature_from_oracle(P0, "Helmut Zemo, Mastermind", 2, 2, HELMUT_ZEMO)
+        .id();
+    scenario.add_creature_from_oracle(P0, "Kess, Dissident Mage", 3, 4, KESS);
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    let bolt = scenario
+        .add_spell_to_graveyard(P0, "Lightning Bolt", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    to_declare_attackers(&mut runner, P0);
+    runner
+        .declare_attackers(&[(zemo, AttackTarget::Player(P1))])
+        .expect("Zemo must be a legal attacker");
+    settle_attack_trigger(&mut runner, true);
+    assert_eq!(
+        offered_card(&runner),
+        Some(bolt),
+        "reach guard: Zemo's offer is open"
+    );
+    decline_offer(&mut runner);
+
+    runner
+        .cast(bolt)
+        .target_players(&[P1])
+        .try_resolve()
+        .expect("the Bolt is cast from the graveyard under Kess's permission");
+    assert_eq!(
+        runner.state().objects[&bolt].zone,
+        Zone::Exile,
+        "reach guard: the Bolt was cast (Kess exiles it afterwards)"
     );
     assert_eq!(
         p1p1(&runner, zemo),
         0,
-        "no spell was cast under the permission, so the gated counter must not be placed"
+        "a cast under another permission is not a cast \"this way\": no counter"
     );
 }
 
@@ -188,12 +316,16 @@ fn zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast() {
     let zemo = scenario
         .add_creature_from_oracle(P0, "Helmut Zemo, Mastermind", 2, 2, HELMUT_ZEMO)
         .id();
-    // Zemo's grant does not waive the cost, so the cast needs real mana.
+    // Zemo's offer does not waive the cost, so the cast needs real mana.
     for _ in 0..4 {
         scenario.add_basic_land(P0, ManaColor::Red);
     }
     let bolt = scenario
         .add_spell_to_graveyard(P0, "Lightning Bolt", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
         .id();
 
     let mut runner = scenario.build();
@@ -203,30 +335,53 @@ fn zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast() {
         .expect("Zemo must be a legal attacker");
     settle_attack_trigger(&mut runner, true);
     assert_eq!(
-        runner.state().objects[&bolt].casting_permissions.len(),
-        1,
-        "reach guard: the permission must exist before the cast can use it"
+        offered_card(&runner),
+        Some(bolt),
+        "reach guard: the offer must be open before the cast can answer it"
     );
-    // BOTH SIDES IN ONE RUN. The permission now exists and has NOT been used.
+    // BOTH SIDES IN ONE RUN. The offer is open and has NOT been answered.
     // Asserting zero here is what makes the post-cast assertion below mean
     // "because of the cast" rather than "at some point during this test" — a
-    // consequent that fired at grant time would already have placed the counter.
+    // consequent that fired when the offer opened would already have placed
+    // the counter.
     assert_eq!(
         p1p1(&runner, zemo),
         0,
-        "the permission is granted but unused, so the gated counter must not be placed yet"
+        "the offer is open but unanswered, so the gated counter must not be placed yet"
     );
 
-    runner
-        .cast(bolt)
-        .target_players(&[P1])
-        .try_resolve()
-        .expect("the granted graveyard cast must succeed");
+    accept_offer_and_pay(&mut runner);
+    assert!(
+        runner.state().stack.iter().any(|entry| entry.id == bolt),
+        "reach guard: the accepted card is on the stack, cast as the trigger resolved (a Bolt \
+         with a real mana cost: Zemo's ceiling is frozen at resolution, issue #4943)"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| object.controller == P0
+                && object.tapped
+                && object
+                    .card_types
+                    .core_types
+                    .contains(&engine::types::card_type::CoreType::Land))
+            .count(),
+        1,
+        "Zemo's offer charges the printed cost and nothing more: one Mountain for a {{R}} Bolt"
+    );
+    assert_eq!(
+        runner.state().phase,
+        Phase::DeclareAttackers,
+        "CR 608.2g: the cast happened inside the attack trigger's resolution, in combat"
+    );
+    runner.advance_until_stack_empty();
 
     assert_eq!(
         p1p1(&runner, zemo),
         1,
-        "casting the granted spell must place exactly the one printed counter"
+        "casting the offered spell must place exactly the one printed counter"
     );
 }
 
@@ -241,19 +396,18 @@ fn zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast() {
 /// "TARDIS Bay", The Twelfth Doctor) or lower through `parse_static_ability`,
 /// which never reaches `parse_effect_chain_ir` ("Yume, Chronicler of Valor",
 /// whose printing is NOT reminder text). The one that does reach it is Ogre
-/// Battlecaster, whose
-/// consequent is "+X/+0 … where X is that spell's mana value" and resolves X to 0
-/// either way (a separate, pre-existing defect). So no printed card can
-/// distinguish this wording at runtime today.
+/// Battlecaster, whose consequent is "+X/+0 … where X is that spell's mana
+/// value" — measured end to end in `ogre_battlecaster_8775.rs`; the stand-in
+/// stays because a counter is the plainer witness for the WORDING.
 ///
 /// Its permission and rider are Helmut Zemo's shape verbatim; only the gate
 /// wording is swapped to Ogre's, and the consequent is a +1/+1 counter, which is
 /// observable. That isolates the wording as the single difference from
 /// `zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast`.
 ///
-/// Both directions in one run: zero after the grant, one after the cast. A
-/// dropped consequent fails the second assertion; a consequent that fires at
-/// grant time fails the first.
+/// Both directions in one run: zero with the offer open, one after the cast. A
+/// dropped consequent fails the second assertion; a consequent that fires when
+/// the offer opens fails the first.
 ///
 /// Counter-probe, MEASURED rather than predicted — and the obvious guess is
 /// wrong: disabling `strip_cast_this_way_gate` turns the SECOND assertion red
@@ -294,27 +448,24 @@ you cast that spell, put a +1/+1 counter on Gate Wording Stand-In.";
     settle_attack_trigger(&mut runner, true);
 
     assert_eq!(
-        runner.state().objects[&bolt].casting_permissions.len(),
-        1,
-        "reach guard: the permission must exist before the cast can use it"
+        offered_card(&runner),
+        Some(bolt),
+        "reach guard: the offer must be open before the cast can answer it"
     );
     assert_eq!(
         p1p1(&runner, standin),
         0,
-        "\"when you cast that spell\" is gated on the CAST, so granting the permission alone \
-         must not place the counter"
+        "\"when you cast that spell\" is gated on the CAST, so opening the offer alone must \
+         not place the counter"
     );
 
-    runner
-        .cast(bolt)
-        .target_players(&[P1])
-        .try_resolve()
-        .expect("the granted graveyard cast must succeed");
+    accept_offer_and_pay(&mut runner);
+    runner.advance_until_stack_empty();
 
     assert_eq!(
         p1p1(&runner, standin),
         1,
-        "casting the granted spell must place exactly the one printed counter — a dropped \
+        "casting the offered spell must place exactly the one printed counter — a dropped \
          consequent leaves this at zero"
     );
 }
@@ -322,18 +473,12 @@ you cast that spell, put a +1/+1 counter on Gate Wording Stand-In.";
 /// CR 603.7 (issue #8721): Ogre Battlecaster itself — the one PRINTED card whose
 /// parse this recognizer changes with the "when you cast that spell" wording.
 ///
-/// It asserts the LOWERING, not a runtime payoff, and that is a deliberate
-/// change from an earlier revision of this test. Ogre's consequent is "+X/+0 …
-/// where X is that spell's mana value", and MEASURED, X binds against a spell not
-/// yet cast and resolves to 0 whether the pump is gated or not — so any
-/// power-based assertion here stays green with the fix removed and answers "yes"
-/// to the only question a reviewer asks. The parsed shape does not: without the
-/// recognizer the consequent is a sequential instruction with no delayed trigger
-/// at all.
-///
-/// The runtime half of this wording is proved by
-/// `the_when_you_cast_that_spell_wording_pays_out_only_after_the_cast`, whose
-/// stand-in swaps Ogre's consequent for an observable one.
+/// It asserts the LOWERING: without the recognizer the consequent is a
+/// sequential instruction with no delayed trigger at all. The runtime half is
+/// proved twice — by `the_when_you_cast_that_spell_wording_pays_out_only_after_the_cast`,
+/// whose stand-in swaps Ogre's consequent for a counter, and by
+/// `ogre_battlecaster_8775.rs` on the printed card (X = the cast spell's mana
+/// value).
 ///
 /// Counter-probe: disabling `strip_cast_this_way_gate` turns the lowering
 /// assertion red.
@@ -357,10 +502,10 @@ fn ogre_battlecaster_lowers_its_gate_to_a_delayed_trigger() {
     settle_attack_trigger(&mut runner, true);
 
     assert_eq!(
-        runner.state().objects[&bolt].casting_permissions.len(),
-        1,
-        "reach guard: the trigger must have granted its cast permission, so the printed \
-         ability really resolved through the production pipeline"
+        offered_card(&runner),
+        Some(bolt),
+        "reach guard: the trigger must have offered the chosen card for casting, so the \
+         printed ability really resolved through the production pipeline"
     );
 
     // The discriminating assertion: Ogre's own printed consequent must have been
@@ -419,12 +564,9 @@ fn ogre_battlecaster_lowers_its_gate_to_a_delayed_trigger() {
     assert_eq!(
         runner.state().objects[&ogre].power,
         Some(3),
-        "and no spell was cast under the permission, so nothing pumped — kept as the \
-         companion check, NOT as evidence. MEASURED END TO END, with the granted Bolt \
-         actually cast and layers re-evaluated, Ogre is `Some(3)` both with this change and \
-         with the parser gate textually removed: `ObjectManaValue` with an `EventSource` scope \
-         resolves to 0 in the delayed trigger, so the printed card cannot discriminate the \
-         wording and the stand-in below carries that evidence. This change fixes the TIMING \
-         of Ogre's consequent, not the value of its X (issue #8775)"
+        "and the offer is unanswered, so nothing is cast and nothing pumped — the companion \
+         check. The runtime half (X = the cast spell's mana value, in combat) is measured in \
+         `ogre_battlecaster_8775.rs`; an earlier revision of this message claimed X resolved \
+         to 0, which was a stand-in Bolt with no mana cost (issue #8775)"
     );
 }

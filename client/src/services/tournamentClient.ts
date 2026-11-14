@@ -9,12 +9,15 @@ import type {
   TournamentActionAckReply,
   TournamentActionRejectedReply,
   TournamentCreatedReply,
+  TournamentCredentialRenewedReply,
+  TournamentCredentialRole,
   TournamentJoinedReply,
   TournamentSummary,
   TournamentUpdateReply,
   TournamentView,
 } from "../adapter/types";
 import {
+  lobbyProtocolRequiredForFormat,
   MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING,
   MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK,
 } from "../adapter/ws-adapter";
@@ -637,6 +640,10 @@ export function defaultScoringForArity(arity: MatchArity): ScoringPolicy {
  * omitted policy is a hard parse error there, so the client substitutes the
  * explicit {@link defaultScoringForArity}. An explicit `req.scoring` is always
  * sent verbatim regardless of version.
+ *
+ * Below {@link lobbyProtocolRequiredForFormat} for `req.format`, the display-only
+ * `format` label is sent as `null`, since a broker that predates the name would
+ * reject the whole frame.
  */
 export function createTournamentOver(
   socket: PhaseSocket,
@@ -649,6 +656,10 @@ export function createTournamentOver(
     lobbyProtocolVersion >= MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING;
   const scoring =
     req.scoring ?? (brokerOwnsDefault ? null : defaultScoringForArity(req.arity));
+  const formatNeeds = req.format == null ? null : lobbyProtocolRequiredForFormat(req.format);
+  const formatSendable =
+    formatNeeds === null ||
+    (lobbyProtocolVersion !== undefined && lobbyProtocolVersion >= formatNeeds);
 
   return requestOver<TournamentCreatedReply>(
     socket,
@@ -661,7 +672,7 @@ export function createTournamentOver(
         bracket: req.bracket,
         total_rounds: req.totalRounds ?? null,
         plus_rounds: req.plusRounds ?? null,
-        format: req.format ?? null,
+        format: formatSendable ? (req.format ?? null) : null,
         match_type: req.matchType ?? null,
       },
     },
@@ -707,6 +718,73 @@ export function getTournamentOver(
     socket,
     { type: "GetTournament", data: { code } },
     matchReply<TournamentUpdateReply>("TournamentUpdate", code),
+    opts,
+  );
+}
+
+/**
+ * `RenewTournamentCredential` → `TournamentCredentialRenewed` (point reply,
+ * carrying the freshly minted secret and its new expiry). Uncorrelated, exactly
+ * like {@link createTournamentOver} / {@link joinTournamentOver}: rotation is
+ * NOT one of the four gated actions (`crates/lobby-broker/src/protocol.rs:1128` —
+ * it carries no `request_id`), and its reply is a distinguishable point reply
+ * naming the `code` and `role` it answers for.
+ *
+ * `role` is the WIRE spelling (`"Organizer"` / `"Player"`, capitalized), never
+ * the store's lowercase display role — the broker rejects the lowercase form
+ * with a serde unknown-variant error. The matcher binds on BOTH `code` and
+ * `role`, because an organizer who also joined holds two authorities on one code
+ * and could rotate both concurrently on one socket; a `code`-only filter would
+ * let the other authority's reply settle this call with the wrong token.
+ *
+ * The presented `token` must still be accepted: the broker refuses rotation of
+ * an already-expired credential (it extends nothing that has lapsed,
+ * `crates/lobby-broker/src/tournament.rs`), so the caller renews from the client
+ * clock BEFORE `expires_at_ms`, never after a rejection.
+ *
+ * `rotationNonce` is the client-minted, per-attempt nonce that makes a lost
+ * reply recoverable under lobby protocol v9: a first attempt sends a fresh nonce
+ * and the broker mints; a RETRY after an uncertain result re-sends the SAME
+ * nonce with the SAME (possibly now-superseded) `token`, and the broker REPLAYS
+ * the already-committed secret rather than minting a second one. Presenting a
+ * superseded token WITHOUT the matching nonce is refused, which is what stops a
+ * stolen superseded secret from becoming a fresh authority — so the caller must
+ * hold the nonce stable across retries of the same rotation.
+ */
+export function renewTournamentCredentialOver(
+  socket: PhaseSocket,
+  code: string,
+  role: TournamentCredentialRole,
+  token: string,
+  rotationNonce: string,
+  opts: TournamentRequestOptions = {},
+): Promise<TournamentRpcResult<TournamentCredentialRenewedReply>> {
+  return requestOver<TournamentCredentialRenewedReply>(
+    socket,
+    {
+      type: "RenewTournamentCredential",
+      data: { code, role, token, rotation_nonce: rotationNonce },
+    },
+    (msg) => {
+      if (msg.type !== "TournamentCredentialRenewed") return null;
+      // Read as optional-everything at the trust boundary, as the other
+      // matchers here do: the frame is what it claims to be, not what has been
+      // established about it.
+      const data = msg.data as
+        | Partial<TournamentCredentialRenewedReply>
+        | undefined
+        | null;
+      if (data == null) return null;
+      if (data.code !== code || data.role !== role) return null;
+      if (typeof data.token !== "string") return null;
+      if (typeof data.expires_at_ms !== "number") return null;
+      return {
+        code: data.code,
+        role: data.role,
+        token: data.token,
+        expires_at_ms: data.expires_at_ms,
+      };
+    },
     opts,
   );
 }

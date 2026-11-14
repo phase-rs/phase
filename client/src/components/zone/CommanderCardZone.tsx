@@ -8,6 +8,7 @@ import { dispatchAction } from "../../game/dispatch.ts";
 import { previewAutomaticManaPayment } from "../../game/manaPaymentPreview.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useLocalizedCardName } from "../../hooks/useEngineCardData.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { getPlayerId, useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useDragToCast } from "../../hooks/useDragToCast.ts";
@@ -20,7 +21,7 @@ import {
   resolveSingleActionDispatch,
 } from "../../viewmodel/cardActionChoice.ts";
 import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
-import { commandZoneLeaders } from "../../viewmodel/commanderColumn.ts";
+import { commandZoneConspiracies, commandZoneLeaders } from "../../viewmodel/commanderColumn.ts";
 import { CardArtFallback } from "../card/CardArtFallback.tsx";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
@@ -72,6 +73,7 @@ function CommanderCard({
 }) {
   const { t } = useTranslation("game");
   const isSignatureSpell = commander.signature_spell != null;
+  const displayName = useLocalizedCardName(commander.name) ?? commander.name;
   const isCompactHeight = useIsCompactHeight();
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const effectiveCost = useGameStore(
@@ -95,6 +97,7 @@ function CommanderCard({
     tokenImageRef: imageProps.tokenImageRef,
     oracleId: imageProps.oracleId,
     faceName: imageProps.faceName,
+    ownerPrinting: imageProps.ownerPrinting,
   });
   const { handlers: hoverHandlers, firedRef } = useCardHover(commander.id);
   const tax = commander.commander_tax ?? 0;
@@ -241,20 +244,20 @@ function CommanderCard({
         canCast
           ? isSignatureSpell
             ? tax > 0
-              ? t("zone.castSignatureSpellTax", { name: commander.name, tax })
-              : t("zone.castSignatureSpell", { name: commander.name })
+              ? t("zone.castSignatureSpellTax", { name: displayName, tax })
+              : t("zone.castSignatureSpell", { name: displayName })
             : tax > 0
-              ? t("zone.castCommanderTax", { name: commander.name, tax })
-              : t("zone.castCommander", { name: commander.name })
+              ? t("zone.castCommanderTax", { name: displayName, tax })
+              : t("zone.castCommander", { name: displayName })
           : canNinjutsu
-            ? t("zone.ninjutsuCommander", { name: commander.name })
+            ? t("zone.ninjutsuCommander", { name: displayName })
             : isSignatureSpell
               ? tax > 0
-                ? t("zone.signatureSpellTitleTax", { name: commander.name, tax })
-                : t("zone.signatureSpellTitle", { name: commander.name })
+                ? t("zone.signatureSpellTitleTax", { name: displayName, tax })
+                : t("zone.signatureSpellTitle", { name: displayName })
               : tax > 0
-                ? t("zone.commanderTitleTax", { name: commander.name, tax })
-                : t("zone.commanderTitle", { name: commander.name })
+                ? t("zone.commanderTitleTax", { name: displayName, tax })
+                : t("zone.commanderTitle", { name: displayName })
       }
       style={{ width: "var(--card-w)", height: "var(--card-h)" }}
     >
@@ -272,7 +275,7 @@ function CommanderCard({
           <img
             src={src}
             {...getCardImageSrcSetProps(src, rungs)}
-            alt={commander.name}
+            alt={displayName}
             className="h-full w-full object-cover"
             draggable={false}
             onError={() => advanceFailedSource?.(src)}
@@ -280,7 +283,7 @@ function CommanderCard({
         ) : (
           /* `artCrop` centres and wraps the name; `fullCard` top-aligns and
              truncates it, which this tile is too narrow to read. */
-          <CardArtFallback name={commander.name} variant="artCrop" className="h-full w-full" />
+          <CardArtFallback name={displayName} variant="artCrop" className="h-full w-full" />
         )}
 
         {/* Translucent overlay — amber tint, lighter when actionable (castable
@@ -328,6 +331,151 @@ function CommanderCard({
           size={splitOverview || isCompactHeight ? "2xs" : "xs"}
           className="absolute right-[4%] top-[2%]"
         />
+      )}
+    </motion.button>
+  );
+}
+
+interface ConspiracyCardZoneProps {
+  playerId: PlayerId;
+  splitOverview?: boolean;
+}
+
+/**
+ * CR 905: Renders conspiracy cards in the command zone.
+ * Displays a "Conspiracy" badge, handles inspection, and exposes the
+ * CR 702.106c / CR 116.2j special action to turn face-down hidden-agenda
+ * conspiracies face up.
+ */
+export function ConspiracyCardZone({ playerId, splitOverview = false }: ConspiracyCardZoneProps) {
+  const gameState = useGameStore((s) => s.gameState);
+
+  const conspiracies = useMemo(
+    () => (gameState ? commandZoneConspiracies(gameState, playerId) : []),
+    [gameState, playerId],
+  );
+
+  if (conspiracies.length === 0) return null;
+
+  return (
+    <div className="flex flex-row items-end gap-1">
+      {conspiracies.map((conspiracy) => (
+        <ConspiracyCard key={conspiracy.id} conspiracy={conspiracy} splitOverview={splitOverview} />
+      ))}
+    </div>
+  );
+}
+
+function ConspiracyCard({
+  conspiracy,
+  splitOverview,
+}: {
+  conspiracy: GameObject;
+  splitOverview: boolean;
+}) {
+  const { t } = useTranslation("game");
+  const displayName = useLocalizedCardName(conspiracy.name) ?? conspiracy.name;
+  const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
+  const inspectObject = useUiStore((s) => s.inspectObject);
+
+  const imageProps = objectImageProps(conspiracy);
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(imageProps.cardName, {
+    size: "normal",
+    faceIndex: imageProps.faceIndex,
+    isToken: imageProps.isToken,
+    tokenFilters: imageProps.tokenFilters,
+    tokenImageRef: imageProps.tokenImageRef,
+    oracleId: imageProps.oracleId,
+    faceName: imageProps.faceName,
+    ownerPrinting: imageProps.ownerPrinting,
+  });
+  const { handlers: hoverHandlers, firedRef } = useCardHover(conspiracy.id);
+
+  const conspiracyActions = useMemo(
+    () => collectObjectActions(legalActionsByObject, conspiracy.id),
+    [legalActionsByObject, conspiracy.id],
+  );
+  const turnFaceUpAction = useMemo(
+    () => conspiracyActions.find((a) => a.type === "TurnFaceUp") ?? null,
+    [conspiracyActions],
+  );
+
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const canActForWaitingState = useCanActForWaitingState();
+  const affordances = useMemo(
+    () =>
+      deriveActivationAffordances(waitingFor, canActForWaitingState, legalActionsByObject, objects),
+    [waitingFor, canActForWaitingState, legalActionsByObject, objects],
+  );
+  const activationOffered = affordances.activatableObjectIds.has(conspiracy.id);
+  const canTurnFaceUp = activationOffered && turnFaceUpAction !== null;
+
+  return (
+    <motion.button
+      type="button"
+      {...hoverHandlers}
+      onClick={(e) => {
+        if (firedRef.current) return;
+        if (useUiStore.getState().debugInteractionMode) {
+          e.stopPropagation();
+          useUiStore.getState().openDebugContextMenu({
+            objectId: conspiracy.id,
+            x: e.clientX,
+            y: e.clientY,
+            surface: "game",
+          });
+          return;
+        }
+        if (canTurnFaceUp && turnFaceUpAction) {
+          dispatchAction(turnFaceUpAction);
+          return;
+        }
+        inspectObject(conspiracy.id);
+      }}
+      data-object-id={conspiracy.id}
+      className={`group relative ${canTurnFaceUp ? "cursor-pointer" : "cursor-default"}`}
+      title={
+        canTurnFaceUp
+          ? t("zone.turnFaceUp", { name: displayName })
+          : t("zone.conspiracyTitle", { name: displayName })
+      }
+      style={{ width: "var(--card-w)", height: "var(--card-h)" }}
+    >
+      {/* Card image */}
+      <div className="relative h-full w-full overflow-hidden rounded-lg border border-purple-400/60 shadow-md">
+        {isLoading ? (
+          <div className="h-full w-full animate-pulse bg-gray-700" />
+        ) : src ? (
+          <img
+            src={src}
+            {...getCardImageSrcSetProps(src, rungs)}
+            alt={displayName}
+            className="h-full w-full object-cover"
+            draggable={false}
+            onError={() => advanceFailedSource?.(src)}
+          />
+        ) : (
+          <CardArtFallback name={displayName} variant="artCrop" className="h-full w-full" />
+        )}
+
+        <div
+          className={`absolute inset-0 transition-colors ${
+            canTurnFaceUp ? "bg-purple-600/20 group-hover:bg-purple-600/5" : "bg-gray-900/50"
+          }`}
+        />
+      </div>
+
+      {/* Conspiracy badge */}
+      {!splitOverview && (
+        <div className="absolute -top-1 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-sm bg-purple-800 px-1.5 py-px text-[8px] font-bold text-purple-100 shadow">
+          {t("zone.conspiracy")}
+        </div>
+      )}
+
+      {/* Actionable glow ring */}
+      {canTurnFaceUp && (
+        <div className={`absolute inset-0 rounded-lg ${CASTABLE_AFFORDANCE_ACTIVE}`} />
       )}
     </motion.button>
   );

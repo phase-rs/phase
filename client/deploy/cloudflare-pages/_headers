@@ -36,6 +36,9 @@
 /config.js
   Cache-Control: public, max-age=0, must-revalidate
 
+/build.json
+  Cache-Control: public, max-age=0, must-revalidate
+
 /index.html
   Cache-Control: public, max-age=0, must-revalidate
 

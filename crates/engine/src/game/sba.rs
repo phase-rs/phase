@@ -18,7 +18,9 @@ use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
+use super::elimination::DepartureTriggers;
 use super::filter::{matches_target_filter, FilterContext};
+use super::players::PoisonLossMeasure;
 use super::speed::{controls_start_your_engines_in, set_speed};
 use super::zones;
 
@@ -97,6 +99,38 @@ fn mid_resolution_entry_pauses_sba(state: &GameState) -> bool {
 /// CR 704.3: Run state-based actions in a fixpoint loop until no more actions are performed,
 /// capped at MAX_SBA_ITERATIONS.
 pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller);
+}
+
+/// CR 704.3 + CR 117.5: [`check_state_based_actions`] inside a post-action pass, which places
+/// what is waiting to be put on the stack at its own settle.
+pub(crate) fn check_state_based_actions_in_pass(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    run_state_based_actions(state, events, &[], DepartureTriggers::PlacedByPass);
+}
+
+/// CR 704.3 + CR 704.5v + CR 510.3a: run state-based actions in a fixpoint loop
+/// until no more actions are performed, capped at MAX_SBA_ITERATIONS, for a
+/// caller that holds abilities that have triggered but are not yet on the
+/// stack (e.g. a CR 510.3a combat-damage batch still being collected). Those
+/// abilities are visible to the CR 704.5v Siege deferral in `check_zero_defense`
+/// as if they were already on the stack.
+pub(crate) fn check_state_based_actions_with_waiting_triggers(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    waiting: &[crate::game::triggers::PendingTriggerContext],
+) {
+    run_state_based_actions(state, events, waiting, DepartureTriggers::ScannedByCaller);
+}
+
+fn run_state_based_actions(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    waiting: &[crate::game::triggers::PendingTriggerContext],
+    departures: DepartureTriggers,
+) {
     // CR 604.2: Re-evaluate layers so computed P/T reflects current static abilities.
     if state.layers_dirty.is_dirty() {
         // Snapshot P/T before layer re-evaluation for delta logging.
@@ -140,6 +174,15 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         // so the game-over check sees the true post-event living set — a draw
         // (winner: None) when all remaining players lose at once, instead of
         // crowning whichever player happened to be eliminated first.
+        // Turtle Team-Up: a Boss stage clearing (life hit zero on a non-final
+        // stage) exiles the deployed Bosses, resets Boss life, and deploys
+        // the next stage — BEFORE life losers are collected, so the reset
+        // seat is not a loser this pass. On the final stage this returns
+        // false and the normal CR 704.5a loss below proceeds (the heroes
+        // win). A clear performs game actions, so it counts as SBA progress.
+        if super::boss::maybe_clear_boss_stage(state, events) {
+            any_performed = true;
+        }
         // CR 704.5a-c + CR 704.6c: collect every player-loss SBA from this
         // check before applying any of them.
         let mut losers: Vec<PlayerId> = collect_life_losers(state);
@@ -156,7 +199,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             for &loser in &losers {
                 events.push(GameEvent::PlayerLost { player_id: loser });
             }
-            super::elimination::eliminate_players_simultaneously(state, &losers, events);
+            super::elimination::eliminate_players(state, &losers, departures, events);
 
             // If the game ended (a sole winner or a CR 104.4a draw), stop now.
             if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
@@ -215,7 +258,19 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         if has_battlefield_sbas {
             // CR 704.5j: If a player controls two or more legendary permanents with the same name,
             // that player chooses one and the rest are put into their owners' graveyards.
-            check_legend_rule(state, events, &mut any_performed, &battlefield_snapshot);
+            //
+            // CR 616.1: the pre-M14 scope moves permanents through the zone
+            // pipeline, which can park a replacement-ordering choice —
+            // `move_to_graveyard_via_pipeline` requires its caller to bail. Stop
+            // the whole pass here so no later SBA acts on the unsettled event.
+            // The modern path never reports a stop: it parks its own
+            // `ChooseLegend` prompt and moves nothing, so its behavior (and the
+            // Aura check that follows it) is unchanged.
+            if check_legend_rule(state, events, &mut any_performed, &battlefield_snapshot)
+                == SbaPassControl::Stop
+            {
+                return;
+            }
 
             // CR 704.5m: If an Aura is attached to an illegal object or player, it is put into
             // its owner's graveyard.
@@ -256,7 +311,13 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // ability that has triggered but not yet left the stack is put into its
             // owner's graveyard. CR 704.5w + CR 310.8: a non-Siege battle with defense 0
             // is put into its owner's graveyard with no such deferral.
-            check_zero_defense(state, events, &mut any_performed, &battlefield_snapshot);
+            check_zero_defense(
+                state,
+                events,
+                &mut any_performed,
+                &battlefield_snapshot,
+                waiting,
+            );
             if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
@@ -282,7 +343,13 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
 
             // CR 704.5s + CR 714.4: If a Saga has lore counters >= its final chapter number,
             // and no chapter ability has triggered but not yet left the stack, sacrifice it.
-            check_saga_sacrifice(state, events, &mut any_performed, &battlefield_snapshot);
+            check_saga_sacrifice(
+                state,
+                events,
+                &mut any_performed,
+                &battlefield_snapshot,
+                waiting,
+            );
             if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
@@ -331,6 +398,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
                     state,
                     events,
                     &mut any_performed,
+                    waiting,
                 ),
                 Some(crate::game::planechase::PlaneswalkResolution::Deferred)
             )
@@ -343,7 +411,12 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         // abandoned (turned face down, put on the bottom of the scheme deck).
         // Gated on an Archenemy game.
         if state.archenemy.is_some() {
-            crate::game::archenemy::check_scheme_abandon_sba(state, events, &mut any_performed);
+            crate::game::archenemy::check_scheme_abandon_sba(
+                state,
+                events,
+                &mut any_performed,
+                waiting,
+            );
         }
 
         // CR 603.10a + CR 704.3: every SBA performed in this iteration is one
@@ -553,7 +626,7 @@ fn ascend_status_in(
 /// SBA-layer predicate rather than re-deriving the can't-lose check.
 pub(crate) fn player_has_cant_lose(state: &GameState, player_id: PlayerId) -> bool {
     cant_lose_active_for(state, player_id)
-        || (super::topology::has_two_headed_giant_shared_resources(state)
+        || (super::topology::has_shared_life(state, player_id)
             && super::players::teammates(state, player_id)
                 .into_iter()
                 .any(|teammate| cant_lose_active_for(state, teammate)))
@@ -618,13 +691,14 @@ pub(crate) fn has_pending_player_loss_sba(state: &GameState) -> bool {
     }
 
     let poison_loss = state.players.iter().any(|player| {
-        // CR 704.5c + CR 810.8d: 10+ individually, or 15+ shared by the team.
+        // CR 704.5c + CR 704.6b / CR 810.8d: the format's individual threshold
+        // (ten by default), or fifteen shared by the team. Archenemy Commander
+        // takes the individual branch for every seat — CR 904.13c keeps poison
+        // unshared even though life is shared. `players::poison_loss_measure`
+        // is the shared authority (twin of `collect_poison_losers`).
         !player.is_eliminated
-            && if super::topology::has_two_headed_giant_shared_resources(state) {
-                super::players::team_poison_total(state, player.id) >= 15
-            } else {
-                player.poison_counters >= 10
-            }
+            && super::players::poison_loss_measure(state, player)
+                .is_some_and(PoisonLossMeasure::is_lethal)
             && !player_has_cant_lose(state, player.id)
     });
     if poison_loss {
@@ -660,8 +734,16 @@ fn static_affects_player(
             // against a player. Fail closed.
             Some(ControllerRef::ScopedPlayer) => false,
             // CR 109.4: TargetOpponent fails closed identically to TargetPlayer here.
-            Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
+            Some(
+                ControllerRef::TargetPlayer
+                | ControllerRef::TargetOpponent
+                | ControllerRef::DeclaredPlayer { .. },
+            ) => false,
             Some(ControllerRef::ParentTargetController) => false,
+            // Engine constraint: this reference resolves only inside a trigger
+            // event window, which a state-based-action check does not have.
+            // Fail closed, mirroring the parent-target refs above.
+            Some(ControllerRef::EventTargetController) => false,
             Some(ControllerRef::ParentTargetOwner) => false,
             Some(ControllerRef::DefendingPlayer) => false,
             // CR 613.1: chosen-player scope has no meaning here. Fail closed.
@@ -708,6 +790,11 @@ fn collect_life_losers(state: &GameState) -> Vec<PlayerId> {
         .players
         .iter()
         .filter(|p| !p.is_eliminated && !p.is_phased_out())
+        // Horde Magic (casual variant): the Horde seat has no life total, so it
+        // is never a CR 704.5a "0 or less life" loser. Belt-and-suspenders with
+        // the life-loss→mill redirect (its life never drops), but this makes
+        // "no life total" a hard guarantee independent of the redirect.
+        .filter(|p| !super::horde::player_has_no_life_total(state, p.id))
         .filter(|p| super::players::team_life_total(state, p.id) <= 0)
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
@@ -726,8 +813,9 @@ fn collect_draw_from_empty_losers(state: &GameState) -> Vec<PlayerId> {
         .collect()
 }
 
-/// CR 704.5c + CR 810.8d: A player with ten or more poison counters loses the
-/// game; in a team-based format, a team with fifteen or more shared poison
+/// CR 704.5c + CR 704.6b / CR 810.8d + CR 904.13c: A player with the format's
+/// individual threshold (ten by default) or more poison counters loses the
+/// game; where poison is shared, a team with fifteen or more shared poison
 /// counters loses instead (CR 810.10/810.10a: poison counters are shared by
 /// the team and checked via `team_poison_total`). Pure collector (see
 /// `collect_life_losers`).
@@ -737,11 +825,10 @@ fn collect_poison_losers(state: &GameState) -> Vec<PlayerId> {
         .iter()
         .filter(|p| !p.is_eliminated)
         .filter(|p| {
-            if super::topology::has_two_headed_giant_shared_resources(state) {
-                super::players::team_poison_total(state, p.id) >= 15
-            } else {
-                p.poison_counters >= 10
-            }
+            // Twin of the `has_pending_player_loss_sba` poison branch above,
+            // through the same authority, `players::poison_loss_measure`:
+            // Archenemy Commander takes the individual branch (CR 904.13c).
+            super::players::poison_loss_measure(state, p).is_some_and(PoisonLossMeasure::is_lethal)
         })
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
@@ -1031,7 +1118,11 @@ fn perform_creature_deaths(
                     }
                 }
                 if destroyed {
-                    events.push(GameEvent::CreatureDestroyed { object_id });
+                    // CR 704.5g / CR 704.5h: a state-based destruction has no destroying source.
+                    events.push(GameEvent::CreatureDestroyed {
+                        object_id,
+                        source_id: None,
+                    });
                 }
                 performed_ids.push(object_id);
             }
@@ -1161,7 +1252,11 @@ fn perform_creature_deaths(
                             return;
                         }
                     }
-                    events.push(GameEvent::CreatureDestroyed { object_id });
+                    // CR 704.5g / CR 704.5h: a state-based destruction has no destroying source.
+                    events.push(GameEvent::CreatureDestroyed {
+                        object_id,
+                        source_id: None,
+                    });
                     performed_ids.push(object_id);
                 }
                 *any_performed = true;
@@ -1231,16 +1326,44 @@ fn legend_rule_exempt_with_gate(
     )
 }
 
+/// Whether an SBA check left an event unsettled — parked on a CR 616.1
+/// replacement-ordering choice — so the rest of the pass must not run.
+///
+/// Only the checks that can pause mid-move need to report this; the others are
+/// covered by the shared `mid_resolution_entry_pauses_sba` guards between them.
+/// A returned `Stop` is the caller's instruction to bail immediately, which is
+/// what [`move_to_graveyard_via_pipeline`] requires of anything that moves a
+/// permanent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a Stop means the SBA pass must return immediately"]
+enum SbaPassControl {
+    Continue,
+    Stop,
+}
+
 /// CR 704.5j: If a player controls two or more legendary permanents with the same name,
 /// that player chooses one and the rest are put into their owners' graveyards.
 /// This is NOT destruction — indestructible does not prevent it.
 fn check_legend_rule(
     state: &mut GameState,
-    _events: &mut Vec<GameEvent>,
-    _any_performed: &mut bool,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
     battlefield_snapshot: &[ObjectId],
-) {
+) -> SbaPassControl {
     let has_legend_rule_exemption_static = legend_rule_exemption_static_present(state);
+
+    // A format may declare the pre-M14 scope, which is a different rule rather
+    // than a variation on this one — global and choiceless. See
+    // `game::legend_scope` for what that variant models and why.
+    if crate::game::legend_scope::groups_across_controllers(state) {
+        return check_legend_rule_pre_m14(
+            state,
+            events,
+            any_performed,
+            battlefield_snapshot,
+            has_legend_rule_exemption_static,
+        );
+    }
 
     for player_idx in 0..state.players.len() {
         let player_id = state.players[player_idx].id;
@@ -1288,9 +1411,89 @@ fn check_legend_rule(
                 legend_name: name,
                 candidates: ids,
             };
-            return;
+            // The modern path only parks its own prompt — nothing has moved, so
+            // there is no unsettled event and the pass continues as it always has.
+            return SbaPassControl::Continue;
         }
     }
+    SbaPassControl::Continue
+}
+
+/// CR 704.5j with the M14 controller scope relaxed: before Magic 2014 the
+/// legend rule grouped same-named legendary permanents across **all**
+/// controllers, and every member of a two-or-more group was put into its
+/// owner's graveyard — no survivor, no choice.
+///
+/// Structurally this is `check_world_rule` (CR 704.5k), not the modern legend
+/// rule, so it is built the same way: one global pass, a deterministic doomed
+/// set, the shared SBA graveyard pipeline, and a simultaneous-departure mark.
+/// It needs no `WaitingFor`, which is why the modern path's choice machinery is
+/// not reused here — there is nothing to choose.
+///
+/// Reached only when [`crate::game::legend_scope::groups_across_controllers`]
+/// says the format declares the pre-M14 scope; that module documents which of
+/// the several pre-M14 forms this is.
+fn check_legend_rule_pre_m14(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+    battlefield_snapshot: &[ObjectId],
+    has_legend_rule_exemption_static: bool,
+) -> SbaPassControl {
+    // BTreeMap (not HashMap) so the grouping is name-sorted and deterministic
+    // across processes — issue #4878, same reason as the modern path.
+    let mut by_name: std::collections::BTreeMap<String, Vec<ObjectId>> =
+        std::collections::BTreeMap::new();
+    for id in battlefield_snapshot.iter().copied() {
+        let Some(obj) = live_battlefield_object(state, &id) else {
+            continue;
+        };
+        if !obj.card_types.supertypes.contains(&Supertype::Legendary) {
+            continue;
+        }
+        let name = obj.name.clone();
+        // The exemption is scope-independent: a permanent a "legend rule
+        // doesn't apply" static exempts (Mirror Gallery, Sakashima, Mirror Box)
+        // is outside the grouping under either rule, so the shared filter is
+        // reused unchanged rather than re-derived.
+        if legend_rule_exempt_with_gate(state, id, has_legend_rule_exemption_static) {
+            continue;
+        }
+        by_name.entry(name).or_default().push(id);
+    }
+
+    // Every member of a group of two or more, not all but one.
+    let mut doomed: Vec<ObjectId> = by_name
+        .into_values()
+        .filter(|ids| ids.len() >= 2)
+        .flatten()
+        .collect();
+    // Deterministic order, mirroring check_world_rule's stable iteration.
+    doomed.sort_by_key(|id| id.0);
+
+    let mut performed_ids = Vec::new();
+    for id in doomed {
+        if live_battlefield_object(state, &id).is_none() {
+            continue;
+        }
+        // CR 704.5j + CR 614.6: the permanent is put into its owner's graveyard
+        // through the replacement pipeline (Moved redirects apply). This is not
+        // destruction, so indestructible does not prevent it — the pipeline is
+        // entered as a state-based-action move, exactly as the modern path's
+        // chosen losers are.
+        // CR 616.1: bail on a replacement-order pause; the SBA fixpoint
+        // re-derives the remaining doomed permanents on the next pass.
+        if move_to_graveyard_via_pipeline(state, id, events) {
+            return SbaPassControl::Stop;
+        }
+        performed_ids.push(id);
+        *any_performed = true;
+    }
+    // CR 603.10a + CR 704.3: state-based actions are performed simultaneously,
+    // so these permanents left the battlefield together — record the group so
+    // co-departing leaves-the-battlefield/dies observers observe each other.
+    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
+    SbaPassControl::Continue
 }
 
 /// CR 704.5m: An Aura attached to an illegal object or player, or that is no
@@ -1327,7 +1530,7 @@ fn check_unattached_auras(
                 if !obj.card_types.core_types.contains(&CoreType::Enchantment) {
                     return None;
                 }
-                // CR 704.5m / CR 704.5n apply specifically to *Auras* —
+                // CR 704.5m applies specifically to *Auras* —
                 // gate on the Aura subtype so non-Aura enchantments
                 // (Saga, Class, Background, Shrine, etc.) are not
                 // affected. The CoreType check above is necessary but
@@ -1342,8 +1545,8 @@ fn check_unattached_auras(
                 }
                 // Note: the parser also routes player-attached Auras here.
                 // CR 303.4c: A player who has left the game is an illegal host.
-                // CR 704.5n: An Aura that is "unattached and on the
-                // battlefield" is also put into its owner's graveyard —
+                // CR 704.5m: An Aura that is "not attached to an object or
+                // player" is also put into its owner's graveyard —
                 // covers the case where a target legally chosen at
                 // announcement is removed before resolution can attach
                 // (target destroyed by another stack effect, target left
@@ -1784,6 +1987,32 @@ fn check_zero_loyalty(
     zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
 }
 
+/// CR 704.5s + CR 704.5v + CR 704.6f + CR 603.3 + CR 704.3: is `source` the
+/// source of an ability that has triggered but not yet left the stack? SBAs are
+/// performed before waiting triggered abilities are put on the stack, so an
+/// ability that has triggered may still be waiting in the batch the caller is
+/// about to place (CR 510.3a combat damage) or parked in the deferred queue.
+/// The stack, that batch and the queue are consulted.
+pub(crate) fn is_source_of_ability_not_yet_left_stack(
+    state: &GameState,
+    waiting: &[crate::game::triggers::PendingTriggerContext],
+    source: ObjectId,
+) -> bool {
+    use crate::types::game_state::StackEntryKind;
+
+    let ability_on_stack = state.stack.iter().any(|entry| {
+        matches!(
+            &entry.kind,
+            StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == source
+        )
+    });
+    ability_on_stack
+        || waiting
+            .iter()
+            .chain(state.deferred_triggers.iter())
+            .any(|ctx| ctx.pending.source_id == source)
+}
+
 /// CR 704.5v + CR 704.5w: a battle with defense 0 is put into its owner's
 /// graveyard. The rule is split across two sub-rules by battle type, and only
 /// the Siege half carries a trigger-on-stack deferral:
@@ -1801,15 +2030,15 @@ fn check_zero_loyalty(
 /// still on the battlefield when it resolves. A battle with any other battle
 /// type has no such intrinsic, so CR 704.5w grants it no deferral — it is put
 /// into its owner's graveyard immediately, even with one of its own triggered
-/// abilities still on the stack.
+/// abilities still on the stack. The Siege deferral consults both the stack
+/// and the caller's waiting batch (`is_source_of_ability_not_yet_left_stack`).
 fn check_zero_defense(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
     battlefield_snapshot: &[ObjectId],
+    waiting: &[crate::game::triggers::PendingTriggerContext],
 ) {
-    use crate::types::game_state::StackEntryKind;
-
     let to_destroy: Vec<_> = battlefield_snapshot
         .iter()
         .copied()
@@ -1830,15 +2059,10 @@ fn check_zero_defense(
                 return true;
             }
             // CR 704.5v: a Siege is spared while one of its own abilities has
-            // triggered but not yet left the stack (mirrors the CR 714.4 Saga
-            // deferral), so its CR 310.12b victory trigger can resolve.
-            let ability_on_stack = state.stack.iter().any(|entry| {
-                matches!(
-                    &entry.kind,
-                    StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == *id
-                )
-            });
-            !ability_on_stack
+            // triggered but not yet left the stack (on the stack or in the
+            // caller's waiting batch; mirrors the CR 714.4 Saga deferral), so
+            // its CR 310.12b victory trigger can resolve.
+            !is_source_of_ability_not_yet_left_stack(state, waiting, *id)
         })
         .collect();
 
@@ -2117,16 +2341,15 @@ fn check_battle_protector(
 }
 
 /// CR 704.5s + CR 714.4: Sacrifice Sagas that have reached their final chapter,
-/// unless a chapter ability from that Saga is still on the stack or a lore counter
-/// was just added (meaning process_triggers hasn't placed the chapter trigger yet).
+/// unless an ability of this Saga has triggered but not yet left the stack, or a
+/// lore counter was just added (its chapter trigger is not collected yet).
 fn check_saga_sacrifice(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
     battlefield_snapshot: &[ObjectId],
+    waiting: &[crate::game::triggers::PendingTriggerContext],
 ) {
-    use crate::types::game_state::StackEntryKind;
-
     let to_sacrifice: Vec<_> = battlefield_snapshot
         .iter()
         .copied()
@@ -2144,14 +2367,9 @@ fn check_saga_sacrifice(
                 return false;
             }
 
-            // CR 714.4: Don't sacrifice while a chapter trigger from this Saga is on the stack.
-            let chapter_on_stack = state.stack.iter().any(|entry| {
-                matches!(
-                    &entry.kind,
-                    StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == *id
-                )
-            });
-            if chapter_on_stack {
+            // CR 714.4: not while an ability of this Saga has triggered but not
+            // yet left the stack.
+            if is_source_of_ability_not_yet_left_stack(state, waiting, *id) {
                 return false;
             }
 
@@ -2245,7 +2463,9 @@ fn check_counter_cancellation(
 /// non-card objects swept by the same removal loop. The stack is excluded for both
 /// so spell copies (and copies of cards resolving as spells) finish resolving
 /// before the next SBA check; the battlefield is legal for a copy of a card
-/// (CR 707.10f) but not for a token off-battlefield.
+/// (CR 707.10f) but not for a token off-battlefield. CR 722.3c exempts the linked
+/// prepare-spell copy in exile while its prepared permanent remains on the
+/// battlefield; that exemption lives in the shared copy predicate.
 fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
     let tokens_to_remove: Vec<(
         crate::types::identifiers::ObjectId,
@@ -2255,8 +2475,17 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
         .objects
         .iter()
         .filter(|(_, obj)| {
-            zones::token_is_outside_battlefield_and_stack(state, obj)
-                || zones::copy_of_card_outside_battlefield_and_stack(state, obj)
+            // Horde-deck-token exemption (casual Horde Magic variant): a token
+            // that IS a Horde deck card lives outside the battlefield by
+            // design (library placeholders, the Boss pile, the command zone,
+            // boss-deck graveyard instances), so it is NOT swept here. The
+            // same flag carves these tokens out of the CR 111.8 movement
+            // freeze (`zones::token_cannot_change_zones`) — boss-deck loops
+            // move them by design, while classic decks never move theirs.
+            // Not a CR-sanctioned rule; Horde Magic is casual.
+            !obj.is_horde_deck_token
+                && (zones::token_is_outside_battlefield_and_stack(state, obj)
+                    || zones::copy_of_card_outside_battlefield_and_stack(state, obj))
         })
         .map(|(id, obj)| (*id, obj.zone, obj.owner))
         .collect();
@@ -2272,9 +2501,9 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
 
 /// CR 301.5 / CR 301.6: The permanent core type(s) a non-Aura attacher's
 /// subtypes structurally require its host to have. An Equipment "can't
-/// legally be attached to anything that isn't a creature" (CR 301.5c); a
+/// legally be attached to anything that isn't a creature" (CR 301.5); a
 /// Fortification "can't legally be attached to an object that isn't a land"
-/// (CR 301.6, applying CR 301.5c by analogy). Unlike an Aura's per-card
+/// (CR 301.6, the land analog of CR 301.5). Unlike an Aura's per-card
 /// `Keyword::Enchant` filter, this requirement is fixed by the subtype
 /// itself — every Equipment requires a creature host and every Fortification
 /// requires a land host, with no Oracle-text exception to either.
@@ -2282,7 +2511,7 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
 /// Each matching subtype contributes its own requirement independently —
 /// not a single either/or choice — so a (no current Oracle precedent, but
 /// rule-text-legal) card with both subtypes requires a host that is BOTH a
-/// creature AND a land (e.g. an animated land-creature), per CR 301.5c +
+/// creature AND a land (e.g. an animated land-creature), per CR 301.5 +
 /// CR 301.6 applying simultaneously. A card with neither subtype (or only
 /// the Aura subtype, whose requirement is carried by `Keyword::Enchant`
 /// instead) returns no requirements, and the caller's `all()` check is
@@ -2328,6 +2557,27 @@ pub(crate) fn is_valid_attachment_target(
     let Some(attacher) = state.objects.get(&attacher_id) else {
         return false;
     };
+    is_valid_attachment_target_for_attacher(state, attacher_id, attacher, target_id)
+}
+
+/// [`is_valid_attachment_target`] against an explicitly supplied attacher:
+/// the same verdict for a token that does not exist yet, judged from its
+/// projected characteristics. The boon "one of them" offer path
+/// (`effects::token::boon_host_passes_projected_legality`) calls this with
+/// its synthetic Role projection so the offer-time verdict runs the COMPLETE
+/// authority — protection/prohibition, the Enchant filter, and the zone gate
+/// — instead of the protection/prohibition subset, and so offer-time and
+/// entry-time legality cannot drift.
+///
+/// Verdict-identical to [`is_valid_attachment_target`] when `attacher` is the
+/// object stored under `attacher_id`: `attachment_illegality` IS the
+/// projected resolver fed `state.objects.get(&attacher_id)`.
+pub(crate) fn is_valid_attachment_target_for_attacher(
+    state: &GameState,
+    attacher_id: crate::types::identifiers::ObjectId,
+    attacher: &crate::game::game_object::GameObject,
+    target_id: crate::types::identifiers::ObjectId,
+) -> bool {
     let Some(target) = state.objects.get(&target_id) else {
         return false;
     };
@@ -2337,7 +2587,13 @@ pub(crate) fn is_valid_attachment_target(
     // Protection acquired by the host, or a prohibition static, makes the host
     // an illegal attachment target even though the Enchant filter / zone below
     // may still match.
-    if crate::game::effects::attach::attachment_illegality(state, attacher_id, target_id).is_some()
+    if crate::game::effects::attach::attachment_illegality_projected(
+        state,
+        attacher_id,
+        Some(attacher),
+        target_id,
+    )
+    .is_some()
     {
         return false;
     }
@@ -2347,7 +2603,7 @@ pub(crate) fn is_valid_attachment_target(
     });
     let Some(filter) = enchant_filter else {
         // Equipment / Fortification (non-Enchant attacher): the battlefield
-        // is a legal host, AND CR 301.5c / CR 301.6 each require the host to
+        // is a legal host, AND CR 301.5 / CR 301.6 each require the host to
         // actually be of the matching permanent type — "An Equipment ...
         // can't legally be attached to anything that isn't a creature" /
         // "A Fortification ... can't legally be attached to an object that
@@ -2433,8 +2689,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ResolvedAbility,
-        TargetFilter,
+        AbilityDefinition, AbilityKind, ChosenAttribute, Effect, ReplacementDefinition,
+        ResolvedAbility, TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::format::FormatConfig;
@@ -2445,6 +2701,177 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// Convert a fresh battlefield object into a zero-defense battle for the
+    /// CR 704.5v/w waiting-batch tests below. `siege` selects whether it gets
+    /// the Siege battle type.
+    fn make_zero_defense_battle(
+        state: &mut GameState,
+        id: ObjectId,
+        protector: PlayerId,
+        siege: bool,
+    ) {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.clear();
+        obj.card_types.core_types.push(CoreType::Battle);
+        if siege {
+            obj.card_types.subtypes = vec!["Siege".to_string()];
+            obj.chosen_attributes
+                .push(ChosenAttribute::Player(protector));
+        }
+        obj.defense = Some(0);
+        obj.base_defense = Some(0);
+        obj.counters.insert(CounterType::Defense, 0);
+    }
+
+    fn waiting_batch_for(
+        source: ObjectId,
+        controller: PlayerId,
+    ) -> Vec<crate::game::triggers::PendingTriggerContext> {
+        let ability = ResolvedAbility::new(
+            Effect::unimplemented("battle trigger", "this battle's own trigger"),
+            vec![],
+            source,
+            controller,
+        );
+        vec![crate::game::triggers::PendingTriggerContext::single(
+            crate::game::triggers::PendingTrigger::ordinary(
+                source,
+                controller,
+                None,
+                Box::new(ability),
+                0,
+            ),
+        )]
+    }
+
+    /// CR 704.5v: a Siege with defense 0 is spared while its own victory
+    /// trigger has triggered but not yet left the stack, even when that
+    /// trigger is only waiting in the caller's batch (CR 510.3a combat
+    /// damage) and not yet placed on the stack (CR 603.3).
+    #[test]
+    fn zero_defense_siege_survives_its_own_waiting_trigger() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let id = create_object(
+            &mut state,
+            CardId(9001),
+            controller,
+            "Test Siege".to_string(),
+            Zone::Battlefield,
+        );
+        make_zero_defense_battle(&mut state, id, PlayerId(1), true);
+        let waiting = waiting_batch_for(id, controller);
+
+        let mut events = Vec::new();
+        check_state_based_actions_with_waiting_triggers(&mut state, &mut events, &waiting);
+
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Battlefield,
+            "CR 704.5v: a Siege with defense 0 is spared while its own ability \
+             has triggered but not yet left the stack (on the stack or in the \
+             caller's waiting batch)"
+        );
+    }
+
+    /// CR 704.5w: a non-Siege battle with defense 0 has no trigger-on-stack
+    /// deferral — it dies even while an ability of its own waits in the
+    /// caller's batch.
+    #[test]
+    fn zero_defense_non_siege_battle_dies_with_its_own_waiting_trigger() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let id = create_object(
+            &mut state,
+            CardId(9002),
+            controller,
+            "Test Battle".to_string(),
+            Zone::Battlefield,
+        );
+        make_zero_defense_battle(&mut state, id, PlayerId(1), false);
+        let waiting = waiting_batch_for(id, controller);
+
+        let mut events = Vec::new();
+        check_state_based_actions_with_waiting_triggers(&mut state, &mut events, &waiting);
+
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Graveyard,
+            "CR 704.5w: a non-Siege battle has no trigger-on-stack deferral"
+        );
+    }
+
+    /// CR 704.5v: a waiting trigger from a different source does not spare a
+    /// Siege — the deferral is keyed by the triggered ability's source
+    /// `ObjectId`, not by incarnation or battle type alone.
+    #[test]
+    fn zero_defense_siege_dies_with_another_sources_waiting_trigger() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let id = create_object(
+            &mut state,
+            CardId(9003),
+            controller,
+            "Test Siege".to_string(),
+            Zone::Battlefield,
+        );
+        make_zero_defense_battle(&mut state, id, PlayerId(1), true);
+        let other_source = create_object(
+            &mut state,
+            CardId(9004),
+            controller,
+            "Other Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&other_source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+        let waiting = waiting_batch_for(other_source, controller);
+
+        let mut events = Vec::new();
+        check_state_based_actions_with_waiting_triggers(&mut state, &mut events, &waiting);
+
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Graveyard,
+            "CR 704.5v: only the Siege's own waiting ability defers its death"
+        );
+    }
+
+    /// CR 704.5v: a Siege whose own trigger is parked in the deferred queue
+    /// has triggered but not yet left the stack.
+    #[test]
+    fn zero_defense_siege_survives_its_own_queued_trigger() {
+        for queued in [true, false] {
+            let mut state = setup();
+            let controller = PlayerId(0);
+            let id = create_object(
+                &mut state,
+                CardId(9005),
+                controller,
+                "Test Siege".to_string(),
+                Zone::Battlefield,
+            );
+            make_zero_defense_battle(&mut state, id, PlayerId(1), true);
+            if queued {
+                state.deferred_triggers = waiting_batch_for(id, controller);
+            }
+
+            let mut events = Vec::new();
+            check_state_based_actions(&mut state, &mut events);
+
+            let expected = if queued {
+                Zone::Battlefield
+            } else {
+                Zone::Graveyard
+            };
+            assert_eq!(state.objects[&id].zone, expected, "queued={queued}");
+        }
     }
 
     /// CR 704.4 + CR 903.9a: the player-loss safety net runs SBAs while a
@@ -2491,15 +2918,18 @@ mod tests {
                 },
             },
             None,
-        );
+        )
+        .expect("the fixture begins with no carrier installed");
         state.push_optional_effect_frame(OptionalEffectFrame {
             ability: Box::new(ability),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         let paused_prompt = WaitingFor::OptionalEffectChoice {
             player: PlayerId(2),
+            decision_subject_id: None,
             source_id: source,
             description: None,
             may_trigger_key: None,
@@ -2670,6 +3100,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::SelfRef,
@@ -2800,6 +3232,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::SelfRef,
@@ -3485,45 +3919,6 @@ mod tests {
     }
 
     #[test]
-    fn sba_equipment_unattaches_when_creature_dies() {
-        let mut state = setup();
-        // Create a creature that will die
-        let creature_id = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
-        state.objects.get_mut(&creature_id).unwrap().damage_marked = 3; // lethal
-
-        // Create equipment attached to that creature
-        let equip_id = create_object(
-            &mut state,
-            CardId(2),
-            PlayerId(0),
-            "Sword".to_string(),
-            Zone::Battlefield,
-        );
-        let obj = state.objects.get_mut(&equip_id).unwrap();
-        obj.card_types
-            .core_types
-            .push(crate::types::card_type::CoreType::Artifact);
-        obj.card_types.subtypes.push("Equipment".to_string());
-        obj.attached_to = Some(creature_id.into());
-
-        state
-            .objects
-            .get_mut(&creature_id)
-            .unwrap()
-            .attachments
-            .push(equip_id);
-
-        let mut events = Vec::new();
-        check_state_based_actions(&mut state, &mut events);
-
-        // Creature should be dead
-        assert!(!state.battlefield.contains(&creature_id));
-        // Equipment should still be on battlefield but unattached
-        assert!(state.battlefield.contains(&equip_id));
-        assert_eq!(state.objects.get(&equip_id).unwrap().attached_to, None);
-    }
-
-    #[test]
     fn sba_aura_detaches_when_host_gains_protection() {
         // CR 702.16c: a creature enchanted by an opponent's white
         // Aura (Pacifism) that gains protection from white (Mother of Runes) →
@@ -3740,50 +4135,17 @@ mod tests {
     // Fortification identically ("If an Equipment or Fortification is
     // attached to an illegal permanent or to a player, it becomes
     // unattached..."). `check_unattached_equipment` previously matched only
-    // the "Equipment" subtype, so a Fortification whose land host left the
-    // battlefield (destroyed, sacrificed, bounced) kept a stale `attached_to`
-    // forever — the SBA pass that should have unattached it never ran for
-    // that subtype. These tests mirror the existing Equipment SBA tests
+    // the "Equipment" subtype, so a Fortification attached to an illegal
+    // permanent that has not left the zone it was in (a land that gained
+    // protection from artifacts, a nonland permanent) or to a player kept a
+    // stale `attached_to` forever — this sweep never ran for that subtype. A
+    // host that LEAVES — a permanent leaving the zone it was in — is a
+    // different authority: the departure itself ends the edge (CR 701.3d),
+    // not this pass. These tests mirror the existing Equipment SBA tests
     // above so the two attachment kinds are held to the same bar; the
     // Equipment cases are re-asserted here too as a regression guard that
     // broadening the filter to `||` did not change Equipment's own behavior.
     // ---------------------------------------------------------------------
-
-    #[test]
-    fn sba_fortification_unattaches_when_land_leaves_battlefield() {
-        // CR 704.5n + CR 301.6: a Fortification whose land host left the
-        // battlefield (here: sacrificed directly, isolating the SBA from any
-        // destroy-pipeline interaction) must unattach but remain on the
-        // battlefield itself.
-        let mut state = setup();
-        let land = create_land(&mut state, CardId(1), PlayerId(0), "Forest");
-        let fort = create_fortification(&mut state, CardId(2), PlayerId(0), "Darksteel Garrison");
-        state.objects.get_mut(&fort).unwrap().attached_to = Some(land.into());
-        state.objects.get_mut(&land).unwrap().attachments.push(fort);
-
-        // Move the land to the graveyard directly (bypassing Destroy) so this
-        // test isolates the SBA re-check from any zone-exit severing logic —
-        // the dangling `attached_to` this leaves behind is exactly the stale
-        // pointer that only an unattach SBA covering Fortification can clear.
-        zones::move_to_zone(&mut state, land, Zone::Graveyard, &mut Vec::new());
-
-        let mut events = Vec::new();
-        check_state_based_actions(&mut state, &mut events);
-
-        assert!(
-            !state.battlefield.contains(&land),
-            "the land is gone, as set up"
-        );
-        assert!(
-            state.battlefield.contains(&fort),
-            "CR 704.5n: the Fortification remains on the battlefield"
-        );
-        assert_eq!(
-            state.objects.get(&fort).unwrap().attached_to,
-            None,
-            "CR 704.5n: the Fortification must unattach from its now-departed land host"
-        );
-    }
 
     #[test]
     fn sba_fortification_unattaches_when_host_gains_protection_from_artifacts() {
@@ -3900,7 +4262,7 @@ mod tests {
 
     #[test]
     fn sba_equipment_unattaches_when_attached_to_a_noncreature_permanent() {
-        // Symmetric Equipment case for the same CR 301.5c host-type axis:
+        // Symmetric Equipment case for the same CR 301.5 host-type axis:
         // "An Equipment ... can't legally be attached to anything that isn't
         // a creature." Wired directly onto a land host (bypassing Equip
         // activation) to isolate the SBA re-check.
@@ -3959,7 +4321,7 @@ mod tests {
 
     #[test]
     fn sba_dual_subtype_attachment_unattaches_from_creature_missing_land_type() {
-        // CR 301.5c + CR 301.6 apply simultaneously to a card with both the
+        // CR 301.5 + CR 301.6 apply simultaneously to a card with both the
         // "Equipment" and "Fortification" subtypes: its host must be BOTH a
         // creature AND a land. A plain creature host (no land type) satisfies
         // only the Equipment half of the requirement, so the SBA must still
@@ -4044,17 +4406,26 @@ mod tests {
 
     #[test]
     fn sba_equipment_and_fortification_unattach_independently_in_same_pass() {
-        // Class-level check: a single SBA pass must correctly unattach BOTH
-        // an illegal Equipment (creature host gone) and an illegal
-        // Fortification (land host gone) at once, each going through its own
+        // CR 704.5n: one sweep pass must unattach BOTH an illegal Equipment
+        // and an illegal Fortification, each judged by its own
         // `is_valid_attachment_target` re-check without interfering with the
-        // other — guards against the fix accidentally coupling the two
-        // subtypes' legality (e.g. an Equipment incorrectly validating
-        // against a Fortification's land host or vice versa).
+        // other. Coupling the two subtypes' legality — validating an Equipment
+        // against a land host, or a Fortification against a creature host —
+        // would leave one of them attached.
+        //
+        // Every host stays in the zone it was in for the whole pass, so the
+        // illegality is in place (CR 301.5, CR 301.6) and the sweep is the
+        // only authority that can end these edges. Each host also carries a
+        // LEGAL attachment of the other kind, so the same pass that catches an
+        // under-collecting sweep also catches an over-collecting one. The
+        // attachments are wired directly, bypassing Equip/Fortify activation,
+        // which CR 701.3b would refuse for an illegal host.
         let mut state = setup();
         let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
         let land = create_land(&mut state, CardId(2), PlayerId(0), "Forest");
-        let equip = create_object(
+
+        // CR 301.5: an Equipment can't legally be attached to a non-creature.
+        let equip_on_land = create_object(
             &mut state,
             CardId(3),
             PlayerId(0),
@@ -4062,7 +4433,43 @@ mod tests {
             Zone::Battlefield,
         );
         {
-            let obj = state.objects.get_mut(&equip).unwrap();
+            let obj = state.objects.get_mut(&equip_on_land).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.attached_to = Some(land.into());
+        }
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .attachments
+            .push(equip_on_land);
+
+        // CR 301.6: a Fortification can't legally be attached to a non-land.
+        let fort_on_creature =
+            create_fortification(&mut state, CardId(4), PlayerId(0), "Darksteel Garrison");
+        state
+            .objects
+            .get_mut(&fort_on_creature)
+            .unwrap()
+            .attached_to = Some(creature.into());
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(fort_on_creature);
+
+        // The legal pair of the same two kinds, on the same two hosts.
+        let equip_on_creature = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Bonesplitter".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&equip_on_creature).unwrap();
             obj.card_types.core_types.push(CoreType::Artifact);
             obj.card_types.subtypes.push("Equipment".to_string());
             obj.attached_to = Some(creature.into());
@@ -4072,58 +4479,126 @@ mod tests {
             .get_mut(&creature)
             .unwrap()
             .attachments
-            .push(equip);
-        let fort = create_fortification(&mut state, CardId(4), PlayerId(0), "Darksteel Garrison");
-        state.objects.get_mut(&fort).unwrap().attached_to = Some(land.into());
-        state.objects.get_mut(&land).unwrap().attachments.push(fort);
+            .push(equip_on_creature);
 
-        // Both hosts leave the battlefield in the same SBA-triggering event.
-        zones::move_to_zone(&mut state, creature, Zone::Graveyard, &mut Vec::new());
-        zones::move_to_zone(&mut state, land, Zone::Graveyard, &mut Vec::new());
+        let fort_on_land = create_fortification(&mut state, CardId(6), PlayerId(0), "C.A.M.P.");
+        state.objects.get_mut(&fort_on_land).unwrap().attached_to = Some(land.into());
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .attachments
+            .push(fort_on_land);
 
         let mut events = Vec::new();
         check_state_based_actions(&mut state, &mut events);
 
         assert!(
-            state.battlefield.contains(&equip),
-            "Equipment stays (CR 704.5n)"
+            state.battlefield.contains(&equip_on_land),
+            "CR 704.5n: the unattached Equipment remains on the battlefield"
         );
         assert!(
-            state.battlefield.contains(&fort),
-            "Fortification stays (CR 704.5n)"
+            state.battlefield.contains(&fort_on_creature),
+            "CR 704.5n: the unattached Fortification remains on the battlefield"
         );
-        assert_eq!(state.objects.get(&equip).unwrap().attached_to, None);
-        assert_eq!(state.objects.get(&fort).unwrap().attached_to, None);
+        assert_eq!(
+            state.objects[&equip_on_land].attached_to, None,
+            "CR 301.5c: an Equipment attached to a land must unattach"
+        );
+        assert_eq!(
+            state.objects[&fort_on_creature].attached_to, None,
+            "CR 301.6: a Fortification attached to a creature must unattach"
+        );
+
+        // The legal attachment of the other kind on each host survives the same
+        // pass, which is what makes the two judgements independent rather than
+        // one sweep clearing whatever it finds.
+        assert_eq!(
+            state.objects[&equip_on_creature].attached_to,
+            Some(creature.into()),
+            "a legally equipped creature keeps its Equipment through the same pass"
+        );
+        assert_eq!(
+            state.objects[&fort_on_land].attached_to,
+            Some(land.into()),
+            "a legally fortified land keeps its Fortification through the same pass"
+        );
+        assert_eq!(
+            state.objects[&creature].attachments,
+            vec![equip_on_creature],
+            "the creature host keeps only the legal Equipment"
+        );
+        assert_eq!(
+            state.objects[&land].attachments,
+            vec![fort_on_land],
+            "the land host keeps only the legal Fortification"
+        );
     }
 
     #[test]
     fn sba_phased_out_fortification_with_illegal_host_is_skipped() {
         // CR 702.26b: a phased-out Fortification is treated as though it
-        // doesn't exist, so the SBA must not touch it even though its host
-        // has left the battlefield — direct analog of the phased-out
-        // Equipment guard implied by `battlefield_phased_in_ids` filtering.
+        // doesn't exist, so the SBA must not touch it even though its host is
+        // an illegal one — direct analog of the phased-out Equipment guard
+        // implied by `battlefield_phased_in_ids` filtering.
+        //
+        // The illegal host here is a creature that is NOT a land: CR 301.6
+        // requires a Fortification's host to be a land, so this fails
+        // `is_valid_attachment_target` while both permanents stay put. Host
+        // EXIT is deliberately not the vehicle — `zones::move_to_zone` now
+        // severs the attachment graph itself per CR 701.3d, so a departing
+        // host would clear the pointer before this SBA ever ran and the
+        // assertion would no longer be about the SBA at all.
         let mut state = setup();
-        let land = create_land(&mut state, CardId(1), PlayerId(0), "Forest");
+        let host = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
         let fort = create_fortification(&mut state, CardId(2), PlayerId(0), "Darksteel Garrison");
         {
             let obj = state.objects.get_mut(&fort).unwrap();
-            obj.attached_to = Some(land.into());
+            obj.attached_to = Some(host.into());
             obj.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
                 cause: crate::game::game_object::PhaseOutCause::Directly,
             };
         }
-        state.objects.get_mut(&land).unwrap().attachments.push(fort);
-        zones::move_to_zone(&mut state, land, Zone::Graveyard, &mut Vec::new());
+        state.objects.get_mut(&host).unwrap().attachments.push(fort);
 
         let mut events = Vec::new();
         check_state_based_actions(&mut state, &mut events);
 
         assert_eq!(
             state.objects.get(&fort).unwrap().attached_to,
-            Some(land.into()),
+            Some(host.into()),
             "a phased-out Fortification is skipped by the SBA re-check"
         );
     }
+
+    #[test]
+    fn sba_phased_in_fortification_with_illegal_host_is_unattached() {
+        // Reach guard for the test above: the ONLY thing keeping that
+        // Fortification attached is its phased-out status. With the identical
+        // illegal host and the attachment phased in, CR 704.5n unattaches it —
+        // proving the SBA genuinely reaches this shape and the phased-out
+        // assertion is not passing for some unrelated reason.
+        let mut state = setup();
+        let host = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        let fort = create_fortification(&mut state, CardId(2), PlayerId(0), "Darksteel Garrison");
+        state.objects.get_mut(&fort).unwrap().attached_to = Some(host.into());
+        state.objects.get_mut(&host).unwrap().attachments.push(fort);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects.get(&fort).unwrap().attached_to,
+            None,
+            "CR 704.5n: a phased-in Fortification on a non-land host unattaches"
+        );
+        assert!(
+            state.battlefield.contains(&fort),
+            "CR 704.5n: it remains on the battlefield"
+        );
+    }
+
+    // ----------------- end Issue #1368 regression suite ------------------
 
     #[test]
     fn sba_aura_still_goes_to_graveyard_when_target_leaves() {
@@ -4236,6 +4711,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -4247,6 +4723,8 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            delivery_boundary: None,
+            unrepresentable_life_change: Default::default(),
         });
 
         // A concurrent player-loss SBA (P2 at 0 life) — the reason reconcile runs
@@ -4323,6 +4801,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::SelfRef,
@@ -4400,6 +4880,7 @@ mod tests {
             candidates: vec![],
             kind: Default::default(),
             last_applied_decides: false,
+            remember_identity: None,
         };
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
             proposed: ProposedEvent::Draw {
@@ -4411,6 +4892,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -4422,6 +4904,8 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            delivery_boundary: None,
+            unrepresentable_life_change: Default::default(),
         });
 
         let mut events = Vec::new();
@@ -4567,6 +5051,304 @@ mod tests {
         assert!(matches!(
             state.waiting_for,
             WaitingFor::GameOver { winner: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn sba_2hg_commander_team_dies_together_at_zero_shared_life() {
+        // CR 810.8c: the 60-life shared total at 0 or less loses the team
+        // the game, even though each head individually still has life.
+        let mut state = GameState::new(FormatConfig::two_headed_giant_commander(), 4, 42);
+        state.players[0].life = -10;
+        state.players[1].life = 10;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[0].is_eliminated);
+        assert!(state.players[1].is_eliminated);
+        assert!(!state.players[2].is_eliminated);
+        assert!(!state.players[3].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver { winner: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn sba_2hg_commander_team_loses_at_fifteen_shared_poison() {
+        // CR 810.8d: 15+ poison shared by the team loses the game. Ten on
+        // one head alone is not enough — the 2HG threshold, not CR 704.5c's.
+        let mut state = GameState::new(FormatConfig::two_headed_giant_commander(), 4, 42);
+        state.players[0].poison_counters = 10;
+        state.players[1].poison_counters = 5;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[0].is_eliminated);
+        assert!(state.players[1].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver { winner: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn sba_2hg_commander_fourteen_shared_poison_does_not_eliminate() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant_commander(), 4, 42);
+        state.players[0].poison_counters = 10;
+        state.players[1].poison_counters = 4;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.players[0].is_eliminated);
+        assert!(!state.players[1].is_eliminated);
+        assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    #[test]
+    fn sba_2hg_commander_damage_21_to_one_head_eliminates_the_team() {
+        use crate::types::game_state::CommanderDamageEntry;
+
+        // CR 903.10a + CR 810.8a: the dealt head loses at 21 from one
+        // commander, and the team loses with it.
+        let mut state = GameState::new(FormatConfig::two_headed_giant_commander(), 4, 42);
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander: ObjectId(999),
+            damage: 21,
+        });
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[0].is_eliminated);
+        assert!(state.players[1].is_eliminated);
+        assert!(!state.players[2].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver { winner: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn sba_2hg_commander_damage_tracks_per_head_not_pooled_per_team() {
+        use crate::types::game_state::CommanderDamageEntry;
+
+        // CR-compositional reading (no CR rule defines the combination):
+        // 10 on one head plus 11 on the other from the same commander is
+        // not lethal — CR 903.10a counts per player. Some groups pool
+        // per-team instead; this pins the engine's reading.
+        let mut state = GameState::new(FormatConfig::two_headed_giant_commander(), 4, 42);
+        let cmd_id = ObjectId(999);
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(0),
+            commander: cmd_id,
+            damage: 10,
+        });
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander: cmd_id,
+            damage: 11,
+        });
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.players[0].is_eliminated);
+        assert!(!state.players[1].is_eliminated);
+        assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    #[test]
+    fn sba_archenemy_commander_heroes_lose_together_at_zero_shared_life() {
+        use crate::types::format::FormatConfig;
+
+        // CR 810.8c-via-904.13b: the heroes' shared 60 at 0 or less loses
+        // every hero the game, and the archenemy wins.
+        let mut state = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+        state.players[1].life = -10;
+        state.players[2].life = 10;
+        state.players[3].life = 0;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.players[0].is_eliminated);
+        assert!(state.players[1].is_eliminated);
+        assert!(state.players[2].is_eliminated);
+        assert!(state.players[3].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+    }
+
+    #[test]
+    fn sba_archenemy_commander_archenemy_loss_lets_heroes_win() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+        state.players[0].life = 0;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[0].is_eliminated);
+        assert!(!state.players[1].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(1))
+            }
+        ));
+    }
+
+    #[test]
+    fn sba_archenemy_commander_ten_poison_eliminates_one_hero_and_team() {
+        use crate::types::format::FormatConfig;
+
+        // CR 904.13c + CR 810.8a-via-904.13b: one hero at 10 poison loses,
+        // and the team loses with them.
+        let mut state = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+        state.players[2].poison_counters = 10;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.players[0].is_eliminated);
+        assert!(state.players[1].is_eliminated);
+        assert!(state.players[2].is_eliminated);
+        assert!(state.players[3].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+    }
+
+    #[test]
+    fn sba_archenemy_commander_split_poison_is_not_lethal() {
+        use crate::types::format::FormatConfig;
+
+        // CR 904.13c pins the life/poison split: 9 + 9 across two heroes
+        // would kill a 2HG team (15 shared) but nobody here — poison is
+        // individual even though life is shared.
+        let mut state = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+        state.players[1].poison_counters = 9;
+        state.players[2].poison_counters = 9;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.players[0].is_eliminated);
+        assert!(!state.players[1].is_eliminated);
+        assert!(!state.players[2].is_eliminated);
+        assert!(!state.players[3].is_eliminated);
+        assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    #[test]
+    fn sba_archenemy_commander_ten_poison_eliminates_archenemy() {
+        use crate::types::format::FormatConfig;
+
+        // CR 904.13c: the archenemy loses individually at 10 poison.
+        let mut state = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+        state.players[0].poison_counters = 10;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[0].is_eliminated);
+        assert!(!state.players[1].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(1))
+            }
+        ));
+    }
+
+    #[test]
+    fn sba_archenemy_commander_damage_21_to_hero_eliminates_team() {
+        use crate::types::format::FormatConfig;
+        use crate::types::game_state::CommanderDamageEntry;
+
+        // CR 903.10a + CR 810.8a-via-904.13b: the dealt hero loses at 21
+        // from one commander, and the team loses with them.
+        let mut state = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander: ObjectId(999),
+            damage: 21,
+        });
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.players[0].is_eliminated);
+        assert!(state.players[1].is_eliminated);
+        assert!(state.players[2].is_eliminated);
+        assert!(state.players[3].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+    }
+
+    #[test]
+    fn sba_archenemy_commander_damage_21_to_archenemy_ends_it() {
+        use crate::types::format::FormatConfig;
+        use crate::types::game_state::CommanderDamageEntry;
+
+        let mut state = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(0),
+            commander: ObjectId(999),
+            damage: 21,
+        });
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[0].is_eliminated);
+        assert!(!state.players[1].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(1))
+            }
+        ));
+    }
+
+    #[test]
+    fn sba_archenemy_commander_empty_draw_eliminates_hero_team() {
+        use crate::types::format::FormatConfig;
+
+        // CR 704.5b + CR 810.8a-via-904.13b: a hero drawing from empty
+        // loses, and the cascade takes the team.
+        let mut state = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+        state.players[3].drew_from_empty_library = true;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.players[0].is_eliminated);
+        assert!(state.players[1].is_eliminated);
+        assert!(state.players[2].is_eliminated);
+        assert!(state.players[3].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
         ));
     }
 
@@ -4728,6 +5510,30 @@ mod tests {
 
         // CR 714.4 deferral: triggers haven't been placed yet
         assert!(state.battlefield.contains(&id));
+    }
+
+    /// CR 704.5s + CR 714.4: a chapter ability parked in the deferred queue has
+    /// triggered but not yet left the stack, so its Saga is not sacrificed.
+    #[test]
+    fn saga_not_sacrificed_with_queued_chapter_trigger() {
+        for queued in [true, false] {
+            let mut state = setup();
+            let id = create_saga(&mut state, CardId(1), PlayerId(0), "Saga", 3);
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .counters
+                .insert(CounterType::Lore, 3);
+            if queued {
+                state.deferred_triggers = waiting_batch_for(id, PlayerId(0));
+            }
+
+            let mut events = Vec::new();
+            check_state_based_actions(&mut state, &mut events);
+
+            assert_eq!(state.battlefield.contains(&id), queued, "queued={queued}");
+        }
     }
 
     #[test]
@@ -6632,7 +7438,7 @@ mod tests {
 
         assert_eq!(zone_changed_for(&events, stale), 0);
         assert!(!events.iter().any(
-            |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == stale)
+            |event| matches!(event, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == stale)
         ));
         assert!(zone_changed_for(&events, live) > 0);
         assert!(
@@ -6818,9 +7624,29 @@ mod tests {
         check_state_based_actions(&mut state, &mut events);
 
         assert!(state.players[0].graveyard.contains(&creature));
-        assert!(events.iter().any(
-            |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == creature)
-        ));
+        // CR 704.5h: a state-based destruction names no destroying source.
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::CreatureDestroyed { object_id, source_id: None } if *object_id == creature
+        )));
+    }
+
+    /// CR 704.5g: lethal damage destroys the creature, and the destruction names
+    /// no destroying source.
+    #[test]
+    fn sba_lethal_damage_destruction_has_no_source() {
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(9910), PlayerId(0), "Burned", 2, 2);
+        state.objects.get_mut(&creature).unwrap().damage_marked = 2;
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[0].graveyard.contains(&creature));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::CreatureDestroyed { object_id, source_id: None } if *object_id == creature
+        )));
     }
 
     #[test]
@@ -6859,7 +7685,7 @@ mod tests {
         assert!(state.battlefield.contains(&zero));
         assert!(state.battlefield.contains(&negative));
         assert!(!events.iter().any(
-            |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == zero || *object_id == negative)
+            |event| matches!(event, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == zero || *object_id == negative)
         ));
     }
 
@@ -6881,7 +7707,7 @@ mod tests {
 
         assert_eq!(zone_changed_for(&events, stale), 0);
         assert!(!events.iter().any(
-            |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == stale)
+            |event| matches!(event, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == stale)
         ));
         assert!(state.players[0].graveyard.contains(&live));
     }
@@ -6923,6 +7749,8 @@ mod tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
+                        library_shuffle: Default::default(),
                         destination: Zone::Battlefield,
                         origin: None,
                         target: TargetFilter::SelfRef,

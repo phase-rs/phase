@@ -1,20 +1,33 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DraftKind, DraftProcedure, TournamentFormat } from "../../adapter/draft-adapter";
+import i18n from "i18next";
+import type { DraftKind, DraftProcedure, RestorableDraftSessionVerdict, TournamentFormat } from "../../adapter/draft-adapter";
 import { draftProcedureFixture } from "../../adapter/__tests__/draftProcedureFixture";
+import deMultiplayer from "../../i18n/locales/de/multiplayer.json";
+import { resources, SUPPORTED_LNGS } from "../../i18n/resources";
 
 const mocks = vi.hoisted(() => ({
   clearActiveDraftPod: vi.fn(),
+  saveActiveDraftPod: vi.fn(),
   loadActiveDraftPod: vi.fn(),
   inspectActiveDraftPod: vi.fn(),
   clearActiveDraftPodIfCurrent: vi.fn(),
   loadDraftHostSession: vi.fn(),
   draftProcedure: vi.fn<(kind: DraftKind, tournamentFormat: TournamentFormat) => Promise<DraftProcedure>>(),
+  checkRestorableSession: vi.fn<(json: string) => Promise<RestorableDraftSessionVerdict>>(),
   multiplayerState: {
     role: null as "host" | "guest" | null,
     phase: "idle",
     roomCode: null as string | null,
-    hostDraft: vi.fn<(config: unknown) => Promise<boolean>>(async () => true),
-    joinDraft: vi.fn<(config: unknown) => Promise<boolean>>(async () => true),
+    hostPersistenceId: null as string | null,
+    hostDraft: vi.fn<(config: unknown) => Promise<DraftSessionOpenOutcome>>(async () => ({ status: "opened" })),
+    resumeHostedDraft: vi.fn(async ({ config }: { config: unknown }) => {
+      const hosted = await mocks.multiplayerState.hostDraft(config);
+      return hosted.status === "opened" ? "resumed" : hosted.status === "superseded" ? "superseded" : "invalid";
+    }),
+    joinDraft: vi.fn<(config: unknown) => Promise<DraftSessionOpenOutcome>>(async () => ({ status: "opened" })),
   },
   // Shaped like the real store's source model: `configuredBackupEndpoint`
   // reads `hostingServer`, so a mock still carrying `serverAddress` would
@@ -22,31 +35,68 @@ const mocks = vi.hoisted(() => ({
   // reason.
   multiplayerConfig: {
     hostingServer: "wss://phase.example/ws" as string | null,
+    // `adoptSavedDisplayName` reads the saved identity off this store, so the
+    // mock carries the field under its real name. Empty is the real store's
+    // own initial value, which keeps it out of the way of every other suite.
+    displayName: "",
     userLobbySources: [],
     sourceStatus: new Map(),
+    lastPodListingPublic: null as boolean | null,
+    rememberPodListingPublic: vi.fn<(isPublic: boolean) => void>(),
+    resolveP2PBroker: vi.fn<(anchor: string | null) => Promise<{
+      url: string;
+      socket: { serverInfo: { mode: string } } | null;
+    }>>(),
   },
+  openBrokerClient: vi.fn<(url: string) => Promise<{ close: () => void }>>(),
+  brokerClose: vi.fn(),
+  // The real recovery bridge below uses the actual lifecycle store and the
+  // actual DraftPodHostAdapter.  Only its peer/host edge is substituted so the
+  // test can hold B between allocation and the fenced lifecycle handoff.
+  recoveryHostRoom: vi.fn(),
+  recoveryHosts: [] as Array<{ dispose: ReturnType<typeof vi.fn> }>,
 }));
 
 vi.mock("../../services/draftPersistence", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../services/draftPersistence")>()),
   clearActiveDraftPod: mocks.clearActiveDraftPod,
+  saveActiveDraftPod: mocks.saveActiveDraftPod,
   loadActiveDraftPod: mocks.loadActiveDraftPod,
   inspectActiveDraftPod: mocks.inspectActiveDraftPod,
   clearActiveDraftPodIfCurrent: mocks.clearActiveDraftPodIfCurrent,
   loadDraftHostSession: mocks.loadDraftHostSession,
 }));
 
-vi.mock("../multiplayerDraftStore", () => ({
-  DRAFT_OFFLINE_ERROR: "offline.startUnavailable",
-  useMultiplayerDraftStore: {
-    getState: () => mocks.multiplayerState,
-  },
-}));
-
-vi.mock("../multiplayerStore", () => ({
+vi.mock("../multiplayerStore", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../multiplayerStore")>()),
   useMultiplayerStore: {
     getState: () => mocks.multiplayerConfig,
   },
+}));
+
+vi.mock("../../network/connection", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../network/connection")>()),
+  hostRoom: mocks.recoveryHostRoom,
+}));
+
+vi.mock("../../adapter/p2p-draft-host", () => ({
+  P2PDraftHost: class {
+    readonly dispose = vi.fn(async () => {});
+
+    constructor() {
+      mocks.recoveryHosts.push(this);
+    }
+
+    onEvent() { return vi.fn(); }
+    async initialize() {}
+    async restoreFromPersisted() { return null; }
+    getHostWorkspaceState() { return null; }
+  },
+}));
+
+vi.mock("../../services/brokerClient", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../services/brokerClient")>()),
+  openBrokerClient: mocks.openBrokerClient,
 }));
 
 // `enterKind` reads the ENGINE's per-kind `DraftProcedure` through the adapter.
@@ -59,11 +109,23 @@ vi.mock("../../adapter/draft-adapter", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../adapter/draft-adapter")>()),
   DraftAdapter: class {
     draftProcedure = mocks.draftProcedure;
+    // The draft engine's check of a recovered pod's saved session.
+    checkRestorableSession = mocks.checkRestorableSession;
   },
 }));
 
-import { useDraftPodStore } from "../draftPodStore";
+import { isHostedPodRecoveryInFlight, useDraftPodStore } from "../draftPodStore";
+import type { DraftSessionOpenOutcome } from "../multiplayerDraftStore";
 import { useConnectivityStore } from "../connectivityStore";
+import { useMultiplayerDraftStore } from "../multiplayerDraftStore";
+
+// Ordinary unit cases below intentionally replace actions on this real Zustand
+// store. Retain the genuine closures before any case can overwrite them so
+// the persistence-to-pod bridge always restores actual lifecycle behavior.
+const realLifecycleActions = {
+  hostDraft: useMultiplayerDraftStore.getState().hostDraft,
+  resumeHostedDraft: useMultiplayerDraftStore.getState().resumeHostedDraft,
+};
 
 const activeMeta = {
   id: "draft-1",
@@ -95,16 +157,54 @@ const persistedSession = {
   poolInput: { type: "Set" as const, data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
 };
 
+/**
+ * A saved draft session from the fixture draft-wasm's own test checks:
+ * draft-core's serialization of a session, and the draft engine's answer to the
+ * saved-session check.
+ */
+function savedSession(name: string): { text: string; verdict: RestorableDraftSessionVerdict } {
+  const fixture = JSON.parse(readFileSync(resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "../../../../fixtures/draft-contract/fifo_legacy_admission.json",
+  ), "utf8")) as { saved_sessions: Record<string, { verdict: RestorableDraftSessionVerdict; session: unknown }> };
+  const saved = fixture.saved_sessions[name];
+  if (!saved) throw new Error(`The fixture has no saved session named ${name}`);
+  return { text: JSON.stringify(saved.session), verdict: saved.verdict };
+}
+
 describe("draftPodStore", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    await useMultiplayerDraftStore.getState().leave(true);
+    useMultiplayerDraftStore.getState().reset();
+    // The ordinary unit cases below can still control their local action
+    // result, but this is the real Zustand object returned to draftPodStore;
+    // no module-level lifecycle substitute exists in this suite.
+    mocks.multiplayerState = useMultiplayerDraftStore.getState() as unknown as typeof mocks.multiplayerState;
     mocks.draftProcedure.mockResolvedValue(draftProcedureFixture());
+    mocks.checkRestorableSession.mockReset().mockResolvedValue({ type: "Admitted" });
     mocks.multiplayerState.role = null;
     mocks.multiplayerState.phase = "idle";
     mocks.multiplayerState.roomCode = null;
-    mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
-    mocks.multiplayerState.joinDraft = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
+    mocks.multiplayerState.hostPersistenceId = null;
+    mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<DraftSessionOpenOutcome>>(async () => ({ status: "opened" }));
+    mocks.multiplayerState.resumeHostedDraft = vi.fn(async ({ config }: { config: unknown }) => {
+      const hosted = await mocks.multiplayerState.hostDraft(config);
+      return hosted.status === "opened" ? "resumed" : hosted.status === "superseded" ? "superseded" : "invalid";
+    });
+    mocks.multiplayerState.joinDraft = vi.fn<(config: unknown) => Promise<DraftSessionOpenOutcome>>(async () => ({ status: "opened" }));
     mocks.multiplayerConfig.hostingServer = "wss://phase.example/ws";
+    mocks.multiplayerConfig.displayName = "";
+    mocks.multiplayerConfig.lastPodListingPublic = null;
+    mocks.multiplayerConfig.rememberPodListingPublic = vi.fn<(isPublic: boolean) => void>();
+    mocks.multiplayerConfig.resolveP2PBroker = vi.fn(async () => ({
+      url: "wss://broker.example/ws",
+      socket: { serverInfo: { mode: "LobbyOnly" } },
+    }));
+    mocks.brokerClose = vi.fn();
+    mocks.openBrokerClient.mockReset().mockImplementation(async () => ({ close: mocks.brokerClose }));
+    mocks.recoveryHostRoom.mockReset();
+    mocks.recoveryHosts.length = 0;
     mocks.inspectActiveDraftPod.mockReturnValue({
       type: "absent",
     });
@@ -192,6 +292,118 @@ describe("draftPodStore", () => {
       expect(state.config.kind).toBe("CommanderDraft");
       expect(state.config.podSize).toBe(before);
       expect(state.configError).toBe("wasm unavailable");
+    });
+
+    it("drops a chaos selection when the entered kind shares one stack", async () => {
+      // The host arranged a Chaos pod under a pick-and-pass kind, then changed
+      // the kind. Nothing in the UI can reach `setSetDraftMode` again on the
+      // way through, so publication is where the stale intent has to go.
+      // A contract that ADMITS Chaos has to be in place first: an absent one
+      // normalizes the selection away, which is the point of the rows below.
+      useDraftPodStore.setState({ allowedSetLayouts: ["UniformByRound", "Chaos"] });
+      useDraftPodStore.getState().setSetDraftMode("chaos");
+      expect(useDraftPodStore.getState().setDraftMode).toBe("chaos");
+      mocks.draftProcedure.mockResolvedValue({
+        ...procedure(2),
+        min_pod_size: 2,
+        max_pod_size: 4,
+        allowed_pod_sizes: [2, 3, 4],
+        distribution: { SharedStackPiles: { pile_count: 3 } },
+        // The CAPABILITY is what the store reads, not the distribution. Spread
+        // over the fixture, so it has to be narrowed here exactly as
+        // `DraftProcedure::allowed_set_layouts` narrows it for a shared stack.
+        allowed_set_layouts: ["UniformByRound"],
+      });
+
+      await useDraftPodStore.getState().enterKind("Winston");
+
+      expect(useDraftPodStore.getState().config.kind).toBe("Winston");
+      expect(useDraftPodStore.getState().setDraftMode).toBe("uniform");
+    });
+
+    /**
+     * THE PUBLISHED LIST DECIDES, NOT THE DISTRIBUTION.
+     *
+     * Every other row here supplies a procedure whose `distribution` and
+     * `allowed_set_layouts` AGREE, because the fixture derives one from the
+     * other. That makes them all blind to the change this pair exists for:
+     * restore `setDraftModeFor(prev.packDistribution, ...)` and they stay green,
+     * because the two inputs give the same answer on every consistent fixture.
+     *
+     * So these two SKEW them on purpose. Neither procedure is one the engine
+     * would publish -- that is the point: they isolate which input the store
+     * actually reads. Both legs red if the store goes back to asking the
+     * distribution.
+     */
+    /**
+     * AN ABSENT CONTRACT IS NOT PERMISSION.
+     *
+     * `allowedSetLayouts` is `null` until a procedure has been published for the
+     * current selection. This used to keep the host's request through that
+     * window, on the reasoning that the engine refuses at `StartDraft` anyway --
+     * but "it will be refused later" is not a reason to hold a selection the
+     * engine may never honour, and it is how a stale Chaos intent survived a
+     * kind change to reach a control that could not be satisfied.
+     */
+    it("normalizes a chaos selection while no layout contract has been published", () => {
+      useDraftPodStore.setState({ allowedSetLayouts: ["UniformByRound", "Chaos"] });
+      useDraftPodStore.getState().setSetDraftMode("chaos");
+      // Reach guard: with a permitting contract the selection really does stick,
+      // so the normalization below is the ABSENCE doing it and not the action.
+      expect(useDraftPodStore.getState().setDraftMode).toBe("chaos");
+
+      useDraftPodStore.setState({ allowedSetLayouts: null });
+      useDraftPodStore.getState().setSetDraftMode("chaos");
+
+      expect(useDraftPodStore.getState().setDraftMode).toBe("uniform");
+    });
+
+    it("keeps chaos when the published list allows it, whatever the distribution says", async () => {
+      // A contract that ADMITS Chaos has to be in place first: an absent one
+      // normalizes the selection away, which is the point of the rows below.
+      useDraftPodStore.setState({ allowedSetLayouts: ["UniformByRound", "Chaos"] });
+      useDraftPodStore.getState().setSetDraftMode("chaos");
+      mocks.draftProcedure.mockResolvedValue({
+        ...procedure(2),
+        allowed_pod_sizes: [2, 3, 4],
+        distribution: { SharedStackPiles: { pile_count: 3 } },
+        allowed_set_layouts: ["UniformByRound", "Chaos"],
+      });
+
+      await useDraftPodStore.getState().enterKind("Winston");
+
+      expect(useDraftPodStore.getState().setDraftMode).toBe("chaos");
+    });
+
+    it("drops chaos when the published list omits it, whatever the distribution says", async () => {
+      // A contract that ADMITS Chaos has to be in place first: an absent one
+      // normalizes the selection away, which is the point of the rows below.
+      useDraftPodStore.setState({ allowedSetLayouts: ["UniformByRound", "Chaos"] });
+      useDraftPodStore.getState().setSetDraftMode("chaos");
+      mocks.draftProcedure.mockResolvedValue({
+        ...procedure(2),
+        allowed_pod_sizes: [2, 3, 4],
+        distribution: "PickAndPass",
+        allowed_set_layouts: ["UniformByRound"],
+      });
+
+      await useDraftPodStore.getState().enterKind("Premier");
+
+      expect(useDraftPodStore.getState().setDraftMode).toBe("uniform");
+    });
+
+    it("keeps a chaos selection for a kind that passes packs", async () => {
+      // The paired positive for the row above, through the SAME entry point:
+      // publication normalizes on the distribution, not on every entry.
+      // A contract that ADMITS Chaos has to be in place first: an absent one
+      // normalizes the selection away, which is the point of the rows below.
+      useDraftPodStore.setState({ allowedSetLayouts: ["UniformByRound", "Chaos"] });
+      useDraftPodStore.getState().setSetDraftMode("chaos");
+      mocks.draftProcedure.mockResolvedValue(procedure(8));
+
+      await useDraftPodStore.getState().enterKind("Premier");
+
+      expect(useDraftPodStore.getState().setDraftMode).toBe("chaos");
     });
 
     it("uses the procedure distribution to select a set pool", async () => {
@@ -361,6 +573,37 @@ describe("draftPodStore", () => {
 
       expect(useDraftPodStore.getState().poolMode).toBe("set");
     });
+
+    it("does not allow a chaos selection when the procedure shares one stack", () => {
+      // Paired positive FIRST, on the same action and the same store: a
+      // pick-and-pass distribution keeps the host's chaos intent, so the
+      // refusal below is the distribution's doing and not the action's.
+      useDraftPodStore.setState({
+        packDistribution: "PickAndPass",
+        allowedSetLayouts: ["UniformByRound", "Chaos"],
+        setDraftMode: "uniform",
+      });
+      useDraftPodStore.getState().setSetDraftMode("chaos");
+      expect(useDraftPodStore.getState().setDraftMode).toBe("chaos");
+
+      // A shared stack shuffles every booster together before the first
+      // decision, so a per-(seat, round) set assignment describes nothing the
+      // players can observe — and `DraftProcedure::validate_source` refuses
+      // the pair outright. The engine's pile count is carried through rather
+      // than invented: this is the tagged member, not a kind name.
+      // The store reads the engine's published capability now, not the
+      // distribution -- the distribution is carried alongside it only because
+      // other selectors still read it.
+      useDraftPodStore.setState({
+        packDistribution: { SharedStackPiles: { pile_count: 3 } },
+        allowedSetLayouts: ["UniformByRound"],
+        setDraftMode: "uniform",
+      });
+
+      useDraftPodStore.getState().setSetDraftMode("chaos");
+
+      expect(useDraftPodStore.getState().setDraftMode).toBe("uniform");
+    });
   });
 
   describe("setConfig", () => {
@@ -523,6 +766,19 @@ describe("draftPodStore", () => {
     });
   });
 
+  describe("setListing", () => {
+    it("merges into the existing listing rather than replacing it", () => {
+      useDraftPodStore.getState().setListing({ isPublic: true, roomName: "Friday" });
+      useDraftPodStore.getState().setListing({ password: "secret" });
+
+      expect(useDraftPodStore.getState().listing).toEqual({
+        isPublic: true,
+        roomName: "Friday",
+        password: "secret",
+      });
+    });
+  });
+
   describe("resumeHostedPod", () => {
     it("returns absent silently without changing setup state", async () => {
       const outcome = await useDraftPodStore.getState().resumeHostedPod({ silent: true, routeToken: 1 });
@@ -534,9 +790,9 @@ describe("draftPodStore", () => {
     it("treats a completed persisted snapshot as terminal and never re-hosts it", async () => {
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
       mocks.loadDraftHostSession.mockResolvedValue({
-        ...persistedSession,
-        draftStarted: true,
-        draftSessionJson: '{"status":"Complete"}',
+        type: "terminal",
+        session: { ...persistedSession, draftStarted: true, draftSessionJson: '{"status":"Complete"}' },
+        raw: { ...persistedSession, draftStarted: true, draftSessionJson: '{"status":"Complete"}' },
       });
 
       const outcome = await useDraftPodStore.getState().resumeHostedPod({ routeToken: 2 });
@@ -546,12 +802,46 @@ describe("draftPodStore", () => {
       expect(mocks.clearActiveDraftPodIfCurrent).toHaveBeenCalled();
     });
 
+    it.each([
+      ["FIFO flow", "fifo_drafting"],
+      ["Review", "legacy_review"],
+      ["residual FIFO", "legacy_carrying_fifo"],
+    ] as const)("keeps an incompatible %s source host-only and does not detach into guest recovery", async (_label, name) => {
+      const saved = savedSession(name);
+      const raw = { ...persistedSession, draftStarted: true, draftSessionJson: saved.text };
+      mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: raw, raw });
+      mocks.checkRestorableSession.mockResolvedValue(saved.verdict);
+
+      await expect(useDraftPodStore.getState().resumeHostedPod({ routeToken: 66 })).resolves.toBe("incompatible");
+
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+      expect(mocks.clearActiveDraftPodIfCurrent).not.toHaveBeenCalled();
+      expect(useDraftPodStore.getState().hostRecoveryFailure).toMatchObject({
+        kind: "incompatible",
+        capture: { id: "draft-1", roomCode: "ABCDE" },
+        raw,
+      });
+    });
+
+    it("retains a read failure as host recovery rather than clearing the locator", async () => {
+      const failure = new Error("IDB unavailable");
+      mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "readFailure", error: failure });
+
+      await expect(useDraftPodStore.getState().resumeHostedPod({ routeToken: 67 })).resolves.toBe("readFailure");
+
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+      expect(mocks.clearActiveDraftPodIfCurrent).not.toHaveBeenCalled();
+      expect(useDraftPodStore.getState().hostRecoveryFailure).toMatchObject({ kind: "readFailure", error: failure });
+    });
+
     it("does not host when the recovery procedure lookup fails", async () => {
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
-      mocks.loadDraftHostSession.mockResolvedValue(persistedSession);
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: persistedSession, raw: persistedSession });
       mocks.draftProcedure.mockRejectedValue(new Error("wasm unavailable"));
 
-      await expect(useDraftPodStore.getState().resumeHostedPod()).resolves.toBe("invalid");
+      await expect(useDraftPodStore.getState().resumeHostedPod()).resolves.toBe("initializationFailure");
 
       expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
       expect(useDraftPodStore.getState().configError).toBe("wasm unavailable");
@@ -560,7 +850,7 @@ describe("draftPodStore", () => {
     it("uses the snapshot rather than stale complete metadata as resume authority", async () => {
       const staleMeta = { ...activeMeta, phase: "complete" as const };
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: staleMeta, capture: { id: staleMeta.id, roomCode: staleMeta.roomCode, updatedAt: staleMeta.updatedAt } });
-      mocks.loadDraftHostSession.mockResolvedValue(persistedSession);
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: persistedSession, raw: persistedSession });
 
       const outcome = await useDraftPodStore.getState().resumeHostedPod({ routeToken: 3 });
 
@@ -570,7 +860,7 @@ describe("draftPodStore", () => {
     });
 
     it("does not publish a persisted pod after a newer procedure request", async () => {
-      let resolveSession!: (session: typeof persistedSession) => void;
+      let resolveSession!: (result: { type: "admitted"; session: typeof persistedSession; raw: unknown }) => void;
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
       mocks.loadDraftHostSession.mockReturnValue(new Promise((resolve) => {
         resolveSession = resolve;
@@ -578,7 +868,7 @@ describe("draftPodStore", () => {
 
       const resuming = useDraftPodStore.getState().resumeHostedPod();
       await useDraftPodStore.getState().enterKind("CommanderDraft");
-      resolveSession(persistedSession);
+      resolveSession({ type: "admitted", session: persistedSession, raw: persistedSession });
 
       await expect(resuming).resolves.toBe("superseded");
       expect(useDraftPodStore.getState().config.kind).toBe("CommanderDraft");
@@ -591,13 +881,13 @@ describe("draftPodStore", () => {
     ])("does not host when recovery's procedure lookup is superseded by %s", async (_reason, supersede) => {
       let resolveProcedure!: (value: DraftProcedure | PromiseLike<DraftProcedure>) => void;
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
-      mocks.loadDraftHostSession.mockResolvedValue(persistedSession);
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: persistedSession, raw: persistedSession });
       mocks.draftProcedure.mockImplementationOnce(() => new Promise((resolve) => {
         resolveProcedure = resolve;
       }));
 
       const resuming = useDraftPodStore.getState().resumeHostedPod();
-      await Promise.resolve();
+      for (let turn = 0; turn < 50 && mocks.draftProcedure.mock.calls.length === 0; turn++) await Promise.resolve();
       expect(mocks.draftProcedure).toHaveBeenCalledOnce();
       supersede();
       resolveProcedure({
@@ -619,9 +909,118 @@ describe("draftPodStore", () => {
       expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
     });
 
+    describe("a retry after a failed host recovery", () => {
+      const capture = { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt };
+
+      async function failFirstRead() {
+        mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture });
+        mocks.loadDraftHostSession.mockRejectedValueOnce(new Error("storage read failed"));
+        mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: persistedSession, raw: persistedSession });
+        const entry = new AbortController();
+        await expect(useDraftPodStore.getState().resumeHostedPod({ entry: "host", routeToken: 1, signal: entry.signal }))
+          .resolves.toBe("readFailure");
+        return useDraftPodStore.getState().hostRecoveryFailure!;
+      }
+
+      it("resumes the host when nothing else starts", async () => {
+        const failure = await failFirstRead();
+        const retry = new AbortController();
+
+        await expect(useDraftPodStore.getState().resumeHostedPod({ routeToken: 2, signal: retry.signal, expectedFailure: failure }))
+          .resolves.toBe("resumed");
+        expect(mocks.multiplayerState.resumeHostedDraft).toHaveBeenCalledOnce();
+      });
+
+      it("is superseded by a procedure refresh started right after it", async () => {
+        const failure = await failFirstRead();
+        const retry = new AbortController();
+
+        const retrying = useDraftPodStore.getState().resumeHostedPod({ routeToken: 2, signal: retry.signal, expectedFailure: failure });
+        void useDraftPodStore.getState().refreshProcedure();
+
+        await expect(retrying).resolves.toBe("superseded");
+        expect(mocks.multiplayerState.resumeHostedDraft).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("a hosted recovery in flight", () => {
+      const capture = { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt };
+      let settleRead!: (result: { type: "admitted"; session: typeof persistedSession; raw: unknown }) => void;
+
+      // The read is held only by the resume that consumes it at once, so a row
+      // that stops early leaves nothing queued for the next one.
+      function resumeWithHeldRead(options: { routeToken: number; signal?: AbortSignal }) {
+        mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture });
+        mocks.loadDraftHostSession.mockReturnValueOnce(new Promise((resolve) => {
+          settleRead = resolve;
+        }));
+        return useDraftPodStore.getState().resumeHostedPod(options);
+      }
+
+      it("is reported until a procedure refresh supersedes it", async () => {
+        expect(isHostedPodRecoveryInFlight()).toBe(false);
+        const resuming = resumeWithHeldRead({ routeToken: 3 });
+        expect(isHostedPodRecoveryInFlight()).toBe(true);
+
+        void useDraftPodStore.getState().refreshProcedure();
+
+        expect(isHostedPodRecoveryInFlight()).toBe(false);
+        settleRead({ type: "admitted", session: persistedSession, raw: persistedSession });
+        await expect(resuming).resolves.toBe("superseded");
+      });
+
+      it("is reported until the recovery settles", async () => {
+        expect(isHostedPodRecoveryInFlight()).toBe(false);
+        const resuming = resumeWithHeldRead({ routeToken: 4 });
+        expect(isHostedPodRecoveryInFlight()).toBe(true);
+
+        settleRead({ type: "admitted", session: persistedSession, raw: persistedSession });
+
+        await expect(resuming).resolves.toBe("resumed");
+        expect(isHostedPodRecoveryInFlight()).toBe(false);
+      });
+
+      it("is not reported once its route signal aborts, while its read is still pending", async () => {
+        expect(isHostedPodRecoveryInFlight()).toBe(false);
+        const route = new AbortController();
+        const resuming = resumeWithHeldRead({ routeToken: 5, signal: route.signal });
+        expect(isHostedPodRecoveryInFlight()).toBe(true);
+
+        route.abort();
+
+        expect(isHostedPodRecoveryInFlight()).toBe(false);
+        settleRead({ type: "admitted", session: persistedSession, raw: persistedSession });
+        await expect(resuming).resolves.toBe("superseded");
+      });
+
+      it("is ended by retiring a host recovery failure, while its read is still pending", async () => {
+        expect(isHostedPodRecoveryInFlight()).toBe(false);
+        const resuming = resumeWithHeldRead({ routeToken: 6 });
+        expect(isHostedPodRecoveryInFlight()).toBe(true);
+
+        useDraftPodStore.getState().retireHostedPodRecoveryFailure();
+
+        expect(isHostedPodRecoveryInFlight()).toBe(false);
+        expect(useDraftPodStore.getState().hostRecoveryFailure).toBeNull();
+        settleRead({ type: "admitted", session: persistedSession, raw: persistedSession });
+        await expect(resuming).resolves.toBe("superseded");
+        expect(mocks.multiplayerState.resumeHostedDraft).not.toHaveBeenCalled();
+      });
+
+      it("reaches the lifecycle store when nothing retires it", async () => {
+        const resuming = resumeWithHeldRead({ routeToken: 7 });
+        expect(isHostedPodRecoveryInFlight()).toBe(true);
+
+        settleRead({ type: "admitted", session: persistedSession, raw: persistedSession });
+
+        await expect(resuming).resolves.toBe("resumed");
+        expect(mocks.multiplayerState.resumeHostedDraft).toHaveBeenCalledOnce();
+      });
+    });
+
     it("publishes every procedure cache axis for a resumed pod", async () => {
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
-      mocks.loadDraftHostSession.mockResolvedValue(persistedSession);
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: persistedSession, raw: persistedSession });
       mocks.draftProcedure.mockResolvedValue({
         ...draftProcedureFixture(),
         pod_size: 8,
@@ -649,7 +1048,7 @@ describe("draftPodStore", () => {
 
     it("publishes resumed cache and dependent normalization atomically", async () => {
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
-      mocks.loadDraftHostSession.mockResolvedValue({
+      const session = {
         ...persistedSession,
         poolInput: {
           type: "Cube" as const,
@@ -665,7 +1064,8 @@ describe("draftPodStore", () => {
             },
           },
         },
-      });
+      };
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session, raw: session });
       mocks.draftProcedure.mockResolvedValue({
         ...draftProcedureFixture(),
         pod_size: 4,
@@ -705,8 +1105,8 @@ describe("draftPodStore", () => {
 
     it("does not report recovery as resumed when host initialization fails", async () => {
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
-      mocks.loadDraftHostSession.mockResolvedValue(persistedSession);
-      mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<boolean>>(async () => false);
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: persistedSession, raw: persistedSession });
+      mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<DraftSessionOpenOutcome>>(async () => ({ status: "failed", error: null }));
 
       await expect(useDraftPodStore.getState().resumeHostedPod({ routeToken: 4 })).resolves.toBe("invalid");
       expect(mocks.clearActiveDraftPodIfCurrent).not.toHaveBeenCalled();
@@ -717,7 +1117,7 @@ describe("draftPodStore", () => {
         useConnectivityStore.setState({ forcedOffline: true });
         throw new Error("IndexedDB unavailable");
       }, "offline", "offline.startUnavailable"],
-      ["ordinary", () => { throw new Error("IndexedDB unavailable"); }, "invalid", "IndexedDB unavailable"],
+      ["ordinary", () => { throw new Error("IndexedDB unavailable"); }, "readFailure", "IndexedDB unavailable"],
     ])("maps a rejected host session read by current ownership before %s handling", async (_label, reject, outcome, error) => {
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
       mocks.loadDraftHostSession.mockImplementationOnce(async () => reject());
@@ -733,7 +1133,7 @@ describe("draftPodStore", () => {
       ["forced offline", { forcedOffline: true, browserOnline: true }],
       ["browser offline", { forcedOffline: false, browserOnline: false }],
     ] as const)("returns offline after a fulfilled hosted session read becomes %s", async (_label, connectivity) => {
-      let resolveSession!: (session: typeof persistedSession) => void;
+      let resolveSession!: (result: { type: "admitted"; session: typeof persistedSession; raw: unknown }) => void;
       mocks.inspectActiveDraftPod.mockReturnValue({
         type: "present",
         meta: activeMeta,
@@ -746,7 +1146,7 @@ describe("draftPodStore", () => {
       const resuming = useDraftPodStore.getState().resumeHostedPod();
       await vi.waitFor(() => expect(mocks.loadDraftHostSession).toHaveBeenCalledOnce());
       useConnectivityStore.setState(connectivity);
-      resolveSession(persistedSession);
+      resolveSession({ type: "admitted", session: persistedSession, raw: persistedSession });
 
       await expect(resuming).resolves.toBe("offline");
       expect(mocks.clearActiveDraftPodIfCurrent).not.toHaveBeenCalled();
@@ -755,8 +1155,8 @@ describe("draftPodStore", () => {
     });
 
     it("deduplicates concurrent resume calls for the same hosted pod", async () => {
-      let resolveSession!: (session: typeof persistedSession) => void;
-      const sessionPromise = new Promise<typeof persistedSession>((resolve) => {
+      let resolveSession!: (result: { type: "admitted"; session: typeof persistedSession; raw: unknown }) => void;
+      const sessionPromise = new Promise<{ type: "admitted"; session: typeof persistedSession; raw: unknown }>((resolve) => {
         resolveSession = resolve;
       });
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
@@ -764,7 +1164,7 @@ describe("draftPodStore", () => {
 
       const first = useDraftPodStore.getState().resumeHostedPod();
       const second = useDraftPodStore.getState().resumeHostedPod();
-      resolveSession(persistedSession);
+      resolveSession({ type: "admitted", session: persistedSession, raw: persistedSession });
       await Promise.all([first, second]);
 
       expect(mocks.loadDraftHostSession).toHaveBeenCalledTimes(1);
@@ -775,6 +1175,7 @@ describe("draftPodStore", () => {
       mocks.multiplayerState.role = "host";
       mocks.multiplayerState.phase = "matchInProgress";
       mocks.multiplayerState.roomCode = "ABCDE";
+      mocks.multiplayerState.hostPersistenceId = "draft-1";
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
 
       await useDraftPodStore.getState().resumeHostedPod();
@@ -788,7 +1189,7 @@ describe("draftPodStore", () => {
       mocks.multiplayerState.phase = "error";
       mocks.multiplayerState.roomCode = "ABCDE";
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
-      mocks.loadDraftHostSession.mockResolvedValue(persistedSession);
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: persistedSession, raw: persistedSession });
 
       await useDraftPodStore.getState().resumeHostedPod();
 
@@ -803,7 +1204,7 @@ describe("draftPodStore", () => {
      */
     it("restores the pack sequence from a persisted multi-set snapshot", async () => {
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
-      mocks.loadDraftHostSession.mockResolvedValue({
+      const session = {
         ...persistedSession,
         poolInput: {
           type: "Set" as const,
@@ -812,7 +1213,8 @@ describe("draftPodStore", () => {
             sequence: ["ISD", "DKA", "ISD"],
           },
         },
-      });
+      };
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session, raw: session });
 
       await useDraftPodStore.getState().resumeHostedPod();
 
@@ -835,7 +1237,7 @@ describe("draftPodStore", () => {
         },
       };
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
-      mocks.loadDraftHostSession.mockResolvedValue(chaosSession);
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: chaosSession, raw: chaosSession });
 
       await useDraftPodStore.getState().resumeHostedPod();
 
@@ -856,10 +1258,11 @@ describe("draftPodStore", () => {
      */
     it("resumes a pre-multi-set snapshot with no pack sequence", async () => {
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
-      mocks.loadDraftHostSession.mockResolvedValue({
+      const session = {
         ...persistedSession,
         poolInput: { type: "Set" as const, data: { set_pool_json: '{"code":"TST"}' } },
-      });
+      };
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session, raw: session });
 
       const outcome = await useDraftPodStore.getState().resumeHostedPod();
 
@@ -890,7 +1293,7 @@ describe("draftPodStore", () => {
         },
       };
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
-      mocks.loadDraftHostSession.mockResolvedValue(cubeSession);
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: cubeSession, raw: cubeSession });
 
       await useDraftPodStore.getState().resumeHostedPod();
 
@@ -908,6 +1311,296 @@ describe("draftPodStore", () => {
         poolInput: { type: string };
       };
       expect(dispatched.poolInput.type).toBe("Cube");
+    });
+
+    it("does not list a resumed pod", async () => {
+      useDraftPodStore.getState().setListing({ isPublic: true });
+      mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
+      // Seated within LOBBY_LISTING_MAX_SEATS so only the resume path's own
+      // no-relist behaviour, not the seat gate, can keep this pod unlisted.
+      const session = { ...persistedSession, podSize: 6 };
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session, raw: session });
+
+      const outcome = await useDraftPodStore.getState().resumeHostedPod();
+
+      expect(outcome).toBe("resumed");
+      // Reach guard: the resume really did reach hosting.
+      expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
+      const dispatched = mocks.multiplayerState.hostDraft.mock.calls[0]?.[0] as { listing?: unknown };
+      expect(dispatched.listing).toBeUndefined();
+      expect(mocks.multiplayerConfig.resolveP2PBroker).not.toHaveBeenCalled();
+      expect(mocks.openBrokerClient).not.toHaveBeenCalled();
+    });
+
+    describe("automatic entry never replaces a session this tab holds", () => {
+      const heldPhases = [
+        "connecting", "lobby", "drafting", "deckbuilding", "pairing",
+        "matchInProgress", "roundComplete", "complete", "kicked", "hostLeft",
+      ] as const;
+      const presentRecord = () => {
+        mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
+        mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: persistedSession, raw: persistedSession });
+      };
+
+      it.each(heldPhases.map((phase) => [phase] as const))(
+        "yields to a held guest in %s",
+        async (phase) => {
+          presentRecord();
+          mocks.multiplayerState.role = "guest";
+          mocks.multiplayerState.phase = phase;
+
+          const outcome = await useDraftPodStore.getState().resumeHostedPod({ entry: "auto", silent: true, routeToken: 20 });
+
+          expect(outcome).toBe("superseded");
+          expect(mocks.inspectActiveDraftPod).not.toHaveBeenCalled();
+          expect(mocks.loadDraftHostSession).not.toHaveBeenCalled();
+          expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+          expect(mocks.clearActiveDraftPodIfCurrent).not.toHaveBeenCalled();
+          expect(useDraftPodStore.getState().configError).toBeNull();
+        },
+      );
+
+      it("yields to a held host of a different room", async () => {
+        presentRecord();
+        mocks.multiplayerState.role = "host";
+        mocks.multiplayerState.phase = "lobby";
+        mocks.multiplayerState.roomCode = "ZZZZZ";
+
+        const outcome = await useDraftPodStore.getState().resumeHostedPod({ entry: "auto", silent: true, routeToken: 21 });
+
+        expect(outcome).toBe("superseded");
+        expect(mocks.loadDraftHostSession).not.toHaveBeenCalled();
+        expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+      });
+
+      it("yields to a held host with no room code yet", async () => {
+        presentRecord();
+        mocks.multiplayerState.role = "host";
+        mocks.multiplayerState.phase = "connecting";
+        mocks.multiplayerState.roomCode = null;
+
+        const outcome = await useDraftPodStore.getState().resumeHostedPod({ entry: "auto", silent: true, routeToken: 22 });
+
+        expect(outcome).toBe("superseded");
+        expect(mocks.loadDraftHostSession).not.toHaveBeenCalled();
+        expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+      });
+
+      it("yields to a held host even with no saved record, rather than reporting absent", async () => {
+        mocks.multiplayerState.role = "host";
+        mocks.multiplayerState.phase = "connecting";
+        mocks.multiplayerState.roomCode = null;
+
+        const outcome = await useDraftPodStore.getState().resumeHostedPod({ entry: "auto", silent: true, routeToken: 23 });
+
+        expect(outcome).toBe("superseded");
+        expect(mocks.inspectActiveDraftPod).not.toHaveBeenCalled();
+      });
+
+      it("still switches a held guest on explicit host entry", async () => {
+        presentRecord();
+        mocks.multiplayerState.role = "guest";
+        mocks.multiplayerState.phase = "lobby";
+
+        const outcome = await useDraftPodStore.getState().resumeHostedPod({ entry: "host", routeToken: 24 });
+
+        expect(outcome).toBe("resumed");
+        expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
+      });
+
+      it("a guest in error does not yield", async () => {
+        presentRecord();
+        mocks.multiplayerState.role = "guest";
+        mocks.multiplayerState.phase = "error";
+
+        const outcome = await useDraftPodStore.getState().resumeHostedPod({ entry: "auto", silent: true, routeToken: 25 });
+
+        expect(outcome).toBe("resumed");
+        expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
+      });
+
+      it("nothing held does not yield", async () => {
+        presentRecord();
+
+        const outcome = await useDraftPodStore.getState().resumeHostedPod({ entry: "auto", silent: true, routeToken: 26 });
+
+        expect(outcome).toBe("resumed");
+        expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
+      });
+
+      it("reports a superseded hosting attempt as superseded", async () => {
+        presentRecord();
+        mocks.multiplayerState.hostDraft.mockResolvedValueOnce({ status: "superseded" });
+
+        const outcome = await useDraftPodStore.getState().resumeHostedPod({ entry: "auto", silent: true, routeToken: 27 });
+
+        expect(outcome).toBe("superseded");
+        expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
+      });
+
+      // `startMatch` writes `phase: "matchInProgress"` after awaiting adapter
+      // setup without checking the session still exists, so a `leave`/`reset`
+      // mid-await can leave `role: null` next to that phase. That combination
+      // must not yield: nothing is held.
+      it("does not yield when a stale matchInProgress phase is left with no role", async () => {
+        presentRecord();
+        mocks.multiplayerState.role = null;
+        mocks.multiplayerState.phase = "matchInProgress";
+
+        const outcome = await useDraftPodStore.getState().resumeHostedPod({ entry: "auto", silent: true, routeToken: 27 });
+
+        expect(outcome).toBe("resumed");
+        expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
+      });
+    });
+
+    it("retires a visible host failure before an intentional guest route and leaves its retry inert", async () => {
+      const capture = { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt };
+      mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture });
+      const saved = savedSession("fifo_drafting");
+      const refused = { ...persistedSession, draftStarted: true, draftSessionJson: saved.text };
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: refused, raw: refused });
+      mocks.checkRestorableSession.mockResolvedValue(saved.verdict);
+
+      await expect(useDraftPodStore.getState().resumeHostedPod({ routeToken: 91 })).resolves.toBe("incompatible");
+      const failure = useDraftPodStore.getState().hostRecoveryFailure;
+      expect(failure).toMatchObject({ capture, routeToken: 91 });
+
+      useDraftPodStore.getState().retireHostedPodRecoveryFailure();
+      expect(useDraftPodStore.getState().hostRecoveryFailure).toBeNull();
+      await expect(useDraftPodStore.getState().resumeHostedPod({
+        routeToken: 92,
+        expectedFailure: failure!,
+      })).resolves.toBe("superseded");
+      expect(mocks.loadDraftHostSession).toHaveBeenCalledOnce();
+    });
+
+    it("keeps a pending procedure refresh when a host recovery failure is retired", async () => {
+      let resolveProcedure!: (value: DraftProcedure | PromiseLike<DraftProcedure>) => void;
+      mocks.draftProcedure.mockImplementationOnce(() => new Promise((resolve) => {
+        resolveProcedure = resolve;
+      }));
+
+      const refreshing = useDraftPodStore.getState().refreshProcedure();
+      expect(mocks.draftProcedure).toHaveBeenCalledOnce();
+      expect(mocks.draftProcedure).toHaveBeenCalledWith("Premier", "Swiss");
+
+      useDraftPodStore.getState().retireHostedPodRecoveryFailure();
+      resolveProcedure(draftProcedureFixture({ min_pod_size: 3, allowed_pod_sizes: [3, 4, 5, 6, 7, 8] }));
+      await refreshing;
+
+      expect(useDraftPodStore.getState().procedureCacheKey).toEqual({ kind: "Premier", tournamentFormat: "Swiss" });
+      expect(useDraftPodStore.getState().allowedPodSizes).toEqual([3, 4, 5, 6, 7, 8]);
+    });
+
+    it("does not let a same-code replacement retry or clear an older capture", async () => {
+      const captureA = { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt };
+      const captureB = { id: "draft-2", roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt + 1 };
+      let current = { type: "present" as const, meta: activeMeta, capture: captureA };
+      mocks.inspectActiveDraftPod.mockImplementation(() => current);
+      const saved = savedSession("fifo_drafting");
+      const refused = { ...persistedSession, draftStarted: true, draftSessionJson: saved.text };
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: refused, raw: refused });
+      mocks.checkRestorableSession.mockResolvedValue(saved.verdict);
+
+      await useDraftPodStore.getState().resumeHostedPod({ routeToken: 93 });
+      const failure = useDraftPodStore.getState().hostRecoveryFailure!;
+      current = {
+        type: "present",
+        meta: { ...activeMeta, id: captureB.id, updatedAt: captureB.updatedAt },
+        capture: captureB,
+      };
+
+      await expect(useDraftPodStore.getState().resumeHostedPod({
+        routeToken: 94,
+        expectedFailure: failure,
+      })).resolves.toBe("superseded");
+      expect(mocks.clearActiveDraftPodIfCurrent).not.toHaveBeenCalled();
+      expect(mocks.loadDraftHostSession).toHaveBeenCalledOnce();
+    });
+
+    it("keeps installed A through real persistence-to-pod-to-lifecycle recovery refusals, then commits exactly current B", async () => {
+      const lifecycle = useMultiplayerDraftStore;
+      await lifecycle.getState().leave(true);
+      // This suite has no module replacement: restore the genuine lifecycle
+      // actions after the surrounding ordinary-unit tests installed their
+      // controlled returns on the same real Zustand state object.
+      lifecycle.setState({
+        hostDraft: realLifecycleActions.hostDraft,
+        resumeHostedDraft: realLifecycleActions.resumeHostedDraft,
+      } as never);
+      const hostResult = (roomCode: string) => ({
+        roomCode,
+        peerId: `phase-${roomCode}`,
+        peer: { destroy: vi.fn() },
+        onGuestConnected: vi.fn(() => vi.fn()),
+        destroy: vi.fn(),
+      });
+      const configFor = (session: typeof persistedSession) => ({
+        poolInput: session.poolInput,
+        kind: session.kind,
+        podSize: session.podSize,
+        hostDisplayName: session.hostDisplayName,
+        tournamentFormat: session.tournamentFormat,
+        podPolicy: session.podPolicy,
+        persistenceId: session.persistenceId,
+        preferredRoomCode: session.roomCode,
+      });
+      const ownerA = { ...persistedSession, persistenceId: "owner-a", roomCode: "AAAAA" };
+      const ownerB = { ...persistedSession, persistenceId: "owner-b", roomCode: "BBBBB" };
+      mocks.loadDraftHostSession.mockReset();
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "absent" });
+      mocks.recoveryHostRoom.mockResolvedValueOnce(hostResult(ownerA.roomCode));
+      await expect(lifecycle.getState().hostDraft(configFor(ownerA) as never)).resolves.toEqual({ status: "opened" });
+      const hostA = mocks.recoveryHosts[0];
+      expect(lifecycle.getState()).toMatchObject({
+        role: "host",
+        hostPersistenceId: ownerA.persistenceId,
+      });
+
+      // Persistence is an external collaborator, but the pod calls the
+      // actual lifecycle action above; it constructs the real wrapper rather
+      // than borrowing a method behind a fake module state.
+      const capture = { id: ownerB.persistenceId, roomCode: ownerB.roomCode, updatedAt: activeMeta.updatedAt + 10 };
+      mocks.inspectActiveDraftPod.mockReturnValue({
+        type: "present",
+        meta: { ...activeMeta, ...capture },
+        capture,
+      });
+      const saved = savedSession("fifo_drafting");
+      const refusedB = { ...ownerB, draftStarted: true, draftSessionJson: saved.text };
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: refusedB, raw: refusedB });
+      mocks.checkRestorableSession.mockResolvedValue(saved.verdict);
+      await expect(useDraftPodStore.getState().resumeHostedPod({ routeToken: 701 })).resolves.toBe("incompatible");
+      expect(lifecycle.getState()).toMatchObject({
+        role: "host",
+        hostPersistenceId: ownerA.persistenceId,
+      });
+      expect(hostA?.dispose).not.toHaveBeenCalled();
+
+      let resolveB!: (value: ReturnType<typeof hostResult>) => void;
+      mocks.recoveryHostRoom.mockImplementationOnce(() => new Promise<ReturnType<typeof hostResult>>((resolve) => { resolveB = resolve; }));
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: ownerB, raw: ownerB });
+      const abort = new AbortController();
+      const abortedB = useDraftPodStore.getState().resumeHostedPod({ routeToken: 702, signal: abort.signal });
+      await vi.waitFor(() => expect(mocks.recoveryHostRoom).toHaveBeenCalledTimes(2));
+      abort.abort();
+      resolveB(hostResult(ownerB.roomCode));
+      await expect(abortedB).resolves.toBe("superseded");
+      expect(lifecycle.getState()).toMatchObject({
+        role: "host",
+        hostPersistenceId: ownerA.persistenceId,
+      });
+      expect(hostA?.dispose).not.toHaveBeenCalled();
+
+      mocks.recoveryHostRoom.mockResolvedValueOnce(hostResult(ownerB.roomCode));
+      await expect(useDraftPodStore.getState().resumeHostedPod({ routeToken: 703 })).resolves.toBe("resumed");
+      expect(lifecycle.getState()).toMatchObject({
+        role: "host",
+        hostPersistenceId: ownerB.persistenceId,
+      });
+      await vi.waitFor(() => expect(hostA?.dispose).toHaveBeenCalledOnce());
+      await lifecycle.getState().leave(true);
     });
   });
 
@@ -1008,8 +1701,8 @@ describe("draftPodStore", () => {
       expect((dispatched as { backupEndpoint?: string }).backupEndpoint).toBe("https://phase.example");
     });
 
-    it("surfaces a current false host result for cube creation", async () => {
-      mocks.multiplayerState.hostDraft.mockResolvedValueOnce(false);
+    it("surfaces a current failed host result for cube creation", async () => {
+      mocks.multiplayerState.hostDraft.mockResolvedValueOnce({ status: "failed", error: null });
       useDraftPodStore.setState({
         poolMode: "cube",
         cubeForm: {
@@ -1030,6 +1723,28 @@ describe("draftPodStore", () => {
 
       expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
       expect(useDraftPodStore.getState().configError).toBe("Unable to host draft pod");
+    });
+    it("surfaces the failed host attempt's own error for cube creation", async () => {
+      mocks.multiplayerState.hostDraft.mockResolvedValueOnce({ status: "failed", error: "Host signaling failed" });
+      useDraftPodStore.setState({
+        poolMode: "cube",
+        cubeForm: {
+          cubeName: "Test Cube",
+          cubeListText: "1 Lightning Bolt\n",
+          settings: {
+            pod_size: 2,
+            pack_count: 1,
+            cards_per_pack: 2,
+            min_deck_size: 4,
+            addable_cards: { policy: "StandardBasics", custom: [] },
+          },
+        },
+        hostDisplayName: "Host",
+      });
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(useDraftPodStore.getState().configError).toBe("Host signaling failed");
     });
   });
 
@@ -1341,6 +2056,654 @@ describe("draftPodStore", () => {
     });
   });
 
+  describe("createPod lobby listing", () => {
+    afterEach(async () => {
+      vi.unstubAllGlobals();
+      await i18n.changeLanguage("en");
+    });
+
+    /** Stub the pool fetch with a `draft-pools.json` carrying `codes`. */
+    function stubPools(codes: string[]): void {
+      vi.stubGlobal("__DRAFT_POOLS_URL__", "/draft-pools.json");
+      const pools = Object.fromEntries(codes.map((code) => [code.toLowerCase(), { code }]));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => ({ ok: true, status: 200, json: async () => pools })),
+      );
+    }
+
+    /** A published procedure admitting every seat count up to the lobby's
+     * ceiling, so `config.podSize` set through `setState` survives publication. */
+    function listableProcedure(overrides: Partial<DraftProcedure> = {}): DraftProcedure {
+      return {
+        ...draftProcedureFixture(),
+        pod_size: 6,
+        human_seats: 1,
+        min_pod_size: 2,
+        max_pod_size: 8,
+        allowed_pod_sizes: [2, 3, 4, 5, 6, 7, 8],
+        packs_per_player: 3,
+        cards_per_pick: 1,
+        distribution: "PickAndPass",
+        min_deck_size: 40,
+        post_draft_play: "TournamentPairings",
+        ...overrides,
+      };
+    }
+
+    /** Configure a set pod of `podSize` seats. */
+    function configureSetPod(podSize = 6): void {
+      useDraftPodStore.setState((prev) => ({
+        config: {
+          ...prev.config,
+          packs: [{ code: "TST", name: "Test Set" }],
+          setCode: "TST",
+          podSize,
+        },
+        hostDisplayName: "Host",
+      }));
+    }
+
+    function dispatchedHostConfig(): {
+      podSize: number;
+      listing?: { broker: unknown; request: Record<string, unknown> };
+    } {
+      const [config] = mocks.multiplayerState.hostDraft.mock.calls[0] as [{
+        podSize: number;
+        listing?: { broker: unknown; request: Record<string, unknown> };
+      }];
+      return config;
+    }
+
+    it("sends a public registration for a listed pod", async () => {
+      stubPools(["TST", "XYZ"]);
+      mocks.draftProcedure.mockResolvedValue(listableProcedure());
+      useDraftPodStore.setState((prev) => ({
+        config: {
+          ...prev.config,
+          packs: [
+            { code: "TST", name: "Test Set" },
+            { code: "TST", name: "Test Set" },
+            { code: "XYZ", name: "XYZ Set" },
+          ],
+          setCode: "TST+XYZ",
+          podSize: 6,
+        },
+        hostDisplayName: "Host",
+      }));
+      useDraftPodStore.getState().setListing({ isPublic: true });
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(mocks.multiplayerConfig.resolveP2PBroker).toHaveBeenCalledWith("wss://phase.example/ws");
+      expect(mocks.openBrokerClient).toHaveBeenCalledWith("wss://broker.example/ws");
+      const openedBroker = await mocks.openBrokerClient.mock.results[0]!.value;
+      const dispatched = dispatchedHostConfig();
+      expect(dispatched.listing?.broker).toBe(openedBroker);
+      expect(dispatched.listing?.request).toEqual({
+        displayName: "Host",
+        public: true,
+        password: null,
+        timerSeconds: null,
+        playerCount: 6,
+        matchConfig: { match_type: "Bo1" },
+        formatConfig: null,
+        roomName: "Host's table",
+        draftMetadata: { setCode: "TST+XYZ", draftKind: "Premier" },
+        ranked: false,
+      });
+    });
+
+    it("advertises the pod's own seat count, not the lobby's ceiling", async () => {
+      stubPools(["TST"]);
+      mocks.draftProcedure.mockResolvedValue(listableProcedure());
+      configureSetPod(4);
+      useDraftPodStore.getState().setListing({ isPublic: true });
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(dispatchedHostConfig().listing?.request.playerCount).toBe(4);
+    });
+
+    it("labels a Chaos pod by its candidate sets", async () => {
+      stubPools(["AAA", "BBB"]);
+      mocks.draftProcedure.mockResolvedValue(listableProcedure());
+      useDraftPodStore.setState((prev) => ({
+        config: {
+          ...prev.config,
+          packs: [
+            { code: "AAA", name: "Set AAA" },
+            { code: "BBB", name: "Set BBB" },
+          ],
+          setCode: "AAA+BBB",
+          podSize: 6,
+        },
+        hostDisplayName: "Host",
+        setDraftMode: "chaos",
+      }));
+      useDraftPodStore.getState().setListing({ isPublic: true });
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(dispatchedHostConfig().listing?.request.draftMetadata).toEqual({
+        setCode: "Chaos:AAA+BBB",
+        draftKind: "Premier",
+      });
+    });
+
+    it("labels a Chaos pod's candidates without deduplicating repeated sets", async () => {
+      stubPools(["AAA", "BBB"]);
+      mocks.draftProcedure.mockResolvedValue(listableProcedure());
+      useDraftPodStore.setState((prev) => ({
+        config: {
+          ...prev.config,
+          packs: [
+            { code: "AAA", name: "Set AAA" },
+            { code: "AAA", name: "Set AAA" },
+            { code: "BBB", name: "Set BBB" },
+          ],
+          setCode: "AAA+BBB",
+          podSize: 6,
+        },
+        hostDisplayName: "Host",
+        setDraftMode: "chaos",
+      }));
+      useDraftPodStore.getState().setListing({ isPublic: true });
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(dispatchedHostConfig().listing?.request.draftMetadata).toEqual({
+        setCode: "Chaos:AAA+AAA+BBB",
+        draftKind: "Premier",
+      });
+    });
+
+    it("labels a listed pod by its selected draft kind, not a hardcoded one", async () => {
+      stubPools(["TST"]);
+      mocks.draftProcedure.mockResolvedValue(listableProcedure());
+      configureSetPod(6);
+      useDraftPodStore.setState((prev) => ({ config: { ...prev.config, kind: "Sealed" } }));
+      useDraftPodStore.getState().setListing({ isPublic: true });
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(dispatchedHostConfig().listing?.request.draftMetadata).toEqual({
+        setCode: "TST",
+        draftKind: "Sealed",
+      });
+    });
+
+    it("dispatches the listing snapshotted at createPod's start, not a later edit", async () => {
+      stubPools(["TST"]);
+      let resolveCreateProcedure!: (procedure: DraftProcedure | PromiseLike<DraftProcedure>) => void;
+      mocks.draftProcedure.mockImplementationOnce(() => new Promise((resolve) => {
+        resolveCreateProcedure = resolve;
+      }));
+      configureSetPod(6);
+      useDraftPodStore.getState().setListing({ isPublic: true, roomName: "Before" });
+
+      const creating = useDraftPodStore.getState().createPod();
+      useDraftPodStore.getState().setListing({ roomName: "After" });
+      resolveCreateProcedure(listableProcedure());
+      await creating;
+
+      expect(dispatchedHostConfig().listing?.request.roomName).toBe("Before");
+    });
+
+    it("lists a cube pod by its name and Pod Size", async () => {
+      useDraftPodStore.setState((prev) => ({
+        config: { ...prev.config, podSize: 6 },
+        poolMode: "cube",
+        cubeForm: {
+          cubeName: "  My Cube  ",
+          cubeListText: "1 Lightning Bolt\n",
+          settings: {
+            pod_size: 8,
+            pack_count: 1,
+            cards_per_pack: 2,
+            min_deck_size: 4,
+            addable_cards: { policy: "StandardBasics", custom: [] },
+          },
+        },
+        hostDisplayName: "Host",
+      }));
+      useDraftPodStore.getState().setListing({ isPublic: true });
+
+      await useDraftPodStore.getState().createPod();
+
+      const dispatched = dispatchedHostConfig();
+      expect(dispatched.listing?.request.draftMetadata).toEqual({
+        setCode: "custom-cube",
+        draftKind: "Premier",
+        cubeName: "My Cube",
+      });
+      expect(dispatched.listing?.request.playerCount).toBe(6);
+    });
+
+    describe("room name default", () => {
+      it.each([
+        ["", "Host's table"],
+        ["   ", "Host's table"],
+        ["  Friday  ", "Friday"],
+      ])("names the room %j", async (roomName, expected) => {
+        stubPools(["TST"]);
+        mocks.draftProcedure.mockResolvedValue(listableProcedure());
+        configureSetPod(6);
+        useDraftPodStore.getState().setListing({ isPublic: true, roomName });
+
+        await useDraftPodStore.getState().createPod();
+
+        expect(dispatchedHostConfig().listing?.request.roomName).toBe(expected);
+      });
+
+      it("names the room in the host's language when it defaults", async () => {
+        i18n.addResourceBundle("de", "multiplayer", deMultiplayer, true, true);
+        await i18n.changeLanguage("de");
+        stubPools(["TST"]);
+        mocks.draftProcedure.mockResolvedValue(listableProcedure());
+        configureSetPod(6);
+        useDraftPodStore.getState().setListing({ isPublic: true });
+
+        await useDraftPodStore.getState().createPod();
+
+        const roomName = dispatchedHostConfig().listing?.request.roomName;
+        expect(roomName).toBe(
+          i18n.t("multiplayer:hostSetup.roomNameDefaultPlaceholder", { name: "Host", lng: "de" }),
+        );
+        expect(roomName).not.toBe("Host's table");
+      });
+    });
+
+    it.each([
+      ["pw", "pw"],
+      ["", null],
+      [" pw ", " pw "],
+    ])("carries the listing password %j", async (password, expected) => {
+      stubPools(["TST"]);
+      mocks.draftProcedure.mockResolvedValue(listableProcedure());
+      configureSetPod(6);
+      useDraftPodStore.getState().setListing({ isPublic: true, password });
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(dispatchedHostConfig().listing?.request.password).toBe(expected);
+    });
+
+    describe("label bounds", () => {
+      function configureCubePod(overrides: {
+        hostDisplayName?: string;
+        roomName?: string;
+        cubeName?: string;
+        password?: string;
+      } = {}): void {
+        useDraftPodStore.setState((prev) => ({
+          config: { ...prev.config, podSize: 2 },
+          poolMode: "cube",
+          cubeForm: {
+            cubeName: overrides.cubeName ?? "Cube",
+            cubeListText: "1 Lightning Bolt\n",
+            settings: {
+              pod_size: 2,
+              pack_count: 1,
+              cards_per_pack: 2,
+              min_deck_size: 4,
+              addable_cards: { policy: "StandardBasics", custom: [] },
+            },
+          },
+          hostDisplayName: overrides.hostDisplayName ?? "Host",
+        }));
+        useDraftPodStore.getState().setListing({
+          isPublic: true,
+          roomName: overrides.roomName ?? "",
+          password: overrides.password ?? "",
+        });
+      }
+
+      it.each([
+        [
+          "a display name past the bound",
+          { hostDisplayName: "A".repeat(21) },
+          "To list this pod in the lobby, use a display name of at most 20 characters.",
+        ],
+        [
+          "a room name past the bound",
+          { roomName: "A".repeat(41) },
+          "To list this pod in the lobby, use a room name of at most 40 characters.",
+        ],
+        [
+          "a cube name past the bound",
+          { cubeName: "A".repeat(41) },
+          "To list this pod in the lobby, use a cube name of at most 40 characters.",
+        ],
+        [
+          "a password past the byte bound",
+          // 65 code points, 130 UTF-8 bytes (2 bytes each) — over the 128-byte bound.
+          { password: "é".repeat(65) },
+          "To list this pod in the lobby, use a shorter password.",
+        ],
+        [
+          "a password one byte past the byte bound",
+          // 64 "é" (128 bytes) + one ASCII byte = 129 bytes — exactly LOBBY_PASSWORD_MAX_BYTES + 1.
+          { password: "é".repeat(64) + "a" },
+          "To list this pod in the lobby, use a shorter password.",
+        ],
+      ] as const)("refuses %s before contacting the lobby", async (_label, overrides, message) => {
+        configureCubePod(overrides);
+
+        await useDraftPodStore.getState().createPod();
+
+        expect(useDraftPodStore.getState().configError).toBe(message);
+        expect(mocks.multiplayerConfig.resolveP2PBroker).not.toHaveBeenCalled();
+        expect(mocks.openBrokerClient).not.toHaveBeenCalled();
+        expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        // 20 code points, 40 UTF-16 units — code points are what the bound counts.
+        ["a display name of 20 astral characters", { hostDisplayName: "🂡".repeat(20) }],
+        ["a room name at the bound", { roomName: "A".repeat(40) }],
+        ["a cube name at the bound", { cubeName: "A".repeat(40) }],
+        // 21 code points, 42 UTF-16 units — code points are what the bound counts.
+        ["a cube name of 21 astral characters", { cubeName: "🂡".repeat(21) }],
+        // 64 code points, 128 UTF-8 bytes — at, not over, the byte bound.
+        ["a password at the byte bound", { password: "é".repeat(64) }],
+      ] as const)("lists a pod with %s", async (_label, overrides) => {
+        configureCubePod(overrides);
+
+        await useDraftPodStore.getState().createPod();
+
+        expect(dispatchedHostConfig().listing).toBeDefined();
+      });
+    });
+
+    it.each([
+      [
+        "the resolver finds no lobby",
+        () => {
+          mocks.multiplayerConfig.resolveP2PBroker = vi.fn(async () => ({
+            url: "wss://broker.example/ws",
+            socket: null,
+          }));
+        },
+      ],
+      [
+        "the resolver settles on a full server",
+        () => {
+          mocks.multiplayerConfig.resolveP2PBroker = vi.fn(async () => ({
+            url: "wss://broker.example/ws",
+            socket: { serverInfo: { mode: "Full" } },
+          }));
+        },
+      ],
+      [
+        "the broker connection itself is refused",
+        () => {
+          mocks.openBrokerClient.mockReset().mockRejectedValueOnce(new Error("refused"));
+        },
+      ],
+    ] as const)("tells the host when the lobby cannot be reached (%s)", async (_label, arrange) => {
+      stubPools(["TST"]);
+      mocks.draftProcedure.mockResolvedValue(listableProcedure());
+      configureSetPod(6);
+      useDraftPodStore.getState().setListing({ isPublic: true });
+      arrange();
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(useDraftPodStore.getState().configError).toBe(
+        "Couldn't reach the lobby to list this pod. Turn off “List in lobby” to host by room code.",
+      );
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [true, 8],
+      [false, 6],
+    ] as const)(
+      "remembers the host's listing choice of %s at %i seats when pod creation starts",
+      async (isPublic, podSize) => {
+        stubPools(["TST"]);
+        mocks.draftProcedure.mockResolvedValue(listableProcedure());
+        configureSetPod(podSize);
+        useDraftPodStore.getState().setListing({ isPublic });
+
+        await useDraftPodStore.getState().createPod();
+
+        expect(mocks.multiplayerConfig.rememberPodListingPublic).toHaveBeenCalledOnce();
+        expect(mocks.multiplayerConfig.rememberPodListingPublic).toHaveBeenCalledWith(isPublic);
+      },
+    );
+
+    it("does not remember a listing choice when creation is refused for a missing display name", async () => {
+      stubPools(["TST"]);
+      mocks.draftProcedure.mockResolvedValue(listableProcedure());
+      configureSetPod(6);
+      useDraftPodStore.setState({ hostDisplayName: "" });
+      useDraftPodStore.getState().setListing({ isPublic: true });
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(mocks.multiplayerConfig.rememberPodListingPublic).not.toHaveBeenCalled();
+      expect(useDraftPodStore.getState().configError).toBe("Enter a display name");
+    });
+
+    it.each(SUPPORTED_LNGS)(
+      "names the listing control in the unreachable-lobby message in %s",
+      async (lng) => {
+        const label = (resources[lng].draft as { podSetup: { listInLobby: string } })
+          .podSetup.listInLobby;
+        i18n.addResourceBundle(lng, "draft", resources[lng].draft, true, true);
+        i18n.addResource(lng, "draft", "podSetup.listInLobby", "Renamed control");
+        await i18n.changeLanguage(lng);
+        try {
+          stubPools(["TST"]);
+          mocks.draftProcedure.mockResolvedValue(listableProcedure());
+          configureSetPod(6);
+          useDraftPodStore.getState().setListing({ isPublic: true });
+          mocks.openBrokerClient.mockReset().mockRejectedValueOnce(new Error("refused"));
+
+          await useDraftPodStore.getState().createPod();
+
+          expect(useDraftPodStore.getState().configError).toContain("Renamed control");
+        } finally {
+          i18n.addResource(lng, "draft", "podSetup.listInLobby", label);
+        }
+      },
+    );
+
+    it.each([7, 8])("creates a pod above the lobby's seat ceiling without listing it (%i seats)", async (podSize) => {
+      stubPools(["TST"]);
+      mocks.draftProcedure.mockResolvedValue(listableProcedure({ pod_size: podSize }));
+      configureSetPod(podSize);
+      useDraftPodStore.getState().setListing({ isPublic: true });
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(mocks.multiplayerConfig.resolveP2PBroker).not.toHaveBeenCalled();
+      expect(mocks.openBrokerClient).not.toHaveBeenCalled();
+      expect(dispatchedHostConfig().listing).toBeUndefined();
+      expect(useDraftPodStore.getState().listing.isPublic).toBe(true);
+    });
+
+    it("opens no lobby connection for a pod created with the initial listing state", async () => {
+      stubPools(["TST"]);
+      mocks.draftProcedure.mockResolvedValue(listableProcedure());
+      configureSetPod(6);
+
+      expect(useDraftPodStore.getState().listing.isPublic).toBe(false);
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(mocks.multiplayerConfig.resolveP2PBroker).not.toHaveBeenCalled();
+      expect(mocks.openBrokerClient).not.toHaveBeenCalled();
+      expect(dispatchedHostConfig().listing).toBeUndefined();
+    });
+
+    it.each([
+      [
+        "hosting fails",
+        () => {
+          mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<DraftSessionOpenOutcome>>(async () => ({ status: "failed", error: null }));
+        },
+        "Unable to host draft pod",
+      ],
+      [
+        "hosting throws",
+        () => {
+          mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<DraftSessionOpenOutcome>>(async () => {
+            throw new Error("boom");
+          });
+        },
+        "boom",
+      ],
+      [
+        "hosting fails with its own error",
+        () => {
+          mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<DraftSessionOpenOutcome>>(async () => ({ status: "failed", error: "Host signaling failed" }));
+        },
+        "Host signaling failed",
+      ],
+      [
+        "hosting is superseded",
+        () => {
+          mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<DraftSessionOpenOutcome>>(async () => ({ status: "superseded" }));
+        },
+        null,
+      ],
+    ] as const)("closes the lobby connection when hosting does not start (%s)", async (_label, arrange, message) => {
+      stubPools(["TST"]);
+      mocks.draftProcedure.mockResolvedValue(listableProcedure());
+      configureSetPod(6);
+      useDraftPodStore.getState().setListing({ isPublic: true });
+      arrange();
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(mocks.brokerClose).toHaveBeenCalledOnce();
+      expect(useDraftPodStore.getState().configError).toBe(message);
+    });
+
+    it("does not close the lobby connection once hosting starts", async () => {
+      stubPools(["TST"]);
+      mocks.draftProcedure.mockResolvedValue(listableProcedure());
+      configureSetPod(6);
+      useDraftPodStore.getState().setListing({ isPublic: true });
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(mocks.brokerClose).not.toHaveBeenCalled();
+    });
+
+    it("closes the lobby connection if the app goes offline while it opens", async () => {
+      stubPools(["TST"]);
+      mocks.draftProcedure.mockResolvedValue(listableProcedure());
+      configureSetPod(6);
+      useDraftPodStore.getState().setListing({ isPublic: true });
+      let resolveOpen!: (client: { close: () => void }) => void;
+      mocks.openBrokerClient.mockReset().mockImplementationOnce(() => new Promise((resolve) => {
+        resolveOpen = resolve;
+      }));
+
+      const creating = useDraftPodStore.getState().createPod();
+      await vi.waitFor(() => expect(resolveOpen).toBeTypeOf("function"));
+      useConnectivityStore.setState({ forcedOffline: true });
+      resolveOpen({ close: mocks.brokerClose });
+
+      await creating;
+
+      expect(mocks.brokerClose).toHaveBeenCalledOnce();
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+      expect(useDraftPodStore.getState().configError).toBe("offline.startUnavailable");
+    });
+
+    it("closes the lobby connection when pod setup is replaced while it opens", async () => {
+      stubPools(["TST"]);
+      mocks.draftProcedure.mockResolvedValue(listableProcedure());
+      configureSetPod(6);
+      useDraftPodStore.getState().setListing({ isPublic: true });
+      let resolveOpen!: (client: { close: () => void }) => void;
+      mocks.openBrokerClient.mockReset().mockImplementationOnce(() => new Promise((resolve) => {
+        resolveOpen = resolve;
+      }));
+
+      const creating = useDraftPodStore.getState().createPod();
+      await vi.waitFor(() => expect(resolveOpen).toBeTypeOf("function"));
+      useDraftPodStore.getState().reset();
+      resolveOpen({ close: mocks.brokerClose });
+
+      await creating;
+
+      expect(mocks.brokerClose).toHaveBeenCalledOnce();
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+    });
+
+    it("does not report a lobby failure for pod setup replaced while the lobby connection opens", async () => {
+      stubPools(["TST"]);
+      mocks.draftProcedure.mockResolvedValue(listableProcedure());
+      configureSetPod(6);
+      useDraftPodStore.getState().setListing({ isPublic: true });
+      let rejectOpen!: (err: Error) => void;
+      mocks.openBrokerClient.mockReset().mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        rejectOpen = reject;
+      }));
+
+      const creating = useDraftPodStore.getState().createPod();
+      await vi.waitFor(() => expect(rejectOpen).toBeTypeOf("function"));
+      useDraftPodStore.getState().reset();
+      rejectOpen(new Error("lobby unreachable"));
+
+      await creating;
+
+      expect(useDraftPodStore.getState().configError).toBeNull();
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["no lobby is available", null],
+      ["a lobby is available", { serverInfo: { mode: "LobbyOnly" } }],
+    ] as const)("does not report a lobby failure for pod setup replaced while the lobby is chosen (%s)", async (_label, socket) => {
+      stubPools(["TST"]);
+      mocks.draftProcedure.mockResolvedValue(listableProcedure());
+      configureSetPod(6);
+      useDraftPodStore.getState().setListing({ isPublic: true });
+      let resolveBroker!: (result: { url: string; socket: { serverInfo: { mode: string } } | null }) => void;
+      mocks.multiplayerConfig.resolveP2PBroker = vi.fn(() => new Promise((resolve) => {
+        resolveBroker = resolve;
+      }));
+
+      const creating = useDraftPodStore.getState().createPod();
+      await vi.waitFor(() => expect(mocks.multiplayerConfig.resolveP2PBroker).toHaveBeenCalledOnce());
+      useDraftPodStore.getState().reset();
+      resolveBroker({ url: "wss://broker.example/ws", socket });
+
+      await creating;
+
+      expect(useDraftPodStore.getState().configError).toBeNull();
+      expect(mocks.openBrokerClient).not.toHaveBeenCalled();
+    });
+
+    it("does not open the lobby connection for a config edited while the broker is chosen", async () => {
+      stubPools(["TST"]);
+      mocks.draftProcedure.mockResolvedValue(listableProcedure());
+      configureSetPod(6);
+      useDraftPodStore.getState().setListing({ isPublic: true });
+      let resolveBroker!: (result: { url: string; socket: { serverInfo: { mode: string } } | null }) => void;
+      mocks.multiplayerConfig.resolveP2PBroker = vi.fn(() => new Promise((resolve) => {
+        resolveBroker = resolve;
+      }));
+
+      const creating = useDraftPodStore.getState().createPod();
+      await vi.waitFor(() => expect(mocks.multiplayerConfig.resolveP2PBroker).toHaveBeenCalledOnce());
+      useDraftPodStore.getState().setConfig({ podSize: 4 });
+      resolveBroker({ url: "wss://broker.example/ws", socket: { serverInfo: { mode: "LobbyOnly" } } });
+
+      await creating;
+
+      expect(mocks.openBrokerClient).not.toHaveBeenCalled();
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+    });
+  });
+
   describe("offline deferred orchestration settlement", () => {
     afterEach(() => {
       vi.unstubAllGlobals();
@@ -1451,8 +2814,8 @@ describe("draftPodStore", () => {
       expect(useDraftPodStore.getState()).toMatchObject({ loadingPool: false, configError: "offline.startUnavailable" });
     });
 
-    it("maps a current false host result to offline after set-pool creation", async () => {
-      let resolveHost!: (value: boolean) => void;
+    it("maps a current failed host result to offline after set-pool creation", async () => {
+      let resolveHost!: (value: DraftSessionOpenOutcome) => void;
       vi.stubGlobal("__DRAFT_POOLS_URL__", "/draft-pools.json");
       vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ tst: { code: "TST" } }) })));
       mocks.multiplayerState.hostDraft.mockImplementationOnce(() => new Promise((resolve) => {
@@ -1463,14 +2826,14 @@ describe("draftPodStore", () => {
       const creating = useDraftPodStore.getState().createPod();
       await vi.waitFor(() => expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce());
       useConnectivityStore.setState({ forcedOffline: true });
-      resolveHost(false);
+      resolveHost({ status: "failed", error: null });
 
       await creating;
       expect(useDraftPodStore.getState().configError).toBe("offline.startUnavailable");
     });
 
-    it("maps a current false guest join result to offline", async () => {
-      let resolveJoin!: (value: boolean) => void;
+    it("maps a current failed guest join result to offline", async () => {
+      let resolveJoin!: (value: DraftSessionOpenOutcome) => void;
       mocks.multiplayerState.joinDraft.mockImplementationOnce(() => new Promise((resolve) => {
         resolveJoin = resolve;
       }));
@@ -1479,10 +2842,38 @@ describe("draftPodStore", () => {
       const joining = useDraftPodStore.getState().joinPod();
       await vi.waitFor(() => expect(mocks.multiplayerState.joinDraft).toHaveBeenCalledOnce());
       useConnectivityStore.setState({ browserOnline: false });
-      resolveJoin(false);
+      resolveJoin({ status: "failed", error: null });
 
       await joining;
       expect(useDraftPodStore.getState().configError).toBe("offline.startUnavailable");
+    });
+
+    it("does not report a superseded guest join as offline", async () => {
+      let resolveJoin!: (value: DraftSessionOpenOutcome) => void;
+      mocks.multiplayerState.joinDraft.mockImplementationOnce(() => new Promise((resolve) => {
+        resolveJoin = resolve;
+      }));
+      useDraftPodStore.setState({ joinCode: "ABCDE", guestDisplayName: "Alice" });
+
+      const joining = useDraftPodStore.getState().joinPod();
+      await vi.waitFor(() => expect(mocks.multiplayerState.joinDraft).toHaveBeenCalledOnce());
+      useConnectivityStore.setState({ browserOnline: false });
+      resolveJoin({ status: "superseded" });
+
+      await joining;
+      expect(useDraftPodStore.getState().configError).toBeNull();
+    });
+
+    it("does not report a superseded host as a hosting failure", async () => {
+      vi.stubGlobal("__DRAFT_POOLS_URL__", "/draft-pools.json");
+      vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ tst: { code: "TST" } }) })));
+      mocks.multiplayerState.hostDraft.mockResolvedValueOnce({ status: "superseded" });
+      configureSetPod();
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
+      expect(useDraftPodStore.getState().configError).toBeNull();
     });
 
     it("retires a stale pool spinner when a newer public orchestration starts", async () => {
@@ -1528,7 +2919,7 @@ describe("draftPodStore", () => {
     });
 
     it("starts a fresh host recovery after an offline resume retires a held attempt", async () => {
-      let resolveFirstLoad!: (session: typeof persistedSession) => void;
+      let resolveFirstLoad!: (result: { type: "admitted"; session: typeof persistedSession; raw: unknown }) => void;
       mocks.inspectActiveDraftPod.mockReturnValue({
         type: "present",
         meta: activeMeta,
@@ -1536,7 +2927,7 @@ describe("draftPodStore", () => {
       });
       mocks.loadDraftHostSession
         .mockImplementationOnce(() => new Promise((resolve) => { resolveFirstLoad = resolve; }))
-        .mockResolvedValueOnce(persistedSession);
+        .mockResolvedValueOnce({ type: "admitted", session: persistedSession, raw: persistedSession });
 
       const firstResume = useDraftPodStore.getState().resumeHostedPod();
       await vi.waitFor(() => expect(mocks.loadDraftHostSession).toHaveBeenCalledOnce());
@@ -1547,7 +2938,7 @@ describe("draftPodStore", () => {
       useConnectivityStore.setState({ forcedOffline: false });
       const recovered = useDraftPodStore.getState().resumeHostedPod();
       await vi.waitFor(() => expect(mocks.loadDraftHostSession).toHaveBeenCalledTimes(2));
-      resolveFirstLoad(persistedSession);
+      resolveFirstLoad({ type: "admitted", session: persistedSession, raw: persistedSession });
 
       await expect(firstResume).resolves.toBe("superseded");
       await expect(recovered).resolves.toBe("resumed");
@@ -1560,7 +2951,7 @@ describe("draftPodStore", () => {
         resolveProcedure = resolve;
         rejectProcedure = reject;
       }));
-      let resolveJoin!: (value: boolean) => void;
+      let resolveJoin!: (value: DraftSessionOpenOutcome) => void;
       mocks.multiplayerState.joinDraft.mockImplementationOnce(() => new Promise((resolve) => {
         resolveJoin = resolve;
       }));
@@ -1573,7 +2964,7 @@ describe("draftPodStore", () => {
       await vi.waitFor(() => expect(mocks.multiplayerState.joinDraft).toHaveBeenCalledOnce());
 
       useConnectivityStore.setState({ forcedOffline: true });
-      resolveJoin(false);
+      resolveJoin({ status: "failed", error: null });
       await joining;
       const newerOffline = useDraftPodStore.getState();
       expect(newerOffline).toMatchObject({
@@ -1592,6 +2983,128 @@ describe("draftPodStore", () => {
         configError: "offline.startUnavailable",
       });
       expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Saved-identity seeding ───────────────────────────────────────────────
+  //
+  // Every assertion here is REVERT-FAILING as a group: BASE has no
+  // `adoptSavedDisplayName`, so the call is a TypeError rather than a wrong
+  // value. The per-test notes below say what each one discriminates BEYOND
+  // that — i.e. what a present-but-wrong implementation would fail on.
+  describe("adoptSavedDisplayName", () => {
+    it("seeds both pod name fields from the saved identity", () => {
+      mocks.multiplayerConfig.displayName = "Alice";
+
+      useDraftPodStore.getState().adoptSavedDisplayName();
+
+      expect(useDraftPodStore.getState()).toMatchObject({
+        hostDisplayName: "Alice",
+        guestDisplayName: "Alice",
+      });
+    });
+
+    it.each([
+      ["host", "hostDisplayName", () => useDraftPodStore.getState().setHostDisplayName("Bea")],
+      ["guest", "guestDisplayName", () => useDraftPodStore.getState().setGuestDisplayName("Bea")],
+    ])("leaves a name the %s already typed alone", (_seat, field, type) => {
+      mocks.multiplayerConfig.displayName = "Alice";
+      type();
+
+      useDraftPodStore.getState().adoptSavedDisplayName();
+
+      // Discriminates an unconditional `set`: that would overwrite "Bea" here.
+      expect(useDraftPodStore.getState()[field as "hostDisplayName" | "guestDisplayName"]).toBe("Bea");
+    });
+
+    it("leaves an already-populated host field alone", () => {
+      // `setState` is the shortcut, so this measures the guard on a non-empty
+      // `hostDisplayName` — NOT a production ordering. The ordering the page
+      // really produces is the test below.
+      useDraftPodStore.setState({ hostDisplayName: "Restored Host" });
+      mocks.multiplayerConfig.displayName = "Alice";
+
+      useDraftPodStore.getState().adoptSavedDisplayName();
+
+      expect(useDraftPodStore.getState().hostDisplayName).toBe("Restored Host");
+      // The guest field was empty, so the same call still seeds it — this is
+      // one action over two independent fields, not an all-or-nothing gate.
+      expect(useDraftPodStore.getState().guestDisplayName).toBe("Alice");
+    });
+
+    it.each([
+      ["never set", ""],
+      ["whitespace only", "   "],
+    ])("leaves both fields empty when the saved identity is %s", (_label, saved) => {
+      mocks.multiplayerConfig.displayName = saved;
+
+      useDraftPodStore.getState().adoptSavedDisplayName();
+
+      // Discriminates a seed that skips the emptiness check: "   " would land
+      // in both fields and read as filled while `createPod`/`joinPod` still
+      // reject it, since both trim before validating.
+      expect(useDraftPodStore.getState()).toMatchObject({
+        hostDisplayName: "",
+        guestDisplayName: "",
+      });
+    });
+
+    it("skips a persisted identity that is not a string", () => {
+      // `multiplayerStore`'s persist `merge` normalizes `lastHostConfig`,
+      // `userLobbySources`, `disabledDirectorySources`, `hostingServer` and
+      // `connectionMode` under the comment "Persisted state is external
+      // input", but spreads `displayName` through unvalidated — so a corrupt
+      // or hand-edited localStorage blob really can hydrate a non-string here.
+      // The cast is how this suite reaches that state; the store's own type
+      // says it cannot happen.
+      (mocks.multiplayerConfig as { displayName: unknown }).displayName = 42;
+
+      // Seeding is cosmetic, so it must not be able to take the page down.
+      // `PodSetup` calls this from a mount effect, and `App.tsx` wraps every
+      // route in `ErrorBoundary` — so an unguarded throw here replaces the
+      // Draft Pod screen with that boundary's fallback. Measured with the guard
+      // removed and `displayName` set to 42: rendering the page bare throws a
+      // TypeError out of the `.trim()`.
+      expect(() => useDraftPodStore.getState().adoptSavedDisplayName()).not.toThrow();
+      expect(useDraftPodStore.getState()).toMatchObject({
+        hostDisplayName: "",
+        guestDisplayName: "",
+      });
+    });
+
+    it("yields to a host session restored after it", async () => {
+      // The ordering the page actually produces: `PodSetup`'s mount effect
+      // seeds first, and `resumeHostedPod` — whose `set` sits behind an
+      // `await` — lands after it. The restored name wins because that path
+      // assigns `hostDisplayName` unconditionally, NOT because of the
+      // empty-field guard, which by then has nothing left to protect.
+      mocks.multiplayerConfig.displayName = "Alice";
+      mocks.inspectActiveDraftPod.mockReturnValue({
+        type: "present",
+        meta: activeMeta,
+        capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt },
+      });
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: persistedSession, raw: persistedSession });
+
+      useDraftPodStore.getState().adoptSavedDisplayName();
+      // Reach guard: the seed really did land, so the assertion after the
+      // resume is measuring an overwrite rather than a seed that never ran.
+      expect(useDraftPodStore.getState().hostDisplayName).toBe("Alice");
+
+      await expect(useDraftPodStore.getState().resumeHostedPod()).resolves.toBe("resumed");
+
+      expect(useDraftPodStore.getState().hostDisplayName).toBe(persistedSession.hostDisplayName);
+    });
+
+    it("reads the identity at call time, not at store creation", () => {
+      // The name is editable — `PlayerIdentityBanner`, and Preferences →
+      // Multiplayer — long after this module is evaluated. Discriminates a
+      // seed captured into `initialState`.
+      mocks.multiplayerConfig.displayName = "Renamed After Load";
+
+      useDraftPodStore.getState().adoptSavedDisplayName();
+
+      expect(useDraftPodStore.getState().hostDisplayName).toBe("Renamed After Load");
     });
   });
 });

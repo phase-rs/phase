@@ -104,6 +104,7 @@ fn arm_solar_array(runner: &mut GameRunner, solar: ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: solar,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Solar Array's mana ability must succeed");
     if matches!(

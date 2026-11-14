@@ -32,6 +32,11 @@ pub fn resolve(
         }
         _ => return Ok(()),
     };
+    let Some(blighting_player) = blighting_player else {
+        // CR 608.2b: a missing player blights nothing, as when no creature is eligible.
+        resolve_nothing_blighted(state, ability, events);
+        return Ok(());
+    };
 
     let source_id = ability.source_id;
 
@@ -53,12 +58,7 @@ pub fn resolve(
     // CR 701.68b: If a player is given the choice to blight but is unable to
     // (controls no creatures), the effect does nothing.
     if eligible.is_empty() {
-        state.last_effect_count = Some(0);
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::BlightEffect,
-            source_id,
-            subject: None,
-        });
+        resolve_nothing_blighted(state, ability, events);
         return Ok(());
     }
 
@@ -66,6 +66,7 @@ pub fn resolve(
     // `count` (in EffectZoneChoice) is the number of creatures chosen (1);
     // `count_param` carries N — the number of -1/-1 counters to place.
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: blighting_player,
         cards: eligible,
         count: 1,
@@ -81,12 +82,14 @@ pub fn resolve(
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         // CR 708.2a: Blight places -1/-1 counters; no face-down entry.
         face_down_profile: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: count,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
@@ -94,6 +97,19 @@ pub fn resolve(
     };
 
     Ok(())
+}
+
+fn resolve_nothing_blighted(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) {
+    state.last_effect_count = Some(0);
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::BlightEffect,
+        source_id: ability.source_id,
+        subject: None,
+    });
 }
 
 #[cfg(test)]
@@ -274,7 +290,7 @@ mod tests {
         // context ref via its final `is_context_ref()` guard, so the controller's
         // creature choice is never declared as a target (hexproof is irrelevant).
         assert!(
-            crate::game::triggers::extract_target_filter_from_effect(&Effect::BlightEffect {
+            crate::types::ability::extract_target_filter_from_effect(&Effect::BlightEffect {
                 count: 1,
                 player: TargetFilter::Controller,
             })

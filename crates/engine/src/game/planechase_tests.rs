@@ -662,7 +662,7 @@ fn phenomenon_encounter_then_sba_planeswalk() {
     // SBA should NOT planeswalk while the phenomenon's ability is on the stack.
     let mut events = Vec::new();
     let mut any = false;
-    check_phenomenon_planeswalk_sba(&mut state, &mut events, &mut any);
+    check_phenomenon_planeswalk_sba(&mut state, &mut events, &mut any, &[]);
     assert!(
         !any,
         "no SBA planeswalk while the phenomenon's ability is on the stack"
@@ -677,13 +677,59 @@ fn phenomenon_encounter_then_sba_planeswalk() {
     state.stack.clear();
     let mut events2 = Vec::new();
     let mut any2 = false;
-    check_phenomenon_planeswalk_sba(&mut state, &mut events2, &mut any2);
+    check_phenomenon_planeswalk_sba(&mut state, &mut events2, &mut any2, &[]);
     assert!(any2, "SBA planeswalks once the ability leaves the stack");
     assert_eq!(
         active_plane(&state),
         Some(next_id),
         "planeswalked to next plane"
     );
+}
+
+/// CR 704.6f: a phenomenon trigger parked in the deferred queue has triggered
+/// but not yet left the stack, so the SBA does not planeswalk.
+#[test]
+fn phenomenon_queued_trigger_blocks_sba_planeswalk() {
+    use super::triggers::{PendingTrigger, PendingTriggerContext};
+    for queued in [true, false] {
+        let mut state = GameState::new_two_player(7);
+        let p0 = PlayerId(0);
+        let phenom = synthesized_planar_face(CoreType::Phenomenon, vec![], vec![]);
+        let next_plane = synthesized_planar_face(CoreType::Plane, vec![], vec![]);
+        let (phenom_id, deck_ids) = setup_planechase(
+            &mut state,
+            p0,
+            ("Phenom", &phenom),
+            &[("Next Plane", &next_plane)],
+        );
+        if queued {
+            let ability = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                phenom_id,
+                p0,
+            );
+            state
+                .deferred_triggers
+                .push(PendingTriggerContext::single(PendingTrigger::ordinary(
+                    phenom_id,
+                    p0,
+                    None,
+                    Box::new(ability),
+                    0,
+                )));
+        }
+
+        let mut events = Vec::new();
+        let mut any = false;
+        check_phenomenon_planeswalk_sba(&mut state, &mut events, &mut any, &[]);
+        assert_eq!(any, !queued, "queued={queued}");
+        let expected = if queued { phenom_id } else { deck_ids[0] };
+        assert_eq!(active_plane(&state), Some(expected), "queued={queued}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -758,7 +804,7 @@ fn planar_controller_none_skips_sba() {
 
     let mut events = Vec::new();
     let mut any = false;
-    check_phenomenon_planeswalk_sba(&mut state, &mut events, &mut any);
+    check_phenomenon_planeswalk_sba(&mut state, &mut events, &mut any, &[]);
     assert!(
         !any,
         "no Planechase SBA work when planar_controller is None"
@@ -1548,5 +1594,53 @@ fn fixed_point_shield_is_continuous_not_one_shot() {
         active_plane(&state),
         Some(active_id),
         "CR 614.6: neither planeswalk happened — no rotation"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Planar controller concedes: the handoff planeswalk triggers once
+// ---------------------------------------------------------------------------
+
+/// CR 901.10 + CR 901.11 + CR 603.2c: the planar controller concedes, so their
+/// plane leaves the game and the next player planeswalks to the top of the
+/// planar deck. The handoff collects that planeswalk's triggers itself; the
+/// concession's own collection of the departure's events must not collect them
+/// again.
+///
+/// REVERT-FAILING: without the handoff claiming its planeswalk, the arriving
+/// plane's "when you planeswalk to" ability is queued twice.
+#[test]
+fn planar_controller_concession_collects_the_handoff_planeswalk_once() {
+    let mut state = GameState::new(FormatConfig::planechase(), 3, 7);
+    let p0 = PlayerId(0);
+    let plane_a = synthesized_planar_face(CoreType::Plane, vec![], vec![]);
+    let plane_b = synthesized_planar_face(CoreType::Plane, vec![planeswalked_to_trigger()], vec![]);
+    let (active_id, deck_ids) = setup_planechase(
+        &mut state,
+        p0,
+        ("Plane A", &plane_a),
+        &[("Plane B", &plane_b)],
+    );
+    let arriving_id = deck_ids[0];
+
+    let mut events = Vec::new();
+    crate::game::elimination::concede(&mut state, p0, &mut events);
+
+    // Reach guard: the handoff planeswalked away from the departed player's plane.
+    assert!(!state.command_zone.contains(&active_id));
+    assert_eq!(state.planar_controller, Some(PlayerId(1)));
+    let queued = state
+        .deferred_triggers
+        .iter()
+        .filter(|d| d.pending.source_id == arriving_id)
+        .count()
+        + state
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == arriving_id)
+            .count();
+    assert_eq!(
+        queued, 1,
+        "the planeswalk-to trigger from {arriving_id:?} is collected exactly once"
     );
 }

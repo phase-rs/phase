@@ -62,7 +62,8 @@ fn gunzip(gz: &[u8]) -> String {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    json
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 /// Load the dump's `["gameState"]` through the REAL production restore
@@ -249,6 +250,7 @@ fn park_prompt(
     library_position: Option<LibraryPosition>,
 ) {
     runner.state_mut().waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: P0,
         cards,
         count: 1,
@@ -264,11 +266,13 @@ fn park_prompt(
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source: false,
+        face_down_in_exile: engine::types::ability::ExileConcealment::Public,
         face_down_profile: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position,
+        library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,

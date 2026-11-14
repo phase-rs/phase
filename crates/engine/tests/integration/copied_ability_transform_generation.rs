@@ -59,6 +59,7 @@ const LITHOFORM_ENGINE_ORACLE: &str = "{2}, {T}: Copy target activated or trigge
 fn stonewing_antagonizer_back_face() -> BackFaceData {
     BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Stonewing Antagonizer".to_string(),
         power: Some(4),
         toughness: Some(2),
@@ -162,6 +163,7 @@ fn copied_transform_ability_captures_copy_time_generation() {
         .act(GameAction::ActivateAbility {
             source_id: gargoyle,
             ability_index: transform_idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Thraben Gargoyle's {6} transform ability must be activatable");
     record(&result);
@@ -177,6 +179,7 @@ fn copied_transform_ability_captures_copy_time_generation() {
         .act(GameAction::ActivateAbility {
             source_id: lithoform,
             ability_index: copy_idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Lithoform Engine's {2}, {T} copy ability must be activatable");
     record(&result);
@@ -213,6 +216,7 @@ fn copied_transform_ability_captures_copy_time_generation() {
         .act(GameAction::ActivateAbility {
             source_id: gargoyle,
             ability_index: transform_idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the {6} transform ability has no {T} in its cost, so it activates twice");
     record(&result);

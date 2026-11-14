@@ -6,8 +6,8 @@
 //!    At the beginning of enchanted player's upkeep, this Aura deals damage
 //!    to that player equal to the number of Curses attached to them."
 //!
-//! Building block under test: `FilterProp::AttachedToPlayer { player:
-//! ControllerRef::EnchantedPlayer }` — a player-referent counterpart of the
+//! Building block under test: `FilterProp::AttachedTo { to: AttachmentReferent::Player { player:
+//! ControllerRef::EnchantedPlayer } }` — a player-referent counterpart of the
 //! existing object-referent `AttachedToSource`/`AttachedToRecipient` props,
 //! composed into `QuantityRef::ObjectCount` over a `Curse`-subtype
 //! `TargetFilter`. `curse_upkeep_triggers.rs` already proves the upkeep
@@ -19,7 +19,7 @@
 //! minimum reachable count through its own trigger is 1 (itself) — there is
 //! no in-game state where Curse of Thirst is on the battlefield, enchanting a
 //! player, and the count is 0. The pure "zero Curses" case is covered instead
-//! by a building-block-level unit test on `FilterProp::AttachedToPlayer`
+//! by a building-block-level unit test on `FilterProp::AttachedTo { to: AttachmentReferent::Player }`
 //! directly in `crates/engine/src/game/filter.rs`.
 //!
 //! `curse_of_surveillance_target_exclusion_fails_closed` below pins a sibling

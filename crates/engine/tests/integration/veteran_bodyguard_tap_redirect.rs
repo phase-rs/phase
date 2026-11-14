@@ -192,7 +192,7 @@ fn veteran_bodyguard_tapped_does_not_redirect_unblocked_damage() {
 }
 
 /// CR 509.1h + CR 510.1c + CR 702.19b + CR 604.2: the redirect covers only damage
-/// dealt "by unblocked creatures" — the source filter (`FilterProp::Unblocked`).
+/// dealt "by unblocked creatures" — the source filter (`FilterProp::BlockStatus { Unblocked }`).
 /// A BLOCKED attacker with trample is a *blocked* creature (CR 509.1h), so even
 /// though its trample excess is dealt to the defending player (CR 510.1c +
 /// CR 702.19b), that damage is NOT dealt "by an unblocked creature" and must NOT
@@ -203,7 +203,7 @@ fn veteran_bodyguard_tapped_does_not_redirect_unblocked_damage() {
 /// dropped or inverted. Without the filter the shield would match ALL damage to
 /// P1 and (per the same prevention-only runtime path exercised by the untapped
 /// test above) prevent the trample excess, so P1 would lose 0 and the -3
-/// assertion would fail. With the correct `FilterProp::Unblocked` restriction the
+/// assertion would fail. With the correct `FilterProp::BlockStatus { Unblocked }` restriction the
 /// blocked trampler's damage is untouched and P1 takes the full 3.
 ///
 /// The 5/5 trampler blocked by a 2/2 assigns lethal 2 to the blocker and 3

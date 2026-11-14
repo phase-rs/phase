@@ -114,7 +114,10 @@ fn fractal_harness_etb_put_counter_then_attach_chain() {
         .sub_ability
         .as_ref()
         .expect("Attach must follow PutCounter");
-    let Effect::Attach { attachment, target } = attach.effect.as_ref() else {
+    let Effect::Attach {
+        attachment, target, ..
+    } = attach.effect.as_ref()
+    else {
         panic!("expected Attach sub, got {:?}", attach.effect);
     };
     assert_eq!(*attachment, TargetFilter::SelfRef);
@@ -123,7 +126,10 @@ fn fractal_harness_etb_put_counter_then_attach_chain() {
 
 #[test]
 fn fractal_harness_etb_attach_targets_last_created_token() {
-    let Effect::Attach { attachment, target } = etb_attach_effect() else {
+    let Effect::Attach {
+        attachment, target, ..
+    } = etb_attach_effect()
+    else {
         panic!("expected Attach effect");
     };
     assert_eq!(attachment, TargetFilter::SelfRef);

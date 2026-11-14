@@ -6,7 +6,7 @@
 //!   hand: Return target creature card with mana value X from your graveyard
 //!   to the battlefield. Activate only as a sorcery."
 //!
-//! Root cause: `try_parse_energy_cost` (crates/engine/src/parser/oracle_cost.rs)
+//! Root cause: `try_parse_energy_cost` (crates/phase-parser/src/parser/oracle_cost.rs)
 //! had no variable-X branch, so "Pay X {E}" silently parsed as `PayEnergy {
 //! amount: Fixed(0) }` instead of `PayEnergy { amount: Ref(Variable("X")) }`
 //! (mirroring the existing "pay x life" / "pay x speed" branches). With X
@@ -89,6 +89,7 @@ fn chthonian_nightmare_activates_pays_x_energy_and_reanimates_by_mana_value() {
         .act(GameAction::ActivateAbility {
             source_id: nightmare,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("begin activation");
 

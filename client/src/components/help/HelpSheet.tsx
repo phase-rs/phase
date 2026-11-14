@@ -13,6 +13,8 @@ import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.t
 import { canExportAuthoritativeState, useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 
+import { TroubleshootingDialog } from "./TroubleshootingDialog";
+
 type HelpSection = "Flow" | "Shortcuts" | "Recovery";
 
 interface HelpEntry {
@@ -26,7 +28,7 @@ interface ResolvedHelpEntry extends HelpEntry {
   body: string;
 }
 
-const HELP_ENTRIES: HelpEntry[] = [
+const HELP_ENTRIES = [
   { section: "Flow", id: "automaticPhaseSkips" },
   { section: "Flow", id: "phaseStops" },
   { section: "Flow", id: "fullControl", shortcut: "F" },
@@ -39,9 +41,10 @@ const HELP_ENTRIES: HelpEntry[] = [
   { section: "Shortcuts", id: "undo", shortcut: "Z" },
   { section: "Shortcuts", id: "cancel", shortcut: "Esc" },
   { section: "Shortcuts", id: "advancedDebugPanel", shortcut: "`" },
+  { section: "Shortcuts", id: "toggleClickMode", shortcut: "K" },
   { section: "Recovery", id: "reportOrExportState" },
   { section: "Recovery", id: "boardRightClickMenu" },
-];
+] as const satisfies readonly HelpEntry[];
 
 const SECTION_ORDER: HelpSection[] = ["Flow", "Shortcuts", "Recovery"];
 
@@ -119,6 +122,7 @@ function currentPromptSummary({
     case "CopyTargetChoice":
     case "CopyRetarget":
     case "ReturnAsAuraTarget":
+    case "ChooseTokenHost":
     case "ExploreChoice":
     case "PopulateChoice":
       return t("help.prompt.targetSelection");
@@ -149,6 +153,8 @@ export function HelpSheet() {
   const autoPassRecommended = useGameStore((s) => s.autoPassRecommended);
   const playerId = usePlayerId();
   const canActForWaitingState = useCanActForWaitingState();
+  const [troubleshootingOpen, setTroubleshootingOpen] = useState(false);
+  const troubleshootingButtonRef = useRef<HTMLButtonElement>(null);
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -172,7 +178,7 @@ export function HelpSheet() {
   }, [open]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || troubleshootingOpen) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -198,7 +204,7 @@ export function HelpSheet() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, setOpen]);
+  }, [open, setOpen, troubleshootingOpen]);
 
   const summary = currentPromptSummary({
     waitingFor,
@@ -212,7 +218,7 @@ export function HelpSheet() {
   });
 
   const filteredEntries = useMemo<ResolvedHelpEntry[]>(() => {
-    const resolved = HELP_ENTRIES.map((entry) => ({
+    const resolved = HELP_ENTRIES.map((entry): ResolvedHelpEntry => ({
       ...entry,
       title: t(`help.entries.${entry.id}.title`),
       body: t(`help.entries.${entry.id}.body`),
@@ -242,20 +248,40 @@ export function HelpSheet() {
   const handleExportState = () => {
     if (!canExportAuthoritative || !adapter?.exportPersistenceState) return;
     exportAuthoritativeGameStateZip(adapter)
-      .then((filename) => setStatus(t("help.status.exported", { filename })))
+      .then((result) => {
+        // Only the desktop shell can say where the file actually landed, and
+        // only once it has landed; a browser knows nothing past the filename.
+        if (result.kind === "failed") return setStatus(t("help.status.exportFailed"));
+        if (result.kind === "requested") {
+          return setStatus(t("help.status.exportRequested", { filename: result.filename }));
+        }
+        setStatus(
+          result.path
+            ? t("help.status.exportedTo", { path: result.path })
+            : t("help.status.exported", { filename: result.filename }),
+        );
+      })
       .catch((err: unknown) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
-        setStatus(t("help.status.exportFailed"));
+        const detail = err instanceof Error ? err.message : String(err);
+        setStatus(t("help.status.exportFailedDetail", { detail }));
       });
   };
 
   const handleExportReplay = () => {
     downloadCurrentReplay()
-      .then((filename) => {
+      .then((result) => {
+        if (!result) return setStatus(t("help.status.replayExportUnavailable"));
+        // Same ladder as the state export above: only the shell can say where
+        // the file landed, and a shell that said nothing has not saved it yet.
+        if (result.kind === "failed") return setStatus(t("help.status.replayExportFailed"));
+        if (result.kind === "requested") {
+          return setStatus(t("help.status.exportRequested", { filename: result.filename }));
+        }
         setStatus(
-          filename
-            ? t("help.status.replayExported", { filename })
-            : t("help.status.replayExportUnavailable"),
+          result.path
+            ? t("help.status.exportedTo", { path: result.path })
+            : t("help.status.replayExported", { filename: result.filename }),
         );
       })
       .catch((err: unknown) => {
@@ -265,6 +291,8 @@ export function HelpSheet() {
   };
 
   return (
+    <>
+    {open && troubleshootingOpen && <TroubleshootingDialog onClose={() => setTroubleshootingOpen(false)} returnFocusRef={troubleshootingButtonRef} />}
     <AnimatePresence>
       {open && (
         <motion.div
@@ -281,6 +309,7 @@ export function HelpSheet() {
           />
           <motion.div
             ref={panelRef}
+            inert={troubleshootingOpen}
             role="dialog"
             aria-modal="true"
             aria-labelledby={titleId}
@@ -322,6 +351,7 @@ export function HelpSheet() {
             </header>
 
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 lg:px-5">
+              <button ref={troubleshootingButtonRef} type="button" onClick={() => setTroubleshootingOpen(true)} className="mb-4 min-h-11 rounded-xl border border-cyan-300/30 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-100 hover:bg-cyan-400/20 active:bg-cyan-400/30 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-300">{t("troubleshooting.title")}</button>
               <section className="mb-4 rounded-xl border border-cyan-300/20 bg-cyan-400/10 p-4">
                 <div className="text-[0.68rem] font-semibold uppercase tracking-[0.2em] text-cyan-200/80">
                   {t("help.whatCanIDo")}
@@ -405,6 +435,7 @@ export function HelpSheet() {
         </motion.div>
       )}
     </AnimatePresence>
+    </>
   );
 }
 

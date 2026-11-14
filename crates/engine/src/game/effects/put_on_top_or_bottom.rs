@@ -15,7 +15,12 @@ pub fn resolve(
     // ~ dies, you may put it on the top or bottom of its owner's library")
     // resolves to the source; a chosen/parent target is unchanged (tier 3
     // returns the pre-selected targets satisfying the filter).
-    let Effect::PutOnTopOrBottom { target, chooser } = &ability.effect else {
+    let Effect::PutOnTopOrBottom {
+        target,
+        chooser,
+        top_position,
+    } = &ability.effect
+    else {
         return Err(EffectError::InvalidParam(
             "PutOnTopOrBottom requires its matching effect".to_string(),
         ));
@@ -38,7 +43,9 @@ pub fn resolve(
     }
 
     // CR 608.2d: the Oracle text supplies the player who makes this choice.
-    let choice_player = super::resolve_player_for_context_ref(state, ability, chooser);
+    let Some(choice_player) = super::resolve_player_for_context_ref(state, ability, chooser) else {
+        return Ok(());
+    };
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -49,6 +56,7 @@ pub fn resolve(
     state.waiting_for = WaitingFor::TopOrBottomChoice {
         player: choice_player,
         object_id,
+        top_position: top_position.clone(),
     };
 
     Ok(())
@@ -81,6 +89,7 @@ mod tests {
             Effect::PutOnTopOrBottom {
                 target: TargetFilter::Any,
                 chooser: TargetFilter::Controller,
+                top_position: Default::default(),
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -97,6 +106,7 @@ mod tests {
                 WaitingFor::TopOrBottomChoice {
                     player: PlayerId(0),
                     object_id: oid,
+                    ..
                 } if oid == obj_id
             ),
             "Expected TopOrBottomChoice for chooser P0, got {:?}",
@@ -121,6 +131,7 @@ mod tests {
             Effect::PutOnTopOrBottom {
                 target: TargetFilter::Any,
                 chooser: TargetFilter::ParentTargetOwner,
+                top_position: Default::default(),
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(101),
@@ -136,6 +147,7 @@ mod tests {
                 WaitingFor::TopOrBottomChoice {
                     player: PlayerId(1),
                     object_id: oid,
+                    ..
                 } if oid == obj_id
             ),
             "Expected TopOrBottomChoice for stack spell owner (P1), got {:?}",
@@ -159,6 +171,7 @@ mod tests {
         let owner_chooser = Effect::PutOnTopOrBottom {
             target: TargetFilter::Any,
             chooser: TargetFilter::ParentTargetOwner,
+            top_position: Default::default(),
         };
         let json = serde_json::to_string(&owner_chooser).unwrap();
         assert!(
@@ -169,6 +182,7 @@ mod tests {
         let controller_chooser = Effect::PutOnTopOrBottom {
             target: TargetFilter::SelfRef,
             chooser: TargetFilter::Controller,
+            top_position: Default::default(),
         };
         let json = serde_json::to_string(&controller_chooser).unwrap();
         assert!(json.contains("chooser"));

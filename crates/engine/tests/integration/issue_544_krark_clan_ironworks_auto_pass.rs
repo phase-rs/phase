@@ -110,6 +110,7 @@ fn auto_pass_fires_for_bare_kci_sacrifice_mana() {
     let kci_activation = GameAction::ActivateAbility {
         source_id: kci,
         ability_index: 0,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     };
     assert!(
         grouped
@@ -150,6 +151,7 @@ fn kci_activation_during_priority_adds_mana_to_pool() {
         GameAction::ActivateAbility {
             source_id: kci,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("KCI activation during priority must be legal");

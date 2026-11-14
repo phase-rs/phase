@@ -107,7 +107,7 @@ pub fn resolve(
     // LATCHED trigger source as current while the pinned incarnation read here
     // is already stale, which is a third shape neither bullet describes. That
     // shape is SAFE rather than impossible — it lands on a conservative no-op,
-    // either here or at the `stale_self_transform` check below, which re-tests
+    // either here or at the `self_transform_is_stale` check below, which re-tests
     // the source through `source_is_current` (CR 400.7). So there is no defect,
     // but do not reason from the two bullets as if nothing else can occur.
     //
@@ -158,9 +158,8 @@ pub fn resolve(
     // PARSE SHAPE, not by an end-to-end run — they are candidates the probe
     // above makes credible, not separately measured failures.
     //
-    // Deferred rather than fixed here: see the PR body's
-    // `## Deferred / known-remaining`, DW#2 (migrate `flip_permanent.rs` onto
-    // `targeting::resolved_targets` the same way this module now does).
+    // Resolved: `flip_permanent.rs` now migrates onto `targeting::resolved_targets`
+    // (via `super::resolved_effect_object_ids`) the same way this module does.
     let subject_came_from_declared_targets = subjects
         .iter()
         .all(|id| ability.targets.contains(&TargetRef::Object(*id)));
@@ -188,7 +187,7 @@ pub fn resolve(
         // CR 400.7 + CR 701.27f: no bound object — either the printed no-target
         // self-transform, or a `SelfRef` whose source is no longer current,
         // which `resolved_targets` reports as an EMPTY list. Both land on
-        // `source_id` and are then filtered by `stale_self_transform` below,
+        // `source_id` and are then filtered by `self_transform_is_stale` below,
         // which is what keeps "no target declared" and "the referent went stale"
         // from collapsing into the same OUTCOME even though they share this arm.
         [] => ability.source_id,
@@ -199,20 +198,7 @@ pub fn resolve(
         }
     };
 
-    // CR 701.27f: A self-transform instruction does nothing if the permanent
-    // has already transformed or converted since the ability was put onto the stack.
-    let stale_self_transform = object_id == ability.source_id
-        && (!ability.source_is_current(state)
-            || ability
-                .context
-                .source_transformation_count
-                .is_some_and(|captured| {
-                    state
-                        .objects
-                        .get(&object_id)
-                        .is_some_and(|object| object.transformation_count != captured)
-                }));
-    if !stale_self_transform {
+    if !self_transform_is_stale(state, ability, object_id) {
         transform_permanent(state, object_id, events)
             .map_err(|err| EffectError::InvalidParam(err.to_string()))?;
     }
@@ -224,6 +210,41 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 701.27f + CR 701.28e: A self-transform (or convert) instruction does
+/// nothing if the source is no longer the object that put the ability on the
+/// stack (CR 400.7), or has already transformed or converted since then. The
+/// resolver and the optional-effect feasibility check both ask this.
+pub(crate) fn self_transform_is_stale(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    object_id: crate::types::identifiers::ObjectId,
+) -> bool {
+    object_id == ability.source_id
+        && (!ability.source_is_current(state)
+            || ability
+                .context
+                .source_transformation_count
+                .is_some_and(|captured| {
+                    state
+                        .objects
+                        .get(&object_id)
+                        .is_some_and(|object| object.transformation_count != captured)
+                }))
+}
+
+/// CR 608.2d: "you may transform/convert ~" cannot be chosen when doing so is
+/// impossible: the source left or already transformed (`self_transform_is_stale`),
+/// or `transform::can_transform` — the reducer's own authority — says the
+/// instruction would do nothing (no other face, CR 701.27c + CR 701.28c, e.g. a
+/// nontoken copy of the card; or a "can't transform" effect, CR 701.28f).
+pub(crate) fn optional_self_transform_is_impossible(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    self_transform_is_stale(state, ability, ability.source_id)
+        || !crate::game::transform::can_transform(state, ability.source_id)
 }
 
 /// CR 701.27a + CR 115.10 / CR 115.10a: Mass transform of every permanent
@@ -245,7 +266,7 @@ fn resolve_all(
     target: &crate::types::ability::TargetFilter,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let effective_filter = crate::game::effects::resolved_object_filter(ability, target);
+    let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
 
     // CR 107.3a + CR 601.2b: ability-context filter evaluation.
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
@@ -280,6 +301,7 @@ fn resolve_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::zones::create_object;
     use crate::types::ability::{AbilityDefinition, AbilityKind, EffectScope, TargetFilter};
     use crate::types::card_type::{CardType, CoreType};
@@ -322,6 +344,7 @@ mod tests {
         obj.base_color = vec![ManaColor::Green];
         obj.back_face = Some(crate::game::game_object::BackFaceData {
             is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: "Back Face".to_string(),
             power: Some(4),
             toughness: Some(4),
@@ -1021,23 +1044,19 @@ mod tests {
     /// PRESERVATION ROW — NOT A DISCRIMINATOR, and it must stay labelled that way.
     /// It passes IDENTICALLY before and after this change: `resolved_targets`
     /// reports a stale self-reference as an EMPTY list, which lands on the `[]` arm
-    /// -> `source_id` -> `stale_self_transform`, the same outcome the positional read
+    /// -> `source_id` -> `self_transform_is_stale`, the same outcome the positional read
     /// reached from an empty `ability.targets`. Its job is to prove the new subject
     /// resolution did not LOSE the guard, not to fail on revert. Do not promote it
     /// to a discriminator in a later edit.
     ///
-    /// MEASURED CAVEAT ON THE MECHANISM, because this fixture does not reach the
-    /// empty-list route and must not pretend to. `self_ref_is_current`
-    /// (`types/ability.rs`) only reports a stale self-reference as EMPTY when the
-    /// ability carries a latched `trigger_source`; `build_resolved_from_def`
-    /// latches none, on EITHER stack shape. So on all four branches below
-    /// `resolved_targets` returns `[Object(source_id)]`, the `[object_id]` arm
-    /// binds the source, and the guard that is preserved here is
-    /// `stale_self_transform` (which reads `source_is_current`) — asserted
-    /// inline, not described. The OUTCOME is identical to the empty-list route,
-    /// which is what makes this a preservation row either way. Do not "simplify"
-    /// the mechanism assertion into the empty-list sentence: it was measured
-    /// false for this fixture on both the activated and the triggered shape.
+    /// THE MECHANISM, asserted inline. `build_resolved_from_def` latches no
+    /// `trigger_source` on EITHER stack shape, so `self_ref_is_current`
+    /// (`types/ability.rs`) reads the captured `source_incarnation` alone: a
+    /// blinked source is stale and `resolved_targets` returns EMPTY, which the
+    /// `[] => ability.source_id` arm then hands to `self_transform_is_stale`
+    /// (which reads `source_is_current`). A live source resolves to
+    /// `[Object(source_id)]`. The OUTCOME is the same on both routes, which is
+    /// what makes this a preservation row.
     ///
     /// Positive control in the same test: the live-source sibling DOES transform,
     /// so "did not transform" cannot pass because the fixture is inert.
@@ -1108,18 +1127,23 @@ mod tests {
                     if blinked { "stale" } else { "current" }
                 );
                 // MECHANISM, asserted rather than described: with no latched
-                // `trigger_source` the SelfRef arm binds the source on every
-                // branch, so the surviving guard below is `stale_self_transform`.
+                // `trigger_source` the SelfRef arm follows the captured
+                // incarnation (CR 400.7), so a blinked source binds nothing and
+                // `self_transform_is_stale` guards the `[]` fallback below.
                 let resolved = crate::game::targeting::resolved_targets(
                     ability,
                     &TargetFilter::SelfRef,
                     &state,
                 );
+                let expected = if blinked {
+                    Vec::new()
+                } else {
+                    vec![TargetRef::Object(source_id)]
+                };
                 assert_eq!(
-                    resolved,
-                    vec![TargetRef::Object(source_id)],
-                    "this fixture latches no `trigger_source`, so the SelfRef arm binds the \
-                     source on every branch (triggered={triggered}, blinked={blinked})"
+                    resolved, expected,
+                    "with no latched `trigger_source` the SelfRef arm binds the source only \
+                     while it is current (triggered={triggered}, blinked={blinked})"
                 );
 
                 resolve(&mut state, ability, &mut events).expect("transform ability resolves");

@@ -188,22 +188,41 @@ fn optional_additional_cost_path(pending: &PendingCast) -> OptionalAdditionalCos
     }
 }
 
+/// Name the life-cost root a generated candidate would arm, if any.
+///
+/// Only a `DecideOptionalCost` answer to a `DefilerPayment` /
+/// `OptionalCostChoice` prompt can arm a root. Every other candidate is
+/// neutral and returns `None` without running the completeness probe, which
+/// re-enumerates the whole candidate set.
 fn extract_life_cost_root(
     state: &GameState,
     candidate: &CandidateAction,
 ) -> Option<ArmedLifeCostRoot> {
     let semantic_owner = candidate.metadata.semantic_owner?;
-    if !is_complete_generated_candidate(state, candidate) {
-        return None;
-    }
+    // A spell announcement's trigger carrier is engine-private custody that
+    // `announcement_triggers` holds outside the `PendingCast` for the whole
+    // reducer action, so the witness names the announcement as the payment
+    // authority will see it.
+    let as_paid = |pending: &PendingCast| {
+        let mut pending = pending.clone();
+        if pending.activation_ability_index.is_none() {
+            pending.activation_trigger_collection = None;
+        }
+        pending
+    };
 
-    match (&state.waiting_for, &candidate.action) {
+    // Resolve the root shape first: only a `DecideOptionalCost` answer to a
+    // `DefilerPayment` / `OptionalCostChoice` prompt can arm a root, and the
+    // completeness probe below re-enumerates the whole candidate set, so it
+    // must not run for the candidates this match already leaves neutral.
+    let root = match (&state.waiting_for, &candidate.action) {
         (
             WaitingFor::DefilerPayment {
                 player,
                 life_cost,
                 mana_reduction,
                 pending_cast,
+                ..
             },
             GameAction::DecideOptionalCost { pay: true },
         ) if *player == semantic_owner => Some(ArmedLifeCostRoot::DefilerPayment(Box::new(
@@ -211,7 +230,7 @@ fn extract_life_cost_root(
                 player: *player,
                 offered_life_cost: *life_cost,
                 mana_reduction: mana_reduction.clone(),
-                pending_cast: *pending_cast.clone(),
+                pending_cast: as_paid(pending_cast),
                 candidate: candidate.clone(),
             },
         ))),
@@ -235,7 +254,7 @@ fn extract_life_cost_root(
                     times_kicked: *times_kicked,
                     origin: *origin,
                     gift_kind: gift_kind.clone(),
-                    pending_cast: *pending_cast.clone(),
+                    pending_cast: as_paid(pending_cast),
                     candidate: candidate.clone(),
                     branch,
                     materialized_cost,
@@ -247,7 +266,8 @@ fn extract_life_cost_root(
         // mechanical choices are deliberately neutral. CR 508.1d / 509.1c
         // combat costs are declaration decisions, not cast/activation costs.
         _ => None,
-    }
+    }?;
+    is_complete_generated_candidate(state, candidate).then_some(root)
 }
 
 /// Preview a generated candidate through the raw reducer boundary.
@@ -412,6 +432,7 @@ pub(crate) fn begin_defiler_payment_attempt(
                 life_cost: waiting_life_cost,
                 mana_reduction: waiting_reduction,
                 pending_cast: waiting_pending,
+                ..
             },
         ) if witness.player == player
             && witness.offered_life_cost == life_cost
@@ -850,6 +871,7 @@ mod tests {
                     shards: vec![ManaCostShard::Green],
                     generic: 0,
                 },
+                reach: crate::types::statics::CostReductionReach::ColoredManaOnly,
             }));
 
         crate::game::apply_as_current(
@@ -948,6 +970,46 @@ mod tests {
                 committed: 2,
             },
             "the raw mana-payment carrier must retain the bound receipt"
+        );
+    }
+
+    /// Revert-failing perf: a candidate that can never arm a root (anything but a
+    /// `DecideOptionalCost` answer to a Defiler / optional-cost prompt) is neutral
+    /// without re-enumerating the candidate set. Pre-fix the completeness probe
+    /// ran first, so every authorized generated candidate paid one full enumeration.
+    #[test]
+    fn non_root_shaped_candidate_is_neutral_without_enumerating_candidates() {
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+
+        let candidate = crate::ai_support::candidate_actions(&state)
+            .into_iter()
+            .find(|candidate| candidate.action == GameAction::PassPriority)
+            .expect("priority always offers a generated pass");
+
+        // Reach-guard: this candidate is complete, and proving so enumerates the
+        // candidate set, which the crew-eligibility scan counter observes.
+        crate::game::perf_counters::reset();
+        assert!(is_complete_generated_candidate(&state, &candidate));
+        assert!(
+            crate::game::perf_counters::snapshot().crew_eligibility_scans >= 1,
+            "reach-guard: the completeness probe must enumerate priority actions"
+        );
+
+        crate::game::perf_counters::reset();
+        assert_eq!(
+            preview_candidate_life_safety(&state, &candidate),
+            CandidateLifeSafety::NotUnsafe
+        );
+        assert_eq!(
+            crate::game::perf_counters::snapshot().crew_eligibility_scans,
+            0,
+            "a non-root shape must not re-enumerate candidates (revert-failing: pre-fix >= 1)"
         );
     }
 

@@ -179,7 +179,7 @@ fn non_source_controller_oneshot_oracles_fall_through_to_their_existing_routes()
     assert!(matches!(
         carom_spell.effect.as_ref(),
         Effect::CreateDamageReplacement {
-            redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+            redirect_to: Some(DamageRedirectTarget::ChosenTarget),
             ..
         }
     ));
@@ -236,7 +236,7 @@ fn invalid_declared_damage_source_cannot_rebind_a_later_redirect_target() {
             combat_scope: None,
             target_filter: None,
             modification: None,
-            redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+            redirect_to: Some(DamageRedirectTarget::ChosenTarget),
             redirect_amount: None,
             redirect_object_filter: Some(creature),
             recipient_object_filter: None,
@@ -307,7 +307,7 @@ fn legal_declared_damage_source_installs_a_redirect_replacement() {
             combat_scope: None,
             target_filter: None,
             modification: None,
-            redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+            redirect_to: Some(DamageRedirectTarget::ChosenTarget),
             redirect_amount: None,
             redirect_object_filter: Some(creature),
             recipient_object_filter: None,
@@ -789,7 +789,7 @@ fn redirect_retargets_mirror_strikes_declared_damage_source_slot() {
     assert!(legal_new_targets.contains(&TargetRef::Object(attacker_b)));
     runner
         .act(GameAction::RetargetSpell {
-            new_targets: vec![TargetRef::Object(attacker_b)],
+            new_targets: vec![Some(TargetRef::Object(attacker_b))],
         })
         .expect("Redirect writes the alternate source into Mirror Strike's slot");
     runner.advance_until_stack_empty();

@@ -137,6 +137,21 @@ describe("DraftLandingPage Commander Draft entry", () => {
     expect(mocks.navigate).toHaveBeenCalledWith("/draft-pod?kind=commander");
   });
 
+  it("deep-links the Winston tile into pod setup", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    // Reach guard: the tile grid rendered, so an absent Winston tile below would
+    // be a real absence rather than a failed render.
+    expect(screen.getByRole("button", { name: /Pod Draft/ })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Winston Draft/ }));
+
+    // REVERT-FAILING: the slug is the contract `DraftPodPage`'s entry effect
+    // reads; both sides spell it once, through `WINSTON_DRAFT_ENTRY`.
+    expect(mocks.navigate).toHaveBeenCalledWith("/draft-pod?kind=winston");
+  });
+
   it("leaves the existing Pod Draft route alone", async () => {
     const user = userEvent.setup();
     renderPage();
@@ -159,7 +174,9 @@ describe("DraftLandingPage Commander Draft entry", () => {
     expect(cube).toBeEnabled();
     expect(screen.getByRole("button", { name: /Pod Draft/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /Commander Draft/ })).toBeDisabled();
-    expect(screen.getAllByText("Starting a multiplayer draft is unavailable while offline. Reconnect or turn off Offline Mode to continue.")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: /Winston Draft/ })).toBeDisabled();
+    // One per multiplayer-entry tile: pod, Commander, Winston.
+    expect(screen.getAllByText("Starting a multiplayer draft is unavailable while offline. Reconnect or turn off Offline Mode to continue.")).toHaveLength(3);
 
     await user.click(quick);
     await user.click(sealed);
@@ -178,6 +195,7 @@ describe("DraftLandingPage Commander Draft entry", () => {
 
     expect(screen.getByRole("button", { name: /Pod Draft/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /Commander Draft/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Winston Draft/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /Quick Draft/ })).toBeEnabled();
   });
 

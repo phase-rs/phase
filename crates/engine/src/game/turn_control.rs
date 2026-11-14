@@ -15,9 +15,11 @@ use crate::types::statics::StaticMode;
 /// current decision controller from the effects that remain applicable. Returns
 /// the removed entry so the caller can apply
 /// window-specific post-processing (CR 723.1 extra-turn grant; CR 723.2 no-op).
-/// All three release sites — turn boundary (`start_next_turn`), combat-phase
-/// boundary (`finish_enter_phase`), and leave-game cleanup (`do_eliminate`) —
-/// route through here so control ends in exactly one place.
+/// The per-entry release sites are the three boundaries: turn boundary
+/// (`start_next_turn`), combat-phase boundary (`finish_enter_phase`), and
+/// leave-game cleanup (`do_eliminate`). Every game-ending release goes through
+/// [`end_all_player_control`], which enumerates its own callers, so control
+/// ends in exactly one place.
 pub(super) fn release_control_at(state: &mut GameState, idx: usize) -> ScheduledTurnControl {
     let entry = state.scheduled_turn_controls[idx];
     let identity = control_identity(entry);
@@ -47,6 +49,28 @@ pub(super) fn release_control_at(state: &mut GameState, idx: usize) -> Scheduled
         }
     }
     entry
+}
+
+/// CR 104.1 + CR 723.1: end every player-control effect because the game ended.
+/// A game that has ended takes no further turn and no further combat phase, so
+/// every scheduled window is over — including one that has not activated yet.
+/// Each removal routes through [`release_control_at`], whose returned CR 500.7
+/// extra-turn grant is deliberately dropped: the game is already over. That
+/// authority clears a window only for the exact entry that created it, so the
+/// two explicit clears are what turn its per-entry guarantee into the
+/// whole-state postcondition "no control survives", and the recompute retires a
+/// latch no surviving window backs.
+///
+/// Called from every site that ends a game: `elimination::end_game` (the
+/// terminal record) and `match_flow::apply_trusted_match_forfeit` (the match
+/// ending that does not go through it).
+pub(super) fn end_all_player_control(state: &mut GameState) {
+    while !state.scheduled_turn_controls.is_empty() {
+        release_control_at(state, 0);
+    }
+    state.active_full_turn_control = None;
+    state.active_combat_phase_control = None;
+    recompute_active_player_control(state);
 }
 
 pub(super) fn control_identity(scheduled: ScheduledTurnControl) -> ActivePlayerControl {
@@ -194,7 +218,7 @@ fn effective_authority_for_player(state: &GameState, semantic_player: PlayerId) 
     // CR 723.5 + CR 805.8: A turn controller makes decisions for the
     // controlled player; in shared team turns, controlling one affected player
     // controls that player's team.
-    let controlled_seat = if state.format_config.topology().has_shared_team_turns() {
+    let controlled_seat = if super::topology::side_takes_shared_turn(state, state.active_player) {
         super::topology::team_members(state, state.active_player).contains(&semantic_player)
     } else {
         semantic_player == state.active_player

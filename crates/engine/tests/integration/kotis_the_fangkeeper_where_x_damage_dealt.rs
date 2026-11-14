@@ -153,7 +153,7 @@ fn drain_until_kotis_cast_window(runner: &mut GameRunner) -> Vec<ObjectId> {
     panic!("Kotis's trigger never opened its resolution-scoped cast window");
 }
 
-/// The granting source carried on the parked window itself.
+/// The granting source carried by the parked window's immutable policy.
 ///
 /// Reach guards read the batch through THIS id rather than through a
 /// fixture-side handle so the guard is anchored to the very window whose
@@ -162,7 +162,7 @@ fn drain_until_kotis_cast_window(runner: &mut GameRunner) -> Vec<ObjectId> {
 /// offer never consulted.
 fn kotis_window_source(runner: &GameRunner) -> ObjectId {
     let WaitingFor::CastOffer {
-        kind: CastOfferKind::FreeCastWindow { source, .. },
+        kind: CastOfferKind::FreeCastWindow { face_policy, .. },
         ..
     } = &runner.state().waiting_for
     else {
@@ -171,7 +171,7 @@ fn kotis_window_source(runner: &GameRunner) -> ObjectId {
             runner.state().waiting_for
         );
     };
-    *source
+    face_policy.source_id
 }
 
 /// The engine's per-source "exiled this turn" ledger — the full batch BEFORE

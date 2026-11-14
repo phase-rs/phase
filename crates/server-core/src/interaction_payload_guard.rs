@@ -14,7 +14,7 @@
 //!
 //! The rejection string is byte-identical to `engine-wasm`'s
 //! (`format!("Engine error: {:?}", code)`) and to
-//! `SessionManager::handle_interaction`'s, so the same engine reason code reads
+//! `GameSession::handle_interaction`'s, so the same engine reason code reads
 //! the same on the WASM and WebSocket transports and at every server layer that
 //! reports one.
 
@@ -84,13 +84,13 @@ mod tests {
     #[test]
     fn rejects_an_oversized_text_value() {
         let msg = submission(InteractionResponse::Text {
-            value: "x".repeat(MAX_INTERACTION_STRING_LEN + 1),
+            values: vec!["x".repeat(MAX_INTERACTION_STRING_LEN + 1)],
         });
 
         assert!(guard_interaction_submission_payload(&msg).is_err());
 
         let at_limit = submission(InteractionResponse::Text {
-            value: "x".repeat(MAX_INTERACTION_STRING_LEN),
+            values: vec!["x".repeat(MAX_INTERACTION_STRING_LEN)],
         });
         assert_eq!(guard_interaction_submission_payload(&at_limit), Ok(()));
     }

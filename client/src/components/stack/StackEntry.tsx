@@ -7,8 +7,11 @@ import type { TFunction } from "i18next";
 import { CardArtFallback } from "../card/CardArtFallback.tsx";
 import { UnimplementedMechanicsBadge } from "../card/UnimplementedMechanicsBadge.tsx";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useFlightVeil } from "../../hooks/useFlightVeil.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
+import { useLocalizedCardContent } from "../../hooks/useLocalizedCardContent.ts";
+import { CardTextReference } from "../card/CardTextReference.tsx";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -24,6 +27,7 @@ import { YieldMuteIcon } from "./YieldMuteIcon.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
 import type {
   ObjectId,
+  StackAbilityKindView,
   StackEntry as StackEntryType,
   StackEntryDisplay,
   StackPaidFactView,
@@ -61,14 +65,21 @@ interface StackEntryProps {
 }
 
 export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds, index, isTop, isPending, cardSize, style, onHoverChange, pacingMultiplier = 1, groupCount = 1, details }: StackEntryProps) {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const isMobile = useIsMobile();
   const playerId = usePlayerId();
   const objects = useGameStore((s) => s.gameState?.objects);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const canActForWaitingState = useCanActForWaitingState();
   const pendingCast = useGameStore((s) => s.gameState?.pending_cast);
+  // CR 701.20a: engine-authored names of the cards this entry keeps revealed.
+  const revealedCards = useGameStore(
+    (s) => s.gameState?.derived?.stack_revealed_cards?.[entry.id],
+  );
   const inspectObject = useUiStore((s) => s.inspectObject);
+  // A spell's stack entry id is its object id, so a card flight veils the
+  // entry by that id.
+  const flightHidden = useFlightVeil(entry.id);
 
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const priorityYields = useGameStore((s) => s.gameState?.priority_yields);
@@ -102,10 +113,13 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
   const triggerSourceName =
     entry.kind.type === "TriggeredAbility" ? entry.kind.data.source_name : undefined;
   const sourceName = details?.source_name || triggerSourceName || sourceObj?.name || "";
+  const localized = useLocalizedCardContent(sourceName);
+  const displaySourceName = localized?.name || sourceName;
   const imageProps = sourceObj ? objectImageProps(sourceObj) : null;
   const sourceIsToken = sourceObj?.display_source === "Token" || Boolean(details?.token_image_ref);
   const sourceTokenImageRef =
     sourceObj?.display_source === "Token" ? sourceObj.token_image_ref : details?.token_image_ref;
+  const rowOwnerRef = details?.printed_ref ?? undefined;
 
   const { src, isLoading, rungs, advanceFailedSource } = useCardImage(
     imageProps?.cardName ?? sourceName,
@@ -117,6 +131,9 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
     tokenImageRef: sourceTokenImageRef,
     oracleId: imageProps?.oracleId,
     faceName: imageProps?.faceName,
+    // A present row owns both printing and identity; never borrow a stale live identity.
+    ownerPrinting: details ? (rowOwnerRef ? details.printing : undefined) : imageProps?.ownerPrinting,
+    ownerPrintedRef: rowOwnerRef,
     },
   );
 
@@ -151,14 +168,15 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
       ? y.target.ThisObject.source_id === entry.source_id && descMatches
       : yieldCardId !== undefined && y.target.AllCopies.card_id === yieldCardId && descMatches;
   });
-  // Triggered abilities show "Triggered — From <source>" so the player can
-  // tell which permanent owns the trigger without hovering the card image.
-  // Activated abilities don't carry a pre-resolved source name (different
-  // engine path); they keep the bare "Activated" label.
-  const abilityLabel = details?.kind_label ?? (entry.kind.type === "ActivatedAbility"
+  // Localize from the engine's typed `ability_kind`; with none (an older engine),
+  // show the engine's `kind_label` verbatim. Never parse `kind_label`.
+  // Ability descriptions below remain in their original text.
+  const abilityLabel = details?.ability_kind
+    ? formatStackAbilityKind(details.ability_kind, t)
+    : details?.kind_label ?? (entry.kind.type === "ActivatedAbility"
     ? t("stack.activated")
     : isTriggered && triggerSourceName
-      ? t("stack.triggeredFrom", { source: triggerSourceName })
+      ? t("stack.triggeredFrom", { source: displaySourceName })
       : t("stack.triggered"));
   const triggerDescription =
     details?.ability_description
@@ -180,6 +198,10 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
   const stormCopyCount = details?.provenance?.type === "Storm"
     ? details.provenance.data.copy_count
     : undefined;
+  const revealedLabel =
+    revealedCards && revealedCards.length > 0
+      ? t("stack.revealedCards", { cards: revealedCards.join(", ") })
+      : undefined;
   // The engine computes the live controller (CR 112.2 + CR 613.1b); `??` is this
   // file's own established structural fallback for a prop the sole production
   // caller always supplies (`details?.source_name`, `details?.kind_label`,
@@ -222,14 +244,14 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
   return (
     <motion.div
       layout
-      initial={{ opacity: 0, x: 30, scale: 0.9 }}
+      initial={flightHidden ? false : { opacity: 0, x: 30, scale: 0.9 }}
       animate={{ opacity: 1, x: 0, scale: 1 }}
       exit={{ opacity: 0, x: 30, scale: 0.9 }}
       transition={{
         delay: index * 0.03 * pacingMultiplier,
         duration: pacingMultiplier === 0 ? 0 : undefined,
       }}
-      style={style}
+      style={flightHidden ? { ...style, visibility: "hidden" } : style}
       data-stack-entry={entry.id}
       data-object-id={entry.id}
       data-grouped-ids={groupedObjectIds && groupedObjectIds.length > 1 ? groupedObjectIds.join(" ") : undefined}
@@ -268,14 +290,14 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
           // forever — worse than a blank square, since it implies the art is
           // still coming. Name the source instead.
           <CardArtFallback
-            name={sourceName}
+            name={displaySourceName}
             className="h-full w-full rounded-lg border border-gray-600"
           />
         ) : (
           <img
             src={src}
             {...getCardImageSrcSetProps(src, rungs)}
-            alt={sourceName}
+            alt={displaySourceName}
             className="h-full w-full object-cover"
             draggable={false}
             onError={() => advanceFailedSource?.(src)}
@@ -350,6 +372,59 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
         </div>
       )}
 
+      {!isSpell && localized?.oracle_text && (
+        <PopoverMenu
+          ariaLabel={t("stack.readAbility")}
+          variant="dialog"
+          menuWidthPx={360}
+          onOpenChange={(open) => {
+            if (open) {
+              inspectObject(null);
+              setPreviewSticky(false);
+              onHoverChange?.(false);
+            }
+          }}
+          renderTrigger={({ ref, open, toggle }) => (
+            // 44px touch target on the left edge, mirroring the yield control on
+            // the right edge, so it never covers the bottom-right controller
+            // avatar and a near-miss tap does not fall through to ChooseTarget.
+            <button
+              ref={ref}
+              type="button"
+              data-testid="stack-read-ability"
+              aria-label={t("stack.readAbility")}
+              aria-haspopup="dialog"
+              aria-expanded={open}
+              title={t("stack.readAbility")}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={toggle}
+              className="absolute left-1 top-1/2 z-30 flex min-h-11 min-w-11 -translate-y-1/2 items-center justify-center rounded-full bg-slate-800/90 text-slate-100 shadow-md ring-1 ring-white/25 hover:bg-slate-700"
+            >
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" aria-hidden="true" className="h-4 w-4">
+                <path d="M3 3h5l2 2 2-2h5v13h-5l-2 2-2-2H3V3Zm7 2v13" />
+              </svg>
+            </button>
+          )}
+        >
+          {(close) => (
+            <div className="p-3">
+              <h2 className="font-semibold text-white">{displaySourceName}</h2>
+              <p className="mt-1 text-xs text-purple-300">{abilityLabel}</p>
+              {triggerDescription && (
+                <div className="mt-3">
+                  <h3 className="text-xs text-slate-400">{t("cardTextReference.originalAbility")}</h3>
+                  <RichLabel text={triggerDescription} size="xs" className="mt-1 block whitespace-pre-wrap text-sm text-slate-200" />
+                </div>
+              )}
+              <CardTextReference text={localized.oracle_text} />
+              <button type="button" onClick={close} className="mt-3 min-h-11 rounded-lg border border-white/20 px-3 text-sm text-white">
+                {t("common:actions.close")}
+              </button>
+            </div>
+          )}
+        </PopoverMenu>
+      )}
+
       {selectedModeLabels.length > 0 && (
         <section
           aria-label={t("stack.selectedModes")}
@@ -366,7 +441,7 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
         </section>
       )}
 
-      {(stormCopyCount !== undefined || targetLabels.length > 0 || paidLabels.length > 0 || contextLabels.length > 0) && (
+      {(stormCopyCount !== undefined || revealedLabel !== undefined || targetLabels.length > 0 || paidLabels.length > 0 || contextLabels.length > 0) && (
         <div className="absolute left-1 right-1 top-5 flex flex-wrap gap-1">
           {stormCopyCount !== undefined && (
             <span
@@ -374,6 +449,15 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
               title={t("storm.copies", { count: stormCopyCount })}
             >
               {t("storm.copies", { count: stormCopyCount })}
+            </span>
+          )}
+          {revealedLabel !== undefined && (
+            <span
+              data-testid="stack-revealed-cards"
+              className="max-w-full truncate rounded bg-emerald-950/90 px-1.5 py-0.5 text-[8px] font-semibold text-emerald-100 shadow"
+              title={revealedLabel}
+            >
+              {revealedLabel}
             </span>
           )}
           {targetLabels.slice(0, 2).map((label) => (
@@ -495,7 +579,7 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
               >
                 <span className="text-sm font-semibold text-purple-200">{t("priorityYield.yieldThis")}</span>
                 <span className="text-xs font-normal leading-tight text-gray-400">
-                  {t("priorityYield.yieldThisHint", { source: sourceName })}
+                  {t("priorityYield.yieldThisHint", { source: displaySourceName })}
                 </span>
               </button>
               <button
@@ -512,7 +596,7 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
               >
                 <span className="text-sm font-semibold text-purple-200">{t("priorityYield.yieldAllCopies")}</span>
                 <span className="text-xs font-normal leading-tight text-gray-400">
-                  {t("priorityYield.allCopiesHint", { source: sourceName })}
+                  {t("priorityYield.allCopiesHint", { source: displaySourceName })}
                 </span>
               </button>
               {matchingYield && (
@@ -578,6 +662,17 @@ function formatPaidFact(fact: StackPaidFactView, t: TFunction<"game">): string {
   }
 }
 
+function formatStackAbilityKind(kind: StackAbilityKindView, t: TFunction<"game">): string {
+  switch (kind.type) {
+    case "Activated":
+      return kind.data.number != null
+        ? t("stack.activatedAbilityNumber", { number: kind.data.number })
+        : t("stack.activatedAbility");
+    case "Triggered":
+      return t("stack.triggeredAbility");
+  }
+}
+
 function stackEntryTitle(
   label: string,
   description: string | undefined,
@@ -590,6 +685,6 @@ function stackEntryTitle(
     description ? `${label}: ${description}` : label,
     targets.length > 0 ? t("stack.titleTargets", { targets: targets.join(", ") }) : "",
     paid.length > 0 ? t("stack.titlePaid", { paid: paid.join(", ") }) : "",
-    context.length > 0 ? t("stack.titleContext", { context: context.join(", ") }) : "",
+    context.length > 0 ? t("stack.titleContext", { items: context.join(", ") }) : "",
   ].filter(Boolean).join("\n");
 }

@@ -95,7 +95,7 @@ fn magnetic_mountain_choose_and_pay_per_creature_untaps_selection() {
     // build-time mana per CR 500.4), so the upkeep trigger's
     // `PayCost { ScaledMana }` sees the full {8} when it resolves.
     if let Some(p) = runner.state_mut().players.iter_mut().find(|p| p.id == P0) {
-        p.mana_pool.mana = pool;
+        p.mana_pool = engine::types::mana::ManaPool::from_units(pool);
     }
 
     assert!(
@@ -151,8 +151,7 @@ fn magnetic_mountain_choose_and_pay_per_creature_untaps_selection() {
         .find(|p| p.id == P0)
         .expect("P0 exists")
         .mana_pool
-        .mana
-        .len();
+        .total();
     assert_eq!(
         mana_left, 0,
         "ScaledMana must charge {{4}}×2 = {{8}}, draining the 8-mana pool"

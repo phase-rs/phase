@@ -260,8 +260,9 @@ fn exiled_card_with_play_permission_stays_on_exile_path() {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: EtbTapState::Unspecified,
             });
         id

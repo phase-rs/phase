@@ -9,10 +9,13 @@ import {
   RANDOM_DECK_SELECTION,
   listSavedDeckNames,
   getDeckMeta,
+  captureSavedDeck,
   deleteDeck,
   MAX_FOLDER_NAME_LENGTH,
   type DeckFolder,
 } from "../../constants/storage";
+import { withSavedDeckLibrary } from "../../services/savedDeckTransaction";
+import { attemptSavedDeckWrite } from "../../services/savedDeckWriteFailure";
 import { PROFILE_REPLACED_EVENT } from "../../stores/cloudSyncStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useEffectiveOffline } from "../../stores/connectivityStore";
@@ -45,12 +48,25 @@ import {
   savedDeckCatalogId,
   type DeckCatalogCandidate,
 } from "../../services/deckCatalog";
+import type { AiDeckCatalogResult } from "../../services/aiDeckCatalog";
 import {
   pickRandomDeckCandidate,
+  randomDeckPriority,
   type RandomDeckCandidate,
 } from "../../services/randomDeckSelection";
+import {
+  applyPoolSelection,
+  isPoolSelectionEmpty,
+  summarizePoolSelection,
+  withCatalogSavedNames,
+  type PoolCandidate,
+} from "../../services/randomPoolSelection";
+import { usePoolFolderIndex } from "../../hooks/usePoolFolderIndex";
+import { resolveBracketDrawBase, resolveRandomDrawPool, type BracketTaggedCandidate } from "../../services/aiRandomPool";
+import { RandomPoolTree } from "./RandomPoolTree";
 import { ImportDeckModal } from "./ImportDeckModal";
 import { PreconDeckModal } from "./PreconDeckModal";
+import type { ImportSession } from "./importSession";
 import { savePreconDeck } from "../../services/preconDecks";
 import type { DeckEntry as PreconDeckEntry } from "../../hooks/useDecks";
 import { MenuPanel } from "./MenuShell";
@@ -64,11 +80,12 @@ import {
   isBundledDeck,
 } from "./deckHelpers";
 import { BASIC_LAND_NAMES } from "../../constants/game";
-import { BracketEstimateChip } from "../deck-builder/BracketEstimateChip";
+import { BracketEstimateChip, ManualBracketChip } from "../deck-builder/BracketEstimateChip";
 import { MenuSelect } from "../ui/MenuSelect";
 import { TextPromptDialog } from "../ui/TextPromptDialog";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
 import { getSharedAdapter } from "../../adapter/wasm-adapter";
+import { isCommanderFamilyFormat, type CommanderBracket } from "../../types/bracket";
 const PRECON_PREFIX = "[Pre-built] ";
 const PRECON_PAGE_SIZE = 12;
 /** Sentinel section ids for the virtual/system folders in the collapse set. */
@@ -80,7 +97,12 @@ const DECK_GRID_CLASS = "grid w-full gap-4 grid-cols-[repeat(auto-fill,minmax(15
 const DECK_SCAN_BATCH_SIZE = 1;
 const COVERAGE_SCAN_BATCH_SIZE = 6;
 
-type SelectableRandomDeckCandidate = RandomDeckCandidate & { deckName: string };
+type SelectableRandomDeckCandidate = RandomDeckCandidate & {
+  deckName: string;
+  /** Resolved bracket tier (static tag or engine estimate) for the AI-matching
+   *  bracket restriction; null when unknown or outside single-player setup. */
+  bracket: CommanderBracket | null;
+};
 
 type FolderPromptRequest =
   | { kind: "create" }
@@ -208,9 +230,7 @@ export function StatusBadge({ label, active }: { label: string; active: boolean 
   );
 }
 
-/** Inner component so the hook is always called unconditionally (Rules of Hooks).
- * Returns null for non-Commander decks — the hook handles that check. */
-function BracketChipForDeck({ candidate }: { candidate: DeckCatalogCandidate }) {
+function EstimatedBracketChipForDeck({ candidate }: { candidate: DeckCatalogCandidate }) {
   const { estimate } = useBracketEstimate({
     deck: candidate.deck,
     commanders: candidate.deck.commander ?? [],
@@ -218,6 +238,16 @@ function BracketChipForDeck({ candidate }: { candidate: DeckCatalogCandidate }) 
     adapter: getSharedAdapter(),
   });
   return <BracketEstimateChip tier={estimate?.tier ?? null} />;
+}
+
+/** Bracket tags apply only to Commander-family formats. A manual declaration
+ * takes precedence without scheduling an estimate for that deck. */
+function BracketChipForDeck({ candidate }: { candidate: DeckCatalogCandidate }) {
+  if (!isCommanderFamilyFormat(candidate.knownFormat)) return null;
+  if (candidate.bracket != null) {
+    return <ManualBracketChip bracket={candidate.bracket} />;
+  }
+  return <EstimatedBracketChipForDeck candidate={candidate} />;
 }
 
 interface DeckTileProps {
@@ -242,7 +272,7 @@ interface DeckTileProps {
 }
 
 const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete, onAdopt, hideFeedBadge, feedDeckOverride, preconDeckOverride, catalogCandidate, actionsMenu }: DeckTileProps) {
-  const { t } = useTranslation("menu");
+  const { t } = useTranslation(["menu", "common"]);
   const [coverageHovered, setCoverageHovered] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
@@ -617,6 +647,17 @@ interface MyDecksProps {
    * scanner batch results into a fan-out storm through the parent's render tree.
    */
   onActiveDeckCompatChange?: (compat: DeckCompatibilityResult | null) => void;
+  /**
+   * Completed catalog snapshot hoisted from the setup page's shared AI
+   * catalog analysis. Present only in single-player setup once the analysis
+   * lands; the deferred human pool (tree, bracket base, counts, fallback)
+   * derives from the legal `candidates` — never the search-narrowed display
+   * — so the preview matches what game start can draw, while group toggles
+   * clear overrides against the complete raw `allCandidates`. Absent
+   * everywhere else (multiplayer select has no AI context, so the pool
+   * selection applies alone there).
+   */
+  aiCatalog?: AiDeckCatalogResult;
 }
 
 type MyDecksTab = "decks" | "subscriptions";
@@ -635,8 +676,9 @@ export function MyDecks({
   randomSelectionMode = "resolveImmediately",
   bare = false,
   onActiveDeckCompatChange,
+  aiCatalog,
 }: MyDecksProps) {
-  const { t } = useTranslation("menu");
+  const { t } = useTranslation(["menu", "common"]);
   const effectiveOffline = useEffectiveOffline();
   const [activeTab, setActiveTab] = useState<MyDecksTab>("decks");
   const [deckNames, setDeckNames] = useState<string[]>([]);
@@ -722,6 +764,28 @@ export function MyDecks({
   const collapsedFolderIds = usePreferencesStore((s) => s.collapsedFolderIds);
   const toggleFolderCollapsed = usePreferencesStore((s) => s.toggleFolderCollapsed);
   const setCollapsedFolderIds = usePreferencesStore((s) => s.setCollapsedFolderIds);
+  const humanPoolSelection = usePreferencesStore((s) => s.humanPoolSelection);
+  const aiBracketFilter = usePreferencesStore((s) => s.aiBracketFilter);
+  // cEDH is a table-wide toggle, not a per-seat difficulty: the v11 → v12
+  // migration resets CEDH seats to their remembered difficulty, so reading the
+  // persisted flag (as the AI setup does) keeps the human pool preview and
+  // the deferred game-start draw in agreement. The resolver's
+  // Commander-family guard makes this a no-op outside Commander formats.
+  const tableCedh = usePreferencesStore((s) => s.cedhMode);
+  // Reactive folder revision: pool membership memos below resolve through
+  // this index so a deck moved between folders (here or in another tab)
+  // recomputes instead of serving stale membership.
+  const poolFolderIndex = usePoolFolderIndex();
+  // The deferred human preview (tree, bracket base, counts, fallback)
+  // derives from the full hoisted legal catalog — never the search-narrowed
+  // display — so it matches what game start can draw. Present only in
+  // single-player setup once the analysis lands; multiplayer select has no
+  // AI context, so the pool selection applies alone there.
+  const useLegalPreview = randomSelectionMode === "defer" && aiCatalog !== undefined;
+  const legalBrackets = useMemo(
+    () => new Map((aiCatalog?.candidates ?? []).map((candidate) => [candidate.id, candidate.bracket] as const)),
+    [aiCatalog],
+  );
 
   const handleToggleStar = useCallback((name: string) => toggleStar(name), [toggleStar]);
   const handleAssignFolder = useCallback(
@@ -743,24 +807,26 @@ export function MyDecks({
   const handleFolderPromptConfirm = useCallback(
     (folderName: string) => {
       if (!folderPrompt) return;
-      switch (folderPrompt.kind) {
-        case "create": {
-          createFolder(folderName);
-          break;
+      const prompt = folderPrompt;
+      void (async () => {
+        switch (prompt.kind) {
+          case "create": {
+            await createFolder(folderName);
+            break;
+          }
+          case "create-and-assign": {
+            await createFolder(folderName, prompt.deckName);
+            break;
+          }
+          case "rename": {
+            await renameFolder(prompt.folderId, folderName);
+            break;
+          }
         }
-        case "create-and-assign": {
-          const folder = createFolder(folderName);
-          if (folder) assignDeck(folderPrompt.deckName, folder.id);
-          break;
-        }
-        case "rename": {
-          renameFolder(folderPrompt.folderId, folderName);
-          break;
-        }
-      }
+      })();
       setFolderPrompt(null);
     },
-    [folderPrompt, createFolder, assignDeck, renameFolder],
+    [folderPrompt, createFolder, renameFolder],
   );
   const handleFolderPromptCancel = useCallback(() => {
     setFolderPrompt(null);
@@ -1134,20 +1200,23 @@ export function MyDecks({
     ? (randomDeckSelected ? t("myDecks.randomDeckTile") : activeDeckName)
     : null;
   const visibleDeckCount = sourceFilteredDeckNames.length + preconDeckNames.length;
-  const randomSelectableCandidates = useMemo<SelectableRandomDeckCandidate[]>(() => {
+  const randomBaseCandidates = useMemo<SelectableRandomDeckCandidate[]>(() => {
     if (mode !== "select") return [];
     return [...sourceFilteredDeckNames, ...preconDeckNames].map((deckName) => {
       const candidate = deckCandidatesByName.get(deckName) ?? legalPreconByName.get(deckName);
+      const id = candidate?.id ?? savedDeckCatalogId(deckName);
       return {
-        id: candidate?.id ?? savedDeckCatalogId(deckName),
+        id,
         name: deckName,
         deckName,
         source: candidate?.source ?? { type: "saved" },
         knownFormat: candidate?.knownFormat,
         compatibility: compatibilities[deckName] ?? null,
+        bracket: legalBrackets.get(id) ?? null,
       };
     });
   }, [
+    legalBrackets,
     compatibilities,
     deckCandidatesByName,
     legalPreconByName,
@@ -1155,6 +1224,127 @@ export function MyDecks({
     preconDeckNames,
     sourceFilteredDeckNames,
   ]);
+  // The human pool curation narrows the Random pick, falling back when the
+  // selection matches nothing (the tree below warns). In single-player setup
+  // the shared bracket-then-curation layering applies so your deck lands in
+  // the same bracket(s) as the AI seats.
+  const randomSelectableCandidates = useMemo(() => {
+    if (!useLegalPreview) {
+      if (isPoolSelectionEmpty(humanPoolSelection)) return randomBaseCandidates;
+      const keep = new Set(
+        applyPoolSelection(
+          withCatalogSavedNames(randomBaseCandidates),
+          humanPoolSelection,
+          poolFolderIndex,
+        ).pool.map((candidate) => candidate.id),
+      );
+      return randomBaseCandidates.filter((candidate) => keep.has(candidate.id));
+    }
+    const resolved = resolveRandomDrawPool(
+      withCatalogSavedNames(randomBaseCandidates),
+      {
+        bracketFilter: aiBracketFilter,
+        cedhMode: tableCedh,
+        selectedFormat: selectedFormatForCompatibility ?? null,
+        poolSelection: humanPoolSelection,
+      },
+      poolFolderIndex,
+    );
+    const keep = new Set(resolved.pool.map((candidate) => candidate.id));
+    return randomBaseCandidates.filter((candidate) => keep.has(candidate.id));
+  }, [
+    aiBracketFilter,
+    humanPoolSelection,
+    poolFolderIndex,
+    randomBaseCandidates,
+    selectedFormatForCompatibility,
+    tableCedh,
+    useLegalPreview,
+  ]);
+  // Deferred preview legality: game start draws the human Random deck from
+  // the full completed legal catalog, so the deferred tree/base/counts use
+  // that same universe directly — intersecting the search-narrowed display
+  // with legal membership cannot restore legal decks search already removed.
+  // Tiles, search, and immediate mode keep the display universe.
+  const poolTreeItems = useMemo<(PoolCandidate & BracketTaggedCandidate)[]>(() => {
+    if (useLegalPreview && aiCatalog) return withCatalogSavedNames(aiCatalog.candidates);
+    return withCatalogSavedNames(randomBaseCandidates);
+  }, [useLegalPreview, aiCatalog, randomBaseCandidates]);
+  // Complete toggleable universe for folder toggles: the display base above
+  // is narrowed by search/source/set filters, but a toggle clears overrides
+  // for every true group member — including saved-duplicate precons, whose
+  // catalog id still draws and still holds explicit overrides even though
+  // the tiles show the saved copy. Every display filter is ignored here.
+  const poolCompleteItems = useMemo(() => {
+    if (mode !== "select") return [];
+    return withCatalogSavedNames(
+      catalogCandidates.map((candidate) => {
+        const deckName = candidate.source.type === "precon"
+          ? PRECON_PREFIX + candidate.name
+          : candidate.name;
+        return {
+          id: candidate.id,
+          name: deckName,
+          deckName,
+          source: candidate.source,
+          knownFormat: candidate.knownFormat,
+          compatibility: compatibilities[deckName] ?? null,
+          bracket: legalBrackets.get(candidate.id) ?? null,
+        };
+      }),
+    );
+  }, [legalBrackets, catalogCandidates, compatibilities, mode]);
+  // Raw toggleable universe for folder toggles in deferred mode: group
+  // membership comes from the complete catalog (every saved, feed, and
+  // precon deck regardless of format or legality), so an override on a
+  // currently-unlisted deck cannot survive a folder-wide unselect — with no
+  // display-only deduplication: a saved-duplicate precon keeps its catalog
+  // id here because the tree still lists it and the draw still serves it.
+  // Display, counts, and the draw itself stay on the legal `poolTreeItems`
+  // universe.
+  const poolToggleItems = useMemo(() => {
+    if (!useLegalPreview || !aiCatalog) return poolCompleteItems;
+    return withCatalogSavedNames(
+      aiCatalog.allCandidates.map((candidate) => {
+        const deckName = candidate.source.type === "precon"
+          ? PRECON_PREFIX + candidate.name
+          : candidate.name;
+        return {
+          id: candidate.id,
+          name: deckName,
+          deckName,
+          source: candidate.source,
+          knownFormat: candidate.knownFormat,
+          compatibility: compatibilities[deckName] ?? null,
+          bracket: legalBrackets.get(candidate.id) ?? null,
+        };
+      }),
+    );
+  }, [useLegalPreview, aiCatalog, poolCompleteItems, compatibilities, legalBrackets]);
+  const poolBaseIds = useMemo(
+    () =>
+      useLegalPreview
+        ? new Set(
+            resolveBracketDrawBase(poolTreeItems, {
+              bracketFilter: aiBracketFilter,
+              cedhMode: tableCedh,
+              selectedFormat: selectedFormatForCompatibility ?? null,
+            }).map((candidate) => candidate.id),
+          )
+        : undefined,
+    [
+      aiBracketFilter,
+      poolTreeItems,
+      selectedFormatForCompatibility,
+      tableCedh,
+      useLegalPreview,
+    ],
+  );
+  const humanPoolConflict = useMemo(() => {
+    if (!useLegalPreview || !poolBaseIds) return null;
+    const summary = summarizePoolSelection(poolTreeItems, humanPoolSelection, poolBaseIds, poolFolderIndex);
+    return summary.selected > 0 && summary.playable === 0 && summary.baseSize > 0 ? summary : null;
+  }, [useLegalPreview, poolTreeItems, humanPoolSelection, poolBaseIds, poolFolderIndex]);
   const userDeckScanTotal = requiresCompatibilityFilter ? unknownFormatDeckNames.length : 0;
   const userDeckScanCompleted = Math.min(deckScanIndex, userDeckScanTotal);
   const isScanningUserDecks = userDeckScanCompleted < userDeckScanTotal;
@@ -1293,25 +1483,42 @@ export function MyDecks({
   const showEvaluationStatus = mode === "manage"
     && (isScanningUserDecks || isScanningCoverage || (isEvaluating && !requiresCompatibilityFilter));
 
-  const materializePreconDeck = useCallback((deckName: string): boolean => {
+  /** Resolves false only when saving the precon was refused; the deck must not be selected then. */
+  const materializePreconDeck = useCallback(async (deckName: string): Promise<boolean> => {
     const candidate = legalPreconByName.get(deckName);
-    if (!candidate || candidate.source.type !== "precon") return false;
-    savePreconDeck(deckName, preconCandidateToDeckEntry(candidate));
+    if (!candidate || candidate.source.type !== "precon") return true;
+    const saved = await attemptSavedDeckWrite("save", () =>
+      savePreconDeck(deckName, preconCandidateToDeckEntry(candidate), { type: "replace" }),
+    );
+    if (!saved.ok) return false;
     setDeckNames(listSavedDeckNames());
     return true;
   }, [legalPreconByName]);
 
-  const handleTileClick = useCallback((deckName: string) => {
+  // Bumped by every select-mode choice, so a choice whose precon save or random pick finishes after a newer choice does not select.
+  const selectionRequest = useRef(0);
+  // A choice pending when this surface unmounts (e.g. the caller navigated
+  // away) must not select once it finishes either.
+  useEffect(() => {
+    return () => {
+      selectionRequest.current += 1;
+    };
+  }, []);
+
+  const handleTileClick = useCallback(async (deckName: string) => {
     if (mode === "manage") {
       onEditDeck?.(deckName);
       return;
     }
-    materializePreconDeck(deckName);
+    const request = ++selectionRequest.current;
+    if (!(await materializePreconDeck(deckName))) return;
+    if (request !== selectionRequest.current) return;
     onSelectDeck?.(deckName);
   }, [materializePreconDeck, mode, onEditDeck, onSelectDeck]);
 
   const handleRandomDeckClick = useCallback(async () => {
     if (mode !== "select" || randomSelectableCandidates.length === 0 || isPickingRandomDeck) return;
+    const request = ++selectionRequest.current;
     if (randomSelectionMode === "defer") {
       onSelectDeck?.(RANDOM_DECK_SELECTION);
       return;
@@ -1321,7 +1528,11 @@ export function MyDecks({
     let nextCompatibilities = compatibilities;
     try {
       if (selectedFormatForCompatibility) {
-        const unknownCandidates = randomSelectableCandidates.flatMap(({ deckName }) => {
+        // Legality resolves across the FULL display base before curation:
+        // validating only the narrowed array could discover that its sole
+        // deck is incompatible and then be forced to pick it anyway, while a
+        // legal deck sits outside the narrowed array.
+        const unknownCandidates = randomBaseCandidates.flatMap(({ deckName }) => {
           const candidate = deckCandidatesByName.get(deckName) ?? legalPreconByName.get(deckName);
           if (!candidate || candidate.knownFormat != null) return [];
           if (compatibilities[deckName]?.selected_format_compatible != null) return [];
@@ -1347,14 +1558,30 @@ export function MyDecks({
       setIsPickingRandomDeck(false);
     }
 
-    const pick = pickRandomDeckCandidate(
-      randomSelectableCandidates.map((candidate) => ({
-        ...candidate,
-        compatibility: nextCompatibilities[candidate.deckName] ?? candidate.compatibility,
-      })),
-      { selectedFormat: selectedFormatForCompatibility },
-    );
-    if (pick) handleTileClick(pick.deckName);
+    const validatedBase = randomBaseCandidates.map((candidate) => ({
+      ...candidate,
+      compatibility: nextCompatibilities[candidate.deckName] ?? candidate.compatibility,
+    }));
+    const curatedIds = new Set(randomSelectableCandidates.map((candidate) => candidate.id));
+    const curated = validatedBase.filter((candidate) => curatedIds.has(candidate.id));
+    // A curation whose best deck is worse than the base's best falls back to
+    // the full validated base, judged by the same tier authority the picker
+    // uses below — so the fallback can only ever improve legality. Tiers 0
+    // (known-format match) and 1 (compatibility-confirmed) are both fully
+    // legal and compare equivalently here: a curation holding a legal deck is
+    // never abandoned for an excluded deck that merely ranks higher.
+    const fallbackTier = (tier: number): number => (tier <= 1 ? 0 : tier);
+    const bestFallbackTier = (list: RandomDeckCandidate[]): number =>
+      Math.min(
+        ...list.map((candidate) =>
+          fallbackTier(randomDeckPriority(candidate, selectedFormatForCompatibility))
+        ),
+      );
+    const pool = curated.length > 0 && bestFallbackTier(curated) <= bestFallbackTier(validatedBase)
+      ? curated
+      : validatedBase;
+    const pick = pickRandomDeckCandidate(pool, { selectedFormat: selectedFormatForCompatibility });
+    if (pick && request === selectionRequest.current) handleTileClick(pick.deckName);
   }, [
     compatibilities,
     deckCandidatesByName,
@@ -1363,6 +1590,7 @@ export function MyDecks({
     legalPreconByName,
     mode,
     onSelectDeck,
+    randomBaseCandidates,
     randomSelectableCandidates,
     randomSelectionMode,
     selectedFormatForCompatibility,
@@ -1370,9 +1598,10 @@ export function MyDecks({
     t,
   ]);
 
-  const handleImported = (name: string, names: string[]) => {
+  const handleImported = (name: string, names: string[], session: ImportSession) => {
     setDeckNames(names);
-    if (mode === "select") {
+    if (mode === "select" && session === "open") {
+      selectionRequest.current += 1;
       onSelectDeck?.(name);
     }
   };
@@ -1381,23 +1610,30 @@ export function MyDecks({
     if (effectiveOffline) return;
     setIsRefreshing(true);
     try {
-      await refreshAllFeeds();
-      setDeckNames(listSavedDeckNames());
+      const refreshed = await attemptSavedDeckWrite("updateFeeds", refreshAllFeeds);
+      if (refreshed.ok) setDeckNames(listSavedDeckNames());
     } finally {
       setIsRefreshing(false);
     }
   };
 
-  const handleAdoptDeck = useCallback((deckName: string) => {
+  const handleAdoptDeck = useCallback(async (deckName: string) => {
     const newName = prompt(t("myDecks.saveAsPrompt"), deckName);
     if (!newName) return;
-    adoptFeedDeck(deckName, newName);
-    setDeckNames(listSavedDeckNames());
+    const adopted = await attemptSavedDeckWrite("save", () => adoptFeedDeck(deckName, newName));
+    if (adopted.ok) setDeckNames(listSavedDeckNames());
   }, [t]);
 
-  const handleDeleteDeck = useCallback((deckName: string) => {
-    deleteDeck(deckName);
-    setDeckNames(listSavedDeckNames());
+  const handleDeleteDeck = useCallback(async (deckName: string) => {
+    const deck = captureSavedDeck(deckName);
+    if (deck.raw === null) {
+      // The precon section wires its tiles to this same handler, and a precon that is not
+      // saved (the common case) names nothing here — deleteDeck would refuse it as "changed".
+      setDeckNames(listSavedDeckNames());
+      return;
+    }
+    const deleted = await attemptSavedDeckWrite("delete", () => withSavedDeckLibrary((txn) => deleteDeck(txn, deck)));
+    if (deleted.ok) setDeckNames(listSavedDeckNames());
   }, []);
 
   const handleFeedManagerClose = () => {
@@ -1843,6 +2079,27 @@ export function MyDecks({
               )}
               {deckEntryTiles}
             </div>
+            {mode === "select" && poolTreeItems.length > 0 && (
+              <RandomPoolTree
+                pool="human"
+                items={poolTreeItems}
+                // Toggle membership is the complete raw universe in deferred
+                // mode (as on the AI side): a folder toggle clears overrides
+                // for every true group member, including decks the legal
+                // display universe hides. Display items need the
+                // search-independent display universe for totals instead.
+                allItems={useLegalPreview ? poolToggleItems : poolCompleteItems}
+                baseIds={poolBaseIds}
+                showBracketFilter={
+                  useLegalPreview && isCommanderFamilyFormat(selectedFormatForCompatibility ?? undefined)
+                }
+              />
+            )}
+            {mode === "select" && humanPoolConflict !== null && (
+              <div role="status" className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                {t("myDecks.poolBracketConflict", { selected: humanPoolConflict.selected, total: humanPoolConflict.baseSize })}
+              </div>
+            )}
           </div>
 
           {/* User decks: a flat grid until the user creates a folder or stars a
@@ -2020,7 +2277,7 @@ export function MyDecks({
       <PreconDeckModal
         open={showPrecon}
         onClose={() => setShowPrecon(false)}
-        onImported={(name) => handleImported(name, listSavedDeckNames())}
+        onImported={(name, session) => handleImported(name, listSavedDeckNames(), session)}
       />
       <FeedManagerModal
         open={showFeedManager}

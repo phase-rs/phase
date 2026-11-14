@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import { GAME_Z, GAME_Z_LAYER } from "../ui.ts";
 
 describe("GAME_Z", () => {
+  it("keeps combat arrows below the dialog host", () => {
+    expect(GAME_Z.combatArrow).toBeLessThan(GAME_Z.dialogHost);
+  });
+
   it("keeps board-choice controls below prompt overlays but above HUD rails", () => {
     expect(GAME_Z.boardChoiceGrid).toBeGreaterThan(GAME_Z.hudRail);
     expect(GAME_Z.boardChoiceGrid).toBeLessThan(GAME_Z.dialogHost);
@@ -10,6 +14,7 @@ describe("GAME_Z", () => {
 
   it("keeps Tailwind layer classes aligned with numeric layer values", () => {
     expect(GAME_Z_LAYER.board).toBe(`z-${GAME_Z.board}`);
+    expect(GAME_Z_LAYER.combatArrow).toBe(`z-${GAME_Z.combatArrow}`);
     expect(GAME_Z_LAYER.hudRail).toBe(`z-${GAME_Z.hudRail}`);
     expect(GAME_Z_LAYER.boardChoiceGrid).toBe(`z-[${GAME_Z.boardChoiceGrid}]`);
     expect(GAME_Z_LAYER.dialogHost).toBe(`z-${GAME_Z.dialogHost}`);

@@ -129,7 +129,8 @@ pub fn validate_limited_deck(
     // CR 903.13e: "but only if those cards are used as the player's commander(s)".
     commanders: &[String],
     // CR 903.3: how many commanders a deck built from this pool must designate.
-    // `0` for the four CR 905.1a kinds. Supplied by the caller, never derived
+    // `0` for every kind whose decks are not Commander decks -- the four
+    // CR 905.1a kinds and `Winston`. Supplied by the caller, never derived
     // here — the validator stays kind-agnostic.
     commanders_required: usize,
 ) -> Result<(), Vec<LimitedDeckError>> {

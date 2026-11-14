@@ -94,6 +94,10 @@ describe("DraftAdapter engine coordinator", () => {
       "DRAFT",
       "Swiss",
       "Competitive",
+      // Deliberately NOT the Medium default: a pod's bot difficulty has to
+      // travel, and a fixture that passed 2 could not tell a threaded argument
+      // from a cell that was already Medium.
+      3,
     );
     await adapter.submitPickForSeat(2, ["first", "second"]);
     await adapter.submitDeck(["Island"], ["Commander"]);
@@ -109,6 +113,11 @@ describe("DraftAdapter engine coordinator", () => {
       "DRAFT",
       "Swiss",
       "Competitive",
+      // LAST, and exact-args: the engine reads this boundary positionally, so
+      // an argument inserted anywhere but the end silently shifts every one
+      // after it. This assertion is what makes that a red test rather than a
+      // draft created with the wrong kind or seed.
+      3,
     );
     expect(wasm.draft_procedure).toHaveBeenCalledWith(4, "Swiss");
     expect(wasm.submit_pick_for_seat).toHaveBeenCalledWith(2, '["first","second"]');

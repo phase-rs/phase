@@ -27,8 +27,8 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::ExtraPhase;
-use engine::types::identifiers::ObjectId;
-use engine::types::phase::Phase;
+use engine::types::identifiers::{ExtraPhaseId, ObjectId};
+use engine::types::phase::{Phase, PhaseGroup, TurnSegment};
 use engine::types::statics::{StaticMode, SuppressedTriggerEvent};
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
@@ -151,9 +151,10 @@ fn ureni_attacks_in_second_combat_fires_again() {
     let current_phase = runner.state().phase;
     runner.state_mut().extra_phases.push(ExtraPhase {
         anchor: current_phase,
-        phase: Phase::BeginCombat,
+        segment: TurnSegment::Phase(PhaseGroup::Combat),
         attacker_restriction: None,
         attacker_restriction_source: None,
+        id: ExtraPhaseId::default(),
     });
 
     // Advance out of the current step (post-combat / end phase) into the

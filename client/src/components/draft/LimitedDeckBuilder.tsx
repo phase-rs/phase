@@ -16,6 +16,7 @@ import {
 import { menuButtonClass } from "../menu/buttonStyles";
 import { PopoverMenu } from "../menu/PopoverMenu";
 import { CommanderPanel } from "../deck-builder/CommanderPanel";
+import { ExportDeckControl } from "../deck-builder/ExportDeckControl";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import type { GameFormat } from "../../adapter/types";
 import type { DeckEntry } from "../../services/deckParser";
@@ -24,6 +25,7 @@ import {
   evaluateDeckCompatibility,
   type DeckCompatibilityResult,
 } from "../../services/deckCompatibility";
+import { draftSubmissionToParsedDeck } from "../../services/draftDeckAutosave";
 import type {
   DraftCardInstance,
   DraftPlayerView,
@@ -55,6 +57,7 @@ import {
 import {
   countProjectedNames,
   projectDeckNames,
+  projectWorkspacePartition,
 } from "./workspace/workspaceProjection";
 
 // Shared enter/exit for cards moving between the pool and the deck.
@@ -409,7 +412,7 @@ function useCommanderDesignation({
   };
 }
 
-type CommanderDraftCompatibilityState =
+type DraftDeckCompatibilityState =
   | { key: string; status: "pending" }
   | { key: string; status: "resolved"; result: DeckCompatibilityResult }
   | { key: string; status: "error" };
@@ -417,11 +420,13 @@ type CommanderDraftCompatibilityState =
 function useCommanderDraftCompatibility({
   enforceCompatibility,
   selectedFormat,
+  draftSetCodes,
   main,
   commanders,
 }: {
   enforceCompatibility: boolean;
   selectedFormat: "CommanderDraft" | null;
+  draftSetCodes: readonly string[];
   main: DeckEntry[];
   commanders: string[];
 }) {
@@ -431,7 +436,9 @@ function useCommanderDraftCompatibility({
     commander: commanders,
   }), [main, commanders]);
   const key = useMemo(() => JSON.stringify({
+    enforceCompatibility,
     selectedFormat,
+    draftSetCodes,
     main,
     sideboard: [],
     commander: commanders,
@@ -439,14 +446,17 @@ function useCommanderDraftCompatibility({
     schemeDeck: [],
     signatureSpell: [],
     companion: null,
-  }), [selectedFormat, main, commanders]);
-  const [state, setState] = useState<CommanderDraftCompatibilityState | null>(null);
+  }), [enforceCompatibility, selectedFormat, draftSetCodes, main, commanders]);
+  const [state, setState] = useState<DraftDeckCompatibilityState | null>(null);
   const generationRef = useRef(0);
 
   useEffect(() => {
     const generation = ++generationRef.current;
     setState({ key, status: "pending" });
-    evaluateDeckCompatibility(request, { selectedFormat })
+    evaluateDeckCompatibility(request, {
+      selectedFormat,
+      draftSetCodes,
+    })
       .then((result) => {
         if (generation === generationRef.current) {
           setState({ key, status: "resolved", result });
@@ -455,6 +465,17 @@ function useCommanderDraftCompatibility({
       .catch(() => {
         if (generation === generationRef.current) setState({ key, status: "error" });
       });
+    // `enforceCompatibility`, `draftSetCodes`, and `selectedFormat` are deliberately absent from this
+    // dependency array: both ride in the `key` memo above, whose value is a
+    // JSON.stringify string, and React compares dependencies with Object.is,
+    // which is by value for strings — so a re-render handing this hook a
+    // different array of equal content does not re-fire the evaluator while
+    // one of different content does. The exhaustive-deps warning naming those
+    // two is expected; do NOT silence it by adding them. `cd client && npx
+    // eslint src/components/draft/LimitedDeckBuilder.tsx` prints that warning,
+    // and `cd client && npx vitest run --coverage.enabled=false
+    // src/components/draft/__tests__/LimitedDeckBuilder.test.tsx` covers both
+    // re-render directions.
   }, [key, request]);
 
   const currentState = state?.key === key ? state : null;
@@ -462,8 +483,9 @@ function useCommanderDraftCompatibility({
   return {
     compatible: !enforceCompatibility || result?.selected_format_compatible === true,
     reasons: result?.selected_format_reasons ?? [],
-    pending: enforceCompatibility && currentState?.status === "pending",
-    unavailable: enforceCompatibility && currentState?.status === "error",
+    pending: currentState === null || currentState.status === "pending",
+    unavailable: currentState?.status === "error"
+      || (currentState?.status === "resolved" && result?.selected_format_compatible == null),
     colorDistribution: result?.color_distribution ?? [],
   };
 }
@@ -722,10 +744,10 @@ function ControlledDeckBuilder({
     deckEntries: commanderDeckEntries,
     draftSetCodes,
   });
-  const commanderDraftCompatibilityActive = deckFormat === "CommanderDraft" && designationRequired;
   const compatibility = useCommanderDraftCompatibility({
-    enforceCompatibility: commanderDraftCompatibilityActive,
+    enforceCompatibility: designationRequired,
     selectedFormat: deckFormat,
+    draftSetCodes,
     main: commanderDeckEntries,
     commanders,
   });
@@ -778,7 +800,7 @@ function ControlledDeckBuilder({
   }, [mainDeck, landCounts]);
 
   const handleSubmit = async () => {
-    if (isSubmitting) return;
+    if (isSubmitting || !deckValid) return;
     setLocalSubmissionError(null);
     setIsSubmitting(true);
     try {
@@ -1115,10 +1137,19 @@ function WorkspaceDeckBuilder({
     deckEntries: commanderDeckEntries,
     draftSetCodes,
   });
-  const commanderDraftCompatibilityActive = deckFormat === "CommanderDraft";
+  // The saved-deck form that submit and the library autosave produce:
+  // commanders leave `main` for the `[Commander]` section.
+  const exportableDeck = useMemo(
+    () => draftSubmissionToParsedDeck(
+      projectWorkspacePartition(workspace, pool),
+      commandersRequired > 0 ? commanders : [],
+    ),
+    [workspace, pool, commandersRequired, commanders],
+  );
   const compatibility = useCommanderDraftCompatibility({
-    enforceCompatibility: commanderDraftCompatibilityActive,
+    enforceCompatibility: designationRequired,
     selectedFormat: deckFormat,
+    draftSetCodes,
     main: commanderDeckEntries,
     commanders,
   });
@@ -1167,7 +1198,7 @@ function WorkspaceDeckBuilder({
   };
 
   const handleSubmit = async () => {
-    if (isSubmitting) return;
+    if (isSubmitting || !deckValid) return;
     setLocalSubmissionError(null);
     setIsSubmitting(true);
     try {
@@ -1327,13 +1358,25 @@ function WorkspaceDeckBuilder({
       )}
     </PopoverMenu>
   ) : null;
+  const exportControl = (
+    <ExportDeckControl
+      deck={exportableDeck}
+      triggerClassName={(disabled) => menuButtonClass({
+        tone: "neutral",
+        size: "xs",
+        disabled,
+        className: responsiveLayout === "desktop" ? undefined : "min-h-11",
+      })}
+    />
+  );
   const desktopDeckControls = responsiveLayout === "desktop" ? (
-    <div data-desktop-deck-controls className="ml-auto grid min-w-0 grid-cols-[auto_auto_minmax(0,1fr)] items-center gap-1">
+    <div data-desktop-deck-controls className="ml-auto grid min-w-0 grid-cols-[auto_auto_auto_minmax(0,1fr)] items-center gap-1">
       {landControls}
       {deckStatsControl}
+      {exportControl}
       {suggestDeckControl}
     </div>
-  ) : landControls;
+  ) : <>{landControls}{exportControl}</>;
 
   const compactLandControls = landPicker(
     (phoneLayout || tabletLayout) ? t("limitedDeck.addLands") : t("limitedDeck.lands"),
@@ -1372,7 +1415,7 @@ function WorkspaceDeckBuilder({
       interactionLocked={interactionLocked}
       dragController={dragController}
       deckControls={desktopDeckControls}
-      compactDeckControls={compactLandControls}
+      compactDeckControls={<>{compactLandControls}{exportControl}</>}
       responsiveLayout={responsiveLayout}
       responsiveContext="builder"
       onWorkspaceChange={onWorkspaceChange}
@@ -1667,7 +1710,7 @@ function WorkspaceDeckBuilder({
                         ? t("limitedDeck.compatibilityPending")
                         : compatibility.unavailable
                           ? t("limitedDeck.compatibilityUnavailable")
-                          : t("limitedDeck.commanderRequired"))
+                          : t("limitedDeck.compatibilityUnavailable"))
               }
             </span>
           </div>

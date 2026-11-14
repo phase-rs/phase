@@ -7,6 +7,7 @@ import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { usePlayerAvatarImage } from "../../hooks/usePlayerAvatarImage.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
+import { useHordeDeckMeta } from "../../hooks/useHordeDeckMeta.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { getWaitingForPlayerChoiceIds } from "../../viewmodel/gameStateView.ts";
@@ -17,9 +18,11 @@ import {
   CounterBadge,
   DungeonBadge,
   EnduringStoryBadge,
+  HordeRulesBadge,
   InitiativeBadge,
   MonarchBadge,
   PendingSpellBadge,
+  PoisonCounterBadge,
   StatusBadge,
   UnboundedBadge,
 } from "../hud/HudBadges.tsx";
@@ -27,6 +30,7 @@ import { AvatarHoverPreview } from "../hud/AvatarHoverPreview.tsx";
 import { EnchantmentsBadge } from "../hud/EnchantmentsBadge.tsx";
 import { KickConfirmDialog } from "../hud/KickConfirmDialog.tsx";
 import { NextUpBadge } from "../hud/NextUpBadge.tsx";
+import { PlayerLatency } from "../hud/PlayerLatency.tsx";
 
 interface OpponentSeatHeaderProps {
   playerId: PlayerId;
@@ -48,6 +52,8 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
   const designations = usePlayerDesignations(playerId);
   const player = gameState?.players[playerId];
   const label = getOpponentDisplayName(playerId);
+  // The Horde deck's engine-authored rules summary (undefined outside Horde).
+  const hordeMeta = useHordeDeckMeta();
   const activeAvatarSrc = avatar.src;
 
   const canActForWaitingState = useCanActForWaitingState();
@@ -161,6 +167,7 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
             />
           )}
           <LifeTotal playerId={playerId} size="sm" hideLabel />
+          <PlayerLatency playerId={playerId} />
           {/* The enclosing identity block is pointer-events-none (so the
               header's full-area target button owns clicks while this seat is a
               legal target). Re-enable pointer events on the badge cluster so the
@@ -172,6 +179,9 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
                 with `Enchant player`). Reads the engine's `auras_attached_to_player`
                 projection; brings the split seat header to parity with the
                 legacy 1v1/tab HUDs, which already surface curses. */}
+            {player.has_no_life_total && hordeMeta ? (
+              <HordeRulesBadge deckLabel={hordeMeta.label} rules={hordeMeta.rules} />
+            ) : null}
             <EnchantmentsBadge playerId={playerId} />
             {designations.isMonarch ? <MonarchBadge /> : null}
             {designations.hasInitiative ? <InitiativeBadge /> : null}
@@ -188,7 +198,7 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
               />
             ) : null}
             {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
-            {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
+            {poisonCounters > 0 ? <PoisonCounterBadge playerId={playerId} value={poisonCounters} /> : null}
             {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
             {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
             {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}

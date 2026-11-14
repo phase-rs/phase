@@ -1,7 +1,11 @@
+import { generateProtocolVersions, protocolGenerationPlugin } from "./protocol-generation";
 import path from "node:path";
 import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 import { resolveMultiplayerServerUrls } from "./src/config/multiplayerServerUrls";
+import { resolveTurnCredentialsUrl } from "./src/config/turnCredentials";
+
+generateProtocolVersions();
 
 const multiplayerServers = resolveMultiplayerServerUrls((name) => process.env[name]);
 
@@ -66,7 +70,7 @@ function pwaRegisterStubPlugin(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [wasmStubPlugin(), pwaRegisterStubPlugin()],
+  plugins: [protocolGenerationPlugin(),wasmStubPlugin(), pwaRegisterStubPlugin()],
   define: {
     __SCRYFALL_DATA_URL__: JSON.stringify("/scryfall-data.json"),
     __SCRYFALL_TOKEN_IMAGES_URL__: JSON.stringify("/scryfall-token-images.json"),
@@ -87,10 +91,14 @@ export default defineConfig({
     // Same resolver vite.config.ts uses — the order is single-authority.
     __OFFICIAL_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.official),
     __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.buildDefault),
+    __TURN_CREDENTIALS_URL__: JSON.stringify(
+      resolveTurnCredentialsUrl(process.env.TURN_CREDENTIALS_URL),
+    ),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
     __PREVIEW_SITE_URL__: JSON.stringify("https://preview.phase-rs.dev"),
     __RELEASE_SITE_URL__: JSON.stringify("https://phase-rs.dev"),
     __IS_RELEASE_BUILD__: JSON.stringify(false),
+    __IS_PREVIEW_BUILD__: "globalThis.__IS_PREVIEW_BUILD__",
     // Empty ⇒ telemetry is build-disabled in tests (no network egress).
     __TELEMETRY_URL__: JSON.stringify(""),
   },
@@ -126,7 +134,9 @@ export default defineConfig({
       provider: "v8",
       reporter: ["text", "lcov"],
       include: ["src/**/*.{ts,tsx}"],
-      exclude: ["src/**/__tests__/**", "src/**/*.test.*", "src/wasm/**"],
+      // Stories are documentation rendered by Storybook, not app code, so
+      // they neither add nor owe coverage.
+      exclude: ["src/**/__tests__/**", "src/**/*.test.*", "src/**/*.stories.*", "src/wasm/**"],
       thresholds: {
         lines: 10,
         functions: 10,

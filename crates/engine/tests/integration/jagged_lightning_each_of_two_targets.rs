@@ -19,6 +19,7 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::EngineError;
+use engine::types::actions::AlternativeCastDecision;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -263,6 +264,9 @@ fn t5_fall_of_the_titans_declines_all_optional_target_slots() {
     // Reach-guard: the same card, same fixture, with one declared target.
     let targeted_outcome = runner
         .cast(targeted)
+        // CR 702.117a: the first cast enables Surge for this one and both costs
+        // are payable, so the caster declares the printed cost.
+        .alternative_cast(AlternativeCastDecision::Normal)
         .x(3)
         .target_objects(&[victim])
         .resolve();

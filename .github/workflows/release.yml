@@ -38,7 +38,7 @@ jobs:
       release_tag: ${{ steps.resolve.outputs.release_tag }}
       release_sha: ${{ steps.resolve.outputs.release_sha }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -95,8 +95,15 @@ jobs:
     env:
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
       WRANGLER_VERSION: "4.113.0"
+      # Data files built from inputs outside the repository. combo-table.json
+      # comes from a pinned Commander Spellbook snapshot that CI does not hold, so
+      # a missing one is warned and skipped instead of failing the job. Keep this
+      # list aligned with phase-server's best-effort data files.
+      # draft-pools.json is still required here because this job generates and
+      # publishes its content-addressed copy before the mutable manifest loop.
+      BEST_EFFORT_DATA_FILES: "combo-table.json"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.RELEASE_SHA }}
 
@@ -123,7 +130,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
           cache-dependency-path: client/pnpm-lock.yaml
 
@@ -487,8 +494,18 @@ jobs:
           wrangler r2 object put "phase-rs-data/$DRAFT_POOLS_FILENAME" --file "$BRDIR/draft-pools.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
 
           # Mutable shared JSONs. Loop over the manifest.
+          is_best_effort() {
+            case " $BEST_EFFORT_DATA_FILES " in
+              *" $1 "*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
           while IFS= read -r f; do
             if [ ! -f "client/public/$f" ]; then
+              if is_best_effort "$f"; then
+                echo "::warning::Best-effort data file client/public/$f was not generated; skipping upload"
+                continue
+              fi
               echo "::error::Expected data file client/public/$f was not generated"
               exit 1
             fi
@@ -504,6 +521,12 @@ jobs:
         run: |
           BASE="https://data.phase-rs.dev"
           fail=0
+          is_best_effort() {
+            case " $BEST_EFFORT_DATA_FILES " in
+              *" $1 "*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
           check() {
             local f="$1"
             local status
@@ -523,7 +546,13 @@ jobs:
           check "$CARD_DATA_FILENAME"
           check "$DRAFT_POOLS_FILENAME"
           check "wasm/$ENGINE_WASM_FILENAME"
-          while IFS= read -r f; do check "$f"; done < <(jq -r '.[]' data-files.json)
+          while IFS= read -r f; do
+            if is_best_effort "$f" && [ ! -f "client/public/$f" ]; then
+              echo "::warning::Best-effort data file client/public/$f was not uploaded in this run; skipping verification"
+              continue
+            fi
+            check "$f"
+          done < <(jq -r '.[]' data-files.json)
           # Prove the brotli round-trip end-to-end on one small file: --compressed
           # requests + decodes br, jq confirms it decoded to valid JSON.
           curl -fsS --compressed --connect-timeout 5 --max-time 30 --retry 3 --retry-all-errors "$BASE/scryfall-sets.json" | jq empty \
@@ -565,7 +594,7 @@ jobs:
   # ── Server binary compile (linux musl, shared) ──────────────────────────────
   # Compiles the static musl binaries ONCE per release run, one matrix leg per
   # image architecture. Consumed by build-server-image (multi-arch prebuilt
-  # image) and build-server's linux leg (slim x86_64 asset), so neither pays a
+  # image) and build-server's linux legs (slim x86_64 and aarch64 assets), so neither pays a
   # redundant ~10min compile. Needs nothing the data pipeline produces, so it
   # starts immediately.
   build-server-binary:
@@ -594,7 +623,7 @@ jobs:
             triple: aarch64-unknown-linux-musl
             cargo_cmd: zigbuild
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.RELEASE_SHA }}
 
@@ -618,7 +647,7 @@ jobs:
         # Python is PEP 668 externally-managed since GitHub reverted its
         # pip workaround (actions/runner-images#10897, 2025-05-09). Same
         # flag the Dockerfile already passes for this identical install.
-        run: pip install --break-system-packages cargo-zigbuild==0.23.0 ziglang==0.16.0
+        run: pip install --break-system-packages --require-hashes -r scripts/requirements-zigbuild.txt
 
       - name: Add musl target
         # Must be `rustup target add`, not setup-rust-toolchain's `targets:`
@@ -660,7 +689,7 @@ jobs:
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
       IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/phase-server
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.RELEASE_SHA }}
 
@@ -724,7 +753,7 @@ jobs:
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
       IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/phase-web
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.RELEASE_SHA }}
 
@@ -777,7 +806,7 @@ jobs:
       # is held outside client/public/ so the GitHub Pages preview deploy
       # (deploy.yml) never serves it at /_headers.
       - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download frontend artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -817,7 +846,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve-release-ref.outputs.release_sha }}
 
@@ -887,20 +916,30 @@ jobs:
             runner: ubuntu-latest
             triple: x86_64-unknown-linux-musl
             extension: ""
+            prebuilt: server-binary-linux-amd64
+          - os: linux-arm64
+            runner: ubuntu-latest
+            triple: aarch64-unknown-linux-musl
+            extension: ""
+            prebuilt: server-binary-linux-arm64
           - os: macos
             runner: macos-latest
             triple: aarch64-apple-darwin
             extension: ""
+            prebuilt: ""
           - os: windows
             runner: windows-latest
             triple: x86_64-pc-windows-msvc
             extension: .exe
+            prebuilt: ""
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.RELEASE_SHA }}
 
+      # Prebuilt legs only copy a binary; the arm64 leg's key would otherwise restore build-server-binary's cache for nothing.
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        if: matrix.prebuilt == ''
         with:
           cache-shared-key: rust-server-${{ matrix.os }}
           # Keep this artifact build consistent with the primary Linux build:
@@ -908,20 +947,20 @@ jobs:
           rustflags: ""
 
       - name: Build phase-server (macOS/Windows)
-        # Linux musl is compiled once in build-server-binary and reused below;
-        # only the non-musl targets compile here.
-        if: matrix.triple != 'x86_64-unknown-linux-musl'
+        # Linux musl is compiled once per architecture in build-server-binary and reused below;
+        # only macOS and Windows compile here.
+        if: matrix.prebuilt == ''
         # -p scopes feature unification (see the Linux leg's note).
         run: cargo build -p phase-server --profile server-release --bin phase-server --target ${{ matrix.triple }}
 
       - name: Download prebuilt linux binary
         # Reuse the single musl build from build-server-binary, placed at the
         # canonical target path so the packaging step is identical across OSes.
-        if: matrix.triple == 'x86_64-unknown-linux-musl'
+        if: matrix.prebuilt != ''
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: server-binary-linux-amd64
-          path: target/x86_64-unknown-linux-musl/server-release
+          name: ${{ matrix.prebuilt }}
+          path: target/${{ matrix.triple }}/server-release
 
       - name: Prepare slim server binary (Unix)
         if: matrix.os != 'windows'
@@ -1026,7 +1065,7 @@ jobs:
       DRAFT_POOLS_HASH16: ${{ needs.build-wasm.outputs.draft_pools_hash16 }}
       WRANGLER_VERSION: "4.113.0"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.RELEASE_SHA }}
           fetch-depth: 0
@@ -1038,7 +1077,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Install pinned Wrangler
         run: npm install --global "wrangler@$WRANGLER_VERSION"
@@ -1052,7 +1091,7 @@ jobs:
           sudo apt-get install -y minisign
 
       - name: Sign slim server artifacts and the release data manifest
-        # Sign in this Ubuntu finisher so all three OS binaries use one trusted
+        # Sign in this Ubuntu finisher so every slim binary uses one trusted
         # signing path. Publishing is the step after this one, so the R2 token
         # is never in scope for minisign and the signing key is gone — the EXIT
         # trap below fires at the end of this step — before wrangler runs.
@@ -1085,6 +1124,7 @@ jobs:
 
           for triple in \
             x86_64-unknown-linux-musl \
+            aarch64-unknown-linux-musl \
             aarch64-apple-darwin \
             x86_64-pc-windows-msvc; do
             binary="artifacts/phase-server-slim-$triple/phase-server-slim-$triple"
@@ -1173,13 +1213,16 @@ jobs:
           cat > changelog.md <<'EOF'
           ## Downloads
 
+          Desktop installers are published with the desktop releases: https://github.com/phase-rs/phase/releases/latest
+
+          This release carries the signed native servers the desktop app downloads for itself:
+
           | Platform | File |
           |----------|------|
-          | **Windows** | `Phase_*_x64-setup.exe` |
-          | **macOS (Apple Silicon)** | `Phase_*_aarch64.dmg` |
-          | **Linux** | `Phase_*_amd64.AppImage` or `.deb` |
-
-          > **macOS note:** If you see "this app is damaged", open Terminal and run: `xattr -cr /Applications/Phase.app`
+          | **Windows (x64)** | `phase-server-slim-x86_64-pc-windows-msvc.exe` |
+          | **macOS (Apple Silicon)** | `phase-server-slim-aarch64-apple-darwin` |
+          | **Linux (x86_64)** | `phase-server-slim-x86_64-unknown-linux-musl` |
+          | **Linux (aarch64)** | `phase-server-slim-aarch64-unknown-linux-musl` |
 
           ## Changes
           EOF
@@ -1214,6 +1257,8 @@ jobs:
             cat <<'EOF'
           artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl
           artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl.minisig
+          artifacts/phase-server-slim-aarch64-unknown-linux-musl/phase-server-slim-aarch64-unknown-linux-musl
+          artifacts/phase-server-slim-aarch64-unknown-linux-musl/phase-server-slim-aarch64-unknown-linux-musl.minisig
           artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin
           artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin.minisig
           artifacts/phase-server-slim-x86_64-pc-windows-msvc/phase-server-slim-x86_64-pc-windows-msvc.exe
@@ -1226,6 +1271,41 @@ jobs:
             fi
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Verify the release assets are the ones desktops download
+        env:
+          RELEASE_FILES: ${{ steps.release-assets.outputs.files }}
+        run: |
+          set -euo pipefail
+          # fail_on_unmatched_files only ever sees the list above, so it cannot
+          # know a platform is missing from it: add a build target, forget this
+          # file, and every desktop on it 404s with all gates green. Immutable
+          # releases take no late upload, so this has to fail before the create.
+          status=0
+          # No nullglob: an absent or empty artifacts/ iterates this literally, failing the grep.
+          for binary in artifacts/phase-server-slim-*/*; do
+            case "$binary" in *.minisig) continue ;; esac
+            for asset in "$binary" "$binary.minisig"; do
+              printf '%s\n' "$RELEASE_FILES" | grep -qxF "$asset" ||
+                { echo "::error::built $asset is missing from the release asset list"; status=1; }
+            done
+          done
+          # Both sides above are publisher-side spellings: rename a pair in the
+          # build and in the list, they still agree, and the desktop's download
+          # 404s. native_engine.rs asks for phase-server-slim-<triple>, and for
+          # that name plus .minisig, with .exe on windows; the contract's os and
+          # triple columns are where CI already holds that naming.
+          canonical=$(awk '{sub(/#.*/, ""); if (NF) print "phase-server-slim-" $3 ($1 == "windows" ? ".exe" : "")}' packaging/desktop-platforms.txt)
+          [ -n "$canonical" ] || { echo "::error::packaging/desktop-platforms.txt named no desktop platform"; exit 1; }
+          printf 'desktop download names: %s\n' "${canonical//$'\n'/ }"
+          published=$(printf '%s\n' "$RELEASE_FILES" | sed 's|.*/||')
+          while read -r binary; do
+            for asset in "$binary" "$binary.minisig"; do
+              printf '%s\n' "$published" | grep -qxF "$asset" ||
+                { echo "::error::no release asset is published as $asset, which the desktop shell downloads by that exact name"; status=1; }
+            done
+          done <<<"$canonical"
+          exit $status
 
       - name: Create release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2

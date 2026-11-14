@@ -266,6 +266,7 @@ fn contested_game_ball_attacker_gains_control_and_untaps() {
         amount: 2,
         is_combat: true,
         excess: 0,
+        source_incarnation: None,
     });
     let attacker_lki = runner.state().objects[&attacker].snapshot_for_mana_spent();
     runner.state_mut().lki_cache.insert(attacker, attacker_lki);
@@ -510,8 +511,10 @@ fn vraska_returned_creature_becomes_treasure_artifact_not_vraska() {
         .id();
     let mut runner = scenario.build();
     // The dies event: TriggeringSource resolves to the dead creature's card.
-    runner.state_mut().current_trigger_event =
-        Some(GameEvent::CreatureDestroyed { object_id: dead });
+    runner.state_mut().current_trigger_event = Some(GameEvent::CreatureDestroyed {
+        object_id: dead,
+        source_id: None,
+    });
 
     let ability = build_resolved_from_def(&return_def, vraska, P0);
     let mut events = Vec::new();

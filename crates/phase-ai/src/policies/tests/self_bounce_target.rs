@@ -9,7 +9,7 @@
 
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::zones::create_object;
-use engine::types::ability::EffectKind;
+use engine::types::ability::{EffectKind, ExileConcealment};
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::format::FormatConfig;
@@ -194,6 +194,7 @@ fn eval(
 
     let decision = AiDecisionContext {
         waiting_for: WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: AI,
             cards: pool,
             count: 1,
@@ -209,12 +210,14 @@ fn eval(
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: Vec::new(),
             conditional_enter_with_counters: Vec::new(),
             count_param: 0,
             mass_library_order: None,
             library_position: None,
+            library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,

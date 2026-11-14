@@ -226,6 +226,7 @@ mod tests {
             token: DelayedTriggerToken(1),
             instance: DelayedTriggerInstanceId(2),
             source_id: ObjectId(3),
+            offer_id: None,
         }
     }
 

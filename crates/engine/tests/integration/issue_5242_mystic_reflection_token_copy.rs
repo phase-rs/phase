@@ -1,15 +1,137 @@
 //! Issue #5242: Mystic Reflection's delayed replacement must make the next
 //! creature/planeswalker entry copy the creature chosen when Mystic resolved.
+//!
+//! CR 616.1g + CR 701.7b: on a token-creation event, Mystic Reflection modifies
+//! the tokens' entry, an event contained within the creation, so it can't be
+//! chosen until the creation's replacements (Parallel Lives, Moonlit Meditation,
+//! Halving Season) have been; a creation they leave with no token contains no
+//! entry, so it does not use Mystic Reflection up (CR 614.3).
 
+use engine::game::game_object::GameObject;
 use engine::game::sba::check_state_based_actions;
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
+use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
+use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 const MYSTIC_REFLECTION: &str = "Choose target nonlegendary creature. The next time one or more creatures or planeswalkers enter this turn, they enter as copies of the chosen creature.";
+// Verbatim Oracle text (MTGJSON).
+const RAISE_THE_ALARM: &str = "Create two 1/1 white Soldier creature tokens.";
+const SPROUT: &str = "Create a 1/1 green Saproling creature token.";
+const PARALLEL_LIVES: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.";
+const HALVING_SEASON: &str = "If an opponent would create one or more tokens, they create half that many of each of those kinds of tokens instead, rounded down.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
+const MOONLIT_MEDITATION: &str = "Enchant artifact or creature you control\nThe first time you would create one or more tokens each turn, you may instead create that many tokens that are copies of enchanted permanent.";
+const GRUMGULLY: &str =
+    "Each other non-Human creature you control enters with an additional +1/+1 counter on it.";
+const HARDENED_SCALES: &str = "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.";
+const BRANCHING_EVOLUTION: &str = "If one or more +1/+1 counters would be put on a creature you control, twice that many +1/+1 counters are put on that creature instead.";
+
+/// How one expected `ReplacementChoice` prompt is answered.
+#[derive(Debug, Clone, Copy)]
+enum Pick {
+    /// An ordering prompt: apply the candidate from this source next.
+    Source(&'static str),
+    /// An optional replacement's accept branch.
+    Accept,
+    /// An optional replacement's decline branch.
+    Decline,
+}
+
+/// Answer exactly `prompts` — each P0's, offering the given number of options —
+/// passing priority in between, until priority with an empty stack.
+fn settle(runner: &mut GameRunner, prompts: &[(usize, Pick)]) {
+    let mut prompts = prompts.iter();
+    for _ in 0..200 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice {
+                player,
+                candidates,
+                kind,
+                ..
+            } => {
+                let &(offered, pick) = prompts.next().unwrap_or_else(|| {
+                    panic!("unexpected extra prompt: {:?}", runner.state().waiting_for)
+                });
+                let names: Vec<&str> = candidates.iter().map(|c| c.source_name.as_str()).collect();
+                assert_eq!(player, P0, "P0 makes the choice, offered {names:?}");
+                assert_eq!(
+                    candidates.len(),
+                    offered,
+                    "prompt {pick:?} offers {names:?}"
+                );
+                let index = match pick {
+                    Pick::Source(name) => {
+                        assert_eq!(kind, ReplacementChoiceKind::Order);
+                        names
+                            .iter()
+                            .position(|n| *n == name)
+                            .unwrap_or_else(|| panic!("{name} is offered: {names:?}"))
+                    }
+                    Pick::Accept => {
+                        assert_eq!(kind, ReplacementChoiceKind::OptionalBranch);
+                        0
+                    }
+                    Pick::Decline => {
+                        assert_eq!(kind, ReplacementChoiceKind::OptionalBranch);
+                        assert_eq!(candidates[1].description, "Decline");
+                        1
+                    }
+                };
+                runner
+                    .act(GameAction::ChooseReplacement { index })
+                    .expect("the choice is accepted");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority is legal");
+            }
+            other => panic!("unexpected decision {other:?}"),
+        }
+    }
+    let unanswered: Vec<_> = prompts.collect();
+    assert!(
+        unanswered.is_empty(),
+        "prompts never raised: {unanswered:?}"
+    );
+}
+
+/// Battlefield tokens named `name`.
+fn tokens_named<'a>(runner: &'a GameRunner, name: &str) -> Vec<&'a GameObject> {
+    let state = runner.state();
+    state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|o| o.is_token && o.name == name)
+        .collect()
+}
+
+/// Battlefield tokens with the subtype `subtype`.
+fn tokens_of_subtype<'a>(runner: &'a GameRunner, subtype: &str) -> Vec<&'a GameObject> {
+    let state = runner.state();
+    state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|o| o.is_token && o.card_types.subtypes.iter().any(|s| s == subtype))
+        .collect()
+}
+
+fn plus_counters(runner: &GameRunner, id: ObjectId) -> u32 {
+    runner.state().objects[&id]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0)
+}
 
 #[test]
 fn mystic_reflection_makes_next_creature_token_copy_chosen_creature() {
@@ -317,4 +439,170 @@ fn mystic_reflection_uses_lki_when_chosen_token_ceases_to_exist() {
         "token must copy LKI subtype, got {:?}",
         obj.card_types.subtypes
     );
+}
+
+/// Grizzly Bears enchanted by Moonlit Meditation, Colossal Dreadmaw chosen by
+/// Mystic Reflection, then Raise the Alarm cast up to Moonlit Meditation's
+/// optional prompt.
+fn moonlit_and_reflection_board() -> GameRunner {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let dreadmaw = scenario.add_creature(P0, "Colossal Dreadmaw", 6, 6).id();
+    let moonlit = scenario
+        .add_enchantment_from_oracle(P0, "Moonlit Meditation", MOONLIT_MEDITATION)
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise the Alarm", true, RAISE_THE_ALARM)
+        .id();
+    let mut runner = scenario.build();
+    runner.attach_as_bestowed_aura(moonlit, bears);
+    runner.cast(mystic).target_object(dreadmaw).resolve();
+    runner.cast(spell).resolve();
+    runner
+}
+
+/// CR 616.1g + CR 701.7a + CR 614.3: Moonlit Meditation, a creation replacement,
+/// is chosen first: the event becomes two copies of Grizzly Bears, and the
+/// original two Soldiers are not created. Those copies then enter, and Mystic
+/// Reflection makes them copies of Colossal Dreadmaw. The zeroed original event
+/// put nothing onto the battlefield, so it did not use Mystic Reflection up.
+#[test]
+fn mystic_reflection_copies_moonlit_meditation_copies() {
+    let mut runner = moonlit_and_reflection_board();
+    settle(&mut runner, &[(2, Pick::Accept)]);
+
+    assert_eq!(
+        tokens_named(&runner, "Colossal Dreadmaw").len(),
+        2,
+        "Moonlit Meditation's two copies enter as Dreadmaw copies"
+    );
+    assert!(tokens_named(&runner, "Grizzly Bears").is_empty());
+    assert!(tokens_of_subtype(&runner, "Soldier").is_empty());
+}
+
+/// Sibling: Moonlit Meditation declined, so the two Soldiers enter and Mystic
+/// Reflection makes them copies of Colossal Dreadmaw.
+#[test]
+fn mystic_reflection_after_declined_moonlit_soldiers_become_copies() {
+    let mut runner = moonlit_and_reflection_board();
+    settle(&mut runner, &[(2, Pick::Decline)]);
+
+    assert_eq!(tokens_named(&runner, "Colossal Dreadmaw").len(), 2);
+    assert!(tokens_of_subtype(&runner, "Soldier").is_empty());
+    assert!(tokens_named(&runner, "Grizzly Bears").is_empty());
+}
+
+/// CR 701.7a + CR 614.3: an opponent's Halving Season halves Sprout's one
+/// Saproling to none, so no creature enters and Mystic Reflection ("the next
+/// time one or more creatures or planeswalkers enter this turn") is not used up.
+/// The next creature cast, Silvercoat Lion, enters as a copy of the chosen
+/// Colossal Dreadmaw.
+#[test]
+fn mystic_reflection_waits_when_no_token_is_created() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dreadmaw = scenario.add_creature(P0, "Colossal Dreadmaw", 6, 6).id();
+    let halving = scenario
+        .add_enchantment_from_oracle(P1, "Halving Season", HALVING_SEASON)
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let sprout = scenario
+        .add_spell_to_hand_from_oracle(P0, "Sprout", true, SPROUT)
+        .id();
+    let lion = scenario
+        .add_creature_to_hand(P0, "Silvercoat Lion", 2, 2)
+        .with_subtypes(vec!["Cat"])
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(mystic).target_object(dreadmaw).resolve();
+    let sprout_events = runner.cast(sprout).resolve().events().to_vec();
+    settle(&mut runner, &[]);
+
+    // Reach guards: Sprout resolved, and Halving Season applied to its token.
+    assert_eq!(runner.state().objects[&sprout].zone, Zone::Graveyard);
+    assert!(
+        sprout_events.iter().any(|e| matches!(
+            e,
+            GameEvent::ReplacementApplied { source_id, .. } if *source_id == halving
+        )),
+        "Halving Season applied to Sprout's token"
+    );
+    assert!(tokens_of_subtype(&runner, "Saproling").is_empty());
+
+    runner.cast(lion).resolve();
+    let lion_obj = &runner.state().objects[&lion];
+    assert_eq!(lion_obj.zone, Zone::Battlefield);
+    assert_eq!(lion_obj.name, "Colossal Dreadmaw");
+    assert_eq!(lion_obj.power, Some(6));
+}
+
+/// CR 616.1g + CR 614.1a: Parallel Lives doubles Raise the Alarm's two Soldiers
+/// to four before Mystic Reflection, a replacement of their entry, applies; all
+/// four enter as copies of Colossal Dreadmaw.
+#[test]
+fn mystic_reflection_after_parallel_lives_copies_all() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dreadmaw = scenario.add_creature(P0, "Colossal Dreadmaw", 6, 6).id();
+    scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise the Alarm", true, RAISE_THE_ALARM)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(mystic).target_object(dreadmaw).resolve();
+    runner.cast(spell).resolve();
+    settle(&mut runner, &[]);
+
+    assert_eq!(tokens_named(&runner, "Colossal Dreadmaw").len(), 4);
+    assert!(tokens_of_subtype(&runner, "Soldier").is_empty());
+}
+
+/// CR 707.2 + CR 608.2c: both Soldiers enter as Grizzly Bears copies on the
+/// plain token route, and each copy's Grumgully counter pauses for its ordering.
+/// After the second pause the created-token referent still names both copies,
+/// in order, not only the last one.
+#[test]
+fn mystic_reflection_paused_copy_batch_keeps_whole_referent() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Grumgully, the Generous", 3, 3, GRUMGULLY);
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES);
+    scenario.add_enchantment_from_oracle(P0, "Branching Evolution", BRANCHING_EVOLUTION);
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise the Alarm", true, RAISE_THE_ALARM)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(mystic).target_object(bears).resolve();
+    runner.cast(spell).resolve();
+    settle(
+        &mut runner,
+        &[
+            (2, Pick::Source("Hardened Scales")),
+            (2, Pick::Source("Hardened Scales")),
+        ],
+    );
+
+    let copies: Vec<ObjectId> = tokens_named(&runner, "Grizzly Bears")
+        .iter()
+        .map(|o| o.id)
+        .collect();
+    assert_eq!(copies.len(), 2, "both Soldiers enter as Bears copies");
+    for &id in &copies {
+        // Grumgully's one counter, Hardened Scales first: (1 + 1) × 2.
+        assert_eq!(plus_counters(&runner, id), 4);
+    }
+    assert_eq!(runner.state().last_created_token_ids, copies);
 }

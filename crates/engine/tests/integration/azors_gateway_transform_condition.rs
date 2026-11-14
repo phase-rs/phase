@@ -44,6 +44,7 @@ const AZORS_GATEWAY_ORACLE: &str = "{1}, {T}: Draw a card, then exile a card fro
 fn sanctum_of_the_sun_back_face() -> BackFaceData {
     BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Sanctum of the Sun".to_string(),
         power: None,
         toughness: None,
@@ -141,6 +142,7 @@ fn activate_and_exile_drawn_card(
         .act(GameAction::ActivateAbility {
             source_id: azor,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Azor's Gateway's ability must be payable ({1}, {T})");
 

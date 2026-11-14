@@ -5,6 +5,7 @@ pub mod activation_patience_repro;
 pub mod artifact_synergy;
 pub mod blink_payoff;
 pub mod cost_reduction;
+pub mod created_token_placement_parity;
 pub mod devotion;
 pub mod discard_payoff;
 pub mod draw_payoff;

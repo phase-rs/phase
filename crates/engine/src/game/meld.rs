@@ -14,8 +14,8 @@ use crate::game::printed_cards::{
 };
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{
-    ControllerRef, Effect, EffectError, FilterProp, PermanentEntryMode, ResolvedAbility,
-    TargetFilter, TypedFilter,
+    ControllerRef, Effect, EffectError, EntryAttackDestination, FilterProp, PermanentEntryMode,
+    ResolvedAbility, TargetFilter, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -253,6 +253,7 @@ pub(crate) fn finish_meld_entry(
             source_id: context.source_id,
             controller: context.controller,
             enters_attacking: attack_target.is_some(),
+            attack_destination: EntryAttackDestination::AnyDefender,
             attach_to: None,
             sacrifice_at: None,
             remaining_count: 0,
@@ -317,6 +318,7 @@ pub(crate) fn finish_meld_delivery(
                 entry.replacement_applied.clone(),
             )),
             LiminalEntryKind::Token => None,
+            LiminalEntryKind::TransformedEntry => None,
         })
         .unwrap_or((context, attack_target, Default::default()));
     state.liminal_entries.remove(&context.source_id);
@@ -375,26 +377,33 @@ pub(crate) fn commit_meld_battlefield(state: &mut GameState, context: &MeldSelec
         .get(&context.source_id)
         .map(|object| object.controller)
         .unwrap_or(context.controller);
-    let values = copiable_values_from_face(&result_face);
+    let values = copiable_values_from_face(&result_face, None);
     let printed_ref = printed_ref_from_face(&result_face);
     merge::install_merge_layer_effect(
         state,
         context.source_id,
         entry_controller,
         values,
-        crate::game::game_object::DisplaySource::Card,
-        printed_ref,
-        None,
+        // Meld results are nontoken cards rendering through `printed_ref`.
+        crate::game::game_object::DisplayIdentity {
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref,
+            token_image_ref: None,
+            token_art: None,
+        },
     );
     // CR 701.42a / CR 730.2: absorb the partner into the single melded permanent
-    // — it is no longer an independent object; remove it from the exile list and
-    // mark it absorbed (zone == Battlefield, in no zone list), mirroring
-    // merge_object_onto, so the CR 712.21 leave-split routes it to the graveyard
-    // exactly once. This runs BEFORE the survivor's pipeline entry below: an
-    // entry-replacement consult (CR 614.1c) can park a `NeedsChoice` pause, and
-    // absorbing first guarantees the partner is never stranded in exile across
-    // that pause.
-    crate::game::zones::absorb_component(state, context.partner_id, Some(Zone::Exile));
+    // — it is no longer an independent object; remove it from the zone list the
+    // exile instruction left it in and mark it absorbed (zone == Battlefield, in
+    // no zone list), mirroring merge_object_onto, so the CR 712.21 leave-split
+    // routes it to the graveyard exactly once. CR 400.7j + CR 701.42b: a
+    // replacement may have left that card in another public zone instead of
+    // exile, so read its current zone rather than assuming Exile.
+    let partner_zone = state
+        .objects
+        .get(&context.partner_id)
+        .map(|partner| partner.zone);
+    crate::game::zones::absorb_component(state, context.partner_id, partner_zone);
     if let Some(survivor) = state.objects.get_mut(&context.source_id) {
         survivor.merged_components = vec![context.source_id, context.partner_id];
         survivor.merge_kind = Some(MergeKind::Meld);
@@ -454,7 +463,7 @@ pub(crate) fn finish_deferred_meld_entry(
 
     let attack_target = targets.first().copied();
     commit_final_attack_status(state, &context, attack_target);
-    finalize_meld_entry_snapshot(state, context.source_id, attack_target, events);
+    finalize_meld_entry_snapshot(state, &context, attack_target, events);
     finish_resolution(state, context.source_id, events);
 }
 
@@ -491,7 +500,7 @@ pub(crate) fn finish_meld_attack_choice(
     };
     let attack_target = still_valid.then_some(selected);
     commit_final_attack_status(state, &context, attack_target);
-    finalize_meld_entry_snapshot(state, context.source_id, attack_target, events);
+    finalize_meld_entry_snapshot(state, &context, attack_target, events);
     finish_resolution(state, context.source_id, events);
 }
 
@@ -501,6 +510,10 @@ fn commit_final_attack_status(
     attack_target: Option<AttackTarget>,
 ) {
     if let Some(combat_state) = state.combat.as_mut() {
+        combat_state.attacked_permanents.remove(&context.source_id);
+        combat_state
+            .attacked_permanent_kinds
+            .remove(&context.source_id);
         combat_state
             .attackers
             .retain(|attacker| attacker.object_id != context.source_id);
@@ -513,7 +526,13 @@ fn commit_final_attack_status(
     else {
         return;
     };
+    let pin = combat::bind_attack_target(state, target);
     if let Some(combat_state) = state.combat.as_mut() {
+        if let Some(pin) = pin {
+            combat_state
+                .attacked_permanents
+                .insert(context.source_id, pin);
+        }
         combat_state.attackers.push(AttackerInfo::new(
             context.source_id,
             target,
@@ -521,6 +540,8 @@ fn commit_final_attack_status(
         ));
         state.layers_dirty.mark_full();
     }
+    // CR 506.4: the new pin's kinds are the baseline for later type changes.
+    combat::record_attacked_kinds(state, context.source_id);
 }
 
 fn park_meld_entry_event(state: &mut GameState, source_id: ObjectId, events: &mut Vec<GameEvent>) {
@@ -540,24 +561,31 @@ fn park_meld_entry_event(state: &mut GameState, source_id: ObjectId, events: &mu
 
 fn finalize_meld_entry_snapshot(
     state: &mut GameState,
-    source_id: ObjectId,
+    context: &MeldSelection,
     attack_target: Option<AttackTarget>,
     events: &mut Vec<GameEvent>,
 ) {
-    let defending_player = attack_target.and_then(|target| {
-        state.objects.get(&source_id).and_then(|object| {
-            combat::entry_attack_target_defender(state, object.controller, target)
-        })
-    });
-    let combat_status = crate::types::game_state::ZoneChangeCombatStatus {
-        attacking: defending_player.is_some(),
-        defending_player,
-        ..Default::default()
-    };
+    let source_id = context.source_id;
+    let _ = attack_target;
+    let combat_status = crate::game::zones::capture_combat_status(state, source_id);
     refresh_meld_entry_records(state, source_id, combat_status, events);
 
-    if !state.deferred_entry_events.is_empty() {
+    let replay_deferred_entry = !state.deferred_entry_events.is_empty();
+    if replay_deferred_entry {
         events.extend(state.deferred_entry_events.iter().cloned());
+    }
+    // CR 701.42a: the pair is now one permanent on the battlefield. Announced
+    // after its entry event so observers see the entry, then the meld.
+    let controller = state
+        .objects
+        .get(&source_id)
+        .map_or(context.controller, |object| object.controller);
+    events.push(GameEvent::Melded {
+        object_id: source_id,
+        partner_id: context.partner_id,
+        controller,
+    });
+    if replay_deferred_entry {
         let _ =
             crate::game::engine_replacement::replay_deferred_entry_events(state, source_id, events);
     }
@@ -579,6 +607,7 @@ fn refresh_meld_entry_records(
         realized.played_from_zone = old.played_from_zone;
         realized.attachments = old.attachments;
         realized.linked_exile_snapshot = old.linked_exile_snapshot;
+        realized.block_pairs = old.block_pairs;
         realized.co_departed = old.co_departed;
         realized.entered_incarnation = old.entered_incarnation;
         realized.attached_to = old.attached_to;

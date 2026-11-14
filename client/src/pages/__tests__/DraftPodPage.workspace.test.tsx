@@ -14,7 +14,9 @@ import type { DraftShellPhoneAction, DraftShellTopAction } from "../../component
 import { ShellProvider } from "../../components/chrome/ShellContext";
 import { DRAFT_WORKSPACE_PREFERENCES_KEY } from "../../constants/storage";
 import type { DraftWorkspaceProps } from "../../components/draft/workspace/DraftWorkspace";
+import type { DraftWorkspaceState } from "../../components/draft/workspace/types";
 import type { ResponsiveDraftLayout } from "../../components/draft/workspace/workspacePreferences";
+import type { DraftPoolGroupKind } from "../../adapter/draft-adapter";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { DraftPodPage } from "../DraftPodPage";
 
@@ -40,7 +42,23 @@ const captured = vi.hoisted(() => ({
   progressVariant: null as string | null,
   showProgress: null as boolean | null,
   hostPresentations: [] as string[],
+  renderRealDeckBuilder: false,
 }));
+
+const deckCompatibility = vi.hoisted(() => ({
+  evaluate: vi.fn(),
+}));
+
+deckCompatibility.evaluate.mockResolvedValue({
+  standard: { compatible: true, reasons: [] },
+  commander: { compatible: true, reasons: [] },
+  bo3_ready: true,
+  unknown_cards: [],
+  selected_format_compatible: false,
+  selected_format_reasons: ["CARD_DB rejected this compatibility request"],
+  color_identity: [],
+  color_distribution: [],
+});
 
 function isEditableDeckBuilderController(
   controller: WorkspaceDeckBuilderController | null,
@@ -57,15 +75,17 @@ const store = vi.hoisted(() => {
     status: "Drafting", kind: "Premier", commanders_required: 0, pool: cards, current_pack: cards, draft_effects: [],
     pool_groups: {
       color_groups: [], type_groups: [], cmc_groups: [], rarity_groups: [],
-      type_filter_options: [], color_filter_options: [],
+      type_filter_options: [] as DraftPoolGroupKind[], color_filter_options: [] as DraftPoolGroupKind[],
       color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
       workspace_capabilities: { rarity_group_order: null },
       workspace_row_classification: { creature_instance_ids: [], noncreature_instance_ids: [] },
     },
     seats: [], current_pack_number: 1, pick_number: 1, pass_direction: "Left",
     cards_per_pack: 2, pack_count: 3, min_deck_size: 1, addable_cards: [],
+    draft_set_codes: ["TST"],
     timer_remaining_ms: null, standings: [], current_round: 0,
     tournament_format: "Swiss", pod_policy: "Casual", pairings: [], match_config: { match_type: "Bo1" },
+    post_draft_play: "TournamentPairings" as string | undefined,
   };
   const state = {
     role: "host",
@@ -78,7 +98,7 @@ const store = vi.hoisted(() => {
         "copy-a": { zone: "sideboard", row: 0, column: 0, order: 0 },
       },
       virtualBasics: [],
-    },
+    } as DraftWorkspaceState,
     selectedCard: null,
     pendingPickIntent: null,
     interactionGeneration: 7,
@@ -102,7 +122,7 @@ const store = vi.hoisted(() => {
     addBasicLand: vi.fn(),
     removeBasicLand: vi.fn(),
     autoSuggestLands: vi.fn(),
-    submitDeck: vi.fn(),
+    submitDeck: vi.fn(async (_commanders?: string[]) => {}),
     leave: vi.fn(),
     resumeDraft: vi.fn(async () => "absent" as const),
   };
@@ -134,7 +154,8 @@ vi.mock("../../stores/multiplayerDraftStore", async (importOriginal) => {
   };
 });
 
-vi.mock("../../stores/draftPodStore", () => ({
+vi.mock("../../stores/draftPodStore", async (importOriginal) => ({
+  isHostedPodRecoveryFailureCurrent: (await importOriginal<typeof import("../../stores/draftPodStore")>()).isHostedPodRecoveryFailureCurrent,
   useDraftPodStore: (selector: (state: { config: { podSize: number }; reset: () => void; resumeHostedPod: () => void; enterKind: () => void }) => unknown) => selector({
     config: { podSize: 8 }, ...podStore,
   }),
@@ -237,14 +258,30 @@ vi.mock("../../components/draft/workspace/DraftWorkspace", () => ({
     return <div data-testid="workspace" />;
   },
 }));
-vi.mock("../../components/draft/LimitedDeckBuilder", () => ({
-  LimitedDeckBuilder: ({ local, responsiveLayout, showSuggestions }: { local?: WorkspaceDeckBuilderController; responsiveLayout?: ResponsiveDraftLayout; showSuggestions?: boolean }) => {
-    captured.deckbuilder = local ?? null;
-    captured.builderLayout = responsiveLayout ?? null;
-    captured.builderShowSuggestions = showSuggestions ?? false;
-    return <div data-testid="deckbuilder" />;
-  },
+vi.mock("../../services/deckCompatibility", () => ({
+  evaluateDeckCompatibility: (...args: unknown[]) => deckCompatibility.evaluate(...args),
 }));
+vi.mock("../../hooks/useDeckCardData", () => ({
+  useDeckCardData: () => ({ cardDataCache: new Map(), cacheCards: () => {} }),
+}));
+vi.mock("../../components/draft/LimitedDeckBuilder", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../components/draft/LimitedDeckBuilder")>();
+  return {
+    ...actual,
+    LimitedDeckBuilder: (props: {
+      local?: WorkspaceDeckBuilderController;
+      responsiveLayout?: ResponsiveDraftLayout;
+      showSuggestions?: boolean;
+    }) => {
+      captured.deckbuilder = props.local ?? null;
+      captured.builderLayout = props.responsiveLayout ?? null;
+      captured.builderShowSuggestions = props.showSuggestions ?? false;
+      return captured.renderRealDeckBuilder
+        ? <actual.LimitedDeckBuilder {...props} />
+        : <div data-testid="deckbuilder" />;
+    },
+  };
+});
 
 describe("DraftPodPage workspace", () => {
   beforeEach(() => {
@@ -269,15 +306,28 @@ describe("DraftPodPage workspace", () => {
     captured.progressVariant = null;
     captured.showProgress = null;
     captured.hostPresentations = [];
+    captured.renderRealDeckBuilder = false;
     store.state.phase = "drafting";
     store.state.role = "host";
     store.state.view.kind = "Premier";
     store.state.view.commanders_required = 0;
+    store.state.view.pod_policy = "Casual";
+    store.state.view.post_draft_play = "TournamentPairings";
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1440 });
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 900 });
     usePreferencesStore.setState({ draftCardPreviewMode: "none", draftDoubleClickConfirmPick: true });
     localStorage.clear();
     vi.clearAllMocks();
+    deckCompatibility.evaluate.mockResolvedValue({
+      standard: { compatible: true, reasons: [] },
+      commander: { compatible: true, reasons: [] },
+      bo3_ready: true,
+      unknown_cards: [],
+      selected_format_compatible: false,
+      selected_format_reasons: ["CARD_DB rejected this compatibility request"],
+      color_identity: [],
+      color_distribution: [],
+    });
     store.state.leave.mockReset();
     store.state.leave.mockResolvedValue(undefined);
   });
@@ -324,6 +374,183 @@ describe("DraftPodPage workspace", () => {
     expect(deckbuilder.onAutoSuggestLands).toBe(store.state.autoSuggestLands);
     await deckbuilder.onAutoSuggestLands?.();
     expect(store.state.autoSuggestLands).toHaveBeenCalledOnce();
+    let submission: Promise<void> | void = undefined;
+    act(() => {
+      submission = deckbuilder.onSubmitDeck([]);
+    });
+    expect(store.state.submitDeck).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm Submission" }));
+    await submission;
+    expect(store.state.submitDeck).toHaveBeenCalledWith([]);
+  });
+
+  it("confirms a Competitive pod submission with the final-deck warning before submitting once", async () => {
+    store.state.phase = "deckbuilding";
+    store.state.view.pod_policy = "Competitive";
+    render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    const deckbuilder = captured.deckbuilder;
+    if (!isEditableDeckBuilderController(deckbuilder)) {
+      throw new Error("editable deck builder controller not installed");
+    }
+
+    let submission: Promise<void> | void = undefined;
+    act(() => {
+      submission = deckbuilder.onSubmitDeck(["Commander A"]);
+    });
+    const dialog = await screen.findByRole("alertdialog", { name: "Submit this deck?" });
+    expect(dialog).toHaveAccessibleDescription(
+      "This is a Competitive pod: your submitted deck is final for every round. You can still sideboard between games of a best-of-three match.",
+    );
+    expect(store.state.submitDeck).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Submission" }));
+    await submission;
+    expect(store.state.submitDeck).toHaveBeenCalledOnce();
+    expect(store.state.submitDeck).toHaveBeenCalledWith(["Commander A"]);
+    await vi.waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+  });
+
+  it("cancels a Casual pod submission without submitting", async () => {
+    store.state.phase = "deckbuilding";
+    render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    const deckbuilder = captured.deckbuilder;
+    if (!isEditableDeckBuilderController(deckbuilder)) {
+      throw new Error("editable deck builder controller not installed");
+    }
+
+    let submission: Promise<void> | void = undefined;
+    act(() => {
+      submission = deckbuilder.onSubmitDeck([]);
+    });
+    const dialog = await screen.findByRole("alertdialog", { name: "Submit this deck?" });
+    expect(dialog).toHaveAccessibleDescription("You can still change your deck between rounds.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await submission;
+    await vi.waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(store.state.submitDeck).not.toHaveBeenCalled();
+    expect(screen.getByTestId("deckbuilder")).toBeInTheDocument();
+  });
+
+  /**
+   * A pod that plays no in-session rounds (`CompleteImmediately`, Commander
+   * Draft) — or an older host that omits the procedure fact — is told its deck
+   * is final, even under the Casual policy whose wording would promise
+   * between-round changes.
+   */
+  it.each([
+    ["CompleteImmediately", "CompleteImmediately"],
+    ["absent (older host)", undefined],
+  ])("words a %s pod's submission as final under the Casual policy", async (_label, postDraftPlay) => {
+    store.state.phase = "deckbuilding";
+    store.state.view.post_draft_play = postDraftPlay;
+    render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    const deckbuilder = captured.deckbuilder;
+    if (!isEditableDeckBuilderController(deckbuilder)) {
+      throw new Error("editable deck builder controller not installed");
+    }
+
+    act(() => {
+      void deckbuilder.onSubmitDeck([]);
+    });
+    const dialog = await screen.findByRole("alertdialog", { name: "Submit this deck?" });
+    expect(dialog).toHaveAccessibleDescription("Your submitted deck is final.");
+  });
+
+  /**
+   * `ConfirmDialog` exits through `AnimatePresence`, which keeps the exiting
+   * buttons mounted with their previous handlers. A second Confirm click in
+   * that window must not submit the deck again.
+   */
+  it("submits once when Confirm is clicked twice before the dialog leaves", async () => {
+    store.state.phase = "deckbuilding";
+    render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    const deckbuilder = captured.deckbuilder;
+    if (!isEditableDeckBuilderController(deckbuilder)) {
+      throw new Error("editable deck builder controller not installed");
+    }
+
+    let submission: Promise<void> | void = undefined;
+    act(() => {
+      submission = deckbuilder.onSubmitDeck([]);
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm Submission" }));
+    // Reach guard: the exiting dialog's button is still in the DOM.
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Submission" }));
+    await submission;
+
+    expect(store.state.submitDeck).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+  });
+
+  it("rejects the deck builder's submission with the store's refusal after confirming", async () => {
+    store.state.phase = "deckbuilding";
+    store.state.submitDeck.mockRejectedValueOnce(new Error("Deck refused by host"));
+    render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    const deckbuilder = captured.deckbuilder;
+    if (!isEditableDeckBuilderController(deckbuilder)) {
+      throw new Error("editable deck builder controller not installed");
+    }
+
+    let submission: Promise<void> | void = undefined;
+    act(() => {
+      submission = deckbuilder.onSubmitDeck([]);
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm Submission" }));
+    await expect(submission).rejects.toThrow("Deck refused by host");
+    expect(store.state.submitDeck).toHaveBeenCalledOnce();
+  });
+
+  it("clicks Submit in the real Set-backed guest builder and forwards no commanders", async () => {
+    const cards = Array.from({ length: 40 }, (_, index) => ({
+      instance_id: `guest-set-${index}`,
+      name: "Guest Set Card",
+      set_code: "TST",
+      collector_number: String(index + 1),
+      rarity: "common",
+      colors: [],
+      cmc: 1,
+      type_line: "Creature",
+    }));
+    const workspace: DraftWorkspaceState = {
+      schemaVersion: 1,
+      placements: Object.fromEntries(cards.map((card, index) => [
+        card.instance_id,
+        { zone: "deck" as const, row: 0, column: 0, order: index },
+      ])),
+      virtualBasics: [],
+    };
+    act(() => {
+      store.state.role = "guest";
+      store.state.phase = "deckbuilding";
+      store.state.view = {
+        ...store.state.view,
+        kind: "Premier",
+        commanders_required: 0,
+        min_deck_size: 40,
+        pool: cards,
+        draft_set_codes: ["TST"],
+        pool_groups: {
+          ...store.state.view.pool_groups,
+          type_filter_options: ["creature"],
+          color_filter_options: ["colorless"],
+        },
+      };
+      store.state.workspaceState = workspace;
+      captured.renderRealDeckBuilder = true;
+    });
+
+    render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+
+    await vi.waitFor(() => expect(deckCompatibility.evaluate).toHaveBeenCalledWith(
+      { main: [{ name: "Guest Set Card", count: 40 }], sideboard: [], commander: [] },
+      { selectedFormat: null, draftSetCodes: ["TST"] },
+    ));
+    const submit = screen.getByRole("button", { name: "Submit Deck" });
+    expect(submit).toBeEnabled();
+    fireEvent.click(submit);
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm Submission" }));
+    await vi.waitFor(() => expect(store.state.submitDeck).toHaveBeenCalledWith([]));
   });
 
   it("forwards the engine commander requirement independently of draft kind", () => {

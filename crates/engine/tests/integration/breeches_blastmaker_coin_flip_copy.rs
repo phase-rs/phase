@@ -28,6 +28,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
+use engine::types::game_state::GameRng;
 use engine::types::game_state::{
     CastingVariant, GameState, StackEntry, StackEntryKind, WaitingFor,
 };
@@ -36,8 +37,6 @@ use engine::types::mana::ManaCost;
 use engine::types::player::PlayerId;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 const BREECHES: &str = "Menace\nWhenever you cast your second spell each turn, you may sacrifice an artifact. If you do, flip a coin. When you win the flip, copy that spell. You may choose new targets for the copy. When you lose the flip, Breeches deals damage equal to that spell's mana value to any target.";
 
@@ -52,7 +51,7 @@ fn parse_breeches() -> engine::parser::oracle::ParsedAbilities {
 }
 
 /// Walk every `Effect` reachable from a definition's effect + sub_ability +
-/// else chain + FlipCoin branch chain, invoking `f` on each.
+/// else chain + FlipCoins branch chain, invoking `f` on each.
 fn walk_effects(def: &AbilityDefinition, f: &mut impl FnMut(&Effect)) {
     f(def.effect.as_ref());
     if let Some(sub) = def.sub_ability.as_deref() {
@@ -64,12 +63,7 @@ fn walk_effects(def: &AbilityDefinition, f: &mut impl FnMut(&Effect)) {
     if let Effect::CreateDelayedTrigger { effect, .. } = def.effect.as_ref() {
         walk_effects(effect, f);
     }
-    if let Effect::FlipCoin {
-        win_effect,
-        lose_effect,
-        ..
-    }
-    | Effect::FlipCoins {
+    if let Effect::FlipCoins {
         win_effect,
         lose_effect,
         ..
@@ -96,7 +90,7 @@ fn walk_effects(def: &AbilityDefinition, f: &mut impl FnMut(&Effect)) {
 /// `Effect::unimplemented("orphaned_copy_retarget", ..)` for the retarget. This
 /// test's `unimplemented == 0` assertion and the structural delayed-trigger
 /// assertions both fail if that fail-closed path is restored. The inline fold
-/// (folding "when" into `FlipCoin.win_effect`) is rejected by
+/// (folding "when" into `FlipCoins.win_effect`) is rejected by
 /// `flip_branches_stay_empty`.
 #[test]
 fn breeches_reflexive_flip_clauses_become_delayed_triggers() {
@@ -160,12 +154,7 @@ fn breeches_reflexive_flip_clauses_become_delayed_triggers() {
             }
             None => panic!("reflexive flip trigger must carry a coin_flip_result filter"),
         },
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
+        Effect::FlipCoins {
             win_effect,
             lose_effect,
             ..
@@ -189,15 +178,15 @@ fn breeches_reflexive_flip_clauses_become_delayed_triggers() {
          delayed trigger's CopySpell to MayChooseNewTargets"
     );
     // CR 603.12: the reflexive 'when' clauses must NOT fold into the inline
-    // FlipCoin win/lose branches (that is the wrong CR 705 ordering).
+    // FlipCoins win/lose branches (that is the wrong CR 705 ordering).
     assert!(
         !flip_branch_populated,
-        "reflexive 'when' clauses must stay delayed triggers, not inline FlipCoin branches"
+        "reflexive 'when' clauses must stay delayed triggers, not inline FlipCoins branches"
     );
 }
 
 /// CR 705: the inline Krark wording ("If you win/lose the flip, ...") is
-/// unchanged — it still folds into the preceding `FlipCoin` because it is part of
+/// unchanged — it still folds into the preceding `FlipCoins` because it is part of
 /// the same one-shot resolution (CR 705), not a reflexive trigger. Guards against
 /// the reflexive-flip change accidentally swallowing the inline form.
 #[test]
@@ -224,17 +213,22 @@ fn krark_inline_flip_branches_still_fold() {
 
     let trigger = parsed.triggers.first().expect("Krark trigger");
     let execute = trigger.execute.as_ref().expect("Krark trigger execute");
-    let Effect::FlipCoin {
+    let Effect::FlipCoins {
+        flips,
         win_effect,
         lose_effect,
         ..
     } = execute.effect.as_ref()
     else {
-        panic!("expected FlipCoin execute, got {:?}", execute.effect);
+        panic!("expected FlipCoins execute, got {:?}", execute.effect);
     };
     assert!(
+        flips.is_single_flip(),
+        "expected a single flip, got {flips:?}"
+    );
+    assert!(
         win_effect.is_some() && lose_effect.is_some(),
-        "Krark's inline branches must populate both FlipCoin slots"
+        "Krark's inline branches must populate both FlipCoins slots"
     );
 }
 
@@ -247,7 +241,7 @@ fn krark_inline_flip_branches_still_fold() {
 /// `seed`; seed 0 wins, seed 1 loses (mirrors flip_coin.rs's seed convention).
 fn setup_breeches_runtime(seed: u64) -> (GameState, ObjectId, ObjectId) {
     let mut state = GameState::new_two_player(seed);
-    state.rng = ChaCha20Rng::seed_from_u64(seed);
+    state.rng = GameRng::seed_from_u64(seed);
     state.active_player = PlayerId(0);
     state.priority_player = PlayerId(0);
 
@@ -392,7 +386,7 @@ fn breeches_won_flip_copy_goes_on_stack_as_separate_object() {
     pass_priority_until_optional(&mut state);
 
     // Accept the optional sacrifice; this resolves the Sacrifice (artifact),
-    // then the FlipCoin (emitting CoinFlipped), then both CreateDelayedTriggers
+    // then the FlipCoins (emitting CoinFlipped), then both CreateDelayedTriggers
     // register their reflexive flip triggers — all inside the trigger's
     // resolution. EffectResolved for the flip happens here, before any reflexive
     // branch.

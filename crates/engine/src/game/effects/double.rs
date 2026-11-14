@@ -1,6 +1,6 @@
 use crate::game::mana_sources::mana_color_to_type;
 use crate::types::ability::{
-    DoubleTarget, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    DoubleTarget, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
@@ -156,7 +156,9 @@ fn resolve_double_life(
     events: &mut Vec<GameEvent>,
     target: &TargetFilter,
 ) -> Result<(), EffectError> {
-    let player_id = resolve_player_target(ability, target);
+    let Some(player_id) = resolve_player_target(state, ability, target) else {
+        return Ok(());
+    };
 
     let current_life = state
         .players
@@ -209,66 +211,36 @@ fn resolve_double_mana(
     target: &TargetFilter,
     color: Option<&ManaColor>,
 ) -> Result<(), EffectError> {
-    let player_id = resolve_player_target(ability, target);
-
-    // Collect the mana types and counts to add
-    let mana_to_add: Vec<(ManaType, usize)> = {
-        let player = state
-            .players
-            .iter()
-            .find(|p| p.id == player_id)
-            .ok_or(EffectError::PlayerNotFound)?;
-
-        if let Some(c) = color {
-            let mt = mana_color_to_type(c);
-            let count = player.mana_pool.count_color(mt);
-            if count > 0 {
-                vec![(mt, count)]
-            } else {
-                vec![]
-            }
-        } else {
-            // All colors
-            ManaColor::ALL
-                .iter()
-                .map(|c| {
-                    let mt = mana_color_to_type(c);
-                    (mt, player.mana_pool.count_color(mt))
-                })
-                .filter(|(_, count)| *count > 0)
-                .collect()
-        }
+    let Some(player_id) = resolve_player_target(state, ability, target) else {
+        return Ok(());
     };
 
     // CR 701.10f: Add equal amount of each mana type
     if !state.players.iter().any(|p| p.id == player_id) {
         return Err(EffectError::PlayerNotFound);
     }
-
-    for (mana_type, count) in mana_to_add {
-        for _ in 0..count {
-            // CR 118.3a: stamp a pip id on pool entry so the unit can be pinned.
-            let _ = state.add_mana_to_pool(
-                player_id,
-                ManaUnit {
-                    color: mana_type,
-                    source_id: ability.source_id,
-                    pip_id: crate::types::mana::ManaPipId(0),
-                    supertype: None,
-                    source_could_produce_two_or_more_colors: false,
-                    restrictions: vec![],
-                    grants: vec![],
-                    expiry: None,
-                },
-            );
-
-            events.push(GameEvent::ManaAdded {
-                player_id,
-                mana_type,
+    for mana_type in doubled_pool_mana(state, player_id, color) {
+        // CR 118.3a: stamp a pip id on pool entry so the unit can be pinned.
+        let _ = state.add_mana_to_pool(
+            player_id,
+            ManaUnit {
+                color: mana_type,
                 source_id: ability.source_id,
-                tap_state: ManaTapState::NotFromTap,
-            });
-        }
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            },
+        );
+
+        events.push(GameEvent::ManaAdded {
+            player_id,
+            mana_type,
+            source_id: ability.source_id,
+            tap_state: ManaTapState::NotFromTap,
+        });
     }
 
     events.push(GameEvent::EffectResolved {
@@ -280,22 +252,52 @@ fn resolve_double_mana(
     Ok(())
 }
 
+/// CR 701.10f + CR 106.1b: the mana a doubling of `player`'s pool adds — for
+/// each of the six mana types (or only `color`'s type), one `ManaType` per
+/// unit of that type the player already has. Restrictions are not copied
+/// (the added units are minted unrestricted; Doubling Cube ruling).
+pub(crate) fn doubled_pool_mana(
+    state: &GameState,
+    player: PlayerId,
+    color: Option<&ManaColor>,
+) -> Vec<ManaType> {
+    // CR 106.1b: "There are six types of mana: white, blue, black, red, green,
+    // and colorless." (`ManaColor::ALL` holds only the five colors.)
+    const MANA_TYPES: [ManaType; 6] = [
+        ManaType::White,
+        ManaType::Blue,
+        ManaType::Black,
+        ManaType::Red,
+        ManaType::Green,
+        ManaType::Colorless,
+    ];
+    let Some(pool) = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| &p.mana_pool)
+    else {
+        return Vec::new();
+    };
+    let types = match color {
+        Some(c) => vec![mana_color_to_type(c)],
+        None => MANA_TYPES.to_vec(),
+    };
+    // `count_color` counts every unit of the type whatever its restrictions, so
+    // restricted mana is doubled too; only the copies are unrestricted.
+    types
+        .into_iter()
+        .flat_map(|mana_type| std::iter::repeat_n(mana_type, pool.count_color(mana_type)))
+        .collect()
+}
+
 /// Resolve a player target from the ability.
-fn resolve_player_target(ability: &ResolvedAbility, target: &TargetFilter) -> PlayerId {
-    match target {
-        TargetFilter::Controller | TargetFilter::SelfRef => ability.controller,
-        _ => ability
-            .targets
-            .iter()
-            .find_map(|t| {
-                if let TargetRef::Player(pid) = t {
-                    Some(*pid)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(ability.controller),
-    }
+fn resolve_player_target(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Option<PlayerId> {
+    super::resolve_player_for_context_ref(state, ability, target)
 }
 
 #[cfg(test)]
@@ -323,7 +325,8 @@ mod tests {
     use super::*;
     use crate::game::game_object::GameObject;
     use crate::types::ability::{
-        AbilityKind, QuantityModification, ReplacementDefinition, SpellContext, TypedFilter,
+        AbilityKind, QuantityModification, ReplacementDefinition, SpellContext, TargetRef,
+        TypedFilter,
     };
     use crate::types::counter::CounterType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -338,6 +341,11 @@ mod tests {
         targets: Vec<TargetRef>,
     ) -> ResolvedAbility {
         ResolvedAbility {
+            coin_branches: None,
+            declares_chosen_group: None,
+            reads_chosen_group: None,
+            declares_return_result: None,
+            reads_return_result: None,
             detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
             effect: Effect::Double {
                 target_kind,
@@ -350,12 +358,18 @@ mod tests {
             source_id: ObjectId(100),
             cast_occurrence: None,
             source_incarnation: None,
+            announced_source_incarnation: None,
             trigger_source: None,
             trigger_definition_ref: None,
+            delayed_origin: None,
             force_block_attacker: None,
             target_incarnations: Vec::new(),
-            selected_target_incarnations: Vec::new(),
+            target_pins: Vec::new(),
+            legacy_selected_target_incarnations: Vec::new(),
+            chosen_target_slots: Default::default(),
             illegal_target_slots: Vec::new(),
+            unjudged_target_slots: Vec::new(),
+            illegal_local_target_slots: Vec::new(),
             targets,
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -368,7 +382,7 @@ mod tests {
             chosen_x: None,
             cost_paid_object: None,
             noted_mana_payment: None,
-            cost_paid_object_ids: Vec::new(),
+            cost_paid_objects: Vec::new(),
             effect_context_object: None,
             amassed_army_object: None,
             ability_index: None,
@@ -387,6 +401,7 @@ mod tests {
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
+            illegal_targets_disposition: Default::default(),
             copy_count_status: crate::types::ability::CopyCountStatus::Pending,
             forward_result: false,
             unless_pay: None,
@@ -397,15 +412,20 @@ mod tests {
             repeat_until: None,
             replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+            target_reads: Default::default(),
+            entry_onset: crate::types::ability::ContinuousEffectOnset::WhenFollowed,
             sibling_condition: crate::types::ability::SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,
+            activation_cost_reduction: None,
+            activation_record: None,
+            control_change_instruction: None,
         }
     }
 
     /// Zimone, Paradox Sculptor's real activated line, committed verbatim at
-    /// `crates/engine/src/parser/swallow_check.rs`.
+    /// `crates/phase-parser/src/parser/swallow_check.rs`.
     const ZIMONE_ACTIVATED_LINE: &str = "{G}{U}, {T}: Double the number of each kind of counter \
         on up to two target creatures and/or artifacts you control.";
 

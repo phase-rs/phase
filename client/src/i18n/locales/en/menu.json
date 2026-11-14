@@ -117,6 +117,8 @@
     "coverageThresholdHint": "Exclude decks below this engine-support threshold",
     "bracket": "Bracket",
     "bracketHint": "Random AI picks from these brackets. Untagged decks are excluded when filtering.",
+    "bracketPoolEmpty": "No decks match the selected brackets. Random AI will draw from all legal decks.",
+    "cedhPoolEmpty": "No bracket-5 decks available. Random AI seats cannot be filled.",
     "opponentLabel": "Opponent {{number}}",
     "deck": "Deck",
     "difficulty": "Difficulty",
@@ -131,7 +133,21 @@
       "feed": "Feed",
       "user": "User",
       "precon": "Precon"
-    }
+    },
+    "brain": "Driven by",
+    "brainEngine": "Engine AI",
+    "poolBracketConflict": "None of the {{selected}} selected decks are legal under the current filters, so Random seats draw from all {{total}} decks."
+  },
+  "randomPool": {
+    "titleHuman": "Your random pool",
+    "titleAi": "AI random pool",
+    "hint": "Uncheck folders or decks to remove them from Random picks.",
+    "count": "{{selected}} of {{total}}",
+    "emptyWarning": "Everything is excluded, so Random draws from all {{total}} decks.",
+    "reset": "Reset",
+    "precons": "Precons",
+    "playable": "{{playable}} playable",
+    "nonePlayable": "None of the {{selected}} selected decks are legal under the current filters, so Random draws from all {{total}} decks."
   },
   "feedManager": {
     "title": "Manage Feeds",
@@ -294,7 +310,8 @@
     "sectionStarred": "Starred",
     "sectionUnfiled": "Unfiled",
     "collapseAll": "Collapse all",
-    "expandAll": "Expand all"
+    "expandAll": "Expand all",
+    "poolBracketConflict": "None of the {{selected}} selected decks are legal under the current filters, so your random deck will be drawn from all {{total}} decks."
   },
   "subscriptions": {
     "emptyTitle": "No feed subscriptions",
@@ -360,5 +377,9 @@
       "ai": "AI",
       "multiplayer": "Multiplayer"
     }
+  },
+  "pileSource": {
+    "label": "Pile",
+    "default": "Default pile"
   }
 }

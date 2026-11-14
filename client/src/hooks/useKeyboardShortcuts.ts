@@ -7,7 +7,7 @@ import {
 } from "../stores/gameStore";
 import { useUiStore } from "../stores/uiStore";
 import { dispatchAction } from "../game/dispatch";
-import { getPlayerId } from "./usePlayerId";
+import { getCanActForWaitingState, getPlayerId } from "./usePlayerId";
 import { useAltToggle } from "./useAltToggle";
 import { useShiftHeld } from "./useShiftHeld";
 import {
@@ -28,11 +28,14 @@ import {
  * - D: Copy game state JSON to clipboard (debug)
  * - Ctrl+D: Export game state JSON as a compressed ZIP (debug)
  * - `: Toggle debug panel
+ * - K: Toggle Click Mode (games with Sandbox Tools available)
  * - Ctrl+Shift+L: Toggle Flex Layout edit mode
  * - Escape (in Flex Layout): Exit edit mode
  * - Triple-tap (touch): Toggle debug panel (iPad/mobile)
  */
-export function useKeyboardShortcuts(): void {
+export function useKeyboardShortcuts({
+  sandboxToolsAvailable = false,
+}: { sandboxToolsAvailable?: boolean } = {}): void {
   useAltToggle();
   useShiftHeld();
 
@@ -87,6 +90,10 @@ export function useKeyboardShortcuts(): void {
       } = useGameStore.getState();
       const uiState = useUiStore.getState();
 
+      // The contest overlay is modal and owns the activation keys (Space / Enter click
+      // for the contest): they never pass priority or toggle auto-pass behind it.
+      if (waitingFor?.type === "PhysicalContest" && (e.key === " " || e.key === "Enter")) return;
+
       // Flex Layout edit mode owns Escape while active so it can't fall through
       // to game-action cancellation.
       if (uiState.flexEditMode && e.key === "Escape") {
@@ -110,9 +117,9 @@ export function useKeyboardShortcuts(): void {
           break;
 
         case " ":
-          if (waitingFor?.type === "Priority") {
+          if (waitingFor?.type === "Priority" && getCanActForWaitingState()) {
             e.preventDefault();
-            dispatch({ type: "PassPriority" });
+            dispatchAction({ type: "PassPriority" });
           }
           break;
 
@@ -193,7 +200,17 @@ export function useKeyboardShortcuts(): void {
             e.preventDefault();
             if (adapter?.exportPersistenceState && canExportAuthoritativeState(gameMode)) {
               exportAuthoritativeGameStateZip(adapter)
-                .then((filename) => console.log(`[Debug] Game state exported to ${filename}`))
+                .then((result) => {
+                  if (result.kind === "failed") {
+                    console.error("[Debug] Game state export failed");
+                  } else if (result.kind === "requested") {
+                    console.log(`[Debug] Game state export requested (${result.filename})`);
+                  } else if (result.path) {
+                    console.log(`[Debug] Game state exported to ${result.path}`);
+                  } else {
+                    console.log(`[Debug] Game state exported ${result.filename}`);
+                  }
+                })
                 .catch((err) => console.error("[Debug] Failed to export:", err));
             }
           } else if (!e.ctrlKey && !e.metaKey) {
@@ -211,6 +228,16 @@ export function useKeyboardShortcuts(): void {
           uiState.toggleDebugPanel();
           break;
 
+        case "k":
+        case "K":
+          // Plain K only: Ctrl/Cmd+K are browser shortcuts. Click Mode reroutes card
+          // clicks to debug menus, so it is only offered where debug actions apply.
+          if (sandboxToolsAvailable && !e.ctrlKey && !e.metaKey && !e.altKey) {
+            e.preventDefault();
+            uiState.toggleDebugInteractionMode();
+          }
+          break;
+
         case "l":
         case "L":
           if (e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey) {
@@ -225,5 +252,5 @@ export function useKeyboardShortcuts(): void {
     return () => {
       window.removeEventListener("keydown", handler);
     };
-  }, []);
+  }, [sandboxToolsAvailable]);
 }

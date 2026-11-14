@@ -57,6 +57,7 @@ fn activate(runner: &mut GameRunner, whelp: ObjectId, nth: usize) {
         .act(GameAction::ActivateAbility {
             source_id: whelp,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .unwrap_or_else(|e| panic!("activation {nth} must be payable: {e:?}"));
     runner.resolve_top();

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "WaitingFor::LoopShortcut and ShortcutProposal carry counted_take; a peer ignoring it admits declarations and shortens this engine refuses"
+}

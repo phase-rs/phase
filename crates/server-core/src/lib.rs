@@ -1,6 +1,7 @@
 pub mod ai_seats_wire_guard;
 pub mod client_hello_guard;
 pub mod client_message_wire_guard;
+pub mod contest;
 pub mod deck_resolve;
 pub mod draft_action_payload_guard;
 pub mod draft_session;
@@ -37,8 +38,8 @@ pub use deck_resolve::resolve_deck;
 pub use draft_action_payload_guard::guard_draft_action_payload;
 pub use draft_session::{generate_draft_code, DraftSession, DraftSessionManager};
 pub use draft_wire_guard::{
-    guard_create_draft_with_settings, guard_draft_action, guard_join_draft_with_password,
-    guard_reconnect_draft,
+    guard_chaos_layout_for_kind, guard_create_draft_with_settings, guard_draft_action,
+    guard_join_draft_with_password, guard_reconnect_draft,
 };
 pub use emote_guard::guard_emote;
 pub use filter::{filter_events_for_player, filter_state_for_player};
@@ -76,6 +77,5 @@ pub use spectator_wire_guard::{
     guard_spectator_join, MAX_DRAFT_SPECTATORS_PER_DRAFT, MAX_GAME_SPECTATORS_PER_GAME,
 };
 pub use takeback::{
-    PendingTakeback, RewindOption, RewindTarget, TakebackOutcome, MAX_TAKEBACK_HISTORY,
-    MAX_TURN_REWIND_HISTORY,
+    RewindOption, RewindTarget, TakebackOutcome, MAX_TAKEBACK_HISTORY, MAX_TURN_REWIND_HISTORY,
 };

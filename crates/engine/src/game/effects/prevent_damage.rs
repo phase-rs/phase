@@ -1,9 +1,9 @@
-use crate::game::effects::add_target_replacement::ReplacementDurationExpiry;
 use crate::game::effects::choose_damage_source;
-use crate::game::quantity::resolve_quantity;
+use crate::game::quantity::resolve_quantity_with_targets;
+use crate::types::ability::{prevention_shield_is_refused, ReplacementDurationExpiry};
 use crate::types::ability::{
     CombatDamageScope, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectError,
-    EffectKind, FilterProp, PreventionAmount, PreventionScope, ReplacementDefinition,
+    EffectKind, EffectScope, FilterProp, PreventionAmount, PreventionScope, ReplacementDefinition,
     ResolvedAbility, SubAbilityLink, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
@@ -157,7 +157,10 @@ pub(crate) fn resolve_source_filter(
 /// `source_controller`, so a controller-relative gate on a player-scoped shield
 /// resolved against `state.active_player`. The authority latches it
 /// unconditionally (CR 113.8).
-fn push_player_scoped_shield(
+///
+/// Shared with `create_damage_replacement::resolve`, whose redirection shield
+/// for a PLAYER original recipient has the same storage shape.
+pub(crate) fn push_player_scoped_shield(
     state: &mut GameState,
     controller: PlayerId,
     source_id: ObjectId,
@@ -172,7 +175,7 @@ fn push_player_scoped_shield(
     );
 }
 
-fn player_damage_filter(player: PlayerId) -> DamageTargetFilter {
+pub(crate) fn player_damage_filter(player: PlayerId) -> DamageTargetFilter {
     DamageTargetFilter::Player {
         player: DamageTargetPlayerScope::Specific(player),
     }
@@ -232,9 +235,16 @@ fn untargeted_damage_filter(
         // the generic `is_context_ref()` catch-all (same ordering contract as
         // the `TrackedSet` carve-out above).
         TargetFilter::SelfRef => None,
-        filter if filter.is_context_ref() => Some(player_damage_filter(
-            super::resolve_player_for_context_ref(state, ability, filter),
-        )),
+        // CR 608.2k + CR 120.1: an event-context recipient (e.g. `EventTarget`
+        // from a passive damage trigger) is an OBJECT referent, not a player.
+        // The generic `is_context_ref()` classification below would misroute it
+        // through `resolve_player_for_context_ref` to the object's controller;
+        // this arm must precede `is_context_ref()` (same ordering contract as
+        // `TrackedSet` and `SelfRef` above).
+        TargetFilter::EventTarget => None,
+        filter if filter.is_context_ref() => {
+            super::resolve_player_for_context_ref(state, ability, filter).map(player_damage_filter)
+        }
         _ => None,
     }
 }
@@ -299,29 +309,46 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (amount, amount_dynamic, target, scope, effect_source_filter, prevention_duration) =
-        match &ability.effect {
-            Effect::PreventDamage {
-                amount,
-                amount_dynamic,
-                target,
-                scope,
-                damage_source_filter,
-                prevention_duration,
-            } => (
-                *amount,
-                amount_dynamic.clone(),
-                target.clone(),
-                *scope,
-                damage_source_filter.clone(),
-                prevention_duration.clone(),
-            ),
-            _ => {
-                return Err(EffectError::InvalidParam(
-                    "expected PreventDamage effect".to_string(),
-                ))
-            }
-        };
+    let (
+        amount,
+        amount_dynamic,
+        target,
+        recipient_scope,
+        scope,
+        effect_source_filter,
+        prevention_duration,
+    ) = match &ability.effect {
+        Effect::PreventDamage {
+            amount,
+            amount_dynamic,
+            target,
+            recipient_scope,
+            scope,
+            damage_source_filter,
+            prevention_duration,
+        } => (
+            *amount,
+            amount_dynamic.clone(),
+            target.clone(),
+            *recipient_scope,
+            *scope,
+            damage_source_filter.clone(),
+            prevention_duration.clone(),
+        ),
+        _ => {
+            return Err(EffectError::InvalidParam(
+                "expected PreventDamage effect".to_string(),
+            ))
+        }
+    };
+
+    // CR 115.1 + CR 601.2c / CR 602.2b: a declared recipient is exactly the
+    // objects/players chosen when the spell was cast or the ability activated.
+    // The single authority on whether an effect declares a slot is
+    // `extract_target_filter_from_effect` (the same predicate that mints the
+    // target slot), so this can never disagree with targeting.
+    let declared_recipient =
+        crate::types::ability::extract_target_filter_from_effect(&ability.effect).is_some();
 
     // CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): resolve any
     // `TrackedSet` sentinel in the recipient/source filters to a CONCRETE
@@ -341,6 +368,14 @@ pub fn resolve(
     let target = crate::game::targeting::resolve_tracked_set_sentinel(state, target);
     let effect_source_filter = effect_source_filter
         .map(|filter| crate::game::targeting::resolve_tracked_set_sentinel(state, filter));
+
+    // CR 608.2b: a declared player with no legal referent is not protected, and
+    // a shield with no recipient filter would protect everyone.
+    if target.names_one_player()
+        && super::resolve_player_for_context_ref(state, ability, &target).is_none()
+    {
+        return Ok(());
+    }
 
     // CR 609.7 + CR 609.7a: A source-scoped prevent ("prevent all damage target
     // instant or sorcery spell would deal this turn") carries its chosen source
@@ -382,11 +417,14 @@ pub fn resolve(
         )
     );
 
-    // CR 615.11: A dynamic prevention amount is resolved to a concrete depletion
-    // count at effect-resolution time; the Next(n) shield itself is always static.
+    // CR 615.7 + CR 107.3a + CR 602.2b + CR 107.3i: the shield size is the
+    // announced value of X, snapshotted at effect resolution. `chosen_x` is the
+    // object's single X channel (`ability_utils::publish_announced_x`);
+    // `resolve_quantity_with_targets` is the resolver that reads it — the bare
+    // `resolve_quantity` passes `chosen_x = None` and would resolve "X" to 0.
     let amount = match amount_dynamic {
         Some(expr) => {
-            let n = resolve_quantity(state, &expr, ability.controller, ability.source_id);
+            let n = resolve_quantity_with_targets(state, &expr, ability);
             PreventionAmount::Next(u32::try_from(n.max(0)).unwrap_or(0))
         }
         None => amount,
@@ -408,10 +446,12 @@ pub fn resolve(
     // (`Typed(instant|sorcery)` leaf) is a duration-bound continuous
     // `Prevention { All }` that must keep re-firing, so it does NOT match here.
     //
-    // NOTE: `target: Any` on the parsed effect is deliberately not consulted on
-    // the `source_scoped_prevent` path below — the target slot is carried by
-    // the `damage_source_filter`'s `And`, and `Any` simply means "no recipient
-    // scope" (CR 115.1: the target slot is hosted by the source-filter `And`).
+    // NOTE: on the `source_scoped_prevent` path `target` is never a declared
+    // target (CR 115.10a) — the only target slot is hosted by the
+    // `damage_source_filter`'s `And` (CR 115.1). It is an untargeted recipient
+    // SCOPE (CR 120.1): `Any` = no recipient scope (Awe Strike); `Player` /
+    // `Controller` ("to one or more players" / "to you" — Ria Ivor) lower to
+    // `damage_target_filter` via `untargeted_damage_filter` below.
     let oneshot_source_shape = effect_source_filter
         .as_ref()
         .is_some_and(crate::types::ability::is_oneshot_target_source_prevent_shape);
@@ -457,13 +497,9 @@ pub fn resolve(
             prevention_duration.as_ref().or(ability.duration.as_ref())
         )));
     }
-    let expiry = match crate::game::effects::add_target_replacement::expiry_from_duration(
-        prevention_duration.as_ref(),
-    ) {
+    let expiry = match crate::types::ability::expiry_from_duration(prevention_duration.as_ref()) {
         ReplacementDurationExpiry::Unstated => {
-            crate::game::effects::add_target_replacement::expiry_from_duration(
-                ability.duration.as_ref(),
-            )
+            crate::types::ability::expiry_from_duration(ability.duration.as_ref())
         }
         expiry => expiry,
     };
@@ -554,19 +590,37 @@ pub fn resolve(
         shield = shield.combat_scope(CombatDamageScope::CombatOnly);
     }
 
-    // CR 608.2c: When the shield is bound to a parent's chosen object target
-    // (Gatta and Luzzu's `ParentTarget` referencing the chosen creature), we
-    // host on the object itself and scope via `valid_card: SelfRef` — the
-    // player-scoped `untargeted_damage_filter` below resolves `ParentTarget`
-    // to the controller, which would mis-scope an object-shield as a
-    // player-shield. Skip the player-filter inference in that case.
-    let host_on_parent_target_object = matches!(target, TargetFilter::ParentTarget)
+    // CR 608.2c + CR 608.2k + CR 120.1: When the shield is bound to a parent's
+    // chosen object target (Gatta and Luzzu's `ParentTarget` referencing the chosen
+    // creature) or an event-context recipient (`EventTarget` referencing the damaged
+    // creature in a passive damage trigger), resolve the concrete target now while
+    // the event context is live, host on the object itself, and scope via
+    // `valid_card: SelfRef` — the player-scoped `untargeted_damage_filter` below
+    // resolves context refs to their controller, which would mis-scope an
+    // object-shield as a player-shield. Skip the player-filter inference in those cases.
+    let event_context_target = if matches!(target, TargetFilter::EventTarget) {
+        crate::game::targeting::resolve_event_referent_permanents(state, &target, ability.source_id)
+            .into_iter()
+            .find(|&id| ability.target_pin_is_current(id, state))
+            .map(TargetRef::Object)
+    } else {
+        None
+    };
+    let host_on_context_target_object = (matches!(target, TargetFilter::ParentTarget)
         && ability
             .targets
             .iter()
-            .any(|t| matches!(t, TargetRef::Object(_)));
+            .any(|t| matches!(t, TargetRef::Object(_))))
+        || (matches!(target, TargetFilter::EventTarget)
+            && matches!(event_context_target, Some(TargetRef::Object(_))));
 
-    if !host_on_parent_target_object {
+    // CR 115.1: a declared recipient is scoped by where the shield is installed
+    // (the chosen object's host, or the chosen player's filter below), never by
+    // the recipient's type filter, which would shield every matching object.
+    if !host_on_context_target_object
+        && !declared_recipient
+        && !matches!(target, TargetFilter::EventTarget)
+    {
         if let Some(filter) = untargeted_damage_filter(state, ability, &target) {
             shield = shield.damage_target_filter(filter);
         } else if let Some(recipient_filter) = typed_recipient_valid_card_filter(&target) {
@@ -577,21 +631,47 @@ pub fn resolve(
     // CR 615.5: A `ContinuationStep` rider ("prevent that damage and put that
     // many +1/+1 counters on it" — Gatta and Luzzu) fires per prevented event,
     // so it installs as the shield's `runtime_execute`. A `SequentialSibling`
-    // sub is an independent instruction (CR 700.2d — a separate chosen mode of a
-    // modal spell, e.g. Dromoka's Command mode 3), NOT a rider; it is resolved
-    // on its own by the chain walker and must not become the shield rider.
+    // sub is an independent instruction (CR 700.2 + CR 608.2c — each chosen mode
+    // of a modal spell is its own instruction, followed in the order written;
+    // e.g. Dromoka's Command mode 3), NOT a rider; it is resolved on its own by
+    // the chain walker and must not become the shield rider.
     //
-    // CR 615.5: AWE STRIKE — "You gain life equal to the damage prevented this
-    // way" is a bare prevented-this-way rider (no when/whenever/if prelude). It
-    // reaches this resolver as a `ContinuationStep` only for the one-shot
-    // shape: the assembly gate (assembly.rs) forces `ContinuationStep` for the
-    // bare rider only when the chain root's prevention carries the
+    // CR 615.5: which sentence-boundary riders arrive here as
+    // `ContinuationStep` is decided by `assembly.rs`'s `prevented_this_way_gate`,
+    // which has three arms. (1) An explicit `when|whenever|if … is prevented
+    // this way,` prelude — shape-unrestricted. (2) AWE STRIKE — "You gain life
+    // equal to the damage prevented this way" is a BARE rider (no prelude), and
+    // folds only when the chain root's prevention carries the
     // `And{[ParentTargetSlot, Typed(creature)]}` source filter; for every other
     // chain root (e.g. Reverse Damage's `ChosenDamageSource` shape) the bare
-    // rider stays a `SequentialSibling` and must NOT install here.
+    // rider stays a `SequentialSibling` and must NOT install here. (3) The
+    // DISTRIBUTIVE rider "For each 1 damage prevented this way, <effect>",
+    // recognized by its clause-level `repeat_for` reading `EventContextAmount`
+    // plus the anaphor (#8777). Arm 3 has NO shape gate whatsoever — not on the
+    // prevention amount, not on a source filter, not on whether the shield is
+    // targeted. It reaches BOTH the untargeted player-scoped
+    // `PreventionAmount::All` combat shield (Inkshield, which works end to end)
+    // AND object-hosted TARGETED shields, `PreventionAmount::All` or
+    // `PreventionAmount::Next(N)` alike (Brace for Impact, Test of Faith,
+    // Temper) and the nested-rider shape (Gatta and Luzzu), whose
+    // `PutCounter { target: ParentTarget }` rider is bound to the parent's
+    // chosen referent by `bind_detached_continuation_to_parent` below —
+    // CR 608.2c, at the one instant parent and rider coexist. A rider whose
+    // parent chain named NO referent (an untargeted parent with an anaphoric
+    // descendant — Clay Pigeon) keeps an empty `targets` and the anaphor
+    // resolves to nothing (CR 608.2b); it does NOT fall back to the creation
+    // event's source, which is CR 603.7c and belongs to the delayed-trigger
+    // seam alone. Corpus census (regenerate: see #8777's census command):
+    // 18 riders reach this install; 5 carry a parent anaphor and enter the
+    // binding; the other 13 keep an empty `targets` unchanged.
+    //
+    // A `SequentialSibling` still never installs here regardless of arm — that
+    // is the CR 700.2 + CR 608.2c boundary above, and widening it is what would
+    // capture an independent chosen mode.
     //
     // The rider is installed via the SAME `runtime_execute` slot as every other
-    // prevention rider — the resolution-time `ResolvedAbility` payload. The
+    // prevention rider — a handle naming the resolution-time `ResolvedAbility`
+    // payload in `GameState::replacement_continuations`. The
     // applier resolves `EventContextAmount` in the rider against
     // `last_effect_count` (stamped with the prevented amount at apply time), so
     // no parse-time template reconstruction is needed; the whole sub-ability is
@@ -599,7 +679,20 @@ pub fn resolve(
     // `build_resolved_from_def` converter round-trips.
     if let Some(sub_ability) = &ability.sub_ability {
         if sub_ability.sub_link == SubAbilityLink::ContinuationStep {
-            shield = shield.runtime_execute(sub_ability.as_ref().clone());
+            let mut rider = sub_ability.as_ref().clone();
+            // CR 615.5 + CR 608.2c + CR 400.7: the rider leaves the resolution chain here, so
+            // bind its parent anaphor now — this is the last instant the parent's chosen
+            // referent and the rider coexist. Same discipline, same instant, as
+            // `resolve_source_filter` above applies to the damage-SOURCE axis
+            // (`TargetFilter::ChosenDamageSource`'s contract in `types/ability.rs`: resolve it
+            // to a concrete object when the shield is created so the shield does not depend on
+            // a live SOURCE — the same independence, applied here to the parent's referent).
+            crate::game::effects::bind_detached_continuation_to_parent(state, ability, &mut rider);
+            // CR 615.5: install once, before any hosting branch, so every hosted clone of the
+            // shield names the same continuation; a path that hosts nothing leaves the entry
+            // unnamed.
+            let id = state.install_replacement_continuation(rider);
+            shield = shield.runtime_execute(id);
         }
     }
 
@@ -619,13 +712,34 @@ pub fn resolve(
     // The shield host is the chosen creature in that case, so the targeted
     // branch must also accept `ParentTarget` when `ability.targets` carries the
     // inherited parent targets.
+    //
+    // CR 115.10a: a mass (`All`) shield never hosts on inherited targets — its
+    // population is matched as each damage event happens, not chosen.
+    // CR 608.2k + CR 120.1: concrete recipient targets to host on — declared targets,
+    // inherited parent targets, or the active event's referent.
+    let targets_to_host: Vec<TargetRef> = if matches!(target, TargetFilter::EventTarget) {
+        event_context_target.into_iter().collect()
+    } else if !ability.targets.is_empty() {
+        ability.live_object_targets(state)
+    } else {
+        Vec::new()
+    };
+
     let host_on_targets = !source_scoped_prevent
-        && !ability.targets.is_empty()
-        && (!target.is_context_ref() || matches!(target, TargetFilter::ParentTarget));
+        && !targets_to_host.is_empty()
+        && (!target.is_context_ref()
+            || matches!(
+                target,
+                TargetFilter::ParentTarget | TargetFilter::EventTarget
+            ))
+        && recipient_scope == EffectScope::Single;
     if host_on_targets {
-        for selected_target in &ability.targets {
+        for selected_target in &targets_to_host {
             match selected_target {
                 TargetRef::Object(obj_id) => {
+                    if !ability.target_pin_is_current(*obj_id, state) {
+                        continue;
+                    }
                     // CR 614.1a: When the shield is hosted on a specific object,
                     // scope it via `valid_card: SelfRef` so it only fires on
                     // damage to its host — not damage to any object on the
@@ -637,6 +751,14 @@ pub fn resolve(
                         object_shield.valid_card = Some(TargetFilter::SelfRef);
                     }
                     if let Some(obj) = state.objects.get_mut(obj_id) {
+                        // CR 400.7 + CR 615.1: the object keeps its id across a
+                        // zone change but bumps its incarnation, so a blinked
+                        // creature is a new object with no memory of the
+                        // departed one's shield. Stamp the host's incarnation on
+                        // the shield at install time so the match-time gate in
+                        // `game::replacement::object_replacement_candidate_applies`
+                        // refuses to apply this shield to a later incarnation.
+                        object_shield.target_recipient_incarnation = Some(obj.incarnation);
                         // CR 611.2c + CR 613.1: install through the one
                         // resolution-install authority so the CR 613.1 layer reseed
                         // CARRIES this shield instead of wiping it. A prevention
@@ -647,8 +769,9 @@ pub fn resolve(
                     }
                 }
                 TargetRef::Player(player) => {
-                    // Player-targeted prevention scopes to the chosen player and
-                    // persists globally when created by an instant/sorcery on the stack.
+                    // CR 115.1: player-targeted prevention scopes to the chosen
+                    // player only, with no object recipient filter, and persists
+                    // globally when created by an instant/sorcery on the stack.
                     let player_shield = shield
                         .clone()
                         .damage_target_filter(player_damage_filter(*player));
@@ -661,6 +784,24 @@ pub fn resolve(
                 }
             }
         }
+    } else if declared_recipient || matches!(target, TargetFilter::EventTarget) {
+        // CR 115.6 + CR 608.2b: "up to" a number of targets with zero chosen or
+        // an event-context recipient with no legal referent leaves nothing to
+        // affect, so no shield is installed (an untargeted shield here would
+        // prevent damage to every matching object).
+    } else if ability.self_ref_binding(state).is_none()
+        && [
+            shield.valid_card.as_ref(),
+            shield.damage_source_filter.as_ref(),
+        ]
+        .into_iter()
+        .any(|filter| matches!(filter, Some(TargetFilter::SelfRef)))
+    {
+        // CR 400.7 + CR 615: the shield names "~" — as the damaged object (Gideon
+        // Jura) or the damage source (Mercenaries) — and the source left and
+        // returned before resolution. The returned permanent is a new object;
+        // latching it as the host below would protect it with an ability of the
+        // departed one. The shield has no referent and is not installed.
     } else {
         // CR 113.7a + CR 611.2a + CR 615.3: Untargeted (SOURCE-scoped) prevention.
         // This branch used to fork on storage -- object-hosted when
@@ -703,49 +844,10 @@ pub fn resolve(
     Ok(())
 }
 
-/// CR 611.2a + CR 615: does the prevention-shield seam refuse this stated
-/// lifetime? THE authority for that question, shared by two consumers:
-///
-/// * `resolve` above, which turns a refusal into a hard `EffectError` rather
-///   than a successful no-op; and
-/// * `parser::oracle::demote_unenforceable_replacement_lifetimes`, the
-///   post-lowering honesty net, which demotes a refused line to
-///   `Effect::Unimplemented` so no card reports the shape as supported.
-///
-/// The fallback order mirrors `resolve`'s exactly — the clause's own
-/// `prevention_duration` first, the resolving ability's duration only when the
-/// clause states none — so the net and the install seam cannot disagree about
-/// which shape is supported.
-///
-/// Both refused classes are genuinely unenforceable HERE, for different
-/// reasons: `Unsupported` has no expiry stamp at all, and `GateControlled`
-/// promises a runtime applicability gate that only the bare untap-prevention
-/// rider carries (`add_target_replacement::stamp_for_as_long_as_controlled_gate`)
-/// — a prevention shield has no such gate, so it would install with no lifetime
-/// the engine can end.
-///
-/// Reachable, measured over the parsed corpus: Old Fat Spider Can't See Me
-/// chapter II states "for as long as this Saga remains on the battlefield" on a
-/// prevention clause, which lands in the refused set. Before this guard it
-/// resolved successfully and installed nothing.
-pub(crate) fn prevention_shield_is_refused(
-    prevention_duration: Option<&crate::types::ability::Duration>,
-    ability_duration: Option<&crate::types::ability::Duration>,
-) -> bool {
-    use crate::game::effects::add_target_replacement::expiry_from_duration;
-    let effective = match expiry_from_duration(prevention_duration) {
-        ReplacementDurationExpiry::Unstated => expiry_from_duration(ability_duration),
-        stated => stated,
-    };
-    matches!(
-        effective,
-        ReplacementDurationExpiry::GateControlled | ReplacementDurationExpiry::Unsupported
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::{effects::deal_damage, zones::create_object};
     use crate::types::ability::{
         PreventionAmount, PtValue, QuantityExpr, QuantityRef, ShieldKind, TypedFilter,
@@ -764,11 +866,17 @@ mod tests {
         scope: PreventionScope,
         targets: Vec<TargetRef>,
     ) -> ResolvedAbility {
+        let recipient_scope = if targets.is_empty() {
+            EffectScope::All
+        } else {
+            EffectScope::Single
+        };
         ResolvedAbility::new(
             Effect::PreventDamage {
                 amount,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
+                recipient_scope,
                 scope,
                 damage_source_filter: None,
                 prevention_duration: None,
@@ -871,6 +979,7 @@ mod tests {
                     amount: PreventionAmount::All,
                     amount_dynamic: None,
                     target: TargetFilter::Controller,
+                    recipient_scope: EffectScope::Single,
                     scope: PreventionScope::CombatDamage,
                     damage_source_filter: None,
                     prevention_duration: duration.clone(),
@@ -915,6 +1024,7 @@ mod tests {
                 amount: PreventionAmount::Next(1),
                 amount_dynamic: Some(QuantityExpr::Fixed { value: 4 }),
                 target: TargetFilter::Any,
+                recipient_scope: EffectScope::All,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,
                 prevention_duration: None,
@@ -942,6 +1052,64 @@ mod tests {
             state.pending_damage_replacements[0].source_object,
             Some(source)
         );
+    }
+
+    #[test]
+    fn dynamic_variable_x_amount_uses_announced_chosen_x() {
+        // CR 107.3a + CR 615.7: the announced X of a counted prevention clause
+        // must size the shield. `resolve_quantity_with_targets` reads the
+        // resolving ability's `chosen_x`; the bare `resolve_quantity` passed
+        // `chosen_x = None` and resolved "X" to 0.
+        for (chosen_x, expected) in [(3u32, 3u32), (0u32, 0u32)] {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Alabaster Potion".to_string(),
+                Zone::Battlefield,
+            );
+
+            let mut ability = ResolvedAbility::new(
+                Effect::PreventDamage {
+                    amount: PreventionAmount::Next(1),
+                    amount_dynamic: Some(QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    }),
+                    target: TargetFilter::Any,
+                    recipient_scope: EffectScope::All,
+                    scope: PreventionScope::AllDamage,
+                    damage_source_filter: None,
+                    prevention_duration: None,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            ability.chosen_x = Some(chosen_x);
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+
+            // Reach guard: the dynamic branch installed exactly one shield,
+            // anchored to the resolving source.
+            assert_eq!(state.pending_damage_replacements.len(), 1);
+            assert_eq!(
+                state.pending_damage_replacements[0].source_object,
+                Some(source)
+            );
+            assert!(
+                matches!(
+                    state.pending_damage_replacements[0].shield_kind,
+                    ShieldKind::Prevention {
+                        amount: PreventionAmount::Next(n)
+                    } if n == expected
+                ),
+                "chosen_x {chosen_x} should install a Next({expected}) shield, got {:?}",
+                state.pending_damage_replacements[0].shield_kind
+            );
+        }
     }
 
     #[test]
@@ -978,6 +1146,7 @@ mod tests {
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
+                recipient_scope: EffectScope::Single,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
                 prevention_duration: None,
@@ -1016,6 +1185,7 @@ mod tests {
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
+                recipient_scope: EffectScope::Single,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: Some(TargetFilter::ChosenDamageSource {
                     filter: qualifier.map(Box::new),
@@ -1426,6 +1596,7 @@ mod tests {
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
+                recipient_scope: EffectScope::Single,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,
                 prevention_duration: Some(Duration::WhileControllingHost),
@@ -1511,6 +1682,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -1555,9 +1728,10 @@ mod tests {
 
         // CR 615.5: fire the rider once against the aggregate prevented amount.
         let (rid, &prevented) = tally.iter().next().unwrap();
-        let runtime = state.pending_damage_replacements[rid.index()]
-            .runtime_execute
-            .clone()
+        let runtime = state
+            .replacement_rider(&state.pending_damage_replacements[rid.index()])
+            .cloned()
+            .map(Box::new)
             .unwrap();
         state.last_effect_count = Some(prevented);
         state.install_ready_continuation(
@@ -1603,6 +1777,7 @@ mod tests {
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Controller,
+                recipient_scope: EffectScope::Single,
                 scope: PreventionScope::CombatDamage,
                 damage_source_filter: None,
                 prevention_duration: None,
@@ -1703,6 +1878,7 @@ mod tests {
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::SelfRef,
+                recipient_scope: EffectScope::Single,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,
                 prevention_duration: None,
@@ -1828,6 +2004,7 @@ mod tests {
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Player,
+                recipient_scope: EffectScope::All,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,
                 prevention_duration: None,
@@ -1964,6 +2141,7 @@ mod tests {
                         .with_type(TypeFilter::Subtype("Dog".into()))
                         .controller(ControllerRef::You),
                 ),
+                recipient_scope: EffectScope::All,
                 scope: PreventionScope::CombatDamage,
                 damage_source_filter: None,
                 prevention_duration: None,
@@ -2076,6 +2254,7 @@ mod tests {
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
                 },
+                recipient_scope: EffectScope::Single,
                 scope: PreventionScope::CombatDamage,
                 damage_source_filter: None,
                 prevention_duration: None,
@@ -2656,6 +2835,7 @@ mod tests {
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::ParentTarget,
+                recipient_scope: EffectScope::Single,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,
                 prevention_duration: None,
@@ -2823,6 +3003,7 @@ mod tests {
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
+                recipient_scope: EffectScope::Single,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: Some(TargetFilter::And {
                     filters: vec![
@@ -3069,6 +3250,544 @@ mod tests {
         }
     }
 
+    // ---- #8777 / PR #8849: bind_detached_continuation_to_parent (H-4/H-4b/H-5/H-6/H-9) ----
+
+    fn put_counter_parent_target_rider(source: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+    }
+
+    /// #8777 (H-4): a `ContinuationStep` rider whose effect targets `ParentTarget`
+    /// binds to EVERY referent the parent's chain selected — a single chosen
+    /// object for a one-target parent, and the WHOLE snapshot (not a per-host
+    /// split) for a multi-target parent. CR 608.2c + CR 615.5.
+    #[test]
+    fn continuation_rider_binds_every_parent_referent() {
+        // Single-target block.
+        {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Test Source".into(),
+                Zone::Battlefield,
+            );
+            let a = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Bear A".into(),
+                Zone::Battlefield,
+            );
+            let ability = ResolvedAbility::new(
+                Effect::PreventDamage {
+                    amount: PreventionAmount::All,
+                    amount_dynamic: None,
+                    target: TargetFilter::ParentTarget,
+                    recipient_scope: EffectScope::Single,
+                    scope: PreventionScope::AllDamage,
+                    damage_source_filter: None,
+                    prevention_duration: None,
+                },
+                vec![TargetRef::Object(a)],
+                source,
+                PlayerId(0),
+            )
+            .sub_ability(put_counter_parent_target_rider(source));
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+
+            let shield = &state.objects[&a].replacement_definitions[0];
+            let rider = state
+                .replacement_rider(shield)
+                .expect("the rider must install as runtime_execute");
+            assert_eq!(
+                rider.targets,
+                vec![TargetRef::Object(a)],
+                "a single-target parent binds the rider to exactly that one referent"
+            );
+        }
+
+        // Two-target block: the multi-target semantics decision (bind the WHOLE
+        // snapshot, mirroring the sibling delayed-trigger authority) — recorded,
+        // not accidental: English cannot distinguish "on that creature"
+        // (per-host) from "on those creatures" (all) at AST level, and the
+        // corpus has zero multi-target carriers (§P2 of the plan), so this is a
+        // test-visible decision rather than a silent one.
+        {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Test Source".into(),
+                Zone::Battlefield,
+            );
+            let a = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Bear A".into(),
+                Zone::Battlefield,
+            );
+            let b = create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(0),
+                "Bear B".into(),
+                Zone::Battlefield,
+            );
+            let ability = ResolvedAbility::new(
+                Effect::PreventDamage {
+                    amount: PreventionAmount::All,
+                    amount_dynamic: None,
+                    target: TargetFilter::ParentTarget,
+                    recipient_scope: EffectScope::Single,
+                    scope: PreventionScope::AllDamage,
+                    damage_source_filter: None,
+                    prevention_duration: None,
+                },
+                vec![TargetRef::Object(a), TargetRef::Object(b)],
+                source,
+                PlayerId(0),
+            )
+            .sub_ability(put_counter_parent_target_rider(source));
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+
+            let shield = &state.objects[&a].replacement_definitions[0];
+            let rider = state
+                .replacement_rider(shield)
+                .expect("the rider must install as runtime_execute");
+            assert_eq!(
+                rider.targets,
+                vec![TargetRef::Object(a), TargetRef::Object(b)],
+                "a two-target parent binds the rider to the WHOLE selected snapshot"
+            );
+        }
+    }
+
+    /// CR 615.5: a two-target prevention installs its `ContinuationStep` rider once,
+    /// before any hosting branch, so both hosted shields name the same continuation
+    /// and the arena grows by exactly one entry.
+    #[test]
+    fn continuation_rider_installs_once_for_every_hosted_shield() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Source".into(),
+            Zone::Battlefield,
+        );
+        let a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear A".into(),
+            Zone::Battlefield,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bear B".into(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::ParentTarget,
+                recipient_scope: EffectScope::Single,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![TargetRef::Object(a), TargetRef::Object(b)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(put_counter_parent_target_rider(source));
+        let arena_before = state.replacement_continuations.len();
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let handle_of = |id: ObjectId| {
+            let defs = &state.objects[&id].replacement_definitions;
+            assert_eq!(defs.len(), 1, "reach guard: {id:?} hosts one shield");
+            defs[0].runtime_execute
+        };
+        let (handle_a, handle_b) = (handle_of(a), handle_of(b));
+        assert!(
+            handle_a.is_some(),
+            "reach guard: the hosted shield names its rider"
+        );
+        assert_eq!(
+            handle_a, handle_b,
+            "both hosted clones of the shield name the one installed continuation"
+        );
+        assert_eq!(
+            state.replacement_continuations.len(),
+            arena_before + 1,
+            "the rider is installed once per resolution, not once per host"
+        );
+    }
+
+    /// #8777 (H-4b, MG2): the gate and the binding fire identically across the
+    /// `ParentTarget*` family — a `ParentTargetSlot { index: 0 }` rider under a
+    /// 1-target parent installs with the same referent as the bare `ParentTarget`
+    /// sibling. Scope note: this pins the INSTALL-TIME binding only; the
+    /// drain-time slot read goes through `resolve_live_parent_slot_from_root` →
+    /// `resolving_root_ability`'s self-fallback, whose same-source hazard has
+    /// zero corpus carriers (§P2 of the plan) and is documented, not tested,
+    /// on `bind_detached_continuation_to_parent`'s doc comment.
+    #[test]
+    fn continuation_rider_with_a_parent_target_slot_anaphor_is_bound() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Source".into(),
+            Zone::Battlefield,
+        );
+        let a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear A".into(),
+            Zone::Battlefield,
+        );
+        let slot_rider = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTargetSlot { index: 0 },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::ParentTarget,
+                recipient_scope: EffectScope::Single,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![TargetRef::Object(a)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(slot_rider);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let shield = &state.objects[&a].replacement_definitions[0];
+        let rider = state
+            .replacement_rider(shield)
+            .expect("the ParentTargetSlot rider must install as runtime_execute");
+        assert_eq!(
+            rider.targets,
+            vec![TargetRef::Object(a)],
+            "the gate must fire identically for ParentTargetSlot as for bare ParentTarget"
+        );
+    }
+
+    /// #8777 (H-5): a `ContinuationStep` rider whose effect carries NO parent
+    /// anaphor (Inkshield's `Token` / Awe Strike's `GainLife` shape) under a
+    /// TARGETED parent must keep an EMPTY `targets` — the row that catches the
+    /// naive unconditional `runtime.targets = ability.targets.clone()` patch.
+    #[test]
+    fn continuation_rider_without_a_parent_anaphor_keeps_empty_targets() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Source".into(),
+            Zone::Battlefield,
+        );
+        let a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear A".into(),
+            Zone::Battlefield,
+        );
+        // A GainLife rider carries no TargetFilter that could ever read
+        // ParentTarget — the Awe Strike shape.
+        let gain_life_rider = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                recipient_scope: EffectScope::Single,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![TargetRef::Object(a)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(gain_life_rider);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let shield = &state.objects[&a].replacement_definitions[0];
+        assert!(
+            shield.runtime_execute.is_some(),
+            "reach guard: the rider must still install as runtime_execute"
+        );
+        assert!(
+            state.replacement_rider(shield).unwrap().targets.is_empty(),
+            "a rider with no parent anaphor must keep an EMPTY targets vector, got {:?}",
+            state.replacement_rider(shield).unwrap().targets
+        );
+    }
+
+    /// #8777 (H-6, CR 400.7): the installed rider's `target_incarnations` names
+    /// the chosen object at its current incarnation; after the referent leaves
+    /// and returns under the same id, `pinned_object_targets_all_stale` is true.
+    /// Mirrors the departed-and-returned pattern at
+    /// `parent_target_slot_source_is_not_captured_once_illegal_or_departed`.
+    #[test]
+    fn continuation_rider_pins_its_object_referent_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Source".into(),
+            Zone::Battlefield,
+        );
+        let a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear A".into(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::ParentTarget,
+                recipient_scope: EffectScope::Single,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![TargetRef::Object(a)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(put_counter_parent_target_rider(source));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let rider = state
+            .replacement_rider(&state.objects[&a].replacement_definitions[0])
+            .cloned()
+            .expect("the rider must install as runtime_execute");
+        assert!(
+            !rider.pinned_object_targets_all_stale(&state),
+            "reach guard: the pin must be current immediately after install"
+        );
+
+        // The referent leaves and returns under the same storage id — CR 400.7:
+        // a new incarnation.
+        for zone in [Zone::Graveyard, Zone::Battlefield] {
+            let _ = crate::game::zone_pipeline::move_object(
+                &mut state,
+                crate::game::zone_pipeline::ZoneMoveRequest::effect(a, zone, source),
+                &mut events,
+            );
+        }
+        assert!(
+            rider.pinned_object_targets_all_stale(&state),
+            "CR 400.7: a departed-and-returned referent must be a new incarnation, \
+             so the pin must now be stale"
+        );
+    }
+
+    /// #8777 (H-9, D1): the NEW scope quadrant Clay Pigeon exposes — an
+    /// UNTARGETED parent (`PreventDamage { target: Controller }`, empty
+    /// `ability.targets`) whose descendant STILL carries a parent anaphor
+    /// (`Sacrifice { target: ParentTarget }`, Clay Pigeon's exact rider shape:
+    /// `SetTapState { SelfRef }` → `Unimplemented("otherwise")` →
+    /// `Sacrifice { ParentTarget }`). The gate fires (the effect chain DOES
+    /// reference `ParentTarget`), but `parent_chain_referents` returns `None`
+    /// (no forwarded context, no root-chain slot, no node-local targets, no
+    /// declared-and-zero-chosen slot) — the referent set stays EMPTY, and it
+    /// does NOT fall back to tier 5 (`TriggeringSource`), because the
+    /// prevention seam consumes only `parent_chain_referents`, never
+    /// `delayed_trigger::parent_target_snapshot`'s tier-5 composition (§D1).
+    /// CR 608.2b: the anaphor has no referent, so this part of the effect
+    /// fails to determine any such information and doesn't happen.
+    #[test]
+    fn untargeted_parent_with_an_anaphoric_descendant_installs_an_empty_referent_set() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Clay Pigeon".into(),
+            Zone::Battlefield,
+        );
+
+        let sacrifice_rider = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::ParentTarget,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut otherwise_rider = ResolvedAbility::new(
+            Effect::unimplemented("otherwise", "Otherwise"),
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        otherwise_rider = otherwise_rider.sub_ability(sacrifice_rider);
+        let tap_rider = ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
+                state: crate::types::ability::TapStateChange::Tap,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(otherwise_rider);
+
+        // Untargeted parent: target = Controller, ability.targets = [] — Clay
+        // Pigeon's exact activated-ability shape.
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Controller,
+                recipient_scope: EffectScope::Single,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(tap_rider);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // CR 113.7a: an untargeted (source-scoped) shield goes to the floating
+        // registry, not onto an object.
+        let shield = state
+            .pending_damage_replacements
+            .last()
+            .expect("reach guard 1: the shield must be installed");
+        let rider = state
+            .replacement_rider(shield)
+            .expect("reach guard 1: the rider must install as runtime_execute");
+
+        // Reach guard 2: the gate DID fire — the empty result below is the
+        // binding's answer, not the gate short-circuiting on a chain it never
+        // recognized as anaphoric. Without this the row would also pass on a
+        // build where the gate simply missed the nested `Sacrifice` node.
+        assert!(
+            crate::game::effects::ability_refs_parent_target(rider),
+            "reach guard 2: the gate must recognize the nested Sacrifice{{ParentTarget}} anaphor"
+        );
+
+        // The assertion under test: the referent set stays empty.
+        assert!(
+            rider.targets.is_empty(),
+            "an untargeted parent's chain names NO referent, so the anaphoric \
+             descendant must keep an empty targets vector, got {:?}",
+            rider.targets
+        );
+        assert!(
+            rider.target_incarnations.is_empty(),
+            "no referent means no pin either, got {:?}",
+            rider.target_incarnations
+        );
+
+        // Reach guard 3 (instrument sanity): the SAME instrument (this test
+        // binary) CAN produce a non-empty answer for a TARGETED parent's
+        // ParentTarget sibling — proving H-9's empty result is not an
+        // instrument artifact.
+        {
+            let mut state2 = GameState::new_two_player(42);
+            let source2 = create_object(
+                &mut state2,
+                CardId(1),
+                PlayerId(0),
+                "Targeted Source".into(),
+                Zone::Battlefield,
+            );
+            let a = create_object(
+                &mut state2,
+                CardId(2),
+                PlayerId(0),
+                "Bear A".into(),
+                Zone::Battlefield,
+            );
+            let ability2 = ResolvedAbility::new(
+                Effect::PreventDamage {
+                    amount: PreventionAmount::All,
+                    amount_dynamic: None,
+                    target: TargetFilter::ParentTarget,
+                    recipient_scope: EffectScope::Single,
+                    scope: PreventionScope::AllDamage,
+                    damage_source_filter: None,
+                    prevention_duration: None,
+                },
+                vec![TargetRef::Object(a)],
+                source2,
+                PlayerId(0),
+            )
+            .sub_ability(put_counter_parent_target_rider(source2));
+            let mut events2 = Vec::new();
+            resolve(&mut state2, &ability2, &mut events2).unwrap();
+            let rider2 = state2
+                .replacement_rider(&state2.objects[&a].replacement_definitions[0])
+                .unwrap();
+            assert_eq!(
+                rider2.targets,
+                vec![TargetRef::Object(a)],
+                "sibling sanity check: a targeted parent's sibling MUST bind non-empty"
+            );
+        }
+    }
+
     // ---- Issue #8485: CR 113.7a source-independence + the host-identity anchor ----
 
     /// Install an untargeted (source-scoped) prevention shield from `source`.
@@ -3077,6 +3796,7 @@ mod tests {
         source: ObjectId,
         controller: PlayerId,
         target: TargetFilter,
+        recipient_scope: EffectScope,
         damage_source_filter: Option<TargetFilter>,
         amount: PreventionAmount,
     ) {
@@ -3085,6 +3805,7 @@ mod tests {
                 amount,
                 amount_dynamic: None,
                 target,
+                recipient_scope,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter,
                 prevention_duration: None,
@@ -3154,6 +3875,7 @@ mod tests {
             mercenaries,
             PlayerId(0),
             TargetFilter::Any,
+            EffectScope::Single,
             Some(TargetFilter::SelfRef),
             PreventionAmount::All,
         );
@@ -3226,6 +3948,7 @@ mod tests {
                 permanent_type: None,
                 source_scope: crate::types::ability::SourceExclusion::Exclude,
             },
+            EffectScope::Single,
             None,
             PreventionAmount::All,
         );
@@ -3298,6 +4021,7 @@ mod tests {
             fog,
             PlayerId(0),
             TargetFilter::Typed(TypedFilter::creature()),
+            EffectScope::All,
             None,
             PreventionAmount::All,
         );
@@ -3352,6 +4076,7 @@ mod tests {
             spell,
             PlayerId(0),
             TargetFilter::Any,
+            EffectScope::Single,
             None,
             PreventionAmount::All,
         );
@@ -3381,6 +4106,7 @@ mod tests {
             permanent,
             PlayerId(0),
             TargetFilter::Any,
+            EffectScope::Single,
             None,
             PreventionAmount::All,
         );
@@ -3406,6 +4132,7 @@ mod tests {
             emblem,
             PlayerId(0),
             TargetFilter::Any,
+            EffectScope::Single,
             None,
             PreventionAmount::All,
         );
@@ -3432,6 +4159,7 @@ mod tests {
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Player,
+                recipient_scope: EffectScope::Single,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,
                 prevention_duration: None,
@@ -3487,6 +4215,7 @@ mod tests {
             cop,
             PlayerId(0),
             TargetFilter::Any,
+            EffectScope::Single,
             None,
             PreventionAmount::All,
         );
@@ -3574,6 +4303,7 @@ mod tests {
                 amount: PreventionAmount::Next(1),
                 amount_dynamic: None,
                 target: TargetFilter::Any,
+                recipient_scope: EffectScope::Single,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,
                 prevention_duration: None,
@@ -3589,6 +4319,7 @@ mod tests {
             source,
             PlayerId(0),
             TargetFilter::Any,
+            EffectScope::All,
             None,
             PreventionAmount::Next(1),
         );
@@ -3729,6 +4460,7 @@ mod tests {
                     amount: PreventionAmount::Next(1),
                     amount_dynamic: None,
                     target: TargetFilter::Any,
+                    recipient_scope: EffectScope::Single,
                     scope: PreventionScope::AllDamage,
                     damage_source_filter: None,
                     prevention_duration: None,
@@ -3744,6 +4476,7 @@ mod tests {
                 shield_source,
                 PlayerId(0),
                 TargetFilter::Any,
+                EffectScope::All,
                 None,
                 PreventionAmount::Next(1),
             );
@@ -3878,6 +4611,7 @@ mod tests {
                 permanent_type: None,
                 source_scope: crate::types::ability::SourceExclusion::Include,
             },
+            EffectScope::Single,
             None,
             PreventionAmount::All,
         );
@@ -3907,5 +4641,107 @@ mod tests {
             3,
             "the source's NEW controller does not inherit the shield"
         );
+    }
+
+    /// A declared ("target creature") recipient lowers to a typed filter, but the
+    /// chosen object is the only recipient: the shield is hosted on it with
+    /// `valid_card: SelfRef`, never carrying the recipient's type filter.
+    ///
+    /// CR 115.1 + CR 601.2c: a declared recipient is exactly the chosen object.
+    #[test]
+    fn declared_object_recipient_hosts_self_ref() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Shielded Passage".into(),
+            Zone::Stack,
+        );
+        let chosen = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Chosen".into(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                recipient_scope: EffectScope::Single,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![TargetRef::Object(chosen)],
+            source,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut Vec::new()).expect("prevention resolves");
+
+        assert_eq!(
+            state.objects[&chosen].replacement_definitions.len(),
+            1,
+            "the shield is hosted on the chosen object"
+        );
+        assert_eq!(
+            state.objects[&chosen].replacement_definitions[0].valid_card,
+            Some(TargetFilter::SelfRef),
+            "the host-bound shield matches only damage to its host"
+        );
+        assert!(state.pending_damage_replacements.is_empty());
+    }
+
+    /// CR 115.6: a declared "up to" recipient with no target chosen leaves
+    /// nothing to affect, so no shield is installed anywhere, and the effect
+    /// still reports as resolved.
+    #[test]
+    fn declared_recipient_without_targets_installs_nothing() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Redeem".into(),
+            Zone::Stack,
+        );
+        let bystander = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Bystander".into(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                recipient_scope: EffectScope::Single,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("prevention resolves");
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::PreventDamage,
+                    ..
+                }
+            )),
+            "reach guard: the effect resolved"
+        );
+        assert!(state.pending_damage_replacements.is_empty());
+        assert!(state.objects[&bystander].replacement_definitions.is_empty());
     }
 }

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Carry the parsed instruction actor on ChangeZone and ChangeZoneAll and the resolved performer on the EffectZoneChoice prompt; separate the paused ChangeZone instruction performer from controller-relative family and exile-duration authority, migrating deployed v11 saves with their recorded controller as the historical actor; carry a separate entry-ownership actor on zone-change events and parked batch moves, and the found-card move's actor on the bound SearchFound disposition"
+}

@@ -518,7 +518,7 @@ describe("VisualPackManager initialization", () => {
     });
   });
 
-  it.each(["en", "de", "es", "fr", "it", "pt"])("installs %s through the combined set-printings selector", async (language) => {
+  it.each(["en", "de", "es", "fr", "it", "ja", "pt"])("installs %s through the combined set-printings selector", async (language) => {
     const fixture = backend();
     vi.mocked(fixture.value.estimateInstall).mockImplementation(async (selector) => {
       const id = selector.kind === "printing" ? `printing:${selector.set}`

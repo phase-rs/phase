@@ -5,14 +5,13 @@ import type { DeckCatalogCandidate } from "../deckCatalog.ts";
 import { VisualPackBackendError } from "../visualPacks/backend.ts";
 
 const dependencies = vi.hoisted(() => ({
-  ensureCardDatabase: vi.fn(),
+  warmCardDatabase: vi.fn(),
   loadScryfallData: vi.fn(),
   loadPreconDeckMap: vi.fn(),
   buildDeckCatalog: vi.fn(),
   prepareDeckLibraryForOffline: vi.fn(),
   useRealLoaders: false,
   actual: {
-    engineRuntime: null as typeof import("../engineRuntime.ts") | null,
     scryfall: null as typeof import("../scryfall.ts") | null,
     decks: null as typeof import("../../hooks/useDecks.ts") | null,
     catalog: null as typeof import("../deckCatalog.ts") | null,
@@ -31,14 +30,15 @@ vi.mock("@wasm/engine", () => ({
   load_card_database: wasm.loadCardDatabase,
   search_cards_js: wasm.searchCards,
 }));
-vi.mock("../engineRuntime.ts", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../engineRuntime.ts")>();
-  dependencies.actual.engineRuntime = actual;
+// The real adapter has no Worker under jsdom, so it falls back to the
+// main-thread engine — the `@wasm/engine` mock above.
+vi.mock("../../adapter/wasm-adapter.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../adapter/wasm-adapter.ts")>();
   return {
     ...actual,
-    ensureCardDatabase: () => dependencies.useRealLoaders
-      ? actual.ensureCardDatabase()
-      : dependencies.ensureCardDatabase(),
+    getSharedAdapter: () => dependencies.useRealLoaders
+      ? actual.getSharedAdapter()
+      : { warmCardDatabase: dependencies.warmCardDatabase },
   };
 });
 vi.mock("../scryfall.ts", async (importOriginal) => {
@@ -101,7 +101,7 @@ function readyReadiness(deckLibrary: "ready" | "not-installed" = "ready") {
   return {
     status: "ready" as const,
     capabilities: {
-      engine: { status: "ready" as const, cardCount: 3 },
+      engine: { status: "ready" as const },
       scryfallSearch: { status: "ready" as const },
       preconCatalog: { status: "ready" as const },
       bundledAiCatalog: { status: "ready" as const },
@@ -148,7 +148,7 @@ function deferred<T>() {
 
 function configureReadyDependencies(): void {
   dependencies.useRealLoaders = false;
-  dependencies.ensureCardDatabase.mockResolvedValue(3);
+  dependencies.warmCardDatabase.mockResolvedValue(undefined);
   dependencies.loadScryfallData.mockResolvedValue({ lightning_bolt: {} });
   dependencies.loadPreconDeckMap.mockResolvedValue({ [GENERATED_PRECON_ID]: {} });
   dependencies.buildDeckCatalog.mockResolvedValue(readyCatalog());
@@ -186,11 +186,11 @@ describe("prepareOfflineAssets", () => {
   });
 
   it("inspects the Deck Catalog only after every independent warmer settles", async () => {
-    const engine = deferred<number>();
+    const engine = deferred<void>();
     const scryfall = deferred<Record<string, unknown> | null>();
     const precons = deferred<Record<string, unknown> | null>();
     const deckLibrary = deferred<"ready" | "not-installed">();
-    dependencies.ensureCardDatabase.mockReturnValue(engine.promise);
+    dependencies.warmCardDatabase.mockReturnValue(engine.promise);
     dependencies.loadScryfallData.mockReturnValue(scryfall.promise);
     dependencies.loadPreconDeckMap.mockReturnValue(precons.promise);
     dependencies.prepareDeckLibraryForOffline.mockReturnValue(deckLibrary.promise);
@@ -200,7 +200,7 @@ describe("prepareOfflineAssets", () => {
     await Promise.resolve();
     expect(dependencies.buildDeckCatalog).not.toHaveBeenCalled();
 
-    engine.resolve(3);
+    engine.resolve();
     scryfall.resolve({ lightning_bolt: {} });
     precons.resolve({ [GENERATED_PRECON_ID]: {} });
     await Promise.resolve();
@@ -212,7 +212,7 @@ describe("prepareOfflineAssets", () => {
   });
 
   it("reports every settled failure without hiding the typed Deck Catalog error", async () => {
-    dependencies.ensureCardDatabase.mockRejectedValue(new Error("engine unavailable"));
+    dependencies.warmCardDatabase.mockRejectedValue(new Error("engine unavailable"));
     dependencies.loadScryfallData.mockResolvedValue(null);
     dependencies.loadPreconDeckMap.mockResolvedValue(null);
     dependencies.prepareDeckLibraryForOffline.mockRejectedValue(new VisualPackBackendError("network"));
@@ -229,7 +229,7 @@ describe("prepareOfflineAssets", () => {
         deckLibrary: { status: "not-ready", error: "network" },
       },
     });
-    expect(dependencies.ensureCardDatabase).toHaveBeenCalledOnce();
+    expect(dependencies.warmCardDatabase).toHaveBeenCalledOnce();
     expect(dependencies.loadScryfallData).toHaveBeenCalledOnce();
     expect(dependencies.loadPreconDeckMap).toHaveBeenCalledOnce();
     expect(dependencies.prepareDeckLibraryForOffline).toHaveBeenCalledOnce();
@@ -237,15 +237,15 @@ describe("prepareOfflineAssets", () => {
   });
 
   it("reports an ordinary engine rejection independently", async () => {
-    dependencies.ensureCardDatabase.mockRejectedValue(new Error("engine unavailable"));
+    dependencies.warmCardDatabase.mockRejectedValue(new Error("engine unavailable"));
     const { prepareOfflineAssets } = await loadOfflineAssets();
 
     await expect(prepareOfflineAssets()).resolves.toEqual(readinessWithNotReady("engine"));
   });
 
   it("reports reload-required alongside independent failures", async () => {
-    const { EngineModuleReloadRequiredError } = await import("../engineRuntime.ts");
-    dependencies.ensureCardDatabase.mockRejectedValue(new EngineModuleReloadRequiredError(new Error("import failed")));
+    const { EngineModuleReloadRequiredError } = await import("../../adapter/types.ts");
+    dependencies.warmCardDatabase.mockRejectedValue(new EngineModuleReloadRequiredError(new Error("import failed")));
     dependencies.loadScryfallData.mockResolvedValue(null);
     const { prepareOfflineAssets } = await loadOfflineAssets();
 
@@ -263,13 +263,6 @@ describe("prepareOfflineAssets", () => {
     expect(dependencies.loadPreconDeckMap).toHaveBeenCalledOnce();
     expect(dependencies.prepareDeckLibraryForOffline).toHaveBeenCalledOnce();
     expect(dependencies.buildDeckCatalog).toHaveBeenCalledOnce();
-  });
-
-  it.each([0, -1])("treats a non-positive engine card count (%i) as not ready", async (cardCount) => {
-    dependencies.ensureCardDatabase.mockResolvedValue(cardCount);
-    const { prepareOfflineAssets } = await loadOfflineAssets();
-
-    await expect(prepareOfflineAssets()).resolves.toEqual(readinessWithNotReady("engine"));
   });
 
   it.each([
@@ -301,7 +294,7 @@ describe("prepareOfflineAssets", () => {
     await expect(prepareOfflineAssets()).resolves.toEqual({
       status: "not-ready",
       capabilities: {
-        engine: { status: "ready", cardCount: 3 },
+        engine: { status: "ready" },
         scryfallSearch: { status: "ready" },
         preconCatalog: { status: "not-ready" },
         bundledAiCatalog: { status: "not-ready" },
@@ -323,7 +316,7 @@ describe("prepareOfflineAssets", () => {
     await expect(prepareOfflineAssets()).resolves.toEqual({
       status: "not-ready",
       capabilities: {
-        engine: { status: "ready", cardCount: 3 },
+        engine: { status: "ready" },
         scryfallSearch: { status: "ready" },
         preconCatalog: { status: "not-ready" },
         bundledAiCatalog: { status: "ready" },
@@ -440,7 +433,7 @@ describe("prepareOfflineAssets", () => {
     await expect(prepareOfflineAssets()).resolves.toEqual({
       status: "ready",
       capabilities: {
-        engine: { status: "ready", cardCount: 1 },
+        engine: { status: "ready" },
         scryfallSearch: { status: "ready" },
         preconCatalog: { status: "ready" },
         bundledAiCatalog: { status: "ready" },
@@ -452,10 +445,10 @@ describe("prepareOfflineAssets", () => {
 
     fetchMock.mockClear();
     fetchMock.mockRejectedValue(new Error("offline"));
-    const engineRuntime = dependencies.actual.engineRuntime;
+    const engineRuntime = await import("../engineRuntime.ts");
     const decks = dependencies.actual.decks;
     const catalogService = dependencies.actual.catalog;
-    if (!engineRuntime || !decks || !catalogService) throw new Error("Expected real loader modules");
+    if (!decks || !catalogService) throw new Error("Expected real loader modules");
 
     await expect(engineRuntime.searchCards({ text: "Lightning Bolt" })).resolves.toMatchObject({
       cards: [{ name: "Lightning Bolt" }],

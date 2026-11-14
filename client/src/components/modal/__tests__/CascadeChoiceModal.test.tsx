@@ -1,13 +1,40 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameObject, WaitingFor } from "../../../adapter/types.ts";
+import type {
+  CastOfferKind,
+  GameObject,
+  ManaCost,
+  ResolutionCastCleanup,
+  WaitingFor,
+} from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
 import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
 import { CascadeChoiceModal } from "../CascadeChoiceModal.tsx";
 
 const dispatchMock = vi.fn();
+
+type GraveyardPaidCastOffer = Extract<CastOfferKind, { type: "GraveyardPaidCast" }>;
+
+const paidCastCleanup = {
+  source_id: 17,
+  face_policy: {
+    filter: { type: "Any" },
+    source_id: 17,
+    controller: 0,
+    constraint: null,
+  },
+  exiled_misses: [],
+  reject_action: { type: "RemainExiled" },
+  success_action: { type: "BottomMisses" },
+} satisfies ResolutionCastCleanup;
+
+function graveyardPaidCast(
+  fields: Omit<GraveyardPaidCastOffer, "type" | "hit_card" | "cleanup"> = {},
+): GraveyardPaidCastOffer {
+  return { type: "GraveyardPaidCast", hit_card: 52, cleanup: paidCastCleanup, ...fields };
+}
 
 function makeObject(id: number, name: string): GameObject {
   return buildGameObjectWithCoreTypes(["Instant"], {
@@ -122,11 +149,9 @@ describe("CascadeChoiceModal", () => {
       type: "CastOffer",
       data: {
         player: 0,
-        kind: {
-          type: "GraveyardPaidCast",
-          hit_card: 52,
+        kind: graveyardPaidCast({
           mana_spend_permission: "AnyTypeOrColor",
-        },
+        }),
       },
     });
 
@@ -152,5 +177,44 @@ describe("CascadeChoiceModal", () => {
       type: "GraveyardPaidCastChoice",
       data: { choice: { type: "Decline" } },
     });
+  });
+
+  // CR 608.2g + CR 601.2b + CR 609.4b (issue #8775): the paid offer names
+  // exactly what it carries — nothing for the plain offer (Helmut Zemo,
+  // Toshiro Umezawa), the additional cost for Ogre Battlecaster, the
+  // concession by its variant (`AnyColor` relaxes colors only), and both
+  // together when both are present.
+  it("names the plain paid cost, the additional cost, the concession variant, and both", () => {
+    const renderOffer = (kind: Omit<GraveyardPaidCastOffer, "type" | "hit_card" | "cleanup">) => {
+      setWaitingFor({
+        type: "CastOffer",
+        data: { player: 0, kind: graveyardPaidCast(kind) },
+      });
+      return render(<CascadeChoiceModal />);
+    };
+    const redRed = { type: "Cost", shards: ["Red", "Red"], generic: 0 } satisfies ManaCost;
+
+    let view = renderOffer({});
+    expect(screen.getByText("(pay its mana cost)")).toBeInTheDocument();
+    expect(screen.queryByText(/any type of mana|any color of mana/)).not.toBeInTheDocument();
+    view.unmount();
+
+    view = renderOffer({ additional_cost: redRed });
+    expect(screen.getByText("(pay its mana cost plus {R}{R})")).toBeInTheDocument();
+    expect(screen.getByText(/by paying its mana cost plus \{R\}\{R\}\. Or decline/)).toBeInTheDocument();
+    view.unmount();
+
+    view = renderOffer({ mana_spend_permission: "AnyColor" });
+    expect(screen.getByText("(pay its mana cost — any color of mana may be spent)")).toBeInTheDocument();
+    expect(screen.queryByText(/any type of mana/)).not.toBeInTheDocument();
+    view.unmount();
+
+    renderOffer({ mana_spend_permission: "AnyTypeOrColor", additional_cost: redRed });
+    expect(
+      screen.getByText("(pay its mana cost plus {R}{R} — any type of mana may be spent)"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/by paying its mana cost plus \{R\}\{R\} — mana of any type may be spent\./),
+    ).toBeInTheDocument();
   });
 });

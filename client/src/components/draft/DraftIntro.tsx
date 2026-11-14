@@ -4,7 +4,7 @@ import { menuButtonClass } from "../menu/buttonStyles";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
-type DraftMode = "quick" | "pod" | "commander";
+type DraftMode = "quick" | "pod" | "commander" | "winston";
 
 interface DraftIntroProps {
   mode: DraftMode;
@@ -17,6 +17,14 @@ interface DraftIntroProps {
    * mixes sizes, so the "packs of N cards" line only holds when they agree.
    */
   packSizes?: number[];
+  /**
+   * Piles dealt off the shared stack, from the engine's own
+   * `PackDistribution::SharedStackPiles { pile_count }`. Read only by the
+   * `winston` mode, and never defaulted to a literal 3: the pile count is a
+   * procedure axis, so a future shared-stack row with a different one gets
+   * correct copy without touching this file.
+   */
+  pileCount?: number;
   onContinue: () => void;
 }
 
@@ -36,6 +44,7 @@ export function DraftIntro({
   cardsPerPack,
   minDeckSize,
   packSizes,
+  pileCount,
   onContinue,
 }: DraftIntroProps) {
   const { t } = useTranslation("draft");
@@ -48,6 +57,7 @@ export function DraftIntro({
   const packSizeLabels = (packSizes ?? [])
     .map((size) => t("intro.quantity.packSizeEntry", { count: size }));
   const packPassing = t("intro.packPassing", { count: packCount });
+  const pilesDealt = t("intro.quantity.pilesDealt", { count: pileCount ?? 0 });
 
   const quickSteps: Step[] = [
     {
@@ -96,17 +106,41 @@ export function DraftIntro({
     { icon: "4", text: t("intro.commander.step4", { minimumDeckCards }) },
   ];
 
+  // A SHARED STACK PASSES NOTHING, so this mode shares only the player-count
+  // line with the pod copy. Every other pod sentence — open a pack, pick one,
+  // pass the rest, alternate direction each round — describes a procedure this
+  // format does not have: the boosters are opened unseen and shuffled together
+  // before the first decision, and a turn is a whole-pile take-or-decline.
+  //
+  // Five steps rather than four because the turn genuinely needs three of them
+  // (the piles, the decision, and what declining the last one does), and this
+  // screen exists to explain exactly that.
+  const winstonSteps: Step[] = [
+    { icon: "1", text: t("intro.pod.step1", { count: podSize }) },
+    {
+      icon: "2",
+      text: mixedPackSizes
+        ? t("intro.winston.step2Mixed", { packs, packSizes: packSizeLabels })
+        : t("intro.winston.step2", { packs }),
+    },
+    { icon: "3", text: t("intro.winston.step3", { piles: pilesDealt }) },
+    { icon: "4", text: t("intro.winston.step4") },
+    { icon: "5", text: t("intro.winston.step5", { minimumDeckCards }) },
+  ];
+
   // Total over `DraftMode`: a future mode is a compile error here rather than a
   // silent fall-through to the pod copy.
   const stepsByMode: Record<DraftMode, Step[]> = {
     quick: quickSteps,
     pod: podStepList,
     commander: commanderSteps,
+    winston: winstonSteps,
   };
   const titleByMode: Record<DraftMode, string> = {
     quick: t("intro.quickTitle"),
     pod: t("intro.podTitle"),
     commander: t("intro.commanderTitle"),
+    winston: t("intro.winstonTitle"),
   };
   const steps = stepsByMode[mode];
   const title = titleByMode[mode];

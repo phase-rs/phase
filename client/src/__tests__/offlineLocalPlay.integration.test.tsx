@@ -10,6 +10,9 @@ import { useCardImage } from "../hooks/useCardImage";
 import { useCloudSyncStore } from "../stores/cloudSyncStore";
 import { clearActiveGame, loadActiveGame, useGameStore } from "../stores/gameStore";
 import { buildGameState } from "../test/factories/gameStateFactory";
+import type * as Scryfall from "../services/scryfall";
+import { audioManager } from "../audio/AudioManager";
+import type * as AudioManagerModule from "../audio/AudioManager";
 
 /*
  * This is intentionally one integration fixture rather than a fourth copy of
@@ -256,22 +259,37 @@ vi.mock("../services/engineRuntime", () => ({
   sideboardPolicyForFormat: vi.fn(async () => ({ type: "Limited", data: 15 })),
   signatureSpellSelectionPolicy: vi.fn(async () => ({ type: "NotApplicable" })),
 }));
-vi.mock("../services/aiDeckCatalog", () => ({
-  buildLegalAiDeckCatalog: vi.fn(async () => ({
-    candidates: test.aiCandidates,
-  })),
-  useAiDeckCatalog: () => ({
-    candidates: test.aiCandidates,
-    loading: false,
-    error: null,
-  }),
-}));
-vi.mock("../services/scryfall", () => {
+vi.mock("../services/aiDeckCatalog", async () => {
+  const actual = await vi.importActual<typeof import("../services/aiDeckCatalog")>(
+    "../services/aiDeckCatalog",
+  );
+  return {
+    ...actual,
+    buildLegalAiDeckCatalog: vi.fn(async () => ({
+      candidates: test.aiCandidates,
+      allCandidates: test.aiCandidates,
+    })),
+    // The stub answers whatever request the caller makes, so its key is
+    // derived from the caller's own inputs with the real key function —
+    // correctly keyed by construction for the settled snapshot.
+    useAiDeckCatalog: (options: Parameters<typeof actual.useAiDeckCatalog>[0]) => ({
+      candidates: test.aiCandidates,
+      allCandidates: test.aiCandidates,
+      loading: false,
+      error: null,
+      requestKey: actual.catalogRequestKey(options.selectedFormat, options.selectedMatchType),
+    }),
+  };
+});
+vi.mock("../services/scryfall", async (importOriginal) => {
+  const actual = await importOriginal<typeof Scryfall>();
   const remote = () => {
     test.ledger.remoteImageContinuation += 1;
     return Promise.reject(new Error("remote image continuation is forbidden"));
   };
   return {
+    MANA_SYMBOL_SHARDS: actual.MANA_SYMBOL_SHARDS,
+    isManaSymbolShard: actual.isManaSymbolShard,
     CARD_BACK_URL: "data:,card-back",
     IMAGE_SIZE_WIDTHS: { small: 146, normal: 488 },
     deriveImageUrl: (src: string) => src,
@@ -310,7 +328,10 @@ vi.mock("../services/scryfall", () => {
     scryfallLegalityKey: vi.fn(() => undefined),
   };
 });
-vi.mock("../services/deckMigrations", () => ({ migrateSavedDecks: vi.fn() }));
+vi.mock("../services/deckMigrations", () => ({
+  migrateSavedDecks: vi.fn(),
+  canonicalizeSavedDeckNames: vi.fn(async () => undefined),
+}));
 vi.mock("../hooks/useHostingSession", () => ({ useHostingSession: vi.fn() }));
 vi.mock("../hooks/useDeckCardData", () => ({
   useDeckCardData: () => ({ cardDataCache: new Map(), cacheCards: vi.fn() }),
@@ -346,7 +367,16 @@ vi.mock("../adapter/ws-adapter", () => ({
   bootstrapFullTerminalDelivery: vi.fn(),
   readFullTerminalResult: vi.fn(),
 }));
-vi.mock("../audio/AudioManager", () => ({ audioManager: { setContext: vi.fn() } }));
+vi.mock("../audio/AudioManager", async (importOriginal) => {
+  const actual = await importOriginal<typeof AudioManagerModule>();
+  return {
+    audioManager: {
+      setContext: vi.fn<typeof actual.audioManager.setContext>(),
+      getPhaseBreakpoints: vi.fn(actual.audioManager.getPhaseBreakpoints.bind(actual.audioManager)),
+      setBattlefieldPhase: vi.fn<typeof actual.audioManager.setBattlefieldPhase>(),
+    },
+  };
+});
 vi.mock("../game/dispatch", () => ({ dispatchAction: vi.fn(), processRemoteUpdate: vi.fn() }));
 vi.mock("../game/staleStateWatchdog", () => ({ resyncFromAdapterSafely: vi.fn() }));
 vi.mock("../game/sessionCleanup", () => ({ clearPromptOverlayState: vi.fn() }));
@@ -436,6 +466,8 @@ beforeEach(async () => {
   vi.useFakeTimers();
   vi.stubEnv("DEV", false);
   test.reset();
+  vi.mocked(audioManager.getPhaseBreakpoints).mockClear();
+  vi.mocked(audioManager.setBattlefieldPhase).mockClear();
   localStorage.clear();
   sessionStorage.clear();
   window.history.replaceState({}, "", "/");
@@ -600,6 +632,12 @@ describe("offline local play integration", () => {
       id: window.location.pathname.slice("/game/".length),
       mode: "ai",
     }));
+
+    await waitFor(() => {
+      expect(audioManager.getPhaseBreakpoints).toHaveBeenCalled();
+      expect(audioManager.setBattlefieldPhase).toHaveBeenCalledWith("early");
+    });
+    expect(await screen.findByRole("button", { name: /^manual$/i })).toBeInTheDocument();
 
     render(<InstalledImageProbe />);
     expect(await screen.findByTestId("installed-image")).toHaveTextContent("blob:installed-lightning-bolt");

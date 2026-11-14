@@ -255,14 +255,20 @@ fn heist_production_path_exiles_chosen_face_down_and_grants_cast_permission() {
         chosen_obj.face_down,
         "chosen card must be face-down in exile (CR 406.3)",
     );
-    // CR 406.3 + HideawayLookable: the controller may look at the exiled card.
+    // CR 406.3: the heister's look is bound to the heister, not the source.
     assert!(
         state.exile_links.iter().any(|link| {
             link.exiled_id == chosen
                 && link.source_id == source
-                && link.kind == ExileLinkKind::HideawayLookable
+                && matches!(
+                    link.kind,
+                    ExileLinkKind::HideawayLookable {
+                        grant: engine::types::game_state::LookGrant::Player { player },
+                        ..
+                    } if player == controller
+                )
         }),
-        "chosen card must be linked to the source with HideawayLookable",
+        "chosen card must be linked to the source with the heister's look",
     );
     // Permanent any-color cast-from-exile permission (reminder: "for as long
     // as it remains exiled, … spend mana as though it were mana of any type").
@@ -809,4 +815,137 @@ fn heist_full_production_path_grenzo_cast_etb_end_to_end() {
     // some build configurations (the `GameRunner` import is here for
     // future extension; the current driver uses `runner` directly).
     let _ = GameRunner::from_state;
+}
+
+/// CR 406.3: the heister keeps the look at the heisted card and may cast it after
+/// a third player takes the heist source; that player may not look.
+#[test]
+fn heister_keeps_the_look_after_losing_control_of_the_heist_source() {
+    use engine::game::casting::spell_objects_available_to_cast;
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::game::visibility::filter_state_for_viewer;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::LookGrant;
+    use engine::types::phase::Phase;
+
+    const P2: PlayerId = PlayerId(2);
+    const GRENZO_ORACLE: &str = "When Grenzo enters and at the beginning of your upkeep, heist target opponent's library.\nOnce each turn, you may pay {0} rather than pay the mana cost for a spell you cast that you don't own with mana value 3 or less.";
+
+    let mut scenario = GameScenario::new_n_player(3, 11);
+    scenario.at_phase(Phase::PreCombatMain);
+    let grenzo = scenario
+        .add_creature_to_hand_from_oracle(P0, "Grenzo, Crooked Jailer", 2, 2, GRENZO_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    for i in 0..4 {
+        scenario
+            .add_spell_to_library_top(P1, &format!("Loot {i}"), true)
+            .with_mana_cost(ManaCost::zero());
+    }
+    for player in [P0, P2] {
+        for i in 0..4 {
+            scenario.add_card_to_library_top(player, &format!("Filler {i}"));
+        }
+    }
+    let steal = scenario
+        .add_spell_to_hand_from_oracle(
+            P2,
+            "Borrow",
+            true,
+            "Gain control of target creature until end of turn.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    let cast_turn = runner.state().turn_number;
+    runner.cast(grenzo).commit();
+    let mut heisted = None;
+    for _ in 0..64 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ChooseFromZoneChoice { player, cards, .. } => {
+                assert_eq!(player, P0);
+                assert_eq!(runner.state().phase, Phase::PreCombatMain);
+                assert_eq!(runner.state().turn_number, cast_turn);
+                heisted = Some(cards[0]);
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![cards[0]],
+                    })
+                    .expect("picking the heisted card");
+            }
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(P1)),
+                    })
+                    .expect("targeting P1");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() && heisted.is_some() => {
+                break
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority");
+            }
+            other => panic!("unexpected prompt while heisting: {other:?}"),
+        }
+    }
+    let card = heisted.expect("the ETB heist offered a pick");
+    let seen_as = |state: &GameState, viewer: PlayerId| {
+        filter_state_for_viewer(state, viewer).objects[&card]
+            .name
+            .clone()
+    };
+    let state = runner.state();
+    assert_eq!(state.objects[&card].owner, P1);
+    assert!(state.objects[&card].face_down);
+    assert!(state.exile_links.iter().any(|link| link.exiled_id == card
+        && link.source_id == grenzo
+        && matches!(
+            link.kind,
+            ExileLinkKind::HideawayLookable {
+                grant: LookGrant::Player { player: P0 },
+                ..
+            }
+        )));
+    assert!(state.objects[&card]
+        .casting_permissions
+        .iter()
+        .any(|p| matches!(
+            p,
+            CastingPermission::PlayFromExile { granted_to, .. } if *granted_to == P0
+        )));
+
+    for _ in 0..8 {
+        if runner.state().priority_player == P2 {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("passing priority");
+    }
+    runner.cast(steal).target_objects(&[grenzo]).resolve();
+    let state = runner.state();
+    assert_eq!(state.objects[&grenzo].controller, P2);
+    assert_eq!(state.objects[&card].zone, Zone::Exile);
+    assert_eq!(seen_as(state, P2), "Hidden Card");
+    assert_ne!(seen_as(state, P0), "Hidden Card");
+    assert!(spell_objects_available_to_cast(state, P0).contains(&card));
+
+    for _ in 0..8 {
+        if runner.state().priority_player == P0 {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("passing priority");
+    }
+    runner.cast(card).resolve();
+    assert_ne!(runner.state().objects[&card].zone, Zone::Exile);
+    assert!(!runner
+        .state()
+        .exile_links
+        .iter()
+        .any(|link| link.exiled_id == card));
 }

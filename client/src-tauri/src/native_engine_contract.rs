@@ -27,6 +27,33 @@ pub struct NativeEngineReady {
     pub port: u16,
 }
 
+/// What became of a finished download. `Unknown` is an answer, not a hedge: a
+/// file sitting at the destination after wry reported failure is equally a
+/// stale failure flag and a write that died mid-file, and reporting either as
+/// saved would hand the user a corrupt snapshot.
+#[cfg(desktop)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellDownloadOutcome {
+    Saved,
+    Unknown,
+    Failed,
+}
+
+/// Where a browser-style download from the shell landed, and whether it did.
+/// The page only ever knows the file name it asked for, so the destination has
+/// to come from the shell side; it arrives home-relative because the page is
+/// remotely served content.
+// Unlike the wire-contract types below, mobile has no consumer for this at
+// all, so it is compiled out there rather than allow(dead_code)'d.
+#[cfg(desktop)]
+#[derive(Clone, Debug, Serialize)]
+pub struct ShellDownload {
+    pub url: String,
+    pub path: Option<String>,
+    pub outcome: ShellDownloadOutcome,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct NativeEngineProgress {
     pub phase: NativeEngineProgressPhase,
@@ -93,8 +120,19 @@ pub enum NativeEngineError {
 #[cfg_attr(mobile, allow(dead_code))]
 pub enum BridgeEvent {
     Message { text: String },
+    Fragment { text: String },
     Closed { code: u16, reason: String },
     Error { detail: String },
+}
+
+/// A text-delivery mode the connecting client declares it can reassemble; a
+/// client that declares none receives every text as one `Message`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+// See `NativeEngineProgressPhase`: these variants are a shared wire contract.
+#[cfg_attr(mobile, allow(dead_code))]
+pub enum BridgeTextDelivery {
+    Fragments,
 }
 
 #[derive(Debug, Serialize)]
@@ -206,6 +244,38 @@ mod tests {
         }
     }
 
+    #[cfg(desktop)]
+    #[test]
+    fn shell_download_preserves_every_exact_json_shape() {
+        assert_eq!(
+            serde_json::to_string(&ShellDownload {
+                url: "blob:http://127.0.0.1:8731/27fbd3e5".to_owned(),
+                path: Some("~/Downloads/replay.json".to_owned()),
+                outcome: ShellDownloadOutcome::Saved,
+            })
+            .unwrap(),
+            r#"{"url":"blob:http://127.0.0.1:8731/27fbd3e5","path":"~/Downloads/replay.json","outcome":"saved"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ShellDownload {
+                url: "blob:http://127.0.0.1:8731/27fbd3e5".to_owned(),
+                path: Some("~/Downloads/replay.json".to_owned()),
+                outcome: ShellDownloadOutcome::Unknown,
+            })
+            .unwrap(),
+            r#"{"url":"blob:http://127.0.0.1:8731/27fbd3e5","path":"~/Downloads/replay.json","outcome":"unknown"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ShellDownload {
+                url: "blob:http://127.0.0.1:8731/27fbd3e5".to_owned(),
+                path: None,
+                outcome: ShellDownloadOutcome::Failed,
+            })
+            .unwrap(),
+            r#"{"url":"blob:http://127.0.0.1:8731/27fbd3e5","path":null,"outcome":"failed"}"#
+        );
+    }
+
     #[test]
     fn native_engine_error_preserves_every_exact_json_shape() {
         let errors = [
@@ -250,6 +320,10 @@ mod tests {
             r#"{"type":"message","text":"hello"}"#
         );
         assert_eq!(
+            serde_json::to_string(&BridgeEvent::Fragment { text: "hel".into() }).unwrap(),
+            r#"{"type":"fragment","text":"hel"}"#
+        );
+        assert_eq!(
             serde_json::to_string(&BridgeEvent::Closed {
                 code: 1000,
                 reason: "normal".into(),
@@ -290,6 +364,14 @@ mod tests {
                 format!(r#"{{"kind":"{kind}","detail":"d"}}"#)
             );
         }
+    }
+
+    #[test]
+    fn bridge_text_delivery_reads_the_client_wire_value() {
+        assert_eq!(
+            serde_json::from_str::<BridgeTextDelivery>(r#""fragments""#).unwrap(),
+            BridgeTextDelivery::Fragments
+        );
     }
 
     #[test]

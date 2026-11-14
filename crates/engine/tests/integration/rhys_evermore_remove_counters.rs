@@ -201,6 +201,7 @@ fn rhys_activated_ability_removes_chosen_counter_subset() {
         .act(GameAction::ActivateAbility {
             source_id: rhys,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Rhys's remove-counter ability");
 
@@ -286,6 +287,7 @@ fn rhys_empty_selection_removes_nothing_and_finishes() {
         .act(GameAction::ActivateAbility {
             source_id: rhys,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate");
 
@@ -359,6 +361,7 @@ fn rhys_ability_rejected_at_instant_speed() {
     let result = runner.act(GameAction::ActivateAbility {
         source_id: rhys,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         result.is_err(),
@@ -473,6 +476,7 @@ fn ai_enumerates_counter_removal_candidates_including_decline() {
         source_id: bearer,
         counter_type: None,
         available: vec![(CounterType::Plus1Plus1, 2)],
+        max_total: None,
         pending_effect: Box::new(pending),
     };
 
@@ -493,4 +497,299 @@ fn ai_enumerates_counter_removal_candidates_including_decline() {
         "the decline (empty) selection must be offered (CR 107.1c)"
     );
     let _ = P1; // keep the import used across the suite
+}
+
+// ── "Remove up to N counters": the capped form of the same choice ───────────
+//
+// CR 608.2d: "remove up to N counters" is announced while the effect is applied:
+// the controller chooses which kinds and how many, zero through N in total.
+// CR 107.3a: Hex Parasite's N is the X announced for its activation cost.
+// CR 608.2c: its "for each counter removed this way" rider reads how many the
+// removal actually removed.
+
+// Verbatim Oracle text (MTGJSON AtomicCards, Hex Parasite).
+const HEX_PARASITE: &str = "{X}{B/P}: Remove up to X counters from target permanent. \
+For each counter removed this way, this creature gets +1/+0 until end of turn. \
+({B/P} can be paid with either {B} or 2 life.)";
+
+struct HexRun {
+    runner: engine::game::scenario::GameRunner,
+    hex: ObjectId,
+    bearer: ObjectId,
+}
+
+/// Real Hex Parasite (1/1) and an opposing permanent with two +1/+1 counters
+/// and one charge counter; the pool holds `x` colorless for the X and the
+/// {B/P} is paid with 2 life. Drives the activation to the stack and passes
+/// until it resolves or asks a resolution-time question.
+fn hex_run(x: u32) -> HexRun {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let hex = scenario
+        .add_creature_from_oracle(P0, "Hex Parasite", 1, 1, HEX_PARASITE)
+        .id();
+    let bearer = scenario.add_creature(P1, "Counter Bearer", 2, 2).id();
+    scenario.with_counter(bearer, CounterType::Plus1Plus1, 2);
+    scenario.with_counter(bearer, charge(), 1);
+    scenario.with_mana_pool(
+        P0,
+        (0..x)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    start_main_phase(&mut runner);
+    let index = remove_ability_index(runner.state(), hex);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: hex,
+            ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("activate Hex Parasite");
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        assert!(guard < 40, "stuck at {:?}", runner.state().waiting_for);
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ChooseXValue { .. } => {
+                runner
+                    .act(GameAction::ChooseX { value: x })
+                    .expect("announce X");
+            }
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(bearer)),
+                    })
+                    .expect("target the counter bearer");
+            }
+            WaitingFor::PhyrexianPayment { shards, .. } => {
+                runner
+                    .act(GameAction::SubmitPhyrexianChoices {
+                        choices: vec![
+                            engine::types::game_state::ShardChoice::PayLife;
+                            shards.len()
+                        ],
+                    })
+                    .expect("pay {B/P} with 2 life");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pay X from the pool");
+            }
+            // The activation is on the stack: pass until it resolves or asks.
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            _ => break,
+        }
+    }
+    HexRun {
+        runner,
+        hex,
+        bearer,
+    }
+}
+
+/// Pass priority until the stack is empty (the activation has resolved).
+fn settle(runner: &mut engine::game::scenario::GameRunner) {
+    let mut guard = 0;
+    while !runner.state().stack.is_empty() {
+        guard += 1;
+        assert!(guard < 20, "stuck at {:?}", runner.state().waiting_for);
+        runner.act(GameAction::PassPriority).expect("pass");
+    }
+}
+
+fn power(state: &GameState, id: ObjectId) -> Option<i32> {
+    state.objects.get(&id).and_then(|obj| obj.power)
+}
+
+/// CR 608.2d + CR 107.3a + CR 608.2c: X = 2 caps the removal at two counters in
+/// total; the controller removes fewer (one +1/+1 counter), the other counters
+/// stay, and the rider gives +1/+0 exactly once. A selection over the cap is
+/// refused and leaves the prompt and the counters as they were.
+#[test]
+fn hex_parasite_removes_up_to_x_counters_of_the_chosen_kinds() {
+    let HexRun {
+        mut runner,
+        hex,
+        bearer,
+    } = hex_run(2);
+    let WaitingFor::RemoveCountersChoice {
+        available,
+        max_total,
+        source_id,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the removal asks the controller: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(source_id, bearer, "the declared target");
+    assert_eq!(max_total, Some(2), "CR 107.3a: capped at the announced X");
+    assert!(
+        available.contains(&(CounterType::Plus1Plus1, 2)),
+        "{available:?}"
+    );
+    assert!(available.contains(&(charge(), 1)), "{available:?}");
+
+    let prompt = runner.state().waiting_for.clone();
+    let over_cap = runner.act(GameAction::ChooseCountersToRemove {
+        selections: vec![
+            CounterRemoveChoice {
+                counter_type: CounterType::Plus1Plus1,
+                count: 2,
+            },
+            CounterRemoveChoice {
+                counter_type: charge(),
+                count: 1,
+            },
+        ],
+    });
+    assert!(over_cap.is_err(), "three counters exceed up to X = 2");
+    assert_eq!(runner.state().waiting_for, prompt, "the prompt stays");
+    assert_eq!(
+        counters(runner.state(), bearer, &CounterType::Plus1Plus1),
+        2
+    );
+
+    runner
+        .act(GameAction::ChooseCountersToRemove {
+            selections: vec![CounterRemoveChoice {
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+            }],
+        })
+        .expect("CR 608.2d: one counter is fewer than X");
+    settle(&mut runner);
+
+    assert_eq!(
+        counters(runner.state(), bearer, &CounterType::Plus1Plus1),
+        1,
+        "exactly the chosen +1/+1 counter was removed"
+    );
+    assert_eq!(
+        counters(runner.state(), bearer, &charge()),
+        1,
+        "the unchosen kind stays"
+    );
+    assert_eq!(
+        power(runner.state(), hex),
+        Some(2),
+        "CR 608.2c: +1/+0 for the one counter removed this way"
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        18,
+        "the {{B/P}} cost 2 life"
+    );
+}
+
+/// The two-kinds sibling: one counter of EACH kind is within X = 2 and gives
+/// +1/+0 twice.
+#[test]
+fn hex_parasite_removes_one_counter_of_each_kind_within_x() {
+    let HexRun {
+        mut runner,
+        hex,
+        bearer,
+    } = hex_run(2);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::RemoveCountersChoice { .. }
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseCountersToRemove {
+            selections: vec![
+                CounterRemoveChoice {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: 1,
+                },
+                CounterRemoveChoice {
+                    counter_type: charge(),
+                    count: 1,
+                },
+            ],
+        })
+        .expect("two counters of two kinds");
+    settle(&mut runner);
+    assert_eq!(
+        counters(runner.state(), bearer, &CounterType::Plus1Plus1),
+        1
+    );
+    assert_eq!(counters(runner.state(), bearer, &charge()), 0);
+    assert_eq!(power(runner.state(), hex), Some(3), "+1/+0 twice");
+}
+
+/// CR 608.2d + CR 107.1c: X = 0 allows only the empty selection, so there is no
+/// prompt; the activation still resolves (the life was paid), nothing is
+/// removed and the rider repeats zero times.
+#[test]
+fn hex_parasite_with_x_zero_removes_nothing_without_a_prompt() {
+    let HexRun {
+        mut runner,
+        hex,
+        bearer,
+    } = hex_run(0);
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::RemoveCountersChoice { .. }
+        ),
+        "no choice is left to make: {:?}",
+        runner.state().waiting_for
+    );
+    settle(&mut runner);
+    assert!(runner.state().stack.is_empty(), "reach guard: it resolved");
+    assert_eq!(
+        runner.state().players[0].life,
+        18,
+        "reach guard: it was paid"
+    );
+    assert_eq!(
+        counters(runner.state(), bearer, &CounterType::Plus1Plus1),
+        2
+    );
+    assert_eq!(counters(runner.state(), bearer, &charge()), 1);
+    assert_eq!(power(runner.state(), hex), Some(1), "no counter, no boost");
+}
+
+/// The AI's "remove the most" candidate respects the cap, so it never wedges on
+/// a capped prompt; the decline is still offered.
+#[test]
+fn ai_counter_removal_candidates_respect_the_up_to_cap() {
+    let HexRun { runner, .. } = hex_run(2);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::RemoveCountersChoice { .. }
+        ),
+        "reach guard: {:?}",
+        runner.state().waiting_for
+    );
+    let actions = engine::ai_support::legal_actions(runner.state());
+    let totals: Vec<u32> = actions
+        .iter()
+        .filter_map(|action| match action {
+            GameAction::ChooseCountersToRemove { selections } => {
+                Some(selections.iter().map(|s| s.count).sum())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(totals.contains(&0), "the decline is offered: {totals:?}");
+    assert!(
+        totals.contains(&2),
+        "the capped maximum is offered: {totals:?}"
+    );
+    assert!(totals.iter().all(|total| *total <= 2), "{totals:?}");
 }

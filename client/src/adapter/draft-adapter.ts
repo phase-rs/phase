@@ -1,5 +1,20 @@
 import type * as DraftWasm from "@wasm/draft";
 import type { MatchConfig } from "./types";
+import type {
+  LlmDraftOutcome,
+  LlmDraftPickRequest,
+} from "../services/llm/types";
+
+/** One seat's LLM reply, handed back to the engine to resolve into a pick. */
+export interface LlmDraftResponsePayload {
+  seat: number;
+  fingerprint: string;
+  provider: string;
+  /** HTTP status, so the engine can refuse a non-2xx reply whatever its body
+   *  looks like. */
+  status: number;
+  body: string;
+}
 
 // ── Types (mirror Rust serde output from draft-core) ────────────────────
 
@@ -137,23 +152,42 @@ export const EMPTY_DRAFT_POOL_GROUPS: DraftPoolGroups = {
 
 // @sync-with: crates/draft-core/src/view.rs
 export interface SeatPublicView {
+  /** FIFO-only progress metadata. Legacy views omit it entirely. */
+  fifo_progress?: FifoProgressView;
   seat_index: number;
   display_name: string;
   is_bot: boolean;
   connected: boolean;
   has_submitted_deck: boolean;
-  pick_status: "Pending" | "Picked" | "TimedOut" | "NotDrafting";
+  /**
+   * `"Waiting"` is the shared-stack seat that is not the active seat: no seat
+   * ever holds a `current_pack` under `SharedStackPiles`, so the engine cannot
+   * describe that seat with the pick-and-pass pair. Engine-owned; never derive
+   * it from `active_pack_count`.
+   */
+  pick_status: "Pending" | "Picked" | "Waiting" | "TimedOut" | "NotDrafting";
   /**
    * Engine-owned active-pack presence: exactly 0 or 1, never a card count.
    * Required by P2P draft v24 and the full WebSocket protocol v49.
    */
   active_pack_count: number;
+  /**
+   * How many cards this seat has drafted so far — a count, never an identity.
+   * Public in every draft kind: a pick-and-pass seat's total is already implied
+   * by the pick number, and at a shared stack the players watch each other's
+   * drafted pile grow across the table.
+   *
+   * Distinct from `active_pack_count`, which answers "is this seat holding a
+   * pack right now" and is 0 under `SharedStackPiles` by construction.
+   */
+  drafted_card_count: number;
   face_up_draft_cards: DraftCardInstance[];
 }
 
 export type DraftStatus =
   | "Lobby"
   | "Drafting"
+  | "Review"
   | "Paused"
   | "Deckbuilding"
   | "Pairing"
@@ -162,7 +196,9 @@ export type DraftStatus =
   | "Complete"
   | "Abandoned";
 
-export type DraftKind = "Quick" | "Premier" | "Traditional" | "Sealed" | "CommanderDraft";
+export { DRAFT_KINDS } from "./draftKinds";
+export type { DraftKind } from "./draftKinds";
+import type { DraftKind } from "./draftKinds";
 
 /**
  * View-safe source metadata from `draft_core::view::DraftSourceView`.
@@ -196,7 +232,63 @@ export type DraftSetLayoutView =
 /** What the engine does after every seat has submitted a deck. */
 export type PostDraftPlay = "CompleteImmediately" | "TournamentPairings";
 /** How the engine procedure distributes packs to seats. */
-export type PackDistribution = "PickAndPass" | "AllAtOnce";
+/**
+ * How the engine procedure distributes packs to seats.
+ *
+ * `SharedStackPiles` is the externally-tagged member, mirroring the Rust
+ * `PackDistribution::SharedStackPiles { pile_count }` — the same spelling
+ * `DraftSetLayoutView` above uses for its data-carrying variants. The two
+ * string members stay bare because their Rust counterparts are unit variants.
+ *
+ * Every existing `distribution === "AllAtOnce"` comparison stays both
+ * type-valid and meaning-correct against this union: each asks "is this the
+ * one-shot sealed shape?", whose answer for a shared stack is `false`.
+ */
+export type PackDistribution =
+  | "PickAndPass"
+  | "AllAtOnce"
+  | { SharedStackPiles: { pile_count: number } };
+
+/**
+ * Is this the shared-stack distribution, and if so what is its pile count?
+ *
+ * THE single client-side spelling of that question. The engine no longer
+ * refuses a bot seat under `PackDistribution::SharedStackPiles` — it seats and
+ * drives one (`resolve_shared_stack_bot_turns`) — so this predicate is NOT a
+ * refusal proxy and must never be reintroduced as one. What it still answers is
+ * the only question a shared-stack pod's turn structure poses: is this the
+ * one-active-seat, take-or-decline procedure, whose seats have no
+ * `current_pack` at all? Both surviving consumers ask exactly that —
+ * `autoPickAllPending`'s timeout sweep and `resolveBotPicks`'s bot dispatch,
+ * each of which would otherwise fall through to a `current_pack` loop that is
+ * null for every seat here.
+ *
+ * Ask the DISTRIBUTION, never the `human_seats` scalar. That scalar is a
+ * per-kind constant that merely correlates, and it correlates WRONGLY: the
+ * procedure table seats humans in every seat for Premier, Traditional and
+ * Sealed too (`human_seats == pod_size == 8`), so a guard written on it
+ * silently caught three kinds it was never about. That lesson outlived the
+ * refusal it was learned on, and `p2pDraftHostBotFill.test.ts` is its
+ * revert-probe.
+ *
+ * A narrowing predicate rather than a `boolean`, so a caller that needs
+ * `pile_count` gets it from the same test instead of re-destructuring the
+ * union and re-deciding what counts as a shared stack.
+ *
+ * `null` — the setup surfaces' "the engine has not published a procedure yet"
+ * state — answers `false`, so a caller need not re-spell the question with its
+ * own null test. The explicit `!== null` is load-bearing rather than defensive:
+ * `typeof null === "object"` in JavaScript, so without it the `in` below throws
+ * on exactly that input.
+ */
+export function isSharedStackDistribution(
+  distribution: PackDistribution | null,
+): distribution is { SharedStackPiles: { pile_count: number } } {
+  return distribution !== null
+    && typeof distribution === "object"
+    && "SharedStackPiles" in distribution;
+}
+
 /** Engine-authorized game launch for a completed draft procedure. */
 export type DraftLaunchCapability = "None" | "CommanderMultiplayer";
 
@@ -217,6 +309,7 @@ const DRAFT_KIND_WIRE_NUMBER: Record<Exclude<DraftKind, "Quick">, number> = {
   Traditional: 2,
   Sealed: 3,
   CommanderDraft: 4,
+  Winston: 5,
 };
 
 /**
@@ -224,6 +317,10 @@ const DRAFT_KIND_WIRE_NUMBER: Record<Exclude<DraftKind, "Quick">, number> = {
  * `crates/draft-wasm/src/lib.rs`. Read these; never re-derive them.
  */
 // @sync-with: crates/draft-wasm/src/lib.rs
+/** The discriminant of a set layout, without its payload. Mirrors the Rust
+ *  `SetLayoutKind`. */
+export type SetLayoutKind = "UniformByRound" | "Chaos";
+
 export interface DraftProcedure {
   pod_size: number;
   human_seats: number;
@@ -236,6 +333,16 @@ export interface DraftProcedure {
   /** Engine-owned interaction policy for selecting cards in one pick step. */
   pick_selection_mode: "Direct" | "Ordered";
   distribution: PackDistribution;
+  /**
+   * Which set-layout shapes this kind admits, published by the engine.
+   *
+   * Render exactly this list. Do NOT re-derive layout legality from
+   * `distribution` -- that was a second authority over a rule the engine owns
+   * (`DraftProcedure::allowed_set_layouts`, which `validate_source` and the
+   * server's admission guard both read), correct only by coincidence and free
+   * to drift the moment a distribution is added.
+   */
+  allowed_set_layouts: SetLayoutKind[];
   min_deck_size: number;
   /** Engine-owned minimum accepted for cube settings under this procedure. */
   cube_min_deck_size: number;
@@ -321,8 +428,352 @@ export interface PairingView {
   score_b: number | null;
 }
 
+/**
+ * Take the pile, or put it back. Mirrors the Rust `SharedStackPileDecision`,
+ * which is deliberately a named axis rather than a boolean so a refusal, a
+ * delta and an i18n key can all key on it.
+ */
+// @sync-with: crates/draft-core/src/types.rs
+export type SharedStackPileDecision = "Take" | "Decline";
+
+/**
+ * Every reason the engine can refuse a shared-stack decision. ONE vocabulary
+ * for the reducer's refusal and the view's publication, so the display layer
+ * renders the engine's reason instead of reinventing it.
+ */
+// @sync-with: crates/draft-core/src/types.rs
+export type SharedStackRefusal = "PileNotActive" | "PileEmpty" | "NoGuaranteedCard";
+
+/**
+ * One decision and the engine's verdict on it. `refusal: null` means legal.
+ *
+ * The reducer converts this same value into `SharedStackDecisionRefused`, so
+ * the published verdict and the enforced one cannot disagree — which is why
+ * nothing in the client may compute legality from `total` or
+ * `main_stack_remaining`.
+ */
 // @sync-with: crates/draft-core/src/view.rs
-export interface SpectatorDraftView {
+export interface SharedStackDecisionView {
+  decision: SharedStackPileDecision;
+  refusal: SharedStackRefusal | null;
+}
+
+/**
+ * One seat's decision on one pile, and how tall that pile was when they made
+ * it.
+ *
+ * PUBLIC INFORMATION: at a physical table everyone watches a player pick a pile
+ * up, weigh it and put it back, and every pile's HEIGHT is visible across the
+ * table (the same reason `SharedStackPileView.total` is published to every
+ * viewer).
+ *
+ * WHAT IS NOT HERE, and must never be added: the pile's CONTENTS. This record
+ * is the one place a future author might reach for them, and they are the
+ * format's only secret. A consumer that wants to know WHICH cards a seat passed
+ * reconstructs them from ITS OWN published `revealed` prefix plus `pile_size` —
+ * exactly the information a player at the table has.
+ */
+// @sync-with: crates/draft-core/src/types.rs
+export interface SharedStackDecisionRecord {
+  /** The seat that decided. */
+  seat: number;
+  /** The pile it decided on, addressed by the engine's own pile index (the same
+   * index `SharedStackPileView.index` publishes), never by a position in a
+   * vector. */
+  pile: number;
+  decision: SharedStackPileDecision;
+  /** The pile's height at the moment of the decision, captured before the
+   * decision moved the pile. */
+  pile_size: number;
+}
+
+/** One shared-stack pile, projected for one viewer. */
+// @sync-with: crates/draft-core/src/view.rs
+export interface SharedStackPileView {
+  /** Position from the left, 0-based. Address a pile by this, not by its index
+   * in `piles`. */
+  index: number;
+  /** How many cards the pile holds. A face-down pile's HEIGHT is public. */
+  total: number;
+  /** The prefix this viewer has looked at this turn; empty for every viewer
+   * that is not the active seat. Never re-derive it from `total`. */
+  revealed: DraftCardInstance[];
+  /** The engine's verdict per decision. Read it; never compute legality. */
+  legality: SharedStackDecisionView[];
+}
+
+/**
+ * The live state of a `SharedStackPiles` turn, projected for ONE viewer.
+ *
+ * Counts are public (a player can count every pile across a physical table),
+ * and so is `active_pile`: at a physical table an opponent watches which pile
+ * you are handling, and the engine's `legality` vector reveals the cursor
+ * anyway (every non-cursor pile answers `PileNotActive`). `revealed` is the ONE
+ * viewer-scoped field — the pile's CONTENTS are the secret. The order of the
+ * main stack is published to nobody, which is why this type carries a remaining
+ * COUNT and has no representation for a main-stack card.
+ */
+// @sync-with: crates/draft-core/src/view.rs
+export interface SharedStackView {
+  main_stack_remaining: number;
+  total_cards: number;
+  active_seat: number;
+  /**
+   * The pile the active seat is deciding on. Public, and non-nullable: a live
+   * pile turn always has a cursor, and a session with no live turn publishes no
+   * `shared_stack` at all. NEVER read this as "is it my turn" — compare
+   * `active_seat` against the viewer's own seat for that.
+   */
+  active_pile: number;
+  piles: SharedStackPileView[];
+  /**
+   * Applied decisions since `StartDraft` — a monotone change detector and
+   * nothing else. This is the field an acknowledging client watches, because a
+   * non-final decline adds no card to any pool and therefore cannot be
+   * acknowledged by pool growth.
+   */
+  decisions: number;
+  /**
+   * The applied decisions the session still retains, oldest first and bounded
+   * by the engine's `SHARED_STACK_HISTORY_CAPACITY`.
+   *
+   * Published to EVERY viewer — every seat and both spectator visibilities —
+   * for the same reason `decisions` is: it is a record of PUBLIC events. It
+   * carries NO CARD; see `SharedStackDecisionRecord`.
+   */
+  history: SharedStackDecisionRecord[];
+  /**
+   * The card THIS VIEWER's most recent forced draw gave them, held until they
+   * decide again; `null` for every other viewer and for a spectator.
+   *
+   * The only private field on this type. A final-pile decline takes the top of
+   * the main stack sight unseen and drops it into the declining seat's pool, so
+   * this is the engine telling that seat what it just got — the one card in the
+   * format a player receives without having looked at it. Do not render it for
+   * anyone but its owner; the engine already refuses to send it to anyone else.
+   */
+  forced_draw: DraftCardInstance | null;
+}
+
+// @sync-with: crates/draft-core/src/view.rs
+/** Rust-mirrored FIFO identity, prompt, and clock metadata. Read only; never
+ * manufacture these identifiers or deadlines on the client. */
+export interface FifoPromptId {
+  session_id: string;
+  seat: number;
+  generation: number;
+}
+
+export type FifoClockTarget =
+  | { type: "Pick"; prompt_id: FifoPromptId }
+  | { type: "Review"; next_round: number };
+
+export type FifoClockState =
+  | { type: "Running"; deadline_ms: number }
+  | { type: "Frozen"; remaining_ms: number };
+
+export interface FifoClock {
+  target: FifoClockTarget;
+  state: FifoClockState;
+}
+
+export interface FifoPausedState {
+  phase: "Drafting" | "Review";
+  reason: "PlayerDisconnected" | "PausedByHost" | "DisconnectGraceExpired";
+}
+
+export interface FifoPublicView {
+  session_id: string;
+  revision: number;
+  paused: FifoPausedState | null;
+  review_clock: FifoClock | null;
+}
+
+export interface FifoProgressView {
+  completed_steps: number;
+  round_completed_steps: number;
+}
+
+export interface FifoHeadView {
+  pack_id: number;
+  opening_seat: number;
+  round: number;
+  original_size: number;
+}
+
+export interface FifoSelectionRequirements {
+  picks: number;
+  burns: number;
+}
+
+/** The draft-effect cards a seat may use on its head pack, and the exact
+ * picks and burns for each number of them it may use. */
+export interface FifoEffectOptions {
+  /** The seat's eligible draft-effect pool cards, in pool order. */
+  card_instance_ids: string[];
+  /** Entry `i` is the requirement when `i + 1` of those cards are used. */
+  requirements: FifoSelectionRequirements[];
+}
+
+export interface FifoPlayerView {
+  state: FifoPublicView;
+  progress: FifoProgressView;
+  queue_count: number;
+  head: FifoHeadView | null;
+  prompt_id: FifoPromptId | null;
+  requirements: FifoSelectionRequirements;
+  /** `null` when the seat is not drafting, holds no eligible card, or has a
+   * head that cannot supply one additional card. */
+  effects: FifoEffectOptions | null;
+  clock: FifoClock | null;
+}
+
+/** Legacy views omit both transport-flow fields rather than sending a value. */
+export interface LegacyDraftViewArm {
+  flow?: undefined;
+  fifo?: undefined;
+}
+
+export interface FifoPlayerDraftViewArm {
+  flow: "FifoAsync";
+  fifo: FifoPlayerView;
+}
+
+/**
+ * Compatibility input for existing fixture-facing view values.  Complete FIFO
+ * views retain the arm above; consumers must still call `isFifoPlayerView`
+ * before treating this partial wire shape as actionable.
+ */
+export interface FifoPlayerDraftViewCompatibilityArm {
+  flow?: "FifoAsync";
+  fifo?: FifoPlayerView;
+}
+
+export interface FifoSpectatorDraftViewArm {
+  flow: "FifoAsync";
+  fifo: FifoPublicView;
+}
+
+export type DraftViewPodPhase =
+  | "lobby"
+  | "drafting"
+  | "review"
+  | "deckbuilding"
+  | "pairing"
+  | "matchInProgress"
+  | "roundComplete"
+  | "complete"
+  | "error";
+
+export interface DraftViewPresentation {
+  podPhase: DraftViewPodPhase;
+  isReadOnly: boolean;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isFifoPromptId(value: unknown): value is FifoPromptId {
+  return isRecord(value)
+    && typeof value.session_id === "string"
+    && isCount(value.seat)
+    && isCount(value.generation);
+}
+
+function isFifoClock(value: unknown): value is FifoClock {
+  if (!isRecord(value) || !isRecord(value.target) || !isRecord(value.state)) return false;
+  const target = value.target;
+  const state = value.state;
+  const validTarget = (target.type === "Pick" && isFifoPromptId(target.prompt_id))
+    || (target.type === "Review" && isCount(target.next_round));
+  const validState = (state.type === "Running" && isCount(state.deadline_ms))
+    || (state.type === "Frozen" && isCount(state.remaining_ms));
+  return validTarget && validState;
+}
+
+function isFifoPlayerView(view: DraftPlayerView): view is DraftPlayerViewFields & FifoPlayerDraftViewArm {
+  if (view.flow !== "FifoAsync" || !isRecord(view.fifo)) return false;
+  const fifo = view.fifo;
+  const state = fifo.state;
+  const paused = isRecord(state) ? state.paused : undefined;
+  const validPause = paused === null || (isRecord(paused)
+    && (paused.phase === "Drafting" || paused.phase === "Review")
+    && typeof paused.reason === "string");
+  const validHead = fifo.head === null || (isRecord(fifo.head)
+    && isCount(fifo.head.pack_id)
+    && isCount(fifo.head.opening_seat)
+    && isCount(fifo.head.round)
+    && isCount(fifo.head.original_size));
+  const effects = fifo.effects;
+  const validEffects = effects === null || (isRecord(effects)
+    && Array.isArray(effects.card_instance_ids)
+    && effects.card_instance_ids.every((id) => typeof id === "string")
+    && Array.isArray(effects.requirements)
+    && effects.requirements.every((entry) => isRecord(entry)
+      && isCount(entry.picks)
+      && isCount(entry.burns)));
+  return isRecord(state)
+    && typeof state.session_id === "string"
+    && isCount(state.revision)
+    && validPause
+    && (state.review_clock === null || isFifoClock(state.review_clock))
+    && isRecord(fifo.progress)
+    && isCount(fifo.progress.completed_steps)
+    && isCount(fifo.progress.round_completed_steps)
+    && isCount(fifo.queue_count)
+    && validHead
+    && (fifo.prompt_id === null || isFifoPromptId(fifo.prompt_id))
+    && isRecord(fifo.requirements)
+    && isCount(fifo.requirements.picks)
+    && isCount(fifo.requirements.burns)
+    && validEffects
+    && (fifo.clock === null || isFifoClock(fifo.clock));
+}
+
+/**
+ * The sole received-view presentation decision. It represents FIFO metadata
+ * already emitted by Rust but never activates a transport or fabricates a
+ * missing FIFO identity, revision, clock, or paused effective phase.
+ */
+export function draftViewPresentation(view: DraftPlayerView): DraftViewPresentation {
+  switch (view.status) {
+    case "Lobby":
+      return { podPhase: "lobby", isReadOnly: false };
+    case "Drafting": {
+      const legacy = view.flow === undefined && view.fifo === undefined;
+      return { podPhase: "drafting", isReadOnly: !legacy && !isFifoPlayerView(view) };
+    }
+    case "Review":
+      return { podPhase: "review", isReadOnly: true };
+    case "Paused": {
+      if (isFifoPlayerView(view) && view.fifo.state.paused?.phase === "Review") {
+        return { podPhase: "review", isReadOnly: true };
+      }
+      // Legacy or incomplete FIFO pause data deliberately keeps the prior safe
+      // drafting composition locked instead of guessing an effective phase.
+      return { podPhase: "drafting", isReadOnly: true };
+    }
+    case "Deckbuilding":
+      return { podPhase: "deckbuilding", isReadOnly: false };
+    case "Pairing":
+      return { podPhase: "pairing", isReadOnly: false };
+    case "MatchInProgress":
+      return { podPhase: "matchInProgress", isReadOnly: false };
+    case "RoundComplete":
+      return { podPhase: "roundComplete", isReadOnly: false };
+    case "Complete":
+      return { podPhase: "complete", isReadOnly: false };
+    case "Abandoned":
+      return { podPhase: "error", isReadOnly: true };
+  }
+}
+
+export interface SpectatorDraftViewFields {
   status: DraftStatus;
   kind: DraftKind;
   /** Candidate intent only for Chaos; no seat assignment is present. */
@@ -358,6 +809,17 @@ export interface SpectatorDraftView {
   /** Present only for non-Chaos drafts when the host enabled omniscient visibility. */
   pools?: DraftCardInstance[][];
   current_packs?: (DraftCardInstance[] | null)[];
+  /**
+   * The live shared-stack turn, with no pile CONTENTS for a spectator. The
+   * counts and `active_pile` are published to spectators in both
+   * visibilities, exactly as to players; only `revealed` is withheld.
+   *
+   * OPTIONAL because the Rust field is
+   * `#[serde(default, skip_serializing_if = "Option::is_none")]`: it is
+   * genuinely absent from every non-Winston frame and from every frame outside
+   * `Drafting`, so `shared_stack != null` means exactly "a pile turn is live".
+   */
+  shared_stack?: SharedStackView | null;
 }
 
 // @sync-with: crates/engine/src/game/deck_validation.rs
@@ -372,13 +834,27 @@ export interface GrantableCommanderFiller {
 }
 
 // @sync-with: crates/draft-core/src/view.rs
-export interface DraftPlayerView {
+export type SpectatorDraftView = SpectatorDraftViewFields
+  & (LegacyDraftViewArm | FifoSpectatorDraftViewArm);
+
+export interface DraftPlayerViewFields {
   status: DraftStatus;
   kind: DraftKind;
   /** Candidate intent plus the viewer-scoped Chaos metadata from the engine. */
   source?: DraftSourceView;
   /** Engine-owned completed-pod launch capability; never infer this from kind. */
   launch_capability: DraftLaunchCapability;
+  /**
+   * How this procedure delivers boosters to seats. Published for the same
+   * reason `launch_capability` is: a procedure fact a display layer needs and
+   * must never infer from the kind label.
+   *
+   * NOT status-gated, unlike `shared_stack` — which is why a surface that
+   * outlives the drafting phase (a pod-status dialog, the standings) asks THIS
+   * rather than `shared_stack !== null`. Pair it with
+   * `isSharedStackDistribution`.
+   */
+  distribution: PackDistribution;
   /**
    * CR 903.3 / CR 903.13f: exact number of commanders this procedure requires.
    * This remains a count because valid Commander construction can designate
@@ -459,9 +935,48 @@ export interface DraftPlayerView {
   next_pairing_round: number;
   tournament_format: TournamentFormat;
   pod_policy: PodPolicy;
+  /**
+   * Engine-published procedure fact: whether a submitted deck faces in-session
+   * rounds (`TournamentPairings`) or the pod completes after deckbuilding
+   * (`CompleteImmediately`, Commander Draft). Optional because hosts predating
+   * the field omit it; absent is read as "unknown", which the submit
+   * confirmation words as a final deck — the wording that promises no later
+   * change the pod may not offer.
+   */
+  post_draft_play?: PostDraftPlay;
+  /**
+   * Whether the viewer may submit (or revise) a deck now. Engine-derived from
+   * `DraftSession::deck_submission_open` so clients never re-derive it from
+   * `status` + `pod_policy`. Defaulted for views from hosts predating it:
+   * absent is false.
+   */
+  deck_submission_open?: boolean;
   pairings: PairingView[];
   match_config: MatchConfig;
+  /**
+   * The live shared-stack turn, projected for this viewer.
+   *
+   * OPTIONAL because the Rust field is
+   * `#[serde(default, skip_serializing_if = "Option::is_none")]`: it is
+   * genuinely absent from every non-Winston frame and from every frame outside
+   * `Drafting`, so `shared_stack != null` is the engine-published
+   * discriminator for "render the pile table", and no kind check is needed.
+   */
+  shared_stack?: SharedStackView | null;
+  /**
+   * The seat that chooses who plays first in the games after the draft, from
+   * the engine's latched starting seat. `null`/absent for pods larger than two
+   * seats and for every kind with no shared stack. Deliberately NOT status
+   * gated — the choice is exercised after the draft.
+   *
+   * ADVISORY: the engine does not enforce it, so this is rendered as an
+   * instruction to the players and never as a control.
+   */
+  play_first_chooser?: number | null;
 }
+
+export type DraftPlayerView = DraftPlayerViewFields
+  & (LegacyDraftViewArm | FifoPlayerDraftViewArm | FifoPlayerDraftViewCompatibilityArm);
 
 export type MultiplayerSeatDescriptor =
   | { type: "Human"; player_id: number; display_name: string }
@@ -571,6 +1086,16 @@ export interface CubeDraftSettings {
   };
 }
 
+/**
+ * The draft engine's verdict on a saved session, from
+ * `check_restorable_draft_session`: admitted or refused by its legacy
+ * admission, or unreadable as a draft session.
+ */
+export type RestorableDraftSessionVerdict =
+  | { type: "Admitted" }
+  | { type: "Incompatible" }
+  | { type: "Unreadable" };
+
 // ── Lazy WASM singleton ─────────────────────────────────────────────────
 
 let wasmModule: typeof DraftWasm | null = null;
@@ -587,6 +1112,11 @@ async function ensureDraftWasm(): Promise<typeof DraftWasm> {
 export class DraftEngineOperationLease {
   constructor(private readonly wasm: typeof DraftWasm) {}
 
+  /** Opt the draft bots in or out of the built-in draft-guide pick enhancements. */
+  setPickEnhancements(enabled: boolean): void {
+    this.wasm.set_draft_pick_enhancements(enabled);
+  }
+
   initialize(setPoolJson: string, difficulty: number, seed: number): DraftPlayerView {
     return this.wasm.start_quick_draft(setPoolJson, difficulty, seed) as DraftPlayerView;
   }
@@ -600,6 +1130,10 @@ export class DraftEngineOperationLease {
 
   poolFilterOptions(pool: DraftCardInstance[]): PoolFilterOptions {
     return this.wasm.pool_filter_options(JSON.stringify(pool)) as PoolFilterOptions;
+  }
+
+  checkRestorableSession(json: string): RestorableDraftSessionVerdict {
+    return this.wasm.check_restorable_draft_session(json) as RestorableDraftSessionVerdict;
   }
 
   initializeSealed(setPoolJson: string, difficulty: number, seed: number): DraftPlayerView {
@@ -624,6 +1158,40 @@ export class DraftEngineOperationLease {
 
   submitPick(cardInstanceId: string): DraftPlayerView {
     return this.wasm.submit_pick(cardInstanceId) as DraftPlayerView;
+  }
+
+  /**
+   * Engine-authored LLM pick requests for this pod's eligible bot seats.
+   *
+   * Takes no seat list: which seats an LLM may draft for is decided by the
+   * draft engine from its own roster, so the display layer never names one.
+   * Read-only — no pick is applied and no session state changes.
+   */
+  buildLlmDraftPickRequests(
+    endpointJson: string,
+    setNames: Record<string, string>,
+  ): LlmDraftPickRequest[] {
+    return this.wasm.buildLlmDraftPickRequests(
+      endpointJson,
+      JSON.stringify(setNames),
+    ) as LlmDraftPickRequest[];
+  }
+
+  /**
+   * Apply the human's pick, resolving each LLM seat's pick from its response.
+   *
+   * Per-seat fallback is the engine's: a response it cannot decode, or one
+   * whose pack has moved on, leaves that seat to the heuristic bot in the same
+   * pass. The pick always completes.
+   */
+  submitPickWithLlmBotPicks(
+    cardInstanceId: string,
+    responses: LlmDraftResponsePayload[],
+  ): { view: DraftPlayerView; llmOutcomes: LlmDraftOutcome[] } {
+    return this.wasm.submitPickWithLlmBotPicks(
+      cardInstanceId,
+      JSON.stringify(responses),
+    ) as { view: DraftPlayerView; llmOutcomes: LlmDraftOutcome[] };
   }
 
   submitPickWithDraftEffect(
@@ -674,6 +1242,14 @@ export class DraftEngineOperationLease {
     return this.wasm.load_card_database(json);
   }
 
+  /**
+   * `difficulty` is LAST, mirroring the wasm export, and must stay last: the
+   * engine reads this boundary positionally and the host's tests read it back
+   * by index. It is the strength this pod's bot seats play at
+   * (`map_difficulty`, 0..=4), and passing it is what stops a pod inheriting
+   * the difficulty of whatever draft this tab ran before it — `DIFFICULTY` is
+   * a per-thread cell in the engine with no reset.
+   */
   createMultiplayerDraft(
     poolInput: PoolInput,
     seats: MultiplayerSeatDescriptor[],
@@ -682,6 +1258,7 @@ export class DraftEngineOperationLease {
     draftCode: string,
     tournamentFormat: TournamentFormat,
     podPolicy: PodPolicy,
+    difficulty: number,
   ): DraftPlayerView {
     return this.wasm.create_multiplayer_draft(
       JSON.stringify(poolInput),
@@ -691,6 +1268,7 @@ export class DraftEngineOperationLease {
       draftCode,
       tournamentFormat,
       podPolicy,
+      difficulty,
     ) as DraftPlayerView;
   }
 
@@ -711,6 +1289,68 @@ export class DraftEngineOperationLease {
       effectCardInstanceId,
       JSON.stringify(cardInstanceIds),
     ) as DraftPlayerView;
+  }
+
+  /**
+   * One whole shared-stack turn decision for `seat`.
+   *
+   * Routed through `apply_draft_action` rather than a dedicated wasm export,
+   * because `DraftAction::SharedStackDecision` is what the reducer accepts and
+   * there is no pick-shaped export for it. `pile` is an optimistic-concurrency
+   * check, not a selector: the cursor is the ENGINE's, and a second frame that
+   * names a stale pile is refused `PileNotActive` instead of silently applying
+   * to the next pile. Nothing here decides legality.
+   *
+   * Returns the filtered view for THAT seat, the same contract
+   * `submit_pick_for_seat` has — not the host view. `revealed` prefixes are
+   * viewer-scoped, so acknowledging a guest with seat 0's projection would hand
+   * it somebody else's turn.
+   */
+  submitSharedStackDecisionForSeat(
+    seat: number,
+    pile: number,
+    decision: SharedStackPileDecision,
+  ): DraftPlayerView {
+    this.wasm.apply_draft_action(
+      JSON.stringify({ type: "SharedStackDecision", data: { seat, pile, decision } }),
+    );
+    return this.wasm.get_view_for_seat(seat) as DraftPlayerView;
+  }
+
+  /**
+   * Resolve every consecutive shared-stack turn a BOT seat owns, and report
+   * how many decisions the engine made.
+   *
+   * The loop, its bound and its termination proof are the engine's
+   * (`resolve_shared_stack_bot_turns_inner`); this boundary only forwards the
+   * call. It is deliberately NOT a decision-shaped method: the host cannot
+   * name a pile or a decision here, so there is no second authority over what
+   * a bot seat does.
+   *
+   * Returns the engine's `DraftDelta` list VERBATIM and untyped. There is no
+   * TypeScript spelling of `DraftDelta` in this client and this method does not
+   * introduce one: nothing here reads a delta's contents, and the host uses
+   * only the LENGTH — empty means the engine moved nothing (the active seat is
+   * human, the draft is over, or the session has no shared stack), so no
+   * persistence fence is owed.
+   */
+  resolveSharedStackBotTurns(): unknown[] {
+    return this.wasm.resolve_shared_stack_bot_turns() as unknown[];
+  }
+
+  /**
+   * The decision the ENGINE would apply for a seat whose turn must be resolved
+   * without that seat choosing. `null` when there is no shared stack or the
+   * seat has no legal move.
+   *
+   * The host asks this instead of scanning the published `legality` vector for
+   * the first entry with no refusal. Same algorithm, but the engine folds
+   * `SharedStackPileDecision::ALL` in declaration order while the client folded
+   * whatever order the view happened to serialize -- agreement by coincidence
+   * rather than by construction. Choosing a rules outcome is the reducer's job.
+   */
+  sharedStackForcedDecision(seat: number): SharedStackPileDecision | null {
+    return this.wasm.shared_stack_forced_decision(seat) as SharedStackPileDecision | null;
   }
 
   submitDeckForSeat(
@@ -832,6 +1472,15 @@ export class DraftAdapter {
     return withDraftEngineOperation((lease) => lease.poolFilterOptions(pool));
   }
 
+  /**
+   * Ask the draft engine whether a saved session passes its legacy admission,
+   * without restoring it. Stateless: no draft session is installed, read or
+   * changed.
+   */
+  async checkRestorableSession(json: string): Promise<RestorableDraftSessionVerdict> {
+    return withDraftEngineOperation((lease) => lease.checkRestorableSession(json));
+  }
+
   async initializeSealed(
     selection: SetPackSequence,
     difficulty: number,
@@ -906,6 +1555,7 @@ export class DraftAdapter {
 
   // ── Multi-seat API (P2P Tournament Host) ─────────────────────────────
 
+  /** See the lease method for why `difficulty` is last and what it fixes. */
   async createMultiplayerDraft(
     poolInput: PoolInput,
     seats: MultiplayerSeatDescriptor[],
@@ -914,6 +1564,7 @@ export class DraftAdapter {
     draftCode: string,
     tournamentFormat: TournamentFormat,
     podPolicy: PodPolicy,
+    difficulty: number,
   ): Promise<DraftPlayerView> {
     return withDraftEngineOperation((lease) =>
       lease.createMultiplayerDraft(
@@ -924,6 +1575,7 @@ export class DraftAdapter {
         draftCode,
         tournamentFormat,
         podPolicy,
+        difficulty,
       ),
     );
   }
@@ -934,6 +1586,31 @@ export class DraftAdapter {
    */
   async submitPickForSeat(seat: number, cardInstanceIds: string[]): Promise<DraftPlayerView> {
     return withDraftEngineOperation((lease) => lease.submitPickForSeat(seat, cardInstanceIds));
+  }
+
+  /**
+   * One whole shared-stack turn decision for `seat`. See the lease method for
+   * why `pile` travels with the decision and why legality is not asked here.
+   */
+  async submitSharedStackDecisionForSeat(
+    seat: number,
+    pile: number,
+    decision: SharedStackPileDecision,
+  ): Promise<DraftPlayerView> {
+    return withDraftEngineOperation((lease) =>
+      lease.submitSharedStackDecisionForSeat(seat, pile, decision));
+  }
+
+  /**
+   * Drive every consecutive bot-owned shared-stack turn. See the lease method
+   * for why the engine owns the loop and why the deltas are returned untyped.
+   */
+  async resolveSharedStackBotTurns(): Promise<unknown[]> {
+    return withDraftEngineOperation((lease) => lease.resolveSharedStackBotTurns());
+  }
+
+  async sharedStackForcedDecision(seat: number): Promise<SharedStackPileDecision | null> {
+    return withDraftEngineOperation((lease) => lease.sharedStackForcedDecision(seat));
   }
 
   /** The engine-owned per-kind procedure axes; never re-derived by the UI. */

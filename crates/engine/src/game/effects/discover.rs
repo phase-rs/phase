@@ -3,6 +3,7 @@ use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{Effect, EffectError, LibraryPosition, ResolvedAbility};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
+use crate::types::game_state::RandomDraw;
 use crate::types::game_state::{BatchCompletion, CastOfferKind, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
@@ -33,6 +34,9 @@ pub fn resolve(
         }
         _ => return Err(EffectError::InvalidParam("Expected Discover".to_string())),
     };
+    let Some(discovering_player) = discovering_player else {
+        return Ok(());
+    };
 
     // CR 701.57a: record this discover's mana-value limit so a "whenever you
     // discover" trigger's effect can reference "the same value" (Curator of
@@ -46,7 +50,7 @@ pub fn resolve(
         .ok_or(EffectError::PlayerNotFound)?;
 
     // Collect library IDs (top to bottom)
-    let library: Vec<ObjectId> = player.library.iter().copied().collect();
+    let library: Vec<ObjectId> = state.library_of(player.id).iter().copied().collect();
     let mut exiled_misses: Vec<ObjectId> = Vec::new();
     let mut hit_card: Option<ObjectId> = None;
 
@@ -131,7 +135,7 @@ pub(crate) fn shuffle_to_bottom(
     use rand::seq::SliceRandom;
 
     let mut shuffled = cards.to_vec();
-    shuffled.shuffle(&mut state.rng);
+    shuffled.shuffle(state.rng.draw(RandomDraw::Placement));
 
     let requests = shuffled
         .into_iter()

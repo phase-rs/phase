@@ -48,7 +48,7 @@ fn lightstall_inquisitor_zero_unimplemented() {
     // card from their hand and may play that card for as long as it remains
     // exiled" splits into a player-scoped exile + an `ObjectOwner`
     // `PlayFromExile` grant; the two rider sentences fold into the grant's
-    // `cast_cost_raise` / `land_enter_tapped`, leaving no `Unimplemented`.
+    // `cast_cost_modifier` / `land_enter_tapped`, leaving no `Unimplemented`.
     assert_zero_unimplemented(
         "Vigilance\nWhen this creature enters, each opponent exiles a card from their hand \
          and may play that card for as long as it remains exiled. Each spell cast this way \

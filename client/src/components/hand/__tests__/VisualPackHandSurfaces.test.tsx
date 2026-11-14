@@ -60,7 +60,7 @@ beforeEach(() => seed(secretOpponent()));
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
-  useUiStore.setState({ mobileHandOpen: false, focusedOpponent: null });
+  useUiStore.setState({ mobileHandOpen: false, focusedOpponent: null, previewSource: null });
 });
 
 describe("visual-pack opponent hand boundary", () => {
@@ -79,6 +79,7 @@ describe("visual-pack opponent hand boundary", () => {
   });
 
   it("uses projected visible identity and never degrades a failed face into a back", () => {
+    seed({ ...secretOpponent(), display_visible_to_viewer: true });
     const advanceFailedSource = vi.fn();
     mockUseCardImage.mockReturnValue({
       src: "installed-face.png",
@@ -89,7 +90,7 @@ describe("visual-pack opponent hand boundary", () => {
       advanceFailedSource,
     });
 
-    const { rerender } = render(<OpponentHand playerId={1} showCards />);
+    const { rerender } = render(<OpponentHand playerId={1} />);
     expect(mockUseCardImage).toHaveBeenCalledWith("SECRET FACE", expect.objectContaining({
       size: "small",
       oracleId: "secret-oracle",
@@ -107,12 +108,22 @@ describe("visual-pack opponent hand boundary", () => {
       isRotated: false,
       isFlip: false,
     });
-    rerender(<OpponentHand playerId={1} showCards />);
+    rerender(<OpponentHand playerId={1} />);
     expect(screen.getByRole("img", { name: "SECRET FACE" })).toHaveTextContent("SECRET FACE");
     expect(mockUseCardBackImage).not.toHaveBeenCalled();
   });
 
-  it("honors engine-projected visibility independently of debug showCards", () => {
+  it("renders a back for an engine-redacted card instead of its placeholder name", () => {
+    seed({ ...secretOpponent(), name: "Hidden Card", printed_ref: null, display_visible_to_viewer: false });
+
+    render(<OpponentHand playerId={1} />);
+
+    expect(mockUseCardImage).not.toHaveBeenCalled();
+    expect(screen.getByRole("img", { name: "Card back" })).toBeInTheDocument();
+    expect(screen.queryByText("Hidden Card")).toBeNull();
+  });
+
+  it("honors engine-projected visibility", () => {
     const projected = { ...secretOpponent(), display_visible_to_viewer: true };
     seed(projected);
     mockUseCardImage.mockReturnValue({
@@ -230,5 +241,47 @@ describe("visual-pack owned hand surfaces", () => {
     );
     fireEvent.error(image);
     expect(advanceFailedSource).toHaveBeenCalledWith("installed-token-normal.png");
+  });
+
+  it("closes and disables the mobile hand drawer when a local board choice begins", () => {
+    const card = buildGameObject({
+      id: 32,
+      owner: 0,
+      controller: 0,
+      zone: "Hand",
+      name: "Mobile Hand Card",
+    });
+    useGameStore.setState({
+      gameMode: "local",
+      gameState: buildGameState({
+        players: buildPlayers([{ id: 0, hand: [card.id] }, 1]),
+        objects: buildObjectMap(card),
+        seat_order: [0, 1],
+      }),
+      legalActionsByObject: {},
+      spellCosts: {},
+    });
+    useUiStore.setState({ mobileHandOpen: true });
+    mockUseCardImage.mockReturnValue({
+      src: "installed-hand-card.png",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    const { rerender } = render(<MobileHandDrawer />);
+    expect(screen.getByRole("img", { name: "Mobile Hand Card" })).toBeInTheDocument();
+    expect(mockUseCardHover).toHaveBeenCalledWith(card.id, "playerHand");
+    useUiStore.setState({
+      inspectedObjectId: card.id,
+      previewSource: "playerHand",
+      previewSticky: true,
+    });
+
+    rerender(<MobileHandDrawer interactionDisabled />);
+
+    expect(screen.queryByRole("img", { name: "Mobile Hand Card" })).not.toBeInTheDocument();
+    expect(useUiStore.getState().mobileHandOpen).toBe(false);
+    expect(useUiStore.getState().inspectedObjectId).toBeNull();
   });
 });

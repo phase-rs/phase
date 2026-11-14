@@ -36,10 +36,10 @@
  * that suite's recipe too — the buttons are gated on `onAnimationComplete` of
  * the title's spring, which never settles under happy-dom's rAF.
  */
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { MotionGlobalConfig } from "framer-motion";
 
 import { GamePage } from "../GamePage";
@@ -89,8 +89,12 @@ const { mockMultiplayerState, mockUseMultiplayerStore } = vi.hoisted(() => {
 
 // ── Mock heavy dependencies (mirrors GamePage.bracketViolation.test.tsx) ──────
 
+let capturedOnNoDeck: ((reason?: string) => void) | undefined;
 vi.mock("../../providers/GameProvider", () => ({
-  GameProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  GameProvider: ({ children, onNoDeck }: { children: React.ReactNode; onNoDeck?: (reason?: string) => void }) => {
+    capturedOnNoDeck = onNoDeck;
+    return <>{children}</>;
+  },
 }));
 
 vi.mock("../../game/sessionCleanup.ts", () => ({ clearPromptOverlayState: vi.fn() }));
@@ -159,6 +163,9 @@ vi.mock("../../hooks/usePlayerId", () => ({
   usePerspectivePlayerId: () => 0,
   useCanActForWaitingState: () => true,
   waitingPlayer: () => null,
+  // The mounted priority-attention controller reads the local seat for the
+  // authorized-submitter check.
+  getPlayerId: () => 0,
 }));
 
 vi.mock("../../hooks/useIsMobile", () => ({
@@ -208,8 +215,15 @@ vi.mock("../../services/quickDraftPersistence", () => ({
   saveQuickDraftRun: vi.fn(),
   deleteQuickDraftRun: vi.fn(),
 }));
-// Type-only in `multiplayerDraftStore`, so this cannot disturb the real store.
-vi.mock("../../adapter/draft-adapter", () => ({ createDraftAdapter: vi.fn() }));
+// Spreads the real module rather than replacing it: the store's graph reaches
+// `draftPersistence`, whose kind guard folds `draft-adapter`'s `DRAFT_KINDS`
+// tuple at module scope, so a total factory leaves that export undefined.
+// The real module's top level is types plus a DYNAMIC `import("@wasm/draft")`,
+// so importing it loads no wasm and still cannot disturb the real store.
+vi.mock("../../adapter/draft-adapter", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../adapter/draft-adapter")>()),
+  createDraftAdapter: vi.fn(),
+}));
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -375,5 +389,50 @@ describe("GamePage — draft-match teardown on Back to Draft", () => {
     expect(leaveSpy).not.toHaveBeenCalled();
     // The pod tournament is still standing — the next round can be paired.
     expect(useMultiplayerDraftStore.getState().matchPairing).not.toBeNull();
+  });
+});
+
+describe("GamePage — game-over life summary", () => {
+  afterEach(() => {
+    MotionGlobalConfig.skipAnimations = false;
+    cleanup();
+  });
+
+  it("shows the engine's unbounded life as ∞ and the opponent's finite total", async () => {
+    MotionGlobalConfig.skipAnimations = true;
+    const gameState = gameStateFactory.withPlayers({ id: 0, life: 92 }, { id: 1, life: 20 }).build();
+    storeOverrides.gameState = { ...gameState, derived: { life_magnitude: { 0: "Unbounded" } } };
+    storeOverrides.waitingFor = { type: "GameOver", data: { winner: 0 } };
+    mockMultiplayerState.activePlayerId = 0;
+
+    renderGameOver();
+
+    expect(await screen.findByText(/You:/)).toHaveTextContent("You: ∞ / Opponent: 20");
+  });
+});
+
+function DraftReturnState() {
+  const location = useLocation();
+  const state = location.state as { draftId?: string; draftStartError?: string } | null;
+  return <div data-testid="draft-return">{`${location.search}|${state?.draftId}|${state?.draftStartError}`}</div>;
+}
+
+describe("GamePage — solo draft failed start", () => {
+  afterEach(() => { cleanup(); });
+
+  it("routes the raw engine reason and exact run ID to Resume", async () => {
+    storeOverrides.gameState = null;
+    storeOverrides.waitingFor = null;
+    render(<MemoryRouter initialEntries={["/game/failed?mode=ai&source=draft&draftId=run-A"]}>
+      <Routes>
+        <Route path="/game/:id" element={<GamePage />} />
+        <Route path="/draft/quick" element={<DraftReturnState />} />
+      </Routes>
+    </MemoryRouter>);
+    expect(capturedOnNoDeck).toBeDefined();
+    act(() => capturedOnNoDeck!("Contract from Below requires ante"));
+    expect(await screen.findByTestId("draft-return")).toHaveTextContent(
+      "?resume=1|run-A|Contract from Below requires ante",
+    );
   });
 });

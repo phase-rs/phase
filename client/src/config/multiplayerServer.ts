@@ -1,3 +1,5 @@
+import { runtimeConfigValue } from "./runtimeConfig";
+
 /**
  * The official lobby broker for THIS build's release channel.
  *
@@ -22,10 +24,11 @@ export const OFFICIAL_MULTIPLAYER_SERVER_URL = __OFFICIAL_MULTIPLAYER_SERVER_URL
 /**
  * Parse a `ws://`/`wss://` URL, or `null` if it is not one.
  *
- * Defined here rather than in `serverDetection` because this module is a leaf
- * and has to validate the runtime override below without importing one of its
- * own consumers. `serverDetection` re-exports it, so there is still exactly one
- * implementation and every existing import site is unchanged.
+ * Defined here rather than in `serverDetection` because this module validates
+ * the runtime override below and must not import one of its own consumers (it
+ * imports only the runtime-config reader). `serverDetection` re-exports it, so
+ * there is still exactly one implementation and every existing import site is
+ * unchanged.
  */
 export function parseWebSocketUrl(value: string): URL | null {
   try {
@@ -48,35 +51,39 @@ export function parseWebSocketUrl(value: string): URL | null {
 }
 
 /**
- * The default server a deployment configured at runtime, or `null`.
+ * The HTTP origin served beside a phase-server's WebSocket API (`wss:` →
+ * `https:`, `ws:` → `http:`), or `undefined` when there is no server or the
+ * address is not a valid ws/wss URL. Path, query and fragment are dropped.
  *
- * A self-hosted deployment serves its own `/config.js` (see
- * `client/public/config.js`), which lets one prebuilt bundle be pointed at any
- * server without a rebuild — the helm chart renders it from
- * `web.defaultMultiplayerServerUrl`. A malformed value is ignored rather than
- * propagated: a typo'd address would otherwise become the seed for every new
- * profile, with nothing to tell the player why nothing connects.
+ * Takes the address rather than reading a store: this module is imported by
+ * the store that holds it, so the read belongs to each caller.
  */
-function runtimeDefaultServerUrl(): string | null {
-  if (typeof window === "undefined") return null;
-  const configured = window.__PHASE_CONFIG__?.multiplayerServerUrl;
-  if (typeof configured !== "string" || configured === "") return null;
-  return parseWebSocketUrl(configured) ? configured : null;
+export function serverHttpOrigin(webSocketUrl: string | null): string | undefined {
+  const server = webSocketUrl === null ? null : parseWebSocketUrl(webSocketUrl);
+  if (!server) return undefined;
+  server.protocol = server.protocol === "wss:" ? "https:" : "http:";
+  return server.origin;
 }
 
 /**
  * Where this build connects by default.
  *
  * Runtime configuration wins over the build-time define so one generic image
- * can be deployed anywhere; with no `/config.js` override the define is used
- * unchanged, which is what every official build does.
+ * can be deployed anywhere: a self-hosted deployment serves its own `/config.js`
+ * (see `client/public/config.js`), which the helm chart renders from
+ * `web.defaultMultiplayerServerUrl`. With no override the define is used
+ * unchanged, which is what every official build does. A malformed value is
+ * ignored rather than propagated: a typo'd address would otherwise become the
+ * seed for every new profile, with nothing to tell the player why nothing
+ * connects.
  *
  * Read once at module load: `serverDetection` derives `SERVER_PRESETS` from
  * this at import time, so re-reading later would let the picker and the store
  * disagree about what "default" means.
  */
 export const DEFAULT_MULTIPLAYER_SERVER_URL =
-  runtimeDefaultServerUrl() ?? __DEFAULT_MULTIPLAYER_SERVER_URL__;
+  runtimeConfigValue("multiplayerServerUrl", (value) => parseWebSocketUrl(value) !== null) ??
+  __DEFAULT_MULTIPLAYER_SERVER_URL__;
 
 /** Hosts we operate. Every channel's broker belongs here — `isOfficial…` gates
  * the persisted-address migration, which treats an address on any of these as a

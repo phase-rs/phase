@@ -33,7 +33,7 @@ use engine::types::player::PlayerId;
 use super::rules::AttackTarget;
 
 /// The back face's verbatim Oracle text (committed identically at
-/// `crates/engine/src/parser/oracle_effect/counter.rs`'s parser test).
+/// `crates/phase-parser/src/parser/oracle_effect/counter.rs`'s parser test).
 const ULTIMATE_SPIDER_MAN: &str = "First strike, haste\n\
      Camouflage — {2}: Put a +1/+1 counter on Ultimate Spider-Man. He gains hexproof and becomes colorless until end of turn.\n\
      Whenever you attack, double the number of each kind of counter on each Spider and legendary creature you control.";

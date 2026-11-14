@@ -51,6 +51,16 @@ pub fn drive_with_response(
     drive_modal_with_response(runner, action, &[], targets, response)
 }
 
+/// [`drive_with_response`] with no response, for a spell or ability whose
+/// targets include players: `targets` are answered as given.
+pub fn drive_with_target_refs(
+    runner: &mut GameRunner,
+    action: GameAction,
+    targets: &[TargetRef],
+) -> Vec<GameEvent> {
+    drive_targets_with_response(runner, action, &[], targets, None)
+}
+
 /// [`drive_with_response`] for a modal spell (CR 700.2): `modes` answers the
 /// `WaitingFor::ModeChoice` window that precedes target selection, as printed
 /// indices. The two share one loop so a driven modal cast reaches the same
@@ -60,6 +70,19 @@ pub fn drive_modal_with_response(
     action: GameAction,
     modes: &[usize],
     targets: &[ObjectId],
+    response: Option<PriorityResponse>,
+) -> Vec<GameEvent> {
+    let targets: Vec<TargetRef> = targets.iter().copied().map(TargetRef::Object).collect();
+    drive_targets_with_response(runner, action, modes, &targets, response)
+}
+
+/// The one loop behind the drivers above: targets are `TargetRef`s, so a
+/// player target is answered the same way as an object.
+fn drive_targets_with_response(
+    runner: &mut GameRunner,
+    action: GameAction,
+    modes: &[usize],
+    targets: &[TargetRef],
     mut response: Option<PriorityResponse>,
 ) -> Vec<GameEvent> {
     let mut events = runner.act(action).expect("submit the driven action").events;
@@ -73,7 +96,7 @@ pub fn drive_modal_with_response(
             },
             WaitingFor::ManaPayment { .. } => GameAction::PassPriority,
             WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
-                target: Some(TargetRef::Object(pending.remove(0))),
+                target: Some(pending.remove(0)),
             },
             WaitingFor::Priority { player } => {
                 if runner.state().stack.is_empty() {
@@ -83,7 +106,7 @@ pub fn drive_modal_with_response(
                     Some(PriorityResponse {
                         instant, target, ..
                     }) => {
-                        pending = vec![target];
+                        pending = vec![TargetRef::Object(target)];
                         cast_spell_action(runner, instant)
                     }
                     None => GameAction::PassPriority,

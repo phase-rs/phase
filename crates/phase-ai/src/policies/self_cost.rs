@@ -45,6 +45,7 @@ use engine::game::effects::counters::{preview_counter_addition, CounterAdditionP
 use engine::game::effects::draw::{preview_draw_delivery, DrawDeliveryPreview};
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::players;
 use engine::game::quantity::resolve_quantity;
 use engine::types::ability::{

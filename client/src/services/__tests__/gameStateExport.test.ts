@@ -2,6 +2,10 @@ import { strFromU8, unzipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useGameStore } from "../../stores/gameStore.ts";
+import {
+  clearAiDecisionDiagnostic,
+  recordAiDecisionDiagnostic,
+} from "../../game/aiDecisionDiagnostics.ts";
 import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory.ts";
 import { buildGameState } from "../../test/factories/gameStateFactory.ts";
 import {
@@ -14,6 +18,7 @@ import { gameStateFromImportText, readImportFile } from "../gameStateImport.ts";
 describe("gameStateExport", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    clearAiDecisionDiagnostic();
     Reflect.deleteProperty(window, "showSaveFilePicker");
   });
 
@@ -34,6 +39,29 @@ describe("gameStateExport", () => {
       waitingFor: { type: "Priority" },
       legalActions: [{ type: "PassPriority" }],
       turnCheckpoints: [{ turn_number: 7 }],
+      clientAiDecision: {
+        stage: "idle",
+        playerId: null,
+        difficulty: null,
+        waitingFor: null,
+      },
+    });
+  });
+
+  it("includes the AI controller stage in a display snapshot", () => {
+    const gameState = buildGameState({ turn_number: 7 });
+    recordAiDecisionDiagnostic({
+      stage: "awaiting-proposal",
+      playerId: 1,
+      difficulty: "VeryHard",
+      waitingFor: "Priority for player 1",
+    });
+
+    expect(JSON.parse(serializeGameStateDebugSnapshot(gameState)).clientAiDecision).toEqual({
+      stage: "awaiting-proposal",
+      playerId: 1,
+      difficulty: "VeryHard",
+      waitingFor: "Priority for player 1",
     });
   });
 
@@ -57,9 +85,12 @@ describe("gameStateExport", () => {
       turnCheckpoints: [],
     });
 
-    const filename = await exportGameStateDebugZip(gameState);
+    const result = await exportGameStateDebugZip(gameState);
 
-    expect(filename).toMatch(/^game-state-turn-7-.*\.zip$/);
+    expect(result).toStrictEqual({
+      kind: "saved",
+      filename: expect.stringMatching(/^game-state-turn-7-.*\.zip$/),
+    });
     expect(write).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
     expect(writtenBlob).not.toBeNull();
@@ -96,9 +127,12 @@ describe("gameStateExport", () => {
     });
     useGameStore.setState({ gameMode: "ai" });
 
-    const filename = await exportAuthoritativeGameStateZip(adapter);
+    const result = await exportAuthoritativeGameStateZip(adapter);
 
-    expect(filename).toMatch(/^authoritative-game-state-.*\.zip$/);
+    expect(result).toStrictEqual({
+      kind: "saved",
+      filename: expect.stringMatching(/^authoritative-game-state-.*\.zip$/),
+    });
     expect(adapter.exportPersistenceState).toHaveBeenCalledOnce();
     const entries = unzipSync(new Uint8Array(await writtenBlob!.arrayBuffer()));
     const [entryName] = Object.keys(entries);
@@ -106,7 +140,9 @@ describe("gameStateExport", () => {
     expect(strFromU8(entries[entryName])).toBe(trustedState);
 
     const imported = gameStateFromImportText(
-      await readImportFile(new File([writtenBlob!], filename, { type: "application/zip" })),
+      await readImportFile(
+        new File([writtenBlob!], result.filename, { type: "application/zip" }),
+      ),
     );
     expect(imported).toEqual(trustedEnvelope);
   });
@@ -114,6 +150,19 @@ describe("gameStateExport", () => {
   it("rejects an incomplete game state import", () => {
     expect(gameStateFromImportText(JSON.stringify({ waiting_for: { type: "Priority" } }))).toBe(
       "JSON does not look like a GameState (missing waiting_for or players)",
+    );
+  });
+
+  it("rejects a display snapshot before the restore path discards it", () => {
+    const displaySnapshot = JSON.stringify({
+      gameState: buildGameState({ turn_number: 7 }),
+      waitingFor: { type: "Priority" },
+      legalActions: [],
+      turnCheckpoints: [],
+    });
+
+    expect(gameStateFromImportText(displaySnapshot)).toBe(
+      "This is a display snapshot, not a restorable game state. Export an Authoritative Game State from the Debug Panel instead.",
     );
   });
 
@@ -164,9 +213,12 @@ describe("gameStateExport", () => {
     });
     useGameStore.setState({ gameMode: "ai" });
 
-    const filename = await exportAuthoritativeGameStateZip(adapter);
+    const result = await exportAuthoritativeGameStateZip(adapter);
 
-    expect(filename).toMatch(/^authoritative-game-state-.*\.zip$/);
+    expect(result).toStrictEqual({
+      kind: "saved",
+      filename: expect.stringMatching(/^authoritative-game-state-.*\.zip$/),
+    });
     expect(clickSpy).toHaveBeenCalledOnce();
     expect(downloadedBlob).not.toBeNull();
     const entries = unzipSync(new Uint8Array(await downloadedBlob!.arrayBuffer()));

@@ -16,7 +16,7 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingContinuation, WaitingFor};
 
-use crate::game::ability_utils::build_resolved_from_def;
+use crate::game::ability_utils::build_resolved_from_def_with_chain_root;
 
 /// CR 701.20a: Resolve `Effect::RevealFromHand`.
 ///
@@ -64,7 +64,14 @@ pub fn resolve(
     // CR 701.20a: No eligible card to reveal → the "if you don't" branch fires.
     // This is equivalent to the player declining the optional reveal.
     if eligible.is_empty() {
-        run_on_decline_now(state, on_decline.as_deref(), controller, source_id, events);
+        run_on_decline_now(
+            state,
+            on_decline.as_deref(),
+            controller,
+            source_id,
+            ability.context.chain_root_targets.clone(),
+            events,
+        );
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,
             source_id,
@@ -84,9 +91,16 @@ pub fn resolve(
     // resolves correctly when drained. Mirrors `apply_post_replacement_effect`'s
     // convention of threading the source object as the default target.
     if let Some(def) = on_decline {
-        let mut resolved = build_resolved_from_def(&def, source_id, controller);
+        // CR 608.2h: propagate the creating ability's chain-root target list
+        // (see `build_resolved_from_def_with_chain_root`'s doc).
+        let mut resolved = build_resolved_from_def_with_chain_root(
+            &def,
+            source_id,
+            controller,
+            ability.context.chain_root_targets.clone(),
+        );
         if resolved.targets.is_empty() {
-            resolved.targets.push(TargetRef::Object(source_id));
+            resolved.push_target(TargetRef::Object(source_id));
         }
         state.park_ability_continuation(PendingContinuation::new(Box::new(resolved), state));
     } else {
@@ -120,6 +134,7 @@ fn run_on_decline_now(
     on_decline: Option<&AbilityDefinition>,
     controller: crate::types::player::PlayerId,
     source_id: crate::types::identifiers::ObjectId,
+    chain_root_targets: Vec<TargetRef>,
     events: &mut Vec<GameEvent>,
 ) {
     let Some(def) = on_decline else {
@@ -138,9 +153,13 @@ fn run_on_decline_now(
     // on `AbilityCondition::ControllerControlsMatching { negated: true }` — the
     // Tap fires only when the controller doesn't already control a [filter]
     // permanent. Bypassing the chain would skip that check.
-    let mut resolved = build_resolved_from_def(def, source_id, controller);
+    //
+    // CR 608.2h: propagate the creating ability's chain-root target list (see
+    // `build_resolved_from_def_with_chain_root`'s doc).
+    let mut resolved =
+        build_resolved_from_def_with_chain_root(def, source_id, controller, chain_root_targets);
     if resolved.targets.is_empty() {
-        resolved.targets.push(TargetRef::Object(source_id));
+        resolved.push_target(TargetRef::Object(source_id));
     }
     let _ = super::resolve_ability_chain(state, &resolved, events, 0);
 }
@@ -418,13 +437,8 @@ mod tests {
         );
     }
 
-    /// The eligible set is drawn from the CONTROLLER'S HAND, and only then filtered — the seam
-    /// the block-(3) `execute` firewall relief
-    /// (`analysis::resource::reveal_from_hand_execute_provably_excludes_class`) rests its
-    /// universe argument on: a growing-class member that is a battlefield object (CR 110.1) can
-    /// never be in the eligible set, WHATEVER the filter says, because the pool is a hand.
-    /// Widening it to `state.objects` would make the relief unsound while every filter-level
-    /// test stayed green, so the pool is pinned here, at its own seam.
+    /// The eligible set is drawn from the CONTROLLER'S HAND, and only then filtered: a battlefield
+    /// object (CR 110.1) can never be in it, WHATEVER the filter says, because the pool is a hand.
     ///
     /// The three decoys discriminate: each MATCHES the filter (asserted below, so the row cannot
     /// pass because they were filtered out) and each is excluded by the POOL alone. The controller

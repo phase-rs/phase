@@ -66,6 +66,13 @@
     "discard": "Discard",
     "saveAndContinue": "Save & continue"
   },
+  "saveConflict": {
+    "title": "Deck changed elsewhere",
+    "bodyChanged": "\"{{name}}\" was changed somewhere else since this editor opened or last saved it, so nothing was saved. Load the saved version to see it (this discards your unsaved changes), or save your version anyway.",
+    "bodyDeleted": "\"{{name}}\" was deleted somewhere else since this editor opened or last saved it, so nothing was saved. Save your version anyway.",
+    "loadSaved": "Load saved version",
+    "saveMine": "Save my version"
+  },
   "card": {
     "moveToSideboard": "Move one {{name}} to sideboard",
     "moveToMain": "Move one {{name}} to main deck",
@@ -222,6 +229,10 @@
     "identity": "Identity:",
     "setAsCommander": "Set as commander:",
     "cardCount": "{{count}}/{{expected}} cards",
+    "cardCountNoMinimum_one": "{{count}} card",
+    "cardCountNoMinimum_few": "{{count}} cards",
+    "cardCountNoMinimum_many": "{{count}} cards",
+    "cardCountNoMinimum_other": "{{count}} cards",
     "singletonViolations": "Singleton violations: {{cards}}",
     "colorViolations": "Color identity violations: {{cards}}",
     "signatureSpell": {
@@ -267,7 +278,9 @@
     "dataVersion": "Data: {{version}}",
     "aboutBrackets": "About brackets ↗",
     "estimatedChip": "Estimated: B{{tier}}",
-    "estimatedChipFull": "Estimated bracket: B{{tier}} {{label}}"
+    "estimatedChipFull": "Estimated bracket: B{{tier}} {{label}}",
+    "manualChip": "B{{tier}}",
+    "manualChipFull": "Declared bracket: B{{tier}} {{label}}"
   },
   "bracketPicker": {
     "ariaLabel": "Deck bracket",

@@ -10,7 +10,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::process::Command;
 
-use phase_ai::auto_play::run_ai_actions;
+use phase_ai::auto_play::run_ai_actions_headless;
 use phase_ai::config::{
     create_config, AiConfig, AiDifficulty, AiProfile, Platform, PolicyPenalties,
     ACTIVE_POLICY_PENALTY_FIELDS,
@@ -772,7 +772,7 @@ fn run_game(
         }
 
         let results = match std::panic::catch_unwind(AssertUnwindSafe(|| {
-            run_ai_actions(
+            run_ai_actions_headless(
                 &mut state,
                 &ai_players,
                 &ai_configs,

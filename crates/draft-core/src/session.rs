@@ -1,13 +1,16 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rand::seq::SliceRandom;
+use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
+use engine::types::card_printing::DeckPrinting;
 use engine::types::player::PlayerId;
 
 use crate::pack_source::PackSource;
 use crate::pick_pass;
+use crate::shared_stack;
 use crate::types::*;
 use crate::validation::{validate_limited_deck, LimitedDeckError};
 // Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
@@ -35,6 +38,59 @@ impl DraftSession {
         self.current_round + 1
     }
 
+    /// Whether this session accepts a `SubmitDeck` now: always while
+    /// deckbuilding; between rounds only where the pod policy permits deck
+    /// changes between matches (MTR 7.3). Single authority for the reducer and
+    /// for `DraftPlayerView::deck_submission_open`.
+    pub(crate) fn deck_submission_open(&self) -> bool {
+        match self.status {
+            DraftStatus::Deckbuilding => true,
+            DraftStatus::RoundComplete => self
+                .config
+                .pod_policy
+                .permits_deck_changes_between_matches(),
+            DraftStatus::Lobby
+            | DraftStatus::Drafting
+            | DraftStatus::Review
+            | DraftStatus::Paused
+            | DraftStatus::Pairing
+            | DraftStatus::MatchInProgress
+            | DraftStatus::Complete
+            | DraftStatus::Abandoned => false,
+        }
+    }
+
+    /// The shared-stack state, or the error a session that should have one but
+    /// does not deserves.
+    ///
+    /// EVERY read of `shared_stack` goes through here, so no call site unwraps.
+    /// The `Err` answer is reachable only from a hand-built or corrupt session,
+    /// which is why `validate_persisted_snapshot` refuses that shape at import.
+    ///
+    /// Every consumer of this accessor and of `shared_stack::refusal_for`, with
+    /// its `None`/`Err` answer stated so no caller has to guess. Rows marked
+    /// **A-ii** are the ones that DO NOT EXIST YET -- `DraftPlayerView` has no
+    /// `shared_stack` field and `pick_status` is still its unchanged
+    /// two-branch `if` -- so they state the contract the next phase must meet,
+    /// not a call site a reader can go and find today:
+    ///
+    /// | Consumer | Answer when `shared_stack` is `None` |
+    /// |---|---|
+    /// | `shared_stack::apply_shared_stack_decision` | this `Err`, surfaced unchanged |
+    /// | **A-ii** `view::filter_for_player` / `filter_for_spectator` | will publish `shared_stack: None`, identical to the status gate's answer |
+    /// | **A-ii** the distribution-dispatched `pick_status` helper | will answer `PickStatus::NotDrafting` |
+    /// | `shared_stack::forced_decision` | `None`, which is a correct answer and not an impossibility |
+    /// | `server_core::draft_seats_needing_auto_pick` | an empty `Vec` -- no seat owes a decision on a session with no stack |
+    /// | `server_core::pick_random_for_seat` | an `Err` that mutates nothing |
+    /// | the wire payload guard | deliberately not a consumer: it can never see a session |
+    pub fn shared_stack(&self) -> Result<&SharedStackState, DraftError> {
+        self.shared_stack
+            .as_ref()
+            .ok_or_else(|| DraftError::InvalidSharedStackConfiguration {
+                reason: "shared-stack state missing on a shared-stack session".to_string(),
+            })
+    }
+
     /// Create a new draft session in Lobby status.
     ///
     /// Timestamps are set to 0 -- callers set them externally since the pure
@@ -43,6 +99,8 @@ impl DraftSession {
         let pod_size = seats.len();
         DraftSession {
             booster_pack_pool: None,
+            shared_stack: None,
+            fifo: None,
             set_code: config.set_code.clone(),
             kind: config.kind,
             status: DraftStatus::Lobby,
@@ -129,6 +187,10 @@ impl DraftSession {
     /// sessions establish these properties at start and legacy `SeatFlags`
     /// snapshots remain compatible because their bitmap lengths are unrelated.
     pub fn validate_persisted_snapshot(&self) -> Result<(), DraftError> {
+        match self.config.flow {
+            DraftFlow::FifoAsync => return self.validate_fifo_snapshot(),
+            DraftFlow::LegacyBarrier => self.validate_legacy_admission()?,
+        }
         if self.kind != self.config.kind {
             return Err(DraftError::InvalidSealedSnapshot {
                 reason: "session kind does not match configuration".to_string(),
@@ -140,37 +202,190 @@ impl DraftSession {
                 .map_err(|reason| DraftError::InvalidPackSequence { reason })?;
         }
         let procedure = self.kind.procedure();
+        // Same authority the reducer asks at `StartDraft`, asked again here
+        // because an imported snapshot never passed through that path.
+        procedure.validate_source(&self.config.source)?;
         let pod_size = self.seats.len() as u8;
-        let local_cube_size_is_allowed = matches!(self.config.source, DraftSource::Cube { .. })
-            && procedure.allows_local_cube_pod_size(self.config.tournament_format, pod_size);
-        if !procedure.allows_pod_size(self.config.tournament_format, pod_size)
-            && !local_cube_size_is_allowed
-        {
-            return Err(DraftError::InvalidSealedSnapshot {
-                reason: "pod size does not satisfy the draft procedure".to_string(),
-            });
-        }
+        self.kind.admit_pod_size(
+            &self.config.source,
+            self.config.tournament_format,
+            pod_size,
+            AdmissionContext::Snapshot {
+                flow: DraftFlow::LegacyBarrier,
+            },
+        )?;
         match procedure.distribution {
             PackDistribution::PickAndPass => return Ok(()),
             PackDistribution::AllAtOnce => {}
+            // A shared-stack session's whole live state is `shared_stack`, so a
+            // snapshot that claims to be drafting without one is not a
+            // restorable session -- it is an unplayable one. THIS IS WHAT MAKES
+            // A REDACTED PUBLIC BACKUP NON-RESUMABLE, deliberately: the
+            // `POST /p2p-draft-backup` projection strips `shared_stack` at the
+            // trust boundary, so the public copy fails here. The authoritative,
+            // resumable copy stays in the host's IndexedDB snapshot, which is
+            // the path that does resume a Winston pod. The alternative -- a
+            // second serialization shape that retains counts without contents
+            // -- needs two snapshot validity rules and a restored session whose
+            // card conservation is knowingly false.
+            PackDistribution::SharedStackPiles { pile_count } => {
+                let piles = shared_stack::piles_needed(pile_count)?;
+                let Some(state) = self.shared_stack.as_ref() else {
+                    if self.status == DraftStatus::Drafting {
+                        return Err(DraftError::InvalidSharedStackConfiguration {
+                            reason: "a drafting shared-stack session must carry its stack"
+                                .to_string(),
+                        });
+                    }
+                    return Ok(());
+                };
+                if state.piles.len() != piles || state.inspected.len() != piles {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: format!("a shared-stack session has exactly {piles} piles"),
+                    });
+                }
+                if usize::from(state.active_seat) >= self.seats.len()
+                    || usize::from(state.cursor) >= piles
+                {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: "active seat and cursor must be in range".to_string(),
+                    });
+                }
+                if state
+                    .inspected
+                    .iter()
+                    .zip(state.piles.iter())
+                    .any(|(seen, pile)| *seen > pile.len())
+                {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: "a seat cannot have inspected more cards than a pile holds"
+                            .to_string(),
+                    });
+                }
+                // One notice slot per seat, so the projection can index by
+                // seat without a length test on every view build. An imported
+                // snapshot is the only way a wrong length arrives: the field
+                // carries `#[serde(default)]` for snapshots that predate it,
+                // and an empty vector is exactly what that default produces --
+                // so it is accepted and read as "no seat has a pending notice".
+                if !state.forced_draws.is_empty() && state.forced_draws.len() != self.seats.len() {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: "a shared-stack session keeps one forced-draw notice per seat"
+                            .to_string(),
+                    });
+                }
+                // The decision history's own rules. The capacity is what bounds
+                // every view broadcast and every snapshot, so an import is the
+                // one place an unbounded history could arrive from.
+                if state.history.len() > SHARED_STACK_HISTORY_CAPACITY {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: format!(
+                            "a shared-stack history keeps at most \
+                             {SHARED_STACK_HISTORY_CAPACITY} decisions"
+                        ),
+                    });
+                }
+                // Both indices are addressed the way the record documents them:
+                // `pile` is an engine pile index and `seat` is a seat index, so
+                // an out-of-range one would make a consumer's lookup silently
+                // wrong rather than loudly absent.
+                if state
+                    .history
+                    .iter()
+                    .any(|record| usize::from(record.pile) >= piles)
+                {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: "a history record names a pile the session does not have"
+                            .to_string(),
+                    });
+                }
+                if state
+                    .history
+                    .iter()
+                    .any(|record| usize::from(record.seat) >= self.seats.len())
+                {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: "a history record names a seat the session does not have"
+                            .to_string(),
+                    });
+                }
+                // The SEAT-INDEXED VECTORS this arm is about to hand the
+                // reducer. `apply_shared_stack_decision` indexes `session.pools`
+                // raw to receive a taken pile, and `filter_for_player` indexes
+                // it to publish a pool, so a snapshot with a short `pools` is
+                // an index-out-of-bounds -- and `panic = "abort"` in the release
+                // wasm profile makes that a dead client rather than an error.
+                // The `AllAtOnce` arm reaches this check by falling through to
+                // the shared per-seat block; this arm returns early, so it has
+                // to ask for itself. `PickAndPass` returns `Ok(())` above and
+                // gets no per-seat vector check at all -- pre-existing, and out
+                // of scope here, but do not read this comment as covering it.
+                if self.pools.len() != self.seats.len()
+                    || self.config.pod_size as usize != self.seats.len()
+                {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: "per-seat vectors do not match the core seats".to_string(),
+                    });
+                }
+                // `starting_seat` is the third seat-valued field, and the only
+                // one the range checks above did not cover. `play_first_chooser`
+                // computes `(starting_seat + 1) % 2` on it for a two-seat pod,
+                // which overflows a `u8` at 255 -- a debug panic, and in release
+                // a silently wrong chooser. It is not status-gated either, so
+                // it runs for lobby and deckbuilding views too.
+                if usize::from(state.starting_seat) >= self.seats.len() {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: "the starting seat must be a seat the session has".to_string(),
+                    });
+                }
+                // `inspected` is bounded above per pile, but the CONTRACT is
+                // narrower: a seat has looked at piles up to the cursor and no
+                // further. Without this a crafted snapshot sets
+                // `inspected = [1, 3, 3]` at cursor 0 and the view hands the
+                // active seat the contents of piles it has not reached -- the
+                // exact over-reveal the counter exists to prevent. Both reducer
+                // write sites maintain this for free; only an import can break it.
+                if state
+                    .inspected
+                    .iter()
+                    .skip(usize::from(state.cursor) + 1)
+                    .any(|seen| *seen != 0)
+                {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: "a seat cannot have inspected a pile beyond its cursor".to_string(),
+                    });
+                }
+                // AND THE SESSION MUST BE PLAYABLE. Everything above checks
+                // shapes; this checks that the shapes describe a turn somebody
+                // can take. A drafting snapshot with three empty piles and a
+                // stocked stack passes every structural rule and is permanently
+                // stuck: `refusal_for` answers `PileEmpty` to every take and
+                // `NoGuaranteedCard` to every decline, `forced_decision` finds
+                // nothing for the timeout sweep to apply, and the terminal
+                // predicate is false because the stack is not empty.
+                //
+                // Asked through `forced_decision` rather than re-derived from
+                // pile sizes, so this stays one question with one authority:
+                // if the reducer would accept no decision at all from the
+                // active seat, there is no session here to restore.
+                if self.status == DraftStatus::Drafting
+                    && shared_stack::forced_decision(state, state.active_seat).is_none()
+                {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: "a drafting shared-stack session must admit a legal decision"
+                            .to_string(),
+                    });
+                }
+                return Ok(());
+            }
         }
-        if !matches!(self.config.source, DraftSource::Set { .. }) {
-            return Err(DraftError::SealedRequiresSetSource);
-        }
-        if self.config.source.set_code() != self.config.set_code
-            || self.set_code != self.config.set_code
-        {
-            return Err(DraftError::InvalidSealedSnapshot {
-                reason: "set source and session codes must match".to_string(),
-            });
-        }
-        if self.config.pack_count != procedure.packs_per_player
-            || self.config.min_deck_size != procedure.min_deck_size
-        {
-            return Err(DraftError::InvalidSealedSnapshot {
-                reason: "sealed requires six packs and a 40-card minimum deck".to_string(),
-            });
-        }
+        self.kind.admit_all_at_once(
+            &self.config,
+            Some(&self.set_code),
+            AdmissionContext::Snapshot {
+                flow: DraftFlow::LegacyBarrier,
+            },
+        )?;
         if self.status == DraftStatus::Drafting {
             return Err(DraftError::InvalidSealedSnapshot {
                 reason: "sealed sessions cannot be in drafting status".to_string(),
@@ -220,7 +435,25 @@ pub fn apply(
     action: DraftAction,
     pack_source: Option<&dyn PackSource>,
 ) -> Result<Vec<DraftDelta>, DraftError> {
+    if session.config.flow == DraftFlow::FifoAsync {
+        return Err(DraftError::ExplicitTimeRequired);
+    }
+    session.validate_legacy_admission()?;
+    if action.is_fifo_only() {
+        return Err(DraftError::IncompatibleFlow);
+    }
+    apply_existing(session, action, pack_source)
+}
+
+fn apply_existing(
+    session: &mut DraftSession,
+    action: DraftAction,
+    pack_source: Option<&dyn PackSource>,
+) -> Result<Vec<DraftDelta>, DraftError> {
     match action {
+        DraftAction::Select { .. } | DraftAction::Control { .. } | DraftAction::AdvanceClock => {
+            Err(DraftError::IncompatibleFlow)
+        }
         DraftAction::StartDraft => apply_start_draft(session, pack_source),
         DraftAction::Pick {
             seat,
@@ -240,7 +473,8 @@ pub fn apply(
             seat,
             main_deck,
             commanders,
-        } => apply_submit_deck(session, seat, main_deck, commanders),
+            printings,
+        } => apply_submit_deck(session, seat, main_deck, commanders, printings),
         DraftAction::GeneratePairings => apply_generate_pairings(session),
         DraftAction::ReportMatchResult {
             match_id,
@@ -253,7 +487,1320 @@ pub fn apply(
         DraftAction::SetSeatConnected { seat, connected } => {
             apply_set_seat_connected(session, seat, connected)
         }
+        DraftAction::SharedStackDecision {
+            seat,
+            pile,
+            decision,
+        } => shared_stack::apply_shared_stack_decision(session, seat, pile, decision),
     }
+}
+
+/// A FIFO operation has one atomic commit, including clocks and result events.
+pub fn apply_at(
+    session: &mut DraftSession,
+    action: DraftAction,
+    pack_source: Option<&dyn PackSource>,
+    now_ms: u64,
+) -> Result<Vec<DraftDelta>, DraftError> {
+    if session.config.flow == DraftFlow::LegacyBarrier {
+        return apply(session, action, pack_source);
+    }
+    session.validate_persisted_snapshot()?;
+    let now_ms = crate::clock::clamped_now(session, now_ms)?;
+    let mut candidate = session.clone();
+    candidate.fifo_mut()?.last_now_ms = now_ms;
+    let deltas = match action {
+        DraftAction::StartDraft => start_fifo(&mut candidate, pack_source, now_ms),
+        DraftAction::Select {
+            seat,
+            prompt_id,
+            picked_card_instance_ids,
+            burned_card_instance_ids,
+            effect_card_instance_ids,
+        } => pick_pass::select_fifo(
+            &mut candidate,
+            seat,
+            prompt_id,
+            picked_card_instance_ids,
+            burned_card_instance_ids,
+            effect_card_instance_ids,
+            pick_pass::SelectionTiming::Human,
+        ),
+        DraftAction::Control { control } => crate::clock::control(&mut candidate, control, now_ms),
+        DraftAction::AdvanceClock => crate::clock::advance(&mut candidate, now_ms),
+        DraftAction::Pick { .. } | DraftAction::PickWithDraftEffect { .. } => {
+            Err(DraftError::IncompatibleFlow)
+        }
+        DraftAction::SharedStackDecision { .. } => Err(DraftError::IncompatibleFlow),
+        DraftAction::SubmitDeck { .. }
+        | DraftAction::GeneratePairings
+        | DraftAction::ReportMatchResult { .. }
+        | DraftAction::AdvanceRound
+        | DraftAction::ReplaceSeatWithBot { .. }
+        | DraftAction::SetSeatConnected { .. } => {
+            apply_existing(&mut candidate, action, pack_source)
+        }
+    }?;
+    if candidate != *session {
+        candidate.fifo_mut()?.revision = crate::clock::increment(candidate.fifo_ref()?.revision)?;
+        candidate.validate_persisted_snapshot()?;
+        *session = candidate;
+    }
+    Ok(deltas)
+}
+
+impl DraftSession {
+    /// Existing public constructors deliberately retain the legacy admission.
+    pub fn validate_legacy_admission(&self) -> Result<(), DraftError> {
+        if self.config.flow != DraftFlow::LegacyBarrier
+            || self.fifo.is_some()
+            || self.status == DraftStatus::Review
+            || !self.config.selection_policy.is_default()
+            || !self.config.clock_policy.is_default()
+        {
+            return Err(DraftError::IncompatibleFlow);
+        }
+        Ok(())
+    }
+
+    pub fn new_fifo(
+        config: DraftConfig,
+        seats: Vec<DraftSeat>,
+        draft_code: String,
+        session_id: DraftSessionId,
+    ) -> Result<Self, DraftError> {
+        if config.flow != DraftFlow::FifoAsync {
+            return Err(DraftError::IncompatibleFlow);
+        }
+        validate_fifo_config(&config, seats.len(), AdmissionContext::Configuration)?;
+        if !valid_draft_id(&session_id.0) {
+            return Err(snapshot_error("invalid session id"));
+        }
+        let seat_count = seats.len();
+        let mut session = Self::new(config, seats, draft_code);
+        session.fifo = Some(FifoDraftState {
+            session_id,
+            revision: 0,
+            last_now_ms: 0,
+            seats: vec![FifoSeatState::default(); seat_count],
+            packs: Default::default(),
+            cards: Default::default(),
+            removed: Vec::new(),
+            returned_effects: Default::default(),
+            review: None,
+            paused: None,
+        });
+        session.validate_fifo_snapshot()?;
+        Ok(session)
+    }
+
+    pub(crate) fn fifo_ref(&self) -> Result<&FifoDraftState, DraftError> {
+        self.fifo
+            .as_ref()
+            .ok_or_else(|| snapshot_error("missing FIFO state"))
+    }
+    pub(crate) fn fifo_mut(&mut self) -> Result<&mut FifoDraftState, DraftError> {
+        self.fifo
+            .as_mut()
+            .ok_or_else(|| snapshot_error("missing FIFO state"))
+    }
+
+    /// The sole pack reader; no FIFO tail card is actionable or shown (CR 905.1c / CR 903.13d).
+    pub fn head_pack(&self, seat: u8) -> Option<&DraftPack> {
+        match self.config.flow {
+            DraftFlow::LegacyBarrier => self.current_pack.get(usize::from(seat))?.as_ref(),
+            DraftFlow::FifoAsync => Some(
+                &self
+                    .fifo
+                    .as_ref()?
+                    .seats
+                    .get(usize::from(seat))?
+                    .queue
+                    .front()?
+                    .pack,
+            ),
+        }
+    }
+
+    pub fn head_metadata(&self, seat: u8) -> Option<&QueuedDraftPack> {
+        self.fifo
+            .as_ref()?
+            .seats
+            .get(usize::from(seat))?
+            .queue
+            .front()
+    }
+
+    fn validate_fifo_snapshot(&self) -> Result<(), DraftError> {
+        validate_fifo_config(
+            &self.config,
+            self.seats.len(),
+            AdmissionContext::Snapshot {
+                flow: DraftFlow::FifoAsync,
+            },
+        )?;
+        if self.kind != self.config.kind || self.set_code != self.config.set_code {
+            return Err(snapshot_error("session/config mismatch"));
+        }
+        let fifo = self.fifo_ref()?;
+        if !valid_draft_id(&fifo.session_id.0)
+            || fifo.revision > MAX_DRAFT_JSON_INTEGER
+            || fifo.last_now_ms > MAX_DRAFT_JSON_INTEGER
+        {
+            return Err(snapshot_error("invalid FIFO identity/counter/time"));
+        }
+        let count = self.seats.len();
+        if [
+            fifo.seats.len(),
+            self.pools.len(),
+            self.packs_by_seat.len(),
+            self.current_pack.len(),
+            self.current_pack_origins.len(),
+            self.connected_seats.len(),
+            self.seats_picked_this_round.len(),
+        ]
+        .iter()
+        .any(|len| *len != count)
+        {
+            return Err(snapshot_error("per-seat dimensions"));
+        }
+        if self.current_pack.iter().any(Option::is_some)
+            || self.current_pack_origins.iter().any(Option::is_some)
+            || (0..self.config.pod_size).any(|seat| self.seats_picked_this_round.get(seat))
+            || self.pick_number != 0
+            || self.shared_stack.is_some()
+        {
+            return Err(snapshot_error("FIFO contains legacy live authority"));
+        }
+        let phase = match self.status {
+            DraftStatus::Drafting => Some(DraftActivePhase::Drafting),
+            DraftStatus::Review => Some(DraftActivePhase::Review),
+            DraftStatus::Paused => Some(
+                fifo.paused
+                    .ok_or_else(|| snapshot_error("paused phase missing"))?
+                    .phase,
+            ),
+            DraftStatus::Lobby
+            | DraftStatus::Deckbuilding
+            | DraftStatus::Pairing
+            | DraftStatus::MatchInProgress
+            | DraftStatus::RoundComplete
+            | DraftStatus::Complete
+            | DraftStatus::Abandoned => None,
+        };
+        if (self.status == DraftStatus::Paused) != fifo.paused.is_some() {
+            return Err(snapshot_error("paused status mismatch"));
+        }
+        let paused = fifo.paused;
+        if self.status == DraftStatus::Lobby {
+            if !fifo.packs.is_empty()
+                || !fifo.cards.is_empty()
+                || !fifo.removed.is_empty()
+                || !fifo.returned_effects.is_empty()
+                || fifo.review.is_some()
+                || !self.pack_sizes.is_empty()
+                || self.current_pack_number != 0
+                || self.pools.iter().any(|pool| !pool.is_empty())
+                || self.packs_by_seat.iter().any(|packs| !packs.is_empty())
+                || fifo.seats.iter().any(|seat| {
+                    !seat.queue.is_empty()
+                        || seat.prompt.is_some()
+                        || seat.generation != 0
+                        || seat.completed_steps != 0
+                        || seat.round_completed_steps != 0
+                })
+            {
+                return Err(snapshot_error("Lobby contains generated draft state"));
+            }
+            return Ok(());
+        }
+        if fifo.packs.len() != count * usize::from(self.config.pack_count)
+            || self.pack_sizes.len() != usize::from(self.config.pack_count)
+        {
+            return Err(snapshot_error("manifest dimensions"));
+        }
+        let mut catalog_ids = HashSet::new();
+        for round in 0..self.config.pack_count {
+            for seat in 0..self.config.pod_size {
+                let id = DraftPackId(
+                    u32::from(round) * u32::from(self.config.pod_size) + u32::from(seat),
+                );
+                let pack = fifo
+                    .packs
+                    .get(&id)
+                    .ok_or_else(|| snapshot_error("manifest coordinate missing"))?;
+                if pack.pack_id != id
+                    || pack.opening_seat != seat
+                    || pack.round != round
+                    || pack.original_size == 0
+                    || usize::from(pack.original_size) != pack.original_card_ids.len()
+                {
+                    return Err(snapshot_error("manifest pack identity/size"));
+                }
+                if seat == 0 && self.pack_sizes[usize::from(round)] != pack.original_size {
+                    return Err(snapshot_error(
+                        "compatibility pack size differs from manifest",
+                    ));
+                }
+                for card_id in &pack.original_card_ids {
+                    let card = fifo
+                        .cards
+                        .get(card_id)
+                        .ok_or_else(|| snapshot_error("manifest physical card missing"))?;
+                    if !valid_draft_id(card_id)
+                        || card.card.instance_id != *card_id
+                        || card.pack_id != id
+                        || !catalog_ids.insert(card_id.as_str())
+                    {
+                        return Err(snapshot_error("manifest physical identity/origin"));
+                    }
+                }
+            }
+        }
+        if catalog_ids.len() != fifo.cards.len() {
+            return Err(snapshot_error("unregistered catalog card"));
+        }
+        let live_drafting = phase == Some(DraftActivePhase::Drafting);
+        let reviewing = phase == Some(DraftActivePhase::Review);
+        if self.kind.procedure().distribution == PackDistribution::AllAtOnce && phase.is_some() {
+            return Err(snapshot_error("AllAtOnce has live draft phase"));
+        }
+        if (live_drafting || reviewing) && self.current_pack_number >= self.config.pack_count {
+            return Err(snapshot_error("live round outside manifest"));
+        }
+        if !live_drafting && !reviewing && self.current_pack_number != self.config.pack_count {
+            return Err(snapshot_error("postdraft round is not exhausted"));
+        }
+        let direction_round = if self.current_pack_number == self.config.pack_count {
+            self.current_pack_number - 1
+        } else {
+            self.current_pack_number
+        };
+        if self.kind.procedure().distribution == PackDistribution::PickAndPass
+            && self.pass_direction != PassDirection::for_pack(direction_round)
+        {
+            return Err(snapshot_error("pass direction/round mismatch"));
+        }
+        let next_unopened = if live_drafting || reviewing {
+            self.current_pack_number + 1
+        } else {
+            self.config.pack_count
+        };
+        let mut owned = HashSet::new();
+        let mut live_origins = HashSet::new();
+        let mut live_pack_ids = HashSet::new();
+        let mut live_returns = HashSet::new();
+        for (seat_index, future) in self.packs_by_seat.iter().enumerate() {
+            if future.len() != usize::from(self.config.pack_count - next_unopened) {
+                return Err(snapshot_error("future pack dimensions"));
+            }
+            for (offset, pack) in future.iter().enumerate() {
+                let round = usize::from(next_unopened) + offset;
+                let id = DraftPackId(
+                    u32::try_from(round * count + seat_index).expect("bounded coordinate"),
+                );
+                let original = &fifo.packs[&id];
+                if pack
+                    .0
+                    .iter()
+                    .map(|card| &card.instance_id)
+                    .ne(original.original_card_ids.iter())
+                {
+                    return Err(snapshot_error("future pack order/origin"));
+                }
+                for card in &pack.0 {
+                    validate_owned_card(fifo, &mut owned, card)?;
+                }
+            }
+        }
+        for (seat_index, seat) in fifo.seats.iter().enumerate() {
+            if seat.generation > MAX_DRAFT_JSON_INTEGER
+                || seat.completed_steps > fifo.cards.len() as u64
+                || seat.round_completed_steps > seat.completed_steps
+                || seat.generation > seat.completed_steps + 1
+            {
+                return Err(snapshot_error("progress/generation bounds"));
+            }
+            let round_supply: u64 = fifo
+                .packs
+                .values()
+                .filter(|pack| {
+                    pack.round == self.current_pack_number.min(self.config.pack_count - 1)
+                })
+                .map(|pack| u64::from(pack.original_size))
+                .sum();
+            if seat.round_completed_steps > round_supply {
+                return Err(snapshot_error("round progress exceeds supply"));
+            }
+            if (!live_drafting && !seat.queue.is_empty()) || seat.queue.len() > count {
+                return Err(snapshot_error("queue/status mismatch"));
+            }
+            for head in &seat.queue {
+                let original = fifo
+                    .packs
+                    .get(&head.pack_id)
+                    .ok_or_else(|| snapshot_error("unregistered live pack"))?;
+                if head.opening_seat != original.opening_seat
+                    || head.round != original.round
+                    || head.original_size != original.original_size
+                    || head.round != self.current_pack_number
+                    || !live_origins.insert(head.opening_seat)
+                    || !live_pack_ids.insert(head.pack_id)
+                {
+                    return Err(snapshot_error("live pack origin/round/identity"));
+                }
+                let size = head.pack.0.len();
+                if size == 0
+                    || size > usize::from(head.original_size)
+                    || (size < usize::from(head.original_size)
+                        && size <= usize::from(self.config.selection_policy.discard_threshold))
+                {
+                    return Err(snapshot_error("empty/oversized/discardable live pack"));
+                }
+                for card in &head.pack.0 {
+                    validate_owned_card(fifo, &mut owned, card)?;
+                    let returned = fifo.returned_effects.get(&card.instance_id);
+                    if let Some(assignment) = returned {
+                        if *assignment != head.pack_id
+                            || card.draft_effect
+                                != Some(engine::types::card::DraftEffect::AdditionalPick)
+                        {
+                            return Err(snapshot_error("counterfeit return membership"));
+                        }
+                        live_returns.insert(card.instance_id.as_str());
+                    } else if fifo.cards[&card.instance_id].pack_id != head.pack_id {
+                        return Err(snapshot_error("foreign card without return membership"));
+                    }
+                }
+            }
+            let head = self.head_metadata(u8::try_from(seat_index).expect("validated seat"));
+            if let (true, Some(head)) = (live_drafting, head) {
+                let prompt = seat
+                    .prompt
+                    .as_ref()
+                    .ok_or_else(|| snapshot_error("missing head prompt"))?;
+                if prompt.id.session_id != fifo.session_id
+                    || usize::from(prompt.id.seat) != seat_index
+                    || prompt.id.generation == 0
+                    || prompt.id.generation != seat.generation
+                    || prompt.pack_id != head.pack_id
+                {
+                    return Err(snapshot_error("prompt/head binding"));
+                }
+                match (
+                    crate::clock::pick_duration(
+                        self.config.clock_policy.pick,
+                        seat.round_completed_steps,
+                    ),
+                    &prompt.clock,
+                ) {
+                    (None, None) => {}
+                    (Some(duration), Some(clock)) => validate_scope(
+                        clock,
+                        &DraftClockTarget::Pick {
+                            prompt_id: prompt.id.clone(),
+                        },
+                        paused,
+                        duration,
+                        fifo.last_now_ms,
+                    )?,
+                    (None, Some(_)) | (Some(_), None) => {
+                        return Err(snapshot_error("pick clock policy mismatch"))
+                    }
+                }
+            } else if seat.prompt.is_some() {
+                return Err(snapshot_error("prompt without actionable/frozen head"));
+            }
+        }
+        if live_drafting && live_pack_ids.is_empty() {
+            return Err(snapshot_error("undrained transition missing"));
+        }
+        if live_returns.len() != fifo.returned_effects.len() {
+            return Err(snapshot_error("return membership has no live owner"));
+        }
+        for pool in &self.pools {
+            for card in pool {
+                validate_owned_card(fifo, &mut owned, card)?;
+            }
+        }
+        for removed in &fifo.removed {
+            let card = fifo
+                .cards
+                .get(&removed.card_instance_id)
+                .ok_or_else(|| snapshot_error("unknown removed card"))?;
+            if !fifo.packs.contains_key(&removed.pack_id)
+                || (removed.pack_id != card.pack_id
+                    && card.card.draft_effect
+                        != Some(engine::types::card::DraftEffect::AdditionalPick))
+                || fifo.packs[&removed.pack_id].round >= next_unopened
+                || !owned.insert(removed.card_instance_id.as_str())
+            {
+                return Err(snapshot_error("invalid removed ownership/source"));
+            }
+            match self.kind.procedure().distribution {
+                PackDistribution::AllAtOnce => {
+                    return Err(snapshot_error("AllAtOnce cannot remove cards"));
+                }
+                PackDistribution::PickAndPass => {
+                    let enabled = match removed.reason {
+                        DraftRemovalReason::Burn => self.config.selection_policy.burns_per_pick > 0,
+                        DraftRemovalReason::Threshold => {
+                            self.config.selection_policy.discard_threshold > 0
+                        }
+                    };
+                    if !enabled {
+                        return Err(snapshot_error("removal reason is disabled by policy"));
+                    }
+                }
+                PackDistribution::SharedStackPiles { .. } => {
+                    return Err(DraftError::InvalidConfiguration {
+                        reason: SHARED_STACK_HAS_NO_FIFO.to_string(),
+                    });
+                }
+            }
+        }
+        if owned != catalog_ids {
+            return Err(snapshot_error("physical card conservation"));
+        }
+        for (seat_index, (seat, pool)) in fifo.seats.iter().zip(&self.pools).enumerate() {
+            match self.kind.procedure().distribution {
+                PackDistribution::PickAndPass => {
+                    // Each successful step grows the pool by at least one and
+                    // by at most the kind's pick step: an AdditionalPick step
+                    // drafts one card beyond it for each draft-effect card it
+                    // returns, so it cannot create an unrecorded extra step.
+                    let size = pool.len() as u64;
+                    let maximum =
+                        seat.completed_steps * u64::from(self.kind.procedure().cards_per_pick);
+                    if size < seat.completed_steps || size > maximum {
+                        return Err(snapshot_error("pool/progress contradiction"));
+                    }
+                }
+                PackDistribution::AllAtOnce => {
+                    if pool.iter().any(|card| {
+                        usize::from(fifo.packs[&fifo.cards[&card.instance_id].pack_id].opening_seat)
+                            != seat_index
+                    }) {
+                        return Err(snapshot_error("AllAtOnce pool origin mismatch"));
+                    }
+                    if seat.completed_steps != 0
+                        || seat.round_completed_steps != 0
+                        || seat.generation != 0
+                    {
+                        return Err(snapshot_error("AllAtOnce contains pick progress"));
+                    }
+                }
+                PackDistribution::SharedStackPiles { .. } => {
+                    return Err(DraftError::InvalidConfiguration {
+                        reason: SHARED_STACK_HAS_NO_FIFO.to_string(),
+                    });
+                }
+            }
+        }
+        match (reviewing, &fifo.review) {
+            (true, Some(review)) => {
+                if self.config.clock_policy.review_duration_ms == 0
+                    || review.exhausted_round != self.current_pack_number
+                    || review.next_round != next_unopened
+                    || review.next_round >= self.config.pack_count
+                {
+                    return Err(snapshot_error("Review round mismatch"));
+                }
+                validate_scope(
+                    &review.clock,
+                    &DraftClockTarget::Review {
+                        next_round: review.next_round,
+                    },
+                    paused,
+                    self.config.clock_policy.review_duration_ms,
+                    fifo.last_now_ms,
+                )?;
+            }
+            (false, None) => {}
+            (true, None) | (false, Some(_)) => {
+                return Err(snapshot_error("Review status mismatch"))
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_owned_card<'a>(
+    fifo: &'a FifoDraftState,
+    owned: &mut HashSet<&'a str>,
+    card: &'a DraftCardInstance,
+) -> Result<(), DraftError> {
+    if !fifo
+        .cards
+        .get(&card.instance_id)
+        .is_some_and(|original| original.card == *card)
+        || !owned.insert(card.instance_id.as_str())
+    {
+        return Err(snapshot_error("duplicate/mismatched physical ownership"));
+    }
+    Ok(())
+}
+
+fn validate_scope(
+    clock: &DraftClock,
+    target: &DraftClockTarget,
+    paused: Option<DraftPausedState>,
+    duration: u32,
+    now: u64,
+) -> Result<(), DraftError> {
+    if &clock.target != target {
+        return Err(snapshot_error("clock scope mismatch"));
+    }
+    match (clock.state, paused) {
+        (DraftClockState::Running { deadline_ms }, None)
+            if deadline_ms <= MAX_DRAFT_JSON_INTEGER
+                && deadline_ms.saturating_sub(now) <= u64::from(duration) =>
+        {
+            Ok(())
+        }
+        (DraftClockState::Frozen { remaining_ms }, Some(_))
+            if remaining_ms <= u64::from(duration) =>
+        {
+            Ok(())
+        }
+        (DraftClockState::Running { .. } | DraftClockState::Frozen { .. }, _) => {
+            Err(snapshot_error("clock status/bounds mismatch"))
+        }
+    }
+}
+
+pub(crate) fn snapshot_error(reason: impl Into<String>) -> DraftError {
+    DraftError::InvalidSnapshot {
+        reason: reason.into(),
+    }
+}
+
+/// A shared stack is dealt as piles, never passed as packs, so it has no
+/// FIFO queue, burns, discard threshold, Review or pick clock (product policy;
+/// Winston has no CR section).
+const SHARED_STACK_HAS_NO_FIFO: &str = "a shared-stack distribution never runs the FIFO flow";
+
+fn validate_fifo_config(
+    config: &DraftConfig,
+    seat_count: usize,
+    context: AdmissionContext,
+) -> Result<(), DraftError> {
+    let invalid = |reason: &str| DraftError::InvalidConfiguration {
+        reason: reason.to_string(),
+    };
+    let count = u8::try_from(seat_count).map_err(|_| invalid("seat count exceeds u8"))?;
+    if count == 0 || count != config.pod_size {
+        return Err(invalid("pod size mismatch"));
+    }
+    let procedure = config.kind.procedure();
+    config
+        .kind
+        .admit_pod_size(&config.source, config.tournament_format, count, context)?;
+    if config.pack_count == 0 || config.pack_count > MAX_PACK_COUNT || config.cards_per_pack == 0 {
+        return Err(invalid("invalid pack dimensions"));
+    }
+    if config.source.set_code() != config.set_code {
+        return Err(invalid("source code mismatch"));
+    }
+    if let DraftSource::Set { layout } = &config.source {
+        layout
+            .validate_for_draft(count, config.pack_count)
+            .map_err(|reason| DraftError::InvalidPackSequence { reason })?;
+    }
+    config.clock_policy.validate()?;
+    match procedure.distribution {
+        PackDistribution::PickAndPass => {}
+        PackDistribution::AllAtOnce => {
+            // `validate_fifo_snapshot` compares the session's label with the
+            // configuration's after this check, and a new FIFO session takes its
+            // label from the configuration, so no session label is passed here.
+            config.kind.admit_all_at_once(config, None, context)?;
+            if !config.selection_policy.is_default() || config.clock_policy.review_duration_ms != 0
+            {
+                return Err(invalid("AllAtOnce policy"));
+            }
+        }
+        PackDistribution::SharedStackPiles { .. } => {
+            return Err(invalid(SHARED_STACK_HAS_NO_FIFO));
+        }
+    }
+    Ok(())
+}
+
+fn start_fifo(
+    session: &mut DraftSession,
+    source: Option<&dyn PackSource>,
+    now_ms: u64,
+) -> Result<Vec<DraftDelta>, DraftError> {
+    if session.status != DraftStatus::Lobby {
+        return Err(DraftError::InvalidTransition {
+            from: session.status,
+            action: "StartDraft".into(),
+        });
+    }
+    validate_fifo_config(
+        &session.config,
+        session.seats.len(),
+        AdmissionContext::Configuration,
+    )?;
+    let source = source.ok_or_else(|| DraftError::InvalidConfiguration {
+        reason: "StartDraft requires a PackSource".into(),
+    })?;
+    let mut rng = ChaCha20Rng::seed_from_u64(session.config.rng_seed);
+    let pod_size = session.config.pod_size;
+    let packs = generate_start_packs(session, source, &mut rng, pod_size)?;
+    if packs.len() != session.seats.len()
+        || packs
+            .iter()
+            .any(|row| row.len() != usize::from(session.config.pack_count))
+    {
+        return Err(snapshot_error("generated matrix dimensions"));
+    }
+    let seat_count = session.seats.len();
+    let fifo = session.fifo_mut()?;
+    for (seat, row) in packs.iter().enumerate() {
+        for (round, pack) in row.iter().enumerate() {
+            let size = u8::try_from(pack.0.len())
+                .ok()
+                .filter(|size| *size > 0)
+                .ok_or_else(|| snapshot_error("generated empty or oversized pack"))?;
+            let pack_id = DraftPackId(
+                u32::try_from(round * seat_count + seat)
+                    .map_err(|_| snapshot_error("pack id overflow"))?,
+            );
+            let mut ids = Vec::with_capacity(pack.0.len());
+            for card in &pack.0 {
+                if !valid_draft_id(&card.instance_id)
+                    || fifo
+                        .cards
+                        .insert(
+                            card.instance_id.clone(),
+                            DraftCardProvenance {
+                                pack_id,
+                                card: card.clone(),
+                            },
+                        )
+                        .is_some()
+                {
+                    return Err(snapshot_error("generated invalid or duplicate physical id"));
+                }
+                ids.push(card.instance_id.clone());
+            }
+            fifo.packs.insert(
+                pack_id,
+                DraftPackProvenance {
+                    pack_id,
+                    opening_seat: u8::try_from(seat).expect("validated seats"),
+                    round: u8::try_from(round).expect("validated rounds"),
+                    original_size: size,
+                    original_card_ids: ids,
+                },
+            );
+        }
+    }
+    session.pack_sizes = packs[0]
+        .iter()
+        .map(|pack| u8::try_from(pack.0.len()).expect("validated size"))
+        .collect();
+    session.packs_by_seat = packs;
+    let mut deltas = vec![DraftDelta::DraftStarted];
+    match session.kind.procedure().distribution {
+        PackDistribution::AllAtOnce => {
+            session.pools = session
+                .packs_by_seat
+                .iter_mut()
+                .map(|packs| packs.drain(..).flat_map(|pack| pack.0).collect())
+                .collect();
+            session.current_pack_number = session.config.pack_count;
+            session.status = DraftStatus::Deckbuilding;
+            deltas.push(DraftDelta::TransitionedTo {
+                status: session.status,
+            });
+        }
+        PackDistribution::PickAndPass => open_fifo_round(session, 0, now_ms)?,
+        PackDistribution::SharedStackPiles { .. } => {
+            return Err(DraftError::InvalidConfiguration {
+                reason: SHARED_STACK_HAS_NO_FIFO.to_string(),
+            });
+        }
+    }
+    Ok(deltas)
+}
+
+pub(crate) fn open_fifo_round(
+    session: &mut DraftSession,
+    round: u8,
+    now_ms: u64,
+) -> Result<(), DraftError> {
+    session.current_pack_number = round;
+    // CR 905.1b / CR 903.13c: the first and third rounds pass left, the second passes right.
+    session.pass_direction = PassDirection::for_pack(round);
+    session.status = DraftStatus::Drafting;
+    session.fifo_mut()?.review = None;
+    for seat in 0..session.seats.len() {
+        if session.packs_by_seat[seat].is_empty() {
+            return Err(snapshot_error("missing unopened pack"));
+        }
+        let pack = session.packs_by_seat[seat].remove(0);
+        let pack_id = DraftPackId(
+            u32::from(round) * u32::from(session.config.pod_size)
+                + u32::try_from(seat).expect("validated seat"),
+        );
+        let original = session
+            .fifo_ref()?
+            .packs
+            .get(&pack_id)
+            .ok_or_else(|| snapshot_error("missing pack provenance"))?
+            .clone();
+        let target = &mut session.fifo_mut()?.seats[seat];
+        target.round_completed_steps = 0;
+        target.queue.push_back(QueuedDraftPack {
+            pack_id,
+            opening_seat: original.opening_seat,
+            round,
+            original_size: original.original_size,
+            pack,
+        });
+    }
+    crate::clock::reconcile_prompts(session, now_ms)
+}
+
+pub(crate) fn finish_fifo_round(
+    session: &mut DraftSession,
+    now_ms: u64,
+) -> Result<Vec<DraftDelta>, DraftError> {
+    if session
+        .fifo_ref()?
+        .seats
+        .iter()
+        .any(|seat| !seat.queue.is_empty())
+    {
+        crate::clock::reconcile_prompts(session, now_ms)?;
+        return Ok(Vec::new());
+    }
+    crate::clock::reconcile_prompts(session, now_ms)?;
+    let exhausted_round = session.current_pack_number;
+    let next_round = exhausted_round
+        .checked_add(1)
+        .ok_or(DraftError::InvalidClockBounds)?;
+    if next_round == session.config.pack_count {
+        session.current_pack_number = next_round;
+        session.status = DraftStatus::Deckbuilding;
+        return Ok(vec![DraftDelta::TransitionedTo {
+            status: session.status,
+        }]);
+    }
+    let duration = session.config.clock_policy.review_duration_ms;
+    if duration == 0 {
+        open_fifo_round(session, next_round, now_ms)?;
+        Ok(vec![DraftDelta::PackExhausted {
+            new_pack_number: next_round,
+        }])
+    } else {
+        let clock =
+            crate::clock::running(DraftClockTarget::Review { next_round }, now_ms, duration)?;
+        session.fifo_mut()?.review = Some(DraftReviewState {
+            exhausted_round,
+            next_round,
+            clock,
+        });
+        session.status = DraftStatus::Review;
+        Ok(vec![DraftDelta::TransitionedTo {
+            status: session.status,
+        }])
+    }
+}
+
+/// Independently retained legacy facts. Absence is not permission to guess a
+/// lost deadline, sparse-window progress, or a custom physical ID's origin.
+#[derive(Debug, Clone)]
+pub struct LegacyUpgradeContext {
+    pub session_id: DraftSessionId,
+    pub now_ms: u64,
+    pub clock_policy: DraftClockPolicy,
+    pub paused: Option<DraftPausedState>,
+    pub pending_clock: Option<DraftClockState>,
+    pub provenance: Option<Vec<DraftPackProvenance>>,
+    pub progress: Option<Vec<LegacySeatProgress>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LegacySeatProgress {
+    pub total: u64,
+    pub round: u64,
+}
+
+/// Upgrade a borrowed legacy save without consuming another pick or editing
+/// its bytes. New FIFO generation never decodes identity from physical IDs.
+pub fn upgrade_legacy_snapshot(
+    source: &DraftSession,
+    context: LegacyUpgradeContext,
+) -> Result<DraftSession, DraftError> {
+    source.validate_persisted_snapshot()?;
+    if source.config.flow == DraftFlow::FifoAsync
+        || source.kind.procedure().distribution == PackDistribution::AllAtOnce
+    {
+        return Ok(source.clone());
+    }
+    validate_fifo_config(
+        &source.config,
+        source.seats.len(),
+        AdmissionContext::Snapshot {
+            flow: DraftFlow::FifoAsync,
+        },
+    )?;
+    context.clock_policy.validate()?;
+    // `new_fifo` below checks the session id and refuses an invalid one as a
+    // snapshot error, the same refusal a fresh FIFO session gets.
+    if context.now_ms > MAX_DRAFT_JSON_INTEGER {
+        return Err(DraftError::InvalidClockBounds);
+    }
+    if source.status != DraftStatus::Paused && context.paused.is_some() {
+        return Err(snapshot_error("legacy paused evidence/status mismatch"));
+    }
+    let count = source.seats.len();
+    if [
+        source.pools.len(),
+        source.current_pack.len(),
+        source.packs_by_seat.len(),
+    ]
+    .iter()
+    .any(|len| *len != count)
+        || (!source.current_pack_origins.is_empty() && source.current_pack_origins.len() != count)
+        || (!source.connected_seats.is_empty() && source.connected_seats.len() != count)
+        || (!source.seats_picked_this_round.is_empty()
+            && source.seats_picked_this_round.len() != count)
+    {
+        return Err(snapshot_error("legacy per-seat dimensions"));
+    }
+    let mut config = source.config.clone();
+    config.flow = DraftFlow::FifoAsync;
+    config.clock_policy = context.clock_policy;
+    let mut result = DraftSession::new_fifo(
+        config,
+        source.seats.clone(),
+        source.draft_code.clone(),
+        context.session_id,
+    )?;
+    result.booster_pack_pool = source.booster_pack_pool.clone();
+    if source.status == DraftStatus::Lobby {
+        if source.pools.iter().any(|pool| !pool.is_empty())
+            || source.current_pack.iter().any(Option::is_some)
+            || source.packs_by_seat.iter().any(|packs| !packs.is_empty())
+            || source.pick_number != 0
+            || source.current_pack_number != 0
+            || !source.pack_sizes.is_empty()
+        {
+            return Err(snapshot_error("legacy Lobby contains generated cards"));
+        }
+        result.created_at = source.created_at;
+        result.updated_at = source.updated_at;
+        result.fifo_mut()?.last_now_ms = context.now_ms;
+        if !source.connected_seats.is_empty() {
+            result.connected_seats = source.connected_seats.clone();
+        }
+        result.validate_persisted_snapshot()?;
+        return Ok(result);
+    }
+    let mut inventory = BTreeMap::new();
+    for card in source
+        .packs_by_seat
+        .iter()
+        .flatten()
+        .flat_map(|pack| &pack.0)
+        .chain(
+            source
+                .current_pack
+                .iter()
+                .flatten()
+                .flat_map(|pack| &pack.0),
+        )
+        .chain(source.pools.iter().flatten())
+    {
+        if !valid_draft_id(&card.instance_id)
+            || inventory
+                .insert(card.instance_id.clone(), card.clone())
+                .is_some()
+        {
+            return Err(snapshot_error("legacy duplicate/invalid physical id"));
+        }
+    }
+    let provenance = match context.provenance {
+        Some(packs) => packs,
+        None => recover_legacy_provenance(source, &inventory)?,
+    };
+    {
+        let fifo = result.fifo_mut()?;
+        for pack in provenance {
+            for id in &pack.original_card_ids {
+                let card = inventory
+                    .get(id)
+                    .ok_or_else(|| snapshot_error("legacy evidence contains absent card"))?;
+                if fifo
+                    .cards
+                    .insert(
+                        id.clone(),
+                        DraftCardProvenance {
+                            pack_id: pack.pack_id,
+                            card: card.clone(),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(snapshot_error("legacy evidence duplicates card"));
+                }
+            }
+            if fifo.packs.insert(pack.pack_id, pack).is_some() {
+                return Err(snapshot_error("legacy evidence duplicates pack"));
+            }
+        }
+        if fifo.cards.len() != inventory.len() {
+            return Err(snapshot_error("legacy evidence omits card"));
+        }
+        fifo.last_now_ms = context.now_ms;
+    }
+    // Complete inventory determines each original size. Historical scalars are
+    // checks against that evidence; a seat-zero Chaos size cannot replace it.
+    result.pack_sizes = (0..source.config.pack_count)
+        .map(|round| {
+            result
+                .fifo_ref()?
+                .packs
+                .get(&DraftPackId(
+                    u32::from(round) * u32::from(source.config.pod_size),
+                ))
+                .map(|pack| pack.original_size)
+                .ok_or_else(|| snapshot_error("legacy provenance missing coordinate"))
+        })
+        .collect::<Result<_, _>>()?;
+    if !source.pack_sizes.is_empty() && source.pack_sizes != result.pack_sizes {
+        return Err(snapshot_error("legacy size evidence contradicts snapshot"));
+    }
+    let chaos = matches!(
+        source.config.source,
+        DraftSource::Set {
+            layout: SetLayout::Chaos { .. }
+        }
+    );
+    if !chaos
+        && result
+            .fifo_ref()?
+            .packs
+            .values()
+            .any(|pack| pack.original_size != source.cards_in_pack(pack.round))
+    {
+        return Err(snapshot_error(
+            "legacy original size contradicts uniform source",
+        ));
+    }
+    result.pools = source.pools.clone();
+    result.packs_by_seat = source.packs_by_seat.clone();
+    result.submitted_decks = source.submitted_decks.clone();
+    result.match_records = source.match_records.clone();
+    result.pairings = source.pairings.clone();
+    result.current_round = source.current_round;
+    result.created_at = source.created_at;
+    result.updated_at = source.updated_at;
+    if !source.connected_seats.is_empty() {
+        result.connected_seats = source.connected_seats.clone();
+    }
+    result.status = source.status;
+    result.current_pack_number = source.current_pack_number;
+    result.pass_direction = source.pass_direction;
+    let active = match source.status {
+        DraftStatus::Drafting => true,
+        DraftStatus::Paused => {
+            if context.paused.map(|paused| paused.phase) != Some(DraftActivePhase::Drafting) {
+                return Err(snapshot_error("legacy paused phase is unknown"));
+            }
+            true
+        }
+        DraftStatus::Lobby | DraftStatus::Review => {
+            return Err(snapshot_error("invalid legacy upgrade status"))
+        }
+        DraftStatus::Deckbuilding
+        | DraftStatus::Pairing
+        | DraftStatus::MatchInProgress
+        | DraftStatus::RoundComplete
+        | DraftStatus::Complete
+        | DraftStatus::Abandoned => false,
+    };
+    if !active
+        && (source
+            .current_pack
+            .iter()
+            .any(|pack| pack.as_ref().is_some_and(|pack| !pack.0.is_empty()))
+            || source.packs_by_seat.iter().any(|packs| !packs.is_empty()))
+    {
+        return Err(snapshot_error("legacy postdraft still owns live packs"));
+    }
+    let derived_progress = context.progress.is_none();
+    let progress = match context.progress {
+        Some(progress) if progress.len() == count => progress,
+        Some(_) => return Err(snapshot_error("legacy progress dimensions")),
+        None => {
+            if chaos || inventory.values().any(|card| card.draft_effect.is_some()) {
+                return Err(snapshot_error(
+                    "legacy sparse/effect progress requires retained evidence",
+                ));
+            }
+            let procedure = source.kind.procedure();
+            let completed_rounds = source.current_pack_number.min(source.config.pack_count);
+            let prior: u64 = (0..completed_rounds)
+                .map(|round| u64::from(procedure.pick_steps_per_pack(source.cards_in_pack(round))))
+                .sum();
+            (0..source.config.pod_size)
+                .map(|seat| {
+                    let step = if active {
+                        u64::from(source.pick_number)
+                            + u64::from(source.seats_picked_this_round.get(seat))
+                    } else {
+                        0
+                    };
+                    LegacySeatProgress {
+                        total: prior + step,
+                        round: if active {
+                            step
+                        } else {
+                            u64::from(procedure.pick_steps_per_pack(
+                                source.cards_in_pack(source.config.pack_count - 1),
+                            ))
+                        },
+                    }
+                })
+                .collect()
+        }
+    };
+    if source.seats_picked_this_round.is_empty()
+        && active
+        && (source.pick_number != 0
+            || source.current_pack_number != 0
+            || source.pools.iter().any(|pool| !pool.is_empty()))
+    {
+        return Err(snapshot_error("missing legacy bitmap is ambiguous"));
+    }
+    for (seat, evidence) in progress.iter().enumerate() {
+        if evidence.round > evidence.total || evidence.total > inventory.len() as u64 {
+            return Err(snapshot_error("invalid legacy progress evidence"));
+        }
+        if derived_progress && active {
+            let expected_pool = (0..source.current_pack_number)
+                .map(|round| usize::from(source.cards_in_pack(round)))
+                .sum::<usize>()
+                + (usize::from(source.pick_number)
+                    + usize::from(source.seats_picked_this_round.get(seat as u8)))
+                    * usize::from(source.kind.procedure().cards_per_pick);
+            if source.pools[seat].len() != expected_pool {
+                return Err(snapshot_error(
+                    "legacy skipped/singleton progress needs evidence",
+                ));
+            }
+        }
+        let state = &mut result.fifo_mut()?.seats[seat];
+        state.completed_steps = evidence.total;
+        state.round_completed_steps = evidence.round;
+        state.generation = evidence.total;
+    }
+    if active {
+        if source.current_pack_number >= source.config.pack_count {
+            return Err(snapshot_error("legacy live round out of bounds"));
+        }
+        let mut pending = Vec::new();
+        let mut passed = Vec::new();
+        for seat in 0..source.config.pod_size {
+            let Some(pack) = source.current_pack[usize::from(seat)]
+                .as_ref()
+                .filter(|pack| !pack.0.is_empty())
+            else {
+                continue;
+            };
+            let stored_origin = source
+                .current_pack_origins
+                .get(usize::from(seat))
+                .copied()
+                .flatten();
+            let inferred: HashSet<_> = pack
+                .0
+                .iter()
+                .filter(|card| card.draft_effect.is_none())
+                .map(|card| {
+                    result.fifo.as_ref().expect("initialized").cards[&card.instance_id].pack_id
+                })
+                .collect();
+            let pack_id = match stored_origin {
+                Some(origin) if origin < source.config.pod_size => DraftPackId(
+                    u32::from(source.current_pack_number) * u32::from(source.config.pod_size)
+                        + u32::from(origin),
+                ),
+                Some(_) => return Err(snapshot_error("legacy origin out of bounds")),
+                None if inferred.len() == 1 => *inferred.iter().next().expect("one origin"),
+                None => return Err(snapshot_error("legacy live pack origin is ambiguous")),
+            };
+            let original = result
+                .fifo_ref()?
+                .packs
+                .get(&pack_id)
+                .ok_or_else(|| snapshot_error("unknown legacy current origin"))?
+                .clone();
+            for card in &pack.0 {
+                if result.fifo_ref()?.cards[&card.instance_id].pack_id != pack_id {
+                    if card.draft_effect != Some(engine::types::card::DraftEffect::AdditionalPick) {
+                        return Err(snapshot_error("legacy current origin contradicts cards"));
+                    }
+                    result
+                        .fifo_mut()?
+                        .returned_effects
+                        .insert(card.instance_id.clone(), pack_id);
+                }
+            }
+            let queued = QueuedDraftPack {
+                pack_id,
+                opening_seat: original.opening_seat,
+                round: original.round,
+                original_size: original.original_size,
+                pack: pack.clone(),
+            };
+            if source.seats_picked_this_round.get(seat) {
+                passed.push((
+                    source
+                        .pass_direction
+                        .next_seat(seat, source.config.pod_size),
+                    queued,
+                ));
+            } else {
+                pending.push((seat, queued));
+            }
+        }
+        let pending_seats: HashSet<_> = pending.iter().map(|(seat, _)| *seat).collect();
+        for (seat, pack) in pending.into_iter().chain(passed) {
+            result.fifo_mut()?.seats[usize::from(seat)]
+                .queue
+                .push_back(pack);
+        }
+        result.status = DraftStatus::Drafting;
+        crate::clock::reconcile_prompts(&mut result, context.now_ms)?;
+        for seat in pending_seats {
+            let policy = result.config.clock_policy.pick;
+            let prompt = result.fifo_mut()?.seats[usize::from(seat)]
+                .prompt
+                .as_mut()
+                .expect("pending head");
+            if policy != PickClockPolicy::Off {
+                let state = context
+                    .pending_clock
+                    .ok_or_else(|| snapshot_error("legacy remaining clock is unknown"))?;
+                prompt.clock.as_mut().expect("timed head").state = match (source.status, state) {
+                    (DraftStatus::Drafting, DraftClockState::Running { .. })
+                    | (DraftStatus::Paused, DraftClockState::Frozen { .. }) => state,
+                    _ => return Err(snapshot_error("legacy clock evidence/status mismatch")),
+                };
+            } else if context.pending_clock.is_some() {
+                return Err(snapshot_error(
+                    "legacy Off clock contradicts timer evidence",
+                ));
+            }
+        }
+        if source.status == DraftStatus::Paused {
+            // Pending clocks already contain their retained frozen interval;
+            // newly exposed heads freeze their newly issued full duration.
+            for seat in &mut result.fifo_mut()?.seats {
+                if let Some(clock) = seat
+                    .prompt
+                    .as_mut()
+                    .and_then(|prompt| prompt.clock.as_mut())
+                {
+                    if let DraftClockState::Running { deadline_ms } = clock.state {
+                        clock.state = DraftClockState::Frozen {
+                            remaining_ms: deadline_ms.saturating_sub(context.now_ms),
+                        };
+                    }
+                }
+            }
+            result.fifo_mut()?.paused = context.paused;
+            result.status = DraftStatus::Paused;
+        } else if result
+            .fifo_ref()?
+            .seats
+            .iter()
+            .all(|seat| seat.queue.is_empty())
+        {
+            finish_fifo_round(&mut result, context.now_ms)?;
+        }
+    } else {
+        result.current_pack_number = result.config.pack_count;
+    }
+    result.validate_persisted_snapshot()?;
+    Ok(result)
+}
+
+fn recover_legacy_provenance(
+    source: &DraftSession,
+    inventory: &BTreeMap<String, DraftCardInstance>,
+) -> Result<Vec<DraftPackProvenance>, DraftError> {
+    let mut groups: BTreeMap<(u8, u8), BTreeMap<u8, String>> = BTreeMap::new();
+    for id in inventory.keys() {
+        // Only the historical in-tree generator shape: prefix-seat-round-card.
+        // Splitting from the right preserves hyphenated source prefixes.
+        let mut parts = id.rsplitn(4, '-');
+        let ordinal = parts
+            .next()
+            .and_then(|part| part.parse::<u8>().ok())
+            .ok_or_else(|| snapshot_error("custom legacy ids require provenance"))?;
+        let round = parts
+            .next()
+            .and_then(|part| part.parse::<u8>().ok())
+            .ok_or_else(|| snapshot_error("custom legacy ids require provenance"))?;
+        let seat = parts
+            .next()
+            .and_then(|part| part.parse::<u8>().ok())
+            .ok_or_else(|| snapshot_error("custom legacy ids require provenance"))?;
+        let prefix = parts
+            .next()
+            .ok_or_else(|| snapshot_error("legacy physical prefix missing"))?;
+        let expected = match &source.config.source {
+            DraftSource::Cube { .. } => "cube".to_string(),
+            DraftSource::Set { .. } => source.config.source.set_code_for_seat_and_pack(seat, round),
+        };
+        if seat >= source.config.pod_size
+            || round >= source.config.pack_count
+            || !prefix.eq_ignore_ascii_case(&expected)
+            || groups
+                .entry((round, seat))
+                .or_default()
+                .insert(ordinal, id.clone())
+                .is_some()
+        {
+            return Err(snapshot_error(
+                "legacy physical coordinates contradict source",
+            ));
+        }
+    }
+    if groups.len() != usize::from(source.config.pod_size) * usize::from(source.config.pack_count) {
+        return Err(snapshot_error(
+            "legacy original pack inventory is incomplete",
+        ));
+    }
+    groups
+        .into_iter()
+        .map(|((round, seat), ids)| {
+            let size = u8::try_from(ids.len())
+                .ok()
+                .filter(|size| *size > 0)
+                .ok_or_else(|| snapshot_error("legacy pack size invalid"))?;
+            if ids.keys().copied().ne(0..size) {
+                return Err(snapshot_error("legacy original ordinals are incomplete"));
+            }
+            Ok(DraftPackProvenance {
+                pack_id: DraftPackId(
+                    u32::from(round) * u32::from(source.config.pod_size) + u32::from(seat),
+                ),
+                opening_seat: seat,
+                round,
+                original_size: size,
+                original_card_ids: ids.into_values().collect(),
+            })
+        })
+        .collect()
 }
 
 /// Map seat index to PlayerId.
@@ -491,8 +2038,24 @@ fn generate_swiss_pairings(
 
 fn generate_se_pairings(session: &DraftSession, round: u8) -> Vec<DraftPairing> {
     if round == 1 {
-        // Standard seeded bracket: 0v7, 1v6, 2v5, 3v4
-        let bracket_pairs: [(u8, u8); 4] = [(0, 7), (1, 6), (2, 5), (3, 4)];
+        // Standard seeded bracket: highest seed against lowest, inward. This is
+        // MTR bracket policy, not a Comprehensive Rules concept -- there is
+        // deliberately no CR citation here.
+        //
+        // Reproduces the previous hardcoded `[(0, 7), (1, 6), (2, 5), (3, 4)]`
+        // EXACTLY at `n == 8`, and yields `[(0, 3), (1, 2)]` at `n == 4`, which
+        // is what a 4-seat single-elimination pod needs. The old literal
+        // panicked below eight seats.
+        //
+        // An odd `n` would drop the middle seat, and that is unreachable:
+        // `allowed_pod_size_range` forces `pod_size == max_pod_size` under
+        // `SingleElimination`; the only `TournamentPairings` kinds are
+        // Premier / Traditional / Sealed / Winston (Quick and CommanderDraft
+        // are `CompleteImmediately`); their max pod sizes are 8, 8, 8, 4, all
+        // even; and `apply_generate_pairings` guards `seats.len()` against that
+        // same range.
+        let n = session.seats.len() as u8;
+        let bracket_pairs: Vec<(u8, u8)> = (0..n / 2).map(|i| (i, n - 1 - i)).collect();
         bracket_pairs
             .iter()
             .enumerate()
@@ -739,6 +2302,12 @@ fn apply_replace_seat_with_bot(
         return Err(DraftError::SeatOutOfRange { seat, pod_size });
     }
 
+    // NO distribution dispatch here, deliberately. A shared-stack pod admits a
+    // bot seat exactly as every other distribution does: the seat is driven by
+    // `draft_wasm::resolve_shared_stack_bot_turns`, whose decisions go through
+    // `shared_stack::refusal_for` like any seat's. The refusal this arm used to
+    // return (`SharedStackRequiresHumanSeats`) is gone, so a mid-draft swap is
+    // no longer the seam a start-time guard had to be defended at.
     session.seats[seat as usize] = DraftSeat::Bot {
         name: name.unwrap_or_else(|| format!("Seat {}", seat + 1)),
     };
@@ -767,6 +2336,20 @@ fn apply_set_seat_connected(
     Ok(vec![DraftDelta::SeatConnectionChanged { seat, connected }])
 }
 
+/// Deals every seat's boosters from `rng` and latches the source's original
+/// pool, which games launched from this draft open boosters from (see
+/// `DraftSession::booster_pack_pool_for_game`). Both StartDraft flows deal here.
+fn generate_start_packs(
+    session: &mut DraftSession,
+    source: &dyn PackSource,
+    rng: &mut dyn rand::RngCore,
+    seat_count: u8,
+) -> Result<Vec<Vec<DraftPack>>, DraftError> {
+    let packs = source.generate_packs(rng, &session.config, seat_count)?;
+    session.booster_pack_pool = source.booster_pack_pool();
+    Ok(packs)
+}
+
 fn apply_start_draft(
     session: &mut DraftSession,
     pack_source: Option<&dyn PackSource>,
@@ -786,30 +2369,19 @@ fn apply_start_draft(
             .validate_for_draft(seat_count, session.config.pack_count)
             .map_err(|reason| DraftError::InvalidPackSequence { reason })?;
     }
+    // The procedure's own verdict on the source shape, asked before anything is
+    // generated or dealt. `validate_for_draft` above checks a layout against the
+    // pod's dimensions; this checks it against the distribution that will consume
+    // it, which is a question no layout can answer about itself.
+    procedure.validate_source(&session.config.source)?;
 
-    // CR 903.13a + CR 800.1: the smallest pod that can still deliver the
-    // multiplayer game this kind is defined as. The procedure owns the full
-    // allowed range and the pairing-only single-elimination exact size.
-    let local_cube_size_is_allowed = matches!(session.config.source, DraftSource::Cube { .. })
-        && procedure.allows_local_cube_pod_size(session.config.tournament_format, seat_count);
-    if !procedure.allows_pod_size(session.config.tournament_format, seat_count)
-        && !local_cube_size_is_allowed
-    {
-        if seat_count < procedure.min_pod_size {
-            return Err(DraftError::PodBelowMinimumSize {
-                kind: session.kind,
-                required: procedure.min_pod_size,
-                actual: seat_count,
-            });
-        }
-        return Err(DraftError::UnsupportedTournamentSize {
-            format: session.config.tournament_format,
-            required: *procedure
-                .allowed_pod_size_range(session.config.tournament_format)
-                .start(),
-            actual: seat_count,
-        });
-    }
+    // The kind's seat-count admission; see DraftKind::admit_pod_size.
+    session.kind.admit_pod_size(
+        &session.config.source,
+        session.config.tournament_format,
+        seat_count,
+        AdmissionContext::Configuration,
+    )?;
     // The session's kind and its configuration's kind must agree on how packs
     // reach the seats; a mismatched pair is a corrupt configuration. Testing the
     // two distributions for disagreement is equivalent to the previous pair of
@@ -825,24 +2397,38 @@ fn apply_start_draft(
     }
     match procedure.distribution {
         PackDistribution::AllAtOnce => {
-            if !matches!(session.config.source, DraftSource::Set { .. }) {
-                return Err(DraftError::SealedRequiresSetSource);
-            }
-            // A multi-set source labels itself with its joined distinct codes,
-            // so the session label is compared against `set_code()` rather than
-            // against any single pack's set. Mirrors `validate_persisted_snapshot`.
-            if session.config.source.set_code() != session.config.set_code
-                || session.set_code != session.config.set_code
-            {
-                return Err(DraftError::InvalidSealedConfiguration {
-                    reason: "set source and session codes must match".to_string(),
-                });
-            }
+            session.kind.admit_all_at_once(
+                &session.config,
+                Some(&session.set_code),
+                AdmissionContext::Configuration,
+            )?;
+        }
+        PackDistribution::SharedStackPiles { pile_count } => {
+            // A distribution that deals no piles has no turn to take: refused
+            // HERE, in the pre-flight arm beside the pack-count and deck-size
+            // refusals, so nothing is generated or dealt before the answer is
+            // known. Unreachable for `Winston` (`pile_count: 3`); it is the
+            // next `SharedStackPiles` row that would otherwise reach
+            // `inspected[0] = piles[0].len()` below with an empty `piles` and
+            // panic inside `StartDraft`.
+            shared_stack::piles_needed(pile_count)?;
+            // NO seat scan here, deliberately. A shared-stack pod admits BOT
+            // SEATS: a bot's turn is driven by
+            // `draft_wasm::resolve_shared_stack_bot_turns`, which reads only
+            // `view::filter_for_player`'s projection and submits ordinary
+            // `DraftAction::SharedStackDecision`s through
+            // `shared_stack::refusal_for`. There is therefore no seat-composition
+            // rule left to enforce at start time, and the `human_seats` scalar
+            // (`2` for Winston) is a per-kind default rather than an authority --
+            // see `DraftProcedure::human_seats`.
             if session.config.pack_count != procedure.packs_per_player
                 || session.config.min_deck_size != procedure.min_deck_size
             {
-                return Err(DraftError::InvalidSealedConfiguration {
-                    reason: "sealed requires six packs and a 40-card minimum deck".to_string(),
+                return Err(DraftError::InvalidSharedStackConfiguration {
+                    reason: format!(
+                        "shared-stack drafts require {} packs per seat and a {}-card minimum deck",
+                        procedure.packs_per_player, procedure.min_deck_size
+                    ),
                 });
             }
         }
@@ -853,8 +2439,7 @@ fn apply_start_draft(
     let pod_size = seat_count;
     let mut rng = ChaCha20Rng::seed_from_u64(session.config.rng_seed);
 
-    let all_packs = pack_source.generate_packs(&mut rng, &session.config, pod_size)?;
-    session.booster_pack_pool = pack_source.booster_pack_pool();
+    let all_packs = generate_start_packs(session, pack_source, &mut rng, pod_size)?;
 
     // Record the shape of the boosters the source actually produced, in pack
     // order. Every seat opens the same set in the same pack round, so seat 0's
@@ -898,6 +2483,79 @@ fn apply_start_draft(
                     status: DraftStatus::Deckbuilding,
                 },
             ]);
+        }
+        // Every pack is opened without looking at the contents and shuffled
+        // into one shared face-down main stack, which is then dealt through
+        // `pile_count` take-or-decline piles. WotC "Casual Formats": "the two
+        // players each supply three booster packs, which they open without
+        // looking at the contents". No CR -- see
+        // `PackDistribution::SharedStackPiles`.
+        PackDistribution::SharedStackPiles { pile_count } => {
+            let packs_per_seat = usize::from(procedure.packs_per_player);
+            if all_packs.len() != session.seats.len()
+                || all_packs.iter().any(|packs| packs.len() != packs_per_seat)
+            {
+                return Err(DraftError::InvalidSharedStackConfiguration {
+                    reason: format!("pack source did not generate {packs_per_seat} packs per seat"),
+                });
+            }
+            // Seat-major, then pack-major, then index order. Deterministic and
+            // RNG-free: the shuffle below is what makes the stack unpredictable,
+            // so the flatten order must not be a second source of entropy.
+            let mut main_stack: Vec<DraftCardInstance> = all_packs
+                .into_iter()
+                .flat_map(|seat_packs| seat_packs.into_iter().flat_map(|pack| pack.0))
+                .collect();
+            // The same single authority the pre-flight arm above already
+            // asked, so the `piles[0]` indexing below rests on a refusal
+            // rather than on a comment.
+            let piles_needed = shared_stack::piles_needed(pile_count)?;
+            if main_stack.len() < piles_needed {
+                return Err(DraftError::InsufficientCards {
+                    available: main_stack.len(),
+                    required: piles_needed,
+                });
+            }
+
+            // THE STREAM'S CONSUMPTION ORDER IS PART OF THE CONTRACT, because
+            // three draws share one `ChaCha20Rng`: `generate_packs` above, then
+            // the shuffle, then the starting-seat draw. SWAPPING THE LAST TWO
+            // changes both the stack order and the starting seat for a given
+            // seed, which is why `same_seed_yields_same_stack_and_starting_seat`
+            // pins a golden pair rather than only asserting determinism.
+            main_stack.shuffle(&mut rng);
+            let starting_seat = rng.random_range(0..seat_count);
+
+            // The LAST element is the top, so seeding pile `i` in ascending `i`
+            // is "deal the top card onto each pile in turn".
+            let mut piles: Vec<Vec<DraftCardInstance>> = vec![Vec::new(); piles_needed];
+            for pile in piles.iter_mut() {
+                pile.push(
+                    main_stack
+                        .pop()
+                        .expect("the stack holds at least `pile_count` cards"),
+                );
+            }
+            let mut inspected = vec![0usize; piles_needed];
+            // First write site of the `inspected` contract: at turn start the
+            // active seat is looking at pile 0. Index 0 exists because
+            // `shared_stack::piles_needed` refused a zero-pile row above, in
+            // the pre-flight arm.
+            inspected[0] = piles[0].len();
+
+            session.shared_stack = Some(SharedStackState {
+                main_stack,
+                piles,
+                starting_seat,
+                active_seat: starting_seat,
+                cursor: 0,
+                inspected,
+                decisions: 0,
+                history: Vec::new(),
+                forced_draws: vec![None; usize::from(seat_count)],
+            });
+            session.status = DraftStatus::Drafting;
+            return Ok(vec![DraftDelta::DraftStarted]);
         }
         PackDistribution::PickAndPass => {}
     }
@@ -973,9 +2631,14 @@ pub(crate) fn concession_set_codes(session: &DraftSession) -> Vec<&str> {
             // A cube contains no draft boosters from any set.
             DraftSource::Cube { .. } => Vec::new(),
         },
-        DraftKind::Quick | DraftKind::Premier | DraftKind::Traditional | DraftKind::Sealed => {
-            Vec::new()
-        }
+        // CR 903.13e is scoped to Commander Draft, so every kind outside
+        // CR 903.13 concedes nothing -- including `Winston`, which carries no
+        // CR section at all.
+        DraftKind::Quick
+        | DraftKind::Premier
+        | DraftKind::Traditional
+        | DraftKind::Sealed
+        | DraftKind::Winston => Vec::new(),
     }
 }
 
@@ -984,8 +2647,9 @@ fn apply_submit_deck(
     seat: u8,
     main_deck: Vec<String>,
     commanders: Vec<String>,
+    printings: Vec<DeckPrinting>,
 ) -> Result<Vec<DraftDelta>, DraftError> {
-    if session.status != DraftStatus::Deckbuilding {
+    if !session.deck_submission_open() {
         return Err(DraftError::InvalidTransition {
             from: session.status,
             action: "SubmitDeck".to_string(),
@@ -1031,7 +2695,8 @@ fn apply_submit_deck(
         &commanders,
         // CR 903.3: the floor is the kind's, read from the procedure table.
         // This is the line that makes the value kind-derived rather than
-        // assumed -- `0` for the four CR 905.1a kinds, `1` for CommanderDraft.
+        // assumed -- `0` for every kind whose decks are not Commander decks
+        // (the four CR 905.1a kinds and `Winston`), `1` for CommanderDraft.
         usize::from(session.kind.procedure().commanders_required),
     ) {
         return Err(DraftError::ValidationFailed { errors });
@@ -1051,10 +2716,19 @@ fn apply_submit_deck(
             // CR 903.3: snapshotted, not re-derived. A later pool change
             // must never silently re-designate this seat's commander(s).
             commanders,
+            // Replace names and owner choices together, including empty clearing.
+            printings,
         },
     );
 
     let mut deltas = vec![DraftDelta::DeckSubmitted { seat }];
+
+    // `deck_submission_open` admits exactly two statuses, and only deckbuilding
+    // completes on the last submission. A between-rounds revision (MTR 7.3)
+    // never moves the pod; the host still advances the round.
+    if session.status != DraftStatus::Deckbuilding {
+        return Ok(deltas);
+    }
 
     // Check if all human seats have submitted
     let human_count = session
@@ -1097,6 +2771,10 @@ fn apply_submit_deck(
 }
 
 #[cfg(test)]
+#[path = "session_fifo_tests.rs"]
+mod fifo_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::pack_source::FixturePackSource;
@@ -1104,6 +2782,73 @@ mod tests {
     // UNION (`draft_set_concessions_for`); these rows assert the union against
     // its parts, so they need the per-set answer too.
     use engine::game::deck_validation::draft_set_concessions;
+
+    #[test]
+    fn submitted_printings_replace_atomically_and_clear_on_empty_resubmission() {
+        use engine::types::card_printing::{CardPrinting, DeckSection};
+        let (mut session, _) = test_session(2);
+        session.status = DraftStatus::Deckbuilding;
+        let submission = |name: &str, set: Option<&str>| DraftAction::SubmitDeck {
+            seat: 0,
+            main_deck: vec![name.into(); 40],
+            commanders: Vec::new(),
+            printings: set
+                .into_iter()
+                .map(|set| DeckPrinting {
+                    section: DeckSection::MainDeck,
+                    name: name.into(),
+                    count: 2,
+                    printing: CardPrinting {
+                        set_code: set.into(),
+                        collector_number: "001".into(),
+                    },
+                })
+                .collect(),
+        };
+        for (name, set) in [
+            ("Plains", Some("lea")),
+            ("Island", Some("leb")),
+            ("Island", Some("2ed")),
+            ("Island", None),
+        ] {
+            let action = submission(name, set);
+            let DraftAction::SubmitDeck {
+                main_deck,
+                commanders,
+                printings,
+                ..
+            } = action.clone()
+            else {
+                unreachable!()
+            };
+            let deltas = apply(&mut session, action, None).unwrap();
+            assert!(deltas.contains(&DraftDelta::DeckSubmitted { seat: 0 }));
+            assert_eq!(session.status, DraftStatus::Deckbuilding);
+            assert_eq!(
+                session.submitted_decks[&PlayerId(0)],
+                DraftDeckSubmission {
+                    seat: 0,
+                    main_deck,
+                    commanders,
+                    printings
+                },
+                "accepted resubmission replaces names and printings, including empty clearing"
+            );
+        }
+        apply(&mut session, submission("Plains", Some("lea")), None).unwrap();
+        let before = session.submitted_decks.clone();
+        assert!(apply(&mut session, submission("Not in pool", Some("bad")), None).is_err());
+        assert_eq!(
+            session.submitted_decks, before,
+            "invalid names preserve the prior submission"
+        );
+        session.status = DraftStatus::Pairing;
+        assert!(apply(&mut session, submission("Island", None), None).is_err());
+        assert_eq!(
+            session.submitted_decks, before,
+            "invalid transition preserves the prior submission"
+        );
+    }
 
     #[test]
     fn cube_booster_pool_captures_original_entries_before_picks_and_restores() {
@@ -1197,6 +2942,9 @@ mod tests {
 
     fn test_session(pod_size: u8) -> (DraftSession, FixturePackSource) {
         let config = DraftConfig {
+            flow: crate::types::DraftFlow::LegacyBarrier,
+            selection_policy: crate::types::DraftSelectionPolicy::default(),
+            clock_policy: crate::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
@@ -1415,6 +3163,399 @@ mod tests {
         }
     }
 
+    /// `test_session(pod_size)` with `edit` applied to the lobby.
+    fn edited_session(
+        pod_size: u8,
+        edit: impl FnOnce(&mut DraftSession),
+    ) -> (DraftSession, FixturePackSource) {
+        let (mut session, source) = test_session(pod_size);
+        edit(&mut session);
+        (session, source)
+    }
+
+    /// Turn a `test_session` lobby into a Commander Draft lobby.
+    fn make_commander_draft(session: &mut DraftSession) {
+        session.kind = DraftKind::CommanderDraft;
+        session.config.kind = DraftKind::CommanderDraft;
+        session.config.min_deck_size = 60;
+    }
+
+    /// Turn a `test_session` lobby into a Sealed lobby opening six packs.
+    fn make_sealed(session: &mut DraftSession) {
+        session.kind = DraftKind::Sealed;
+        session.config.kind = DraftKind::Sealed;
+        session.config.pack_count = 6;
+    }
+
+    fn local_cube() -> DraftSource {
+        DraftSource::Cube {
+            id: "cube".to_string(),
+            name: "cube".to_string(),
+        }
+    }
+
+    /// Legacy `StartDraft` reports every seat-count and Sealed admission
+    /// refusal with its exact error (variant, fields and reason text), leaves
+    /// the lobby in `Lobby`, and keeps its check order wherever two checks
+    /// could both refuse one lobby.
+    #[test]
+    fn legacy_start_draft_admission_refusals_keep_their_exact_errors() {
+        // The admitted siblings come first: each of these lobbies starts.
+        let admitted = [
+            ("Premier, two seats", test_session(2)),
+            (
+                "Premier, eight seats, single elimination",
+                edited_session(8, |s| {
+                    s.config.tournament_format = TournamentFormat::SingleElimination;
+                }),
+            ),
+            (
+                "Quick cube, one seat",
+                edited_session(1, |s| {
+                    s.kind = DraftKind::Quick;
+                    s.config.kind = DraftKind::Quick;
+                    s.config.source = local_cube();
+                }),
+            ),
+            ("Sealed, two seats", edited_session(2, make_sealed)),
+        ];
+        for (label, (mut session, source)) in admitted {
+            assert!(
+                apply(&mut session, DraftAction::StartDraft, Some(&source)).is_ok(),
+                "{label} should start"
+            );
+            assert_ne!(session.status, DraftStatus::Lobby, "{label}");
+        }
+
+        let dimension_refusal = DraftError::InvalidSealedConfiguration {
+            reason: "sealed requires six packs and a 40-card minimum deck".to_string(),
+        };
+        let label_refusal = DraftError::InvalidSealedConfiguration {
+            reason: "set source and session codes must match".to_string(),
+        };
+        let refused = [
+            (
+                "Commander Draft, two seats",
+                edited_session(2, make_commander_draft),
+                DraftError::PodBelowMinimumSize {
+                    kind: DraftKind::CommanderDraft,
+                    required: 3,
+                    actual: 2,
+                },
+            ),
+            (
+                "Premier, one seat",
+                test_session(1),
+                DraftError::PodBelowMinimumSize {
+                    kind: DraftKind::Premier,
+                    required: 2,
+                    actual: 1,
+                },
+            ),
+            (
+                "Premier, nine seats",
+                test_session(9),
+                DraftError::UnsupportedTournamentSize {
+                    format: TournamentFormat::Swiss,
+                    required: 2,
+                    actual: 9,
+                },
+            ),
+            (
+                "Premier, four seats, single elimination",
+                edited_session(4, |s| {
+                    s.config.tournament_format = TournamentFormat::SingleElimination;
+                }),
+                DraftError::UnsupportedTournamentSize {
+                    format: TournamentFormat::SingleElimination,
+                    required: 8,
+                    actual: 4,
+                },
+            ),
+            (
+                "Premier cube, one seat",
+                edited_session(1, |s| s.config.source = local_cube()),
+                DraftError::PodBelowMinimumSize {
+                    kind: DraftKind::Premier,
+                    required: 2,
+                    actual: 1,
+                },
+            ),
+            (
+                "Sealed from a cube",
+                edited_session(2, |s| {
+                    make_sealed(s);
+                    s.config.source = local_cube();
+                }),
+                DraftError::SealedRequiresSetSource,
+            ),
+            (
+                "Sealed whose source names another set",
+                edited_session(2, |s| {
+                    make_sealed(s);
+                    s.config.source = DraftSource::single_set("OTHER");
+                }),
+                label_refusal.clone(),
+            ),
+            (
+                "Sealed whose session label names another set",
+                edited_session(2, |s| {
+                    make_sealed(s);
+                    s.set_code = "OTHER".to_string();
+                }),
+                label_refusal.clone(),
+            ),
+            (
+                "Sealed with three packs",
+                edited_session(2, |s| {
+                    make_sealed(s);
+                    s.config.pack_count = 3;
+                }),
+                dimension_refusal.clone(),
+            ),
+            (
+                "Sealed with a 41-card minimum deck",
+                edited_session(2, |s| {
+                    make_sealed(s);
+                    s.config.min_deck_size = 41;
+                }),
+                dimension_refusal.clone(),
+            ),
+            // Lobbies that two checks could refuse: the earlier check reports.
+            (
+                "Sealed cube, one seat: seat count before the Sealed checks",
+                edited_session(1, |s| {
+                    make_sealed(s);
+                    s.config.source = local_cube();
+                }),
+                DraftError::PodBelowMinimumSize {
+                    kind: DraftKind::Sealed,
+                    required: 2,
+                    actual: 1,
+                },
+            ),
+            (
+                "Sealed cube, three packs: source before dimensions",
+                edited_session(2, |s| {
+                    make_sealed(s);
+                    s.config.source = local_cube();
+                    s.config.pack_count = 3;
+                }),
+                DraftError::SealedRequiresSetSource,
+            ),
+            (
+                "Sealed naming another set, three packs: label before dimensions",
+                edited_session(2, |s| {
+                    make_sealed(s);
+                    s.config.source = DraftSource::single_set("OTHER");
+                    s.config.pack_count = 3;
+                }),
+                label_refusal.clone(),
+            ),
+            (
+                "Sealed session, Premier configuration",
+                edited_session(2, |s| s.kind = DraftKind::Sealed),
+                DraftError::InvalidSealedConfiguration {
+                    reason: "session kind does not match configuration".to_string(),
+                },
+            ),
+            (
+                "Sealed session, Premier configuration, one seat: seat count before kinds",
+                edited_session(1, |s| s.kind = DraftKind::Sealed),
+                DraftError::PodBelowMinimumSize {
+                    kind: DraftKind::Sealed,
+                    required: 2,
+                    actual: 1,
+                },
+            ),
+            (
+                "nine seats, two-seat Chaos layout: layout before seat count",
+                edited_session(9, |s| s.config.source = chaos_layout(2)),
+                DraftError::InvalidPackSequence {
+                    reason: "Chaos assignments must contain 9 seats, got 2".to_string(),
+                },
+            ),
+            (
+                "Winston, five seats, Chaos layout: source verdict before seat count",
+                edited_session(5, |s| {
+                    s.kind = DraftKind::Winston;
+                    s.config.kind = DraftKind::Winston;
+                    s.config.source = chaos_layout(5);
+                }),
+                DraftError::InvalidSharedStackConfiguration {
+                    reason: CHAOS_LAYOUT_REFUSAL.to_string(),
+                },
+            ),
+        ];
+        for (label, (mut session, source), error) in refused {
+            assert_eq!(
+                apply(&mut session, DraftAction::StartDraft, Some(&source)),
+                Err(error),
+                "{label}"
+            );
+            assert_eq!(session.status, DraftStatus::Lobby, "{label}");
+        }
+    }
+
+    /// Legacy persisted-snapshot validation reports every seat-count and Sealed
+    /// admission refusal with its exact error, and keeps its check order
+    /// wherever two checks could both refuse one snapshot.
+    #[test]
+    fn legacy_snapshot_admission_refusals_keep_their_exact_errors() {
+        // The admitted siblings come first: each of these snapshots validates.
+        let admitted = [
+            ("Premier, two seats", test_session(2)),
+            (
+                "Quick cube, one seat",
+                edited_session(1, |s| {
+                    s.kind = DraftKind::Quick;
+                    s.config.kind = DraftKind::Quick;
+                    s.config.source = local_cube();
+                }),
+            ),
+            (
+                "Commander Draft, three seats, single elimination",
+                edited_session(3, |s| {
+                    make_commander_draft(s);
+                    s.config.tournament_format = TournamentFormat::SingleElimination;
+                }),
+            ),
+            ("Sealed, two seats", edited_session(2, make_sealed)),
+        ];
+        for (label, (session, _)) in admitted {
+            assert_eq!(session.validate_persisted_snapshot(), Ok(()), "{label}");
+        }
+
+        let pod_refusal = DraftError::InvalidSealedSnapshot {
+            reason: "pod size does not satisfy the draft procedure".to_string(),
+        };
+        let label_refusal = DraftError::InvalidSealedSnapshot {
+            reason: "set source and session codes must match".to_string(),
+        };
+        let dimension_refusal = DraftError::InvalidSealedSnapshot {
+            reason: "sealed requires six packs and a 40-card minimum deck".to_string(),
+        };
+        let refused = [
+            ("Premier, nine seats", test_session(9), pod_refusal.clone()),
+            (
+                "Commander Draft, two seats",
+                edited_session(2, make_commander_draft),
+                pod_refusal.clone(),
+            ),
+            (
+                "Premier, four seats, single elimination",
+                edited_session(4, |s| {
+                    s.config.tournament_format = TournamentFormat::SingleElimination;
+                }),
+                pod_refusal.clone(),
+            ),
+            (
+                "Sealed from a cube",
+                edited_session(2, |s| {
+                    make_sealed(s);
+                    s.config.source = local_cube();
+                }),
+                DraftError::SealedRequiresSetSource,
+            ),
+            (
+                "Sealed whose source names another set",
+                edited_session(2, |s| {
+                    make_sealed(s);
+                    s.config.source = DraftSource::single_set("OTHER");
+                }),
+                label_refusal.clone(),
+            ),
+            (
+                "Sealed whose session label names another set",
+                edited_session(2, |s| {
+                    make_sealed(s);
+                    s.set_code = "OTHER".to_string();
+                }),
+                label_refusal.clone(),
+            ),
+            (
+                "Sealed with three packs",
+                edited_session(2, |s| {
+                    make_sealed(s);
+                    s.config.pack_count = 3;
+                }),
+                dimension_refusal.clone(),
+            ),
+            (
+                "Sealed with a 41-card minimum deck",
+                edited_session(2, |s| {
+                    make_sealed(s);
+                    s.config.min_deck_size = 41;
+                }),
+                dimension_refusal.clone(),
+            ),
+            // Snapshots that two checks could refuse: the earlier check reports.
+            (
+                "Sealed cube, one seat: seat count before the Sealed checks",
+                edited_session(1, |s| {
+                    make_sealed(s);
+                    s.config.source = local_cube();
+                }),
+                pod_refusal.clone(),
+            ),
+            (
+                "Sealed cube, three packs: source before dimensions",
+                edited_session(2, |s| {
+                    make_sealed(s);
+                    s.config.source = local_cube();
+                    s.config.pack_count = 3;
+                }),
+                DraftError::SealedRequiresSetSource,
+            ),
+            (
+                "Sealed naming another set, three packs: label before dimensions",
+                edited_session(2, |s| {
+                    make_sealed(s);
+                    s.config.source = DraftSource::single_set("OTHER");
+                    s.config.pack_count = 3;
+                }),
+                label_refusal.clone(),
+            ),
+            (
+                "drafting Sealed, three packs: dimensions before status",
+                edited_session(2, |s| {
+                    make_sealed(s);
+                    s.config.pack_count = 3;
+                    s.status = DraftStatus::Drafting;
+                }),
+                dimension_refusal.clone(),
+            ),
+            (
+                "Sealed session, Premier configuration, nine seats: kinds before seat count",
+                edited_session(9, |s| s.kind = DraftKind::Sealed),
+                DraftError::InvalidSealedSnapshot {
+                    reason: "session kind does not match configuration".to_string(),
+                },
+            ),
+            (
+                "nine seats, two-seat Chaos layout: layout before seat count",
+                edited_session(9, |s| s.config.source = chaos_layout(2)),
+                DraftError::InvalidPackSequence {
+                    reason: "Chaos assignments must contain 9 seats, got 2".to_string(),
+                },
+            ),
+            (
+                "Winston, five seats, Chaos layout: source verdict before seat count",
+                edited_session(5, |s| {
+                    s.kind = DraftKind::Winston;
+                    s.config.kind = DraftKind::Winston;
+                    s.config.source = chaos_layout(5);
+                }),
+                DraftError::InvalidSharedStackConfiguration {
+                    reason: CHAOS_LAYOUT_REFUSAL.to_string(),
+                },
+            ),
+        ];
+        for (label, (session, _), error) in refused {
+            assert_eq!(session.validate_persisted_snapshot(), Err(error), "{label}");
+        }
+    }
+
     #[test]
     fn sealed_rejects_mismatched_set_code_before_generating_packs() {
         let (mut session, source) = test_session(2);
@@ -1585,6 +3726,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -1619,6 +3761,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         );
@@ -1629,6 +3772,9 @@ mod tests {
     #[test]
     fn submit_deck_all_submitted_quick_draft_transitions_to_complete() {
         let config = DraftConfig {
+            flow: crate::types::DraftFlow::LegacyBarrier,
+            selection_policy: crate::types::DraftSelectionPolicy::default(),
+            clock_policy: crate::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Quick,
@@ -1677,6 +3823,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -1721,6 +3868,7 @@ mod tests {
                 seat: 0,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -1733,6 +3881,7 @@ mod tests {
                 seat: 1,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -1808,6 +3957,7 @@ mod tests {
                 // so `CommanderNotInDeck` cannot fire. The row's subject is
                 // unchanged -- only what makes a Commander deck legal is.
                 commanders: vec!["Card 0".to_string()],
+                printings: Vec::new(),
             },
             None,
         )
@@ -1913,6 +4063,7 @@ mod tests {
                 // so `CommanderNotInDeck` cannot fire. The row's subject is
                 // unchanged -- only what makes a Commander deck legal is.
                 commanders: vec!["Card 0".to_string()],
+                printings: Vec::new(),
             },
             None,
         )
@@ -1936,6 +4087,7 @@ mod tests {
                 // so `CommanderNotInDeck` cannot fire. The row's subject is
                 // unchanged -- only what makes a Commander deck legal is.
                 commanders: vec!["Card 0".to_string()],
+                printings: Vec::new(),
             },
             None,
         )
@@ -1999,6 +4151,7 @@ mod tests {
                 seat: 0,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -2013,6 +4166,7 @@ mod tests {
                 seat: 1,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -2037,6 +4191,7 @@ mod tests {
                 seat: 0,
                 main_deck: vec![],
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         );
@@ -2047,6 +4202,93 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// A seat-0 basics-only deck: `test_session` pools are empty, so only the
+    /// addable basics validate.
+    fn basics_submission(name: &str) -> DraftAction {
+        DraftAction::SubmitDeck {
+            seat: 0,
+            main_deck: vec![name.into(); 40],
+            commanders: Vec::new(),
+            printings: Vec::new(),
+        }
+    }
+
+    /// A pod between rounds whose seat 0 already submitted 40 Plains.
+    fn round_complete_session(policy: PodPolicy) -> DraftSession {
+        let (mut session, _) = test_session(2);
+        session.config.pod_policy = policy;
+        session.status = DraftStatus::Deckbuilding;
+        apply(&mut session, basics_submission("Plains"), None).unwrap();
+        session.status = DraftStatus::RoundComplete;
+        session
+    }
+
+    #[test]
+    fn casual_pod_accepts_a_deck_revision_between_rounds_without_moving_the_pod() {
+        let mut session = round_complete_session(PodPolicy::Casual);
+
+        let deltas = apply(&mut session, basics_submission("Island"), None).unwrap();
+
+        assert_eq!(deltas, vec![DraftDelta::DeckSubmitted { seat: 0 }]);
+        assert_eq!(
+            session.submitted_decks[&PlayerId(0)].main_deck,
+            vec!["Island".to_string(); 40],
+            "MTR 7.3: the revision replaces the submission the next round reads"
+        );
+        assert_eq!(session.status, DraftStatus::RoundComplete);
+    }
+
+    #[test]
+    fn competitive_pod_refuses_a_deck_revision_between_rounds() {
+        // Reach guard: the identical payload is accepted in a Casual pod.
+        let mut casual = round_complete_session(PodPolicy::Casual);
+        assert!(apply(&mut casual, basics_submission("Island"), None).is_ok());
+
+        let mut session = round_complete_session(PodPolicy::Competitive);
+        let before = session.submitted_decks.clone();
+        let result = apply(&mut session, basics_submission("Island"), None);
+
+        assert!(matches!(
+            result,
+            Err(DraftError::InvalidTransition {
+                from: DraftStatus::RoundComplete,
+                ..
+            })
+        ));
+        assert_eq!(session.submitted_decks, before);
+    }
+
+    #[test]
+    fn between_rounds_revision_is_validated_against_the_seat_pool() {
+        let mut session = round_complete_session(PodPolicy::Casual);
+        let before = session.submitted_decks.clone();
+
+        let result = apply(&mut session, basics_submission("Not in pool"), None);
+
+        assert!(matches!(result, Err(DraftError::ValidationFailed { .. })));
+        assert_eq!(session.submitted_decks, before);
+        assert_eq!(session.status, DraftStatus::RoundComplete);
+    }
+
+    #[test]
+    fn casual_pod_refuses_a_deck_revision_outside_the_between_rounds_window() {
+        // Reach guard: `round_complete_session` itself proves Casual accepts at
+        // `RoundComplete` (the casual acceptance test covers the revision).
+        for status in [DraftStatus::Pairing, DraftStatus::MatchInProgress] {
+            let mut session = round_complete_session(PodPolicy::Casual);
+            session.status = status;
+            let before = session.submitted_decks.clone();
+
+            let result = apply(&mut session, basics_submission("Island"), None);
+
+            assert!(
+                matches!(result, Err(DraftError::InvalidTransition { from, .. }) if from == status),
+                "{status:?} must refuse SubmitDeck"
+            );
+            assert_eq!(session.submitted_decks, before);
+        }
     }
 
     #[test]
@@ -2384,9 +4626,391 @@ mod tests {
         assert_eq!(unordered(pairings[0].players), unordered([p[0], p[2]]));
     }
 
+    /// V19. The bracket is seeded for ANY even pod, not just eight seats.
+    ///
+    /// The `n == 8` leg is an EXACT-EQUALITY regression against the literal the
+    /// generalization replaced, seat for seat. The `n == 4` leg is the one a
+    /// 4-seat single-elimination Winston pod needs: the old literal indexed
+    /// seats 4..7 and panicked below eight.
+    #[test]
+    fn se_bracket_is_seeded_for_any_even_pod() {
+        fn round_one_pairs(kind: DraftKind, pod_size: u8) -> Vec<(u8, u8)> {
+            let (mut session, _) = test_session(pod_size);
+            // `allowed_pod_size_range` forces `pod_size == max_pod_size` under
+            // single elimination, so the 4-seat bracket is reachable only for a
+            // kind whose ceiling is 4 -- which is exactly why this row exists.
+            session.kind = kind;
+            session.config.kind = kind;
+            session.config.tournament_format = TournamentFormat::SingleElimination;
+            session.status = DraftStatus::Deckbuilding;
+            apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
+            session
+                .pairings
+                .iter()
+                .filter(|pairing| pairing.round == 1)
+                .map(|pairing| (pairing.players[0].0, pairing.players[1].0))
+                .collect()
+        }
+
+        assert_eq!(
+            round_one_pairs(DraftKind::Premier, 8),
+            vec![(0, 7), (1, 6), (2, 5), (3, 4)]
+        );
+        assert_eq!(round_one_pairs(DraftKind::Winston, 4), vec![(0, 3), (1, 2)]);
+    }
+
+    /// A started, drafting 2-seat Winston pod, built through the REAL reducer
+    /// so its shared stack is the shape `StartDraft` produces rather than one
+    /// a test invented.
+    fn winston_started() -> DraftSession {
+        let (mut session, source) = test_session(2);
+        session.kind = DraftKind::Winston;
+        session.config.kind = DraftKind::Winston;
+        apply(&mut session, DraftAction::StartDraft, Some(&source))
+            .expect("a human-only Winston pod starts");
+        assert_eq!(session.status, DraftStatus::Drafting);
+        session
+    }
+
+    /// The import legs that keep a crafted snapshot from PANICKING the reducer
+    /// or from restoring a session nobody can play.
+    ///
+    /// Every leg here is reachable only from `import_draft_session`, which
+    /// parses client-supplied JSON — so each is a hostile snapshot refused,
+    /// not an internal invariant restated. The last one is the interesting
+    /// one: it is not a shape check at all. A drafting session with three
+    /// empty piles and a stocked stack satisfies every structural rule above
+    /// it and is permanently stuck, so playability is asked directly, through
+    /// the same `forced_decision` the timeout sweep uses rather than by
+    /// re-deriving anything from pile sizes.
+    #[test]
+    fn a_shared_stack_snapshot_that_would_panic_or_stall_is_refused_at_import() {
+        let reason_for = |mutate: &dyn Fn(&mut DraftSession)| -> String {
+            let mut session = winston_started();
+            mutate(&mut session);
+            match session
+                .validate_persisted_snapshot()
+                .expect_err("a snapshot the reducer could not survive is not restorable")
+            {
+                DraftError::InvalidSharedStackConfiguration { reason } => reason,
+                other => panic!("expected InvalidSharedStackConfiguration, got {other:?}"),
+            }
+        };
+
+        // `apply_shared_stack_decision` indexes `pools[seat]` raw, and so does
+        // `filter_for_player`. A short vector is an index-out-of-bounds, which
+        // the release wasm profile turns into an aborted client.
+        assert!(reason_for(&|session| session.pools.clear()).contains("per-seat vectors"));
+
+        // `play_first_chooser` computes `(starting_seat + 1) % 2`, which
+        // overflows a `u8` at 255.
+        assert!(reason_for(&|session| {
+            session.shared_stack.as_mut().unwrap().starting_seat = 255;
+        })
+        .contains("starting seat"));
+
+        // The `inspected` contract's own rule: a seat has looked at piles up to
+        // its cursor and no further. Bounded-per-pile is not the same claim, and
+        // the gap is an over-reveal — the view slices every pile by `inspected`.
+        assert!(reason_for(&|session| {
+            let state = session.shared_stack.as_mut().unwrap();
+            state.cursor = 0;
+            let ahead = state.piles[1].len();
+            state.inspected[1] = ahead;
+        })
+        .contains("beyond its cursor"));
+
+        // Structurally perfect and permanently unplayable: no take (every pile
+        // empty) and no decline (nothing later to advance onto), so
+        // `forced_decision` finds nothing for the sweep either.
+        assert!(reason_for(&|session| {
+            let state = session.shared_stack.as_mut().unwrap();
+            let emptied: Vec<DraftCardInstance> =
+                state.piles.iter_mut().flat_map(std::mem::take).collect();
+            state.main_stack.extend(emptied);
+            state.inspected.iter_mut().for_each(|seen| *seen = 0);
+            state.cursor = 0;
+        })
+        .contains("must admit a legal decision"));
+
+        // PAIRED POSITIVE, and it is what keeps the legs above from passing on
+        // a session that was never valid: the real started pod restores.
+        winston_started()
+            .validate_persisted_snapshot()
+            .expect("a real started Winston snapshot restores");
+    }
+
+    /// The forced-draw notice vector's own import rule, and the migration the
+    /// reducer performs for the shape the rule deliberately lets through.
+    ///
+    /// Two legs, and the ACCEPTED one is the interesting half: `forced_draws`
+    /// carries `#[serde(default)]`, so a snapshot written before the field
+    /// existed arrives EMPTY and must load — but an empty vector would then
+    /// no-op every `get_mut` for the rest of the pod, silently costing that
+    /// draft its notices. So the import accepts it and the next decision grows
+    /// it.
+    #[test]
+    fn a_forced_draw_notice_vector_is_held_to_the_seat_count_or_migrated() {
+        // Refused: a length that is neither empty nor one slot per seat is a
+        // corrupt snapshot, not an old one.
+        let mut wrong_length = winston_started();
+        wrong_length
+            .shared_stack
+            .as_mut()
+            .expect("a started Winston session carries its stack")
+            .forced_draws = vec![None; 5];
+        assert!(matches!(
+            wrong_length.validate_persisted_snapshot(),
+            Err(DraftError::InvalidSharedStackConfiguration { .. })
+        ));
+
+        // Accepted, and then MIGRATED. An empty vector is what the serde
+        // default produces for a pre-field snapshot.
+        let mut legacy = winston_started();
+        legacy
+            .shared_stack
+            .as_mut()
+            .expect("a started Winston session carries its stack")
+            .forced_draws = Vec::new();
+        legacy
+            .validate_persisted_snapshot()
+            .expect("a snapshot that predates the field still loads");
+
+        let seat = legacy.shared_stack.as_ref().unwrap().active_seat;
+        let pile = legacy.shared_stack.as_ref().unwrap().cursor;
+        apply(
+            &mut legacy,
+            DraftAction::SharedStackDecision {
+                seat,
+                pile,
+                decision: SharedStackPileDecision::Take,
+            },
+            None,
+        )
+        .expect("the first decision after a legacy load applies");
+        assert_eq!(
+            legacy.shared_stack.as_ref().unwrap().forced_draws.len(),
+            legacy.seats.len(),
+            "the reducer grows the vector rather than no-opping on it forever"
+        );
+    }
+
+    /// A dimensionally VALID `SetLayout::Chaos` for a `pod_size`-seat,
+    /// 3-pack `test_session`, so `validate_for_draft` passes it through and
+    /// the only thing left that can refuse it is the distribution.
+    fn chaos_layout(pod_size: u8) -> DraftSource {
+        DraftSource::Set {
+            layout: SetLayout::Chaos {
+                candidate_codes: vec!["TST".to_string()],
+                assignments: vec![vec!["TST".to_string(); 3]; usize::from(pod_size)],
+            },
+        }
+    }
+
+    /// A shared-stack draft takes a named pack sequence, never a Chaos
+    /// assignment: the shuffle that builds the stack destroys the
+    /// `(seat, round)` identity a Chaos layout exists to express, and the
+    /// privacy it keeps would leave the players unable to learn what pool they
+    /// are drafting.
+    ///
+    /// The PAIRED POSITIVE is the load-bearing half. The identical layout,
+    /// pod, and pack source start a Premier pod, so the Winston refusal is
+    /// demonstrably about the distribution and not about the layout's
+    /// dimensions, the fixture pool, or the two-seat pod — every one of which
+    /// `validate_for_draft` and the pod-size gate could otherwise be answering.
+    #[test]
+    fn a_shared_stack_draft_refuses_a_chaos_layout() {
+        let (mut premier, source) = test_session(2);
+        premier.config.source = chaos_layout(2);
+        apply(&mut premier, DraftAction::StartDraft, Some(&source))
+            .expect("a pick-and-pass pod still drafts a Chaos layout");
+
+        let (mut winston, source) = test_session(2);
+        winston.kind = DraftKind::Winston;
+        winston.config.kind = DraftKind::Winston;
+        winston.config.source = chaos_layout(2);
+        match apply(&mut winston, DraftAction::StartDraft, Some(&source))
+            .expect_err("a shared stack does not deal a Chaos assignment")
+        {
+            DraftError::InvalidSharedStackConfiguration { reason } => {
+                assert!(
+                    reason.contains("Chaos"),
+                    "the refusal must name the layout it refused, got {reason}"
+                );
+            }
+            other => panic!("expected InvalidSharedStackConfiguration, got {other:?}"),
+        }
+        // Refused BEFORE anything is dealt: nothing was generated, so no
+        // shared stack exists and the pod is still in its lobby.
+        assert!(winston.shared_stack.is_none());
+        assert_eq!(winston.status, DraftStatus::Lobby);
+    }
+
+    /// The OTHER two source shapes a shared stack admits, so the refusal above
+    /// is demonstrably about the Chaos layout and not about set-backed pools.
+    ///
+    /// A cube generates packs exactly as a set does and names no seats, which
+    /// is why `draft-wasm`'s cube entry point lets a Winston pod run from one;
+    /// this is that permission asserted against the authority that grants it.
+    #[test]
+    fn a_shared_stack_draft_takes_a_named_sequence_and_a_cube() {
+        let winston = DraftKind::Winston.procedure();
+        assert!(!winston.allows_chaos_layout());
+        assert!(winston
+            .validate_source(&DraftSource::single_set("TST"))
+            .is_ok());
+        assert!(winston
+            .validate_source(&DraftSource::Cube {
+                id: "cube-1".to_string(),
+                name: "A Cube".to_string(),
+            })
+            .is_ok());
+        // Every other kind keeps the layout, read off the procedure table
+        // rather than listed here: a new pick-and-pass kind joins this leg
+        // without editing it.
+        for kind in [
+            DraftKind::Premier,
+            DraftKind::Traditional,
+            DraftKind::Sealed,
+        ] {
+            assert!(
+                kind.procedure().allows_chaos_layout(),
+                "{kind:?} still draws its boosters per seat and round"
+            );
+        }
+    }
+
+    /// The same rule at the IMPORT boundary, which `StartDraft` never guards:
+    /// `import_draft_session` parses client-supplied JSON, so a Chaos layout
+    /// can reach a live shared-stack session without passing the reducer.
+    #[test]
+    fn a_shared_stack_snapshot_carrying_a_chaos_layout_is_refused_at_import() {
+        // Paired positive first, so the refusal below is about the layout.
+        let started = winston_started();
+        started
+            .validate_persisted_snapshot()
+            .expect("a real started Winston snapshot restores");
+
+        let mut swapped = winston_started();
+        swapped.config.source = chaos_layout(2);
+        assert!(matches!(
+            swapped.validate_persisted_snapshot(),
+            Err(DraftError::InvalidSharedStackConfiguration { .. })
+        ));
+    }
+
+    /// Every corrupt-shared-stack leg of `validate_persisted_snapshot`, which
+    /// is the IMPORT TRUST BOUNDARY: `import_draft_session` parses
+    /// client-supplied JSON, so each leg here is a hostile snapshot refused
+    /// rather than an internal invariant.
+    ///
+    /// The over-inspection leg is the hidden-information one, and it is why
+    /// the whole set is asserted rather than only the missing-stack leg that
+    /// `draft-wasm` already covers: `inspected[i] > piles[i].len()` is a
+    /// snapshot claiming a seat saw cards the pile does not hold, which is an
+    /// over-reveal the moment a view projects `revealed` from `inspected` --
+    /// and a slice panic before that.
+    #[test]
+    fn a_corrupt_shared_stack_snapshot_is_refused_at_import() {
+        // Paired positive FIRST, so every refusal below is demonstrably about
+        // the corruption and not about Winston.
+        winston_started()
+            .validate_persisted_snapshot()
+            .expect("a real started Winston snapshot restores");
+
+        let reason_for = |mutate: &dyn Fn(&mut DraftSession)| -> String {
+            let mut session = winston_started();
+            mutate(&mut session);
+            match session
+                .validate_persisted_snapshot()
+                .expect_err("a corrupt shared stack is not a restorable snapshot")
+            {
+                DraftError::InvalidSharedStackConfiguration { reason } => reason,
+                other => panic!("expected InvalidSharedStackConfiguration, got {other:?}"),
+            }
+        };
+
+        // A drafting session's whole live state is the stack.
+        assert!(reason_for(&|session| session.shared_stack = None).contains("must carry its stack"));
+        // The two vectors that must both be `pile_count` long -- the piles and
+        // the per-pile inspected prefixes, which are indexed in lockstep.
+        assert!(reason_for(&|session| {
+            session.shared_stack.as_mut().unwrap().piles.pop();
+        })
+        .contains("exactly 3 piles"));
+        assert!(reason_for(&|session| {
+            session.shared_stack.as_mut().unwrap().inspected.pop();
+        })
+        .contains("exactly 3 piles"));
+        // Out-of-range authorities: a cursor past the last pile and a seat
+        // past the last seat.
+        assert!(reason_for(&|session| {
+            session.shared_stack.as_mut().unwrap().cursor = 3;
+        })
+        .contains("cursor must be in range"));
+        assert!(reason_for(&|session| {
+            session.shared_stack.as_mut().unwrap().active_seat = 2;
+        })
+        .contains("cursor must be in range"));
+        // THE HIDDEN-INFORMATION LEG: a prefix longer than the pile it indexes.
+        assert!(reason_for(&|session| {
+            let state = session.shared_stack.as_mut().unwrap();
+            state.inspected[1] = state.piles[1].len() + 1;
+        })
+        .contains("inspected more cards than a pile holds"));
+
+        // The counter-case, so the missing-stack refusal above is keyed on
+        // DRAFTING and not on the kind: a lobby snapshot legitimately has no
+        // stack yet.
+        let mut lobby = winston_started();
+        lobby.shared_stack = None;
+        lobby.status = DraftStatus::Lobby;
+        lobby
+            .validate_persisted_snapshot()
+            .expect("a lobby snapshot carries no stack yet");
+    }
+
+    /// V22's snapshot half: a non-Winston session's serialized JSON carries NO
+    /// `shared_stack` key at all, so `skip_serializing_if` keeps every existing
+    /// snapshot byte-identical.
+    #[test]
+    fn non_winston_sessions_serialize_without_a_shared_stack_key() {
+        let (mut session, source) = test_session(2);
+        let json = serde_json::to_value(&session).unwrap();
+        assert!(json.get("shared_stack").is_none());
+        apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+        let started = serde_json::to_value(&session).unwrap();
+        assert!(started.get("shared_stack").is_none());
+        // Reach-guard: the serializer demonstrably ran and the session is live.
+        assert_eq!(started["status"], "Drafting");
+        // Paired positive: a Winston session DOES carry the key, so the absence
+        // above is `skip_serializing_if` and not a missing field.
+        let mut winston: DraftSession =
+            serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
+        winston.shared_stack = Some(SharedStackState {
+            main_stack: Vec::new(),
+            piles: vec![Vec::new(); 3],
+            starting_seat: 0,
+            active_seat: 0,
+            cursor: 0,
+            inspected: vec![0; 3],
+            decisions: 0,
+            history: Vec::new(),
+            forced_draws: Vec::new(),
+        });
+        let winston_json = serde_json::to_value(&winston).unwrap();
+        assert!(winston_json.get("shared_stack").is_some());
+        let back: DraftSession =
+            serde_json::from_str(&serde_json::to_string(&winston).unwrap()).unwrap();
+        assert_eq!(back.shared_stack, winston.shared_stack);
+    }
+
     #[test]
     fn test_se_bracket_8_players() {
         let config = DraftConfig {
+            flow: crate::types::DraftFlow::LegacyBarrier,
+            selection_policy: crate::types::DraftSelectionPolicy::default(),
+            clock_policy: crate::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
@@ -2424,6 +5048,9 @@ mod tests {
     #[test]
     fn single_elimination_advances_pairing_winners() {
         let config = DraftConfig {
+            flow: crate::types::DraftFlow::LegacyBarrier,
+            selection_policy: crate::types::DraftSelectionPolicy::default(),
+            clock_policy: crate::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
@@ -3249,6 +5876,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck_with(2),
                 commanders: designations.clone(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -3263,6 +5891,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck_with(3),
                 commanders: designations,
+                printings: Vec::new(),
             },
             None,
         );
@@ -3288,6 +5917,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: vec![filler.card_name.clone()],
+                printings: Vec::new(),
             },
             None,
         )
@@ -3318,6 +5948,7 @@ mod tests {
                 seat: 0,
                 main_deck: main_deck.clone(),
                 commanders: over_bound,
+                printings: Vec::new(),
             },
             None,
         );
@@ -3345,6 +5976,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: at_bound,
+                printings: Vec::new(),
             },
             None,
         )
@@ -3370,6 +6002,7 @@ mod tests {
                 seat: 0,
                 main_deck: main_deck.clone(),
                 commanders: vec!["Card 999".to_string()],
+                printings: Vec::new(),
             },
             None,
         );
@@ -3391,6 +6024,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: vec!["Card 0".to_string()],
+                printings: Vec::new(),
             },
             None,
         )
@@ -3545,6 +6179,68 @@ mod tests {
         deck
     }
 
+    #[test]
+    fn custom_cube_submission_keeps_its_configured_twenty_card_floor() {
+        let deck = std::iter::repeat_n("Forest".to_string(), 20).collect::<Vec<_>>();
+        let cube_session = |minimum| {
+            let mut session = deckbuilding_session(DraftKind::Premier);
+            session.config.source = DraftSource::Cube {
+                id: "custom-cube".to_string(),
+                name: "Twenty Card Cube".to_string(),
+            };
+            session.config.min_deck_size = minimum;
+            session
+        };
+
+        let mut accepted = cube_session(20);
+        let deltas = apply(
+            &mut accepted,
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck: deck.clone(),
+                commanders: Vec::new(),
+                printings: Vec::new(),
+            },
+            None,
+        )
+        .expect("the configured twenty-card Cube deck submits");
+        assert!(deltas.contains(&DraftDelta::DeckSubmitted { seat: 0 }));
+        assert_eq!(accepted.submitted_decks[&PlayerId(0)].main_deck, deck);
+
+        for (minimum, source) in [
+            (
+                21,
+                DraftSource::Cube {
+                    id: "custom-cube".to_string(),
+                    name: "Twenty Card Cube".to_string(),
+                },
+            ),
+            (40, DraftSource::single_set("TST")),
+        ] {
+            let mut session = cube_session(minimum);
+            session.config.source = source;
+            let err = apply(
+                &mut session,
+                DraftAction::SubmitDeck {
+                    seat: 0,
+                    main_deck: deck.clone(),
+                    commanders: Vec::new(),
+                    printings: Vec::new(),
+                },
+                None,
+            )
+            .expect_err("the session minimum must still be enforced");
+            let DraftError::ValidationFailed { errors } = err else {
+                panic!("expected ValidationFailed, got {err:?}");
+            };
+            assert!(errors.contains(&LimitedDeckError::TooFewCards {
+                actual: 20,
+                minimum
+            }));
+            assert!(session.submitted_decks.is_empty());
+        }
+    }
+
     /// VM row 9 — the PRODUCTION-PATH row for CR 903.3's floor.
     ///
     /// `validation.rs`'s rows enter at `validate_limited_deck` directly and so
@@ -3563,6 +6259,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck.clone(),
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -3591,6 +6288,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck,
                 commanders: vec!["Card 0".to_string()],
+                printings: Vec::new(),
             },
             None,
         )
@@ -3611,6 +6309,7 @@ mod tests {
                 seat: 0,
                 main_deck: pooled_deck(40),
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -3631,6 +6330,7 @@ mod tests {
                     "Card 1".to_string(),
                     "Card 2".to_string(),
                 ],
+                printings: Vec::new(),
             },
             None,
         )

@@ -21,9 +21,20 @@
 //! recovery only.
 //!
 //! The host also embeds a full `draftSessionJson` blob (exported `DraftSession`).
-//! That nested payload can carry `config.rng_seed`, unopened `packs_by_seat`, and
-//! Chaos `config.source` assignments. All three must be stripped before SQLite
-//! persistence or `GET` echo — merged #5053 only removed top-level seat tokens.
+//! That nested payload can carry `config.rng_seed`, unopened `packs_by_seat`,
+//! Chaos `config.source` assignments, and a shared-stack draft's `shared_stack`
+//! (whose `main_stack` is the draw order every pile is derived from — publishing
+//! it would solve the only decision that format contains). All four must be
+//! stripped before SQLite persistence or `GET` echo — merged #5053 only removed
+//! top-level seat tokens.
+//!
+//! **This class of edit is manual, and that is a property of the mechanism, not
+//! an oversight.** [`redact_draft_session_object`] is DENY-BY-ENUMERATION, so
+//! nothing compiler-forces a new `DraftSession` field into it: a field added
+//! upstream passes through verbatim until somebody names it here. A new
+//! session-secret field therefore has to be added to
+//! [`NESTED_DRAFT_SECRET_KEYS`] deliberately, and the test beside it is the only
+//! thing that says so.
 
 use lobby_broker::validation::{validate_token, MAX_TOKEN_LEN};
 use serde_json::{Map, Value};
@@ -71,7 +82,38 @@ const P2P_BACKUP_SECRET_KEYS: &[&str] = &["seatTokens", "kickedTokens", "booster
 const DRAFT_SESSION_JSON_KEY: &str = "draftSessionJson";
 
 /// Nested draft session fields that must not be stored or echoed on the backup API.
-const NESTED_DRAFT_SECRET_KEYS: &[&str] = &["packs_by_seat"];
+///
+/// THE ONE PLACE THE ANSWER LIVES. Extend this constant rather than adding a
+/// bespoke `session.remove(...)` beside it — a bespoke removal leaves the next
+/// field to the next incident.
+///
+/// What each one is, since "secret" is doing a lot of work:
+///   * `packs_by_seat` — the boosters a seat still has to open.
+///   * `shared_stack` — the whole Winston state, whose `main_stack` IS the
+///     face-down draw order every pile is dealt from.
+///   * `pools` — EVERY SEAT'S DRAFTED CARDS. A pool is private in every draft
+///     kind, and under a shared stack it is the format's central secret: the
+///     opponent's pool is what a Winston player is guessing at all draft. The
+///     row is reachable by anyone who can derive the host peer id, which a
+///     guest in the pod can, so echoing it hands an opponent the answer.
+///   * `current_pack` — the booster a seat is looking at right now, which in a
+///     pick-and-pass draft is the pick they are about to make.
+///   * `booster_pack_pool` — the cube/source card list the pods were built from.
+///     Folded in from a bespoke `session.remove` that sat beside this loop: it
+///     made the constant read as four keys to anyone comparing it against the
+///     client's mirror in `p2p-draft-host.ts`, which is exactly how
+///     `packs_by_seat` came to be missing there.
+///
+/// This list is what makes the public copy NON-RESUMABLE, deliberately. The
+/// authoritative, resumable snapshot is the host's own IndexedDB copy; see the
+/// note on `validate_persisted_snapshot` in `draft-core`.
+const NESTED_DRAFT_SECRET_KEYS: &[&str] = &[
+    "packs_by_seat",
+    "shared_stack",
+    "pools",
+    "current_pack",
+    "booster_pack_pool",
+];
 
 /// Remove session credentials from a host backup snapshot JSON blob.
 ///
@@ -141,7 +183,6 @@ fn redact_draft_session_object(session: &mut Map<String, Value>) {
     for key in NESTED_DRAFT_SECRET_KEYS {
         session.remove(*key);
     }
-    session.remove("booster_pack_pool");
     if let Some(Value::Object(config)) = session.get_mut("config") {
         config.insert("rng_seed".to_string(), Value::Number(0.into()));
         redact_chaos_assignments(config);
@@ -347,6 +388,75 @@ mod tests {
         assert_eq!(nested_out["config"]["rng_seed"], 0);
         assert!(nested_out.get("packs_by_seat").is_none());
         assert_eq!(nested_out["status"], "Drafting");
+    }
+
+    /// V25. Both the string-encoded and the inline-object shapes, matching
+    /// `redact_p2p_backup_snapshot_secrets_strips_object_shaped_draft_session`.
+    ///
+    /// The `packs_by_seat` and `rng_seed` legs are the REACH-GUARD: they prove
+    /// the redactor demonstrably ran on this fixture, so the absent
+    /// `shared_stack` is a redaction rather than a field the fixture never had.
+    #[test]
+    fn redact_p2p_backup_snapshot_secrets_strips_shared_stack() {
+        let nested = serde_json::json!({
+            "draft_code": "ABC123",
+            "kind": "Winston",
+            "config": { "rng_seed": 42, "pod_size": 2 },
+            "packs_by_seat": [[{"card_id": "secret-pack"}]],
+            "pools": [[{"instance_id": "secret-own-pool"}], [{"instance_id": "secret-rival-pool"}]],
+            "current_pack": [[{"instance_id": "secret-open-pack"}], null],
+            "shared_stack": {
+                "main_stack": [{"instance_id": "secret-draw-order"}],
+                "piles": [[], [], []],
+                "starting_seat": 0,
+                "active_seat": 0,
+                "cursor": 0,
+                "inspected": [0, 0, 0],
+                "decisions": 0
+            },
+            "status": "Drafting"
+        });
+
+        for draft_session_json in [nested.to_string().into(), nested.clone()] {
+            let raw = serde_json::json!({
+                "draftCode": "ABC123",
+                "draftSessionJson": draft_session_json,
+                "seatTokens": { "0": "host-secret" }
+            });
+            let redacted =
+                redact_p2p_backup_snapshot_secrets(&raw.to_string()).expect("valid snapshot");
+            let parsed: Value = serde_json::from_str(&redacted).unwrap();
+            let nested_out: Value = match &parsed["draftSessionJson"] {
+                Value::String(encoded) => serde_json::from_str(encoded).unwrap(),
+                other => other.clone(),
+            };
+            // Reach-guard legs: the redactor ran.
+            assert!(parsed.get("seatTokens").is_none());
+            assert!(nested_out.get("packs_by_seat").is_none());
+            assert_eq!(nested_out["config"]["rng_seed"], 0);
+            // The new leg.
+            assert!(nested_out.get("shared_stack").is_none());
+            // A POOL IS PRIVATE IN EVERY KIND, and under a shared stack the
+            // opponent's pool is what the whole format is a guess at. This row
+            // is reachable by anyone who can derive the host peer id, which a
+            // guest in the pod can.
+            assert!(nested_out.get("pools").is_none());
+            assert!(nested_out.get("current_pack").is_none());
+            // Whole-payload sentinel: no secret card id survives anywhere in
+            // the projection, whatever shape it took.
+            for secret in [
+                "secret-draw-order",
+                "secret-own-pool",
+                "secret-rival-pool",
+                "secret-open-pack",
+                "secret-pack",
+            ] {
+                assert!(!redacted.contains(secret), "{secret} survived redaction");
+            }
+            // Untouched fields survive, so this is not a blanket wipe.
+            assert_eq!(nested_out["status"], "Drafting");
+            assert_eq!(nested_out["kind"], "Winston");
+        }
     }
 
     #[test]

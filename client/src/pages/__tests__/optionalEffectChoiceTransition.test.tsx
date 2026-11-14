@@ -27,7 +27,7 @@
  * `OptionalEffectModal` appears. The class under test is "two seats
  * dispatching the same action type across a multi-stage prompt sequence".
  */
-import { act, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -45,14 +45,25 @@ import { DialogHost } from "../../components/modal/DialogHost.tsx";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../test/factories/gameObjectFactory.ts";
-import { buildGameState, buildPlayers, buildPriorityWaitingFor, buildStackEntry } from "../../test/factories/gameStateFactory.ts";
+import { buildGameObjectWithCoreTypes, buildObjectMap, gameObjectFactory } from "../../test/factories/gameObjectFactory.ts";
+import { buildGameState, buildPlayers, buildPriorityWaitingFor, buildStackEntry, gameStateFactory, optionalEffectChoiceWaitingForFactory } from "../../test/factories/gameStateFactory.ts";
+
+vi.mock("../../hooks/useCardImage.ts", () => ({
+  useCardImage: vi.fn(() => ({
+    src: null,
+    isLoading: false,
+    isRotated: false,
+    isFlip: false,
+  })),
+}));
 
 // ── Engine-shaped fixtures ──────────────────────────────────────────────
 
 const OB_NIXILIS_ID = 100;
+const DECISION_SUBJECT_ID = 44;
 
 function baseState(waitingFor: WaitingFor, stack: GameState["stack"]): GameState {
   return buildGameState({
@@ -82,14 +93,14 @@ function baseState(waitingFor: WaitingFor, stack: GameState["stack"]): GameState
 const PRIORITY_P0: WaitingFor = buildPriorityWaitingFor({ data: { player: 0 } });
 const PRIORITY_P1: WaitingFor = buildPriorityWaitingFor({ data: { player: 1 } });
 
-const OPTIONAL_EFFECT_CHOICE: WaitingFor = {
-  type: "OptionalEffectChoice",
-  data: {
+const OPTIONAL_EFFECT_CHOICE: WaitingFor = optionalEffectChoiceWaitingForFactory
+  .withData({
     player: 0,
     source_id: OB_NIXILIS_ID,
+    decision_subject_id: DECISION_SUBJECT_ID,
     description: "Ob Nixilis, the Fallen — you may have target player lose 3 life.",
-  },
-};
+  })
+  .build();
 
 const TWO_TRIGGERS_ON_STACK: GameState["stack"] = [
   buildStackEntry({ id: 1 }),
@@ -194,14 +205,17 @@ describe("issue #459 — optional + targeted landfall trigger prompt sequence", 
         turnCheckpoints: [],
       });
       useUiStore.setState({ pendingAbilityChoice: null, enchantmentsDialogPlayer: null });
+      useMultiplayerStore.setState({ activePlayerId: null, isSpectator: false });
       // Instant animations so the dispatch pipeline does not await timers.
       usePreferencesStore.setState({ animationSpeedMultiplier: 0 });
     });
   });
 
   afterEach(() => {
+    cleanup();
     act(() => {
       useGameStore.setState({ gameState: null, waitingFor: null, adapter: null });
+      useMultiplayerStore.setState({ activePlayerId: null, isSpectator: false });
     });
   });
 
@@ -234,5 +248,51 @@ describe("issue #459 — optional + targeted landfall trigger prompt sequence", 
     // The actionable modal must now be mounted — the softlock is cleared.
     expect(screen.getByRole("button", { name: /yes/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /no/i })).toBeInTheDocument();
+  });
+
+  it("routes the projected subject preview only to the acting player's view", () => {
+    const source = gameObjectFactory
+      .creature(3, 3)
+      .legendary()
+      .named("Bre of Clan Stoutarm")
+      .withId(OB_NIXILIS_ID)
+      .build();
+    const subject = gameObjectFactory
+      .creature(2, 2)
+      .inExile()
+      .named("Grizzly Bears")
+      .withId(DECISION_SUBJECT_ID)
+      .build();
+    const state = gameStateFactory
+      .withPlayers(0, 1)
+      .withObjects(source, subject)
+      .optionalEffectChoice({
+        player: 0,
+        source_id: source.id,
+        decision_subject_id: subject.id,
+      })
+      .build();
+
+    act(() => {
+      useGameStore.setState({
+        gameMode: "online",
+        gameState: state,
+        waitingFor: state.waiting_for,
+      });
+      useMultiplayerStore.setState({ activePlayerId: 0, isSpectator: false });
+    });
+    const { rerender } = render(<GameDialogHarness />);
+
+    expect(screen.getByRole("button", { name: /yes/i })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Grizzly Bears" })).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Bre of Clan Stoutarm" })).not.toBeInTheDocument();
+
+    act(() => {
+      useMultiplayerStore.setState({ activePlayerId: 1 });
+    });
+    rerender(<GameDialogHarness />);
+
+    expect(screen.queryByRole("button", { name: /yes/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Grizzly Bears" })).not.toBeInTheDocument();
   });
 });

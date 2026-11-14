@@ -19,7 +19,7 @@
     "description": "Desktop-only permissions for the bundled bootstrap page",
     "platforms": ["linux", "macOS", "windows"],
     "windows": ["main"],
-    "permissions": ["core:window:allow-set-fullscreen"]
+    "permissions": ["core:window:allow-set-fullscreen", "allow-take-pending-deep-link"]
   },
   {
     "identifier": "remote-shell-common",
@@ -71,7 +71,8 @@
       "process:allow-exit",
       "process:allow-restart",
       "updater:default",
-      "allow-lan"
+      "allow-lan",
+      "allow-take-pending-deep-link"
     ]
   }
 ]

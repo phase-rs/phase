@@ -35,6 +35,15 @@ Originating discussion: [phase-rs/phase#5312](https://github.com/phase-rs/phase/
   the way. `CombatDamageTiming::OnStack` (and the two EC presets that need
   it) is deliberately excluded — a separate, later, larger sub-project per
   §6/§7/§8 below.
+- **COMBAT_DAMAGE_ON_STACK.md** — that sub-project's own design pass: the
+  sourced pre-M10 rule (Sixth Edition through M10, not "pre-6th-edition"),
+  the `StackEntryKind::CombatDamage` object and its not-a-spell-or-ability
+  classification, dealing semantics for sources and recipients that change
+  while damage is on the stack, incarnation-aware damage-source identity, and a
+  four-phase implementation plan ending in the Middle School registration
+  (Classic Magic deferred to a follow-up that adds its Time Vault /
+  Illusionary Mask card-text overrides). Reviewed over three architecture + rules rounds (final verdict
+  APPROVE WITH CHANGES, all applied).
 
 The design (`CONTEXT.md`/`RESEARCH.md`/`PLAN.md`) is merged as reviewed.
 Each implementation phase lands as its own PR, planned and reviewed

@@ -5,7 +5,6 @@
       "player": 0,
       "state": {
         "data": {
-          "certainty": "Conditional",
           "prompted": 0
         },
         "type": "Scheduled"
@@ -16,6 +15,7 @@
     402,
     403,
     404,
+    406,
     407
   ],
   "unbounded_resources": [

@@ -1,9 +1,11 @@
+use crate::game::deck_loading;
 use crate::game::effects::change_zone::{self, ZoneMoveResult};
 use crate::game::printed_cards::apply_card_face_to_object;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
 use crate::types::ability::TargetFilter;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, EffectKind, LibraryShuffleMode, ResolvedAbility};
+use crate::types::card_printing::DeckSection;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, OutsideGameCardUse, OutsideGameChoiceEntry, OutsideGameChoiceSource, WaitingFor,
@@ -77,7 +79,12 @@ pub fn resolve(
     // CR 406.3 + CR 400.11: Karn/Coax-class — also append face-up exile cards
     // the controller owns and that match the filter. The exile zone is a normal
     // in-game zone, so we route through the standard filter pipeline.
-    if source_pool.includes_face_up_exile() {
+    //
+    // The pool is resolved through `game::wish_scope`, never read raw: a format
+    // declaring the pre-M10 Wish reach widens a plain `Sideboard` search to this
+    // same pool, and that decision belongs to the axis authority rather than to
+    // every site that consumes a pool.
+    if crate::game::wish_scope::effective_pool(state, *source_pool).includes_face_up_exile() {
         let exile_candidates = collect_face_up_exile_candidates(state, ability, filter);
         choices.extend(exile_candidates);
     }
@@ -120,9 +127,11 @@ fn collect_face_up_exile_candidates(
     let controller = ability.controller;
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
     // CR 406.3: A card's default face state in exile is face-up; the
-    // `face_down: true` marker means the card is exiled face-down. Use the
-    // canonical `targeting::zone_object_ids` helper for zone iteration.
-    crate::game::targeting::zone_object_ids(state, Zone::Exile)
+    // `face_down: true` marker means the card is exiled face-down.
+    // CR 108.2 + CR 109.1: the candidates are CARDS in exile, so iterate the
+    // card-level `targeting::zone_card_ids` listing; the CR 722.3c retained
+    // prepare copy is not a card.
+    crate::game::targeting::zone_card_ids(state, Zone::Exile)
         .into_iter()
         .filter_map(|object_id| {
             let object = state.objects.get(&object_id)?;
@@ -174,25 +183,30 @@ pub(crate) fn put_face_up_exile_into(
     let ctx = change_zone::ChangeZoneIterationCtx {
         source_id,
         controller,
+        performed_by: controller,
         origin: Some(Zone::Exile),
         destination,
         enter_transformed: false,
-        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_under_player: None,
-        enters_attacking: false,
-        enter_with_counters: Vec::new(),
-        conditional_enter_with_counters: vec![],
         duration: None,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         // Search-from-outside brings cards in face up.
         face_down_profile: None,
         library_placement: None,
-        // CR 614.12: search-from-outside carries no moved-object type gate.
-        enters_modified_if: None,
+        library_shuffle: LibraryShuffleMode::PerObject,
         enter_attached_to: None,
     };
+    // Search-from-outside carries no entry modifications: no counters, no
+    // tapped/attacking rider, and no moved-object type gate.
+    let member = crate::types::game_state::ChangeZoneMemberEntry {
+        object_id,
+        enter_with_counters: Vec::new(),
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+    };
     Ok(change_zone::process_one_zone_move(
-        state, &ctx, object_id, events,
+        state, &ctx, &member, events,
     ))
 }
 
@@ -202,13 +216,13 @@ pub(crate) fn put_sideboard_entry_into_game(
     sideboard_index: usize,
     destination: Zone,
 ) -> Result<crate::types::identifiers::ObjectId, EffectError> {
-    let card_face = {
-        let entry = state
+    let (card_face, printing) = {
+        let pool = state
             .deck_pools
             .iter()
             .find(|pool| pool.player == player)
             .ok_or(EffectError::PlayerNotFound)?;
-        let Some(entry) = entry.current_sideboard.get(sideboard_index) else {
+        let Some(entry) = pool.current_sideboard.get(sideboard_index) else {
             return Err(EffectError::InvalidParam(
                 "sideboard index out of range".to_string(),
             ));
@@ -218,7 +232,16 @@ pub(crate) fn put_sideboard_entry_into_game(
                 "sideboard card already brought into game".to_string(),
             ));
         }
-        entry.card.clone()
+        // CR 400.11b + CR 203.1 + CR 206.1: the brought-in card keeps its owner's printing
+        // (display-only). Read before the bookkeeping below, so the copy being brought in
+        // counts as not yet taken.
+        let printing = deck_loading::outside_game_copy_printing(
+            pool,
+            &state.outside_game_cards_brought_in,
+            DeckSection::Sideboard,
+            &entry.card,
+        );
+        (entry.card.clone(), printing)
     };
 
     // CR 407.3: refuse BEFORE the bookkeeping below, not at materialization —
@@ -251,12 +274,15 @@ pub(crate) fn put_sideboard_entry_into_game(
     // The CR 407.3 gate above already cleared this face, so the authority's own
     // check cannot refuse here; map it rather than unwrap so a future divergence
     // between the two surfaces as an error instead of a panic.
-    put_outside_game_face_into(state, player, &card_face, destination).ok_or_else(|| {
-        EffectError::InvalidParam(format!(
-            "{} can't be brought into the game from outside the game (CR 407.3)",
-            card_face.name
-        ))
-    })
+    let object_id =
+        put_outside_game_face_into(state, player, &card_face, destination).ok_or_else(|| {
+            EffectError::InvalidParam(format!(
+                "{} can't be brought into the game from outside the game (CR 407.3)",
+                card_face.name
+            ))
+        })?;
+    deck_loading::stamp_created_card_shared(state, object_id, printing);
+    Ok(object_id)
 }
 
 /// CR 400.11b: Bring one card from OUTSIDE the game into `destination` as a new
@@ -381,6 +407,8 @@ mod tests {
         );
         ability.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -885,6 +913,224 @@ mod tests {
                 assert!(choices.is_empty());
             }
             other => panic!("expected OutsideGameChoice, got {other:?}"),
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Pre-M10 Wish reach (`game::wish_scope`).
+    //
+    // The modern Wish cycle declares `OutsideGameSourcePool::Sideboard`. Under
+    // a format declaring `WishOutsideGameScope::PreM10ReachesExile` the same
+    // ability reaches owned face-up exile too, because pre-M10 those cards were
+    // "removed from the game" and that counted as outside it. Every assertion
+    // is paired against the identical board under a modern format, so a failure
+    // to widen and a failure to set the board up are distinguishable.
+    // ---------------------------------------------------------------------
+
+    fn with_wish_scope(
+        state: &mut GameState,
+        scope: crate::types::custom_format::WishOutsideGameScope,
+    ) {
+        let rules = crate::types::custom_format::test_rules_with_legacy(
+            crate::types::custom_format::LegacyRuleSet {
+                wish_scope: scope,
+                ..crate::types::custom_format::LegacyRuleSet::default()
+            },
+        );
+        state.format_config = crate::types::format::FormatConfig::for_custom_rules(&rules);
+    }
+
+    /// A Wish-class ability: the real `Sideboard` pool the parser produces for
+    /// the cycle, not the Karn-class widened one.
+    fn wish_for_artifact(source: crate::types::identifiers::ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::SearchOutsideGame {
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                count: QuantityExpr::up_to(QuantityExpr::Fixed { value: 1 }),
+                reveal: true,
+                destination: Zone::Hand,
+                source_pool: OutsideGameSourcePool::Sideboard,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+    }
+
+    /// Seeds one face-up exiled artifact owned by `owner`, and a Wish source.
+    fn wish_board(owner: PlayerId, face_down: bool) -> (GameState, ObjectId, ResolvedAbility) {
+        let mut state = state_with_sideboard(vec![entry("Pithing Needle", CoreType::Artifact, 1)]);
+        let exiled = create_object(
+            &mut state,
+            CardId(50),
+            owner,
+            "Pithing Needle".to_string(),
+            Zone::Exile,
+        );
+        if let Some(obj) = state.objects.get_mut(&exiled) {
+            obj.card_types = CardType {
+                core_types: vec![CoreType::Artifact],
+                ..Default::default()
+            };
+            obj.face_down = face_down;
+        }
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Burnt Offering".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = wish_for_artifact(source);
+        (state, exiled, ability)
+    }
+
+    fn offers_face_up_exile(state: &GameState, exiled: ObjectId) -> bool {
+        match &state.waiting_for {
+            WaitingFor::OutsideGameChoice { choices, .. } => choices.iter().any(|choice| {
+                matches!(
+                    &choice.source,
+                    OutsideGameChoiceSource::FaceUpExile { object_id } if *object_id == exiled
+                )
+            }),
+            _ => false,
+        }
+    }
+
+    /// CR 400.11 + CR 400.11a + CR 701.23j, relaxed: the whole point of the
+    /// axis, asserted on one board under both scopes.
+    #[test]
+    fn a_wish_reaches_face_up_exile_only_under_the_pre_m10_scope() {
+        let (mut modern, exiled, ability) = wish_board(PlayerId(0), false);
+        with_wish_scope(
+            &mut modern,
+            crate::types::custom_format::WishOutsideGameScope::PostM10SideboardOnly,
+        );
+        let mut events = Vec::new();
+        effects::resolve_ability_chain(&mut modern, &ability, &mut events, 0).unwrap();
+        assert!(
+            !offers_face_up_exile(&modern, exiled),
+            "CR 400.11: exile is an in-game zone, so a modern Wish cannot see it"
+        );
+
+        let (mut legacy, exiled, ability) = wish_board(PlayerId(0), false);
+        with_wish_scope(
+            &mut legacy,
+            crate::types::custom_format::WishOutsideGameScope::PreM10ReachesExile,
+        );
+        let mut events = Vec::new();
+        effects::resolve_ability_chain(&mut legacy, &ability, &mut events, 0).unwrap();
+        assert!(
+            offers_face_up_exile(&legacy, exiled),
+            "pre-M10: a removed-from-the-game card the Wish's controller owns is \
+             outside the game and may be chosen, got {:?}",
+            legacy.waiting_for
+        );
+
+        // And it actually comes back, not merely appears in a list.
+        crate::game::apply_as_current(
+            &mut legacy,
+            GameAction::ChooseOutsideGameCards {
+                selections: vec![OutsideGameSelection::FaceUpExile { object_id: exiled }],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            legacy.objects.get(&exiled).map(|obj| obj.zone),
+            Some(Zone::Hand)
+        );
+        assert!(!legacy.exile.contains(&exiled));
+    }
+
+    /// CR 108.2 + CR 109.1 + CR 722.3c: the face-up exile half of the pool
+    /// offers CARDS. A non-card copy of a card (the CR 722.3c retained prepare
+    /// copy's shape: `is_copy`, not a token, owned by the Wish's controller)
+    /// in exile is not offered, while the real card of the same type is.
+    #[test]
+    fn exile_card_population_wish_offers_only_cards_in_exile() {
+        let (mut state, exiled, ability) = wish_board(PlayerId(0), false);
+        let copy = create_object(
+            &mut state,
+            CardId(51),
+            PlayerId(0),
+            "Retained Copy".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&copy).unwrap();
+            obj.card_types = CardType {
+                core_types: vec![CoreType::Artifact],
+                ..Default::default()
+            };
+            obj.is_copy = true;
+        }
+        with_wish_scope(
+            &mut state,
+            crate::types::custom_format::WishOutsideGameScope::PreM10ReachesExile,
+        );
+        effects::resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
+        assert!(
+            offers_face_up_exile(&state, exiled),
+            "reach guard: the real exiled card is offered, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            !offers_face_up_exile(&state, copy),
+            "the non-card copy is not a card in exile"
+        );
+    }
+
+    /// The widening is additive: the sideboard half of the pool is untouched.
+    /// Without this, replacing the pool rather than widening it would pass the
+    /// test above.
+    #[test]
+    fn the_pre_m10_scope_keeps_the_sideboard_half_of_the_pool() {
+        let (mut state, exiled, ability) = wish_board(PlayerId(0), false);
+        with_wish_scope(
+            &mut state,
+            crate::types::custom_format::WishOutsideGameScope::PreM10ReachesExile,
+        );
+        let mut events = Vec::new();
+        effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let WaitingFor::OutsideGameChoice { choices, .. } = &state.waiting_for else {
+            panic!("expected OutsideGameChoice, got {:?}", state.waiting_for);
+        };
+        assert!(
+            choices.iter().any(|choice| matches!(
+                &choice.source,
+                OutsideGameChoiceSource::Sideboard {
+                    sideboard_index: 0,
+                    ..
+                }
+            )),
+            "the sideboard entry must still be offered: {choices:?}"
+        );
+        assert!(offers_face_up_exile(&state, exiled));
+    }
+
+    /// The legacy scope widens WHICH pool is consulted, never what that pool
+    /// admits. A card the collector already refuses — one the controller does
+    /// not own, or one exiled face down — stays refused, which is what makes
+    /// the modern face-up-exile pool a faithful model of pre-M10 "removed from
+    /// the game": you could not name a card you did not own or could not see.
+    #[test]
+    fn the_pre_m10_scope_admits_no_card_the_modern_pool_would_refuse() {
+        for (label, owner, face_down) in [
+            ("owned by an opponent", PlayerId(1), false),
+            ("exiled face down", PlayerId(0), true),
+        ] {
+            let (mut state, exiled, ability) = wish_board(owner, face_down);
+            with_wish_scope(
+                &mut state,
+                crate::types::custom_format::WishOutsideGameScope::PreM10ReachesExile,
+            );
+            let mut events = Vec::new();
+            effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+            assert!(
+                !offers_face_up_exile(&state, exiled),
+                "{label}: must not be offered even under the legacy scope"
+            );
         }
     }
 }
