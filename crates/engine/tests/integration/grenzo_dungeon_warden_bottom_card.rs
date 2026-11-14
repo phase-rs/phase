@@ -11,7 +11,7 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -24,7 +24,7 @@ const GRENZO: &str = "Grenzo enters with X +1/+1 counters on it.\n{2}: Put the b
 
 const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
 const LEYLINE_OF_THE_VOID: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.";
-const BLIGHTSTEEL_COLOSSUS: &str = "Trample, infect\nBlightsteel Colossus is indestructible.\nIf Blightsteel Colossus would be put into a graveyard from anywhere, reveal Blightsteel Colossus and shuffle it into its owner's library instead.";
+const BLIGHTSTEEL_COLOSSUS: &str = "Trample, infect, indestructible\nIf Blightsteel Colossus would be put into a graveyard from anywhere, reveal Blightsteel Colossus and shuffle it into its owner's library instead.";
 
 /// A plain removal spell: Grenzo must be put into the graveyard in response to
 /// its own activation. Murder is "Destroy target creature." for {1}{B}{B}.
@@ -482,6 +482,10 @@ fn grenzo_bottom_card_blightsteel_colossus_shuffles_back_and_stays_in_library() 
     let colossus = scenario
         .add_spell_to_library_top(P0, "Blightsteel Colossus", false)
         .as_creature()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 12,
+        })
         .from_oracle_text(BLIGHTSTEEL_COLOSSUS)
         .id();
 
@@ -529,20 +533,37 @@ fn grenzo_bottom_card_blightsteel_colossus_shuffles_back_and_stays_in_library() 
         }
     }
 
-    // Colossus reveals itself and shuffles into its owner's library
-    assert!(
-        events.iter().any(|e| matches!(e, GameEvent::CardsRevealed { card_ids, .. } if card_ids.contains(&colossus))),
-        "Colossus must be revealed by its replacement effect"
+    // CR 608.2c + CR 701.24a: "reveal Blightsteel Colossus and shuffle it into
+    // its owner's library" is one reveal followed by exactly one shuffle; the
+    // redirected delivery must not add a shuffle of its own (an opponent's
+    // Cosi's Trickster would otherwise see two).
+    let reveal_at = events
+        .iter()
+        .position(|e| matches!(e, GameEvent::CardsRevealed { card_ids, .. } if card_ids.contains(&colossus)))
+        .expect("Colossus must be revealed by its replacement effect");
+    let shuffles: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            matches!(
+                e,
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                } if *player_id == P0
+            )
+        })
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        shuffles.len(),
+        1,
+        "the owner's library must be shuffled exactly once"
     );
     assert!(
-        events.iter().any(|e| matches!(
-            e,
-            GameEvent::EffectResolved {
-                kind: engine::types::ability::EffectKind::Shuffle,
-                ..
-            }
-        )),
-        "Owner's library must be shuffled by Colossus's replacement effect"
+        reveal_at < shuffles[0],
+        "the reveal must precede the shuffle, in the order the card instructs"
     );
 
     // CR 614.1a + CR 614.6: Colossus replaced its graveyard move, stays in library

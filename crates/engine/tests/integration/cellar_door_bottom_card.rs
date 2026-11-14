@@ -6,19 +6,30 @@
 //! Mill effect — "their library" resolved to TriggeringPlayer, so the mill
 //! targeted the ability's controller instead of the announced player target.
 
+use engine::game::effects::stack_reach::stack_entry_node_reach;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
+use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 /// Verbatim printed Oracle text (Scryfall).
 const CELLAR_DOOR: &str = "{3}, {T}: Target player puts the bottom card of their library into their graveyard. If it's a creature card, you create a 2/2 black Zombie creature token.";
+
+/// Verbatim printed Oracle text (Scryfall): a mill replacement that names
+/// opponents of its controller.
+const BRUVAC: &str = "If an opponent would mill one or more cards, they mill twice that many cards instead. (To mill a card, a player puts the top card of their library into their graveyard.)";
+
+/// Verbatim printed Oracle text (Scryfall): a per-card graveyard redirect.
+const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
+
+/// Verbatim printed Oracle text (Scryfall): a genuine (top-edge) mill.
+const THOUGHT_SCOUR: &str = "Target player mills two cards.\nDraw a card.";
 
 /// A basic creature to use as the bottom card.
 const BOTTOM_CREATURE: &str = "Bottom Creature";
@@ -47,7 +58,17 @@ fn stage_cellar_door(
     bottom_is_creature: bool,
     target_player: TargetPlayer,
 ) -> (GameRunner, ObjectId, ObjectId, PlayerId) {
+    stage_cellar_door_with(bottom_is_creature, target_player, |_| {})
+}
+
+/// `stage_cellar_door`, with `extra` adding permanents to the board first.
+fn stage_cellar_door_with(
+    bottom_is_creature: bool,
+    target_player: TargetPlayer,
+    extra: impl FnOnce(&mut GameScenario),
+) -> (GameRunner, ObjectId, ObjectId, PlayerId) {
     let mut scenario = GameScenario::new();
+    extra(&mut scenario);
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(
         P0,
@@ -105,7 +126,9 @@ fn stage_cellar_door(
     (runner, cellar_door, bottom, target)
 }
 
-fn activate_cellar_door(
+/// Activate Cellar Door, choose `target_player`, and pay, stopping with the
+/// ability on the stack and its controller holding priority.
+fn announce_cellar_door(
     runner: &mut GameRunner,
     cellar_door: ObjectId,
     target_player: PlayerId,
@@ -169,6 +192,15 @@ fn activate_cellar_door(
             ),
         }
     }
+    events
+}
+
+fn activate_cellar_door(
+    runner: &mut GameRunner,
+    cellar_door: ObjectId,
+    target_player: PlayerId,
+) -> Vec<GameEvent> {
+    let mut events = announce_cellar_door(runner, cellar_door, target_player);
 
     // Resolve the ability
     for _ in 0..64 {
@@ -410,4 +442,131 @@ fn cellar_door_targets_self_bottom_creature_goes_to_own_graveyard() {
         matches!(run.runner.state().waiting_for, WaitingFor::Priority { .. }),
         "the activation must resolve back to priority"
     );
+}
+
+/// The `acted_on` stack reach of the first `Mill` node on the stack entry whose
+/// source is `source`.
+fn mill_node_reach(runner: &GameRunner, source: ObjectId) -> Vec<TargetRef> {
+    let state = runner.state();
+    let entry = state
+        .stack
+        .iter()
+        .find(|entry| entry.source_id == source)
+        .expect("the ability must be on the stack");
+    stack_entry_node_reach(state, entry)
+        .into_iter()
+        .find(|reach| matches!(reach.node.effect, Effect::Mill { .. }))
+        .expect("the entry must hold a Mill node")
+        .acted_on
+}
+
+fn add_bruvac(scenario: &mut GameScenario) {
+    scenario.add_creature_from_oracle(P0, "Bruvac the Grandiloquent", 1, 4, BRUVAC);
+}
+
+/// CR 701.17a + CR 614.1a: putting the bottom card of a library into a
+/// graveyard is not a mill, so Bruvac's "If an opponent would mill" never
+/// applies to Cellar Door, and stack reach keeps the chosen opponent.
+#[test]
+fn cellar_door_stack_reach_keeps_the_chosen_player_under_bruvac() {
+    let (mut runner, cellar_door, bottom, target) = stage_cellar_door_with(true, 1, add_bruvac);
+    announce_cellar_door(&mut runner, cellar_door, target);
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the activation must stop with the ability on the stack"
+    );
+    assert_eq!(
+        mill_node_reach(&runner, cellar_door),
+        vec![TargetRef::Player(P1)],
+        "Bruvac replaces mills only; the bottom-card move acts on the chosen player"
+    );
+
+    // The live resolver agrees: exactly the bottom card moves, not two cards.
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&bottom].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().players[1].graveyard.len(),
+        1,
+        "Bruvac must not double a bottom-card move"
+    );
+}
+
+/// Control for the test above: a genuine top-edge mill of Bruvac's opponent
+/// still meets Bruvac's replacement, so stack reach answers nothing for it.
+#[test]
+fn thought_scour_stack_reach_defers_to_bruvac_for_a_genuine_mill() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    add_bruvac(&mut scenario);
+    for i in 0..4 {
+        scenario.add_card_to_library_top(P1, &format!("{FILLER} {i}"));
+    }
+    let scour = scenario
+        .add_spell_to_hand_from_oracle(P0, "Thought Scour", true, THOUGHT_SCOUR)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![])],
+    );
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&scour].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: scour,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Thought Scour must be castable");
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1)],
+            })
+            .expect("select the opponent");
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the cast must stop with the spell on the stack"
+    );
+    assert!(
+        mill_node_reach(&runner, scour).is_empty(),
+        "a genuine mill under Bruvac is replaced, so stack reach cannot name its player"
+    );
+
+    // Reach guard: Bruvac really applies to this mill (two cards become four).
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().players[1].graveyard.len(), 4);
+}
+
+/// CR 614.6: the bottom card's own move still meets per-card `Moved`
+/// redirects; with Rest in Peace on the board stack reach answers nothing for
+/// Cellar Door's move, as for any replaced move.
+#[test]
+fn cellar_door_stack_reach_defers_to_a_per_card_graveyard_redirect() {
+    let (mut runner, cellar_door, bottom, target) = stage_cellar_door_with(true, 1, |scenario| {
+        scenario.add_enchantment_from_oracle(P0, "Rest in Peace", REST_IN_PEACE);
+    });
+    announce_cellar_door(&mut runner, cellar_door, target);
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the activation must stop with the ability on the stack"
+    );
+    assert!(
+        mill_node_reach(&runner, cellar_door).is_empty(),
+        "Rest in Peace replaces the bottom card's move, so stack reach cannot name it"
+    );
+
+    // Reach guard: Rest in Peace really redirects the bottom card.
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&bottom].zone, Zone::Exile);
 }

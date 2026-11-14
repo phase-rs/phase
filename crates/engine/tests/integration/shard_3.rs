@@ -8,7 +8,6 @@
 
 pub mod support;
 
-mod cellar_door_bottom_card;
 mod dark_confidant_upkeep;
 mod dark_depths_thespian_stage;
 mod darkness_crystal_exiled_with_activation_8164;

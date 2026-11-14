@@ -155,6 +155,33 @@ pub fn apply_mill_after_replacement(
     )
 }
 
+/// CR 401.2 + CR 701.17b: The (up to) `count` cards on `player`'s library edge
+/// named by `position`, in the order the instruction takes them. A player can't
+/// take more cards than are in their library; if instructed to, they take as
+/// many as possible. A placement-only `LibraryPosition` names no edge and yields
+/// nothing.
+///
+/// Single authority for which cards an `Effect::Mill` moves, shared by the
+/// resolver and `stack_reach`'s replacement projection.
+pub(crate) fn library_edge_cards(
+    state: &GameState,
+    player_id: crate::types::player::PlayerId,
+    count: u32,
+    position: &LibraryPosition,
+) -> Vec<ObjectId> {
+    let library = state.library_of(player_id);
+    let count = (count as usize).min(library.len());
+    // CR 401.2: the library is a single ordered pile; `library[0]` is the top,
+    // so the bottommost card is the last element.
+    match position {
+        LibraryPosition::Top => library.iter().take(count).copied().collect(),
+        LibraryPosition::Bottom => library.iter().rev().take(count).copied().collect(),
+        LibraryPosition::NthFromTop { .. }
+        | LibraryPosition::BeneathTop { .. }
+        | LibraryPosition::RandomWithinTop { .. } => Vec::new(),
+    }
+}
+
 /// CR 401.2 + CR 608.2c: Move cards from a named library edge to `destination`.
 ///
 /// `position` is the edge the instruction names. `Top` is the printed mill form
@@ -176,20 +203,7 @@ fn apply_library_edge_move(
         .find(|p| p.id == player_id)
         .ok_or(EffectError::PlayerNotFound)?;
 
-    // CR 701.17b: A player can't mill more cards than are in their library;
-    // if instructed to, they mill as many as possible.
-    let library = state.library_of(player.id);
-    let count = (count as usize).min(library.len());
-    // CR 401.2: the library is a single ordered pile; `library[0]` is the top,
-    // so the bottommost card is the last element.
-    let cards_to_mill: Vec<_> = match position {
-        LibraryPosition::Top => library.iter().take(count).copied().collect(),
-        LibraryPosition::Bottom => library.iter().rev().take(count).copied().collect(),
-        // A placement-only position names no edge to take cards from.
-        LibraryPosition::NthFromTop { .. }
-        | LibraryPosition::BeneathTop { .. }
-        | LibraryPosition::RandomWithinTop { .. } => Vec::new(),
-    };
+    let cards_to_mill = library_edge_cards(state, player.id, count, &position);
     state.last_effect_count = Some(cards_to_mill.len() as i32);
 
     // CR 701.17a + CR 614.6: Route each moved card through the zone-change

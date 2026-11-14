@@ -3850,6 +3850,15 @@ pub(crate) fn deliver_replaced_zone_change(
         ..
     } = event
     {
+        // CR 701.24a + CR 608.2c: a delivered library move whose chained
+        // `Shuffle` owns the randomization (the instruction's own terminal
+        // shuffle, or a shuffle-back redirect such as Blightsteel Colossus's)
+        // takes a transient position, so the tail below does not shuffle again.
+        let library_placement = crate::game::effects::change_zone::member_library_placement(
+            to,
+            library_placement,
+            library_shuffle,
+        );
         if let Some(entry) = state.liminal_entries.get_mut(&object_id) {
             entry.replacement_applied = applied.clone();
         }

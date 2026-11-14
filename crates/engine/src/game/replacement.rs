@@ -10012,6 +10012,11 @@ pub(super) struct EventModifiers {
     etb_tap_state: EtbTapState,
     etb_counters: Vec<(CounterType, u32)>,
     redirect_zone: Option<Zone>,
+    /// CR 701.24a: who owns the shuffle when `redirect_zone` is a library.
+    /// `TerminalShuffle` (Blightsteel Colossus's "reveal ~ and shuffle it into
+    /// its owner's library instead") leaves the single shuffle to the
+    /// redirect's chained `Shuffle` instruction instead of the delivery tail.
+    redirect_library_shuffle: crate::types::ability::LibraryShuffleMode,
     /// CR 110.2a: Controller override for a self-ETB replacement
     /// (`ReplacementDefinition::enters_under`). Carried as an unresolved
     /// `ControllerRef`; resolved to a concrete `PlayerId` and written onto the
@@ -10102,6 +10107,7 @@ fn event_modifiers_for_ability(
 ) -> EventModifiers {
     let mut etb_tap_state = EtbTapState::Unspecified;
     let mut redirect = None;
+    let mut redirect_library_shuffle = crate::types::ability::LibraryShuffleMode::PerObject;
     let mut current = ability;
     while let Some(def) = current {
         if etb_tap_state == EtbTapState::Unspecified {
@@ -10122,8 +10128,14 @@ fn event_modifiers_for_ability(
             };
         }
         if redirect.is_none() {
-            if let Effect::ChangeZone { destination, .. } = &*def.effect {
+            if let Effect::ChangeZone {
+                destination,
+                library_shuffle,
+                ..
+            } = &*def.effect
+            {
                 redirect = Some(*destination);
+                redirect_library_shuffle = *library_shuffle;
             }
         }
         if !EventModifiers::is_event_modifier_effect(&def.effect) {
@@ -10136,6 +10148,7 @@ fn event_modifiers_for_ability(
         etb_tap_state,
         etb_counters: counters,
         redirect_zone: redirect,
+        redirect_library_shuffle,
         controller_override: None,
     }
 }
@@ -11235,10 +11248,22 @@ fn apply_single_replacement(
                     if let ProposedEvent::ZoneChange {
                         ref mut to,
                         ref mut cause,
+                        ref mut library_shuffle,
                         ..
                     } = new_event
                     {
                         *to = zone;
+                        // CR 701.24a + CR 608.2c: a redirect whose own chained
+                        // `Shuffle` randomizes the library ("reveal ~ and shuffle
+                        // it into its owner's library instead") owns the one
+                        // shuffle; delivery must not shuffle a second time. An
+                        // event already owned by a terminal shuffle keeps it.
+                        if matches!(
+                            modifiers.redirect_library_shuffle,
+                            crate::types::ability::LibraryShuffleMode::TerminalShuffle
+                        ) {
+                            *library_shuffle = modifiers.redirect_library_shuffle;
+                        }
                         // CR 607.2b: the redirecting replacement's own source is
                         // the "exiled with [this object]" linked-ability
                         // authority for whatever this event ultimately

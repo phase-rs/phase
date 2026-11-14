@@ -800,12 +800,31 @@ fn proposed_events(
                 applied: Default::default(),
             })
             .collect(),
-        Effect::Mill { destination, .. } => players
-            .map(|player_id| ProposedEvent::Mill {
-                player_id,
-                count: 1,
-                destination: *destination,
-                applied: Default::default(),
+        // CR 701.17a: only a top-edge move into a graveyard is a mill, so only it
+        // proposes `Mill`. Any other edge (Cellar Door; Grenzo, Dungeon Warden)
+        // is an ordinary library→zone move whose cards each meet the per-card
+        // `Moved` replacements, exactly as the resolver proposes them.
+        Effect::Mill {
+            destination,
+            position,
+            ..
+        } => players
+            .flat_map(|player_id| {
+                if super::mill::is_mill_move(*destination, position) {
+                    vec![ProposedEvent::Mill {
+                        player_id,
+                        count: 1,
+                        destination: *destination,
+                        applied: Default::default(),
+                    }]
+                } else {
+                    super::mill::library_edge_cards(board, player_id, 1, position)
+                        .into_iter()
+                        .map(|id| {
+                            ProposedEvent::zone_change(id, Zone::Library, *destination, source)
+                        })
+                        .collect()
+                }
             })
             .collect(),
         Effect::PutCounter { counter_type, .. } | Effect::MultiplyCounter { counter_type, .. } => {
