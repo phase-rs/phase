@@ -2095,3 +2095,56 @@ fn an_untargeted_spell_ignores_becomes_target_triggers() {
     );
     assert_eq!(reason.kind, "poison_clock_lethal");
 }
+
+/// The AI at 2 life with Prologue to Phyresis and {1}{U}; the opponent at nine poison, with
+/// Kambal, Consul of Allocation when `kambal`.
+fn kambal_board(kambal: bool) -> (GameRunner, ObjectId) {
+    use engine::types::mana::{ManaType, ManaUnit};
+    let (runner, ids) = board(FormatConfig::standard(), 2, &[(OPPONENT, 9)], |s| {
+        s.at_phase(Phase::PreCombatMain);
+        s.with_life(AI, 2);
+        let blue = |t| ManaUnit::new(t, ObjectId(0), false, vec![]);
+        s.with_mana_pool(AI, vec![blue(ManaType::Blue), blue(ManaType::Blue)]);
+        if kambal {
+            s.add_real_card(
+                OPPONENT,
+                "Kambal, Consul of Allocation",
+                Zone::Battlefield,
+                shared_integration_card_db(),
+            );
+        }
+        vec![prologue_to_phyresis(s)]
+    });
+    (runner, ids[0])
+}
+
+/// CR 601.2i + CR 704.5a: Kambal triggers as Prologue becomes cast and resolves first, so the AI
+/// at 2 life loses before the opponent's tenth counter; the policy withholds lethal, and credits
+/// it without Kambal.
+#[test]
+fn a_cast_trigger_that_can_eliminate_the_ai_withholds_the_lethal_read() {
+    let (mut runner, prologue) = kambal_board(true);
+    let card_id = runner.state().objects[&prologue].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: prologue,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Prologue is cast");
+    for _ in 0..8 {
+        if matches!(runner.state().waiting_for, WaitingFor::GameOver { .. }) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass priority");
+    }
+    assert!(!engine::game::players::is_alive(runner.state(), AI));
+    assert_eq!(poison_of(runner.state(), OPPONENT), 9);
+
+    let kinds = [true, false].map(|kambal| {
+        let (runner, prologue) = kambal_board(kambal);
+        verdict_on(runner.state(), &cast_candidate(prologue)).1.kind
+    });
+    assert_eq!(kinds, ["poison_clock_pressure", "poison_clock_lethal"]);
+}

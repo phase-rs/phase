@@ -59,13 +59,14 @@ use engine::game::effects::preview_resolution;
 use engine::game::functioning_abilities::battlefield_active_triggers;
 use engine::game::players::{self, PoisonLossMeasure, PoisonLossScope};
 use engine::game::sba::check_state_based_actions;
+use engine::game::trigger_index::trigger_subscribes_to;
 use engine::types::ability::{AbilityDefinition, Effect, QuantityExpr, ResolvedAbility, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::player::{PlayerCounterKind, PlayerId};
-use engine::types::triggers::TriggerMode;
+use engine::types::TriggerEventKey;
 
 use crate::ability_chain::{collect_scoped_nodes, AbilityScope};
 use crate::features::poison::{
@@ -270,10 +271,10 @@ fn ability_delivery(
                         .cloned(),
                 })
                 .collect::<Option<Vec<_>>>()?;
-            // CR 601.2c: "Any abilities that trigger when those objects and/or players become the
-            // target of a spell trigger at this point"; conservative: subjects and valid_source are
-            // not evaluated because the spell isn't staged on the preview.
-            if !targets.is_empty() && targeting_may_trigger(state, ai_player, &targets) {
+            // CR 601.2c + CR 601.2i: abilities that trigger on targeting or casting go on the stack
+            // first; conservative: subjects and valid_source are not evaluated because the spell
+            // isn't staged on the preview.
+            if cast_path_may_trigger(state, ai_player, &targets) {
                 return None;
             }
             if !targets.is_empty() {
@@ -298,18 +299,21 @@ fn ability_delivery(
     })
 }
 
-/// CR 702.21a: Ward on a targeted object, or a live becomes-target trigger on any permanent; an
-/// unsettled board may hide granted ones.
-fn targeting_may_trigger(state: &GameState, ai_player: PlayerId, targets: &[TargetRef]) -> bool {
+/// CR 702.21a: Ward on a targeted object, or a live cast, activation or (when targeting)
+/// becomes-target trigger on a permanent the AI doesn't control; an unsettled board may hide
+/// granted ones.
+fn cast_path_may_trigger(state: &GameState, ai_player: PlayerId, targets: &[TargetRef]) -> bool {
+    let cast_path_key = |key: &TriggerEventKey| match key {
+        TriggerEventKey::SpellCast(_) | TriggerEventKey::AbilityOrCopyActivated => true,
+        TriggerEventKey::BecomesTarget => !targets.is_empty(),
+        _ => false,
+    };
     state.layers_dirty.is_dirty()
         || targets
             .iter()
             .any(|target| has_ward(state, ai_player, target))
-        || battlefield_active_triggers(state).any(|(_, active)| {
-            matches!(
-                active.definition.mode,
-                TriggerMode::BecomesTarget | TriggerMode::BecomesTargetOnce
-            )
+        || battlefield_active_triggers(state).any(|(obj, active)| {
+            obj.controller != ai_player && trigger_subscribes_to(active.definition, cast_path_key)
         })
 }
 

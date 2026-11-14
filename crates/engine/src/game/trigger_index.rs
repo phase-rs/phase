@@ -1073,6 +1073,14 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
 /// battlefield permanent carrying one of these keywords on every event, even
 /// if its printed `trigger_definitions` is empty.
 ///
+/// CR 603.2: whether `def` subscribes to an event carrying a key `wanted` accepts.
+pub fn trigger_subscribes_to(
+    def: &TriggerDefinition,
+    wanted: impl Fn(&TriggerEventKey) -> bool,
+) -> bool {
+    keys_from_trigger_def(def).0.iter().any(wanted)
+}
+
 /// Returns `true` if `obj` carries a keyword whose triggered behavior is
 /// synthesized outside `obj.trigger_definitions`. Such objects are routed to
 /// `unclassified` so the per-candidate loop always visits them.
