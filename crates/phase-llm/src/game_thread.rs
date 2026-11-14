@@ -112,8 +112,8 @@ pub struct ThreadTurnId(pub u32);
 enum ThreadOrigin {
     /// Created by an ordinary decision.
     Fresh,
-    /// Created to replace a thread the API had just lost, and not continued
-    /// since. Anthropic: "If a continue request still returns a 404 error right
+    /// Created to replace a thread the API had just lost (`thread_not_found`),
+    /// and not continued since. Anthropic: "If a continue request still returns a 404 error right
     /// after you replay, the API might be unable to store that conversation …
     /// Send it without `thread`." A seat whose recovery thread is lost at its
     /// first continue therefore sends self-contained requests from then on.
@@ -144,10 +144,12 @@ struct SeatThread {
     /// accepted.
     pending: Option<PendingTurn>,
     /// What the seat's next create is: [`ThreadOrigin::Recovery`] right after
-    /// the API lost the seat's thread, [`ThreadOrigin::Fresh`] otherwise.
+    /// the API lost the seat's thread (`thread_not_found`),
+    /// [`ThreadOrigin::Fresh`] otherwise.
     next_create: ThreadOrigin,
     /// An endpoint the seat sends self-contained requests to for as long as
-    /// this memory lasts (the rest of the match): its API refused threads
+    /// this memory lasts: the rest of the match, unless a restore (an undo or
+    /// a resume) clears it first. Its API refused threads
     /// (`thread_unsupported_request`), or lost a recovery thread at its first
     /// continue. A fresh create would only be refused, or lost, again.
     refused: Option<ThreadEndpoint>,
@@ -362,7 +364,8 @@ impl LlmThreadMemory {
     ///   continues from. One that cannot be continued (a refusal, or no `id`)
     ///   leaves the seat with no thread, so its next decision starts a new one.
     /// - **A thread error.** The seat's thread is dropped, so the same decision
-    ///   asked again goes out as a fresh create, a recovery. When the API
+    ///   asked again goes out as a fresh create; after `thread_not_found` that
+    ///   create is a recovery. When the API
     ///   refuses threads outright (`thread_unsupported_request`), or loses a
     ///   recovery thread at its first continue (`thread_not_found`), the
     ///   endpoint is remembered and the seat's decisions to it are
@@ -421,12 +424,26 @@ impl LlmThreadMemory {
             }
             Err(LlmError::ThreadUnavailable { code }) => {
                 thread.open = None;
-                let recovery_lost = *code == ThreadErrorCode::NotFound
-                    && answered.shape == PendingShape::Continue(ThreadOrigin::Recovery);
-                if *code == ThreadErrorCode::UnsupportedRequest || recovery_lost {
-                    thread.refused = Some(answered.endpoint);
-                } else {
-                    thread.next_create = ThreadOrigin::Recovery;
+                match code {
+                    ThreadErrorCode::UnsupportedRequest => {
+                        thread.refused = Some(answered.endpoint);
+                    }
+                    ThreadErrorCode::NotFound
+                        if answered.shape == PendingShape::Continue(ThreadOrigin::Recovery) =>
+                    {
+                        thread.refused = Some(answered.endpoint);
+                    }
+                    // Anthropic's replay rule is about a thread the API lost:
+                    // the create that replaces one is a recovery.
+                    ThreadErrorCode::NotFound => thread.next_create = ThreadOrigin::Recovery,
+                    // The API still holds this thread, or holds it with other
+                    // fixed fields; nothing was lost, so the create that
+                    // replaces it is an ordinary one.
+                    ThreadErrorCode::AlreadyContinued
+                    | ThreadErrorCode::ContinueInFlight
+                    | ThreadErrorCode::FingerprintMismatch => {
+                        thread.next_create = ThreadOrigin::Fresh;
+                    }
                 }
             }
             Err(
@@ -1455,6 +1472,71 @@ mod tests {
             .unwrap()
             .request;
         assert!(is_create(&recovered));
+    }
+
+    /// Only a lost thread (`thread_not_found`) makes its replacement a
+    /// recovery. A thread the API still holds, recovered from after
+    /// `thread_already_continued` and its siblings, is an ordinary one: losing
+    /// it at its first continue is recovered again, not a reason to give
+    /// threads up.
+    #[test]
+    fn only_a_lost_thread_makes_its_replacement_a_recovery() {
+        for code in [
+            ThreadErrorCode::AlreadyContinued,
+            ThreadErrorCode::ContinueInFlight,
+            ThreadErrorCode::FingerprintMismatch,
+        ] {
+            let mut memory = LlmThreadMemory::new();
+            answer(
+                &mut memory,
+                &threaded(),
+                &decision(1, AiDifficulty::Medium),
+                &log(2),
+                "msg_1",
+            );
+            memory
+                .decision_request(
+                    SEAT,
+                    &threaded(),
+                    &decision(2, AiDifficulty::Medium),
+                    &log(3),
+                )
+                .unwrap();
+            lose_thread(&mut memory, code);
+            answer(
+                &mut memory,
+                &threaded(),
+                &decision(2, AiDifficulty::Medium),
+                &log(3),
+                "msg_2",
+            );
+
+            let first_continue = memory
+                .decision_request(
+                    SEAT,
+                    &threaded(),
+                    &decision(3, AiDifficulty::Medium),
+                    &log(4),
+                )
+                .unwrap()
+                .request;
+            assert_eq!(
+                continued_from(&first_continue),
+                Some("msg_2".to_string()),
+                "{code:?}"
+            );
+            lose_thread(&mut memory, ThreadErrorCode::NotFound);
+            let recovered = memory
+                .decision_request(
+                    SEAT,
+                    &threaded(),
+                    &decision(3, AiDifficulty::Medium),
+                    &log(4),
+                )
+                .unwrap()
+                .request;
+            assert!(is_create(&recovered), "{code:?}");
+        }
     }
 
     /// A cancelled attempt's late reply belongs to its own request: it never

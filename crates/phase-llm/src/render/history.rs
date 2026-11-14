@@ -104,6 +104,11 @@ impl TurnCycle {
 /// the last run of turn-0 entries that follows an entry from a numbered turn.
 /// A log with no such run (the first game, or one whose earlier games were
 /// trimmed away) belongs to the game in progress throughout.
+///
+/// The log carries no typed game-start marker, so an earlier game that ended
+/// before its first turn began (a concession during the mulligans) logged
+/// nothing at a numbered turn and cannot be told apart from the next game's
+/// pregame: its entries stay in the next game's history.
 pub fn current_game(history: &[GameLogEntry]) -> &[GameLogEntry] {
     let Some(last_pregame) = history.iter().rposition(|entry| entry.turn == 0) else {
         return history;

@@ -67,9 +67,11 @@ export function buildLlmDecisionRequest(difficulty: string, player_id: number, e
  *
  * Stateless by design: a player configures a provider in Settings, usually
  * with no game running, and a test that required a live board would be
- * untestable exactly when it is most needed. The request is built by the same
- * `build_chat_request` a real decision uses, so a probe that succeeds proves
- * the endpoint, credential and model the game path will use.
+ * untestable exactly when it is most needed. The request is built in the shape
+ * a real decision's first request takes (`phase_llm::build_probe_request`:
+ * a message-thread create for a profile on threads), so a probe that succeeds
+ * proves the endpoint, credential, model and request shape the game path will
+ * use.
  */
 export function buildLlmProbeRequest(endpoint_json: string): any;
 

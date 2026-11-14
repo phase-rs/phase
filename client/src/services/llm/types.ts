@@ -80,7 +80,10 @@ export interface LlmHttpRequestSpec {
 export interface LlmDecisionRequest {
   fingerprint: string;
   optionCount: number;
-  /** Characters of prompt the request carries (system + user). */
+  /**
+   * Characters of prompt the request carries: system and user for a full
+   * request, the one update message for a message-thread continue.
+   */
   promptChars: number;
   request: LlmHttpRequestSpec;
 }

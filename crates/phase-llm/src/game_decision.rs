@@ -416,7 +416,7 @@ pub fn build_game_decision_prompt(
     }
 
     // A best-of-three's next game replaces the game in place while the log
-    // runs on; the prompt describes the game in progress only.
+    // runs on; the prompt describes the game in progress (`current_game`).
     let history = current_game(history);
     let viewer = contract.semantic_owner;
     // The engine's own visibility authority decides what this seat may read.
