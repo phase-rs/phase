@@ -8,8 +8,8 @@ use super::*;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
     CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageKindFilter,
-    Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
+    Duration, Effect, FilterProp, ObjectProperty, ObjectScope, Parity, ParitySource, PlayerFilter,
+    PlayerRelation, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
     SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
@@ -87,6 +87,33 @@ fn color_conditional_keyword_grant_single_pair() {
         defs[0].modifications,
         vec![ContinuousModification::AddKeyword {
             keyword: Keyword::Vigilance
+        }]
+    );
+}
+
+/// CR 611.3a + CR 608.2c: Predator's Gambit's printed "as long as its controller
+/// controls no other creatures" stays an explicit `Unrecognized` coverage gap.
+/// A static ability has no resolving target to bind the referent against, so the
+/// shared target-controller recognizer must not be reachable from
+/// `parse_inner_condition` and read an unbound parent-target controller.
+#[test]
+fn predators_gambit_controller_clause_stays_an_explicit_gap() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature has intimidate as long as its controller controls no other creatures.",
+    );
+    assert_eq!(defs.len(), 1);
+    assert!(
+        matches!(
+            defs[0].condition,
+            Some(StaticCondition::Unrecognized { .. })
+        ),
+        "the controller clause must stay an explicit gap, got {:?}",
+        defs[0].condition
+    );
+    assert_eq!(
+        defs[0].modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Intimidate
         }]
     );
 }
@@ -2792,6 +2819,49 @@ fn cant_attack_scoped_player_only_variant() {
         Some(crate::types::triggers::AttackTargetFilter::Player),
         "companion must be scoped to Player, got {:?}",
         lockout.attack_defended
+    );
+}
+
+/// CR 508.1c + CR 508.6: Bloodthirster / Port Razer — "This creature can't attack
+/// a player it has already attacked this turn." The defended scope is the
+/// creature's OWN attack history, not a blanket prohibition. Before this arm
+/// existed the history rider was left unconsumed after the bare " a player" match,
+/// the whole line fell through to the blanket `CantAttack` arm, and the creature
+/// could not attack any opponent at all (issue #8064).
+///
+/// Both printed printings normalize their subject to the self-reference the static
+/// grammar understands (`This creature` and the card name both become `~`), so the
+/// subject axis is covered by the shared self-reference combinator rather than a
+/// per-card string.
+#[test]
+fn cant_attack_player_already_attacked_scopes_to_the_source_history() {
+    for line in [
+        "This creature can't attack a player it has already attacked this turn.",
+        "~ can't attack a player it has already attacked this turn.",
+    ] {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line} must parse"));
+        assert_eq!(def.mode, StaticMode::CantAttack, "{line}");
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
+        assert_eq!(
+            def.attack_defended,
+            Some(crate::types::triggers::AttackTargetFilter::PlayerAttackedBySourceThisTurn),
+            "{line}: the restriction must scope to players this creature already attacked, got {:?}",
+            def.attack_defended
+        );
+        assert!(
+            def.condition.is_none(),
+            "{line}: the history rider belongs to the defended scope, not a gate; got {:?}",
+            def.condition
+        );
+    }
+
+    // Control: the bare self restriction is still a blanket `CantAttack` with no
+    // defended scope, so the new arm cannot swallow it.
+    let bare = parse_static_line("~ can't attack.").expect("bare cant attack");
+    assert_eq!(bare.mode, StaticMode::CantAttack);
+    assert_eq!(
+        bare.attack_defended, None,
+        "a bare CantAttack must stay unscoped"
     );
 }
 
@@ -6484,6 +6554,122 @@ fn static_this_spell_cost_less_for_each_creature_that_attacked_this_turn() {
     assert_eq!(
         def.active_zones,
         crate::types::zones::self_spell_cost_mod_active_zones()
+    );
+}
+
+/// CR 107.14 + CR 601.2f: Blaster Hulk's reduction counts the energy the
+/// controller paid or lost this turn. Regression for issue #7899: the clause
+/// fell through to the type-phrase fallback and became an `ObjectCount` over an
+/// empty filter (every object), so the spell cost only {R}{R}.
+#[test]
+fn static_this_spell_cost_less_for_each_energy_paid_or_lost_this_turn() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "This spell costs {1} less to cast for each {E} (energy counter) you've paid or lost this turn.\nHaste\nWhenever this creature attacks, you get {E}{E}, then you may pay eight {E}. When you do, this creature deals 8 damage divided as you choose among up to eight targets.",
+        "Blaster Hulk",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Pirate".to_string()],
+    );
+    let reductions: Vec<_> = parsed
+        .statics
+        .iter()
+        .filter(|def| matches!(def.mode, StaticMode::ModifyCost { .. }))
+        .collect();
+    assert_eq!(reductions.len(), 1, "statics = {:?}", parsed.statics);
+    let def = reductions[0];
+    assert!(
+        matches!(
+            def.mode,
+            StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::Cost { generic: 1, .. },
+                spell_filter: None,
+                dynamic_count: Some(QuantityRef::EnergyPaidOrLostThisTurn),
+                ..
+            }
+        ),
+        "got {:?}",
+        def.mode
+    );
+    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    assert_eq!(
+        def.active_zones,
+        crate::types::zones::self_spell_cost_mod_active_zones()
+    );
+}
+
+/// CR 601.2f: a "for each" count the parser cannot read must leave the cost
+/// modifier unparsed. It must not fall back to an `ObjectCount` over an empty
+/// filter (every object in the game), which made these spells nearly free
+/// (issue #7899 class: Lumbering Megasloth, Astral Confrontation).
+#[test]
+fn static_cost_reduction_with_unreadable_for_each_count_fails_closed() {
+    for line in [
+        "This spell costs {1} less to cast for each counter among players and permanents.",
+        "This spell costs {1} less to cast for each opponent you're attacking.",
+    ] {
+        let def = parse_static_line(line);
+        assert!(
+            !matches!(
+                def.as_ref().map(|def| &def.mode),
+                Some(StaticMode::ModifyCost { .. })
+            ),
+            "{line}: unreadable count must not yield a cost modifier, got {def:?}"
+        );
+    }
+    // Reach guard: a readable count through the same "for each" path still
+    // lowers to a dynamic cost modifier.
+    let readable = parse_static_line(
+        "This spell costs {1} less to cast for each creature that attacked this turn.",
+    );
+    assert!(
+        matches!(
+            readable.as_ref().map(|def| &def.mode),
+            Some(StaticMode::ModifyCost {
+                dynamic_count: Some(QuantityRef::ObjectCount { .. }),
+                ..
+            })
+        ),
+        "readable count must still parse, got {readable:?}"
+    );
+}
+
+/// CR 601.2f: the type-phrase fallback must consume the WHOLE count clause. A
+/// recognized type followed by an unparsed qualifier would otherwise count a
+/// broader class than the text allows ("each creature" instead of "each creature
+/// that's attacking") and over-reduce the cost. The premise assert pins that the
+/// folding parser really leaves this qualifier behind, so the test cannot go
+/// vacuously green if that parser learns the suffix later.
+#[test]
+fn static_cost_reduction_with_unparsed_type_qualifier_fails_closed() {
+    let phrase = "creature that's attacking";
+    let (filter, remainder) = crate::parser::oracle_target::parse_type_phrase_folding(phrase);
+    assert!(
+        !remainder.trim().is_empty()
+            && matches!(filter, TargetFilter::Typed(ref tf) if !tf.type_filters.is_empty()),
+        "probe premise: a recognized type with an unparsed qualifier, got {filter:?} / {remainder:?}"
+    );
+    let line = format!("This spell costs {{1}} less to cast for each {phrase}.");
+    let def = parse_static_line(&line);
+    assert!(
+        !matches!(
+            def.as_ref().map(|def| &def.mode),
+            Some(StaticMode::ModifyCost { .. })
+        ),
+        "{line}: unparsed qualifier must not yield a cost modifier, got {def:?}"
+    );
+    // Reach guard: the same type phrase without the qualifier still parses.
+    let readable =
+        parse_static_line("This spell costs {1} less to cast for each creature you control.");
+    assert!(
+        matches!(
+            readable.as_ref().map(|def| &def.mode),
+            Some(StaticMode::ModifyCost {
+                dynamic_count: Some(QuantityRef::ObjectCount { .. }),
+                ..
+            })
+        ),
+        "readable count must still parse, got {readable:?}"
     );
 }
 
@@ -12852,6 +13038,80 @@ fn static_same_turn_loyalty_abilities_activate_as_instant() {
     );
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     assert_eq!(def.condition, Some(StaticCondition::SourceEnteredThisTurn));
+}
+
+/// CR 606.3 + CR 304.5: Teferi, Master of Time's timing permission (Scryfall-
+/// verified verbatim Oracle line 1; the production pipeline normalizes "Teferi"
+/// to `~` before the static line parses, so the unit shape uses `~` directly).
+/// Unlike the Wandering Emperor's conditional possessive form, this is
+/// unconditional with an "of \<subject\>" axis plus the "on any player's turn"
+/// infix — which CR 304.5 subsumes into instant timing (priority only), so it
+/// lowers to the same shared `ActivateAsInstant { PaysLoyalty, None }` mode,
+/// self-scoped. Reverting the `dispatch.rs` call site yields `None` here.
+#[test]
+fn static_teferi_master_of_time_loyalty_timing_permission() {
+    let def = parse_static_line(
+        "You may activate loyalty abilities of ~ on any player's turn any time you could cast an instant.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::ActivateAsInstant {
+            cost_category: CostCategory::PaysLoyalty,
+            keyword: None,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(def.condition, None);
+}
+
+/// CR 606.3 + CR 304.5: the subject axis composes — Teferi's Talent's emblem
+/// carries the same timing permission scoped to "planeswalkers you control"
+/// (verbatim emblem text, already quoted in the granted-loyalty corpus below).
+/// Same shared mode; only `affected` differs.
+#[test]
+fn static_loyalty_timing_permission_subject_axis_composes() {
+    let def = parse_static_line(
+        "You may activate loyalty abilities of planeswalkers you control on any player's turn any time you could cast an instant.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::ActivateAsInstant {
+            cost_category: CostCategory::PaysLoyalty,
+            keyword: None,
+        }
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::You),
+        ))
+    );
+    assert_eq!(def.condition, None);
+}
+
+/// CR 304.5: the "on any player's turn" infix is optional — instant timing
+/// already spans any player's turn, so the bare tail parses to the same
+/// permission rather than failing closed. Combinator pin: no printed card
+/// carries the bare form yet. Both apostrophe forms parse.
+#[test]
+fn static_loyalty_timing_permission_turn_infix_optional() {
+    for line in [
+        "You may activate loyalty abilities of ~ any time you could cast an instant.",
+        "You may activate loyalty abilities of ~ on any player\u{2019}s turn any time you could cast an instant.",
+    ] {
+        let def = parse_static_line(line).unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::ActivateAsInstant {
+                cost_category: CostCategory::PaysLoyalty,
+                keyword: None,
+            },
+            "{line}"
+        );
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
+    }
 }
 
 #[test]
@@ -24838,7 +25098,17 @@ fn cant_cast_spells_of_chosen_color() {
 
 #[test]
 fn cant_cast_spells_with_even_mana_values() {
-    // CR 101.2: "can't cast spells with even mana values"
+    // CR 601.3a: "can't cast spells with even mana values" — Void Winnower, the
+    // card that rule's own example is written about. The parity is one of the
+    // "certain qualities" CR 601.3a says the prohibition names, so it must
+    // reach `affected`; CR 202.3 defines the mana value it is read from.
+    //
+    // This test used to assert `def.mode` ALONE and passed with the card
+    // completely broken: `affected` was `None`, and
+    // `is_blocked_by_cant_be_cast_for` skips its filter test when `affected` is
+    // `None` and falls through to PROHIBITED — so Void Winnower stopped
+    // opponents from casting every spell in the game. Asserting the filter is
+    // the whole point of this test; do not weaken it back to a mode check.
     let def = parse_static_line("Your opponents can't cast spells with even mana values.").unwrap();
     assert_eq!(
         def.mode,
@@ -24846,6 +25116,44 @@ fn cant_cast_spells_with_even_mana_values() {
             who: ProhibitionScope::Opponents,
         }
     );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => assert!(
+            tf.properties.contains(&FilterProp::ManaValueParity {
+                parity: ParitySource::Fixed(Parity::Even),
+            }),
+            "even-mana-value cast prohibition must scope to EVEN mana values; got {:?}",
+            tf.properties
+        ),
+        other => panic!(
+            "expected a Typed filter carrying ManaValueParity(Fixed(Even)), got {other:?} \
+             (an unfiltered prohibition is a total cast-lock on every spell)"
+        ),
+    }
+}
+
+#[test]
+fn cant_cast_spells_with_odd_mana_values() {
+    // CR 601.3a + CR 202.3: the ODD mirror of the Void Winnower arm. No printed
+    // card uses it today, but the parity must be read from the text rather than
+    // defaulted — a head that hardcoded `Even` would pass the sibling test
+    // above and silently invert this one.
+    let def = parse_static_line("Your opponents can't cast spells with odd mana values.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantBeCast {
+            who: ProhibitionScope::Opponents,
+        }
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => assert!(
+            tf.properties.contains(&FilterProp::ManaValueParity {
+                parity: ParitySource::Fixed(Parity::Odd),
+            }),
+            "odd-mana-value cast prohibition must scope to ODD mana values; got {:?}",
+            tf.properties
+        ),
+        other => panic!("expected ManaValueParity(Fixed(Odd)), got {other:?}"),
+    }
 }
 
 #[test]
@@ -42072,5 +42380,200 @@ fn enchanted_land_creature_retention_clause_keeps_land_type() {
         assert!(mods.contains(&ContinuousModification::AddSubtype {
             subtype: "Ooze".to_string()
         }));
+    }
+}
+
+fn dynamic_count_of(line: &str) -> QuantityRef {
+    match parse_static_line(line).map(|def| def.mode) {
+        Some(StaticMode::ModifyCost {
+            dynamic_count: Some(count),
+            ..
+        }) => count,
+        other => panic!("{line}: expected a counted cost modifier, got {other:?}"),
+    }
+}
+
+/// CR 601.2f + CR 108.3 + CR 400.1: cost-modifier counts keep every qualifier
+/// of a coordinated population — owned cards across listed zones restricted by
+/// a card-description list, an "and each" union of populations, and a
+/// spell-relative name reference.
+#[test]
+fn cost_modifier_counts_keep_coordinated_population_qualifiers() {
+    let owned = || FilterProp::Owned {
+        controller: ControllerRef::You,
+    };
+    assert_eq!(
+        dynamic_count_of("This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure."),
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        owned(),
+                        FilterProp::InAnyZone {
+                            zones: vec![Zone::Exile, Zone::Graveyard],
+                        },
+                    ])),
+                    TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                            TargetFilter::Typed(
+                                TypedFilter::card().properties(vec![FilterProp::HasAdventure]),
+                            ),
+                        ],
+                    },
+                ],
+            },
+        }
+    );
+    assert_eq!(
+        dynamic_count_of("This spell costs {1} less to cast for each artifact you control and each artifact card in your hand."),
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+                    ),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                        FilterProp::InZone { zone: Zone::Hand },
+                        owned(),
+                    ])),
+                ],
+            },
+        }
+    );
+    // CR 400.1: legs in one zone can share an object, which a single union count
+    // would count once instead of once per leg, so that union declines.
+    // Synthetic; Machinist's Dismissal is the nearest printed card.
+    assert!(!matches!(
+        parse_static_line("This spell costs {1} less to cast for each artifact you control and each creature you control.")
+            .map(|def| def.mode),
+        Some(StaticMode::ModifyCost {
+            dynamic_count: Some(QuantityRef::ObjectCount {
+                filter: TargetFilter::Or { .. }
+            }),
+            ..
+        })
+    ));
+    assert_eq!(
+        dynamic_count_of("Spells you cast cost {1} less to cast for each card with the same name as that spell in your graveyard."),
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Graveyard
+                },
+                owned(),
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(Box::new(TargetFilter::CastingSpell)),
+                    relation: SharedQualityRelation::Shares,
+                },
+            ])),
+        }
+    );
+}
+
+/// CR 509.1h + CR 105.2: a combat-status word after a `non-`
+/// prefix, and "that each share a color with one or more <objects>", both
+/// stay in the parsed filter.
+#[test]
+fn type_phrase_keeps_post_negation_status_and_plural_shared_color_reference() {
+    let (filter, rest) =
+        crate::parser::oracle_target::parse_target("target nonartifact attacking creature");
+    assert_eq!(rest, "");
+    assert_eq!(
+        filter,
+        TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature)
+                .with_type(TypeFilter::Non(Box::new(TypeFilter::Artifact)))
+                .properties(vec![FilterProp::Attacking { defender: None }])
+        )
+    );
+    let (filter, rest) = crate::parser::oracle_target::parse_target(
+        "target card that each share a color with one or more permanents you control",
+    );
+    assert_eq!(rest, "");
+    assert_eq!(
+        filter,
+        TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::SharesQuality {
+                quality: SharedQuality::Color,
+                reference: Some(Box::new(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You)
+                ))),
+                relation: SharedQualityRelation::Shares,
+            }])
+        )
+    );
+}
+
+fn parsed_json(name: &str, text: &str, card_type: &str) -> String {
+    let parsed =
+        crate::parser::oracle::parse_oracle_text(text, name, &[], &[card_type.to_string()], &[]);
+    serde_json::to_string(&(&parsed.abilities, &parsed.triggers)).expect("parse serializes")
+}
+
+/// Neighbours of the repaired grammars stay honest: each either parses to its
+/// printed meaning or keeps an explicit gap instead of a silently wrong shape.
+#[test]
+fn repaired_grammar_neighbours_parse_to_their_meaning_or_an_explicit_gap() {
+    // CR 608.2c + CR 109.4: "Other creatures that player controls" excludes the
+    // target (Mark for Death), not the spell.
+    let mark = parsed_json(
+        "Mark for Death",
+        "Target creature an opponent controls blocks this turn if able. Untap that creature. Other creatures that player controls can't block this turn.",
+        "Sorcery",
+    );
+    assert!(
+        mark.contains(r#""controller":"ParentTargetController","properties":[{"type":"DistinctFrom","reference":{"type":"ParentTarget"}}]"#),
+        "{mark}"
+    );
+    // CR 508.1k / CR 509.1g / CR 509.1h: "goaded attacking or blocking" keeps both legs goaded.
+    let baeloth = parsed_json(
+        "Baeloth Barrityl, Entertainer",
+        "Whenever a goaded attacking or blocking creature dies, you create a Treasure token.",
+        "Creature",
+    );
+    assert!(
+        baeloth.contains(r#"[{"type":"Goaded"},{"type":"Attacking"}]"#),
+        "{baeloth}"
+    );
+    assert!(
+        baeloth.contains(r#"[{"type":"Goaded"},{"type":"Blocking"}]"#),
+        "{baeloth}"
+    );
+    // CR 607.2d: a trigger reading "the chosen quality" binds the persisted choice.
+    let gollum = parsed_json(
+        "Gollum, Riddle Master",
+        "As Gollum enters, choose odd or even. (Zero is even.)\nWhenever an opponent casts a spell with mana value of the chosen quality, you draw a card.",
+        "Creature",
+    );
+    assert!(
+        gollum.contains(r#""parity":{"type":"SourceChosen"}"#),
+        "{gollum}"
+    );
+    // Unmodeled riders and targeted fixed-kind adjustments stay explicit gaps.
+    for (name, text, card_type) in [
+        (
+            "Watcher of Hours",
+            "Whenever you remove a time counter from this card while it's exiled, surveil 1.",
+            "Creature",
+        ),
+        (
+            "Sigurd, Jarl of Ravensthorpe",
+            "Boast \u{2014} {1}: Put a lore counter on target Saga you control or remove one from it.",
+            "Creature",
+        ),
+        (
+            "Discover the Formula",
+            "Seek three nonland cards, then nonland cards in your hand perpetually gain \"This spell costs {1} less to cast.\"",
+            "Instant",
+        ),
+    ] {
+        let json = parsed_json(name, text, card_type);
+        assert!(
+            json.contains("Unknown") || json.contains("Unimplemented"),
+            "{name} must stay an explicit gap: {json}"
+        );
     }
 }

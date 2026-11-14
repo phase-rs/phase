@@ -827,9 +827,27 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // `PhysicalContest`. It is ACTORLESS — nobody submits a `GameAction` while it
     // runs — and is declared in `ACTORLESS` with `NoActor::HostContestDriver`,
     // advanced by `game::contest::advance_contest`.
-    if declared.len() != 144 {
+    // 144 -> 145 is adjudicated: the conspiracy agenda prompt added
+    // `SecretAgendaChoice`, `ActingAuthority::One(player)`. Not actorless: pregame
+    // cannot advance without that player's `GameAction::ChooseSecretAgendaNames`.
+    // 145 -> 146 is adjudicated: Petals of Insight's "put those cards on the
+    // bottom of your library in any order" (CR 401.4 + CR 608.2c) added
+    // `DigBottomOrder`. It names one acting `player` — the controller
+    // announcing the bottom permutation — and is classified by
+    // `WaitingFor::acting_authority` as `ActingAuthority::One(player)`. Not
+    // actorless: it cannot advance without that player's `SelectCards`.
+    // 146 -> 147 is adjudicated: Turtle Team-Up added `HeroEventChoice`. It HAS
+    // an acting player — the prompted hero answers with `SelectCards` — and is
+    // classified `ActingAuthority::One(player)` alongside `DiscardChoice`.
+    // 147 -> 148 is adjudicated: CR 103.1's game-one starting-player choice
+    // added `ChooseStartingPlayer`. It names one acting `player` — the player
+    // chosen to decide who takes the first turn — and is classified by
+    // `WaitingFor::acting_authority` as `ActingAuthority::One(player)`. Not
+    // actorless: the prompt cannot advance without that player's
+    // `GameAction::ChooseStartingPlayer`.
+    if declared.len() != 148 {
         failures.push(format!(
-            "PIN declared.len()={} != 144.\n\
+            "PIN declared.len()={} != 148.\n\
              \n\
              Adding a `WaitingFor` variant IS the counted event this gate exists to make loud. \
              Repair it by ADJUDICATING, not by bumping the number:\n\

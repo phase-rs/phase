@@ -390,6 +390,27 @@ pub(crate) fn run_async_test_with_blocking_limit<F: std::future::Future<Output =
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
 }
 
+/// CR 103.1: a started session rests at the game-one choice. For tests whose
+/// subject is not the choice, the contest winner elects to play first, as it
+/// did before the choice existed, and the session's revision advances for that
+/// transition as `NativeTable::keep_all` does after each action. A session
+/// not waiting on the choice is left alone.
+pub(crate) fn elect_contest_winner_to_play(session: &mut server_core::session::GameSession) {
+    let engine::types::game_state::WaitingFor::ChooseStartingPlayer { player, .. } =
+        session.state.waiting_for
+    else {
+        return;
+    };
+    let token = session.player_tokens[usize::from(player.0)].clone();
+    session
+        .handle_action(
+            &token,
+            engine::types::actions::GameAction::ChooseStartingPlayer { player },
+        )
+        .expect("the contest winner elects to play first");
+    session.advance_state_revision();
+}
+
 pub(crate) fn room_request(
     deck: server_core::protocol::DeckData,
     player_count: u8,
@@ -424,6 +445,8 @@ fn reconnect_bootstrap_precedes_a_concurrent_newer_action() {
         };
         use engine::types::actions::{GameAction, MulliganChoice};
         use engine::types::format::FormatConfig;
+        use engine::types::game_state::WaitingFor;
+        use engine::types::player::PlayerId;
         use futures_util::SinkExt;
         use server_core::protocol::{ClientMessage, DeckData};
         use std::time::Duration;
@@ -483,11 +506,48 @@ fn reconnect_bootstrap_precedes_a_concurrent_newer_action() {
                 ))
                 .await
                 .unwrap();
+            let mut started = Vec::new();
+            for socket in [&mut host, &mut guest] {
+                started.push(loop {
+                    match recv_server_message(socket).await {
+                        ServerMessage::GameStarted { state, .. } => break state.waiting_for,
+                        ServerMessage::Error { message, .. } => panic!("start: {message}"),
+                        _ => {}
+                    }
+                });
+            }
+            // CR 103.1: the chooser elects to play first, as the roll winner did
+            // before the choice existed.
+            let WaitingFor::ChooseStartingPlayer {
+                player: chooser, ..
+            } = started[0]
+            else {
+                panic!("the start rests at the CR 103.1 choice");
+            };
+            let chooser_socket = if chooser == PlayerId(0) {
+                &mut host
+            } else {
+                &mut guest
+            };
+            chooser_socket
+                .send(Message::Text(
+                    serde_json::to_string(&ClientMessage::Action {
+                        action: GameAction::ChooseStartingPlayer { player: chooser },
+                    })
+                    .unwrap()
+                    .into(),
+                ))
+                .await
+                .unwrap();
             for socket in [&mut host, &mut guest] {
                 loop {
                     match recv_server_message(socket).await {
-                        ServerMessage::GameStarted { .. } => break,
-                        ServerMessage::Error { message, .. } => panic!("start: {message}"),
+                        ServerMessage::StateUpdate { .. } => break,
+                        ServerMessage::ActionRejected { rejection } => {
+                            panic!("choice: {rejection:?}")
+                        }
+                        ServerMessage::ActionFailed { message } => panic!("choice: {message}"),
+                        ServerMessage::Error { message, .. } => panic!("choice: {message}"),
                         _ => {}
                     }
                 }
@@ -967,7 +1027,7 @@ fn starting_join_bootstrap_precedes_an_existing_players_action() {
         use crate::issue_4548_full_create_tests::{
             recv_server_message, send_test_message, spawn_full_mode_server_with_db,
         };
-        use engine::types::actions::{GameAction, MulliganChoice};
+        use engine::types::actions::GameAction;
         use server_core::protocol::{ClientMessage, DeckData};
         use std::time::Duration;
 
@@ -999,12 +1059,16 @@ fn starting_join_bootstrap_precedes_an_existing_players_action() {
             )
             .await;
             gate.entered.notified().await;
+            // The start now rests at the CR 103.1 choice, whose chooser is
+            // unknown when this action is committed. `CancelAutoPass` is an
+            // actor-scoped preference, legal in every `WaitingFor` from any
+            // seat, so the existing player's action is admissible whoever
+            // chooses, and it still advances the revision the start must
+            // publish first.
             send_test_message(
                 &mut host,
                 &ClientMessage::Action {
-                    action: GameAction::MulliganDecision {
-                        choice: MulliganChoice::Keep,
-                    },
+                    action: GameAction::CancelAutoPass,
                 },
                 false,
             )
@@ -1204,6 +1268,7 @@ fn draft_full_bootstrap_precedes_a_concurrent_full_action() {
                     .unwrap();
                 session.state.format_config = FormatConfig::freeform();
                 session.start_game(&app.db).unwrap();
+                elect_contest_winner_to_play(&mut session);
                 session.player_tokens[1].clone()
             };
             let mut draft_player = connect_and_hello(url.clone()).await;

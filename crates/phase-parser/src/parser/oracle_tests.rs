@@ -469,6 +469,42 @@ fn teferi_master_of_time_minus_ten_preserves_two_extra_turns() {
     ));
 }
 
+/// CR 606.3 + CR 304.5: Teferi, Master of Time's full verbatim Oracle text
+/// (Scryfall-verified) routes line 1 through the static fallback to the shared
+/// `ActivateAsInstant { PaysLoyalty, None }` timing permission, self-scoped —
+/// not to the effect gap the export pipeline reports today.
+#[test]
+fn teferi_master_of_time_timing_permission_types_as_static() {
+    let oracle = "You may activate loyalty abilities of Teferi on any player's turn any time you could cast an instant.\n\
+[+1]: Draw a card, then discard a card.\n\
+[\u{2212}3]: Target creature you don't control phases out. (Treat it and anything attached to it as though they don't exist until its controller's next turn.)\n\
+[\u{2212}10]: Take two extra turns after this one.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Teferi, Master of Time",
+        &[],
+        &["Planeswalker".into()],
+        &["Teferi".into()],
+    );
+    let permission = parsed
+        .statics
+        .iter()
+        .find(|def| {
+            matches!(
+                def.mode,
+                crate::types::statics::StaticMode::ActivateAsInstant {
+                    cost_category: crate::types::ability::CostCategory::PaysLoyalty,
+                    keyword: None,
+                }
+            )
+        })
+        .expect("Teferi's line 1 must lower to the loyalty timing permission static");
+    assert_eq!(
+        permission.affected,
+        Some(crate::types::ability::TargetFilter::SelfRef)
+    );
+}
+
 /// CR 607.2d + CR 614.1c: only an as-enters replacement whose separate static
 /// reads `IsChosenCardType` is promoted from its locally-labeled list.
 #[test]
@@ -1586,6 +1622,86 @@ fn activated_ability_opponents_upkeep_restriction_composes_scope_and_step() {
         "expected composed opponent's-upkeep restriction, got {:?}",
         ability.activation_restrictions
     );
+}
+
+/// CR 602.5 + CR 122.1e: Jace, Reality Sculptor's [0] ability is gated on
+/// "there are twenty-five or more loyalty counters among Jaces you control".
+/// The clause is an ordinary quantity comparison over the loyalty counters
+/// summed across Jace planeswalkers, so it must lower to `RequiresCondition`
+/// rather than leave an `unrecognized_clause_head` gap on "Activate only".
+#[test]
+fn jace_reality_sculptor_zero_ability_gates_on_loyalty_counters_among_jaces() {
+    let r = parse(
+        "[+1]: Empower Jace X, where X is the number of Islands you control.\n\
+         [−3]: Until your next turn, whenever a creature attacks you or a planeswalker you control, it gets -5/-0 until end of turn.\n\
+         [0]: Exile all but the bottom card of each opponent's library. Activate only if there are twenty-five or more loyalty counters among Jaces you control.",
+        "Jace, Reality Sculptor",
+        &[],
+        &["Planeswalker"],
+        &["Jace"],
+    );
+
+    assert_eq!(r.abilities.len(), 3, "got {r:#?}");
+    let zero = &r.abilities[2];
+    assert!(
+        matches!(
+            zero.cost,
+            Some(crate::types::ability::AbilityCost::Loyalty { amount: 0 })
+        ),
+        "the third ability is the [0] loyalty ability, got {:?}: {zero:#?}",
+        zero.cost
+    );
+    assert!(
+        !matches!(zero.effect.as_ref(), Effect::Unimplemented { .. }),
+        "the exile must parse: {zero:#?}"
+    );
+
+    let (counter_type, comparator, value) = zero
+        .activation_restrictions
+        .iter()
+        .find_map(|restriction| match restriction {
+            ActivationRestriction::RequiresCondition {
+                condition:
+                    Some(ParsedCondition::QuantityComparison {
+                        lhs:
+                            QuantityExpr::Ref {
+                                qty:
+                                    QuantityRef::CountersOnObjects {
+                                        counter_type,
+                                        filter,
+                                    },
+                            },
+                        comparator,
+                        rhs: QuantityExpr::Fixed { value },
+                    }),
+            } => {
+                assert!(
+                    matches!(
+                        filter,
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters,
+                            controller: Some(ControllerRef::You),
+                            ..
+                        }) if type_filters.iter().any(|type_filter| matches!(
+                            type_filter,
+                            TypeFilter::Subtype(subtype) if subtype == "Jace"
+                        ))
+                    ),
+                    "the count is scoped to Jaces you control, got {filter:?}"
+                );
+                Some((counter_type, comparator, value))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a loyalty-counters-among-Jaces activation condition, got {:?}",
+                zero.activation_restrictions
+            )
+        });
+    assert_eq!(*counter_type, Some(CounterType::Loyalty));
+    assert_eq!(*comparator, Comparator::GE);
+    assert_eq!(*value, 25);
 }
 
 /// CR 602.5b: the `during <role> <window>` activation gate is composed from a
@@ -3238,12 +3354,13 @@ fn compound_target_player_continuations_share_one_target() {
 
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AggregateFunction, BasicLandType, Comparator,
-    ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect, EffectScope,
-    FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec,
-    ObjectProperty, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount,
-    PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, RoundingMode,
-    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, ShieldKind,
-    StaticCondition, TapStateChange, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+    ContinuousModification, ControllerRef, DelayedTriggerCondition, DevotionColors, Duration,
+    Effect, EffectScope, FilterProp, ManaProduction, ManaSpendRestriction,
+    ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ObjectScope, ParsedCondition,
+    PlayerFilter, PlayerScope, PreventionAmount, PtStat, PtValue, PtValueScope, QuantityExpr,
+    QuantityRef, ReplacementCondition, RoundingMode, SacrificeCost, SacrificeRequirement,
+    SharedQuality, SharedQualityRelation, ShieldKind, StaticCondition, TapStateChange,
+    TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind, WardCost};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, StepEndManaAction};
@@ -3678,7 +3795,12 @@ fn bile_blight_target_and_same_name_creatures_emit_pump_plus_pumpall() {
         }
         other => panic!("expected PumpAll sub_ability, got {other:?}"),
     }
-    assert_eq!(sub.duration, Some(Duration::UntilEndOfTurn));
+    // CR 611.2a (#7962): the mass link states no window of its own — the printed
+    // "until end of turn" is hoisted onto the clause carrier (asserted above), and the
+    // resolver supplies the end-of-turn fallback for this link. An injected value here
+    // was byte-identical to a printed window, so an enclosing printed window could not
+    // distribute onto it.
+    assert_eq!(sub.duration, None);
 }
 
 /// Class coverage: the +N/+N sibling (Echoing Courage) takes the same recognizer,
@@ -23175,8 +23297,8 @@ fn commune_with_nature_dig_from_among() {
             assert_eq!(*rest_destination, Some(Zone::Library));
             assert_eq!(
                 *rest_order,
-                crate::types::ability::DigRestOrder::Preserve,
-                "'in any order' must not be misrepresented as a random instruction"
+                crate::types::ability::DigRestOrder::PlayerChoice,
+                "'in any order' must be parsed as player choice, not preserve"
             );
         }
         other => {
@@ -23899,6 +24021,7 @@ fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
         AttackTargetFilter::OwnerOrPlaneswalker,
         AttackTargetFilter::PlayerOrPermanents,
         AttackTargetFilter::Monarch,
+        AttackTargetFilter::PlayerAttackedBySourceThisTurn,
     ];
     for scope in attack_target_scopes {
         let expected_rebind = match scope {
@@ -23909,7 +24032,8 @@ fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
             | AttackTargetFilter::Battle
             | AttackTargetFilter::Owner
             | AttackTargetFilter::OwnerOrPlaneswalker
-            | AttackTargetFilter::PlayerOrPermanents => false,
+            | AttackTargetFilter::PlayerOrPermanents
+            | AttackTargetFilter::PlayerAttackedBySourceThisTurn => false,
         };
         assert_eq!(
             attack_intervening_if_anaphor_is_defending_player(&base(Some(scope.clone()))),
@@ -25634,6 +25758,434 @@ fn prevention_followup_if_this_way_does_not_emit_condition_warning() {
     assert!(
         ability.sub_ability.is_some(),
         "expected prevented-this-way follow-up sub-ability"
+    );
+}
+
+/// CR 615.7 + CR 107.3a + CR 107.3c: every printed counted prevention clause in
+/// the "prevent the next X damage" class must carry the announced `{X}` in
+/// `amount_dynamic` (`Next(1)` stays as the static placeholder), while a trailing
+/// "where X is <quantity>" binder still DEFINES X and replaces it with the
+/// card's own count. The negative siblings are Guardian Angel's fixed second
+/// shield and the four binder cards.
+#[derive(Clone, Copy)]
+enum ExpectedDynamic {
+    /// The announced `{X}`: `Next(1)` placeholder plus `Variable X`.
+    AnnouncedX,
+    /// A fixed counted shield with no dynamic override.
+    Fixed,
+    DevotionWhite,
+    ClericCount,
+    BasicLandTypeCount,
+    VerseCounters,
+}
+
+#[derive(Clone, Copy)]
+enum ExpectedTarget {
+    Any,
+    Controller,
+    Creature,
+    /// Pre-existing recipient defect, deliberately not asserted (Divine
+    /// Deflection's "you and/or permanents you control").
+    Unasserted,
+}
+
+/// Every `Effect::PreventDamage` reachable from ordinary ability roots and
+/// trigger execution roots, as `(amount, amount_dynamic, target)`. Built on
+/// `collect_all_effects`, so it walks exactly what `unimplemented_keys` walks.
+fn collect_prevention_nodes(
+    parsed: &ParsedAbilities,
+) -> Vec<(PreventionAmount, Option<QuantityExpr>, TargetFilter)> {
+    collect_all_effects(parsed)
+        .into_iter()
+        .filter_map(|effect| match effect {
+            Effect::PreventDamage {
+                amount,
+                amount_dynamic,
+                target,
+                ..
+            } => Some((amount, amount_dynamic, target)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn x_prevention_class_parses_announced_x_as_dynamic_amount() {
+    const ALABASTER_POTION: &str = "Choose one —\n• Target player gains X life.\n• Prevent the next X damage that would be dealt to any target this turn.";
+    const ATALYA: &str = "{X}, {T}: Choose one —\n• Prevent the next X damage that would be dealt to target creature this turn. Spend only white mana on X.\n• You gain X life. Spend only white mana on X.";
+    const PANACEA: &str =
+        "{X}{X}, {T}: Prevent the next X damage that would be dealt to any target this turn.";
+    const VENGEFUL_ARCHON: &str = "Flying\n{X}: Prevent the next X damage that would be dealt to you this turn. If damage is prevented this way, this creature deals that much damage to target player or planeswalker.";
+    const DIVINE_DEFLECTION: &str = "Prevent the next X damage that would be dealt to you and/or permanents you control this turn. If damage is prevented this way, Divine Deflection deals that much damage to any target.";
+    const FESTIVAL_OF_THE_GUILDPACT: &str =
+        "Prevent the next X damage that would be dealt to you this turn.\nDraw a card.";
+    const GUARDIAN_ANGEL: &str = "Prevent the next X damage that would be dealt to any target this turn. Until end of turn, you may pay {1} any time you could cast an instant. If you do, prevent the next 1 damage that would be dealt to that permanent or player this turn.";
+    const TEMPER: &str = "Prevent the next X damage that would be dealt to target creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.";
+    const ACOLYTES_REWARD: &str = "Prevent the next X damage that would be dealt to target creature this turn, where X is your devotion to white. If damage is prevented this way, Acolyte's Reward deals that much damage to any target. (Each {W} in the mana costs of permanents you control counts toward your devotion to white.)";
+    const BATTLEFIELD_MEDIC: &str = "{T}: Prevent the next X damage that would be dealt to target creature this turn, where X is the number of Clerics on the battlefield.";
+    const SAMITE_PILGRIM: &str = "Domain — {T}: Prevent the next X damage that would be dealt to target creature this turn, where X is the number of basic land types among lands you control.";
+    const SERRAS_HYMN: &str = "At the beginning of your upkeep, you may put a verse counter on this enchantment.\nSacrifice this enchantment: Prevent the next X damage that would be dealt this turn to any number of targets, divided as you choose, where X is the number of verse counters on this enchantment.";
+
+    type Expected = (ExpectedDynamic, ExpectedTarget);
+    type Case<'a> = (
+        &'a str,
+        &'a str,
+        &'a [&'a str],
+        &'a [&'a str],
+        &'a [Expected],
+    );
+    let cases: &[Case<'_>] = &[
+        (
+            "Alabaster Potion",
+            ALABASTER_POTION,
+            &["Instant"],
+            &[],
+            &[(ExpectedDynamic::AnnouncedX, ExpectedTarget::Any)],
+        ),
+        (
+            "Atalya, Samite Master",
+            ATALYA,
+            &["Creature"],
+            &["Human", "Cleric"],
+            &[(ExpectedDynamic::AnnouncedX, ExpectedTarget::Creature)],
+        ),
+        (
+            "Panacea",
+            PANACEA,
+            &["Artifact"],
+            &[],
+            &[(ExpectedDynamic::AnnouncedX, ExpectedTarget::Any)],
+        ),
+        (
+            "Vengeful Archon",
+            VENGEFUL_ARCHON,
+            &["Creature"],
+            &["Archon"],
+            &[(ExpectedDynamic::AnnouncedX, ExpectedTarget::Controller)],
+        ),
+        (
+            "Divine Deflection",
+            DIVINE_DEFLECTION,
+            &["Instant"],
+            &[],
+            &[(ExpectedDynamic::AnnouncedX, ExpectedTarget::Unasserted)],
+        ),
+        (
+            "Festival of the Guildpact",
+            FESTIVAL_OF_THE_GUILDPACT,
+            &["Instant"],
+            &[],
+            &[(ExpectedDynamic::AnnouncedX, ExpectedTarget::Controller)],
+        ),
+        (
+            "Guardian Angel",
+            GUARDIAN_ANGEL,
+            &["Instant"],
+            &[],
+            &[
+                // The second shield's recipient ("that permanent or player")
+                // is a pre-existing defect, deliberately unasserted.
+                (ExpectedDynamic::AnnouncedX, ExpectedTarget::Any),
+                (ExpectedDynamic::Fixed, ExpectedTarget::Unasserted),
+            ],
+        ),
+        (
+            "Temper",
+            TEMPER,
+            &["Instant"],
+            &[],
+            &[(ExpectedDynamic::AnnouncedX, ExpectedTarget::Creature)],
+        ),
+        (
+            "Acolyte's Reward",
+            ACOLYTES_REWARD,
+            &["Instant"],
+            &[],
+            &[(ExpectedDynamic::DevotionWhite, ExpectedTarget::Creature)],
+        ),
+        (
+            "Battlefield Medic",
+            BATTLEFIELD_MEDIC,
+            &["Creature"],
+            &["Human", "Cleric"],
+            &[(ExpectedDynamic::ClericCount, ExpectedTarget::Creature)],
+        ),
+        (
+            "Samite Pilgrim",
+            SAMITE_PILGRIM,
+            &["Creature"],
+            &["Human", "Cleric"],
+            &[(
+                ExpectedDynamic::BasicLandTypeCount,
+                ExpectedTarget::Creature,
+            )],
+        ),
+        (
+            "Serra's Hymn",
+            SERRAS_HYMN,
+            &["Enchantment"],
+            &[],
+            &[(ExpectedDynamic::VerseCounters, ExpectedTarget::Any)],
+        ),
+    ];
+
+    for (name, oracle, core_types, subtypes, expected) in cases {
+        let parsed = parse(oracle, name, &[], core_types, subtypes);
+
+        // Reach guard: the prevention clause was represented, not discarded by an
+        // upstream guard, and no warning quotes it as unrepresented text.
+        let nodes = collect_prevention_nodes(&parsed);
+        assert_eq!(
+            nodes.len(),
+            expected.len(),
+            "{name}: prevention nodes {nodes:?}"
+        );
+        let clause_warnings: Vec<String> = parsed
+            .parse_warnings
+            .iter()
+            .map(|warning| format!("{warning:?}").to_lowercase())
+            .filter(|warning| warning.contains("prevent the next"))
+            .collect();
+        assert!(
+            clause_warnings.is_empty(),
+            "{name}: prevention clause left warnings {clause_warnings:?}"
+        );
+
+        for ((amount, amount_dynamic, target), (want_dynamic, want_target)) in
+            nodes.iter().zip(expected.iter())
+        {
+            match want_dynamic {
+                ExpectedDynamic::AnnouncedX => {
+                    assert_eq!(
+                        *amount,
+                        PreventionAmount::Next(1),
+                        "{name}: static placeholder amount"
+                    );
+                    assert_eq!(
+                        amount_dynamic,
+                        &Some(QuantityExpr::Ref {
+                            qty: QuantityRef::Variable {
+                                name: "X".to_string(),
+                            },
+                        }),
+                        "{name}: announced X must be carried in amount_dynamic"
+                    );
+                }
+                ExpectedDynamic::Fixed => {
+                    assert_eq!(
+                        *amount,
+                        PreventionAmount::Next(1),
+                        "{name}: fixed counted amount"
+                    );
+                    assert_eq!(
+                        *amount_dynamic, None,
+                        "{name}: fixed counted shield carries no dynamic amount"
+                    );
+                }
+                ExpectedDynamic::DevotionWhite => {
+                    assert_eq!(
+                        *amount,
+                        PreventionAmount::Next(1),
+                        "{name}: static placeholder amount"
+                    );
+                    assert_eq!(
+                        amount_dynamic,
+                        &Some(QuantityExpr::Ref {
+                            qty: QuantityRef::Devotion {
+                                colors: DevotionColors::Fixed(vec![ManaColor::White]),
+                            },
+                        }),
+                        "{name}: the trailing binder defines X"
+                    );
+                }
+                ExpectedDynamic::ClericCount => {
+                    assert_eq!(
+                        *amount,
+                        PreventionAmount::Next(1),
+                        "{name}: static placeholder amount"
+                    );
+                    let Some(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    }) = amount_dynamic
+                    else {
+                        panic!("{name}: expected the Cleric-count binder, got {amount_dynamic:?}");
+                    };
+                    let TargetFilter::Typed(typed) = filter else {
+                        panic!("{name}: expected a Typed Cleric filter, got {filter:?}");
+                    };
+                    assert!(
+                        typed
+                            .type_filters
+                            .contains(&TypeFilter::Subtype("Cleric".to_string())),
+                        "{name}: expected the Cleric-count binder, got {typed:?}"
+                    );
+                }
+                ExpectedDynamic::BasicLandTypeCount => {
+                    assert_eq!(
+                        *amount,
+                        PreventionAmount::Next(1),
+                        "{name}: static placeholder amount"
+                    );
+                    assert_eq!(
+                        amount_dynamic,
+                        &Some(QuantityExpr::Ref {
+                            qty: QuantityRef::BasicLandTypeCount {
+                                controller: ControllerRef::You,
+                            },
+                        }),
+                        "{name}: the trailing binder defines X"
+                    );
+                }
+                ExpectedDynamic::VerseCounters => {
+                    assert_eq!(
+                        *amount,
+                        PreventionAmount::Next(1),
+                        "{name}: static placeholder amount"
+                    );
+                    assert_eq!(
+                        amount_dynamic,
+                        &Some(QuantityExpr::Ref {
+                            qty: QuantityRef::CountersOn {
+                                scope: ObjectScope::Source,
+                                counter_type: Some(CounterType::Generic("verse".to_string())),
+                            },
+                        }),
+                        "{name}: the trailing binder defines X"
+                    );
+                }
+            }
+
+            match want_target {
+                ExpectedTarget::Any => {
+                    assert_eq!(*target, TargetFilter::Any, "{name}: recipient target");
+                }
+                ExpectedTarget::Controller => {
+                    assert_eq!(
+                        *target,
+                        TargetFilter::Controller,
+                        "{name}: recipient target"
+                    );
+                }
+                ExpectedTarget::Creature => {
+                    let TargetFilter::Typed(typed) = target else {
+                        panic!("{name}: expected Typed(creature) recipient, got {target:?}");
+                    };
+                    assert!(
+                        typed.type_filters.contains(&TypeFilter::Creature),
+                        "{name}: expected Typed(creature) recipient, got {typed:?}"
+                    );
+                }
+                ExpectedTarget::Unasserted => {}
+            }
+        }
+    }
+}
+
+/// CR 615.7 + CR 107.3a + CR 120.2a: a counted prevention publishes an announced-X
+/// shield only when the shared count grammar consumed the whole quantity, i.e. its
+/// remainder opens on the prevention damage noun. "the next X plus X damage" leaves
+/// "plus X damage" unconsumed; the parser must report an explicit
+/// `prevent_damage_unconsumed_quantity` gap, never an X-sized shield that dropped the
+/// second operand, and the held gap must keep a weaker priority from re-reading the
+/// line as a blanket prevention replacement with X as 0.
+///
+/// No printed card has this shape (the corpus has no "prevent the next X plus ..."
+/// head). The synthetic texts replace "the next X damage" with "the next X plus X
+/// damage" in the verbatim templates of the nearest printed cards: Festival of the
+/// Guildpact (non-modal instant with a following spell line), Panacea (activated
+/// artifact ability) and Alabaster Potion (modal instant). Each printed card is the
+/// paired positive reach guard: it must still publish exactly one `PreventDamage`
+/// carrying the announced X, so the negatives cannot pass by the line having failed
+/// to parse at all.
+#[test]
+fn x_prevention_unconsumed_quantity_connective_fails_closed() {
+    const KEY: &str = "prevent_damage_unconsumed_quantity";
+    let announced_x = Some(QuantityExpr::Ref {
+        qty: QuantityRef::Variable {
+            name: "X".to_string(),
+        },
+    });
+
+    // (name, printed text, synthetic text, core types)
+    let cases: &[(&str, &str, &str, &[&str])] = &[
+        (
+            "Festival of the Guildpact",
+            "Prevent the next X damage that would be dealt to you this turn.\nDraw a card.",
+            "Prevent the next X plus X damage that would be dealt to you this turn.\nDraw a card.",
+            &["Instant"],
+        ),
+        (
+            "Panacea",
+            "{X}{X}, {T}: Prevent the next X damage that would be dealt to any target this turn.",
+            "{X}{X}, {T}: Prevent the next X plus X damage that would be dealt to any target this turn.",
+            &["Artifact"],
+        ),
+        (
+            "Alabaster Potion",
+            "Choose one \u{2014}\n\u{2022} Target player gains X life.\n\u{2022} Prevent the next X damage that would be dealt to any target this turn.",
+            "Choose one \u{2014}\n\u{2022} Target player gains X life.\n\u{2022} Prevent the next X plus X damage that would be dealt to any target this turn.",
+            &["Instant"],
+        ),
+    ];
+
+    for (name, printed, synthetic, core_types) in cases {
+        // Positive reach guard: the printed text publishes the announced-X shield.
+        let printed_parsed = parse(printed, name, &[], core_types, &[]);
+        let printed_nodes = collect_prevention_nodes(&printed_parsed);
+        assert_eq!(
+            printed_nodes.len(),
+            1,
+            "{name}: the printed clause must publish exactly one shield, got {printed_nodes:?}"
+        );
+        assert_eq!(
+            printed_nodes[0].1, announced_x,
+            "{name}: the printed clause must carry the announced X"
+        );
+        assert!(
+            !unimplemented_keys(&printed_parsed)
+                .iter()
+                .any(|key| key == KEY),
+            "{name}: the printed clause must not reach the gap"
+        );
+
+        // The unconsumed connective fails closed.
+        let parsed = parse(synthetic, name, &[], core_types, &[]);
+        assert!(
+            unimplemented_keys(&parsed).iter().any(|key| key == KEY),
+            "{name}: the unconsumed quantity must be an explicit gap, keys={:?}",
+            unimplemented_keys(&parsed)
+        );
+        let nodes = collect_prevention_nodes(&parsed);
+        assert!(
+            nodes.is_empty(),
+            "{name}: no one-operand shield may be published, got {nodes:?}"
+        );
+        assert!(
+            parsed.replacements.is_empty(),
+            "{name}: the gap must not be re-read as a prevention replacement, got {:?}",
+            parsed.replacements
+        );
+    }
+
+    // The sibling spell line of a gapped prevention survives untouched: the only
+    // `Unimplemented` on the card is the receipt itself.
+    let festival = parse(
+        "Prevent the next X plus X damage that would be dealt to you this turn.\nDraw a card.",
+        "Festival of the Guildpact",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert!(
+        collect_all_effects(&festival)
+            .iter()
+            .any(|effect| matches!(effect, Effect::Draw { .. })),
+        "the Draw spell line must still be represented"
+    );
+    assert_eq!(
+        unimplemented_keys(&festival),
+        vec![KEY.to_string()],
+        "only the prevention receipt may be unimplemented"
     );
 }
 
@@ -34483,7 +35035,7 @@ fn choice_of_fortunes_shuffles_the_sought_set_into_the_library() {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
-            library_shuffle: crate::types::ability::MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::TerminalShuffle,
             random_order: false,
         }
     );
@@ -34519,14 +35071,24 @@ fn owner_subject_shuffle_them_into_their_libraries_moves_the_objects() {
     assert!(
         defs.iter().any(|d| matches!(
             &*d.effect,
-            Effect::ChangeZone {
+            Effect::ChangeZoneAll {
+                origin: None,
                 destination: Zone::Library,
                 target: TargetFilter::ParentTarget,
-                owner_library: true,
+                library_shuffle: crate::types::ability::LibraryShuffleMode::TerminalShuffle,
                 ..
             }
         )),
-        "expected an owner-library move, got {defs:?}"
+        "expected an owner-library population move, got {defs:?}"
+    );
+    assert!(
+        defs.iter().any(|d| matches!(
+            &*d.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            }
+        )),
+        "expected the terminal owner-scoped shuffle, got {defs:?}"
     );
     assert!(
         !defs
@@ -35144,4 +35706,218 @@ fn self_exile_land_grant_class_parses_until_self_cast_and_self_permission() {
             link = def.sub_ability.as_deref();
         }
     }
+}
+
+/// CR 202.3 + CR 601.3a: the FIXED odd/even mana-value conjunct must reach
+/// every call site the corpus exercises, and must stay away from the two
+/// printed shapes that only LOOK like it.
+///
+/// `ParitySource::Fixed` had a complete runtime (`filter::parity_from_source`,
+/// `coverage`, `triggers`) and was constructed by NO parser, so every printed
+/// fixed-parity clause silently dropped its conjunct. The four cards below are
+/// the whole set of corpus cards whose fixed-parity clause is a FILTER, and they
+/// cover four distinct call sites: a casting prohibition's `affected`
+/// (Void Winnower), a target filter (Desecrate Reality), a tracked-set filter
+/// inside a trigger's sub-ability (Gyruda), and a spell-cast trigger's
+/// `valid_card` (Soundwave). One head feeds all four — a per-site fix would
+/// have had to be written four times.
+///
+/// The three EXCLUSIONS are asserted too, because "no parity anywhere" is the
+/// correct answer for them and a greedier head would wrongly claim them:
+///
+///   * Obosh, the Preypiercer — "a source you control with an odd mana value
+///     would deal damage" is a REPLACEMENT's damage-source filter
+///     (`damage_source_filter`), which is `None` for reasons that have nothing
+///     to do with this suffix (the whole source filter is dropped, the
+///     "you control" half included). A separate seam; see the follow-up note.
+///   * Gyruda / Obosh companion lines — "Your starting deck contains only cards
+///     with even mana values" is a CR 702.139a DECKBUILDING constraint, not a
+///     filter over game objects, and is carried by the `Companion` keyword
+///     rather than a `TargetFilter`. Forcing it through this arm would invent a
+///     filter the card does not apply in play.
+#[test]
+fn fixed_mana_value_parity_conjunct_reaches_every_filter_call_site() {
+    /// Collect every `FilterProp::ManaValueParity` anywhere in a parse, as
+    /// "<source>(<parity>)". Walking the serialized form rather than the typed
+    /// tree is deliberate: the four call sites nest the prop at four different
+    /// depths behind four different wrappers, and the point of this test is that
+    /// ONE head serves all of them — a per-site typed navigation would re-encode
+    /// the very assumption under test.
+    fn parities(parsed: &ParsedAbilities) -> Vec<String> {
+        fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    if map.get("type").and_then(serde_json::Value::as_str)
+                        == Some("ManaValueParity")
+                    {
+                        let p = &map["parity"];
+                        out.push(format!(
+                            "{}({})",
+                            p.get("type")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("?"),
+                            p.get("value")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("?"),
+                        ));
+                    }
+                    for child in map.values() {
+                        walk(child, out);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for child in items {
+                        walk(child, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(
+            &serde_json::to_value(parsed).expect("ParsedAbilities serializes"),
+            &mut out,
+        );
+        out.sort();
+        out
+    }
+
+    /// One corpus card: its name, type line axes, and the fixed-parity
+    /// conjuncts its printed text must produce (empty = off this seam).
+    struct Case {
+        name: &'static str,
+        types: &'static [&'static str],
+        subtypes: &'static [&'static str],
+        expected: &'static [&'static str],
+    }
+
+    let cases: &[Case] = &[
+        Case {
+            name: "Void Winnower",
+            types: &["Creature"],
+            subtypes: &["Eldrazi"],
+            expected: &["Fixed(Even)"],
+        },
+        Case {
+            name: "Desecrate Reality",
+            types: &["Instant"],
+            subtypes: &[],
+            // One leg per printed clause: the even-mana-value exile target and
+            // the adamant odd-mana-value graveyard return.
+            expected: &["Fixed(Even)", "Fixed(Odd)"],
+        },
+        Case {
+            name: "Gyruda, Doom of Depths",
+            types: &["Creature"],
+            subtypes: &["Demon", "Kraken"],
+            // ONE conjunct: the milled-card filter. The companion line is a
+            // deckbuilding constraint and contributes none.
+            expected: &["Fixed(Even)"],
+        },
+        Case {
+            name: "Soundwave, Superior Captain",
+            types: &["Artifact"],
+            subtypes: &[],
+            expected: &["Fixed(Even)", "Fixed(Odd)"],
+        },
+        Case {
+            // Both lines are off this seam: a companion constraint and a
+            // replacement-effect damage-source filter.
+            name: "Obosh, the Preypiercer",
+            types: &["Creature"],
+            subtypes: &["Hellion", "Horror"],
+            expected: &[],
+        },
+        // CR 702.16e: "Protection from odd/even mana values" is the PROTECTION
+        // keyword's quality slot, not a postnominal filter suffix — there is no
+        // "with "/"that have " subject head for the parity production to attach
+        // to, so these two cannot reach it. Both are unfinished playtest cards
+        // ({TK} cost placeholders) that parse entirely to `Unimplemented`
+        // today; asserting the empty set here is what keeps a future, greedier
+        // parity head from quietly claiming the keyword's quality.
+        Case {
+            name: "Squid Fire Knight",
+            types: &[],
+            subtypes: &[],
+            expected: &[],
+        },
+        Case {
+            name: "Weird Angel Flame",
+            types: &[],
+            subtypes: &[],
+            expected: &[],
+        },
+    ];
+
+    for case in cases {
+        let oracle = corpus_oracle_text(case.name);
+        let types: Vec<String> = case.types.iter().map(|s| (*s).to_string()).collect();
+        let subtypes: Vec<String> = case.subtypes.iter().map(|s| (*s).to_string()).collect();
+        let parsed = parse_oracle_text(&oracle, case.name, &[], &types, &subtypes);
+        assert_eq!(
+            parities(&parsed),
+            case.expected,
+            "{}: fixed-parity conjuncts must match the printed clauses",
+            case.name
+        );
+    }
+}
+
+/// The printed Oracle text this test file asserts against, kept beside the
+/// assertions so a reader can see what is being parsed. Held here rather than
+/// read from the card-data export on purpose: the export is GENERATED and may
+/// lag the parser, so judging a parse against it would compare the parser to a
+/// stale snapshot of itself.
+fn corpus_oracle_text(name: &str) -> String {
+    match name {
+        "Void Winnower" => concat!(
+            "Your opponents can't cast spells with even mana values. (Zero is even.)\n",
+            "Your opponents can't block with creatures with even mana values."
+        ),
+        "Desecrate Reality" => concat!(
+            "For each opponent, exile up to one target permanent that player controls ",
+            "with an even mana value. (Zero is even.)\n",
+            "Adamant \u{2014} If at least three colorless mana was spent to cast this spell, ",
+            "return a permanent card with an odd mana value from your graveyard to the battlefield."
+        ),
+        "Gyruda, Doom of Depths" => concat!(
+            "Companion \u{2014} Your starting deck contains only cards with even mana values. ",
+            "(If this card is your chosen companion, you may put it into your hand from ",
+            "outside the game for {3} as a sorcery.)\n",
+            "When Gyruda enters, each player mills four cards. Put a creature card with an ",
+            "even mana value from among the milled cards onto the battlefield under your control."
+        ),
+        "Soundwave, Superior Captain" => concat!(
+            "Whenever you cast a spell with an odd mana value, convert Soundwave. If you do, ",
+            "create Ravage, a legendary 3/3 black Robot artifact creature token with menace ",
+            "and deathtouch.\n",
+            "Whenever you cast a spell with an even mana value, convert Soundwave. If you do, ",
+            "create Laserbeak, a legendary 2/2 blue Robot artifact creature token with flying ",
+            "and hexproof."
+        ),
+        "Obosh, the Preypiercer" => concat!(
+            "Companion \u{2014} Your starting deck contains only cards with odd mana values and ",
+            "land cards. (If this card is your chosen companion, you may put it into your hand ",
+            "from outside the game for {3} as a sorcery.)\n",
+            "If a source you control with an odd mana value would deal damage to a permanent ",
+            "or player, it deals double that damage to that permanent or player instead."
+        ),
+        "Squid Fire Knight" => concat!(
+            "{TK}{TK} \u{2014} {T}: The next time target player would roll one or more dice ",
+            "this turn, instead they roll that many dice plus one, then you choose one of ",
+            "those rolls to ignore.\n",
+            "{TK}{TK}{TK} \u{2014} Protection from odd mana values\n",
+            "{TK}{TK} \u{2014} 4/1\n",
+            "{TK}{TK}{TK}{TK} \u{2014} 6/6"
+        ),
+        "Weird Angel Flame" => concat!(
+            "{TK}{TK} \u{2014} Heroic \u{2014} Whenever you cast a spell that targets this ",
+            "permanent, put two +1/+1 counters on it.\n",
+            "{TK}{TK}{TK} \u{2014} Protection from even mana values\n",
+            "{TK}{TK} \u{2014} 2/3\n",
+            "{TK}{TK}{TK}{TK}{TK} \u{2014} 7/8"
+        ),
+        other => panic!("no corpus oracle text recorded for {other}"),
+    }
+    .to_string()
 }

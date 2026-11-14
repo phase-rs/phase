@@ -57,6 +57,78 @@ pub(crate) fn parse_loyalty_activation_timing_permission(
     )
 }
 
+/// CR 606.3 + CR 304.5: "You may activate [the] loyalty abilities of
+/// \<subject\> [on any player's turn] any time you could cast an instant." —
+/// the loyalty-activation TIMING permission with an "of \<subject\>" axis
+/// (Teferi, Master of Time: subject `~` after card-name normalization;
+/// Teferi's Talent's emblem: subject "planeswalkers you control").
+///
+/// Lowers to the existing `StaticMode::ActivateAsInstant { PaysLoyalty, None }`
+/// the Wandering Emperor's conditional possessive form already uses, so the
+/// runtime gate is untouched. CR 304.5 subsumes the "on any player's turn"
+/// infix (instant timing needs only priority), so the infix is accepted but
+/// optional, in both apostrophe spellings (the source text is not
+/// apostrophe-normalized). An unrecognized subject (including empty) is
+/// rejected rather than emitting a match-anything filter, mirroring the limit
+/// static below.
+///
+/// Start-anchored on "you may activate", so the duration-scoped instant form
+/// ("Until end of turn, you may activate ...", Jace's Machinations) never
+/// matches here — that line owns a duration the static surface cannot carry
+/// and must keep falling through to the effect pipeline.
+pub(crate) fn parse_loyalty_timing_permission_of_subject(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let subject = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = tag("you may activate ").parse(i)?;
+        let (i, _) = opt(tag("the ")).parse(i)?;
+        let (i, _) = tag("loyalty abilities of ").parse(i)?;
+        let (i, subject) = alt((
+            terminated(
+                take_until(" on any player"),
+                alt((
+                    tag(" on any player's turn "),
+                    tag(" on any player\u{2019}s turn "),
+                )),
+            ),
+            terminated(take_until(" any time you could cast an instant"), tag(" ")),
+        ))
+        .parse(i)?;
+        let (i, _) = tag("any time you could cast an instant").parse(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = all_consuming(value((), tag(""))).parse(i)?;
+        Ok((i, subject.to_string()))
+    })
+    .map(|(subject, _)| subject)?;
+
+    // CR 201.5 + CR 201.5c: a self-reference subject scopes the static to its
+    // source (the `dispatch.rs` "~" pattern); anything else folds through the
+    // typed subject phrase. Reject an empty or unrecognized subject outright.
+    let trimmed = subject.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let affected = if trimmed == "~" {
+        TargetFilter::SelfRef
+    } else {
+        let (affected, rest) = parse_type_phrase_folding(trimmed);
+        if !rest.trim().is_empty() {
+            return None;
+        }
+        affected
+    };
+
+    Some(
+        StaticDefinition::new(StaticMode::ActivateAsInstant {
+            cost_category: CostCategory::PaysLoyalty,
+            keyword: None,
+        })
+        .affected(affected)
+        .description(text.to_string()),
+    )
+}
+
 /// CR 602.5e + CR 702.6a: "You may activate equip abilities any time you could
 /// cast an instant." (Leonin Shikari) and its class — any "You may activate
 /// [tagged] abilities any time you could cast an instant" permission keyed to

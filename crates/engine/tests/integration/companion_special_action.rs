@@ -7,6 +7,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
+use engine::types::display_only::DisplayOnly;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
     GameState, ManaAbilityResume, ManaChoice, ManaChoicePrompt, PendingCostMoveResume, WaitingFor,
@@ -32,6 +33,7 @@ fn set_declared_companion(runner: &mut GameRunner) {
             count: 1,
         },
         used: false,
+        printing: DisplayOnly::default(),
     });
 }
 
@@ -47,6 +49,7 @@ fn redirect_exile_to_graveyard() -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 destination: Zone::Graveyard,
                 origin: None,
                 target: TargetFilter::SelfRef,

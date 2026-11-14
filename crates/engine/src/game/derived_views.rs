@@ -19,30 +19,38 @@ use std::num::NonZeroUsize;
 
 use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::{declared_targets_in_chain, flatten_targets_in_chain};
+use crate::game::combat::{active_attack_target, AttackTarget};
+use crate::game::combat_damage::combat_damage_to_defender;
+use crate::game::effects::deal_damage::DamageContext;
 use crate::game::filter::{matches_target_filter, FilterContext};
-use crate::game::game_object::{AttachTarget, DisplaySource};
+use crate::game::game_object::{AttachTarget, DisplaySource, GameObject};
+use crate::game::players::{poison_loss_measure, PoisonLossScope};
 use crate::game::stack::{
     effective_stack_ability, stack_display_groups, stack_display_groups_revealing,
     stack_revealed_card_names, StackDisplayGroup,
 };
+use crate::game::topology::Side;
 use crate::types::ability::{
-    ContinuousModification, Duration, GameRestriction, KeywordAction, ProhibitedActivity,
-    RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
+    AbilityCost, ContinuousModification, Duration, Effect, GameRestriction, KeywordAction,
+    ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
 };
 use crate::types::attribution::EffectRef;
-use crate::types::card::TokenImageRef;
+use crate::types::card::{PrintedCardRef, TokenImageRef};
+use crate::types::card_printing::SharedPrinting;
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_entries, CounterType};
+use crate::types::display_only::{CanonicalDigest, DisplayOnly};
 use crate::types::events::GameEvent;
+use crate::types::format::TurnStructure;
 use crate::types::game_state::{
-    CastingVariant, CombatDamageSubStep, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
-    SyntheticTriggerProvenance, WaitingFor,
+    CastingVariant, CombatDamageSubStep, GameState, PendingManaAbility, StackEntry, StackEntryKind,
+    StackPaidSnapshot, SyntheticTriggerProvenance, TriggerSourceRead, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::interaction::InteractionId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::Layer;
-use crate::types::mana::ManaCost;
+use crate::types::mana::{ManaCost, ManaPipId, ManaPool, PaymentContext};
 use crate::types::player::PlayerId;
 use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
@@ -93,6 +101,15 @@ pub struct StackEntryDisplay {
     pub source_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_image_ref: Option<TokenImageRef>,
+    /// The source card's printing for this row, derived from the viewer's filtered state.
+    /// Display-only: CR 203.1 + CR 206.1, a printing has no effect on game play, so no rules
+    /// or AI path reads it. Absent from the wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
+    /// Oracle and face authority for row owner art, from the printing's selected read.
+    /// Display-only; no rules or AI path reads it. Absent when the row has no printing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_ref: Option<PrintedCardRef>,
     pub kind_label: String,
     /// The typed template behind `kind_label` for activated and triggered
     /// ability entries (`StackAbilityKindView`); `None` for every other kind.
@@ -445,6 +462,15 @@ pub fn family_of(axis: ResourceAxis) -> UnboundedFamily {
     }
 }
 
+/// CR 601.2g + CR 605.3a: display data for a manual mana ability's payment
+/// window: the ability's source, its mana sub-cost and the pinned pool units.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManaAbilityPaymentView {
+    pub source_id: ObjectId,
+    pub cost: ManaCost,
+    pub pinned_pool_units: Vec<ManaPipId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanechaseView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -482,10 +508,16 @@ pub struct TurnOrderSlotView {
     /// display classification rather than comparing player IDs themselves.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_viewer: bool,
-    /// Whether this projected slot is the game's starting player. It is only
-    /// true while that player is also the current turn representative.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub is_starting_player: bool,
+}
+
+/// CR 103.1 + CR 103.1a: whether the viewer's side takes the first turn of a
+/// game with exactly two sides — the starting player's side ("on the play") or
+/// the other side ("on the draw"). Display classification only; no rules path
+/// reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlayDrawPosition {
+    OnThePlay,
+    OnTheDraw,
 }
 
 /// A card identity deliberately exposed to the debug library browser. This
@@ -495,6 +527,14 @@ pub struct TurnOrderSlotView {
 pub struct DebugLibraryCardView {
     pub object_id: ObjectId,
     pub name: String,
+    /// Oracle and face authority for owner art, authorized with the debug name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_ref: Option<PrintedCardRef>,
+    /// The library card's printing, exposed only on this debug surface. Display-only:
+    /// CR 203.1 + CR 206.1, a printing has no effect on game play, so no rules or AI path
+    /// reads it. Absent from the wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
 }
 
 /// Engine-authored identity for a candidate in a legend-rule choice.
@@ -605,6 +645,43 @@ pub struct SharedPilesView {
     pub graveyard: Option<PlayerId>,
 }
 
+/// CR 121.1 + CR 702.24a: the resolved draw an unless-payment prompt asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlessDrawCostView {
+    /// Cards one printed instruction draws (CR 107.1b: a negative count is 0).
+    pub cards: u32,
+    /// Printed instructions the payment performs, each drawing `cards`.
+    pub instructions: u32,
+    /// Whether the payer may still decline.
+    pub stage: UnlessDrawPaymentStage,
+}
+
+/// CR 702.24a: where a draw unless-payment prompt stands. "Either the entire set
+/// of costs is paid, or none of them is paid": once part of a repeated payment
+/// is performed, the prompt only continues it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnlessDrawPaymentStage {
+    /// The payer chooses whether to pay.
+    #[default]
+    Offered,
+    /// The payer chose to pay and part of the payment is performed; the prompt
+    /// continues the instructions still owed and cannot be declined.
+    Continuing,
+}
+
+/// CR 510.1a + CR 702.4b + CR 120.3a/b: display-only projection, at the current
+/// state, of what a creature that may attack would do to a player if it attacks
+/// and is not blocked. Computed before replacement and prevention effects
+/// (CR 614.1 / CR 615.1), which apply only as the damage event happens.
+/// Not a game action; recomputed on every snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnblockedAttackPreview {
+    /// CR 510.1a + CR 702.4b: combat damage across every damage step it would assign in.
+    pub damage: u32,
+    /// CR 120.3a / CR 120.3b: life loss that damage causes a player (0 for infect).
+    pub life_loss: u32,
+}
+
 /// Engine-authored projections used by the display layer. Keep this struct
 /// small — every field becomes mandatory payload on every state snapshot
 /// the client receives. Add a new field only when the frontend would
@@ -619,6 +696,16 @@ pub struct DerivedViews {
     /// interaction projection omits its opportunities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scry_prompt_id: Option<InteractionId>,
+    /// Opaque canonical digest of this viewer's delivered prompt minus typed display data.
+    /// CR 400.2 + CR 203.1 + CR 206.1: hidden information and printing cannot identify it.
+    /// Serialization failure omits this field, selecting the client's legacy fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for_identity: Option<CanonicalDigest>,
+    /// Existing authoritative transition count, for equality comparisons only.
+    /// Includes accepted state-changing actions and internal repairs, disclosing their
+    /// occurrence/count, never contents. Fresh-engine restores may lower the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_revision: Option<u64>,
     /// Viewer-visible object ids in each player's shared exile pile. This is
     /// projected after face-down visibility filtering so the client can anchor
     /// rejection feedback without reimplementing private-information rules.
@@ -633,6 +720,13 @@ pub struct DerivedViews {
     /// seat whose `Player` container stores each shared pile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_piles: Option<SharedPilesView>,
+    /// CR 121.1 + CR 702.24a: the draw an open unless-payment prompt asks the
+    /// payer to perform — the resolved card count of one printed draw
+    /// instruction and how many times it repeats (one per age counter for
+    /// cumulative upkeep). Present only while that prompt is a draw cost, so
+    /// the client renders these numbers instead of decoding the cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unless_draw_cost: Option<UnlessDrawCostView>,
     /// The live (post-layer) keyword badges each battlefield permanent should
     /// display. The engine classifies the complete keyword list so the client
     /// can render the compact strip without reinterpreting keyword timing.
@@ -747,6 +841,14 @@ pub struct DerivedViews {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dungeon_rooms: BTreeMap<PlayerId, DungeonRoomView>,
 
+    /// CR 704.5c / CR 704.6b + CR 810.8d / CR 904.13c: the poison-loss rule each
+    /// player with a nonzero poison-loss count is measured against, so the HUD
+    /// states the threshold the SBA actually uses (a house-rule dial, or the
+    /// shared fifteen) instead of a client literal. Keyed by PlayerId; omitted
+    /// when nobody is poisoned. Poison counters and the format are public.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub poison_loss: BTreeMap<PlayerId, PoisonLossView>,
+
     /// Engine-authored coalesced view of the stack. Adjacent entries with
     /// the same (source, kind, description, targets) signature collapse
     /// into one `StackDisplayGroup` with a `count`. Empty when the stack
@@ -858,14 +960,22 @@ pub struct DerivedViews {
     pub player_status: Vec<PlayerStatusView>,
 
     /// CR 118.3a + CR 601.2g: during the viewer's own manual mana payment for a
-    /// spell, the portion of the locked cost still UNPAID by the pool units they
-    /// have pinned (selected) so far — the cost reduced against a pool of ONLY
-    /// those pinned units. Lets the payment UI show the cost shrinking as the
-    /// player picks mana, and "covered" (`NoCost`) when their selection alone
-    /// pays the whole cost. `None` outside a non-convoke spell `ManaPayment` the
+    /// spell or a manual mana ability, the portion of the locked cost still
+    /// UNPAID by the pool units they have pinned (selected) so far — the cost
+    /// reduced against a pool of ONLY those pinned units. Lets the payment UI
+    /// show the cost shrinking as the player picks mana, and "covered"
+    /// (`NoCost`) when their selection alone pays the whole cost. `None` outside
+    /// a non-convoke spell `ManaPayment` or a manual `ManaAbilityManaPayment` the
     /// viewer controls. Viewer-scoped — one caster's private in-progress choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_payment_remaining: Option<ManaCost>,
+
+    /// CR 601.2g + CR 602.2b + CR 605.3a: the viewer's own manual payment of a
+    /// mana ability's mana cost — its source, the mana it costs (X announced)
+    /// and the pool units they've directed. `None` outside that window.
+    /// Viewer-scoped, like `pending_payment_remaining`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_ability_payment: Option<ManaAbilityPaymentView>,
 
     /// CR 901: Engine-authored Planechase presentation state. The frontend
     /// renders this directly instead of deriving the active plane from command
@@ -883,15 +993,26 @@ pub struct DerivedViews {
     /// multiplayer turn-order slots. Empty for one-on-one games because the
     /// existing active-player ring is sufficient; populated by engine-owned
     /// projection so the frontend never computes extra/skipped/controlled turn
-    /// order from raw state.
+    /// order from raw state. Empty until the starting player is determined
+    /// (CR 103.1: there is no turn order before the starting player).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub turn_order: Vec<TurnOrderSlotView>,
 
     /// One-based projected turn position for the viewing player. This keeps
     /// player-specific turn-order interpretation in the engine while allowing
-    /// the client to render "You take turn N" directly.
+    /// the client to render "You take turn N" directly. Empty until the
+    /// starting player is determined (CR 103.1: there is no turn order before
+    /// the starting player).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewer_turn_number: Option<u8>,
+
+    /// CR 103.1 + CR 103.1a + CR 805.3: the viewer's side relative to the starting
+    /// side, for a game of exactly two sides that each take one turn per round
+    /// (two-player, Two-Headed Giant, Archenemy, Horde). `None` for an unseated
+    /// viewer, before the starting player is determined, and in every other
+    /// multiplayer game — where `viewer_turn_number` carries the viewer's position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_play_draw: Option<PlayDrawPosition>,
 
     /// CR 732.2a: the `∞` HUD rows — one per (attributed player, pumped axis) of
     /// every unbounded-resource loop in `GameState::unbounded_resources`. The
@@ -984,6 +1105,18 @@ pub struct DerivedViews {
     /// `Life` axis for that seat is rising; only non-`Finite` entries are emitted.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub life_magnitude: BTreeMap<PlayerId, DisplayMagnitude>,
+
+    /// CR 508.1a + CR 510.1a + CR 120.3a/b: per-candidate-attacker projection of unblocked
+    /// damage, published only while the attack declaration prompt is open; keyed by attacker
+    /// id. Display-only; before replacement and prevention effects (CR 614.1 / CR 615.1).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub unblocked_attack_previews: HashMap<ObjectId, UnblockedAttackPreview>,
+
+    /// CR 506.4c: each attacking creature's current attack target, keyed by attacker id. An
+    /// attacker whose relation has ended is absent: it is still an attacking creature, but it
+    /// is not attacking any player, planeswalker, or battle.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub attack_targets: HashMap<ObjectId, AttackTarget>,
 }
 
 /// Serialize-only wrapper. The wire shape is
@@ -1020,8 +1153,12 @@ impl Serialize for ClientGameStateRef<'_> {
 /// persistence schema of [`GameState`]. Delayed-trigger receipts and their
 /// allocators authorize replay/transition handling; clients receive neither
 /// those private capabilities nor the resolved journal that contains them.
+/// The prompt identity shares both the typed paid-cast cleanup redaction and recursive
+/// trigger-firing redaction below. Future private removals reaching `waiting_for` must
+/// remain shared with [`delivered_prompt_identity`].
 fn client_state_wire_value(state: &GameState) -> serde_json::Result<serde_json::Value> {
-    let projected_state = crate::game::visibility::project_paid_cast_cleanup_authority(state);
+    let mut projected_state = crate::game::visibility::project_paid_cast_cleanup_authority(state);
+    crate::game::visibility::redact_waiting_for_iteration_members(&mut projected_state.waiting_for);
     let mut value = serde_json::to_value(&projected_state)?;
     let Some(root) = value.as_object_mut() else {
         return Ok(value);
@@ -1166,20 +1303,36 @@ pub struct ClientGameState {
 }
 
 /// CR 118.3a + CR 601.2g: the cost still unpaid by `viewer`'s pinned pool units
-/// during their own manual mana payment for a spell. Reduces the locked spell
-/// cost against a pool containing ONLY the pinned units (so the residual is
-/// exactly what the player has chosen to spend), under the same spend-restriction
-/// context (`PaymentContext::Spell`) the finalize spend uses. Returns `None`
+/// during their own manual mana payment for a spell or a manual mana ability.
+/// Reduces the locked cost against a pool containing ONLY the pinned units (so
+/// the residual is exactly what the player has chosen to spend), under the same
+/// spend-restriction context the finalize spend uses (`PaymentContext::Spell`
+/// for a spell, the activation's context for a mana ability). Returns `None`
 /// unless the viewer is mid (non-convoke) spell `ManaPayment` with a pending
-/// cast — activated-ability mana payment keeps its full-cost display, and
-/// convoke/improvise/delve pay via board taps tracked by their own staged UI.
+/// cast, or mid their own manual `ManaAbilityManaPayment` — activated-ability
+/// mana payment keeps its full-cost display, and convoke/improvise/delve pay
+/// via board taps tracked by their own staged UI.
 ///
-/// Uses the current spell's typed mana-spend permission when matching pinned
-/// units to colored or colorless requirements. This projection subtracts only
-/// pinned mana units; it does not subtract life payments.
+/// Uses the payment's typed mana-spend permission when matching pinned units to
+/// colored or colorless requirements. This projection subtracts only pinned
+/// mana units; it does not subtract life payments.
 fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<ManaCost> {
-    use crate::types::game_state::WaitingFor;
-    use crate::types::mana::{ManaPool, PaymentContext};
+    if let Some(pending) = manual_mana_ability_payment(state, viewer) {
+        let cost = crate::game::mana_abilities::pending_mana_sub_cost(state, pending).ok()??;
+        let activation_context = crate::game::casting::activation_payment_context(
+            state,
+            pending.source_id,
+            pending.ability_index,
+        );
+        return remaining_after_pins(
+            state,
+            viewer,
+            pending.source_id,
+            &pending.pinned_pool_units,
+            &cost,
+            Some(&activation_context.as_payment_context()),
+        );
+    }
 
     let WaitingFor::ManaPayment {
         player,
@@ -1199,33 +1352,89 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
     if pending.activation_ability_index.is_some() {
         return None;
     }
-    let cost = pending.cost.clone();
-
-    // Scratch pool of ONLY the pinned units = the player's current selection.
-    let player_obj = state.players.iter().find(|p| p.id == viewer)?;
-    let selected = ManaPool::from_units(
-        player_obj
-            .mana_pool
-            .units()
-            .filter(|unit| pending.pinned_pool_units.contains(&unit.pip_id)),
-    );
 
     // CR 106.6: reduce under the SAME spend-restriction context the finalize
     // spend uses, so restricted mana the spell can't accept stays in the residual.
     let spell_meta = crate::game::casting::build_spell_meta(state, viewer, pending.object_id);
     let ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    remaining_after_pins(
+        state,
+        viewer,
+        pending.object_id,
+        &pending.pinned_pool_units,
+        &pending.cost,
+        ctx.as_ref(),
+    )
+}
+
+/// CR 118.3a + CR 106.6: `cost` reduced against a scratch pool of ONLY
+/// `viewer`'s pinned units (their current selection), under `ctx` and the
+/// payment's mana-spend permission for `source`.
+fn remaining_after_pins(
+    state: &GameState,
+    viewer: PlayerId,
+    source: ObjectId,
+    pins: &[ManaPipId],
+    cost: &ManaCost,
+    ctx: Option<&PaymentContext<'_>>,
+) -> Option<ManaCost> {
+    let player_obj = state.players.iter().find(|p| p.id == viewer)?;
+    let selected = ManaPool::from_units(
+        player_obj
+            .mana_pool
+            .units()
+            .filter(|unit| pins.contains(&unit.pip_id)),
+    );
     Some(crate::game::mana_payment::reduce_cost_by_pool(
         &selected,
-        &cost,
-        ctx.as_ref(),
+        cost,
+        ctx,
         crate::game::casting::player_mana_spend_permission_for_payment(
             state,
             viewer,
-            Some(pending.object_id),
-            ctx.as_ref(),
+            Some(source),
+            ctx,
         ),
         None,
     ))
+}
+
+/// CR 601.2g + CR 605.3a: the mana ability `viewer` is paying for by hand in
+/// its own `ManaAbilityManaPayment` window. An automatic window is paid by
+/// activating mana abilities alone, so it has nothing to display here.
+fn manual_mana_ability_payment(state: &GameState, viewer: PlayerId) -> Option<&PendingManaAbility> {
+    let WaitingFor::ManaAbilityManaPayment {
+        player,
+        pending_mana_ability,
+    } = &state.waiting_for
+    else {
+        return None;
+    };
+    (*player == viewer
+        && crate::game::casting::payment_mode_pays_mana_manually(pending_mana_ability.payment_mode))
+    .then_some(pending_mana_ability.as_ref())
+}
+
+/// CR 601.2g + CR 602.2b + CR 605.3a: the viewer's own manual mana-ability
+/// payment window — the source, its mana sub-cost (X announced) and the pins
+/// still naming a unit in their pool.
+fn mana_ability_payment_view(
+    state: &GameState,
+    viewer: PlayerId,
+) -> Option<ManaAbilityPaymentView> {
+    let pending = manual_mana_ability_payment(state, viewer)?;
+    let cost = crate::game::mana_abilities::pending_mana_sub_cost(state, pending).ok()??;
+    let pool = &state.players.iter().find(|p| p.id == viewer)?.mana_pool;
+    Some(ManaAbilityPaymentView {
+        source_id: pending.source_id,
+        cost,
+        pinned_pool_units: pending
+            .pinned_pool_units
+            .iter()
+            .copied()
+            .filter(|pip| pool.contains_pip(*pip))
+            .collect(),
+    })
 }
 
 /// CR 309.4a-c: name the room each venturing player's marker currently sits on.
@@ -1253,6 +1462,60 @@ fn dungeon_rooms(state: &GameState) -> BTreeMap<PlayerId, DungeonRoomView> {
                     rooms: crate::game::dungeon::room_nodes(dungeon),
                 },
             ))
+        })
+        .collect()
+}
+
+/// The poison-loss rule one player is measured against, projected from
+/// `players::poison_loss_measure` — the authority the poison SBA reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoisonLossView {
+    pub scope: PoisonLossScope,
+    pub threshold: u32,
+    pub proximity: PoisonLossProximity,
+}
+
+/// Display classification (no CR): how close a player's poison-loss count is
+/// to its threshold, which the HUD badge styles from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PoisonLossProximity {
+    /// More than `POISON_NEAR_LETHAL_MARGIN` counters short of the threshold.
+    Normal,
+    /// Within `POISON_NEAR_LETHAL_MARGIN` counters of the threshold.
+    NearLethal,
+}
+
+/// Display-only: how many counters short of the loss threshold the HUD starts
+/// warning. 2 reproduces the badge's pre-dial `value >= 8` at the CR default
+/// of ten. No CR governs it.
+const POISON_NEAR_LETHAL_MARGIN: u32 = 2;
+
+/// CR 704.5c / CR 704.6b + CR 810.8d: the poison-loss rule for every player
+/// with a nonzero poison-loss count, read from the same measure the SBA uses.
+/// Empty (and omitted from the wire) when nobody is poisoned.
+fn poison_loss(state: &GameState) -> BTreeMap<PlayerId, PoisonLossView> {
+    state
+        .players
+        .iter()
+        .filter_map(|player| {
+            let measure = poison_loss_measure(state, player)?;
+            (measure.count > 0).then(|| {
+                let proximity = if measure.count.saturating_add(POISON_NEAR_LETHAL_MARGIN)
+                    >= measure.threshold
+                {
+                    PoisonLossProximity::NearLethal
+                } else {
+                    PoisonLossProximity::Normal
+                };
+                (
+                    player.id,
+                    PoisonLossView {
+                        scope: measure.scope,
+                        threshold: measure.threshold,
+                        proximity,
+                    },
+                )
+            })
         })
         .collect()
 }
@@ -1509,9 +1772,13 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         blocker_assignment_pairs: blocker_assignment_pairs(state),
         debug_library_cards: debug_library_cards(state, viewer),
         shared_piles: shared_piles(state),
+        unless_draw_cost: unless_draw_cost(state),
         current_target_kind: current_target_kind(state),
         dungeon_rooms: dungeon_rooms(state),
+        poison_loss: poison_loss(state),
         storm_count: storm_count(state),
+        unblocked_attack_previews: unblocked_attack_previews(state),
+        attack_targets: attack_targets(state),
         ..DerivedViews::default()
     };
 
@@ -1741,6 +2008,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // pinned (selected) pool mana — drives the payment UI's live-shrinking cost.
     if let Some(viewer) = viewer {
         views.pending_payment_remaining = pending_payment_remaining(state, viewer);
+        views.mana_ability_payment = mana_ability_payment_view(state, viewer);
     }
 
     if state.format_config.format.is_planechase_family() {
@@ -1785,6 +2053,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     let (turn_order, viewer_turn_number) = turn_order_views(state, viewer);
     views.turn_order = turn_order;
     views.viewer_turn_number = viewer_turn_number;
+    views.viewer_play_draw = viewer_play_draw(state, viewer);
 
     // WHY THE THREE ∞ SURFACE CHANNELS BELOW ARE UNCONDITIONAL — the accept→boundary window.
     //
@@ -2118,6 +2387,13 @@ fn counter_display_views(state: &GameState) -> HashMap<ObjectId, ObjectCounterDi
     display
 }
 
+fn delivered_prompt_identity(filtered_state: &GameState) -> serde_json::Result<CanonicalDigest> {
+    let projected = crate::game::visibility::project_paid_cast_cleanup_authority(filtered_state);
+    let mut prompt = crate::types::display_only::rules_projection(&projected.waiting_for)?;
+    redact_private_trigger_firing(&mut prompt);
+    Ok(crate::types::display_only::canonical_digest(&prompt))
+}
+
 /// Derive a viewer-safe presentation from `filtered_state`, retaining only the
 /// decision-authority projection from the pre-filter rules state. This keeps
 /// rules state pure and makes repeated filtering idempotent.
@@ -2128,9 +2404,16 @@ pub fn derive_filtered_views(
 ) -> DerivedViews {
     let mut views = derive_views(filtered_state, viewer);
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    // CR 702.24a: whether the prompt continues a payment already begun is read
+    // from the payment's parked owner, which the viewer projection drops.
+    if let Some(draw) = views.unless_draw_cost.as_mut() {
+        draw.stage = unless_draw_payment_stage(authoritative_state);
+    }
     views.scry_prompt_id = viewer.and_then(|viewer| {
         crate::game::interaction::scry_prompt_id_for_viewer(authoritative_state, viewer)
     });
+    views.waiting_for_identity = delivered_prompt_identity(filtered_state).ok();
+    views.state_revision = Some(authoritative_state.state_revision);
     views.debug_library_cards = debug_library_cards(authoritative_state, viewer);
     views.visible_exile_object_ids = visible_exile_object_ids(filtered_state);
     // CR 509.1g: blocking relationships are public information. Preserve this
@@ -2172,6 +2455,50 @@ fn storm_count(state: &GameState) -> u32 {
         .unwrap_or_else(|| spells_cast_this_turn(state))
 }
 
+/// CR 508.1a: one unblocked-attack projection per creature the open attack
+/// declaration prompt lets attack; empty in every other state (just-in-time).
+fn unblocked_attack_previews(state: &GameState) -> HashMap<ObjectId, UnblockedAttackPreview> {
+    let WaitingFor::DeclareAttackers {
+        valid_attacker_ids, ..
+    } = &state.waiting_for
+    else {
+        return HashMap::new();
+    };
+    valid_attacker_ids
+        .iter()
+        .filter_map(|&id| {
+            // CR 510.1b + CR 702.4b: unblocked attacker's damage over both damage steps — the
+            // shared authority.
+            let damage = combat_damage_to_defender(state, id, &[]).max(0) as u32;
+            let has_infect = DamageContext::from_source(state, id)?.has_infect;
+            let life_loss = if has_infect {
+                // CR 120.3b: infect damage to a player is poison counters, not life loss.
+                0
+            } else {
+                // CR 120.3a: damage to a player without infect is that much life loss.
+                damage
+            };
+            Some((id, UnblockedAttackPreview { damage, life_loss }))
+        })
+        .collect()
+}
+
+/// CR 400.7 + CR 506.4c: each attacker's relation read through the combat authority, which
+/// drops a planeswalker or battle removed from combat (CR 506.4) and a player who has left
+/// the game; empty outside combat.
+fn attack_targets(state: &GameState) -> HashMap<ObjectId, AttackTarget> {
+    let Some(combat) = &state.combat else {
+        return HashMap::new();
+    };
+    combat
+        .attackers
+        .iter()
+        .filter_map(|info| {
+            active_attack_target(state, info).map(|(target, _)| (info.object_id, target))
+        })
+        .collect()
+}
+
 /// The table-wide count of spells actually cast this turn. This is intentionally
 /// private: public Storm presentation must use [`storm_count`] so an active
 /// Storm trigger uses its cast-time snapshot rather than including itself.
@@ -2205,6 +2532,41 @@ fn visible_exile_object_ids(state: &GameState) -> BTreeMap<PlayerId, Vec<ObjectI
         .collect()
 }
 
+/// CR 121.1 + CR 702.24a: the draw the open unless-payment prompt asks for,
+/// with its count resolved against the pending ability as the payment would
+/// resolve it, and its repetition.
+fn unless_draw_cost(state: &GameState) -> Option<UnlessDrawCostView> {
+    let WaitingFor::UnlessPayment {
+        cost: AbilityCost::EffectCost { effect },
+        pending_effect,
+        repeat,
+        ..
+    } = &state.waiting_for
+    else {
+        return None;
+    };
+    let Effect::Draw { count, .. } = effect.as_ref() else {
+        return None;
+    };
+    let resolved =
+        crate::game::quantity::resolve_quantity_with_targets(state, count, pending_effect);
+    Some(UnlessDrawCostView {
+        cards: u32::try_from(resolved).unwrap_or(0),
+        instructions: repeat.unwrap_or(1),
+        stage: unless_draw_payment_stage(state),
+    })
+}
+
+/// CR 702.24a: the stage of the open draw unless-payment prompt, read from the
+/// rules state that holds the payment's parked owner.
+fn unless_draw_payment_stage(state: &GameState) -> UnlessDrawPaymentStage {
+    if crate::game::engine_payment_choices::awaits_payment_continuation(state) {
+        UnlessDrawPaymentStage::Continuing
+    } else {
+        UnlessDrawPaymentStage::Offered
+    }
+}
+
 fn shared_piles(state: &GameState) -> Option<SharedPilesView> {
     let view = SharedPilesView {
         library: state.shared_zone_holder(Zone::Library),
@@ -2233,6 +2595,10 @@ fn debug_library_cards(state: &GameState, viewer: Option<PlayerId>) -> Vec<Debug
                 .map(|object| DebugLibraryCardView {
                     object_id: *object_id,
                     name: object.name.clone(),
+                    printed_ref: object.printed_ref.clone(),
+                    // Beside the name this authorized row already exposes, from the
+                    // authoritative object.
+                    printing: object.printing.clone(),
                 })
         })
         .collect::<Vec<_>>();
@@ -2285,22 +2651,52 @@ fn unique_authorized_submitter(state: &GameState) -> Option<PlayerId> {
     (submitters.len() == 1).then(|| submitters[0])
 }
 
+/// CR 103.1: the starting player of the game this state describes, once it has
+/// been determined. `current_starting_player` alone cannot answer this: it is
+/// non-optional and `GameState::new` seeds it with a format default before any
+/// determination. Turn 1 is established in the same step that assigns the
+/// starter (`engine::start_game_with_starting_player`,
+/// `engine::start_game_skip_mulligan`), so a state still on turn 0 has none.
+fn determined_starting_player(state: &GameState) -> Option<PlayerId> {
+    (state.turn_number > 0).then_some(state.current_starting_player)
+}
+
+/// CR 103.1 + CR 103.1a + CR 805.4: the viewer's play/draw position — see
+/// `DerivedViews::viewer_play_draw`. Sides come from `topology::sides`, which
+/// includes departed seats, so the position stays fixed for the whole game.
+fn viewer_play_draw(state: &GameState, viewer: Option<PlayerId>) -> Option<PlayDrawPosition> {
+    let viewer = viewer?;
+    let starter = determined_starting_player(state)?;
+    let sides = crate::game::topology::sides(state);
+    let [first, second] = sides.as_slice() else {
+        return None;
+    };
+    // CR 805.4: a side takes one turn per round when it is a single seat or
+    // takes shared team turns; any other side makes the game multiplayer-ordered.
+    let one_turn_per_round = |side: &Side| {
+        side.seats.len() == 1 || side.turn_structure == TurnStructure::SharedTeamTurns
+    };
+    if !(one_turn_per_round(first) && one_turn_per_round(second)) {
+        return None;
+    }
+    let side_index = |player| sides.iter().position(|side| side.seats.contains(&player));
+    Some(if side_index(viewer)? == side_index(starter)? {
+        PlayDrawPosition::OnThePlay
+    } else {
+        PlayDrawPosition::OnTheDraw
+    })
+}
+
 fn turn_order_views(
     state: &GameState,
     viewer: Option<PlayerId>,
 ) -> (Vec<TurnOrderSlotView>, Option<u8>) {
-    let mut seen = BTreeSet::new();
-    let representatives: Vec<PlayerId> = state
-        .seat_order
-        .iter()
-        .copied()
-        .filter(|&player| crate::game::players::is_alive(state, player))
-        .filter_map(|player| {
-            let representative =
-                crate::game::topology::normalize_shared_turn_recipient(state, player);
-            seen.insert(representative).then_some(representative)
-        })
-        .collect();
+    // CR 103.1: no turn order exists before the starting player is determined.
+    if determined_starting_player(state).is_none() {
+        return (Vec::new(), None);
+    }
+
+    let representatives = crate::game::topology::turn_representatives(state);
 
     if representatives.len() <= 2 {
         return (Vec::new(), None);
@@ -2317,7 +2713,6 @@ fn turn_order_views(
                 turns_from_now: slot_index,
                 turn_number: slot_index + 1,
                 is_viewer: viewer == Some(player),
-                is_starting_player: slot_index == 0 && player == state.current_starting_player,
             }
         })
         .collect();
@@ -2689,7 +3084,7 @@ fn stack_entry_details(state: &GameState) -> HashMap<ObjectId, StackEntryDisplay
 }
 
 fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDisplay {
-    let source_name = stack_source_name(state, entry);
+    let source = stack_row_source(state, entry);
     let effective_ability = effective_stack_ability(state, entry);
     let (kind_label, ability_kind, ability_description) = match &entry.kind {
         StackEntryKind::Spell { ability, .. } => (
@@ -2730,8 +3125,10 @@ fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDispla
     };
 
     StackEntryDisplay {
-        source_name,
+        source_name: source.name,
         token_image_ref: stack_source_token_image_ref(state, entry),
+        printing: source.printing,
+        printed_ref: source.printed_ref,
         kind_label,
         ability_kind,
         ability_description,
@@ -2788,16 +3185,96 @@ fn stack_source_token_image_ref(state: &GameState, entry: &StackEntry) -> Option
         })
 }
 
-fn stack_source_name(state: &GameState, entry: &StackEntry) -> String {
-    match &entry.kind {
-        StackEntryKind::TriggeredAbility { source_name, .. } if !source_name.is_empty() => {
-            source_name.clone()
+/// A stack row's source label and printing from its selected, viewer-filtered authority.
+/// Ordinary printing follows the disclosed name. An emblem keeps its label but uses only
+/// the creator provenance already delivered in that emblem's `emblem_source`.
+struct StackRowSource {
+    name: String,
+    printing: DisplayOnly<Option<SharedPrinting>>,
+    printed_ref: Option<PrintedCardRef>,
+}
+
+/// Mirrors image identity precedence without looking up the creator. Emblems without their
+/// own printed identity use captured provenance, including authoritative absence. Ordinary
+/// nameless sources (face-down objects and uncast Rooms) disclose no printing.
+fn live_source_printing(object: &GameObject) -> DisplayOnly<Option<SharedPrinting>> {
+    if object.name.is_empty() {
+        DisplayOnly::default()
+    } else if object.printed_ref.is_none() && object.is_emblem {
+        object
+            .emblem_source
+            .as_ref()
+            .map(|source| source.printing.clone())
+            .unwrap_or_default()
+    } else {
+        object.printing.clone()
+    }
+}
+
+/// Uses the same own-card / captured-emblem authority as `live_source_printing`.
+fn live_source_printed_ref(object: &GameObject) -> Option<&PrintedCardRef> {
+    if object.printed_ref.is_none() && object.is_emblem {
+        object.emblem_source.as_ref()?.printed_ref.as_ref()
+    } else {
+        object.printed_ref.as_ref()
+    }
+}
+
+fn stack_row_source(state: &GameState, entry: &StackEntry) -> StackRowSource {
+    let live = state.objects.get(&entry.source_id);
+    let live_art = |object| {
+        (
+            live_source_printing(object),
+            live_source_printed_ref(object),
+        )
+    };
+    let (name, printing, printed_ref) = match &entry.kind {
+        StackEntryKind::TriggeredAbility {
+            source_name,
+            ability,
+            ..
+        } if !source_name.is_empty() => {
+            // Printing and identity follow one selected read and only while it still
+            // discloses the latched name. Never borrow from a newer incarnation.
+            let (printing, printed_ref) = match ability.trigger_source.as_ref() {
+                Some(context) => match context.source_read(state) {
+                    TriggerSourceRead::ExactLive(object) if object.name == *source_name => {
+                        live_art(object)
+                    }
+                    TriggerSourceRead::Latched(context) if context.lki.name == *source_name => {
+                        (context.printing.clone(), context.printed_ref.as_ref())
+                    }
+                    TriggerSourceRead::ExactLive(_) | TriggerSourceRead::Latched(_) => {
+                        (DisplayOnly::default(), None)
+                    }
+                },
+                // Legacy/synthetic rows read the live source; a departed source without a context has no latched
+                // printing or printed identity, so the row discloses neither.
+                None => match live {
+                    Some(object) => live_art(object),
+                    None => (DisplayOnly::default(), None),
+                },
+            };
+            (source_name.clone(), printing, printed_ref)
         }
-        _ => state
-            .objects
-            .get(&entry.source_id)
-            .map(|obj| obj.name.clone())
-            .unwrap_or_else(|| "Unknown".to_string()),
+        StackEntryKind::TriggeredAbility { .. }
+        | StackEntryKind::ActivatedAbility { .. }
+        | StackEntryKind::Spell { .. }
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => match live {
+            Some(object) => {
+                let (printing, printed_ref) = live_art(object);
+                (object.name.clone(), printing, printed_ref)
+            }
+            None => ("Unknown".to_string(), DisplayOnly::default(), None),
+        },
+    };
+    // Retained contexts may keep identity after their printing is concealed.
+    let printed_ref = printed_ref.filter(|_| printing.get().is_some()).cloned();
+    StackRowSource {
+        name,
+        printing,
+        printed_ref,
     }
 }
 
@@ -3083,27 +3560,606 @@ mod tests {
     use super::*;
     use crate::game::combat::CombatState;
     use crate::game::game_object::ObjectIncarnationRefExt;
+    use crate::game::scenario::{GameScenario, P0, P1};
     use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::game::zones::create_object;
     use crate::types::ability::{
         DelayedTriggerCondition, DelayedTriggerKind, Duration, Effect, EffectKind, ModalChoice,
         ResolvedAbility, RestrictionExpiry, StaticCondition, TargetFilter, TargetRef,
     };
+    use crate::types::actions::GameAction;
+    use crate::types::card_printing::CardPrinting;
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        CommanderDamageEntry, DelayedTrigger, PendingCast, StackEntry, StackEntryKind,
-        StackPaidSnapshot, TargetEffectDetail, TargetSelectionProgress, TargetSelectionSlot,
-        TriggerOrderGroup, WaitingFor, ZoneChangeRecord,
+        CastPaymentMode, CommanderDamageEntry, DelayedTrigger, DistributionScope, DistributionUnit,
+        PendingCast, StackEntry, StackEntryKind, StackPaidSnapshot, TargetEffectDetail,
+        TargetSelectionProgress, TargetSelectionSlot, TriggerOrderGroup, WaitingFor,
+        ZoneChangeRecord,
     };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, TriggerFiring,
     };
-    use crate::types::mana::ManaCost;
+    use crate::types::mana::{ManaCost, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::statics::ActivationExemption;
     use crate::types::zones::Zone;
     use std::collections::HashMap;
+
+    fn emblem_printing(collector: &str) -> SharedPrinting {
+        SharedPrinting::new(CardPrinting {
+            set_code: "owner".into(),
+            collector_number: collector.into(),
+        })
+    }
+
+    /// A synthetic emblem row fixture. No printed emblem carries an activated ability or empty
+    /// ability lists; the nearest printed emblem shape is Daretti, Scrap Savant's [−10] emblem
+    /// (MTGJSON, checked 2026-11-01: "You get an emblem with \"Whenever an artifact is put into
+    /// your graveyard from the battlefield, return that card to the battlefield at the beginning
+    /// of the next end step.\""), whose emblem is triggered. These tests exercise only a stack
+    /// row's source authority — the display-only printing captured from the creator — so the
+    /// fixture grants an empty emblem and names its source "Creator" rather than impersonating a
+    /// printed card.
+    fn emblem_row_fixture() -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let id = crate::game::effects::create_emblem::grant_emblem(
+            &mut state,
+            PlayerId(0),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.emblem_source = Some(crate::game::game_object::EmblemSource {
+            name: "Creator".into(),
+            printed_ref: None,
+            printing: DisplayOnly::new(Some(emblem_printing("A"))),
+        });
+        (state, id)
+    }
+
+    fn emblem_trigger_row(
+        id: ObjectId,
+        name: &str,
+        context: Option<crate::types::game_state::TriggerSourceContext>,
+    ) -> StackEntry {
+        let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], id, PlayerId(0));
+        ability.trigger_source = context;
+        StackEntry {
+            id: ObjectId(900),
+            source_id: id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: id,
+                ability: Box::new(ability),
+                source_name: name.into(),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        }
+    }
+
+    fn owner_identity_fixture() -> (GameState, ObjectId, PrintedCardRef) {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Twin".into(),
+            Zone::Battlefield,
+        );
+        let identity = PrintedCardRef {
+            oracle_id: "oracle-b".into(),
+            face_name: "Twin".into(),
+        };
+        let object = state.objects.get_mut(&id).unwrap();
+        object.printed_ref = Some(identity.clone());
+        object.printing = DisplayOnly::new(Some(emblem_printing("B")));
+        (state, id, identity)
+    }
+
+    #[test]
+    fn stack_owner_identity_follows_latched_read_and_requires_disclosed_printing() {
+        let (state, id, identity) = owner_identity_fixture();
+        let context =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        assert_eq!(context.printed_ref.as_ref(), Some(&identity));
+        assert!(matches!(
+            context.source_read(&state),
+            TriggerSourceRead::ExactLive(_)
+        ));
+        let entry = emblem_trigger_row(id, "Twin", Some(context.clone()));
+        assert_eq!(
+            stack_entry_detail(&state, &entry).printed_ref,
+            Some(identity.clone())
+        );
+        for stale in ["departed", "incarnation", "zone"] {
+            let mut changed = state.clone();
+            if stale == "departed" {
+                changed.objects.remove(&id);
+                changed.battlefield.retain(|object_id| *object_id != id);
+            } else {
+                let object = changed.objects.get_mut(&id).unwrap();
+                if stale == "incarnation" {
+                    object.incarnation += 1;
+                } else {
+                    object.zone = Zone::Exile;
+                }
+                object.printed_ref.as_mut().unwrap().oracle_id = "stale-live-a".into();
+                object.printing = DisplayOnly::new(Some(emblem_printing("A")));
+            }
+            assert!(
+                matches!(context.source_read(&changed), TriggerSourceRead::Latched(_)),
+                "{stale}"
+            );
+            let row = stack_entry_detail(&changed, &entry);
+            assert_eq!(row.printing.get(), &Some(emblem_printing("B")), "{stale}");
+            assert_eq!(
+                row.printed_ref,
+                Some(identity.clone()),
+                "latched identity survives {stale}"
+            );
+            for absent in ["name", "printing", "identity"] {
+                let mut retained = context.clone();
+                match absent {
+                    "name" => retained.lki.name = "Changed".into(),
+                    "printing" => retained.printing = DisplayOnly::default(),
+                    "identity" => retained.printed_ref = None,
+                    _ => unreachable!(),
+                }
+                assert!(matches!(
+                    retained.source_read(&changed),
+                    TriggerSourceRead::Latched(_)
+                ));
+                let row =
+                    stack_entry_detail(&changed, &emblem_trigger_row(id, "Twin", Some(retained)));
+                assert!(
+                    row.printed_ref.is_none(),
+                    "latched {absent} must not disclose identity"
+                );
+                assert_eq!(row.printing.get().is_some(), absent == "identity");
+            }
+        }
+    }
+
+    #[test]
+    fn stack_owner_identity_live_emblem_and_lki_cache_authorities() {
+        let (mut state, id, identity) = owner_identity_fixture();
+        let context =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        for name in ["Twin", ""] {
+            for retained in [None, Some(context.clone())] {
+                let entry = emblem_trigger_row(id, name, retained);
+                assert_eq!(
+                    stack_entry_detail(&state, &entry).printed_ref,
+                    Some(identity.clone())
+                );
+                let mut concealed = state.clone();
+                concealed.objects.get_mut(&id).unwrap().printing = DisplayOnly::default();
+                assert!(stack_entry_detail(&concealed, &entry).printed_ref.is_none());
+            }
+        }
+        state
+            .lki_cache
+            .insert(id, state.objects[&id].snapshot_public_characteristics());
+        state.objects.remove(&id);
+        let cached = stack_entry_detail(&state, &emblem_trigger_row(id, "Twin", None));
+        assert!(
+            cached.printing.get().is_none(),
+            "a context-free departed row carries no printing"
+        );
+        assert!(
+            cached.printed_ref.is_none(),
+            "LKI-only rows cannot synthesize identity"
+        );
+        let empty = stack_entry_detail(&state, &emblem_trigger_row(id, "", None));
+        assert!(empty.printing.get().is_none());
+        assert!(empty.printed_ref.is_none());
+
+        let (mut emblems, emblem) = emblem_row_fixture();
+        emblems
+            .objects
+            .get_mut(&emblem)
+            .unwrap()
+            .emblem_source
+            .as_mut()
+            .unwrap()
+            .printed_ref = Some(identity.clone());
+        let entry = emblem_trigger_row(emblem, "", None);
+        let row = stack_entry_detail(&emblems, &entry);
+        assert_eq!(row.printed_ref, Some(identity.clone()));
+        assert_eq!(row.printing.get(), &Some(emblem_printing("A")));
+        let object = emblems.objects.get_mut(&emblem).unwrap();
+        object.printed_ref = Some(PrintedCardRef {
+            oracle_id: "own".into(),
+            face_name: "Emblem".into(),
+        });
+        object.printing = DisplayOnly::new(Some(emblem_printing("B")));
+        assert_eq!(
+            stack_entry_detail(&emblems, &entry).printed_ref,
+            emblems.objects[&emblem].printed_ref
+        );
+        emblems.objects.get_mut(&emblem).unwrap().printed_ref = None;
+        emblems
+            .objects
+            .get_mut(&emblem)
+            .unwrap()
+            .emblem_source
+            .as_mut()
+            .unwrap()
+            .printed_ref = None;
+        let row = stack_entry_detail(&emblems, &entry);
+        assert!(row.printing.get().is_some());
+        assert!(
+            row.printed_ref.is_none(),
+            "optional emblem identity is never synthesized"
+        );
+    }
+
+    #[test]
+    fn stack_owner_identity_viewer_filtering_and_wire_contract() {
+        let (mut state, id, identity) = owner_identity_fixture();
+        let context =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        state
+            .stack
+            .push_back(emblem_trigger_row(id, "Twin", Some(context)));
+        for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+            let wire = serde_json::to_value(ClientGameStateRef::wrap(&state, viewer)).unwrap();
+            let row = &wire["derived"]["stack_entry_details"]["900"];
+            assert_eq!(row["printed_ref"], serde_json::to_value(&identity).unwrap());
+            assert_eq!(
+                row["printing"],
+                serde_json::to_value(emblem_printing("B")).unwrap()
+            );
+        }
+        // A hidden live source still reaches ExactLive; its retained identity must not leak.
+        let id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Twin".into(),
+            Zone::Hand,
+        );
+        let hidden = state.objects.get_mut(&id).unwrap();
+        hidden.printed_ref = Some(identity.clone());
+        hidden.printing = DisplayOnly::new(Some(emblem_printing("B")));
+        let context =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        state.stack[0] = emblem_trigger_row(id, "Twin", Some(context));
+        let owner_wire =
+            serde_json::to_value(ClientGameStateRef::wrap(&state, Some(PlayerId(0)))).unwrap();
+        assert_eq!(
+            owner_wire["derived"]["stack_entry_details"]["900"]["printed_ref"],
+            serde_json::to_value(&identity).unwrap()
+        );
+        for viewer in [Some(PlayerId(1)), None] {
+            let filtered = match viewer {
+                Some(viewer) => crate::game::visibility::filter_state_for_viewer(&state, viewer),
+                None => crate::game::visibility::filter_state_for_unseated_viewer(&state),
+            };
+            let StackEntryKind::TriggeredAbility { ability, .. } = &filtered.stack[0].kind else {
+                unreachable!()
+            };
+            assert!(matches!(
+                ability
+                    .trigger_source
+                    .as_ref()
+                    .unwrap()
+                    .source_read(&filtered),
+                TriggerSourceRead::ExactLive(_)
+            ));
+            assert_ne!(filtered.objects[&id].name, state.objects[&id].name);
+            assert!(filtered.objects[&id].printing.get().is_none());
+            let wire =
+                serde_json::to_value(ClientGameStateRef::wrap_filtered(&state, &filtered, viewer))
+                    .unwrap();
+            let row = &wire["derived"]["stack_entry_details"]["900"];
+            assert!(row.get("printing").is_none());
+            assert!(
+                row.get("printed_ref").is_none(),
+                "hidden ExactLive identity must be omitted"
+            );
+            let legacy: StackEntryDisplay = serde_json::from_value(row.clone()).unwrap();
+            assert!(legacy.printed_ref.is_none());
+        }
+    }
+
+    #[test]
+    fn emblem_stack_owner_printing_trigger_authority_matrix() {
+        let (mut state, id) = emblem_row_fixture();
+        // Synthetic contradictory own printing: creator metadata remains the authority.
+        state.objects.get_mut(&id).unwrap().printing = DisplayOnly::new(Some(emblem_printing("B")));
+        let context =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        for name in ["Emblem", ""] {
+            for context in [None, Some(context.clone())] {
+                let entry = emblem_trigger_row(id, name, context);
+                assert_eq!(stack_entry_detail(&state, &entry).source_name, "Emblem");
+                assert_eq!(
+                    stack_entry_detail(&state, &entry).printing.get(),
+                    &Some(emblem_printing("A")),
+                    "live emblem reads captured printing for latch {name:?}"
+                );
+                for metadata in [
+                    Some(crate::game::game_object::EmblemSource {
+                        name: "Creator".into(),
+                        printed_ref: None,
+                        printing: DisplayOnly::default(),
+                    }),
+                    None,
+                ] {
+                    let mut absent = state.clone();
+                    absent.objects.get_mut(&id).unwrap().emblem_source = metadata;
+                    assert!(
+                        stack_entry_detail(&absent, &entry).printing.get().is_none(),
+                        "explicit missing provenance must not recover own B"
+                    );
+                }
+            }
+        }
+        // A synthetic emblem with its own printed identity stays on the ordinary image route.
+        let mut printed = state.clone();
+        printed.objects.get_mut(&id).unwrap().printed_ref =
+            Some(crate::types::card::PrintedCardRef {
+                oracle_id: "ordinary-oracle".into(),
+                face_name: "Emblem".into(),
+            });
+        for context in [None, Some(context.clone())] {
+            let entry = emblem_trigger_row(id, "Emblem", context);
+            assert_eq!(
+                stack_entry_detail(&printed, &entry).printing.get(),
+                &Some(emblem_printing("B")),
+                "own printed identity precedes emblem provenance"
+            );
+        }
+        let mismatch = emblem_trigger_row(id, "Different source", Some(context));
+        assert!(stack_entry_detail(&state, &mismatch)
+            .printing
+            .get()
+            .is_none());
+        let nameless = state.objects.get_mut(&id).unwrap();
+        nameless.name.clear();
+        nameless.is_emblem = false;
+        assert!(
+            stack_entry_detail(&state, &emblem_trigger_row(id, "", None))
+                .printing
+                .get()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn emblem_stack_owner_printing_stale_zone_and_departure_fail_closed() {
+        let (state, id) = emblem_row_fixture();
+        let context =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        let entry = emblem_trigger_row(id, "Emblem", Some(context.clone()));
+        assert_eq!(
+            stack_entry_detail(&state, &entry).printing.get(),
+            &Some(emblem_printing("A"))
+        );
+        let mut moved = state.clone();
+        moved.objects.get_mut(&id).unwrap().zone = Zone::Exile;
+        moved
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .emblem_source
+            .as_mut()
+            .unwrap()
+            .printing = DisplayOnly::new(Some(emblem_printing("B")));
+        assert!(matches!(
+            context.source_read(&moved),
+            crate::types::game_state::TriggerSourceRead::Latched(_)
+        ));
+        assert!(
+            stack_entry_detail(&moved, &entry).printing.get().is_none(),
+            "stale expected zone must not select same-ID live creator B"
+        );
+        let mut reincarnated = state.clone();
+        let replacement = reincarnated.objects.get_mut(&id).unwrap();
+        replacement.incarnation += 1;
+        replacement.emblem_source.as_mut().unwrap().printing =
+            DisplayOnly::new(Some(emblem_printing("B")));
+        assert!(matches!(
+            context.source_read(&reincarnated),
+            crate::types::game_state::TriggerSourceRead::Latched(_)
+        ));
+        assert!(
+            stack_entry_detail(&reincarnated, &entry)
+                .printing
+                .get()
+                .is_none(),
+            "stale incarnation must not select same-ID live creator B"
+        );
+        // Synthetic removal: this pins the LKI boundary, not multiplayer elimination.
+        let mut gone = state.clone();
+        gone.lki_cache
+            .insert(id, state.objects[&id].snapshot_public_characteristics());
+        gone.objects.remove(&id);
+        for entry in [entry, emblem_trigger_row(id, "Emblem", None)] {
+            let row = stack_entry_detail(&gone, &entry);
+            assert_eq!(row.source_name, "Emblem");
+            assert!(
+                row.printing.get().is_none(),
+                "emblem LKI has no creator provenance"
+            );
+        }
+        let row = stack_entry_detail(&gone, &emblem_trigger_row(id, "", Some(context)));
+        assert_eq!(row.source_name, "Unknown");
+        assert!(row.printing.get().is_none());
+    }
+
+    #[test]
+    fn emblem_stack_owner_printing_other_kinds_and_ordinary_authority() {
+        let (mut state, id) = emblem_row_fixture();
+        let ability = Box::new(ResolvedAbility::new(Effect::NoOp, vec![], id, PlayerId(0)));
+        let kinds = [
+            StackEntryKind::ActivatedAbility {
+                source_id: id,
+                ability: ability.clone(),
+            },
+            StackEntryKind::Spell {
+                card_id: CardId(0),
+                ability: Some(ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+            StackEntryKind::Spell {
+                card_id: CardId(0),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+            StackEntryKind::KeywordAction {
+                action: KeywordAction::Equip {
+                    equipment_id: id,
+                    target_creature_id: id,
+                },
+            },
+            StackEntryKind::CombatDamage {
+                sub_step: CombatDamageSubStep::Regular,
+                assignments: vec![],
+            },
+        ];
+        // Non-ability emblem kinds are synthetic branch boundaries, not playable emblems.
+        for kind in kinds {
+            let entry = StackEntry {
+                id: ObjectId(900),
+                source_id: id,
+                controller: PlayerId(0),
+                kind,
+            };
+            assert_eq!(
+                stack_entry_detail(&state, &entry).printing.get(),
+                &Some(emblem_printing("A"))
+            );
+            let mut ordinary = state.clone();
+            ordinary.objects.get_mut(&id).unwrap().is_emblem = false;
+            ordinary.objects.get_mut(&id).unwrap().printing =
+                DisplayOnly::new(Some(emblem_printing("B")));
+            assert_eq!(
+                stack_entry_detail(&ordinary, &entry).printing.get(),
+                &Some(emblem_printing("B"))
+            );
+            ordinary.objects.get_mut(&id).unwrap().printing = DisplayOnly::default();
+            assert!(
+                stack_entry_detail(&ordinary, &entry)
+                    .printing
+                    .get()
+                    .is_none(),
+                "live absence discloses no printing"
+            );
+            ordinary.objects.remove(&id);
+            let row = stack_entry_detail(&ordinary, &entry);
+            assert_eq!(row.source_name, "Unknown");
+            assert!(row.printing.get().is_none());
+        }
+        state.objects.get_mut(&id).unwrap().is_emblem = false;
+        state.objects.get_mut(&id).unwrap().printing = DisplayOnly::new(Some(emblem_printing("B")));
+        let context =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        let entry = emblem_trigger_row(id, "Emblem", Some(context));
+        assert_eq!(
+            stack_entry_detail(&state, &entry).printing.get(),
+            &Some(emblem_printing("B"))
+        );
+        state.objects.get_mut(&id).unwrap().printing = DisplayOnly::default();
+        assert!(stack_entry_detail(&state, &entry).printing.get().is_none());
+    }
+
+    #[test]
+    fn emblem_stack_owner_printing_is_display_only() {
+        use crate::types::display_only::rules_projection;
+        use std::hash::{Hash, Hasher};
+        let (mut state, id) = emblem_row_fixture();
+        state
+            .stack
+            .push_back(emblem_trigger_row(id, "Emblem", None));
+        let original = state.clone();
+        let baseline = rules_projection(&state).unwrap();
+        let mut projected = Vec::new();
+        let mut hashes = Vec::new();
+        for pair in [Some(emblem_printing("A")), Some(emblem_printing("B")), None] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .emblem_source
+                .as_mut()
+                .unwrap()
+                .printing = DisplayOnly::new(pair.clone());
+            let before = serde_json::to_value(&state).unwrap();
+            let envelope =
+                serde_json::to_value(ClientGameStateRef::wrap(&state, Some(PlayerId(0)))).unwrap();
+            let row = stack_entry_detail(&state, &state.stack[0]);
+            assert_eq!(row.printing.get(), &pair);
+            assert_eq!(row.source_name, "Emblem");
+            assert_eq!(state, original);
+            assert_eq!(rules_projection(&state).unwrap(), baseline);
+            assert_eq!(
+                serde_json::to_value(&state).unwrap(),
+                before,
+                "derivation cannot mutate authority"
+            );
+            assert_eq!(format!("{:?}", row.printing), "DisplayOnly(..)");
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            row.printing.hash(&mut hash);
+            hashes.push(hash.finish());
+            projected.push(envelope);
+        }
+        assert_eq!(hashes[0], hashes[1]);
+        assert_eq!(hashes[1], hashes[2]);
+        for value in &projected[1..] {
+            assert_eq!(
+                value["derived"]["waiting_for_identity"],
+                projected[0]["derived"]["waiting_for_identity"]
+            );
+            assert_eq!(
+                value["derived"]["state_revision"],
+                projected[0]["derived"]["state_revision"]
+            );
+        }
+        assert_ne!(
+            projected[0]["derived"]["stack_entry_details"],
+            projected[1]["derived"]["stack_entry_details"]
+        );
+        assert_ne!(
+            projected[1]["derived"]["stack_entry_details"],
+            projected[2]["derived"]["stack_entry_details"]
+        );
+    }
+
+    #[test]
+    fn prompt_fence_is_optional_in_base_and_authoritative_on_filtered_delivery() {
+        let mut state = GameState::new_two_player(0);
+        state.state_revision = 17;
+        for base in [
+            DerivedViews::default(),
+            derive_views(&state, Some(PlayerId(0))),
+        ] {
+            let wire = serde_json::to_value(base).unwrap();
+            assert!(wire.get("waiting_for_identity").is_none());
+            assert!(wire.get("state_revision").is_none());
+        }
+        let legacy: DerivedViews = serde_json::from_str("{}").unwrap();
+        assert!(legacy.waiting_for_identity.is_none());
+        assert!(legacy.state_revision.is_none());
+        for viewer in [Some(PlayerId(0)), None] {
+            let wire = serde_json::to_value(ClientGameStateRef::wrap(&state, viewer)).unwrap();
+            assert_eq!(wire["derived"]["state_revision"], 17);
+            assert_eq!(
+                wire["derived"]["waiting_for_identity"],
+                "ae290362dc64d95b65ecb96ab3bd73cb33c820ddf926c06d687a9631c217bd1d"
+            );
+        }
+    }
 
     /// CR 108.3 + CR 400.7: the player a zone-change trigger shows is the
     /// identity the move installed, not the one the card had when it left.
@@ -3981,10 +5037,14 @@ mod tests {
                 DebugLibraryCardView {
                     object_id: own,
                     name: "Authorized Debug Card".to_string(),
+                    printed_ref: None,
+                    printing: Default::default(),
                 },
                 DebugLibraryCardView {
                     object_id: another_own,
                     name: "Second Authorized Debug Card".to_string(),
+                    printed_ref: None,
+                    printing: Default::default(),
                 },
             ],
             "the explicit debug surface must expose only the authorized viewer's own cards in a non-library order"
@@ -4005,6 +5065,45 @@ mod tests {
             unauthorized.debug_library_cards.is_empty(),
             "a player without debug permission must not receive a debug library projection"
         );
+    }
+
+    #[test]
+    fn debug_library_owner_identity_is_projected_only_with_authorization() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        state.debug_mode = true;
+        state.debug_permitted.insert(PlayerId(0));
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Twin".to_string(),
+            Zone::Library,
+        );
+        let printed_ref = PrintedCardRef {
+            oracle_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
+            face_name: "Twin".into(),
+        };
+        state.objects.get_mut(&id).unwrap().printed_ref = Some(printed_ref.clone());
+        let rows = debug_library_cards(&state, Some(PlayerId(0)));
+        let wire = serde_json::to_value(&rows).unwrap();
+        assert_eq!(
+            wire[0]["printed_ref"],
+            serde_json::to_value(&printed_ref).unwrap(),
+            "authorized debug owner art must receive the object's Oracle and face"
+        );
+        assert_eq!(rows[0].printed_ref, Some(printed_ref));
+        assert!(debug_library_cards(&state, None).is_empty());
+        assert!(debug_library_cards(&state, Some(PlayerId(1))).is_empty());
+        state.debug_mode = false;
+        assert!(debug_library_cards(&state, Some(PlayerId(0))).is_empty());
+        state.debug_mode = true;
+        state.objects.get_mut(&id).unwrap().printed_ref = None;
+        let rows = debug_library_cards(&state, Some(PlayerId(0)));
+        let wire = serde_json::to_value(&rows[0]).unwrap();
+        assert!(wire.get("printed_ref").is_none());
+        let legacy: DebugLibraryCardView = serde_json::from_value(wire).unwrap();
+        assert_eq!(legacy.printed_ref, None);
+        assert_eq!(legacy.object_id, id);
     }
 
     #[test]
@@ -4477,7 +5576,17 @@ mod tests {
 
     #[test]
     fn turn_order_hidden_for_two_or_fewer_live_representatives() {
-        let state = GameState::new(FormatConfig::standard(), 2, 42);
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        // A game in progress: the starting player is determined (CR 103.1), so
+        // the representative count and not determination is what hides turn order.
+        state.turn_number = 1;
+
+        assert!(
+            derive_views(&state, Some(PlayerId(0)))
+                .viewer_play_draw
+                .is_some(),
+            "the determination guard passed, so the <= 2 branch hides turn order"
+        );
 
         let views = derive_views(&state, None);
 
@@ -4497,6 +5606,8 @@ mod tests {
     #[test]
     fn turn_order_duplicates_survive_wire_round_trip() {
         let mut state = GameState::new(FormatConfig::free_for_all(), 4, 42);
+        // A game in progress: the starting player is determined (CR 103.1).
+        state.turn_number = 1;
         state.active_player = PlayerId(0);
         state.extra_turns.push(crate::types::game_state::ExtraTurn {
             player: PlayerId(2),
@@ -4518,7 +5629,6 @@ mod tests {
                     turns_from_now: 0,
                     turn_number: 1,
                     is_viewer: false,
-                    is_starting_player: true,
                 },
                 TurnOrderSlotView {
                     player: PlayerId(0),
@@ -4526,7 +5636,6 @@ mod tests {
                     turns_from_now: 1,
                     turn_number: 2,
                     is_viewer: false,
-                    is_starting_player: false,
                 },
             ],
             "same player can be both NOW and NEXT when an extra turn is queued"
@@ -5067,6 +6176,70 @@ mod tests {
         );
     }
 
+    /// CR 601.2g + CR 602.2b + CR 605.3a: in the payer's own manual Rakdos
+    /// Signet window (`{1}, {T}: Add {B}{R}.`) the engine publishes the Signet,
+    /// its `{1}` and the pins, and the remaining cost shrinks with the pins.
+    /// The opponent sees neither.
+    #[test]
+    fn mana_ability_payment_view_reflects_the_manual_window_for_its_payer_only() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let signet = scenario
+            .add_artifact_from_oracle(P0, "Rakdos Signet", "{1}, {T}: Add {B}{R}.")
+            .id();
+        let mut runner = scenario.build();
+        for color in [ManaType::Black, ManaType::Red] {
+            let _ = runner
+                .state_mut()
+                .add_mana_to_pool(P0, ManaUnit::new(color, ObjectId(0), false, vec![]));
+        }
+        let red = runner.state().players[0]
+            .mana_pool
+            .units()
+            .find(|unit| unit.color == ManaType::Red)
+            .map(|unit| unit.pip_id)
+            .expect("the floating {R}");
+        let ability_index = runner.state().objects[&signet]
+            .abilities
+            .iter()
+            .position(crate::game::mana_abilities::is_mana_ability)
+            .expect("the Signet's mana ability");
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: signet,
+                ability_index,
+                payment_mode: CastPaymentMode::Manual,
+            })
+            .expect("the manual activation opens its window");
+
+        let views = derive_views(runner.state(), Some(P0));
+        assert_eq!(
+            views.mana_ability_payment,
+            Some(ManaAbilityPaymentView {
+                source_id: signet,
+                cost: ManaCost::generic(1),
+                pinned_pool_units: vec![],
+            })
+        );
+        assert_eq!(views.pending_payment_remaining, Some(ManaCost::generic(1)));
+
+        runner
+            .act(GameAction::SpendPoolMana { pip_id: red })
+            .expect("the {R} can pay the {1}");
+        let views = derive_views(runner.state(), Some(P0));
+        assert_eq!(
+            views
+                .mana_ability_payment
+                .map(|view| view.pinned_pool_units),
+            Some(vec![red])
+        );
+        assert_eq!(views.pending_payment_remaining, Some(ManaCost::NoCost));
+
+        let opponent = derive_views(runner.state(), Some(P1));
+        assert_eq!(opponent.mana_ability_payment, None);
+        assert_eq!(opponent.pending_payment_remaining, None);
+    }
+
     #[test]
     fn derive_views_wires_stack_entry_details() {
         let mut state = GameState::new_two_player(42);
@@ -5494,6 +6667,8 @@ mod tests {
         let empty = StackEntryDisplay {
             source_name: "Spell".to_string(),
             token_image_ref: None,
+            printing: Default::default(),
+            printed_ref: None,
             kind_label: "Spell".to_string(),
             ability_kind: None,
             ability_description: None,
@@ -8250,6 +9425,52 @@ mod tests {
         );
     }
 
+    /// CR 608.2d: `client_state_wire_value` redacts a paused resolution-time
+    /// division's look-result provenance by itself. The fixture is the raw
+    /// authoritative state — no viewer filter runs first — so this fails if the
+    /// serializer's own `redact_waiting_for_iteration_members` call is removed.
+    #[test]
+    fn client_wire_redacts_resolution_division_provenance_without_viewer_filter() {
+        let mut state = GameState::new_two_player(42);
+        let mut pending = ResolvedAbility::new(
+            Effect::unimplemented("private loop probe", "private loop probe"),
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        pending.context.parent_target_iteration_members = Some(vec![ObjectId(1), ObjectId(2)]);
+        state.waiting_for = WaitingFor::DistributeAmong {
+            player: PlayerId(0),
+            total: 3,
+            targets: vec![
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Object(ObjectId(2)),
+            ],
+            unit: DistributionUnit::Damage,
+            scope: DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(pending),
+            },
+        };
+
+        let wire = client_state_wire_value(&state).expect("client projection serializes");
+        let pending_effect = &wire["waiting_for"]["data"]["scope"]["data"]["pending_effect"];
+        assert!(pending_effect.is_object(), "reach guard: {wire}");
+        assert!(
+            pending_effect["context"]
+                .get("parent_target_iteration_members")
+                .is_none(),
+            "wire payload leaked iteration members: {pending_effect}"
+        );
+        // Reach guard: the trusted serialization of the same state carries the
+        // provenance, so its absence above is the projection's own redaction.
+        let trusted = serde_json::to_value(&state).expect("trusted state serializes");
+        assert!(
+            trusted["waiting_for"]["data"]["scope"]["data"]["pending_effect"]["context"]
+                .get("parent_target_iteration_members")
+                .is_some()
+        );
+    }
+
     /// CR 605.4a + CR 117.3c: `client_state_wire_value` is a defence-in-depth
     /// boundary.
     ///
@@ -9285,6 +10506,89 @@ mod tests {
         assert!(state.players[1].library.is_empty());
     }
 
+    /// CR 121.1 + CR 702.24a: the unless-payment draw view resolves the
+    /// instruction's count against the pending ability (fixed, zero and
+    /// dynamic) and carries the repetition; any other prompt has none.
+    #[test]
+    fn unless_draw_cost_resolves_the_count_and_repetition() {
+        use crate::types::ability::{
+            AbilityCost, Effect, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility,
+        };
+        let mut state = GameState::new_two_player(42);
+        assert_eq!(derive_views(&state, None).unless_draw_cost, None);
+        let draw = |count: QuantityExpr| AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count,
+                target: TargetFilter::Controller,
+            }),
+        };
+        let prompt = |cost: AbilityCost, repeat: Option<u32>| WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost,
+            pending_effect: Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+            repeat,
+        };
+        for (count, repeat, expected) in [
+            (QuantityExpr::Fixed { value: 1 }, None, (1, 1)),
+            (QuantityExpr::Fixed { value: 3 }, None, (3, 1)),
+            (QuantityExpr::Fixed { value: 0 }, None, (0, 1)),
+            (QuantityExpr::Fixed { value: -2 }, None, (0, 1)),
+            (QuantityExpr::Fixed { value: 1 }, Some(65), (1, 65)),
+        ] {
+            state.waiting_for = prompt(draw(count), repeat);
+            assert_eq!(
+                derive_views(&state, None).unless_draw_cost,
+                Some(UnlessDrawCostView {
+                    cards: expected.0,
+                    instructions: expected.1,
+                    stage: UnlessDrawPaymentStage::Offered,
+                })
+            );
+        }
+        // A dynamic count is resolved by the engine, here P0's hand size.
+        for _ in 0..4 {
+            create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                "Hand Card".to_string(),
+                Zone::Hand,
+            );
+        }
+        state.waiting_for = prompt(
+            draw(QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Controller,
+                },
+            }),
+            None,
+        );
+        assert_eq!(
+            derive_views(&state, None).unless_draw_cost,
+            Some(UnlessDrawCostView {
+                cards: 4,
+                instructions: 1,
+                stage: UnlessDrawPaymentStage::Offered,
+            })
+        );
+        // A non-draw unless cost has no draw view.
+        state.waiting_for = prompt(
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            None,
+        );
+        assert_eq!(derive_views(&state, None).unless_draw_cost, None);
+    }
+
     #[test]
     fn shared_piles_is_absent_for_per_player_formats() {
         let standard = GameState::new(FormatConfig::standard(), 2, 42);
@@ -9347,6 +10651,8 @@ mod tests {
             vec![DebugLibraryCardView {
                 object_id: card,
                 name: "Shared Pile Card".to_string(),
+                printed_ref: None,
+                printing: Default::default(),
             }]
         );
     }

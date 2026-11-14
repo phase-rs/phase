@@ -26,8 +26,8 @@ use crate::types::ability::{
     ContinuousModification, ControllerRef, CountScope, CounterKindChooser, CounterKindDomain,
     CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
     EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
-    ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition, ManaProduction,
-    MassLibraryShuffleMode, NameStickerSet, NumberQuality, ObjectProperty, ObjectScope,
+    ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition, LibraryShuffleMode,
+    ManaProduction, NameStickerSet, NumberQuality, ObjectProperty, ObjectScope,
     ObjectSelectionCardinality, ObjectSelectionEligibility, Parity, ParsedCondition,
     PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValue,
     PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
@@ -56,6 +56,7 @@ use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
+use std::sync::LazyLock;
 use strum::IntoEnumIterator;
 
 const TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL: &str =
@@ -323,6 +324,8 @@ pub enum ItemGap {
     /// CR 608.2e + CR 603.10d: the node's effect is handled, but its fan-out
     /// control boundary is unobservable (`PLAYER_SCOPE_CONTROL_BOUNDARY_GAP`).
     FanOutControlBoundary,
+    /// CR 601.2c / CR 608.2d: the GiveControl player recipient is never bound (`GIVE_CONTROL_UNBOUND_RECIPIENT_GAP`).
+    UnboundControlRecipient,
 }
 
 impl ItemGap {
@@ -330,6 +333,7 @@ impl ItemGap {
     fn handler(self) -> &'static str {
         match self {
             ItemGap::FanOutControlBoundary => PLAYER_SCOPE_CONTROL_BOUNDARY_GAP,
+            ItemGap::UnboundControlRecipient => GIVE_CONTROL_UNBOUND_RECIPIENT_GAP,
         }
     }
 }
@@ -430,10 +434,10 @@ impl ResolverFeatureFamily {
 /// result from the same merged view of analysis gaps, parse-tree gaps, and
 /// parser warnings.
 #[derive(Debug, Clone)]
-struct CoverageGap {
-    handler: String,
-    source_text: Option<String>,
-    diagnoses: Vec<GapDiagnosis>,
+pub struct CoverageGap {
+    pub handler: String,
+    pub source_text: Option<String>,
+    pub diagnoses: Vec<GapDiagnosis>,
 }
 
 fn merge_coverage_gaps(
@@ -803,6 +807,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::TriggeringSourceController => "triggering source's controller".into(),
         TargetFilter::TriggeringPlayer => "triggering player".into(),
         TargetFilter::TriggeringSource => "triggering source".into(),
+        TargetFilter::CastingSpell => "the spell being cast".into(),
         TargetFilter::EventTarget => "object targeted by the triggering event".into(),
         TargetFilter::EventTargetController => {
             "controller of the object targeted by the triggering event".into()
@@ -993,7 +998,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     crate::types::ability::ParitySource::Fixed(parity) => {
                         format!("{parity:?} mana value").to_lowercase()
                     }
-                    crate::types::ability::ParitySource::LastNamedChoice => {
+                    crate::types::ability::ParitySource::LastNamedChoice
+                    | crate::types::ability::ParitySource::SourceChosen => {
                         "chosen odd/even mana value".to_string()
                     }
                 };
@@ -1960,6 +1966,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             }
         }
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
+        QuantityRef::DeployedBossCount => "deployed bosses".into(),
         QuantityRef::ExiledCardPower { index } => format!("power of exiled card {index}"),
         QuantityRef::ZoneCardCount {
             zone,
@@ -2065,6 +2072,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             )
         }
         QuantityRef::CrimesCommittedThisTurn => "crimes committed this turn".into(),
+        QuantityRef::EnergyPaidOrLostThisTurn => "energy paid or lost this turn".into(),
         QuantityRef::BendTypesThisTurn => "distinct bend types this turn".into(),
         QuantityRef::LifeGainedThisTurn { player } => {
             format!("life gained this turn ({})", fmt_player_scope(player))
@@ -2778,6 +2786,8 @@ fn fmt_core_type(ct: &CoreType) -> &'static str {
         CoreType::Phenomenon => "phenomenon",
         CoreType::Scheme => "scheme",
         CoreType::Conspiracy => "conspiracy",
+        CoreType::Boss => "boss",
+        CoreType::Event => "event",
     }
 }
 
@@ -2803,6 +2813,7 @@ fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
                             "designated for an owner-library shuffle"
                         }
                         ThisWayCause::Discarded => "discarded",
+                        ThisWayCause::Tapped => "tapped",
                         ThisWayCause::Exiled => "exiled",
                         ThisWayCause::Milled => "milled",
                         ThisWayCause::Destroyed => "destroyed",
@@ -2810,6 +2821,7 @@ fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
                         ThisWayCause::Returned => "returned",
                         ThisWayCause::Bounced => "bounced",
                         ThisWayCause::PutIntoGraveyard => "put into a graveyard",
+                        ThisWayCause::ControlGained => "gained control of",
                     };
                     format!("cards {verb} this way")
                 }
@@ -3405,6 +3417,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             destination,
             target,
             owner_library,
+            library_shuffle,
             enter_transformed,
             enters_under,
             enter_tapped,
@@ -3429,6 +3442,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             // only when active, so a plain ChangeZone's signature is unchanged.
             if *owner_library {
                 d.push(("owner_library".into(), "true".into()));
+            }
+            if matches!(library_shuffle, LibraryShuffleMode::TerminalShuffle) {
+                d.push(("library_shuffle".into(), format!("{library_shuffle:?}")));
             }
             if *enter_transformed {
                 d.push(("enter_transformed".into(), "true".into()));
@@ -3506,7 +3522,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if let Some(lp) = library_position {
                 d.push(("library_position".into(), format!("{lp:?}")));
             }
-            if matches!(library_shuffle, MassLibraryShuffleMode::TerminalShuffle) {
+            if matches!(library_shuffle, LibraryShuffleMode::TerminalShuffle) {
                 d.push(("library_shuffle".into(), format!("{library_shuffle:?}")));
             }
             if *random_order {
@@ -4516,6 +4532,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::PairWith { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
+        Effect::HordePlayCard { count } => {
+            d.push(("count".into(), format!("{count}")));
+        }
         // Effects with no interesting parameters
         Effect::Unimplemented { .. }
         | Effect::Explore
@@ -5271,6 +5290,9 @@ fn fmt_attack_target_filter(filter: &crate::types::triggers::AttackTargetFilter)
         // CR 725.1: the monarch is a player designation, and no player is the
         // monarch until an effect creates one.
         ATF::Monarch => "the monarch",
+        // CR 508.6: the source's own attack history, so the label names the
+        // history rather than a player class the card does not print.
+        ATF::PlayerAttackedBySourceThisTurn => "a player it has already attacked this turn",
     }
 }
 
@@ -6047,6 +6069,10 @@ fn build_ability_item(
                 supported = false;
                 gap = Some(ItemGap::FanOutControlBoundary);
             }
+            AbilityNodeGap::UnboundControlRecipient => {
+                supported = false;
+                gap = Some(ItemGap::UnboundControlRecipient);
+            }
         }
     }
     if unimplemented_effect {
@@ -6811,6 +6837,9 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
                         AbilityNodeGap::UnobservableFanOutControl => {
                             "Effect: fan_out_control_boundary".to_string()
                         }
+                        AbilityNodeGap::UnboundControlRecipient => {
+                            "Effect: give_control_unbound_recipient".to_string()
+                        }
                     };
                     if !missing.contains(&label) {
                         missing.push(label);
@@ -6911,6 +6940,17 @@ fn token_pt_provenance_has_no_materialization_gap(
         TokenPtProvenance::SourceDefinedOrDynamic { .. }
     ) && !token_rules_text_unparsed_gap(preset, materialized)
 }
+
+/// The token-catalog coverage summary, computed once per process.
+///
+/// Its only inputs are the compiled-in token catalog ([`known_token_presets`])
+/// and the pure Oracle parser, so the summary is a process-wide constant that
+/// does not depend on the `CardDatabase` being analyzed. Deriving it re-parses
+/// every catalog preset's rules text (~1.5k lines), which dominated each
+/// [`analyze_coverage`] call: ~20s per call in an unoptimized build against
+/// microseconds for a one-card database, so a test that analyzes N one-card
+/// databases paid the catalog parse N times.
+static TOKEN_COVERAGE: LazyLock<TokenCoverageSummary> = LazyLock::new(analyze_token_coverage);
 
 fn analyze_token_coverage() -> TokenCoverageSummary {
     let mut summary = TokenCoverageSummary::default();
@@ -7125,6 +7165,8 @@ fn token_category_label(category: &crate::game::token_presets::TokenCategory) ->
         TokenCategory::Land => "land".to_string(),
         TokenCategory::Planeswalker => "planeswalker".to_string(),
         TokenCategory::Artifact => "artifact".to_string(),
+        TokenCategory::Boss => "boss".to_string(),
+        TokenCategory::Event => "event".to_string(),
     }
 }
 
@@ -7179,84 +7221,17 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         .collect();
 
     for (key, face) in card_db.face_iter() {
-        let mut missing = Vec::new();
-
-        // Build the parse tree once — it feeds both the silent-drop check
-        // (below) and gap_details (further down), so compute it up front.
-        let parse_details = build_parse_details(face, &trigger_registry, &static_registry);
-
-        // Check abilities
-        check_abilities(
-            &face.abilities,
+        let coverage = compute_card_face_coverage_for_report(
+            face,
             &trigger_registry,
             &static_registry,
-            TokenStaticTraversal::Include,
-            &mut missing,
+            &valid_subtypes,
         );
-
-        // Check additional cost
-        check_additional_cost(&face.additional_cost, &mut missing);
-
-        // Check triggers
-        check_triggers(
-            &face.triggers,
-            &trigger_registry,
-            &static_registry,
-            TokenStaticTraversal::Include,
-            &mut missing,
-        );
-
-        // Check keywords
-        check_keywords(&face.keywords, &mut missing);
-
-        // Check static abilities
-        check_statics(
-            &face.static_abilities,
-            &trigger_registry,
-            &static_registry,
-            TokenStaticTraversal::Include,
-            &mut missing,
-        );
-
-        // Check replacements
-        check_replacements(
-            &face.replacements,
-            &trigger_registry,
-            &static_registry,
-            &mut missing,
-        );
-
-        // Validate subtype references in AddSubtype modifications against
-        // the printed-corpus lexicon. Catches parser misfires where English
-        // filler words (`Gets`, `Until`, `And`) were tokenized as subtypes.
-        check_subtype_lexicon(face, &valid_subtypes, &mut missing);
-
-        // Flag cards whose parsed features have no runtime resolver. Without
-        // this, a card can parse cleanly yet silently do nothing on resolution.
-        check_resolver_features(face, &mut missing);
-        check_shared_source_graveyard_slot(face, &mut missing);
-
-        // Flag cards where the parser consumed Oracle text without producing
-        // a corresponding parse item. Uses the parse tree computed above.
-        check_silent_drops(&face.oracle_text, &face.name, &parse_details, &mut missing);
-
-        // The public result, summary counters, and warning rollup all derive
-        // from this one canonical gap set. `missing` captures analysis-only
-        // findings (for example resolver features), while the tree contributes
-        // the most specific Oracle source text for representable failures.
-        let gaps_before_parse_warnings =
-            merge_coverage_gaps(&missing, extract_gap_details(&parse_details), &[]);
-        let supported_before_parse_warnings = gaps_before_parse_warnings.is_empty();
-        let gaps = merge_coverage_gaps(
-            &missing,
-            extract_gap_details(&parse_details),
-            &face.parse_warnings,
-        );
-        let supported = gaps.is_empty();
-        let gap_details = public_gap_details(&gaps);
+        let supported = coverage.is_supported();
+        let gap_details = public_gap_details(&coverage.gaps);
         let gap_count = gap_details.len();
 
-        for gap in &gaps {
+        for gap in &coverage.gaps {
             *freq.entry(gap.handler.clone()).or_default() += 1;
         }
 
@@ -7292,7 +7267,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
                 .or_default()
                 .push(
                     &face.name,
-                    supported_before_parse_warnings,
+                    coverage.supported_before_parse_warnings(),
                     gap_count == 1,
                     &legal_formats,
                 );
@@ -7311,7 +7286,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             gap_details,
             gap_count,
             oracle_text: face.oracle_text.clone(),
-            parse_details,
+            parse_details: coverage.parse_details,
             printings,
         });
     }
@@ -7604,7 +7579,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         supported_cards,
         coverage_pct,
         keyword_count,
-        token_coverage: analyze_token_coverage(),
+        token_coverage: TOKEN_COVERAGE.clone(),
         coverage_by_format,
         coverage_by_set,
         cards,
@@ -7685,45 +7660,171 @@ fn modification_has_unimplemented_parts(
     }
 }
 
-/// Returns the list of unsupported handler labels for a card face (e.g.
-/// "Effect:Unimplemented", "Trigger:ChangesZone", "Keyword:someKeyword").
-/// Empty means the card is fully supported.
-pub fn card_face_gaps(face: &CardFace) -> Vec<String> {
-    let trigger_registry = build_trigger_registry();
-    let static_registry = build_static_registry();
+/// The per-face result of coverage analysis: parse tree items, merged coverage gaps,
+/// and the subset of those gaps that exist before parse warnings are folded in.
+#[derive(Debug, Clone)]
+pub struct CardFaceCoverage {
+    pub parse_details: Vec<ParsedItem>,
+    pub gaps: Vec<CoverageGap>,
+    /// Handler, resolver-feature and parse-tree gaps only, excluding the
+    /// parse-warning gaps (`ParseWarning:*`, `Swallow:*`) that `gaps` adds.
+    pub gaps_before_parse_warnings: Vec<CoverageGap>,
+}
+
+impl CardFaceCoverage {
+    pub fn is_supported(&self) -> bool {
+        self.gaps.is_empty()
+    }
+
+    /// Whether the face is supported ignoring parse warnings (diagnostic-only gaps).
+    pub fn supported_before_parse_warnings(&self) -> bool {
+        self.gaps_before_parse_warnings.is_empty()
+    }
+
+    pub fn gap_handlers_before_parse_warnings(&self) -> Vec<String> {
+        self.gaps_before_parse_warnings
+            .iter()
+            .map(|gap| gap.handler.clone())
+            .collect()
+    }
+
+    pub fn gap_handlers(&self) -> Vec<String> {
+        self.gaps.iter().map(|gap| gap.handler.clone()).collect()
+    }
+}
+
+/// Whether the CR 614.12 entry-projection check participates in a coverage verdict.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum EntryProjectionPolicy {
+    /// Deck validation: fail closed on entry-projection gaps.
+    Include,
+    /// Published report and CI gates: preserve the historical policy.
+    Exclude,
+}
+
+/// The single canonical per-face coverage computation shared between
+/// `analyze_coverage` (for coverage-report and CI gates) and `card_face_gaps`
+/// (for deck validation and runtime deck building).
+///
+/// `entry_projection` selects the one intentional divergence between the two
+/// consumers: the report excludes the CR 614.12 entry-projection check to preserve
+/// its published policy, while deck validation includes it and fails closed.
+pub fn compute_card_face_coverage(
+    face: &CardFace,
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    valid_subtypes: &HashSet<String>,
+    entry_projection: EntryProjectionPolicy,
+) -> CardFaceCoverage {
     let mut missing = Vec::new();
+
+    let parse_details = build_parse_details(face, trigger_registry, static_registry);
+
     check_keywords(&face.keywords, &mut missing);
     check_abilities(
         &face.abilities,
-        &trigger_registry,
-        &static_registry,
+        trigger_registry,
+        static_registry,
         TokenStaticTraversal::Include,
         &mut missing,
     );
     check_triggers(
         &face.triggers,
-        &trigger_registry,
-        &static_registry,
+        trigger_registry,
+        static_registry,
         TokenStaticTraversal::Include,
         &mut missing,
     );
     check_statics(
         &face.static_abilities,
-        &trigger_registry,
-        &static_registry,
+        trigger_registry,
+        static_registry,
         TokenStaticTraversal::Include,
         &mut missing,
     );
     check_additional_cost(&face.additional_cost, &mut missing);
     check_replacements(
         &face.replacements,
-        &trigger_registry,
-        &static_registry,
+        trigger_registry,
+        static_registry,
         &mut missing,
     );
     check_shared_source_graveyard_slot(face, &mut missing);
-    check_entry_projection(face, &mut missing);
-    missing
+    check_confirmed_misparse(face, &mut missing);
+    match entry_projection {
+        EntryProjectionPolicy::Include => check_entry_projection(face, &mut missing),
+        EntryProjectionPolicy::Exclude => {}
+    }
+    check_subtype_lexicon(face, valid_subtypes, &mut missing);
+    check_resolver_features(face, &mut missing);
+    check_silent_drops(&face.oracle_text, &face.name, &parse_details, &mut missing);
+
+    let tree_gaps = extract_gap_details(&parse_details);
+    let gaps_before_parse_warnings = merge_coverage_gaps(&missing, tree_gaps.clone(), &[]);
+    let gaps = merge_coverage_gaps(&missing, tree_gaps, &face.parse_warnings);
+
+    CardFaceCoverage {
+        parse_details,
+        gaps,
+        gaps_before_parse_warnings,
+    }
+}
+
+/// Coverage computation for the published report (coverage-report and CI gates).
+/// Excludes the deck-only entry-projection check to preserve existing policy.
+fn compute_card_face_coverage_for_report(
+    face: &CardFace,
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    valid_subtypes: &HashSet<String>,
+) -> CardFaceCoverage {
+    compute_card_face_coverage(
+        face,
+        trigger_registry,
+        static_registry,
+        valid_subtypes,
+        EntryProjectionPolicy::Exclude,
+    )
+}
+
+/// Compute full coverage information for a single card face against the engine's
+/// global registries and the default subtype lexicon.
+pub fn card_face_coverage(face: &CardFace) -> CardFaceCoverage {
+    card_face_coverage_with_subtypes(face, default_valid_subtypes())
+}
+
+/// Like [`card_face_coverage`], but against a caller-supplied subtype lexicon
+/// (see [`collect_valid_subtypes`]). With the database lexicon this matches
+/// `analyze_coverage` except for the entry-projection check, which this deck
+/// entry point includes and the report excludes ([`EntryProjectionPolicy`]).
+pub fn card_face_coverage_with_subtypes(
+    face: &CardFace,
+    valid_subtypes: &HashSet<String>,
+) -> CardFaceCoverage {
+    compute_card_face_coverage(
+        face,
+        trigger_registry(),
+        static_registry(),
+        valid_subtypes,
+        EntryProjectionPolicy::Include,
+    )
+}
+
+/// Returns the list of unsupported handler labels for a card face (e.g.
+/// "Effect:Unimplemented", "Trigger:ChangesZone", "Keyword:someKeyword").
+/// Empty means the card is fully supported.
+///
+/// Drives in-app deck coverage validation. Shares the canonical per-face
+/// gap computation with `analyze_coverage`.
+pub fn card_face_gaps(face: &CardFace) -> Vec<String> {
+    card_face_coverage(face).gap_handlers()
+}
+
+/// Project export support metadata into the existing coverage-gap authority.
+fn check_confirmed_misparse(face: &CardFace, missing: &mut Vec<String>) {
+    if let Some(class) = face.metadata.confirmed_misparse {
+        missing.push(class.handler().to_string());
+    }
 }
 
 /// The coverage label for an ability whose per-player fan-out ("each player
@@ -7772,6 +7873,26 @@ enum AbilityNodeGap<'a> {
     /// CR 608.2e + CR 603.10d: a fan-out control boundary the runtime can't
     /// observe (`fan_out_control_boundary_is_unobservable`).
     UnobservableFanOutControl,
+    /// CR 601.2c / CR 608.2d: a player-population GiveControl recipient (`give_control_recipient_is_unbound`).
+    UnboundControlRecipient,
+}
+
+/// The coverage label for a GiveControl whose player recipient ("target player", "target
+/// opponent", "an opponent") is never announced or chosen: `resolve_give` binds it only when
+/// exactly one player qualifies, so it fails with two or more qualifying players (every game for
+/// "target player").
+pub const GIVE_CONTROL_UNBOUND_RECIPIENT_GAP: &str = "Effect:give_control_unbound_recipient";
+
+/// CR 601.2c / CR 608.2d: a "target player/opponent" or "an opponent" recipient that no target
+/// slot or choice binds, so `unique_recipient_from_filter` resolves it only when one player
+/// qualifies.
+fn give_control_recipient_is_unbound(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::GiveControl { recipient, .. }
+            if matches!(recipient, TargetFilter::Player)
+                || crate::types::ability::payer_is_declared_target(recipient)
+    )
 }
 
 /// The strict failures on `def` itself (not its children).
@@ -7782,12 +7903,18 @@ fn ability_node_gaps(def: &AbilityDefinition) -> impl Iterator<Item = AbilityNod
     };
     let boundary = fan_out_control_boundary_is_unobservable(def)
         .then_some(AbilityNodeGap::UnobservableFanOutControl);
+    let recipient = give_control_recipient_is_unbound(&def.effect)
+        .then_some(AbilityNodeGap::UnboundControlRecipient);
     let cost = def
         .cost
         .as_ref()
         .filter(|cost| cost.contains_unimplemented())
         .map(AbilityNodeGap::UnimplementedCost);
-    effect.into_iter().chain(boundary).chain(cost)
+    effect
+        .into_iter()
+        .chain(boundary)
+        .chain(recipient)
+        .chain(cost)
 }
 
 /// Every ability node the coverage walks judge under `def`: `def` itself, its
@@ -7935,12 +8062,10 @@ fn check_graveyard_permission_extra_cost(definition: &StaticDefinition, missing:
     }
 }
 
-/// Convenience wrapper that builds the registries internally so callers
-/// don't need to construct them.
+/// Convenience wrapper that uses the engine's global registries internally so
+/// callers don't need to construct them.
 pub fn build_parse_details_for_face(face: &CardFace) -> Vec<ParsedItem> {
-    let trigger_registry = build_trigger_registry();
-    let static_registry = build_static_registry();
-    build_parse_details(face, &trigger_registry, &static_registry)
+    build_parse_details(face, trigger_registry(), static_registry())
 }
 
 fn check_abilities(
@@ -8294,8 +8419,23 @@ fn check_replacements(
     }
 }
 
+static DEFAULT_VALID_SUBTYPES: std::sync::LazyLock<HashSet<String>> =
+    std::sync::LazyLock::new(|| {
+        crate::types::text_grammar::oracle_subtypes()
+            .iter()
+            .cloned()
+            .collect()
+    });
+
+/// Default lexicon of valid subtypes across Magic, derived from `oracle-subtypes.json`
+/// and canonical noncreature tables in `card_type.rs`.
+pub fn default_valid_subtypes() -> &'static HashSet<String> {
+    &DEFAULT_VALID_SUBTYPES
+}
+
 /// Build a lexicon of every subtype that appears on at least one printed
-/// card face. Used by [`check_subtype_lexicon`] to flag parser misfires:
+/// card face. Used by
+/// [`check_subtype_lexicon`] to flag parser misfires:
 /// any `AddSubtype { subtype }` whose value isn't a real printed subtype
 /// (e.g. `"Gets"`, `"Until"`, `"+1/+1"`) signals that the animation or
 /// static-ability parser tokenized English filler words as subtypes.
@@ -8303,7 +8443,7 @@ fn check_replacements(
 /// The MTG Comprehensive Rules define valid subtypes (CR 205.3), but the
 /// printed corpus is the authoritative source for the engine — anything
 /// that has appeared on a real card's type line is valid.
-fn collect_valid_subtypes(card_db: &CardDatabase) -> HashSet<String> {
+pub fn collect_valid_subtypes(card_db: &CardDatabase) -> HashSet<String> {
     card_db
         .face_iter()
         .flat_map(|(_, face)| face.card_type.subtypes.iter().cloned())
@@ -8494,7 +8634,7 @@ fn visit_effect_static_carrier_modifications(
 fn check_subtype_lexicon(face: &CardFace, valid: &HashSet<String>, missing: &mut Vec<String>) {
     visit_face_modifications(face, &mut |m| {
         if let ContinuousModification::AddSubtype { subtype } = m {
-            if !valid.contains(subtype) {
+            if !valid.contains(subtype) && !face.card_type.subtypes.contains(subtype) {
                 let label = format!(
                     "ParserMisfire:InvalidSubtype({})",
                     truncate_label(subtype, 40)
@@ -8770,6 +8910,9 @@ fn collect_ability_missing_parts(
             AbilityNodeGap::UnimplementedEffect(name) => format!("Effect:{name}"),
             AbilityNodeGap::UnobservableFanOutControl => {
                 PLAYER_SCOPE_CONTROL_BOUNDARY_GAP.to_string()
+            }
+            AbilityNodeGap::UnboundControlRecipient => {
+                GIVE_CONTROL_UNBOUND_RECIPIENT_GAP.to_string()
             }
             // Labelled per cost node below, after the delayed-trigger modes.
             AbilityNodeGap::UnimplementedCost(cost) => {
@@ -10087,9 +10230,10 @@ fn counter_exile_rider_drops_its_tail(def: &AbilityDefinition) -> bool {
 /// quality it could not type (`types/keywords.rs`), and
 /// `game::keywords::source_matches_card_type` can only ever match `s` against a
 /// core type word or a parseable subtype. Any other string — "each mana value
-/// other than the chosen number" (Haktos the Unscarred), "each color", "that
-/// player" — makes the grant INERT: the card parses, exports a real
-/// `AddKeyword` modification, and grants nothing at runtime.
+/// other than the chosen number" (Haktos the Unscarred), "each color" — makes
+/// the grant INERT: the card parses, exports a real `AddKeyword` modification,
+/// and grants nothing at runtime. ("that player" no longer lands here: it is
+/// typed as `FromPlayer(TargetPlayer)` and fixed to the declared target.)
 ///
 /// The predicate below mirrors `source_matches_card_type`'s two acceptance paths
 /// exactly, so the two cannot drift.
@@ -11154,6 +11298,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ("DistinctSubtypes", batch_filter_support(source))
         }
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
+        QuantityRef::DeployedBossCount => ("DeployedBossCount", Handled),
         QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
         QuantityRef::BasicLandTypeCount { .. } => ("BasicLandTypeCount", Handled),
@@ -11176,6 +11321,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
         QuantityRef::SacrificedThisTurn { .. } => ("SacrificedThisTurn", Handled),
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
+        QuantityRef::EnergyPaidOrLostThisTurn => ("EnergyPaidOrLostThisTurn", Handled),
         QuantityRef::BendTypesThisTurn => ("BendTypesThisTurn", Handled),
         QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
         QuantityRef::CardsDrawnThisTurn { .. } => ("CardsDrawnThisTurn", Handled),
@@ -15292,6 +15438,7 @@ mod tests {
         let inner = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin,
                 destination: Zone::Battlefield,
                 target: TargetFilter::TrackedSet {
@@ -15657,12 +15804,13 @@ mod tests {
     /// unsupported with exactly that resolver gap.
     #[test]
     fn transcendent_dragon_reports_its_dropped_counter_rider_tail() {
-        let card = coverage_result_for_face(counter_rider_face(
+        let face = counter_rider_face(
             "Transcendent Dragon",
             TRANSCENDENT_DRAGON_ORACLE,
             &["Flash", "Flying"],
             &["Creature"],
-        ));
+        );
+        let card = coverage_result_for_face(face.clone());
         // Reach guard: the card reached coverage with its trigger and counter.
         assert!(
             card.parse_details.iter().any(|item| {
@@ -15688,6 +15836,21 @@ mod tests {
             ["ResolverFeature:structural:counter_exile_rider_tail_dropped"],
             "the dropped tail is the only gap — in particular no Swallow:Replacement_Instead"
         );
+
+        // Deck coverage authority (card_face_gaps and card_face_coverage) must agree
+        // with analyze_coverage (issue #9972).
+        let face_gaps = card_face_gaps(&face);
+        assert_eq!(
+            face_gaps,
+            vec!["ResolverFeature:structural:counter_exile_rider_tail_dropped".to_string()],
+            "card_face_gaps must report the resolver feature gap, agreeing with analyze_coverage"
+        );
+        let coverage = card_face_coverage(&face);
+        assert!(
+            !coverage.is_supported(),
+            "card_face_coverage must mark the face unsupported"
+        );
+        assert_eq!(coverage.gap_handlers(), face_gaps);
     }
 
     /// The review's "execute/decline" half: the visitor yields decline bodies
@@ -16471,6 +16634,7 @@ mod tests {
 
         // A graveyard self-return: the shape where the collision bites.
         let graveyard_self_return = || Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Hand,
             target: TargetFilter::SelfRef,
@@ -16636,13 +16800,14 @@ mod tests {
             AttackTargetFilter::OwnerOrPlaneswalker,
             AttackTargetFilter::PlayerOrPermanents,
             AttackTargetFilter::Monarch,
+            AttackTargetFilter::PlayerAttackedBySourceThisTurn,
         ]
         .iter()
         .map(fmt_attack_target_filter)
         .collect();
         assert_eq!(
             labels.len(),
-            8,
+            9,
             "every AttackTargetFilter variant must map to a distinct label: {labels:?}"
         );
     }
@@ -17143,6 +17308,7 @@ mod tests {
         // parse-diff signature; a plain ChangeZone has no such row.
         let signature_keys = |attacking: bool| -> Vec<String> {
             effect_details(&Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::None,
@@ -17194,13 +17360,13 @@ mod tests {
             })
         };
 
-        let per_object = details(MassLibraryShuffleMode::PerObject);
+        let per_object = details(LibraryShuffleMode::PerObject);
         assert!(
             !per_object.iter().any(|(key, _)| key == "library_shuffle"),
             "the default mode must not churn legacy coverage signatures"
         );
 
-        let terminal = details(MassLibraryShuffleMode::TerminalShuffle);
+        let terminal = details(LibraryShuffleMode::TerminalShuffle);
         assert!(
             terminal
                 .iter()
@@ -23502,6 +23668,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin,
                 destination,
                 target,
@@ -26247,6 +26414,246 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         assert_eq!(slot0, "total mana value of that card (slot 0)");
         assert_eq!(slot1, "total mana value of that card (slot 1)");
     }
+
+    /// Deck coverage (card_face_gaps) and CI coverage (analyze_coverage)
+    /// must share the per-face gap computation (issue #9972).
+    #[test]
+    fn card_face_gaps_reports_parse_warnings_matching_coverage_report() {
+        let mut face = make_face();
+        face.name = "Swallowed Warning Card".to_string();
+        face.parse_warnings.push(OracleDiagnostic::swallowed_clause(
+            "Replacement_Instead",
+            "exile it instead",
+            None,
+        ));
+
+        let gaps = card_face_gaps(&face);
+        assert_eq!(
+            gaps,
+            vec!["Swallow:Replacement_Instead".to_string()],
+            "card_face_gaps must surface parse warnings"
+        );
+
+        let report_result = coverage_result_for_face(face.clone());
+        assert!(!report_result.supported);
+        let report_gaps: Vec<String> = report_result
+            .gap_details
+            .into_iter()
+            .map(|g| g.handler)
+            .collect();
+        assert_eq!(
+            gaps, report_gaps,
+            "card_face_gaps and analyze_coverage must agree on parse warnings"
+        );
+
+        let coverage = card_face_coverage(&face);
+        assert!(!coverage.is_supported());
+        assert_eq!(coverage.gap_handlers(), gaps);
+    }
+
+    #[test]
+    fn card_face_gaps_reports_silent_drops_matching_coverage_report() {
+        let mut face = make_face();
+        face.name = "Dropped Text Card".to_string();
+        // Two effective Oracle lines, but abilities is empty so both lines drop.
+        face.oracle_text =
+            Some("First unparsed ability line.\nSecond unparsed ability line.".to_string());
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.iter().any(|g| g.starts_with("SilentDrop:")),
+            "card_face_gaps must surface silent drops: got {gaps:?}"
+        );
+
+        let report_result = coverage_result_for_face(face.clone());
+        assert!(!report_result.supported);
+        let report_gaps: Vec<String> = report_result
+            .gap_details
+            .into_iter()
+            .map(|g| g.handler)
+            .collect();
+        assert_eq!(
+            gaps, report_gaps,
+            "card_face_gaps and analyze_coverage must agree on silent drops"
+        );
+    }
+
+    #[test]
+    fn card_face_gaps_reports_invalid_subtype_lexicon_matching_coverage_report() {
+        let mut face = make_face();
+        face.name = "Misfired Subtype Card".to_string();
+        face.static_abilities
+            .push(StaticDefinition::continuous().modifications(vec![
+                ContinuousModification::AddSubtype {
+                    subtype: "Gets".to_string(),
+                },
+            ]));
+
+        let gaps = card_face_gaps(&face);
+        assert_eq!(
+            gaps,
+            vec!["ParserMisfire:InvalidSubtype(Gets)".to_string()],
+            "card_face_gaps must surface invalid subtype misfires"
+        );
+
+        let report_result = coverage_result_for_face(face.clone());
+        assert!(!report_result.supported);
+        let report_gaps: Vec<String> = report_result
+            .gap_details
+            .into_iter()
+            .map(|g| g.handler)
+            .collect();
+        assert_eq!(
+            gaps, report_gaps,
+            "card_face_gaps and analyze_coverage must agree on invalid subtype misfires"
+        );
+    }
+
+    #[test]
+    fn card_face_coverage_agrees_with_analyze_coverage_for_supported_face() {
+        let face = make_face();
+        assert!(card_face_gaps(&face).is_empty());
+        let coverage = card_face_coverage(&face);
+        assert!(coverage.is_supported());
+        assert!(coverage.gaps.is_empty());
+
+        let report_result = coverage_result_for_face(face);
+        assert!(report_result.supported);
+        assert!(report_result.gap_details.is_empty());
+    }
+
+    /// The one intentional report/deck divergence: the CR 614.12 entry check is
+    /// part of the deck verdict ([`EntryProjectionPolicy::Include`]) and not of
+    /// the published report ([`EntryProjectionPolicy::Exclude`]).
+    #[test]
+    fn entry_projection_policy_splits_report_and_deck() {
+        let mut face = make_face();
+        face.name = "Entry Consumer".to_string();
+        face.replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+                .valid_card(TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::PowerGTSource]),
+                ))
+                .destination_zone(Zone::Battlefield),
+        );
+
+        // Reach guard: the check fires on this face when called directly.
+        let mut direct = Vec::new();
+        check_entry_projection(&face, &mut direct);
+        assert_eq!(direct, vec![ENTRY_CONSUMER_GAP.to_string()]);
+
+        let deck = card_face_coverage(&face);
+        assert_eq!(
+            deck.gap_handlers(),
+            vec![ENTRY_CONSUMER_GAP.to_string()],
+            "deck coverage includes the entry-projection check"
+        );
+        let report = coverage_result_for_face(face);
+        assert!(
+            report.supported,
+            "the report excludes the entry-projection check: {:?}",
+            report.gap_details
+        );
+    }
+
+    /// Warning-only faces are unsupported but carry no pre-warning gap, and the
+    /// handler-gap view the audit consumes excludes the warning label.
+    #[test]
+    fn gaps_before_parse_warnings_exclude_warning_labels() {
+        let mut face = make_face();
+        face.parse_warnings.push(OracleDiagnostic::swallowed_clause(
+            "Replacement_Instead",
+            "exile it instead",
+            None,
+        ));
+        let warning_only = card_face_coverage(&face);
+        assert_eq!(
+            warning_only.gap_handlers(),
+            vec!["Swallow:Replacement_Instead".to_string()]
+        );
+        assert!(warning_only.supported_before_parse_warnings());
+        assert!(warning_only.gap_handlers_before_parse_warnings().is_empty());
+
+        face.static_abilities
+            .push(StaticDefinition::continuous().modifications(vec![
+                ContinuousModification::AddSubtype {
+                    subtype: "Gets".to_string(),
+                },
+            ]));
+        let mixed = card_face_coverage(&face);
+        assert!(!mixed.supported_before_parse_warnings());
+        assert_eq!(
+            mixed.gap_handlers_before_parse_warnings(),
+            vec!["ParserMisfire:InvalidSubtype(Gets)".to_string()]
+        );
+        assert_eq!(mixed.gap_handlers().len(), 2);
+    }
+
+    /// The report keeps its corpus-derived lexicon: a subtype printed on another
+    /// face is valid, one absent from the corpus is flagged even if the default
+    /// Oracle vocabulary lists it. Deck verdicts match the report when given the
+    /// same database lexicon, and a caller-supplied lexicon is honored.
+    #[test]
+    fn subtype_lexicon_is_corpus_derived_and_caller_supplied() {
+        let animate = |name: &str, subtype: &str| {
+            let mut face = make_face();
+            face.name = name.to_string();
+            face.static_abilities
+                .push(StaticDefinition::continuous().modifications(vec![
+                    ContinuousModification::AddSubtype {
+                        subtype: subtype.to_string(),
+                    },
+                ]));
+            face
+        };
+        let mut printed = make_face();
+        printed.name = "Printed Elsewhere".to_string();
+        printed.card_type.subtypes = vec!["Zzyzx".to_string()];
+        let uses_printed = animate("Uses Printed", "Zzyzx");
+        let uses_default_only = animate("Uses Default Only", "Blinkmoth");
+        assert!(default_valid_subtypes().contains("Blinkmoth"));
+
+        let mut export = serde_json::Map::new();
+        for face in [&printed, &uses_printed, &uses_default_only] {
+            export.insert(
+                face.name.to_lowercase(),
+                serde_json::to_value(face).expect("test face should serialize"),
+            );
+        }
+        let db = CardDatabase::from_json_str(&serde_json::Value::Object(export).to_string())
+            .expect("test export should deserialize");
+        let summary = analyze_coverage(&db);
+        let report_gaps = |name: &str| -> Vec<String> {
+            summary
+                .cards
+                .iter()
+                .find(|card| card.card_name == name)
+                .expect("card in report")
+                .gap_details
+                .iter()
+                .map(|gap| gap.handler.clone())
+                .collect()
+        };
+        assert!(report_gaps("Uses Printed").is_empty());
+        assert_eq!(
+            report_gaps("Uses Default Only"),
+            vec!["ParserMisfire:InvalidSubtype(Blinkmoth)".to_string()],
+            "the report's corpus lexicon is not seeded with the default vocabulary"
+        );
+
+        // Deck verdicts with the database lexicon agree with the report.
+        let lexicon = collect_valid_subtypes(&db);
+        assert!(card_face_coverage_with_subtypes(&uses_printed, &lexicon).is_supported());
+        assert_eq!(
+            card_face_coverage_with_subtypes(&uses_default_only, &lexicon).gap_handlers(),
+            report_gaps("Uses Default Only")
+        );
+        // Without the database lexicon the printed-elsewhere subtype is unknown.
+        assert_eq!(
+            card_face_coverage(&uses_printed).gap_handlers(),
+            vec!["ParserMisfire:InvalidSubtype(Zzyzx)".to_string()]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -26426,5 +26833,71 @@ mod unpublished_event_source_tests {
         assert_eq!(db.card_count(), 2, "both faces reach the audits");
         assert_eq!(audit_resolver_features(&db).total_supported_audited, 1);
         assert_eq!(audit_semantic(&db).total_supported_audited, 1);
+    }
+
+    /// CR 601.2c / CR 608.2d: a `TargetFilter::Player` or declared-target player
+    /// recipient of GiveControl is a coverage gap; a context recipient is not.
+    #[test]
+    fn give_control_player_recipient_is_an_unbound_recipient_gap() {
+        for (name, type_line, types, oracle) in [
+            (
+                "Donate",
+                "Sorcery",
+                &["Sorcery"][..],
+                "Target player gains control of target permanent you control.",
+            ),
+            (
+                "Harmless Offering",
+                "Sorcery",
+                &["Sorcery"][..],
+                "Target opponent gains control of target permanent you control.",
+            ),
+            (
+                "Coveted Falcon",
+                "Artifact Creature — Bird",
+                &["Artifact", "Creature"][..],
+                "Flying\nWhenever this creature attacks, gain control of target permanent you own but don't control.\nDisguise {1}{U}\nWhen this creature is turned face up, target opponent gains control of any number of target permanents you control. Draw a card for each one they gained control of this way.",
+            ),
+        ] {
+            let face = parsed_face(name, type_line, types, oracle);
+            assert!(
+                card_face_gaps(&face)
+                    .iter()
+                    .any(|gap| gap == GIVE_CONTROL_UNBOUND_RECIPIENT_GAP),
+                "{name}: {:?}",
+                card_face_gaps(&face)
+            );
+        }
+
+        let kain = parsed_face(
+            "Kain, Traitorous Dragoon",
+            "Legendary Creature — Human Knight",
+            &["Creature"],
+            "Jump — During your turn, Kain has flying.\nWhenever Kain deals combat damage to a player, that player gains control of Kain. If they do, you draw that many cards, create that many tapped Treasure tokens, then lose that much life.",
+        );
+        let mut triggering_player_recipient = false;
+        for execute in kain.triggers.iter().filter_map(|t| t.execute.as_deref()) {
+            for_each_ability_tree_node(execute, TokenStaticTraversal::Include, &mut |node, _| {
+                triggering_player_recipient |= matches!(
+                    &*node.effect,
+                    Effect::GiveControl {
+                        recipient: TargetFilter::TriggeringPlayer,
+                        ..
+                    }
+                );
+            });
+        }
+        assert!(
+            triggering_player_recipient,
+            "Kain parses a TriggeringPlayer GiveControl: {:#?}",
+            kain.triggers
+        );
+        assert!(
+            !card_face_gaps(&kain)
+                .iter()
+                .any(|gap| gap == GIVE_CONTROL_UNBOUND_RECIPIENT_GAP),
+            "{:?}",
+            card_face_gaps(&kain)
+        );
     }
 }

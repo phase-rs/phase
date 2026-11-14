@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::types::ability::{AggregateFunction, ControllerRef, PlayerRelation, SeatDirection};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
@@ -5,7 +7,7 @@ use crate::types::game_state::StackEntry;
 use crate::types::game_state::{LinkedExileSnapshot, TriggerSourceContext};
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::TurnDirection;
-use crate::types::player::PlayerId;
+use crate::types::player::{Player, PlayerId};
 use crate::types::zones::Zone;
 
 /// Returns true if the player exists in the game and is not eliminated.
@@ -368,27 +370,13 @@ pub fn apnap_order_from(
         ) => state.active_player,
     };
 
-    if state.format_config.topology().has_shared_team_turns() {
-        return super::topology::apnap_order_from(state, start_player);
-    }
-
-    let start_idx = seat_order
-        .iter()
-        .position(|&id| id == start_player)
-        .unwrap_or(0);
-
-    let mut result = Vec::new();
-    for offset in 0..len {
-        // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction.
-        let idx = turn_order_index(start_idx, offset, len, state.turn_direction);
-        let candidate = seat_order[idx];
-        // CR 800.4f: A player who has left the game does not pay costs or
-        // make choices on objects' behalf; skip eliminated players.
-        if is_alive(state, candidate) {
-            result.push(candidate);
-        }
-    }
-    result
+    // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction, with
+    // each shared side collapsed to a single choice group and each individual seat
+    // its own group (see `topology::apnap_choice_groups_from`). Flattening that is
+    // the living APNAP order for every side shape — uniform-individual (one group
+    // per seat), uniform-shared, and the mixed Horde game alike — so this is a
+    // single delegation rather than a per-format branch.
+    super::topology::apnap_order_from(state, start_player)
 }
 
 /// CR 603.10a + CR 607.2a: Return the cards linked as "exiled with" `source_id`.
@@ -494,9 +482,10 @@ pub fn teammates(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
 /// each DISTINCT team's shared `team_life_total` exactly once (dedup by team).
 /// Min/Max = extremum over team totals; Sum = Σ team totals (no double-count).
 /// Empty population → 0. Off-team every player is its own singleton team, so
-/// this matches a per-individual fold: the dedup key falls back to `pid.0`,
-/// which is distinct per player even when two players share a `team_index`
-/// (e.g. a 1v1 where players 0 and 1 are both `team_index == 0`).
+/// this matches a per-individual fold: the dedup key is a per-seat variant,
+/// distinct per player even when two players share a `team_index` (e.g. a 1v1
+/// where players 0 and 1 are both `team_index == 0`) — and distinct from any
+/// shared-side key, so a Horde seat never collapses into the survivor pool.
 /// CR 810.9d is the confirming example: a per-team extremum (Repay in Kind)
 /// reads each team's total once, not each member.
 pub(crate) fn aggregate_over_teams<I>(
@@ -548,6 +537,66 @@ pub fn team_poison_total(state: &GameState, player: PlayerId) -> u32 {
         .filter_map(|member| state.players.iter().find(|p| p.id == member))
         .map(|p| p.poison_counters)
         .sum()
+}
+
+/// CR 704.5c / CR 704.6b + CR 810.8d / CR 904.13c: whose poison counters a
+/// poison loss is measured on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PoisonLossScope {
+    /// CR 704.5c / CR 904.13c: the player's own counters.
+    Player,
+    /// CR 704.6b + CR 810.10: the team's shared counters.
+    Team,
+}
+
+/// CR 704.6b / CR 810.8d: fifteen shared poison counters.
+pub const TEAM_POISON_LOSS_THRESHOLD: u32 = 15;
+
+/// The poison count that decides a player's poison loss and the threshold it
+/// is checked against, as returned by [`poison_loss_measure`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoisonLossMeasure {
+    pub scope: PoisonLossScope,
+    pub count: u32,
+    pub threshold: u32,
+}
+
+impl PoisonLossMeasure {
+    /// CR 704.5c / CR 704.6b: "… or more poison counters" — the count reaching
+    /// the threshold is a loss.
+    pub fn is_lethal(self) -> bool {
+        self.count >= self.threshold
+    }
+}
+
+/// The poison count that decides `player`'s poison loss and the threshold it
+/// is checked against: the team's shared total against fifteen where poison
+/// is shared (`topology::has_shared_poison`), else the player's own counters
+/// against the format's individual threshold. `None` when no poison-loss rule
+/// applies to `player` (individual branch with `poison_counter_threshold:
+/// None`). The single authority read by the poison SBA
+/// (`sba::has_pending_player_loss_sba`, `sba::collect_poison_losers`) and by
+/// the HUD's `DerivedViews.poison_loss`.
+pub fn poison_loss_measure(state: &GameState, player: &Player) -> Option<PoisonLossMeasure> {
+    if super::topology::has_shared_poison(state, player.id) {
+        // CR 704.6b + CR 810.8d / CR 810.10: the team's shared total.
+        Some(PoisonLossMeasure {
+            scope: PoisonLossScope::Team,
+            count: team_poison_total(state, player.id),
+            threshold: TEAM_POISON_LOSS_THRESHOLD,
+        })
+    } else {
+        // CR 704.5c / CR 904.13c: the player's own counters against the
+        // format's individual threshold.
+        state
+            .format_config
+            .poison_counter_threshold
+            .map(|threshold| PoisonLossMeasure {
+                scope: PoisonLossScope::Player,
+                count: player.poison_counters,
+                threshold: u32::from(threshold),
+            })
+    }
 }
 
 #[cfg(test)]
@@ -1203,10 +1252,10 @@ mod tests {
         );
     }
 
-    /// The dedup key falls back to `pid.0` off-team so two players that share a
+    /// The dedup key is a per-seat variant off-team so two players that share a
     /// `team_index` in a NON-team format are NOT collapsed. In Commander,
     /// players 0 and 1 both have `team_index == 0` (0/2 and 1/2); a bare
-    /// `team_index` key would drop one and break Sum. With the `pid.0` guard,
+    /// `team_index` key would drop one and break Sum. With the per-seat guard,
     /// Sum over [11, 7] is 18 (both counted as singleton teams).
     #[test]
     fn aggregate_over_teams_non_team_format_keeps_players_distinct() {

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Game one ends start_game at the CR 103.1 ChooseStartingPlayer prompt instead of a started game; GameStarted/TurnStarted move to the answer"
+}

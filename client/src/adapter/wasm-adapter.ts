@@ -66,6 +66,13 @@ import {
   DEFAULT_AI_CARD_DATA_MODE,
   resolveAiPoolCardDbPlan,
 } from "./card-db-subset";
+import {
+  STATE_CODEC_DECODE_TIMEOUT_MS,
+  StateCodecLifecycleError,
+  StateCodecRuntime,
+  type StateCodecDecodeResult,
+  type StateCodecSession,
+} from "./state-codec-runtime";
 
 const INITIALIZATION_CANCELED_MESSAGE = "Adapter initialization was canceled. Please try again.";
 
@@ -168,6 +175,29 @@ async function classifyEngineErrorAsync(
 }
 
 /**
+ * Caller-visible deadline around a queued main-thread operation. The queued
+ * work cannot be cancelled (synchronous WASM), so a late result is dropped by
+ * settling once; whatever cleanup the caller enqueues runs behind it.
+ */
+function withDeadline<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`State codec decode timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
+
+/**
  * Module-level singleton for AI/local games.
  *
  * Keeping the WASM worker alive across game sessions preserves V8's TurboFan-compiled
@@ -192,6 +222,8 @@ type MainThreadRuntime = {
   nextHostGeneration: number;
   hostGeneration: number | null;
   hostOwner: HostSessionOwner | null;
+  /** Shared decoder-session registry for every fallback facade on this runtime. */
+  codecs: StateCodecRuntime | null;
 };
 
 // Main-thread fallback adapters share one @wasm/engine module instance. Keep
@@ -213,6 +245,7 @@ function getMainThreadRuntime(): Promise<MainThreadRuntime> {
         nextHostGeneration: 0,
         hostGeneration: null,
         hostOwner: null,
+        codecs: null,
       };
     })();
   }
@@ -306,6 +339,13 @@ export class WasmAdapter
 
   // Fallback: direct WASM on main thread (only used if Worker fails)
   private fallback: MainThreadFallback | null = null;
+
+  /**
+   * Close hooks for decoder sessions this facade opened. Sessions belong to a
+   * facade's lifecycle, not to the shared runtime: disposing or replacing one
+   * adapter must not touch another's baseline.
+   */
+  private readonly stateCodecLeases = new Set<() => void>();
 
   // In-flight init dedupe. The `initialized` flag only flips *after* the worker
   // handshake resolves, so without this a second concurrent `initialize()`
@@ -1293,6 +1333,20 @@ export class WasmAdapter
   }
 
   /**
+   * Engine resource-bound check of one guest deck's printings sidecar (the P2P
+   * host's admission, `P2PHostAdapter.handleNewGuest`). Resolves when the
+   * sidecar is within the engine's bounds and rejects with the engine's reason
+   * when it is not. Reads no card database, so it does not wait for one.
+   */
+  async checkDeckPrintingsBounds(printings: unknown): Promise<void> {
+    await this.initialize();
+    if (this.engine) {
+      return this.engine.checkDeckPrintingsBounds(printings);
+    }
+    return this.fallback!.checkDeckPrintingsBounds(printings);
+  }
+
+  /**
    * Axis A: ask the ENGINE to capture a lobby `FormatConfig` as a saved
    * custom-format definition. Rejects (with the engine's own message) for a
    * source format whose behavior cannot be represented — Planechase, Archenemy,
@@ -1420,6 +1474,10 @@ export class WasmAdapter
     // Clear the singleton reference so getSharedAdapter() creates a fresh
     // instance if called after dispose (e.g., error recovery code paths).
     if (sharedAdapter === this) sharedAdapter = null;
+    // Release this facade's decoder sessions before the worker goes away, so
+    // another facade sharing the runtime cannot keep a stale baseline.
+    for (const close of [...this.stateCodecLeases]) close();
+    this.stateCodecLeases.clear();
     this.engine?.dispose();
     this.engine = null;
     this.aiPool?.dispose();
@@ -1440,6 +1498,89 @@ export class WasmAdapter
       return this.engine.ping();
     }
     return this.fallback!.ping();
+  }
+
+  /**
+   * Open one decoder session against this adapter's engine. The endpoint and
+   * lifecycle generation are captured now, so a later `getSharedAdapter()`
+   * lookup, disposal, or replacement runtime cannot retarget the session.
+   *
+   * The returned lease is live until `close()`; closing it never resets the
+   * game, disposes the shared engine, or affects another session.
+   * `ifReady` warms a cold runtime in the background without delaying the
+   * caller or allocating a lease when that startup eventually completes.
+   * A warm runtime still opens its lease asynchronously; best-effort socket
+   * callers must race that promise with capability discovery, not await it.
+   */
+  async openStateCodecSession(
+    startup: "wait" | "ifReady" = "wait",
+  ): Promise<StateCodecSession | null> {
+    if (startup === "ifReady") {
+      if (this.disposed) return null;
+      if (!this.initialized) {
+        void this.initialize().catch(() => undefined);
+        return null;
+      }
+    } else {
+      await this.initialize();
+    }
+    if (this.disposed) return null;
+    const generation = this.lifecycleGeneration;
+    if (this.engine) {
+      const engine = this.engine;
+      const sessionId = await engine.openStateCodec();
+      return this.adoptStateCodecSession(
+        generation,
+        () => engine.closeStateCodec(sessionId),
+        (frame) => engine.decodeStateCodec(sessionId, frame),
+      );
+    }
+    const fallback = this.fallback;
+    if (!fallback) return null;
+    const sessionId = await fallback.openStateCodecSession();
+    return this.adoptStateCodecSession(
+      generation,
+      () => fallback.closeStateCodecSession(sessionId),
+      // The fallback cannot preempt synchronous main-thread WASM; the deadline
+      // is caller-visible only, and a late result is fenced by settle-once.
+      (frame) => withDeadline(
+        fallback.decodeStateCodecSession(sessionId, frame),
+        STATE_CODEC_DECODE_TIMEOUT_MS,
+      ),
+    );
+  }
+
+  private adoptStateCodecSession(
+    generation: number,
+    closeRemote: () => Promise<void>,
+    decodeRemote: (frame: Uint8Array) => Promise<StateCodecDecodeResult>,
+  ): StateCodecSession | null {
+    let released = false;
+    const close = () => {
+      if (released) return;
+      released = true;
+      this.stateCodecLeases.delete(close);
+      void closeRemote().catch(() => undefined);
+    };
+    if (this.disposed || this.lifecycleGeneration !== generation) {
+      // Opened against a runtime this facade no longer owns: release it now
+      // rather than orphaning the session.
+      close();
+      return null;
+    }
+    const session: StateCodecSession = {
+      decode: async (frame) => {
+        if (released) throw new StateCodecLifecycleError("State codec session is closed.");
+        const result = await decodeRemote(frame);
+        if (released || this.disposed || this.lifecycleGeneration !== generation) {
+          throw new StateCodecLifecycleError("State codec session is closed.");
+        }
+        return result;
+      },
+      close,
+    };
+    this.stateCodecLeases.add(close);
+    return session;
   }
 
   async initializeGame(
@@ -1636,12 +1777,16 @@ interface MainThreadFallback {
   estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
   evaluateDeckCompatibility(request: unknown): Promise<unknown>;
   evaluateDeckFormatGate(request: unknown): Promise<unknown>;
+  checkDeckPrintingsBounds(printings: unknown): Promise<void>;
   customFormatFromLobbyConfig(name: string, formatConfig: unknown): Promise<unknown>;
   formatConfigForCustomRules(customRules: unknown): Promise<unknown>;
   getCardFaceData(cardName: string): Promise<unknown>;
   getCardParseDetails(cardName: string): Promise<unknown>;
   getCardRulings(cardName: string): Promise<unknown>;
   canonicalCardNames(names: string[]): Promise<unknown>;
+  openStateCodecSession(): Promise<number>;
+  decodeStateCodecSession(sessionId: number, frame: Uint8Array): Promise<StateCodecDecodeResult>;
+  closeStateCodecSession(sessionId: number): Promise<void>;
   query<K extends EngineQueryName>(name: K, args: EngineQueryArgs<K>): Promise<EngineQueryResult<K>>;
 }
 
@@ -1992,6 +2137,9 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
     evaluateDeckFormatGate: (request: unknown) =>
       enqueue(() => wasm.evaluateDeckFormatGate(request)),
 
+    checkDeckPrintingsBounds: (printings: unknown) =>
+      enqueue(() => wasm.checkDeckPrintingsBounds(printings)),
+
     customFormatFromLobbyConfig: (name: string, formatConfig: unknown) =>
       enqueue(() => wasm.customFormatFromLobbyConfig(name, formatConfig)),
 
@@ -2009,6 +2157,26 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
 
     canonicalCardNames: (names: string[]) =>
       enqueue(() => wasm.canonicalCardNames(names)),
+
+    // Decoder sessions share this runtime's registry and its single queue.
+    // Closing one session only drops that session's baseline.
+    openStateCodecSession: () =>
+      enqueue(() => {
+        runtime.codecs ??= new StateCodecRuntime(wasm);
+        return runtime.codecs.open();
+      }),
+
+    decodeStateCodecSession: (sessionId: number, frame: Uint8Array) =>
+      enqueue(() => {
+        const codecs = runtime.codecs;
+        if (!codecs) throw new StateCodecLifecycleError("State codec session was never opened.");
+        return codecs.decode(sessionId, frame);
+      }),
+
+    closeStateCodecSession: (sessionId: number) =>
+      enqueue(() => {
+        runtime.codecs?.close(sessionId);
+      }),
 
     query: <K extends EngineQueryName>(name: K, args: EngineQueryArgs<K>) =>
       enqueue(() => runEngineQuery(wasm, name, args)),
