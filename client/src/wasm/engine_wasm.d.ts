@@ -57,12 +57,13 @@ export function bestOfThreeCeilingForFormat(format: any): any;
  * is the engine-authored game log the caller has accumulated from prior
  * `ActionResult`s — engine data handed back for rendering, not a client
  * derivation. `now_ms` is the caller's clock as the request is built, in
- * milliseconds and never slower than real time: the AI controller's thread
- * clock, the wall clock held from running slower than the monotonic clock. A
- * message thread expires after five idle minutes of real time, counted from
- * its last request, which goes out no earlier than this. Returns `null` when
- * the seat has no decision to make; throws only on a malformed argument,
- * which is a programming error rather than a runtime outcome.
+ * milliseconds, which must not run slower than real time: the AI
+ * controller's thread clock is the wall clock, held from running slower than
+ * the monotonic clock. A message thread expires after five idle minutes of
+ * real time, counted from its last request, which goes out no earlier than
+ * this. Returns `null` when the seat has no decision to make; throws only on
+ * a malformed argument, which is a programming error rather than a runtime
+ * outcome.
  */
 export function buildLlmDecisionRequest(difficulty: string, player_id: number, endpoint_json: string, history_json: string, now_ms: number): any;
 

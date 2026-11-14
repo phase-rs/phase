@@ -492,6 +492,8 @@ pub fn build_game_decision_prompt(
             live_position: format!("{live_board}\n{waiting_for}"),
             options: options_section,
             history: render.history,
+            // CR 723.5: a decision another player makes for this seat, while
+            // they control its turn, belongs to no thread of the seat's.
             game: (state.match_phase == MatchPhase::InGame
                 && contract.authorized_actor == contract.semantic_owner)
                 .then_some(state.game_number),

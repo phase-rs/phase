@@ -275,8 +275,8 @@ async function llmActionProposal(
       // The thread clock as the reply arrived, no earlier than the API read the
       // request. A thread the reply reports lost is judged by its idle time up
       // to now, so time the machine slept while the request was built or out
-      // counts toward the thread's expiry, and an expired thread never reads
-      // as a conversation the API cannot store.
+      // counts toward the thread's expiry. `createThreadClock` names the one
+      // case that can still shorten it.
       threadClock(),
     );
     // The call was paid for whether or not its reply is usable.

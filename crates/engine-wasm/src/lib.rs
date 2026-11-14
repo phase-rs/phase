@@ -4971,8 +4971,8 @@ mod restored_card_db_requirements_tests {
         body["thread"].clone()
     }
 
-    /// Resolve the seat's reply, arrived at `now_ms` on the caller's wall
-    /// clock, through the production entry point.
+    /// Resolve the seat's reply, arrived at `now_ms` on the caller's clock,
+    /// through the production entry point.
     fn resolve_llm_reply_at(
         seat: PlayerId,
         built: &serde_json::Value,
@@ -7345,12 +7345,13 @@ pub fn validate_llm_probe_response(
 /// is the engine-authored game log the caller has accumulated from prior
 /// `ActionResult`s — engine data handed back for rendering, not a client
 /// derivation. `now_ms` is the caller's clock as the request is built, in
-/// milliseconds and never slower than real time: the AI controller's thread
-/// clock, the wall clock held from running slower than the monotonic clock. A
-/// message thread expires after five idle minutes of real time, counted from
-/// its last request, which goes out no earlier than this. Returns `null` when
-/// the seat has no decision to make; throws only on a malformed argument,
-/// which is a programming error rather than a runtime outcome.
+/// milliseconds, which must not run slower than real time: the AI
+/// controller's thread clock is the wall clock, held from running slower than
+/// the monotonic clock. A message thread expires after five idle minutes of
+/// real time, counted from its last request, which goes out no earlier than
+/// this. Returns `null` when the seat has no decision to make; throws only on
+/// a malformed argument, which is a programming error rather than a runtime
+/// outcome.
 #[wasm_bindgen(js_name = buildLlmDecisionRequest)]
 pub fn build_llm_decision_request(
     difficulty: &str,

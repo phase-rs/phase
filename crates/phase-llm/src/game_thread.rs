@@ -1677,11 +1677,11 @@ mod tests {
         );
     }
 
-    /// A caller's clock can read earlier than an earlier request (a wall clock
-    /// that stepped back). A replacement thread reported lost at its first
-    /// continue at a time earlier than its create has an unknown idle time,
-    /// which is read as an ordinary expiry: the conversation is recovered
-    /// again, not made self-contained.
+    /// A reading of the caller's clock can come out earlier than an earlier
+    /// request's (a wall clock that stepped back). A replacement thread
+    /// reported lost at its first continue at a time earlier than its create
+    /// has an unknown idle time, which is read as an ordinary expiry: the
+    /// conversation is recovered again, not made self-contained.
     #[test]
     fn a_recovery_thread_lost_after_the_clock_stepped_back_is_recovered_again() {
         let mut memory = LlmThreadMemory::new();
