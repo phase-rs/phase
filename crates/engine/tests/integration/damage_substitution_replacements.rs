@@ -4388,14 +4388,14 @@ const AWE_STRIKE: &str = "The next time target creature would deal damage this t
 
 /// CR 615.7 + CR 616.1: the player chooses which damage a shield prevents. Mending Hands ("Prevent
 /// the next 4 damage that would be dealt to any target this turn.") is on P1's Wall of Stone and
-/// Awe Strike on P0's Hill Giant; Allies at Last has the Giant and then Rumbling Baloth deal
-/// damage to the Wall. The Giant's 3 meets both shields, P1's choice; the Baloth's 4 meets only
+/// Awe Strike on P0's Hill Giant; Allies at Last has the Giant and Rumbling Baloth deal damage
+/// to the Wall, with either selected first. The Giant's 3 meets both shields, P1's choice; the Baloth's 4 meets only
 /// Mending Hands, and waits for that choice instead of spending the shield first. Mending Hands
 /// for the Giant leaves 1 of it for the Baloth: the Wall takes 3 and P0 gains nothing. Awe Strike
 /// for the Giant leaves all 4 for the Baloth: the Wall takes none and P0 gains 3.
 #[test]
 fn a_batch_keeps_a_shared_shield_for_the_players_choice() {
-    for pick_hands in [true, false] {
+    for (baloth_first, pick_hands) in [(false, true), (false, false), (true, true), (true, false)] {
         let mut scenario = scenario();
         let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
         let baloth = scenario.add_creature(P0, "Rumbling Baloth", 4, 4).id();
@@ -4409,11 +4409,20 @@ fn a_batch_keeps_a_shared_shield_for_the_players_choice() {
         let mut events = cast(
             &mut runner,
             allies,
-            vec![
-                object_target(giant),
-                object_target(baloth),
-                object_target(wall),
-            ],
+            // The batch replaces the sources in their selected order (CR 115.1).
+            if baloth_first {
+                vec![
+                    object_target(baloth),
+                    object_target(giant),
+                    object_target(wall),
+                ]
+            } else {
+                vec![
+                    object_target(giant),
+                    object_target(baloth),
+                    object_target(wall),
+                ]
+            },
         );
 
         let mut prompts = 0;
@@ -4437,7 +4446,10 @@ fn a_batch_keeps_a_shared_shield_for_the_players_choice() {
             );
         }
 
-        assert_eq!(prompts, 1, "pick_hands {pick_hands}");
+        assert_eq!(
+            prompts, 1,
+            "baloth_first {baloth_first}, pick_hands {pick_hands}"
+        );
         assert_at_rest(&runner);
         if pick_hands {
             assert_eq!(damage(&runner, wall), 3);

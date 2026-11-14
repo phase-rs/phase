@@ -1543,18 +1543,11 @@ fn run_damage_batch_phases(
                 (ctx, proposed)
             }
         };
-        // CR 615.7 + CR 616.1: the player chooses which damage a shield prevents. While a choice
-        // that offers a limited shield (Mending Hands' "the next 4 damage") is outstanding, a
-        // portion that would spend that shield on its own waits for the choice to be made.
-        if !asking
-            && deferred.iter().any(|choice| {
-                replacement::damage_event_shares_spendable_shield(
-                    state,
-                    &proposed,
-                    &choice.candidates,
-                )
-            })
-        {
+        // CR 615.7 + CR 616.1: the player chooses which damage a shield prevents. A portion that
+        // would spend a limited shield (Mending Hands' "the next 4 damage") on its own waits while
+        // a choice could still pick that shield for another portion of the batch: a choice
+        // already outstanding, or a portion still to be replaced that will ask one.
+        if !asking && shield_is_still_choosable(state, &proposed, &deferred, &portions, &split) {
             waiting.push_back((ctx, proposed));
             continue;
         }
@@ -1748,6 +1741,61 @@ fn settle_event_losses(state: &mut GameState, events: &mut Vec<GameEvent>) -> bo
         crate::game::elimination::settle_event_outcomes(state, outcomes, events);
     }
     state.game_end.is_some()
+}
+
+/// CR 615.7 + CR 616.1: whether a limited shield this automatic portion would spend can still be
+/// picked by a choice for another portion of the batch: one already deferred (its candidates), or
+/// a portion still to be replaced whose affected player will choose among it and another effect.
+fn shield_is_still_choosable(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    deferred: &[DeferredDamageChoice],
+    portions: &std::collections::VecDeque<BatchPortion>,
+    split: &std::collections::VecDeque<SplitDamagePortion>,
+) -> bool {
+    let shields = replacement::spendable_shields_for(state, proposed);
+    // A portion that itself asks a choice among the shield and another effect is one of those
+    // choices; only a portion that would take the shield on its own waits.
+    if shields.is_empty() || replacement::damage_event_chooses_among(state, proposed, &shields) {
+        return false;
+    }
+    deferred
+        .iter()
+        .any(|choice| choice.candidates.iter().any(|rid| shields.contains(rid)))
+        || portions
+            .iter()
+            .map(portion_event)
+            .chain(split.iter().map(split_event))
+            .any(|other| replacement::damage_event_chooses_among(state, &other, &shields))
+}
+
+/// CR 120.1: the damage event a queued portion proposes, before its gate.
+fn portion_event(portion: &BatchPortion) -> ProposedEvent {
+    match portion {
+        BatchPortion::Gated { event, .. } => event.clone(),
+        BatchPortion::Ungated {
+            ctx,
+            target,
+            amount,
+        } => ProposedEvent::Damage {
+            source_id: ctx.source_id,
+            target: target.clone(),
+            amount: *amount,
+            is_combat: false,
+            applied: HashSet::new(),
+        },
+    }
+}
+
+/// CR 614.9 + CR 614.5: a split-off part's damage event, keeping its applied replacements.
+fn split_event(part: &SplitDamagePortion) -> ProposedEvent {
+    ProposedEvent::Damage {
+        source_id: part.source,
+        target: part.target.clone(),
+        amount: part.amount,
+        is_combat: part.is_combat,
+        applied: part.applied.iter().copied().collect(),
+    }
 }
 
 /// CR 608.2c: the raw portions a pausing batch parks: its remaining portions, then those waiting

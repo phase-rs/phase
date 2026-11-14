@@ -7040,18 +7040,27 @@ pub(crate) fn replacement_spends_shared_capacity(state: &GameState, rid: Replace
     })
 }
 
-/// CR 615.7 + CR 616.1: whether this damage event would meet a replacement that spends a shared
-/// capacity and that one of `offered` (an outstanding choice's candidates) is. The batch keeps
-/// such a portion waiting until that choice is made, so the choice keeps the shield to pick.
-pub(crate) fn damage_event_shares_spendable_shield(
+/// CR 615.7 + CR 614.5: the replacements applicable to this damage event that spend a shared
+/// capacity (`replacement_spends_shared_capacity`).
+pub(crate) fn spendable_shields_for(
     state: &GameState,
     proposed: &ProposedEvent,
-    offered: &[ReplacementId],
+) -> Vec<ReplacementId> {
+    find_applicable_replacements(state, proposed, replacement_registry())
+        .into_iter()
+        .filter(|rid| replacement_spends_shared_capacity(state, *rid))
+        .collect()
+}
+
+/// CR 616.1: whether this damage event's affected player would choose among two or more
+/// applicable replacements, one of which is in `shields`.
+pub(crate) fn damage_event_chooses_among(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    shields: &[ReplacementId],
 ) -> bool {
-    !offered.is_empty()
-        && find_applicable_replacements(state, proposed, replacement_registry())
-            .into_iter()
-            .any(|rid| offered.contains(&rid) && replacement_spends_shared_capacity(state, rid))
+    let applicable = find_applicable_replacements(state, proposed, replacement_registry());
+    applicable.len() >= 2 && applicable.iter().any(|rid| shields.contains(rid))
 }
 
 /// CR 615.12: whether this damage event can't be prevented ("Damage can't be prevented this
