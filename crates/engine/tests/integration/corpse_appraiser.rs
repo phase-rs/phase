@@ -384,10 +384,9 @@ fn crew(runner: &mut GameRunner, vehicle: ObjectId, crewer: ObjectId) {
 /// CR 400.7 + CR 608.2c + CR 702.122a: the "creature" put into exile this way
 /// is a crewed Vehicle, which stops being a creature the moment it leaves the
 /// battlefield. The noun is read as it was when moved, so the gate still holds
-/// and the card Limousine exiled earlier (through its own enters trigger) comes
-/// back while the Vehicle stays exiled. The second Vehicle is SYNTHETIC
-/// ("Parked Vehicle", Crew 1, no other text); the nearest printed analogue is
-/// any crewed Vehicle, e.g. a second Mysterious Limousine.
+/// and the card the first Limousine exiled earlier (through its own enters
+/// trigger) comes back while the crewed Vehicle stays exiled. Both Vehicles
+/// are printed Mysterious Limousines (Crew 2); the second is the victim.
 #[test]
 fn mysterious_limousine_exiling_a_crewed_vehicle_returns_the_other_exiled_card() {
     let mut scenario = GameScenario::new();
@@ -396,14 +395,14 @@ fn mysterious_limousine_exiling_a_crewed_vehicle_returns_the_other_exiled_card()
         .add_artifact_to_hand_from_oracle(P0, "Mysterious Limousine", MYSTERIOUS_LIMOUSINE)
         .with_subtypes(vec!["Vehicle"])
         .id();
-    let parked = scenario
-        .add_creature(P0, "Parked Vehicle", 3, 3)
+    let second_limo = scenario
+        .add_creature(P0, "Mysterious Limousine", 4, 4)
         .as_artifact()
         .with_subtypes(vec!["Vehicle"])
-        .from_oracle_text("Crew 1")
+        .from_oracle_text(MYSTERIOUS_LIMOUSINE)
         .id();
     let limo_crewer = scenario.add_creature(P0, "Limousine Crewer", 2, 2).id();
-    let parked_crewer = scenario.add_creature(P0, "Parked Crewer", 1, 1).id();
+    let second_crewer = scenario.add_creature(P0, "Second Crewer", 2, 2).id();
     let first_victim = scenario.add_creature(P1, "First Bear", 2, 2).id();
     // Both players must be able to draw through the turn cycle.
     for n in 0..3 {
@@ -447,9 +446,9 @@ fn mysterious_limousine_exiling_a_crewed_vehicle_returns_the_other_exiled_card()
     assert_eq!(runner.state().phase, Phase::PreCombatMain);
 
     crew(&mut runner, limo, limo_crewer);
-    crew(&mut runner, parked, parked_crewer);
+    crew(&mut runner, second_limo, second_crewer);
     assert!(
-        runner.state().objects[&parked]
+        runner.state().objects[&second_limo]
             .card_types
             .core_types
             .contains(&engine::types::card_type::CoreType::Creature),
@@ -471,9 +470,9 @@ fn mysterious_limousine_exiling_a_crewed_vehicle_returns_the_other_exiled_card()
                 ..
             } => {
                 let legal = &target_slots[selection.current_slot].legal_targets;
-                assert!(legal.contains(&TargetRef::Object(parked)));
+                assert!(legal.contains(&TargetRef::Object(second_limo)));
                 GameAction::ChooseTarget {
-                    target: Some(TargetRef::Object(parked)),
+                    target: Some(TargetRef::Object(second_limo)),
                 }
             }
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
@@ -486,7 +485,7 @@ fn mysterious_limousine_exiling_a_crewed_vehicle_returns_the_other_exiled_card()
 
     let state = runner.state();
     assert_eq!(
-        state.objects[&parked].zone,
+        state.objects[&second_limo].zone,
         Zone::Exile,
         "the crewed Vehicle was put into exile"
     );
@@ -494,5 +493,67 @@ fn mysterious_limousine_exiling_a_crewed_vehicle_returns_the_other_exiled_card()
         state.objects[&first_victim].zone,
         Zone::Battlefield,
         "a creature was put into exile this way, so the other exiled card returns"
+    );
+}
+
+const MURDER: &str = "Destroy target creature.";
+const DEATHGORGE_SCAVENGER: &str = "Whenever this creature enters or attacks, you may exile target card from a graveyard. If a creature card is exiled this way, you gain 2 life. If a noncreature card is exiled this way, this creature gets +1/+1 until end of turn.";
+
+/// CR 400.7 + CR 608.2c: the exit last-known information that answers "a
+/// creature card is exiled this way" must belong to the move being resolved. A
+/// crewed Mysterious Limousine destroyed by Murder leaves a creature-typed exit
+/// snapshot, but the card is a noncreature artifact in the graveyard; exiling it
+/// from the graveyard with Deathgorge Scavenger is a different move, so the
+/// creature-card rider must not gain life.
+#[test]
+fn deathgorge_scavenger_stale_exit_snapshot_does_not_count_as_a_creature_card() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let limo = scenario
+        .add_creature(P0, "Mysterious Limousine", 4, 4)
+        .as_artifact()
+        .with_subtypes(vec!["Vehicle"])
+        .from_oracle_text(MYSTERIOUS_LIMOUSINE)
+        .id();
+    let crewer = scenario.add_creature(P0, "Crewer", 2, 2).id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let scavenger = scenario
+        .add_creature_to_hand_from_oracle(P0, "Deathgorge Scavenger", 3, 2, DEATHGORGE_SCAVENGER)
+        .id();
+    let mut pool: Vec<ManaUnit> = (0..3)
+        .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+        .collect();
+    pool.extend((0..3).map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![])));
+    scenario.with_mana_pool(P0, pool);
+    let mut runner = scenario.build();
+
+    crew(&mut runner, limo, crewer);
+    runner.cast(murder).target_object(limo).resolve();
+    assert_eq!(
+        runner.state().objects[&limo].zone,
+        Zone::Graveyard,
+        "reach: the crewed Vehicle was destroyed"
+    );
+
+    let life_before = runner.state().players[0].life;
+    let outcome = runner
+        .cast(scavenger)
+        .target_object(limo)
+        .accept_optional()
+        .resolve();
+    let _ = outcome;
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&limo].zone,
+        Zone::Exile,
+        "reach: the noncreature card was exiled from the graveyard"
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        life_before,
+        "a noncreature card was exiled this way: no creature-card life gain"
     );
 }
