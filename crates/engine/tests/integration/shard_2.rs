@@ -154,6 +154,7 @@ mod brain_pry_named_discard;
 mod brainspoil;
 mod bramble_elemental_aura_attach;
 mod brass_knuckles_equipment_threshold;
+mod brawl_commander_damage_exclusion;
 mod bre_of_clan_stoutarm_endstep;
 mod breathless_knight_graveyard_origin;
 mod breeches_blastmaker_coin_flip_copy;
