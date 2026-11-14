@@ -6806,8 +6806,9 @@ pub struct PendingCounterRemovalQueue {
     pub effect_kind: EffectKind,
     /// Ability source object for the terminating `EffectResolved` event.
     pub source_ability_id: ObjectId,
-    /// Total counters requested across all entries. Retained for diagnostics and
-    /// legacy wire compatibility; use `applied_total` for effect result context.
+    /// Total counters requested across all entries, saturating at `u32::MAX` (each
+    /// entry keeps its true count). Retained for diagnostics and legacy wire
+    /// compatibility; use `applied_total` for effect result context.
     pub total: u32,
     /// Counters actually removed so far, after clamping and replacements.
     #[serde(default, skip_serializing_if = "is_zero_u32")]

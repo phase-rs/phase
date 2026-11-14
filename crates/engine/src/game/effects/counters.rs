@@ -10111,6 +10111,9 @@ mod tests {
     }
 }
 
+// Unit-level: an end-to-end Bold Plagiarist board with two same-kind placements on
+// one recipient in one firing was not driven (probe 4); these tests call the resolver
+// with the firing's `current_trigger_events` directly.
 #[cfg(test)]
 mod same_number_overflow_tests {
     use super::*;
