@@ -1596,6 +1596,85 @@ fn a_from_anywhere_source_that_died_in_the_event_does_not_trigger_for_itself() {
     assert_eq!(queued + triggers_from(&runner, memento), 0);
 }
 
+/// CR 603.6c + CR 603.10 + CR 400.7: a "from anywhere" ability that functions
+/// in the graveyard belongs to the object that is there. P0 controls Dread
+/// ("When Dread is put into a graveyard from anywhere, shuffle it into its
+/// owner's library.") and has cast Clone as a copy of it; P0's
+/// Earthquake for 6 leaves only P2 at lethal life, so in one state-based-action
+/// check P2 loses and both 6/6 creatures die. The Dread card has the ability in
+/// the graveyard and triggers once; the Clone card there does not.
+#[test]
+fn a_copy_of_a_from_anywhere_ability_does_not_trigger_from_the_graveyard() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let dread = scenario.add_real_card(P0, "Dread", Zone::Battlefield, db);
+    let clone = scenario.add_real_card(P0, "Clone", Zone::Hand, db);
+    let earthquake = scenario.add_real_card(P0, "Earthquake", Zone::Hand, db);
+    let mut pool = red_mana(9);
+    pool.extend((0..4).map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![])));
+    pool.extend((0..4).map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![])));
+    scenario.with_mana_pool(P0, pool);
+    scenario.with_life(P2, 6);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    let mut runner = scenario.build();
+    runner.cast(clone).commit();
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("P0 has the Clone enter as a copy");
+            }
+            WaitingFor::CopyTargetChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(engine::types::ability::TargetRef::Object(dread)),
+                    })
+                    .expect("P0 copies Dread");
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority passes while the Clone resolves");
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(zone(&runner, clone), Zone::Battlefield);
+    assert_eq!(runner.state().objects[&clone].name, "Dread");
+    runner.cast(earthquake).x(6).commit();
+    for _ in 0..4 {
+        if runner.state().players[2].is_eliminated {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Earthquake resolves");
+    }
+    assert!(runner.state().players[2].is_eliminated);
+    assert_eq!(zone(&runner, dread), Zone::Graveyard);
+    assert_eq!(zone(&runner, clone), Zone::Graveyard);
+    let state = runner.state();
+    let from = |source: ObjectId| {
+        state
+            .pending_trigger_order
+            .iter()
+            .flat_map(|order| order.groups.iter())
+            .flat_map(|group| group.triggers.iter())
+            .chain(state.deferred_triggers.iter())
+            .filter(|context| context.pending.source_id == source)
+            .count()
+            + triggers_from(&runner, source)
+    };
+    assert_eq!(
+        from(dread),
+        1,
+        "the Dread card has the ability in the graveyard"
+    );
+    assert_eq!(from(clone), 0, "the Clone card there does not");
+}
+
 /// Welcoming Vampire ("Whenever one or more other creatures you control with
 /// power 2 or less enter, draw a card. This ability triggers only once each
 /// turn.") and Sol Ring on P0's side; with `suppressor`, Hushbringer

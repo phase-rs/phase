@@ -3373,19 +3373,21 @@ fn collect_matching_triggers_inner(
             } else {
                 trig_def.trigger_zones.contains(&zone)
             };
-            // CR 603.10: the game immediately after the event has no source
-            // on the battlefield that left it in the event, the moving source
-            // included, so an after-read admits it only through the zone it
-            // moved to.
-            if use_latched_trigger_entries
+            // CR 603.10 + CR 603.6c: the game immediately after the event has
+            // no source on the battlefield that left it in the event, the
+            // moving source included. An after-read admits that source only
+            // through the zone it moved to, and only while the object that
+            // is there now has the ability (CR 400.7: a copy ability does not
+            // follow its card).
+            let after_read_of_moving_source = use_latched_trigger_entries
                 && matches!(visit, TriggerSourceVisit::EventSubject)
                 && matches!(
                     collection,
                     LogicalZoneTriggerCollection::Observed(
                         TriggerObservationTime::ImmediatelyAfter
                     )
-                )
-            {
+                );
+            if after_read_of_moving_source {
                 zones_match = false;
             }
             // A zone-change record may let the moving source's own trigger
@@ -3398,7 +3400,18 @@ fn collect_matching_triggers_inner(
             {
                 if let GameEvent::ZoneChanged { record, to, .. } = event {
                     zones_match = record.from_zone == Some(source_context.identity.expected_zone)
-                        && trig_def.trigger_zones.contains(to);
+                        && trig_def.trigger_zones.contains(to)
+                        && (!after_read_of_moving_source
+                            || state
+                                .objects
+                                .get(&source_context.identity.reference.object_id)
+                                .is_some_and(|object| {
+                                    object.zone == *to
+                                        && super::functioning_abilities::active_trigger_definitions(
+                                            state, object,
+                                        )
+                                        .any(|active| active.definition == trig_def)
+                                }));
                 }
             }
             if !zones_match {
