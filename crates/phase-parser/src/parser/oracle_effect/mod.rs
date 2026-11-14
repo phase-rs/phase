@@ -25854,6 +25854,7 @@ fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<Pars
     // tracked-owner terminal still settles each affected owner's shuffle.
     if owner_library && matches!(first, TargetFilter::SelfRef) {
         let effect = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: first_origin,
             destination: Zone::Library,
             target: TargetFilter::Or {
