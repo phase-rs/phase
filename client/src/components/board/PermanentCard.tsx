@@ -7,12 +7,7 @@ import type { GameObject, Keyword, ObjectId } from "../../adapter/types.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
-import {
-  pointerLeftTouchable,
-  pointerOverTouchable,
-  retainCapturedTouchTracking,
-  UN_TOUCH_ATTRIBUTE,
-} from "../../game/unTouch.ts";
+import { retainTouchTracking, UN_TOUCH_ATTRIBUTE } from "../../game/unTouch.ts";
 import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
@@ -457,10 +452,10 @@ export const PermanentCard = memo(function PermanentCard({
   // Un-card touch (Vile Bile): the engine lists the objects whose touch
   // abilities function (`un_actions.touchable`). An opted-in player's pointer
   // entering one is a touch — each entry one instance — and any pointer type
-  // counts, since a finger on the screen touches the card too. A pointer
-  // captured elsewhere (a long press that began on another card, or a finger)
-  // gets no enter event here; the shared tracker in game/unTouch.ts hit-tests
-  // those moves against `UN_TOUCH_ATTRIBUTE` and counts each entry once.
+  // counts, since a finger on the screen touches the card too. The card only
+  // marks itself with `UN_TOUCH_ATTRIBUTE`; the shared tracker in
+  // game/unTouch.ts resolves the card under the pointer (never a host whose
+  // attachment the pointer is on) and counts each entry once.
   const spectator = useSpectatorMode();
   const reportsTouch = useGameStore((s) => {
     const unActions = s.gameState?.un_actions;
@@ -468,12 +463,11 @@ export const PermanentCard = memo(function PermanentCard({
       && (unActions?.enabled_players?.includes(playerId) ?? false)
       && (unActions?.touchable?.includes(objectId) ?? false);
   });
-  useEffect(() => (reportsTouch ? retainCapturedTouchTracking() : undefined), [reportsTouch]);
+  useEffect(() => (reportsTouch ? retainTouchTracking() : undefined), [reportsTouch]);
   const handlePointerEnter = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    if (reportsTouch) pointerOverTouchable(event.pointerId, objectId);
     if (isMobile || event.pointerType === "touch") return;
     hoverObject(objectId); inspectObject(objectId);
-  }, [hoverObject, inspectObject, isMobile, objectId, reportsTouch]);
+  }, [hoverObject, inspectObject, isMobile, objectId]);
 
   // Composes with useLongPress's own `onPointerLeave` instead of replacing it —
   // this handler wins the key collision in the spread below, so dropping the
@@ -482,12 +476,11 @@ export const PermanentCard = memo(function PermanentCard({
   const cancelLongPress = longPressHandlers.onPointerLeave;
   const handlePointerLeave = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     cancelLongPress(event);
-    pointerLeftTouchable(event.pointerId, objectId);
     if (isMobile || event.pointerType === "touch") return;
     const nextObjectId = objectIdFromRelatedTarget(event.relatedTarget);
     hoverObject(nextObjectId);
     inspectObject(nextObjectId);
-  }, [cancelLongPress, hoverObject, inspectObject, isMobile, objectId]);
+  }, [cancelLongPress, hoverObject, inspectObject, isMobile]);
 
   const controllerIdentity = useGameStore(
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,

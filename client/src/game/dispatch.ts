@@ -310,13 +310,13 @@ function releaseDispatchMutex(generation: number): void {
   }
 }
 
-/** Structural equality for GameAction — action objects are small plain JSON. */
 /** Actions that report a physical event (an Un-card touch) rather than answer
  *  a prompt: every submission is a separate instance. */
 function isRepeatableEvent(action: GameAction): boolean {
   return action.type === "UnAction" && action.data.action.type === "TouchObject";
 }
 
+/** Structural equality for GameAction — action objects are small plain JSON. */
 function actionsEqual(a: GameAction, b: GameAction): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }

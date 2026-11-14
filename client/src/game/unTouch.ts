@@ -8,49 +8,65 @@ import { dispatchAction } from "./dispatch.ts";
  */
 export const UN_TOUCH_ATTRIBUTE = "data-un-touch-object-id";
 
+/** Carried by every rendered permanent, touchable or not. */
+const PERMANENT_CARD_ATTRIBUTE = "data-permanent-card";
+
 /** The touchable object each pointer is currently over, if any. */
 const overByPointer = new Map<number, number | null>();
 
 /**
  * Pointer `pointerId` is now over touchable `objectId` (or over none). Entering
- * a touchable object is one touch; staying on it is not another. Both the
- * card's own `pointerenter` and the captured-move hit-test report through here,
- * so one entry is never counted twice.
+ * a touchable object is one touch; staying on it is not another.
  */
-export function pointerOverTouchable(pointerId: number, objectId: number | null): void {
+function pointerOverTouchable(pointerId: number, objectId: number | null): void {
   if ((overByPointer.get(pointerId) ?? null) === objectId) return;
   overByPointer.set(pointerId, objectId);
   if (objectId === null) return;
-  void dispatchAction({
+  // A touch the engine refuses (over its bound, or the object just left) is
+  // already reported by dispatch; the pointer has nothing left to do with it.
+  dispatchAction({
     type: "UnAction",
     data: { action: { type: "TouchObject", data: { object_id: objectId } } },
-  });
+  }).catch(() => {});
 }
 
-/** Pointer `pointerId` left touchable `objectId`; a later entry is a new touch. */
-export function pointerLeftTouchable(pointerId: number, objectId: number): void {
-  if (overByPointer.get(pointerId) === objectId) overByPointer.set(pointerId, null);
-}
-
-function touchableUnder(x: number, y: number): number | null {
-  const host = document
-    .elementFromPoint?.(x, y)
-    ?.closest<HTMLElement>(`[${UN_TOUCH_ATTRIBUTE}]`);
-  if (!host) return null;
-  const objectId = Number(host.getAttribute(UN_TOUCH_ATTRIBUTE));
+/**
+ * The touchable object at `element`: the innermost permanent containing it, if
+ * that permanent is marked touchable. An attachment is rendered inside its
+ * host's element but is its own card, so a pointer on an attachment's exposed
+ * edge touches the attachment, never the host beneath it.
+ */
+function touchableAt(element: Element | null | undefined): number | null {
+  const card = element?.closest(`[${PERMANENT_CARD_ATTRIBUTE}]`);
+  const marked = card?.getAttribute(UN_TOUCH_ATTRIBUTE);
+  if (marked == null) return null;
+  const objectId = Number(marked);
   return Number.isInteger(objectId) ? objectId : null;
+}
+
+/**
+ * Every pointer crossing into an element — a mouse moving, or a finger landing
+ * — reports the card it is now on. Both routes below resolve that card through
+ * `touchableAt`, so one entry is never counted twice.
+ */
+function onPointerOver(event: PointerEvent): void {
+  pointerOverTouchable(event.pointerId, touchableAt(event.target as Element | null));
 }
 
 /**
  * A pressed pointer may be captured — by `useLongPress` on the card it went
  * down on, or implicitly by the browser for a finger — and a captured pointer
- * never delivers `pointerenter` to the cards it slides onto. Hit-test its moves
- * instead. An unpressed pointer is never captured; its card's own enter and
- * leave handlers report it.
+ * reports its crossings only against the capturing element. Hit-test its moves
+ * instead.
  */
 function onPointerMove(event: PointerEvent): void {
   if (event.buttons === 0) return;
-  pointerOverTouchable(event.pointerId, touchableUnder(event.clientX, event.clientY));
+  pointerOverTouchable(event.pointerId, touchableAt(document.elementFromPoint?.(event.clientX, event.clientY)));
+}
+
+/** A pointer that left the window is over nothing; coming back is a new entry. */
+function onPointerOut(event: PointerEvent): void {
+  if (event.relatedTarget === null) pointerOverTouchable(event.pointerId, null);
 }
 
 /** A lifted finger stops touching; its next contact is a new touch. */
@@ -58,17 +74,25 @@ function onPointerEnd(event: PointerEvent): void {
   if (event.pointerType === "touch") overByPointer.delete(event.pointerId);
 }
 
+const listeners: [string, (event: PointerEvent) => void][] = [
+  ["pointerover", onPointerOver],
+  ["pointermove", onPointerMove],
+  ["pointerout", onPointerOut],
+  ["pointerup", onPointerEnd],
+  ["pointercancel", onPointerEnd],
+];
+
 let listenerHolders = 0;
 
 /**
- * Install the document-level hit-test while at least one touchable card is
- * mounted. Returns the release function for a `useEffect` cleanup.
+ * Track touches while at least one touchable card is mounted. Returns the
+ * release function for a `useEffect` cleanup.
  */
-export function retainCapturedTouchTracking(): () => void {
+export function retainTouchTracking(): () => void {
   if (listenerHolders === 0) {
-    document.addEventListener("pointermove", onPointerMove, { capture: true, passive: true });
-    document.addEventListener("pointerup", onPointerEnd, { capture: true, passive: true });
-    document.addEventListener("pointercancel", onPointerEnd, { capture: true, passive: true });
+    for (const [type, listener] of listeners) {
+      document.addEventListener(type, listener as EventListener, { capture: true, passive: true });
+    }
   }
   listenerHolders += 1;
   let released = false;
@@ -77,9 +101,9 @@ export function retainCapturedTouchTracking(): () => void {
     released = true;
     listenerHolders -= 1;
     if (listenerHolders > 0) return;
-    document.removeEventListener("pointermove", onPointerMove, { capture: true });
-    document.removeEventListener("pointerup", onPointerEnd, { capture: true });
-    document.removeEventListener("pointercancel", onPointerEnd, { capture: true });
+    for (const [type, listener] of listeners) {
+      document.removeEventListener(type, listener as EventListener, { capture: true });
+    }
     overByPointer.clear();
   };
 }
