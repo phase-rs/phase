@@ -2062,10 +2062,12 @@ pub fn fallback_action(
             ..
         } => Some(GameAction::DecideOptionalEffect { accept: false }),
 
-        // Unless payment: pay a zero-Mana Counter cost (CR 118.5);
-        // decline every other unless payment.
+        // Unless payment: pay a zero-Mana Counter cost (CR 118.5) and
+        // continue a repeated payment already begun (CR 702.24a: its prompt
+        // has no decline); decline every other unless payment.
         WaitingFor::UnlessPayment { player, .. } => Some(GameAction::PayUnlessCost {
-            pay: zero_counter_payment_owed_by(state, *player),
+            pay: zero_counter_payment_owed_by(state, *player)
+                || engine::ai_support::unless_payment_only_continues(state),
         }),
 
         WaitingFor::ActivationCostOneOfChoice { .. } => {
@@ -2388,9 +2390,9 @@ pub fn fallback_action(
             .first()
             .map(|slot| GameAction::ChoosePermanentTypeSlot { slot: *slot }),
 
-        // Choose play/draw and sideboard: between-games defaults.
-        WaitingFor::BetweenGamesChoosePlayDraw { .. } => {
-            Some(GameAction::ChoosePlayDraw { play_first: true })
+        // CR 103.1: the chooser elects to take the first turn (game one and between games); sideboard: submit the deck unchanged.
+        WaitingFor::BetweenGamesChoosePlayDraw { .. } | WaitingFor::ChooseStartingPlayer { .. } => {
+            first_turn_election(state)
         }
         WaitingFor::BetweenGamesSideboard { player, .. } => {
             // Submit the current deck unchanged (no sideboarding).
@@ -2884,6 +2886,28 @@ pub fn fallback_action(
     };
 
     gate(action)
+}
+
+/// CR 103.1: the AI chooser elects to take the first turn.
+fn first_turn_election(state: &GameState) -> Option<GameAction> {
+    match &state.waiting_for {
+        WaitingFor::BetweenGamesChoosePlayDraw { .. } => {
+            Some(GameAction::ChoosePlayDraw { play_first: true })
+        }
+        // CR 103.1a + CR 800.4h: a chooser who inherited the choice need not be
+        // its side's representative, so when its own seat is not a candidate it
+        // names the candidate representing its team as the starting team.
+        WaitingFor::ChooseStartingPlayer { player, candidates } => candidates
+            .iter()
+            .find(|&seat| seat == player)
+            .or_else(|| {
+                let teammates = engine::game::players::teammates(state, *player);
+                candidates.iter().find(|seat| teammates.contains(seat))
+            })
+            .or_else(|| candidates.first())
+            .map(|&seat| GameAction::ChooseStartingPlayer { player: seat }),
+        _ => None,
+    }
 }
 
 /// Score all candidate actions without selecting one.
@@ -4575,11 +4599,8 @@ pub(crate) fn deterministic_choice(
         return Some(action);
     }
 
-    if matches!(
-        state.waiting_for,
-        WaitingFor::BetweenGamesChoosePlayDraw { .. }
-    ) {
-        return Some(GameAction::ChoosePlayDraw { play_first: true });
+    if let Some(action) = first_turn_election(state) {
+        return Some(action);
     }
 
     if matches!(state.waiting_for, WaitingFor::BetweenGamesSideboard { .. }) {
@@ -5814,6 +5835,7 @@ mod tests {
     use engine::types::card::LayoutKind;
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
+    use engine::types::custom_format::CustomFormatDef;
     use engine::types::format::FormatConfig;
     use engine::types::game_state::{
         CastPaymentMode, CastingVariant, NamedChoiceSource, NamedChoiceSourceBinding,
@@ -5825,7 +5847,7 @@ mod tests {
         AbilityActivationScope, ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaType,
         ManaUnit,
     };
-    use engine::types::phase::Phase;
+    use engine::types::phase::{Phase, TurnDirection};
     use engine::types::replacements::ReplacementEvent;
     use engine::types::statics::{CostModifyMode, StaticMode};
     use engine::types::triggers::TriggerMode;
@@ -6661,6 +6683,89 @@ mod tests {
                 "fallback answer with {lands} lands open"
             );
         }
+    }
+
+    /// CR 103.1: the rollout driver and the deadlock-safe fallback both elect
+    /// the chooser to take the first turn, for the game-one starting-player
+    /// prompt and for the between-games play/draw prompt. The chooser is P1 so
+    /// a hard-coded seat cannot pass.
+    #[test]
+    fn first_turn_election_answers_both_choosers() {
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::ChooseStartingPlayer {
+            player: P1,
+            candidates: vec![P0, P1],
+        };
+        let expected = GameAction::ChooseStartingPlayer { player: P1 };
+        assert!(
+            test_contract(&state).contains_action(&state, &expected),
+            "the engine must issue the chooser's own seat as a candidate"
+        );
+        assert_eq!(
+            deterministic_choice(&state, P1, &config, &[], None),
+            Some(expected.clone())
+        );
+        assert_eq!(fallback_action_default(&state), Some(expected));
+
+        state.waiting_for = WaitingFor::BetweenGamesChoosePlayDraw {
+            player: P1,
+            game_number: 2,
+            score: Default::default(),
+        };
+        assert_eq!(
+            deterministic_choice(&state, P1, &config, &[], None),
+            Some(GameAction::ChoosePlayDraw { play_first: true })
+        );
+    }
+
+    /// CR 103.1a + CR 800.4h: a chooser who inherited the choice from a departed
+    /// representative is not its team's representative, so its own seat is not
+    /// an issued answer; the AI elects the candidate representing its team.
+    #[test]
+    fn first_turn_election_names_the_choosers_team_when_its_seat_is_not_a_candidate() {
+        let mut source = FormatConfig::free_for_all();
+        source.team_based = true;
+        source.min_players = 4;
+        source.max_players = 4;
+        let def = CustomFormatDef::from_lobby_config("Shared-turn teams".to_string(), &source)
+            .expect("a team-based free-for-all is saveable as a custom format");
+        let mut state = GameState::new(FormatConfig::for_custom_rules(&def.rules), 4, 42);
+        state.turn_direction = TurnDirection::Reversed;
+        state.waiting_for = WaitingFor::ChooseStartingPlayer {
+            player: PlayerId(2),
+            candidates: vec![P0, PlayerId(2)],
+        };
+        engine::game::engine::apply(
+            &mut state,
+            PlayerId(2),
+            GameAction::Concede {
+                player_id: PlayerId(2),
+            },
+        )
+        .expect("CR 104.3a: the representative concedes during the prompt");
+        let WaitingFor::ChooseStartingPlayer { player, candidates } = &state.waiting_for else {
+            panic!(
+                "the prompt survives the departure, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert!(
+            *player == P1 && !candidates.contains(&P1),
+            "reach: CR 800.4h hands the choice to P1, which is not a candidate"
+        );
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let expected = GameAction::ChooseStartingPlayer { player: P0 };
+        assert!(
+            test_contract(&state).contains_action(&state, &expected),
+            "the chooser's team representative is an issued answer"
+        );
+        assert_eq!(
+            deterministic_choice(&state, P1, &config, &[], None),
+            Some(expected.clone())
+        );
+        assert_eq!(fallback_action_default(&state), Some(expected));
     }
 
     /// T8 — the combat production wiring at `deterministic_choice`'s combat
@@ -7584,6 +7689,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining,
+            repeat: None,
         };
         state
     }
@@ -7687,6 +7793,85 @@ mod tests {
     }
 
     /// `fallback_action` pays a zero Counter payment and declines a nonzero one.
+    /// CR 702.24a: at the continuation of a repeated draw payment the
+    /// fallback continues. Psychic Vortex with 1,025 age counters under an
+    /// opponent's Hullbreacher (verbatim Oracle texts) reaches the boundary
+    /// after one work slice; the only answer the state offers is to pay, and a
+    /// fallback that declined there would be filtered out by the contract and
+    /// answer nothing.
+    #[test]
+    fn fallback_continues_a_repeated_payment_at_its_work_slice_boundary() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Untap);
+        let vortex = scenario
+            .add_enchantment_from_oracle(
+                P0,
+                "Psychic Vortex",
+                "Cumulative upkeep\u{2014}Draw a card. (At the beginning of your upkeep, put \
+                 an age counter on this permanent, then sacrifice it unless you pay its upkeep \
+                 cost for each age counter on it.)\nAt the beginning of your end step, \
+                 sacrifice a land and discard your hand.",
+            )
+            .id();
+        scenario.add_creature_from_oracle(
+            P1,
+            "Hullbreacher",
+            3,
+            2,
+            "Flash\nIf an opponent would draw a card except the first one they draw in each \
+             of their draw steps, instead you create a Treasure token. (It's an artifact with \
+             \"{T}, Sacrifice this token: Add one mana of any color.\")",
+        );
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&vortex)
+            .expect("Psychic Vortex exists")
+            .counters
+            .insert(engine::types::counter::CounterType::Age, 1_024);
+        runner.auto_advance_to_main_phase();
+        runner.advance_until_stack_empty();
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::UnlessPayment {
+                    repeat: Some(1_025),
+                    ..
+                }
+            ),
+            "reach: the upkeep offers 1,025 draws, got {:?}",
+            runner.state().waiting_for
+        );
+        let offered = fallback_action_default(runner.state());
+        assert_eq!(
+            offered,
+            Some(GameAction::PayUnlessCost { pay: false }),
+            "at the initial offer the fallback still declines a draw cost"
+        );
+        runner
+            .act(GameAction::PayUnlessCost { pay: true })
+            .expect("paying is never refused");
+        assert!(
+            engine::ai_support::unless_payment_only_continues(runner.state()),
+            "reach: the first slice ended at the continuation, got {:?}",
+            runner.state().waiting_for
+        );
+        let answer = fallback_action_default(runner.state());
+        assert_eq!(
+            answer,
+            Some(GameAction::PayUnlessCost { pay: true }),
+            "the fallback continues the payment"
+        );
+        runner
+            .act(answer.expect("the fallback answered"))
+            .expect("the fallback's answer is accepted");
+        assert!(
+            runner.state().pending_cost_move_resume.is_none(),
+            "the payment completed"
+        );
+    }
+
     #[test]
     fn fallback_pays_a_free_unless_payment_and_declines_a_real_one() {
         let payer = PlayerId(1);
@@ -17123,6 +17308,7 @@ mod tests {
             conditional_enter_with_counters: Vec::new(),
             count_param: 0,
             library_position: None,
+            library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
@@ -18133,6 +18319,7 @@ mod tests {
                 conditional_enter_with_counters: Vec::new(),
                 count_param: 0,
                 library_position: None,
+                library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
                 mass_library_order: None,
                 is_cost_payment: false,
                 enters_modified_if: None,

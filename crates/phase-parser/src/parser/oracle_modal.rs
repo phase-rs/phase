@@ -1092,8 +1092,17 @@ fn reflexive_modal_connector(
         // CR 115.1 + CR 608.2c: a target P/T threshold guard's
         // `TargetMatchesFilter { subject_slot: None }` reads the gated node's own
         // first object target, and a mode may announce its own target, so the
-        // guard cannot bind the antecedent "that creature" here; refuse it.
-        (Some((_, LeadingConditionRoute::TargetPtThreshold)), _) => {
+        // guard cannot bind the antecedent "that creature" here; refuse it. The
+        // own-target-controller route is produced only by the trailing strip,
+        // never by this leading one; it is refused here too rather than bound.
+        (
+            Some((
+                _,
+                LeadingConditionRoute::TargetPtThreshold
+                | LeadingConditionRoute::OwnTargetController,
+            )),
+            _,
+        ) => {
             return Err(Box::new(Effect::unimplemented(
                 "modal_reflexive_condition",
                 &header.raw,

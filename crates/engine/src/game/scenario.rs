@@ -588,6 +588,27 @@ impl GameScenario {
         }
     }
 
+    /// Add an artifact card to a player's graveyard (CR 404), without
+    /// introducing a creature or spell type that the printed card lacks.
+    pub fn add_artifact_to_graveyard(&mut self, player: PlayerId, name: &str) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Graveyard,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types = obj.card_types.clone();
+
+        CardBuilder {
+            state: &mut self.state,
+            id,
+        }
+    }
+
     /// Add a creature card to a player's exile. Returns a `CardBuilder` for
     /// fluent chaining. Used to stage cards tracked by source-linked exile
     /// effects.
@@ -2098,6 +2119,7 @@ impl GameRunner {
             WaitingFor::TriggerTargetSelection { .. } => "TriggerTargetSelection",
             WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",
             WaitingFor::BetweenGamesChoosePlayDraw { .. } => "BetweenGamesChoosePlayDraw",
+            WaitingFor::ChooseStartingPlayer { .. } => "ChooseStartingPlayer",
             WaitingFor::NamedChoice { .. } => "NamedChoice",
             WaitingFor::OpponentGuess { .. } => "OpponentGuess",
             WaitingFor::SpellbookDraft { .. } => "SpellbookDraft",

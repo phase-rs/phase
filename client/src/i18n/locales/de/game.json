@@ -1186,6 +1186,11 @@
       "drawFirst": "Zuerst ziehen",
       "drawFirstDescription": "Nimm den zusätzlichen Zug in deinem ersten Zug"
     },
+    "startingPlayer": {
+      "title": "Wähle, wer beginnt",
+      "playerPlaysFirst": "{{name}} beginnt",
+      "opponentChoosing": "{{name}} wählt, wer beginnt…"
+    },
     "mulligan": {
       "opponentDeciding": "Der Gegner entscheidet über seine Starthand…",
       "londonTitle": "London-Mulligan ({{count}} genommen)",
@@ -1332,7 +1337,10 @@
         "Ticket": "Ticket"
       },
       "generic": "Kosten",
-      "pay": "{{cost}} bezahlen"
+      "pay": "{{cost}} bezahlen",
+      "draw": "ziehe eine Karte",
+      "drawCount_one": "ziehe {{count}} Karte",
+      "drawCount_other": "ziehe {{count}} Karten"
     },
     "unlessPayment": {
       "defaultEffect": "Neutralisieren, sofern du nicht bezahlst",

@@ -891,6 +891,16 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        WaitingFor::ChooseStartingPlayer { player, candidates } => candidates
+            .iter()
+            .map(|seat| {
+                candidate(
+                    GameAction::ChooseStartingPlayer { player: *seat },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 103.5 + 103.5b: For simultaneous mulligan, generate candidates
         // for each pending player. AI search iterates over the cross-product;
         // the engine accepts them in any arrival order. Serum Powder and
@@ -2945,18 +2955,20 @@ pub fn candidate_actions_broad_with_probe(
             .collect(),
         // CR 118.12: "Counter unless pays" — opponent chooses pay or decline.
         WaitingFor::UnlessPayment { player, .. } => {
-            vec![
-                candidate(
-                    GameAction::PayUnlessCost { pay: true },
-                    TacticalClass::Selection,
-                    Some(*player),
-                ),
-                candidate(
+            let mut answers = vec![candidate(
+                GameAction::PayUnlessCost { pay: true },
+                TacticalClass::Selection,
+                Some(*player),
+            )];
+            // CR 702.24a: a repeated payment already begun only continues.
+            if !crate::game::engine_payment_choices::awaits_payment_continuation(state) {
+                answers.push(candidate(
                     GameAction::PayUnlessCost { pay: false },
                     TacticalClass::Selection,
                     Some(*player),
-                ),
-            ]
+                ));
+            }
+            answers
         }
         // CR 118.12a: Disjunctive unless-cost — paying player chooses **which**
         // sub-cost (by index) or declines all. One `ChooseUnlessCostBranch`
@@ -3801,6 +3813,7 @@ pub fn candidate_actions_broad_with_probe(
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::PhysicalContest { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. }
         | WaitingFor::OrderTriggers { .. }
         | WaitingFor::MulliganDecision { .. }
         | WaitingFor::OpeningHandBottomCards { .. } => Vec::new(),
@@ -9134,6 +9147,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,

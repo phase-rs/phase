@@ -4675,6 +4675,397 @@ mod restored_card_db_requirements_tests {
 
         clear_game_state();
     }
+
+    /// CR 118.12 + CR 614.17a: a staged payment parked on a recovery checkpoint
+    /// carries a second executable board, and settling the payment installs
+    /// it. The restore refreshes printed faces on that board as on the live
+    /// one: the saved discard prompt is answered and the refreshed face is
+    /// still there afterwards.
+    ///
+    /// The board is the one of the engine's
+    /// `a_recovered_payment_reopens_through_checked_restore_and_settles`
+    /// (verbatim Oracle texts): P0's draw is a Dredge prompt (Stinkweed Imp),
+    /// Maralen of the Mornsong is muted by P2's Humility, and P2 concedes after
+    /// the draw leg. Synthetic: the `Composite[draw, discard]` cost is no
+    /// printed card's; "Test Card" is the test database's printed face, saved
+    /// with Vigilance and printed with Trample.
+    #[test]
+    fn restore_refreshes_printed_faces_on_a_parked_payments_checkpoint() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::ability::{
+            AbilityCost, CardSelectionMode, DiscardSelfScope, Effect, QuantityExpr,
+            ResolvedAbility, TargetFilter,
+        };
+        use engine::types::keywords::Keyword;
+        use engine::types::zones::Zone;
+
+        let face = |keyword| engine::types::card::CardFace {
+            name: "Test Card".to_string(),
+            card_type: engine::types::card_type::CardType {
+                supertypes: vec![],
+                core_types: vec![engine::types::card_type::CoreType::Creature],
+                subtypes: vec!["Bear".to_string()],
+            },
+            power: Some(engine::types::ability::PtValue::Fixed(2)),
+            toughness: Some(engine::types::ability::PtValue::Fixed(2)),
+            keywords: vec![keyword],
+            scryfall_oracle_id: Some("oracle-1".to_string()),
+            ..Default::default()
+        };
+        let stale = face(Keyword::Vigilance);
+        let printed_faces =
+            std::collections::HashMap::from([("test card".to_string(), face(Keyword::Trample))]);
+        let db = std::sync::Arc::new(
+            CardDatabase::from_json_str(
+                &serde_json::to_string(&printed_faces).expect("the face serializes"),
+            )
+            .expect("the test card database deserializes"),
+        );
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(std::sync::Arc::clone(&db)));
+
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        // Dredge 5 needs five cards to mill.
+        let library = [
+            "Library 1",
+            "Library 2",
+            "Library 3",
+            "Library 4",
+            "Library 5",
+            "Library 6",
+        ];
+        for player in 0..3 {
+            scenario.with_library_top(PlayerId(player), &library);
+        }
+        let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+        scenario
+            .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+            .from_oracle_text(
+                "Flying\nWhenever this creature deals combat damage to a creature, destroy \
+                 that creature.\nDredge 5 (If you would draw a card, you may mill five cards \
+                 instead. If you do, return this card from your graveyard to your hand.)",
+            );
+        scenario.add_creature_from_oracle(
+            P1,
+            "Maralen of the Mornsong",
+            2,
+            3,
+            "Players can't draw cards.\nAt the beginning of each player's draw step, that \
+             player loses 3 life, searches their library for a card, puts it into their hand, \
+             then shuffles.",
+        );
+        scenario.add_enchantment_from_oracle(
+            PlayerId(2),
+            "Humility",
+            "All creatures lose all abilities and have base power and toughness 1/1.",
+        );
+        scenario.add_card_to_hand(P0, "Hand A");
+        scenario.add_card_to_hand(P0, "Hand B");
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        let printed = engine::game::deck_loading::create_object_from_card_face(state, &stale, P0);
+        engine::game::zones::move_to_zone(state, printed, Zone::Battlefield, &mut Vec::new());
+        engine::game::layers::evaluate_layers(state);
+
+        let root = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::EffectCost {
+                            effect: Box::new(Effect::Draw {
+                                count: QuantityExpr::Fixed { value: 1 },
+                                target: TargetFilter::Controller,
+                            }),
+                        },
+                        AbilityCost::Discard {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            filter: None,
+                            selection: CardSelectionMode::Chosen,
+                            self_scope: DiscardSelfScope::FromHand,
+                        },
+                    ],
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            P0,
+        );
+        engine::game::effects::resolve_ability_chain(state, &root, &mut Vec::new(), 0)
+            .expect("the staged payment resolves");
+        apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+            .expect("declining Dredge accepts the draw");
+        apply(
+            state,
+            PlayerId(2),
+            GameAction::Concede {
+                player_id: PlayerId(2),
+            },
+        )
+        .expect("a player can concede at any time");
+        let checkpoint = state
+            .payment_transaction
+            .as_ref()
+            .and_then(|transaction| transaction.recovered.as_ref())
+            .expect("reach: the concession parks the payment on a recovery checkpoint");
+        assert!(matches!(
+            checkpoint.state.waiting_for,
+            WaitingFor::DiscardChoice { .. }
+        ));
+        assert!(
+            checkpoint.state.objects[&printed]
+                .base_keywords
+                .contains(&Keyword::Vigilance),
+            "reach: the checkpoint holds the face as saved"
+        );
+        let drawn = checkpoint
+            .events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::CardDrawn {
+                    player_id,
+                    object_id,
+                    ..
+                } if *player_id == P0 => Some(*object_id),
+                _ => None,
+            })
+            .expect("the accepted prefix drew a card");
+
+        let json = serde_json::to_string(&PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("the state serializes");
+        let mut restored = decode_and_rehydrate_restored_game_state(&json, |_| Ok(()))
+            .expect("the recovered payment restores")
+            .state;
+        assert!(
+            restored.objects[&printed]
+                .base_keywords
+                .contains(&Keyword::Trample),
+            "reach: the restore refreshed the live board"
+        );
+
+        apply(
+            &mut restored,
+            P0,
+            GameAction::SelectCards { cards: vec![drawn] },
+        )
+        .expect("the restored prompt is answered with the prefix-drawn card");
+        assert!(
+            restored.payment_transaction.is_none(),
+            "the payment settled"
+        );
+        assert!(
+            restored.players[0].graveyard.contains(&drawn),
+            "the drawn card was discarded"
+        );
+        let settled = &restored.objects[&printed];
+        assert_eq!(
+            (
+                settled.base_keywords.contains(&Keyword::Trample),
+                settled.base_keywords.contains(&Keyword::Vigilance),
+            ),
+            (true, false),
+            "settlement keeps the refreshed face"
+        );
+        clear_game_state();
+    }
+
+    /// CR 613.1f + CR 616.1: a recovery checkpoint parked on a replacement
+    /// choice is checked after its refreshed faces went through the layers.
+    /// Humility and Hullbreacher are printed objects of the test database
+    /// (verbatim Oracle texts): the face refresh gives Hullbreacher its
+    /// printed replacement back until Humility is applied again, and a restore
+    /// that checked the prompt before that refused the valid Dredge-only
+    /// choice as leaving Hullbreacher out.
+    ///
+    /// Synthetic: the `Composite[draw, draw]` cost is no printed card's.
+    #[test]
+    fn restore_applies_layers_to_a_checkpoint_before_checking_its_prompt() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::ability::{
+            AbilityCost, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
+        };
+        use engine::types::card::{CardFace, PrintedCardRef};
+        use engine::types::zones::Zone;
+
+        let mut scenario = GameScenario::new_n_player(4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        // Dredge 5 needs five cards to mill.
+        let library = [
+            "Library 1",
+            "Library 2",
+            "Library 3",
+            "Library 4",
+            "Library 5",
+            "Library 6",
+            "Library 7",
+        ];
+        for player in 0..4 {
+            scenario.with_library_top(PlayerId(player), &library);
+        }
+        let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+        scenario
+            .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+            .from_oracle_text(
+                "Flying\nWhenever this creature deals combat damage to a creature, destroy \
+                 that creature.\nDredge 5 (If you would draw a card, you may mill five cards \
+                 instead. If you do, return this card from your graveyard to your hand.)",
+            );
+        let hullbreacher = scenario
+            .add_creature_from_oracle(
+                P1,
+                "Hullbreacher",
+                3,
+                2,
+                "Flash\nIf an opponent would draw a card except the first one they draw in \
+                 each of their draw steps, instead you create a Treasure token. (It's an \
+                 artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")",
+            )
+            .id();
+        let humility = scenario
+            .add_enchantment_from_oracle(
+                PlayerId(2),
+                "Humility",
+                "All creatures lose all abilities and have base power and toughness 1/1.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+
+        // Make the two interacting permanents printed objects of the database.
+        let mut printed_faces = std::collections::HashMap::new();
+        for (id, oracle_id) in [
+            (hullbreacher, "oracle-hullbreacher"),
+            (humility, "oracle-humility"),
+        ] {
+            let object = state.objects.get_mut(&id).expect("the permanent exists");
+            let face = CardFace {
+                name: object.name.clone(),
+                card_type: object.base_card_types.clone(),
+                power: object
+                    .base_power
+                    .map(engine::types::ability::PtValue::Fixed),
+                toughness: object
+                    .base_toughness
+                    .map(engine::types::ability::PtValue::Fixed),
+                keywords: object.base_keywords.clone(),
+                abilities: (*object.base_abilities).clone(),
+                triggers: (*object.base_trigger_definitions).clone(),
+                static_abilities: (*object.base_static_definitions).clone(),
+                replacements: (*object.base_replacement_definitions).clone(),
+                scryfall_oracle_id: Some(oracle_id.to_string()),
+                ..Default::default()
+            };
+            object.printed_ref = Some(PrintedCardRef {
+                oracle_id: oracle_id.to_string(),
+                face_name: face.name.clone(),
+            });
+            object.base_printed_ref = object.printed_ref.clone();
+            printed_faces.insert(face.name.to_lowercase(), face);
+        }
+        let db = std::sync::Arc::new(
+            CardDatabase::from_json_str(
+                &serde_json::to_string(&printed_faces).expect("the faces serialize"),
+            )
+            .expect("the test card database deserializes"),
+        );
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(std::sync::Arc::clone(&db)));
+        engine::game::layers::evaluate_layers(state);
+
+        let draw_leg = || AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            }),
+        };
+        let root = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Composite {
+                    costs: vec![draw_leg(), draw_leg()],
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            P0,
+        );
+        engine::game::effects::resolve_ability_chain(state, &root, &mut Vec::new(), 0)
+            .expect("the staged payment resolves");
+        apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+            .expect("declining leg 1's Dredge accepts the draw");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == P0),
+            "reach: leg 2's Dredge is offered, got {:?}",
+            state.waiting_for
+        );
+        apply(
+            state,
+            PlayerId(3),
+            GameAction::Concede {
+                player_id: PlayerId(3),
+            },
+        )
+        .expect("a player can concede at any time");
+        let checkpoint = state
+            .payment_transaction
+            .as_ref()
+            .and_then(|transaction| transaction.recovered.as_ref())
+            .expect("reach: the concession parks the payment on a recovery checkpoint");
+        assert!(
+            matches!(
+                checkpoint.state.waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ),
+            "reach: the checkpoint is parked on leg 2's Dredge choice"
+        );
+        // Reach: on the checkpoint Humility mutes Hullbreacher, and the face
+        // refresh alone gives it its printed replacement back.
+        let mut refreshed = (*checkpoint.state).clone();
+        let functioning = |state: &GameState| {
+            state.objects[&hullbreacher]
+                .replacement_definitions
+                .iter_all()
+                .count()
+        };
+        assert_eq!(functioning(&refreshed), 0);
+        rehydrate_game_from_card_db_with_finalization(
+            &mut refreshed,
+            &db,
+            CardDbRehydrationFinalization::Defer,
+        );
+        assert_eq!(functioning(&refreshed), 1);
+        let hand_before = state.players[0].hand.len();
+
+        let json = serde_json::to_string(&PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("the state serializes");
+        let mut restored = decode_and_rehydrate_restored_game_state(&json, |_| Ok(()))
+            .expect("the Dredge-only prompt is the one the game offers under Humility")
+            .state;
+        apply(
+            &mut restored,
+            P0,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("the restored prompt is answered");
+        assert!(
+            restored.payment_transaction.is_none(),
+            "the payment settled"
+        );
+        assert_eq!(
+            restored.players[0].hand.len(),
+            hand_before + 2,
+            "both legs' cards were drawn"
+        );
+        assert!(
+            !restored
+                .objects
+                .values()
+                .any(|object| object.zone == Zone::Battlefield && object.name == "Treasure"),
+            "Hullbreacher stayed muted"
+        );
+        clear_game_state();
+    }
 }
 
 #[cfg(test)]
@@ -7937,6 +8328,7 @@ mod tests {
 #[cfg(test)]
 mod replay_bridge_tests {
     use super::*;
+    use engine::game::start_game_winner_plays_first;
     use engine::types::game_state::WaitingFor;
 
     #[test]
@@ -7987,7 +8379,7 @@ mod replay_bridge_tests {
         clear_replay_playback();
 
         let mut state = GameState::new_two_player(99);
-        let start_result = start_game(&mut state);
+        let start_result = start_game_winner_plays_first(&mut state);
         let _ = start_result;
 
         let header = ReplayHeader {
@@ -8044,6 +8436,82 @@ mod replay_bridge_tests {
             0,
             "clear_replay_playback should drop the loaded replay"
         );
+        clear_game_state();
+    }
+
+    /// CR 103.1: a local game started by the engine's own contest rests at the
+    /// choice; the chooser's answer starts it, is recorded like any other
+    /// action, and a reloaded recording replays it to the same start.
+    #[test]
+    fn wasm_local_game_records_the_starting_player_choice() {
+        clear_game_state();
+        clear_replay_playback();
+
+        // Mirrors `initialize_game_impl`'s `first_player: None` start with no
+        // deck data: `start_game`, the replay header, the interaction bind and
+        // the install.
+        let mut state = GameState::new_two_player(99);
+        let _ = start_game(&mut state);
+        let WaitingFor::ChooseStartingPlayer { player: winner, .. } = state.waiting_for else {
+            panic!("the start rests at the CR 103.1 choice");
+        };
+        let starter = PlayerId(1 - winner.0);
+        let header = ReplayHeader {
+            format_config: state.format_config.clone(),
+            match_config: state.match_config,
+            player_count: state.players.len() as u8,
+            first_player: None,
+            seed: state.rng_seed,
+            deck_data: None,
+        };
+        REPLAY_LOG.with(|cell| cell.set(Some(ReplayLog::new(header))));
+        bind_interaction_session(&mut state);
+        install_game_state(Some(state));
+        assert!(
+            matches!(
+                with_installed_state(|state| state.waiting_for.clone()),
+                Ok(WaitingFor::ChooseStartingPlayer { .. })
+            ),
+            "reach: the installed game waits on the choice"
+        );
+
+        let submitted =
+            submit_action_inner(winner, GameAction::ChooseStartingPlayer { player: starter })
+                .expect("a game is installed");
+        assert!(
+            matches!(submitted, SubmittedAction::Applied { .. }),
+            "the chooser's answer applies"
+        );
+        let live = with_installed_state(GameState::clone).expect("a game is installed");
+        assert_eq!(live.turn_number, 1);
+        assert_eq!(live.current_starting_player, starter);
+        assert!(!matches!(
+            live.waiting_for,
+            WaitingFor::ChooseStartingPlayer { .. }
+        ));
+
+        let replay_json = export_replay_log().expect("the recording survives the answer");
+        assert!(
+            replay_json.contains("ChooseStartingPlayer"),
+            "the answer is a recorded action"
+        );
+        let length =
+            load_replay_for_playback(&replay_json).expect("exported replay should load back");
+        let replayed = REPLAY_PLAYER.with(|cell| {
+            let mut player = cell.take().expect("a replay is loaded");
+            let replayed = player
+                .seek(length)
+                .expect("the recorded answer replays")
+                .clone();
+            cell.set(Some(player));
+            replayed
+        });
+        assert_eq!(replayed.current_starting_player, starter);
+        assert_eq!(replayed.turn_number, live.turn_number);
+        assert_eq!(replayed.phase, live.phase);
+        assert_eq!(replayed.waiting_for, live.waiting_for);
+
+        clear_replay_playback();
         clear_game_state();
     }
 

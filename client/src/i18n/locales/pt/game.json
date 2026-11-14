@@ -1186,6 +1186,11 @@
       "drawFirst": "Comprar Primeiro",
       "drawFirstDescription": "Faça a compra extra em seu primeiro turno"
     },
+    "startingPlayer": {
+      "title": "Escolha quem joga primeiro",
+      "playerPlaysFirst": "{{name}} joga primeiro",
+      "opponentChoosing": "{{name}} está escolhendo quem joga primeiro…"
+    },
     "mulligan": {
       "opponentDeciding": "O oponente está decidindo sua mão inicial…",
       "londonTitle": "London Mulligan ({{count}} feitos)",
@@ -1332,7 +1337,10 @@
         "Ticket": "ticket"
       },
       "generic": "um custo",
-      "pay": "Pagar {{cost}}"
+      "pay": "Pagar {{cost}}",
+      "draw": "compre uma carta",
+      "drawCount_one": "compre {{count}} carta",
+      "drawCount_other": "compre {{count}} cartas"
     },
     "unlessPayment": {
       "defaultEffect": "Anular a Menos Que Você Pague",
