@@ -10336,6 +10336,31 @@ impl GameState {
         owners
     }
 
+    /// The casting stage of the live announcement, read from its custody owner.
+    pub(crate) fn pending_cast_stage(&self) -> Option<PendingCastStage> {
+        let owner = *self.live_pending_cast_owners().first()?;
+        Some(match owner {
+            PendingCastOwner::Prompt => self.waiting_for.pending_cast_with_stage()?.1,
+            // CR 601.2d: a division announced before costs keeps `distribute`; the X-deferred
+            // division raised after mana payment holds a fresh cast without it.
+            PendingCastOwner::External => match (&self.waiting_for, self.pending_cast.as_deref()) {
+                (
+                    WaitingFor::DistributeAmong {
+                        scope: DistributionScope::AnnouncedTargets,
+                        ..
+                    },
+                    Some(pending),
+                ) if pending.distribute.is_some() && !pending.activation_cost_committed => {
+                    PendingCastStage::Proposal
+                }
+                _ => PendingCastStage::Costs,
+            },
+            PendingCastOwner::DeferredLifeCost
+            | PendingCastOwner::CostMove
+            | PendingCastOwner::DiscardForCost => PendingCastStage::Costs,
+        })
+    }
+
     /// The [`PendingCast`] held by `owner`, if that owner is live.
     pub(crate) fn pending_cast_at(&self, owner: PendingCastOwner) -> Option<&PendingCast> {
         match owner {
@@ -10500,6 +10525,15 @@ impl GameState {
             };
         }
     }
+}
+
+/// Where an announced cast is, in the order the engine raises its prompts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingCastStage {
+    /// CR 601.2a–e: the proposal, before the total cost is determined.
+    Proposal,
+    /// CR 601.2f–h: determining and paying the total cost.
+    Costs,
 }
 
 /// CR 601.2 + CR 602.2b: every typed owner of an announced cast or activation
@@ -21042,6 +21076,12 @@ impl WaitingFor {
     /// mid-payment detail for opponents while preserving the public "spell on
     /// the stack" view elsewhere. `has_pending_cast()` accounts for this.
     pub fn pending_cast_ref(&self) -> Option<&PendingCast> {
+        self.pending_cast_with_stage().map(|(pending, _)| pending)
+    }
+
+    /// [`Self::pending_cast_ref`] with the casting stage the engine raises each prompt in.
+    pub(crate) fn pending_cast_with_stage(&self) -> Option<(&PendingCast, PendingCastStage)> {
+        use PendingCastStage::{Costs, Proposal};
         match self {
             WaitingFor::ChooseXValue { pending_cast, .. }
             | WaitingFor::TargetSelection { pending_cast, .. }
@@ -21050,12 +21090,14 @@ impl WaitingFor {
             | WaitingFor::ChooseGiftRecipient { pending_cast, .. }
             | WaitingFor::SpliceOffer { pending_cast, .. }
             | WaitingFor::DefilerPayment { pending_cast, .. }
-            | WaitingFor::OrderCostReductions { pending_cast, .. }
+            | WaitingFor::ChooseAnnouncingOpponent { pending_cast, .. } => {
+                Some((pending_cast, Proposal))
+            }
+            WaitingFor::OrderCostReductions { pending_cast, .. }
             | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
             | WaitingFor::CostTypeChoice { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
-            | WaitingFor::HarmonizeTapChoice { pending_cast, .. }
-            | WaitingFor::ChooseAnnouncingOpponent { pending_cast, .. } => Some(pending_cast),
+            | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some((pending_cast, Costs)),
             WaitingFor::PayCost { resume, .. } => match resume {
                 CostResume::Spell {
                     spell: pending_cast,
@@ -21063,14 +21105,14 @@ impl WaitingFor {
                 | CostResume::SpellCost {
                     spell: pending_cast,
                     ..
-                } => Some(pending_cast),
+                } => Some((pending_cast, Costs)),
                 CostResume::ManaAbility { .. }
                 | CostResume::Resolution
                 | CostResume::TeamTapPayment { .. }
                 | CostResume::TurnFaceUp { .. } => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
-                CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
+                CollectEvidenceResume::Casting { pending_cast, .. } => Some((pending_cast, Costs)),
                 CollectEvidenceResume::Effect { .. }
                 | CollectEvidenceResume::ManaAbility { .. } => None,
             },

@@ -5228,6 +5228,99 @@ the bottom.)\nDraw a card.";
         let restored = restore_without_leyline(runner, leyline);
         assert_restored_at_target_selection(&restored, CastTimingRoute::Permission);
     }
+
+    const ARC_LIGHTNING: &str =
+        "Arc Lightning deals 3 damage divided as you choose among one, two, or three targets.";
+
+    const DEFILER_OF_VIGOR: &str = "Trample\nAs an additional cost to cast green permanent \
+spells, you may pay 2 life. Those spells cost {G} less to cast if you paid life this way. This \
+effect reduces only the amount of green mana you pay.\nWhenever you cast a green permanent \
+spell, put a +1/+1 counter on each creature you control.";
+
+    fn assert_reversed(restored: &GameState, spell: ObjectId, pool: usize) {
+        assert!(
+            matches!(restored.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "{:?}",
+            restored.waiting_for
+        );
+        assert_eq!(restored.objects[&spell].zone, Zone::Hand);
+        assert!(restored.stack.is_empty());
+        assert!(restored.pending_cast.is_none());
+        assert_eq!(restored.players[P0.0 as usize].mana_pool.total(), pool);
+    }
+
+    // CR 601.2d + CR 733.1: dividing Arc Lightning's damage is still part of its proposal, so
+    // with Leyline gone the sorcery's cast is reversed.
+    #[test]
+    fn legacy_proposal_at_its_division_is_reversed() {
+        let (mut runner, leyline, (arc, bears)) = {
+            let mut bears = None;
+            let (runner, leyline, arc) = leyline_upkeep(mana(ManaType::Red, 3), |scenario| {
+                bears = Some(scenario.add_creature(P1, "Grizzly Bears", 2, 2).id());
+                scenario
+                    .add_spell_to_hand_from_oracle(P0, "Arc Lightning", false, ARC_LIGHTNING)
+                    .with_mana_cost(ManaCost::Cost {
+                        shards: vec![ManaCostShard::Red],
+                        generic: 2,
+                    })
+                    .id()
+            });
+            (
+                runner,
+                leyline,
+                (arc, bears.expect("Grizzly Bears is added")),
+            )
+        };
+        cast(&mut runner, arc, CastPaymentMode::Auto);
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![
+                    engine::types::ability::TargetRef::Object(bears),
+                    engine::types::ability::TargetRef::Player(P1),
+                ],
+            })
+            .expect("P0 chooses two targets");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::DistributeAmong { .. }
+            ),
+            "{:?}",
+            runner.state().waiting_for
+        );
+
+        let restored = restore_without_leyline(runner, leyline);
+        assert_reversed(&restored, arc, 3);
+    }
+
+    // CR 601.2b + CR 733.1: Defiler of Vigor's optional life payment is announced in the
+    // proposal, so with Leyline gone the creature spell's cast is reversed.
+    #[test]
+    fn legacy_proposal_at_its_defiler_payment_is_reversed() {
+        let (mut runner, leyline, bears) = leyline_upkeep(mana(ManaType::Green, 4), |scenario| {
+            scenario.add_creature_from_oracle(P0, "Defiler of Vigor", 6, 6, DEFILER_OF_VIGOR);
+            scenario
+                .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Green],
+                    generic: 1,
+                })
+                .id()
+        });
+        cast(&mut runner, bears, CastPaymentMode::Auto);
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::DefilerPayment { .. }
+            ),
+            "{:?}",
+            runner.state().waiting_for
+        );
+
+        let restored = restore_without_leyline(runner, leyline);
+        assert_reversed(&restored, bears, 4);
+        assert_eq!(restored.players[P0.0 as usize].life, 20);
+    }
 }
 
 #[cfg(test)]

@@ -9,8 +9,9 @@ use crate::types::ability::{
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CastTimingRoute, CollectEvidenceResume, GameState, PendingCast, PendingManaAbility,
-    PersistedRestoreError, PlayerDeckPool, SpellCastReversal, SpellCastUndo, WaitingFor,
+    CastTimingRoute, CollectEvidenceResume, GameState, PendingCast, PendingCastStage,
+    PendingManaAbility, PersistedRestoreError, PlayerDeckPool, SpellCastReversal, SpellCastUndo,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
@@ -1589,16 +1590,7 @@ pub(crate) fn restore_legacy_cast_timing_routes(
     // A legacy route is recovered from the proposal's own timing authority, and a cast is
     // reversed only while its proposal (CR 601.2a–e) is still open and that authority finds no
     // route; after the proposal, CR 601.6 keeps the cast.
-    let proposal_open = matches!(
-        state.waiting_for,
-        WaitingFor::ChooseXValue { .. }
-            | WaitingFor::TargetSelection { .. }
-            | WaitingFor::ModeChoice { .. }
-            | WaitingFor::OptionalCostChoice { .. }
-            | WaitingFor::ChooseGiftRecipient { .. }
-            | WaitingFor::SpliceOffer { .. }
-            | WaitingFor::ChooseAnnouncingOpponent { .. }
-    );
+    let proposal_open = state.pending_cast_stage() == Some(PendingCastStage::Proposal);
     let timing_open_without_flash = state.objects.get(&pending.object_id).is_some_and(|obj| {
         restrictions::check_spell_timing(
             state,
