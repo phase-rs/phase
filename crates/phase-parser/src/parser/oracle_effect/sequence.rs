@@ -14065,6 +14065,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         };
         let result = parse_followup_continuation_ast(
             "Put all creature cards milled this way onto the battlefield tapped.",
@@ -14161,6 +14162,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 4 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         };
         let result = parse_followup_continuation_ast(
             "You may put an artifact, creature, or land card from among the milled cards into your hand.",
@@ -14198,6 +14200,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 4 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         };
         let result = parse_followup_continuation_ast(
             "You may return a permanent card from among them to your hand.",
@@ -14229,6 +14232,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         };
         let result = parse_followup_continuation_ast(
             "Return a card milled this way to your hand.",
@@ -14261,6 +14265,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 6 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         };
         let result = parse_followup_continuation_ast(
             "Return any number of creature cards milled this way to your hand.",
@@ -14669,6 +14674,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 6 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: LibraryPosition::Top,
             },
         )];
         let mut env = crate::parser::oracle_effect::assembly::AssemblyEnv::default();
@@ -14740,6 +14746,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 4 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: LibraryPosition::Top,
             },
         )];
         let mut env = crate::parser::oracle_effect::assembly::AssemblyEnv::default();
@@ -15271,6 +15278,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
         };
         let result = parse_followup_continuation_ast(
             "Put all creature cards milled this way onto the battlefield face down.",

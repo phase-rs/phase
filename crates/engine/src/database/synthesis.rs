@@ -3180,6 +3180,7 @@ pub(crate) fn dredge_replacement_definition(n: u32) -> ReplacementDefinition {
             count: QuantityExpr::Fixed { value: n as i32 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: crate::types::ability::LibraryPosition::Top,
         },
     );
     mill.sub_ability = Some(Box::new(return_to_hand));

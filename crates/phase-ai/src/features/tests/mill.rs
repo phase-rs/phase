@@ -35,6 +35,7 @@ fn mill_spell_face(target: TargetFilter, count: u32) -> CardFace {
         },
         target,
         destination: Zone::Graveyard,
+        position: engine::types::ability::LibraryPosition::Top,
     }));
     f
 }
@@ -56,6 +57,7 @@ fn triggered_mill_creature(target: TargetFilter) -> CardFace {
             count: QuantityExpr::Fixed { value: 2 },
             target,
             destination: Zone::Graveyard,
+            position: engine::types::ability::LibraryPosition::Top,
         },
     );
     f.triggers.push(
@@ -80,6 +82,7 @@ fn player_target_mill_is_opponent_mill() {
         count: QuantityExpr::Fixed { value: 10 },
         target: TargetFilter::Player,
         destination: Zone::Graveyard,
+        position: engine::types::ability::LibraryPosition::Top,
     };
     assert!(effect_is_opponent_mill(&e));
 }
@@ -90,6 +93,7 @@ fn opponent_filter_mill_is_opponent_mill() {
         count: QuantityExpr::Fixed { value: 3 },
         target: TargetFilter::Typed(TypedFilter::card().controller(ControllerRef::Opponent)),
         destination: Zone::Graveyard,
+        position: engine::types::ability::LibraryPosition::Top,
     };
     assert!(effect_is_opponent_mill(&e));
 }
@@ -100,6 +104,7 @@ fn controller_target_mill_excluded() {
         count: QuantityExpr::Fixed { value: 13 },
         target: TargetFilter::Controller,
         destination: Zone::Graveyard,
+        position: engine::types::ability::LibraryPosition::Top,
     };
     assert!(!effect_is_opponent_mill(&e));
 }
@@ -110,6 +115,7 @@ fn any_target_mill_excluded() {
         count: QuantityExpr::Fixed { value: 6 },
         target: TargetFilter::Any,
         destination: Zone::Graveyard,
+        position: engine::types::ability::LibraryPosition::Top,
     };
     assert!(!effect_is_opponent_mill(&e));
 }
@@ -163,6 +169,7 @@ fn cross_ability_draw_and_self_mill_is_not_enabler() {
         count: QuantityExpr::Fixed { value: 3 },
         target: TargetFilter::Controller,
         destination: Zone::Graveyard,
+        position: engine::types::ability::LibraryPosition::Top,
     }));
     assert!(!is_mill_enabler(&f));
 }

@@ -5536,6 +5536,7 @@ fn rw_effect(
             count,
             target: _,
             destination: _,
+            position: _,
         } => {
             let mut p = RwProfile::empty();
             place_membership_write(

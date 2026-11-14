@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    ControllerRef, Effect, EffectScope, ManaProduction, PtValue, QuantityExpr, TapStateChange,
-    TargetFilter, TypedFilter,
+    ControllerRef, Effect, EffectScope, LibraryPosition, ManaProduction, PtValue, QuantityExpr,
+    TapStateChange, TargetFilter, TypedFilter,
 };
 use crate::types::mana::ManaColor;
 use crate::types::Zone;
@@ -479,11 +479,22 @@ fn translate_mill(
 ) -> Result<Effect, ForgeTranslateError> {
     let count = resolve_quantity(params, "NumCards", resolver);
     let target = resolve_defined(params);
+    let position = resolve_library_position(params);
     Ok(Effect::Mill {
         count,
         target,
         destination: Zone::Graveyard,
+        position,
     })
+}
+
+/// Resolve LibraryPosition from Forge params. Forge uses "Top" or "Bottom"
+/// (case-insensitive). Defaults to Top per CR 701.17a.
+fn resolve_library_position(params: &ForgeParams) -> LibraryPosition {
+    match params.get("Position") {
+        Some(v) if v.eq_ignore_ascii_case("Bottom") => LibraryPosition::Bottom,
+        _ => LibraryPosition::Top,
+    }
 }
 
 // CR 701.22a: Scry.

@@ -3679,6 +3679,7 @@ mod tests {
                         .controller(crate::types::ability::ControllerRef::Opponent),
                 ),
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![],
             hope_id,

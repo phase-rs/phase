@@ -11760,6 +11760,7 @@ fn parse_mill_count_replacement(lower: &str, original_text: &str) -> Option<Repl
                 count,
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: LibraryPosition::Top,
             },
         ))
         .description(original_text.to_string());
@@ -31214,6 +31215,7 @@ mod tests {
                 count,
                 target,
                 destination,
+                ..
             } => {
                 assert_eq!(target, &TargetFilter::Controller);
                 assert_eq!(destination, &Zone::Graveyard);

@@ -15177,6 +15177,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 5 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![TargetRef::Player(PlayerId(0))],
             ObjectId(100),

@@ -14656,6 +14656,19 @@ pub(crate) fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause>
             state: TapStateChange::Tap,
             ..
         } => Some(ThisWayCause::Tapped),
+        // CR 701.17a: the library EDGE is part of what a `Mill` does, and the
+        // shared table below is only ever handed kind + destination. A
+        // bottom-edge instruction is the shared library→zone move, so it takes
+        // the destination zone's producer verb exactly as the `ChangeZone` arm
+        // does — never `Milled`. `mill::is_mill_move` is the single authority
+        // for that predicate, shared with the emitted `Milled` event.
+        Effect::Mill {
+            destination,
+            position,
+            ..
+        } if !crate::game::effects::mill::is_mill_move(*destination, position) => {
+            this_way_cause_for_zone(*destination)
+        }
         _ => this_way_cause_for_action(
             EffectKind::from(effect),
             declared_this_way_destination(effect),
@@ -36038,6 +36051,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 1 },
             destination,
             target: TargetFilter::Any,
+            position: crate::types::ability::LibraryPosition::Top,
         };
         assert_eq!(
             this_way_cause_for_effect(&mill(Zone::Hand)),
@@ -36048,6 +36062,31 @@ mod tests {
         // by the function answering `None` for everything.
         assert_eq!(
             this_way_cause_for_effect(&mill(Zone::Graveyard)),
+            Some(ThisWayCause::Milled)
+        );
+    }
+
+    /// CR 701.17a + CR 401.2: a BOTTOM-edge move into a graveyard is not a mill
+    /// either. The table is handed only kind + destination, so the resolved
+    /// entry reads the library edge itself — a bottom card put into a graveyard
+    /// names no `Milled` cause (Grenzo, Dungeon Warden).
+    #[test]
+    fn this_way_cause_for_bottom_edge_mill_names_no_milled_cause() {
+        let mill = |position| Effect::Mill {
+            count: QuantityExpr::Fixed { value: 1 },
+            destination: Zone::Graveyard,
+            target: TargetFilter::Any,
+            position,
+        };
+        assert_eq!(
+            this_way_cause_for_effect(&mill(crate::types::ability::LibraryPosition::Bottom)),
+            None,
+            "a bottom card put into a graveyard was not milled"
+        );
+        // The positive leg is the live control: the same destination read from
+        // the top edge still names the mill action.
+        assert_eq!(
+            this_way_cause_for_effect(&mill(crate::types::ability::LibraryPosition::Top)),
             Some(ThisWayCause::Milled)
         );
     }
@@ -39580,6 +39619,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![],
             source_id,
@@ -55223,6 +55263,7 @@ mod tests {
                 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![],
             ObjectId(100),
