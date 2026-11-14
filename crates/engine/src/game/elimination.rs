@@ -249,6 +249,21 @@ pub(crate) fn eliminate_players(
         None
     };
 
+    // CR 800.4a: a parked unless payment leaves with the players leaving: with
+    // the controller of the ability it settles, or with the payer of the legs
+    // or instructions still owed.
+    super::engine_payment_choices::retire_parked_unless_payment_of_departing_players(
+        state,
+        &leaving_set,
+    );
+    // CR 800.4a + CR 400.7: so does an accepted entry payment parked behind a
+    // leg's replacement choice, with the player who accepted it or the owner
+    // of the entering object.
+    super::engine_payment_choices::retire_parked_entry_payment_of_departing_players(
+        state,
+        &leaving_set,
+    );
+
     // CR 800.4a: elimination can remove frozen stack entries and a session's
     // canonical representative. Restore the pre-overlay preferences before
     // `do_eliminate` removes the departing player's own state, so teardown
@@ -418,6 +433,7 @@ pub(crate) fn eliminate_players(
                         trigger_event: None,
                         effect_description: None,
                         remaining: Vec::new(),
+                        repeat: None,
                     };
                     state.pending_player_scope_unless_payment = Some(pending);
                 } else {
@@ -552,6 +568,32 @@ pub(crate) fn eliminate_players(
                     debug_assert!(
                         false,
                         "player-scope sacrifice was not reconciled after a departure: {error}"
+                    );
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                }
+            };
+
+        // CR 800.4a + CR 608.2d + CR 608.2m: an open resolution-time object choice
+        // ("choose a creature you control") stored its candidates when it was
+        // raised. The departure removed the leaving player's objects and ended
+        // their control effects, so the choice is re-offered against the objects
+        // eligible now, put to the controller a reverted spell has now
+        // (CR 109.5), or settled (one or no candidate left, or the chooser
+        // left) and the resolution's remaining instructions run. Runs before
+        // `drain_or_clear_deferred_triggers_after_elimination`, which places the
+        // triggers those instructions queued (CR 603.3), and before the generic
+        // dead-actor repoint, which would otherwise give priority while the
+        // resolution is unfinished (CR 117.2e).
+        let resolution_object_choice =
+            match super::engine_resolution_choices::settle_resolution_object_choice_after_departure(
+                state, events,
+            ) {
+                Ok(settlement) => settlement,
+                Err(error) => {
+                    tracing::error!(%error, "resolution object choice was not reconciled after a departure");
+                    debug_assert!(
+                        false,
+                        "resolution object choice was not reconciled after a departure: {error}"
                     );
                     super::engine_resolution_choices::DepartureSettlement::NotSettled
                 }
@@ -702,6 +744,10 @@ pub(crate) fn eliminate_players(
                     player_scope_sacrifice,
                     super::engine_resolution_choices::DepartureSettlement::NotSettled
                 )
+                && matches!(
+                    resolution_object_choice,
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                )
                 && state
                     .resolving_stack_entry
                     .as_ref()
@@ -765,7 +811,8 @@ pub(crate) fn eliminate_players(
 /// This is also the pregame-reconciliation seam for the prompts that precede
 /// mulligans: a departed companion chooser (CR 103.2b) is resumed at the walk
 /// cursor by `advance_companion_reveal`, and a departed agenda chooser (CR
-/// 103.2e) resumes at the agenda step.
+/// 103.2e) resumes at the agenda step. A departed CR 103.1 chooser passes the
+/// choice on (CR 800.4h), and a departed seat leaves the candidates.
 fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let alive: HashSet<PlayerId> = state
         .prepaid_mulligan_bottoms
@@ -823,6 +870,22 @@ fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // CR 103.2b precedes the CR 103.2e agenda step, so a departure here
             // resumes at the agenda step; the companion walk is already done.
             state.waiting_for = super::conspiracy::agenda_choices_or_mulligan(state, events);
+        }
+        // CR 800.4a + CR 103.1a: a departed seat is no longer a candidate to take
+        // the first turn. The candidates are re-derived from the living side
+        // representatives, so a shared-turn side whose representative left is
+        // still offered through a living member.
+        // CR 800.4h: a departed chooser's choice passes to the next player in turn order.
+        WaitingFor::ChooseStartingPlayer { player, .. } => {
+            let player = if players::is_alive(state, player) {
+                player
+            } else {
+                players::next_player_in_turn_order(state, player)
+            };
+            state.waiting_for = WaitingFor::ChooseStartingPlayer {
+                player,
+                candidates: super::topology::turn_representatives(state),
+            };
         }
         WaitingFor::OpeningHandBottomCards { pending, reason } => {
             let alive: Vec<_> = pending
@@ -1624,13 +1687,36 @@ fn do_eliminate(
                 .expect("eliminated search batch must own the active frame");
         }
     }
-    if state.pending_replacement.is_some() && leaving_is_latched_chooser {
+    // CR 800.4a + CR 121.6b + CR 614.17c: under a parked draw unless payment
+    // that outlives this departure, the choice the leaver was asked is their
+    // own draw inside the payer's draw sequence (a substitute: Notion Thief's
+    // "you draw a card"). It is kept for the concession's action boundary,
+    // which settles it through the replacement authority as a draw that can no
+    // longer happen (`engine::reconcile_parked_unless_payment_after_departure`):
+    // the sequences above it resume, so the payer's own remaining draws
+    // (Thought Reflection's second card) are not abandoned with the leaver's.
+    let settles_with_parked_payment = leaving_is_latched_chooser
+        && super::engine_payment_choices::departed_draw_settles_with_parked_payment(
+            state,
+            leaving_set,
+        );
+    if state.pending_replacement.is_some()
+        && leaving_is_latched_chooser
+        && !settles_with_parked_payment
+    {
         state.pending_replacement = None;
         // CR 800.4a: a paused frameless single-card discard belongs to the
         // abandoned choice of the leaving player; left behind it would go stale.
         state.pending_single_discard = None;
         state.replacement_may_cost_paused = false;
-        super::replacement::abandon_post_replacement_continuation(state);
+        // CR 121.6b: under a surviving parked draw payment the abandoned
+        // choice sat inside a substitute for one of the payer's draws, so only
+        // the leaver's part of the draw authority goes with it.
+        if super::engine_payment_choices::draw_payment_is_parked(state) {
+            super::replacement::abandon_departed_substitute_continuation(state, leaving_set);
+        } else {
+            super::replacement::abandon_post_replacement_continuation(state);
+        }
         super::turns::abandon_phase_begin_choice(state);
     }
 
@@ -1943,6 +2029,35 @@ fn abandon_source_bound_resolution_prompt(
         };
     if !abandon {
         return;
+    }
+
+    // CR 800.4a + CR 121.6b + CR 117.2e: under a parked draw unless payment that outlives
+    // this departure, the leaver's prompt is a choice inside a substitute for
+    // one of the payment's draws (Abundance's land-or-nonland, after Notion
+    // Thief made that draw the leaver's). Only the leaver's part of that
+    // substitute is abandoned: their draw instructions, the continuations
+    // they control and the one their choice deferred. The payer's own draw
+    // sequence and the resolution the payment settles are not the leaver's to
+    // abandon; they stay, and resume at the concession's action boundary
+    // (`engine::reconcile_parked_unless_payment_after_departure`).
+    if super::engine_payment_choices::draw_payment_is_parked(state)
+        && !selecting_resolution_sacrifice
+        && !parked_resolution_sacrifice
+    {
+        super::replacement::abandon_departed_substitute_continuation(state, leaving_set);
+        state.waiting_for = WaitingFor::Priority {
+            player: players::next_player(state, player),
+        };
+        return;
+    }
+
+    // CR 800.4a: the family is abandoned in dependency order. A draw still in
+    // flight above the abandoned choice (an interactive substitute asked it:
+    // the leaver's own Abundance, on a draw of a payment that left with them)
+    // is torn down before the continuation beneath it, which the carrier's
+    // abandonment expects on top.
+    if state.active_multi_draw_frame().is_some() {
+        super::replacement::abandon_post_replacement_continuation(state);
     }
 
     if selecting_resolution_sacrifice {
@@ -2516,6 +2631,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -2581,6 +2697,7 @@ mod tests {
             moved_count: None,
             face_down_profile: None,
             library_placement: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
             effect_kind: EffectKind::ChangeZone,
         }
@@ -2645,6 +2762,7 @@ mod tests {
                     attach_to: None,
                     performed_by: None,
                     library_placement: None,
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     exile_duration: None,
                     exile_controller: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -2665,6 +2783,7 @@ mod tests {
                     attach_to: None,
                     performed_by: None,
                     library_placement: None,
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     exile_duration: None,
                     exile_controller: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -4038,6 +4157,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -4183,6 +4303,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -4240,6 +4361,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -4289,6 +4411,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -4368,6 +4491,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,

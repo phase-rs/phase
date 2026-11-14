@@ -830,9 +830,9 @@ fn contest_event(result: &ActionResult) -> (Vec<ContestRound>, PlayerId) {
 }
 
 /// CR 103.1 / CR 706: a seeded contest with no tie emits a single round
-/// with one d20 per seat and the high roller becomes the starting player.
+/// with one d20 per seat and the high roller chooses who takes the first turn.
 #[test]
-fn start_game_contest_emits_d20_per_seat_and_picks_high_roller() {
+fn start_game_contest_emits_d20_per_seat_and_makes_the_high_roller_choose() {
     let mut state = GameState::new(FormatConfig::standard(), 2, 7);
     let result = start_game(&mut state);
     let (rounds, winner) = contest_event(&result);
@@ -846,42 +846,55 @@ fn start_game_contest_emits_d20_per_seat_and_picks_high_roller() {
     // The winner is the seat that rolled the max.
     let argmax = rolls.iter().find(|&&(_, r)| r == max_roll).unwrap().0;
     assert_eq!(winner, argmax, "winner == argmax of the round");
-    assert_eq!(
-        state.current_starting_player, winner,
-        "high roller becomes the starting player"
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::ChooseStartingPlayer { player, .. } if player == winner
+        ),
+        "the high roller chooses who takes the first turn"
     );
     // All d20 rolls are in range.
     assert!(rolls.iter().all(|&(_, r)| (1..=20).contains(&r)));
 }
 
-/// Event sequencing: the single `StartingPlayerContest` precedes
-/// `GameStarted`, which precedes `TurnStarted`.
+/// CR 103.1: event sequencing. The start batch is the single
+/// `StartingPlayerContest`; the chooser's answer then emits `GameStarted`,
+/// which precedes `TurnStarted`.
 #[test]
-fn start_game_contest_sequences_dice_before_game_started() {
+fn start_game_contest_precedes_the_choice_and_the_game_start() {
     let mut state = GameState::new(FormatConfig::standard(), 2, 7);
     let result = start_game(&mut state);
-    let contest = result
-        .events
-        .iter()
-        .position(|e| matches!(e, GameEvent::StartingPlayerContest { .. }))
-        .expect("StartingPlayerContest present");
-    let first_game_started = result
-        .events
-        .iter()
-        .position(|e| matches!(e, GameEvent::GameStarted))
-        .expect("GameStarted present");
-    let first_turn_started = result
-        .events
-        .iter()
-        .position(|e| matches!(e, GameEvent::TurnStarted { .. }))
-        .expect("TurnStarted present");
     assert!(
-        contest < first_game_started,
-        "StartingPlayerContest must precede GameStarted"
+        matches!(
+            result.events.as_slice(),
+            [GameEvent::StartingPlayerContest { .. }]
+        ),
+        "the start batch is the contest alone: {:?}",
+        result.events
     );
+    let WaitingFor::ChooseStartingPlayer {
+        player: chooser, ..
+    } = state.waiting_for
+    else {
+        panic!("the start rests at the CR 103.1 choice");
+    };
+    let answer = apply(
+        &mut state,
+        chooser,
+        GameAction::ChooseStartingPlayer { player: chooser },
+    )
+    .expect("the chooser elects to play first");
     assert!(
-        first_game_started < first_turn_started,
-        "GameStarted must precede TurnStarted"
+        matches!(
+            answer.events.as_slice(),
+            [
+                GameEvent::GameStarted,
+                GameEvent::TurnStarted { turn_number: 1, .. },
+                ..
+            ]
+        ),
+        "the answer's batch begins GameStarted, TurnStarted: {:?}",
+        answer.events
     );
 }
 
@@ -924,13 +937,26 @@ fn start_game_contest_tie_triggers_reroll_and_resolves() {
             );
         }
     }
-    // Resolves to exactly one starting player that is a valid seat.
-    assert_eq!(state.current_starting_player, winner);
+    // Resolves to exactly one chooser that is a valid seat.
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::ChooseStartingPlayer { player, .. } if player == winner
+        ),
+        "the high roller chooses who takes the first turn"
+    );
     assert!(
         state.seat_order.contains(&winner),
-        "starting player is a valid seat after a reroll"
+        "the chooser is a valid seat after a reroll"
     );
-    exactly_one_game_started(&result);
+    // CR 103.1: the game starts once, in the chooser's answer.
+    let answer = apply(
+        &mut state,
+        winner,
+        GameAction::ChooseStartingPlayer { player: winner },
+    )
+    .expect("the chooser elects to play first");
+    exactly_one_game_started(&answer);
 }
 
 /// CR 103.1: high roller wins — for 3- and 4-player contests across many
@@ -961,7 +987,13 @@ fn start_game_contest_high_roller_wins_three_and_four_seats() {
                 winner, top[0],
                 "winner is the unique-max roller of the final round"
             );
-            assert_eq!(state.current_starting_player, winner);
+            assert!(
+                matches!(
+                    state.waiting_for,
+                    WaitingFor::ChooseStartingPlayer { player, .. } if player == winner
+                ),
+                "the high roller chooses who takes the first turn"
+            );
         }
     }
 }
@@ -1023,7 +1055,13 @@ fn start_game_contest_round_structure_invariants() {
                 .collect();
             assert_eq!(top.len(), 1, "final round has a unique max");
             assert_eq!(winner, top[0]);
-            assert_eq!(state.current_starting_player, winner);
+            assert!(
+                matches!(
+                    state.waiting_for,
+                    WaitingFor::ChooseStartingPlayer { player, .. } if player == winner
+                ),
+                "the high roller chooses who takes the first turn"
+            );
         }
     }
 }
@@ -1045,7 +1083,13 @@ fn start_game_contest_is_bounded_no_hang() {
                     rounds.len()
                 );
             assert!(state.seat_order.contains(&winner));
-            assert_eq!(state.current_starting_player, winner);
+            assert!(
+                matches!(
+                    state.waiting_for,
+                    WaitingFor::ChooseStartingPlayer { player, .. } if player == winner
+                ),
+                "the high roller chooses who takes the first turn"
+            );
         }
     }
 }

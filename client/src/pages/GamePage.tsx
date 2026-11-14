@@ -208,6 +208,8 @@ import {
   loyaltyBadge,
   stripCostPrefix,
   stripLoyaltyCostPrefix,
+  unlessDrawCostLabel,
+  unlessPaymentCanBeDeclined,
 } from "../viewmodel/costLabel.ts";
 import { renderDescription } from "../utils/description.ts";
 import { LoyaltyBadge } from "../components/ui/LoyaltyBadge.tsx";
@@ -2320,7 +2322,7 @@ function GamePageContent({
             })()}
 
           {waitingFor?.type === "BetweenGamesChoosePlayDraw" &&
-            waitingFor.data.player === playerId && (
+            canActForWaitingState && (
               <ChoiceModal
                 title={t("gamePage.playDraw.title", { gameNumber: waitingFor.data.game_number })}
                 subtitle={t("gamePage.playDraw.matchScore", {
@@ -2341,6 +2343,48 @@ function GamePageContent({
                 ]}
                 onChoose={(id) => handleChoosePlayDraw(id === "play")}
               />
+            )}
+
+          {/* CR 103.1: the chooser names the seat that takes the first turn, once
+              the starting-player contest has finished. */}
+          {waitingFor?.type === "ChooseStartingPlayer" &&
+            !startingContestActive &&
+            canActForWaitingState && (
+              <ChoiceModal
+                title={t("gamePage.startingPlayer.title")}
+                options={waitingFor.data.candidates.map((seat) =>
+                  seat === playerId
+                    ? {
+                        id: String(seat),
+                        label: t("gamePage.playDraw.playFirst"),
+                        description: t("gamePage.playDraw.playFirstDescription"),
+                      }
+                    : {
+                        id: String(seat),
+                        label: t("gamePage.startingPlayer.playerPlaysFirst", {
+                          name: getOpponentDisplayName(seat),
+                        }),
+                      },
+                )}
+                onChoose={(id) =>
+                  dispatch({ type: "ChooseStartingPlayer", data: { player: Number(id) } })
+                }
+              />
+            )}
+
+          {waitingFor?.type === "ChooseStartingPlayer" &&
+            !startingContestActive &&
+            !canActForWaitingState && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center">
+                <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
+                <div className="relative text-center">
+                  <p className="text-base font-semibold text-white">
+                    {t("gamePage.startingPlayer.opponentChoosing", {
+                      name: getOpponentDisplayName(waitingFor.data.player),
+                    })}
+                  </p>
+                </div>
+              </div>
             )}
 
           {/* Multiplayer UX overlays */}
@@ -3979,6 +4023,7 @@ function UnlessPaymentPanel() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const waitingFor = useGameStore((s) => s.waitingFor);
+  const drawCost = useGameStore((s) => s.gameState?.derived?.unless_draw_cost);
 
   if (waitingFor?.type !== "UnlessPayment") return null;
 
@@ -3991,7 +4036,9 @@ function UnlessPaymentPanel() {
     return <SayPhrasePanel phrase={waitingFor.data.cost.phrase} effect={effect} />;
   }
 
-  const costDisplay = formatUnlessCost(waitingFor.data.cost, t);
+  const costDisplay = drawCost
+    ? unlessDrawCostLabel(drawCost)
+    : formatUnlessCost(waitingFor.data.cost, t);
 
   return (
     <AnimatePresence>
@@ -4021,14 +4068,16 @@ function UnlessPaymentPanel() {
                 size="sm"
               />
             </button>
-            <button
-              onClick={() =>
-                dispatch({ type: "PayUnlessCost", data: { pay: false } })
-              }
-              className="rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
-            >
-              {t("gamePage.unlessPayment.dontPay")}
-            </button>
+            {unlessPaymentCanBeDeclined(drawCost) && (
+              <button
+                onClick={() =>
+                  dispatch({ type: "PayUnlessCost", data: { pay: false } })
+                }
+                className="rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
+              >
+                {t("gamePage.unlessPayment.dontPay")}
+              </button>
+            )}
           </div>
         </div>
       </motion.div>

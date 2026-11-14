@@ -543,6 +543,17 @@ pub enum ProposedEvent {
         /// player who becomes the card's owner (`zone_pipeline::entry_receiver`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         performed_by: Option<PlayerId>,
+        /// CR 701.24a + CR 730.3: whether this move is the move component of a
+        /// "shuffle [set] into [library]" operation whose chained `Shuffle`
+        /// randomizes the library. Its library position is then transient, so
+        /// a merged permanent's components share it instead of each taking the
+        /// zone default. Rides the event through replacement and CR 616.1
+        /// pause/resume, like `face_down_in_exile`.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+        )]
+        library_shuffle: crate::types::ability::LibraryShuffleMode,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -971,6 +982,7 @@ impl ProposedEvent {
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: HashSet::new(),
         }
     }

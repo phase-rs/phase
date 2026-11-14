@@ -154,7 +154,12 @@ pub fn resolve(
             });
             return Ok(());
         };
-        if !control_is_exchangeable(obj_a.zone) || !control_is_exchangeable(obj_b.zone) {
+        // CR 702.26b: a phased-out permanent can't be affected, so the exchange can't be completed.
+        if !control_is_exchangeable(obj_a.zone)
+            || !control_is_exchangeable(obj_b.zone)
+            || obj_a.is_phased_out_permanent()
+            || obj_b.is_phased_out_permanent()
+        {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::ExchangeControl,
                 source_id: ability.source_id,

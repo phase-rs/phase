@@ -1186,6 +1186,11 @@
       "drawFirst": "Dobieraj pierwszy",
       "drawFirstDescription": "Wykonaj dodatkowe dobranie w swojej pierwszej turze"
     },
+    "startingPlayer": {
+      "title": "Wybierz, kto zaczyna",
+      "playerPlaysFirst": "{{name}} zaczyna",
+      "opponentChoosing": "{{name}} wybiera, kto zaczyna…"
+    },
     "mulligan": {
       "opponentDeciding": "Przeciwnik wybiera swoją rękę startową…",
       "londonTitle": "Mulligan londyński ({{count}} wziętych)",
@@ -1332,7 +1337,10 @@
         "Ticket": "biletu"
       },
       "generic": "koszt",
-      "pay": "Zapłać {{cost}}"
+      "pay": "Zapłać {{cost}}",
+      "draw": "dobierz kartę",
+      "drawCount_one": "dobierz {{count}} kartę",
+      "drawCount_other": "dobierz {{count}} karty"
     },
     "unlessPayment": {
       "defaultEffect": "Skontruj, chyba że zapłacisz",

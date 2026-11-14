@@ -1186,6 +1186,11 @@
       "drawFirst": "Robar primero",
       "drawFirstDescription": "Toma el robo extra en tu primer turno"
     },
+    "startingPlayer": {
+      "title": "Elige quién juega primero",
+      "playerPlaysFirst": "{{name}} juega primero",
+      "opponentChoosing": "{{name}} está eligiendo quién juega primero…"
+    },
     "mulligan": {
       "opponentDeciding": "El oponente está decidiendo su mano inicial…",
       "londonTitle": "Mulligan de Londres ({{count}} tomados)",
@@ -1332,7 +1337,10 @@
         "Ticket": "ticket"
       },
       "generic": "un coste",
-      "pay": "Pagar {{cost}}"
+      "pay": "Pagar {{cost}}",
+      "draw": "roba una carta",
+      "drawCount_one": "roba {{count}} carta",
+      "drawCount_other": "roba {{count}} cartas"
     },
     "unlessPayment": {
       "defaultEffect": "Contrarrestar a menos que pagues",

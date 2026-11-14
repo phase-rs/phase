@@ -331,6 +331,11 @@
     "body": "The app hit an unexpected error and can't continue on this screen. Reloading usually fixes it.",
     "reload": "Reload"
   },
+  "stateCodec": {
+    "actionInterrupted": "State delivery interrupted during action",
+    "submissionNotSent": "State delivery is being recovered; this submission was not sent.",
+    "reconnectSubmissionNotSent": "The connection is being re-established; this action was not sent."
+  },
   "actionError": {
     "title": "{{action}} failed",
     "skipTarget": "Skip target",

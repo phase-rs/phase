@@ -1517,7 +1517,10 @@
       "returnToHand_one": "将一个永久物移回手牌",
       "returnToHand_other": "将{{count}}个永久物移回手牌",
       "sacrifice_one": "牺牲一个永久物",
-      "sacrifice_other": "牺牲{{count}}个永久物"
+      "sacrifice_other": "牺牲{{count}}个永久物",
+      "draw": "抓一张牌",
+      "drawCount_one": "抓{{count}}张牌",
+      "drawCount_other": "抓{{count}}张牌"
     },
     "debug": {
       "modeBanner": "调试模式 —— 点击任意牌",
@@ -1652,6 +1655,11 @@
       "subtitle": "选择一张要展示并通联至该咒语的牌，或不使用通联直接施放。",
       "title": "通联古咒？",
       "unknownCard": "牌 #{{id}}"
+    },
+    "startingPlayer": {
+      "opponentChoosing": "{{name}} 正在选择先手玩家…",
+      "playerPlaysFirst": "{{name}} 先手",
+      "title": "选择先手玩家"
     },
     "toasts": {
       "gamePausedPlayerDisconnected": "游戏已暂停 —— {{name}}已断开连接",

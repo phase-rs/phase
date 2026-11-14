@@ -5563,29 +5563,51 @@ fn start_game_counts_the_starting_players_first_turn() {
     assert_eq!(state.players[0].turns_taken, 1);
 }
 
+/// CR 103.1: `start_game` ends at the choice; the chooser's answer starts
+/// the game.
 #[test]
-fn start_game_emits_game_started_event() {
+fn start_game_ends_at_the_choice_and_the_answer_starts_the_game() {
     let mut state = new_game(42);
     let result = start_game(&mut state);
 
-    assert!(result
+    assert!(!result
+        .events
+        .iter()
+        .any(|e| matches!(e, GameEvent::GameStarted)));
+    let WaitingFor::ChooseStartingPlayer {
+        player: chooser, ..
+    } = state.waiting_for
+    else {
+        panic!("the start rests at the CR 103.1 choice");
+    };
+
+    let answer = apply(
+        &mut state,
+        chooser,
+        GameAction::ChooseStartingPlayer { player: chooser },
+    )
+    .expect("the chooser elects to play first");
+    assert!(answer
         .events
         .iter()
         .any(|e| matches!(e, GameEvent::GameStarted)));
 }
 
-// CR 103.1: Regression — `start_game` must randomize the starting player for
-// all match types, not just Bo3. Previously gated on `match_type == Bo3`, which
+// CR 103.1: Regression — `start_game` must randomize the chooser for all
+// match types, not just Bo3. Previously gated on `match_type == Bo3`, which
 // caused every Bo1 (default) game to begin with PlayerId(0).
 #[test]
-fn start_game_randomizes_starting_player_for_default_match_type() {
+fn start_game_randomizes_the_chooser_for_default_match_type() {
     let mut saw_p0 = false;
     let mut saw_p1 = false;
 
     for seed in 0..64u64 {
         let mut state = new_game(seed);
         let _ = start_game(&mut state);
-        match state.current_starting_player {
+        let WaitingFor::ChooseStartingPlayer { player, .. } = state.waiting_for else {
+            panic!("the start rests at the CR 103.1 choice");
+        };
+        match player {
             PlayerId(0) => saw_p0 = true,
             PlayerId(1) => saw_p1 = true,
             _ => unreachable!("two-player game can only produce PlayerId(0) or PlayerId(1)"),
@@ -9307,6 +9329,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         cost_reduction_election: None,
         activation_cost_snapshot: None,
         activation_cost: None,
+        activation_cost_paused_on_draw: false,
         deferred_hand_discard_cost: None,
         prepaid_finalization: None,
         activation_ability_index: None,
@@ -9757,6 +9780,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         cost_reduction_election: None,
         activation_cost_snapshot: None,
         activation_cost: None,
+        activation_cost_paused_on_draw: false,
         deferred_hand_discard_cost: None,
         prepaid_finalization: None,
         activation_ability_index: None,
@@ -13828,5 +13852,33 @@ fn resolution_back_land_face_play_is_legal_requires_a_modal_land_back_turn_and_a
     assert!(
         !resolution_back_land_face_play_is_legal(&prohibited, PlayerId(0), card),
         "CR 101.2: a \"can't play lands\" static refuses the land face"
+    );
+}
+
+/// CR 104.1 + CR 118.12: a finished game retires the staged payment before the
+/// match transition moves to sideboarding.
+#[test]
+fn a_finished_match_retires_the_payment_before_the_transition() {
+    use crate::types::game_state::{GameEnd, ResolutionPaymentTransaction};
+    use crate::types::match_config::MatchType;
+
+    let mut state = GameState::new_two_player(7);
+    state.match_config.match_type = MatchType::Bo3;
+    state.waiting_for = WaitingFor::GameOver { winner: Some(P0) };
+    state.game_end = Some(GameEnd { winner: Some(P0) });
+    state.payment_transaction = Some(Box::new(ResolutionPaymentTransaction {
+        wire_version: 1,
+        owner: P0,
+        root: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), P0)),
+        transcript: Vec::new(),
+        base_waiting_for: WaitingFor::Priority { player: P0 },
+        resolving_trigger_context: None,
+        recovered: None,
+    }));
+    let mut result = ActionResult::applied(vec![], state.waiting_for.clone());
+    super::settle_finished_game(&mut state, &mut result);
+    assert!(
+        state.payment_transaction.is_none(),
+        "the terminal transition sees no live payment descriptor"
     );
 }

@@ -13,6 +13,7 @@ import {
   type LobbySource,
   type LobbySourceStatus,
 } from "../../../stores/multiplayerStore";
+import { refuseRealWebSockets } from "../../../test/helpers/refusingWebSocket";
 
 /**
  * `findLobbyGameByCode` reads the store module's private per-source channel
@@ -138,8 +139,10 @@ describe("LobbyView", () => {
   const originalSubscribeLobby = useMultiplayerStore.getState().subscribeLobby;
   const originalSubscribeAmbient =
     useMultiplayerStore.getState().subscribeAmbientLobby;
+  let socketUrls: string[] = [];
 
   beforeEach(() => {
+    socketUrls = refuseRealWebSockets();
     // Egress guards — defence-in-depth; the real mitigation is the module
     // mock above. These only make the absence of a send observable.
     vi.stubGlobal("navigator", { sendBeacon: vi.fn(() => true) });
@@ -152,6 +155,11 @@ describe("LobbyView", () => {
       directorySources: [],
       directoryFetchedAtMs: null,
       disabledDirectorySources: [],
+      // Own the subscriptions in EVERY case, including typed-code tests.
+      // Real channels outlive a view's unsubscribe; their delayed handshake
+      // and reconnect callbacks can overwrite a later case's seeded counts.
+      subscribeLobby: vi.fn().mockResolvedValue(() => {}),
+      subscribeAmbientLobby: ambientFanOut().subscribe,
     });
   });
 
@@ -191,6 +199,7 @@ describe("LobbyView", () => {
       subscribeLobby: originalSubscribeLobby,
       subscribeAmbientLobby: originalSubscribeAmbient,
     });
+    expect(socketUrls).toEqual([]);
   });
 
   it("calls onServerOffline when the shared subscription socket is unreachable", async () => {

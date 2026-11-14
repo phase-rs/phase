@@ -1186,6 +1186,11 @@
       "drawFirst": "Piocher en premier",
       "drawFirstDescription": "Prenez la pioche supplémentaire à votre premier tour"
     },
+    "startingPlayer": {
+      "title": "Choisissez qui joue en premier",
+      "playerPlaysFirst": "{{name}} joue en premier",
+      "opponentChoosing": "{{name}} choisit qui joue en premier…"
+    },
     "mulligan": {
       "opponentDeciding": "L'adversaire décide de sa main de départ…",
       "londonTitle": "Mulligan de Londres ({{count}} pris)",
@@ -1332,7 +1337,10 @@
         "Ticket": "ticket"
       },
       "generic": "un coût",
-      "pay": "Payer {{cost}}"
+      "pay": "Payer {{cost}}",
+      "draw": "piochez une carte",
+      "drawCount_one": "piochez {{count}} carte",
+      "drawCount_other": "piochez {{count}} cartes"
     },
     "unlessPayment": {
       "defaultEffect": "Contrer à moins que vous ne payiez",

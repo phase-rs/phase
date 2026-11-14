@@ -1681,6 +1681,17 @@ pub fn rehydrate_game_from_card_db_with_finalization(
     finalization: CardDbRehydrationFinalization,
 ) {
     rehydrate_card_db_metadata(state, db);
+    rehydrate_printed_faces(state, db, finalization);
+    rehydrate_recovery_checkpoint_faces(state, db);
+}
+
+/// The printed-face restore of one executable board: the live game, or the
+/// recovery checkpoint a parked payment settles onto.
+fn rehydrate_printed_faces(
+    state: &mut GameState,
+    db: &CardDatabase,
+    finalization: CardDbRehydrationFinalization,
+) {
     restore_legacy_swap_snapshot_provenance(state);
     let (changed_any, changed_battlefield) = reapply_printed_faces_from_card_db(state, db);
     repair_battlefield_trigger_index_after_face_reapply(state, changed_battlefield);
@@ -1692,6 +1703,27 @@ pub fn rehydrate_game_from_card_db_with_finalization(
             finalize_public_state(state);
         }
     }
+}
+
+/// A staged payment's recovery checkpoint is a second executable board: its
+/// prompt is answered on it and settlement installs it as the game. It takes
+/// the same printed-face restore as the board that carries it, so settling the
+/// payment cannot put back the characteristics the host just refreshed. Its
+/// zones, payment state and prompt are kept as accepted; the registries it
+/// reads are the live state's (`payment_transaction::hydrated_checkpoint`).
+fn rehydrate_recovery_checkpoint_faces(state: &mut GameState, db: &CardDatabase) {
+    let Some(checkpoint) = state
+        .payment_transaction
+        .as_deref_mut()
+        .and_then(|transaction| transaction.recovered.as_deref_mut())
+    else {
+        return;
+    };
+    rehydrate_printed_faces(
+        &mut checkpoint.state,
+        db,
+        CardDbRehydrationFinalization::Defer,
+    );
 }
 
 /// Populate Conjure registry and card-name validation lists on first rehydrate.

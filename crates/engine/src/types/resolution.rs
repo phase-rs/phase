@@ -3782,43 +3782,6 @@ impl ResolutionStack {
         self.frames.iter()
     }
 
-    /// CR 104.4b: whether any parked frame is an unsettled delivery (a
-    /// zone-change or batch delivery mid-flight). Its retained events are not
-    /// normalized, so loop equality treats a state holding one as not
-    /// comparable. Exhaustive on purpose: a new frame family must say whether
-    /// it is a settled, visited carrier or an unsettled one.
-    pub(crate) fn holds_unsettled_delivery_frame(&self) -> bool {
-        self.frames.iter().any(|frame| match frame {
-            ResolutionFrame::ChangeZone(_) | ResolutionFrame::BatchDelivery(_) => true,
-            ResolutionFrame::AbilityContinuation(_)
-            | ResolutionFrame::RepeatFor(_)
-            | ResolutionFrame::RepeatUntil(_)
-            | ResolutionFrame::RepeatedOptionalPayment(_)
-            | ResolutionFrame::CounterMoves(_)
-            | ResolutionFrame::CounterRemovals(_)
-            | ResolutionFrame::CounterAdditions(_)
-            | ResolutionFrame::CopyToken(_)
-            | ResolutionFrame::DebugCardEntries(_)
-            | ResolutionFrame::EachPlayerCopyChosen(_)
-            | ResolutionFrame::ChooseOneOf(_)
-            | ResolutionFrame::VoteBallot(_)
-            | ResolutionFrame::PerPlayerZoneChoice(_)
-            | ResolutionFrame::PerCategoryZoneChoice(_)
-            | ResolutionFrame::OptionalEffect(_)
-            | ResolutionFrame::CoinFlip(_)
-            | ResolutionFrame::DieRoll(_)
-            | ResolutionFrame::Proliferate(_)
-            | ResolutionFrame::MultiDraw(_)
-            | ResolutionFrame::Discard(_)
-            | ResolutionFrame::ConniveReentry(_)
-            | ResolutionFrame::LifeTotalAssignment(_)
-            | ResolutionFrame::SpellResolution(_)
-            | ResolutionFrame::MutateMerge(_)
-            | ResolutionFrame::CipherEncode(_)
-            | ResolutionFrame::PostReplacement(_) => false,
-        })
-    }
-
     /// CR 104.4b: every trigger event a parked frame retains, in every frame
     /// rather than only the active one — an optional frame's singular and plural
     /// events, a copy-chosen walk's trigger event, and an ability continuation's zone-choice and pending trigger
@@ -5695,15 +5658,20 @@ impl ResolutionStateWire {
                 Err("invalid resolution-state wire decode mode".to_string())
             }
         })();
-        decoded.map_err(|error: String| {
-            if version <= LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
-                && error.contains("INVALID_COIN_BRANCH_BINDINGS:")
-            {
-                LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string()
-            } else {
-                error
-            }
-        })
+        decoded
+            .and_then(|wire: Self| {
+                crate::types::game_state::validate_restored_event_context_pins(&wire.state)?;
+                Ok(wire)
+            })
+            .map_err(|error: String| {
+                if version <= LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
+                    && error.contains("INVALID_COIN_BRANCH_BINDINGS:")
+                {
+                    LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string()
+                } else {
+                    error
+                }
+            })
     }
 }
 
@@ -7321,6 +7289,7 @@ mod tests {
                 moved_count: None,
                 face_down_profile: None,
                 library_placement: None,
+                library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                 enter_attached_to: None,
                 effect_kind: EffectKind::ChangeZone,
             }),
@@ -10054,6 +10023,7 @@ mod tests {
                 index: 0,
             }],
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,

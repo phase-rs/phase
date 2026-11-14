@@ -1369,6 +1369,11 @@ struct RawActionApplication {
     submitted_interaction_owner: Option<PlayerId>,
     preserve_interaction: bool,
     lifecycle: super::lifecycle::ActionLifecycleGuard,
+    /// CR 104.3a: the departure a concession committed at this boundary.
+    committed_departure: Option<CommittedDeparture>,
+    /// CR 104.3a: the failure that ended a committed concession's follow-up in
+    /// the core; finalization publishes the committed departure instead.
+    follow_up_failure: Option<EngineError>,
 }
 
 /// Receipt-relevant observations from one prospective action. The lifecycle
@@ -1576,6 +1581,8 @@ fn apply_action_boundary_core(
             submitted_interaction_owner,
             preserve_interaction,
             lifecycle,
+            committed_departure: None,
+            follow_up_failure: None,
         });
     }
     // A player-resource change this action resolves must be representable: open
@@ -1589,6 +1596,15 @@ fn apply_action_boundary_core(
     // snapshot above still holds it on its `PendingCast`, so every restore path
     // below returns it there.
     super::announcement_triggers::begin_action(state);
+    // CR 104.3a + CR 118.12: a submitter-scoped action admitted outside the
+    // parked payment must stay authoritative in the recovery checkpoint too.
+    let mirror_source = (state
+        .payment_transaction
+        .as_ref()
+        .is_some_and(|transaction| transaction.recovered.is_some())
+        && action.is_submitter_scoped()
+        && !matches!(action, GameAction::Concede { .. } | GameAction::Debug(_)))
+    .then(|| (action.clone(), authenticated_actor));
     let mut result = match if payment_transaction::owns_action(state, &action) {
         // All staged-payment actions enter through this admission point. The
         // authenticated actor is recorded for deterministic replay; the
@@ -1706,8 +1722,21 @@ fn apply_action_boundary_core(
             submitted_interaction_owner,
             preserve_interaction,
             lifecycle,
+            committed_departure: None,
+            follow_up_failure: None,
         });
     }
+    if let Some((mirror_action, mirror_actor)) = mirror_source {
+        payment_transaction::mirror_outside_action(state, mirror_actor, &mirror_action);
+    }
+    // CR 104.3a: "A player who concedes leaves the game immediately." The
+    // departure and the events that record it commit here, at the
+    // authenticated action boundary; every later failure of this action's
+    // follow-up restores this state and publishes these events.
+    let committed_departure = independent_cast_action
+        .as_ref()
+        .filter(|(_, _, action)| matches!(action, GameAction::Concede { .. }))
+        .map(|concession| CommittedDeparture::capture(state, &result, concession.clone()));
     // CR 400.7 + CR 403.3 + CR 614.12a: an as-enters choice (and any continuation it raises) can
     // span an arbitrary number of client round-trips of ANY `WaitingFor` shape, so realization of a
     // parked token battlefield entry is keyed on the action having SETTLED, not on prompt shape.
@@ -1725,70 +1754,97 @@ fn apply_action_boundary_core(
     // cannot have them collected a second time. Inert on every other route: the flush returns
     // `false` when nothing was parked or an earlier convergence point already consumed it
     // (`Option::take_if`).
-    let scan_from = result.events.len();
-    // CR 601.2h + CR 602.2b + CR 605.3b: a parked counter-cost root's subtree is
-    // finished and the root resumed before the action returns; when that made
-    // progress, its events join the convergence pass below.
-    let resumed_parked_root = match resume_parked_counter_cost_root_at_action_boundary(
-        state,
-        &result.waiting_for,
-        &mut result.events,
-    ) {
-        Ok(Some(waiting_for)) => {
-            result.waiting_for = waiting_for;
-            true
-        }
-        Ok(None) => false,
-        Err(err) => {
-            let failure = boundary_life_change_failure(state);
-            lifecycle.discard();
-            *state = cast_undo_boundary.restore(boundary_snapshot);
-            return Err(
-                failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                    player,
-                }),
-            );
-        }
-    };
-    let realized_token_entry =
-        effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
-    // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
-    // completed on a route that never reached the pipeline (a spell cast during
-    // a resolution, CR 608.2g, finishes its announcement here): the resolving
-    // instant or sorcery still owes its final part — leaving the stack — and the
-    // pipeline's top runs it (`run_spell_final_part_if_due`) and collects its
-    // triggers. A token realization and an owed final part on the same action
-    // share one pass.
-    let owed_spell_final_part_is_due = owed_spell_final_part_is_due(state, &result);
-    if (resumed_parked_root && matches!(result.waiting_for, WaitingFor::Priority { .. }))
-        || realized_token_entry
-        || owed_spell_final_part_is_due
-    {
-        if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
-            let failure = boundary_life_change_failure(state);
-            lifecycle.discard();
-            *state = cast_undo_boundary.restore(boundary_snapshot);
-            return Err(
-                failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                    player,
-                }),
-            );
-        }
-    }
-    // CR 603.2 + CR 603.3: events this action emitted while the announcement
-    // stays paused are staged into its carrier; a spell's carrier returns to
-    // whichever owner now holds the announcement. A reducer arm can return a
-    // prompt carrying the announcement without having written it to the state
-    // yet, so the result's wait is the one the custody authority inspects; the
-    // state's own wait is left exactly as the reducer left it.
-    let reducer_wait = std::mem::replace(&mut state.waiting_for, result.waiting_for.clone());
-    super::announcement_triggers::end_action(state, &result.events);
-    result.waiting_for = std::mem::replace(&mut state.waiting_for, reducer_wait);
-    if let Some(player) = boundary_life_change_failure(state) {
-        lifecycle.discard();
-        *state = cast_undo_boundary.restore(boundary_snapshot);
-        return Err(EngineError::LifeChangeUnrepresentable { player });
-    }
+    // CR 104.3a: a concession's follow-up that fails stops here; finalization
+    // publishes the committed departure (`reject_or_publish_departure`).
+    let follow_up_failure =
+        'follow_up: {
+            let scan_from = result.events.len();
+            // CR 601.2h + CR 602.2b + CR 605.3b: a parked counter-cost root's subtree is
+            // finished and the root resumed before the action returns; when that made
+            // progress, its events join the convergence pass below.
+            let resumed_parked_root = match resume_parked_counter_cost_root_at_action_boundary(
+                state,
+                &result.waiting_for,
+                &mut result.events,
+            ) {
+                Ok(Some(waiting_for)) => {
+                    result.waiting_for = waiting_for;
+                    true
+                }
+                Ok(None) => false,
+                Err(err) => {
+                    if committed_departure.is_some() {
+                        break 'follow_up Some(err);
+                    }
+                    let failure = boundary_life_change_failure(state);
+                    lifecycle.discard();
+                    *state = cast_undo_boundary.restore(boundary_snapshot);
+                    return Err(failure.map_or(err, |player| {
+                        EngineError::LifeChangeUnrepresentable { player }
+                    }));
+                }
+            };
+            // CR 800.4a + CR 616.1 + CR 117.2e: a concession that left a parked unless
+            // payment without its prompt, or with a prompt that no longer describes its
+            // event, is reconciled before the action returns. A payment that ended joins
+            // the convergence pass below.
+            let reconciled_unless_payment = match reconcile_parked_unless_payment_after_departure(
+                state,
+                committed_departure.as_ref(),
+                &mut result,
+                scan_from,
+            ) {
+                Ok(moved) => moved,
+                Err(err) => break 'follow_up Some(err),
+            };
+            let realized_token_entry =
+                effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
+            // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
+            // completed on a route that never reached the pipeline (a spell cast during
+            // a resolution, CR 608.2g, finishes its announcement here): the resolving
+            // instant or sorcery still owes its final part — leaving the stack — and the
+            // pipeline's top runs it (`run_spell_final_part_if_due`) and collects its
+            // triggers. A token realization and an owed final part on the same action
+            // share one pass.
+            let owed_spell_final_part_is_due = owed_spell_final_part_is_due(state, &result);
+            if ((resumed_parked_root || reconciled_unless_payment)
+                && matches!(result.waiting_for, WaitingFor::Priority { .. }))
+                || realized_token_entry
+                || owed_spell_final_part_is_due
+            {
+                if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
+                    if committed_departure.is_some() {
+                        break 'follow_up Some(err);
+                    }
+                    let failure = boundary_life_change_failure(state);
+                    lifecycle.discard();
+                    *state = cast_undo_boundary.restore(boundary_snapshot);
+                    return Err(failure.map_or(err, |player| {
+                        EngineError::LifeChangeUnrepresentable { player }
+                    }));
+                }
+            }
+            // CR 603.2 + CR 603.3: events this action emitted while the announcement
+            // stays paused are staged into its carrier; a spell's carrier returns to
+            // whichever owner now holds the announcement. A reducer arm can return a
+            // prompt carrying the announcement without having written it to the state
+            // yet, so the result's wait is the one the custody authority inspects; the
+            // state's own wait is left exactly as the reducer left it.
+            let reducer_wait =
+                std::mem::replace(&mut state.waiting_for, result.waiting_for.clone());
+            super::announcement_triggers::end_action(state, &result.events);
+            result.waiting_for = std::mem::replace(&mut state.waiting_for, reducer_wait);
+            if let Some(player) = boundary_life_change_failure(state) {
+                let error = EngineError::LifeChangeUnrepresentable { player };
+                if committed_departure.is_some() {
+                    break 'follow_up Some(error);
+                }
+                lifecycle.discard();
+                *state = cast_undo_boundary.restore(boundary_snapshot);
+                return Err(error);
+            }
+            None
+        };
     // Do not carry the core's window into finalization: that pass owns its own
     // scope over convergence, auto-pass, and re-convergence.
     state.ingress_life_window = None;
@@ -1806,6 +1862,8 @@ fn apply_action_boundary_core(
         submitted_interaction_owner,
         preserve_interaction,
         lifecycle,
+        committed_departure,
+        follow_up_failure,
     })
 }
 
@@ -1863,6 +1921,129 @@ fn resume_parked_counter_cost_root_at_action_boundary(
         );
     }
     Ok(progressed.then(|| state.waiting_for.clone()))
+}
+
+/// CR 800.4a + CR 616.1 + CR 117.2e: the concession-boundary reconciliation of
+/// a parked unless payment
+/// ([`PendingCostMoveResume::CounterAdditionUnlessPayment`]) the departure did
+/// not retire
+/// (`engine_payment_choices::retire_parked_unless_payment_of_departing_players`).
+///
+/// - Its replacement choice is still open for a surviving chooser, and the
+///   departure changed the replacements that apply to the parked draw (a
+///   candidate's source left, or an effect the departed player's permanent
+///   suppressed applies again): the event is re-proposed through the
+///   replacement authority, so the chooser is offered exactly the effects that
+///   apply now (CR 616.1). The same authority re-proposes on an answer; here it
+///   runs before the chooser is asked.
+/// - Its replacement choice was a departed player's own draw (a substitute
+///   draw by another player, interrupted on that player's choice). That draw
+///   can no longer happen (CR 800.4a + CR 614.17c); the same authority settles
+///   it with no card drawn and resumes the draw sequences above it (CR
+///   121.6b), so the payer's own remaining draws and then the instructions
+///   still owed are performed.
+/// - Its open question was abandoned with a departed chooser (any other
+///   parked event of theirs, or a later choice of an interactive substitute:
+///   Abundance's land-or-nonland). The departure removed only the leaver's
+///   part of the substitute (`replacement::abandon_departed_substitute_continuation`),
+///   so a surviving draw sequence is finished first (CR 121.6b), and then the
+///   payer, who chose to pay and is still in the game, performs what is still
+///   owed. No player receives priority before the payment ends (CR 117.2e);
+///   when the resolution it belongs to ends, the active player does (CR 117.3b).
+///
+/// A payment that parks again has its events collected as any pause inside a
+/// payment of draws does (CR 603.2c); one that ended is left to the caller's
+/// convergence pass. A staged resolution payment is settled by its own
+/// authority in the concession arm
+/// (`payment_transaction::settle_after_outside_action`). Inert for an action
+/// that committed no departure; `true` when the payment moved.
+fn reconcile_parked_unless_payment_after_departure(
+    state: &mut GameState,
+    departure: Option<&CommittedDeparture>,
+    result: &mut ActionResult,
+    scan_from: usize,
+) -> Result<bool, EngineError> {
+    if departure.is_none() {
+        return Ok(false);
+    }
+    match parked_unless_payment_repair(state, &result.waiting_for) {
+        Some(ParkedPaymentRepair::StalePrompt) => {
+            sync_waiting_for(state, &result.waiting_for);
+            // No answer is read: the replacement authority settles a draw that
+            // can't happen with no replacement, and re-proposes any other stale
+            // prompt, before it applies an index (`handle_replacement_choice`,
+            // `continue_replacement`).
+            result.waiting_for =
+                engine_replacement::handle_replacement_choice(state, 0, &mut result.events)?;
+            state.waiting_for = result.waiting_for.clone();
+        }
+        Some(ParkedPaymentRepair::LostPrompt) => {
+            sync_waiting_for(state, &result.waiting_for);
+            engine_payment_choices::set_active_priority(state);
+            // CR 121.6b + CR 614.11a: a surviving draw sequence the departed
+            // substitute sat inside is finished before the payment's owner
+            // resumes; a draw of it that parks keeps the owner parked.
+            if engine_replacement::resume_active_draw_sequences(state, &mut result.events).is_none()
+            {
+                resume_pending_continuation_if_priority(state, &mut result.events)?;
+            }
+            result.waiting_for = state.waiting_for.clone();
+        }
+        None => return Ok(false),
+    }
+    if !matches!(result.waiting_for, WaitingFor::Priority { .. })
+        && engine_payment_choices::paused_in_draw_payment(state)
+        && state.game_end.is_none()
+    {
+        triggers::collect_paused_exit_triggers(state, &result.events, scan_from);
+    }
+    Ok(true)
+}
+
+/// What a departure left to repair on a parked unless payment.
+enum ParkedPaymentRepair {
+    /// CR 616.1: the payment's replacement prompt no longer describes its
+    /// event. It is still open for a surviving chooser, or its chooser left
+    /// and the departure handed priority on while keeping the record
+    /// (`engine_payment_choices::departed_draw_settles_with_parked_payment`).
+    StalePrompt,
+    /// CR 117.2e: the prompt left with its chooser and the owner is parked
+    /// under a priority window.
+    LostPrompt,
+}
+
+/// The one reading of whether a parked unless payment needs the concession's
+/// reconciliation: by the reconciliation itself, and by the departure fallback
+/// (`reject_or_publish_departure`), which retires a payment still in need of
+/// it.
+fn parked_unless_payment_repair(
+    state: &GameState,
+    waiting_for: &WaitingFor,
+) -> Option<ParkedPaymentRepair> {
+    if state.payment_transaction.is_some()
+        || !matches!(
+            state.pending_cost_move_resume,
+            Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
+        )
+    {
+        return None;
+    }
+    let stale_prompt = engine_payment_choices::draw_payment_is_parked(state)
+        && state
+            .pending_replacement
+            .as_ref()
+            .is_some_and(|pending| replacement::parked_prompt_is_stale(state, pending));
+    match waiting_for {
+        WaitingFor::ReplacementChoice { .. } | WaitingFor::Priority { .. } if stale_prompt => {
+            Some(ParkedPaymentRepair::StalePrompt)
+        }
+        WaitingFor::Priority { .. }
+            if engine_payment_choices::parked_unless_payment_lost_its_prompt(state) =>
+        {
+            Some(ParkedPaymentRepair::LostPrompt)
+        }
+        _ => None,
+    }
 }
 
 /// The action boundary's convergence pass: the ordinary post-action pipeline,
@@ -2290,6 +2471,134 @@ fn settle_deferred_triggers_after_persisted_restore(
     Ok(())
 }
 
+/// CR 104.3a: "A player who concedes leaves the game immediately." The state a
+/// concession left and the result that publishes it, committed at the
+/// authenticated action boundary right after the reducer. It lives only in this
+/// action's frame, so the next action starts without it.
+struct CommittedDeparture {
+    state: std::sync::Arc<GameState>,
+    result: ActionResult,
+    /// The authenticated concession `(actor, owner, action)`, recorded over any
+    /// cast-undo descriptor when the departure is published.
+    concession: (PlayerId, PlayerId, GameAction),
+}
+
+impl CommittedDeparture {
+    fn capture(
+        state: &GameState,
+        result: &ActionResult,
+        concession: (PlayerId, PlayerId, GameAction),
+    ) -> Self {
+        Self {
+            state: std::sync::Arc::new(state.clone()),
+            result: result.clone(),
+            concession,
+        }
+    }
+}
+
+/// The interaction binding an action found, kept so a failure after it was
+/// consumed can still rebind the committed departure's prompt.
+struct InteractionHandoff {
+    previous_waiting: WaitingFor,
+    previous_slots: Vec<crate::types::interaction::ActiveInteractionSlot>,
+    submitted_owner: Option<PlayerId>,
+}
+
+/// The single rollback authority for a failure in finalization. Any action
+/// other than a concession restores its pre-action snapshot and is rejected.
+/// CR 104.3a: a concession committed at this boundary instead restores that
+/// committed state and publishes it with its events; the failed follow-up is
+/// discarded whole, never kept half-run.
+fn reject_or_publish_departure(
+    state: &mut GameState,
+    lifecycle: super::lifecycle::ActionLifecycleGuard,
+    snapshot: std::sync::Arc<GameState>,
+    committed: Option<CommittedDeparture>,
+    interaction_handoff: InteractionHandoff,
+    mode: PublicFinalizeMode,
+    error: EngineError,
+) -> Result<
+    (
+        ActionResult,
+        Option<super::lifecycle::ProspectiveLifecycleFacts>,
+    ),
+    EngineError,
+> {
+    lifecycle.discard();
+    let Some(departure) = committed else {
+        *state = std::sync::Arc::unwrap_or_clone(snapshot);
+        return Err(error);
+    };
+    tracing::debug!(
+        ?error,
+        "a concession's follow-up failed; the committed departure stands"
+    );
+    let CommittedDeparture {
+        state: committed_state,
+        mut result,
+        concession: (actor, owner, action),
+    } = departure;
+    *state = std::sync::Arc::unwrap_or_clone(committed_state);
+    // The committed state was taken inside the core's ingress window and
+    // announcement scope; close both as the core does.
+    state.ingress_life_window = None;
+    let reducer_wait = std::mem::replace(&mut state.waiting_for, result.waiting_for.clone());
+    super::announcement_triggers::end_action(state, &result.events);
+    result.waiting_for = std::mem::replace(&mut state.waiting_for, reducer_wait);
+    // CR 733.1: the departure is recorded over a live cast's undo descriptor,
+    // as on the ordinary path; one that cannot be rebased is retired rather
+    // than left able to restore pre-departure values.
+    if super::engine_casting::preserve_independent_cast_action(
+        state, &snapshot, actor, owner, action,
+    )
+    .is_err()
+    {
+        state.spell_cast_reversal = None;
+    }
+    // CR 104.2a: a concession that left one player ends the game here too.
+    settle_finished_game(state, &mut result);
+    // CR 104.3a + CR 118.12 + CR 616.1: the follow-up that reconciles a parked
+    // unless payment with the departure is discarded with everything else, so
+    // a payment that needed it is retired here, as part of the departure that
+    // is published. Left parked, its prompt would name the departed player's
+    // effect, and the answers that failed the follow-up (Words of Worship's
+    // gain at the life limit once the competing Hullbreacher is gone) would
+    // fail again at every attempt.
+    if state.game_end.is_none()
+        && parked_unless_payment_repair(state, &result.waiting_for).is_some()
+    {
+        engine_payment_choices::retire_unreconcilable_parked_unless_payment(state);
+        result.waiting_for = state.waiting_for.clone();
+    }
+    bump_state_revision(state);
+    sync_waiting_for(state, &result.waiting_for);
+    mark_public_state_from_events(state, &result.events);
+    finalize_rules_state(state);
+    super::un_actions::refresh_menu(state);
+    result.waiting_for = state.waiting_for.clone();
+    if matches!(mode, PublicFinalizeMode::Immediate) {
+        finalize_display_state(state);
+    }
+    result.log_entries = super::log::resolve_log_entries(&result.events, &snapshot, state);
+    let InteractionHandoff {
+        previous_waiting,
+        previous_slots,
+        submitted_owner,
+    } = interaction_handoff;
+    if interaction::rebind_interaction_slots_after_action(
+        state,
+        &previous_waiting,
+        previous_slots.clone(),
+        submitted_owner,
+    )
+    .is_err()
+    {
+        interaction::preserve_interaction_slots(state, previous_slots);
+    }
+    Ok((result, None))
+}
+
 fn finish_action_boundary(
     state: &mut GameState,
     raw: RawActionApplication,
@@ -2328,7 +2637,25 @@ fn finish_action_boundary_with_lifecycle(
         submitted_interaction_owner,
         preserve_interaction,
         lifecycle,
+        committed_departure,
+        follow_up_failure,
     } = raw;
+    let interaction_handoff = || InteractionHandoff {
+        previous_waiting: previous_interaction_waiting.clone(),
+        previous_slots: previous_interaction_slots.clone(),
+        submitted_owner: submitted_interaction_owner,
+    };
+    if let Some(error) = follow_up_failure {
+        return reject_or_publish_departure(
+            state,
+            lifecycle,
+            boundary_snapshot,
+            committed_departure,
+            interaction_handoff(),
+            mode,
+            error,
+        );
+    }
     // Finalization owns the remainder of the action (convergence, auto-pass,
     // reconvergence), so it needs its own ingress window: the core boundary
     // closed its window before handing the raw application over.
@@ -2340,9 +2667,13 @@ fn finish_action_boundary_with_lifecycle(
         reconcile_terminal_result,
     ) {
         let life_failure = close_ingress_window(state, &mut prior_window);
-        lifecycle.discard();
-        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(
+        return reject_or_publish_departure(
+            state,
+            lifecycle,
+            boundary_snapshot,
+            committed_departure,
+            interaction_handoff(),
+            mode,
             life_failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
                 player,
             }),
@@ -2369,11 +2700,17 @@ fn finish_action_boundary_with_lifecycle(
             Ok(advanced) => advanced,
             Err(error) => {
                 let life_failure = close_ingress_window(state, &mut prior_window);
-                lifecycle.discard();
-                *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-                return Err(life_failure.map_or(error, |player| {
-                    EngineError::LifeChangeUnrepresentable { player }
-                }));
+                return reject_or_publish_departure(
+                    state,
+                    lifecycle,
+                    boundary_snapshot,
+                    committed_departure,
+                    interaction_handoff(),
+                    mode,
+                    life_failure.map_or(error, |player| EngineError::LifeChangeUnrepresentable {
+                        player,
+                    }),
+                );
             }
         }
     };
@@ -2386,16 +2723,20 @@ fn finish_action_boundary_with_lifecycle(
     if let Err(err) = reconcile_terminal_result_completing_resolution(state, &mut result, reconcile)
     {
         let life_failure = close_ingress_window(state, &mut prior_window);
-        lifecycle.discard();
-        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(
+        return reject_or_publish_departure(
+            state,
+            lifecycle,
+            boundary_snapshot,
+            committed_departure,
+            interaction_handoff(),
+            mode,
             life_failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
                 player,
             }),
         );
     }
     if matches!(result.waiting_for, WaitingFor::GameOver { .. }) {
-        take_and_restore_stack_resolution_session(state);
+        payment_transaction::retire_terminal_transaction(state);
     }
     // Debug "infinite mana" (CR 500.5 suppressed for flagged players): restore any
     // pool that a spend during this action depleted, before public state is
@@ -2421,20 +2762,24 @@ fn finish_action_boundary_with_lifecycle(
         super::log::resolve_log_entries(&result.events, &boundary_snapshot, state)
     };
     if preserve_interaction && !auto_pass_advanced {
-        interaction::preserve_interaction_slots(state, previous_interaction_slots);
-    } else {
-        if interaction::rebind_interaction_slots_after_action(
+        interaction::preserve_interaction_slots(state, previous_interaction_slots.clone());
+    } else if interaction::rebind_interaction_slots_after_action(
+        state,
+        &previous_interaction_waiting,
+        previous_interaction_slots.clone(),
+        submitted_interaction_owner,
+    )
+    .is_err()
+    {
+        let life_failure = close_ingress_window(state, &mut prior_window);
+        return reject_or_publish_departure(
             state,
-            &previous_interaction_waiting,
-            previous_interaction_slots,
-            submitted_interaction_owner,
-        )
-        .is_err()
-        {
-            let life_failure = close_ingress_window(state, &mut prior_window);
-            lifecycle.discard();
-            *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-            return Err(life_failure.map_or_else(
+            lifecycle,
+            boundary_snapshot,
+            committed_departure,
+            interaction_handoff(),
+            mode,
+            life_failure.map_or_else(
                 || {
                     EngineError::InvalidAction(
                         "Unable to allocate interaction authority for the resulting decision"
@@ -2442,8 +2787,8 @@ fn finish_action_boundary_with_lifecycle(
                     )
                 },
                 |player| EngineError::LifeChangeUnrepresentable { player },
-            ));
-        }
+            ),
+        );
     }
     // CR 733.1: capture after information/interaction settlement too, so a
     // library reveal cannot evade its exception merely by journaling late.
@@ -2475,18 +2820,28 @@ fn finish_action_boundary_with_lifecycle(
     })();
     if let Err(error) = recording {
         let life_failure = close_ingress_window(state, &mut prior_window);
-        lifecycle.discard();
-        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(
+        return reject_or_publish_departure(
+            state,
+            lifecycle,
+            boundary_snapshot,
+            committed_departure,
+            interaction_handoff(),
+            mode,
             life_failure.map_or(error, |player| EngineError::LifeChangeUnrepresentable {
                 player,
             }),
         );
     }
     if let Some(player) = close_ingress_window(state, &mut prior_window) {
-        lifecycle.discard();
-        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(EngineError::LifeChangeUnrepresentable { player });
+        return reject_or_publish_departure(
+            state,
+            lifecycle,
+            boundary_snapshot,
+            committed_departure,
+            interaction_handoff(),
+            mode,
+            EngineError::LifeChangeUnrepresentable { player },
+        );
     }
     #[cfg(debug_assertions)]
     super::perf_counters::outside_take_cost(|| debug_assert_runtime_resolution_invariants(state));
@@ -2550,6 +2905,9 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
 fn settle_finished_game(state: &mut GameState, result: &mut ActionResult) {
     super::elimination::retire_finished_game_resolution(state);
     if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+        // CR 104.1: retire the staged payment before the match transition can
+        // move the state to sideboarding with a live descriptor.
+        payment_transaction::retire_terminal_transaction(state);
         match_flow::handle_game_over_transition(state);
         result.waiting_for = state.waiting_for.clone();
     }
@@ -2574,8 +2932,13 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
     // (CR 119.4), so the 0-life check waits until that process ends and a
     // player would next receive priority. Until then that player is still in
     // the game, so waiting on their choices is not the #962 softlock; prompts
-    // owned by a resolution keep the net.
-    if sba::has_pending_player_loss_sba(state) && !state.withholds_priority() {
+    // owned by a resolution keep the net. CR 117.2e + CR 121.4: one exception is
+    // a parked unless payment of draws: a draw from an empty library loses at the
+    // next priority, after the payment's later replacement prompts.
+    if sba::has_pending_player_loss_sba(state)
+        && !state.withholds_priority()
+        && !engine_payment_choices::draw_payment_is_parked(state)
+    {
         sba::check_state_based_actions(state, &mut result.events);
         // SBA may have advanced waiting_for (e.g., GameOver, or Priority for
         // the next living player). Sync the result.
@@ -6451,19 +6814,65 @@ fn published_period_elapsed(frames_this_cycle: u32, frames_per_period: Option<u3
 
 /// The board a shortcut take compares its settle frames against: `state` seeded to its active
 /// player's priority and normalized.
+///
+/// CR 104.4b + CR 732.2a: the SAMPLE form, not the strict one. Every consumer of this value
+/// (`settle_recurs`, and through it `loop_states_equal_modulo_resources` /
+/// `loop_states_cover_modulo_growth`) projects before it ranks, so a strict boundary would
+/// rank the row-unbounded damage journal on the very path that defers that work — the
+/// maintainer's second whole-priority blocker.
 pub(crate) fn take_boundary(state: &GameState) -> GameState {
     let mut seed = state.clone();
     priority::reset_priority(&mut seed);
     seed.waiting_for = WaitingFor::Priority {
         player: seed.active_player,
     };
-    seed.normalize_for_loop()
+    seed.normalize_for_loop_sample()
 }
 
 /// Whether a settle frame recurs against `boundary` on the take's board predicates.
 pub(crate) fn settle_recurs(boundary: &GameState, settled: &GameState) -> bool {
     crate::analysis::resource::loop_states_equal_modulo_resources(boundary, settled)
         || crate::analysis::resource::loop_states_cover_modulo_growth(boundary, settled)
+}
+
+/// What the expression each loop comparator entry point evaluates answers for one frame
+/// pair, each side put through the production normalization that entry point applies. These
+/// are the same expressions as the call sites, not the call sites: `ring_walk` is the
+/// equality arm alone (the walks also OR in growth covers), and `settlement` seeds both sides
+/// with [`take_boundary`], where production samples a settle frame that is already at the
+/// active player's priority. The sample form and the comparators are crate-private;
+/// integration tests reach them through [`loop_entry_point_verdicts_for_tests`].
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoopEntryPointVerdicts {
+    /// CR 104.4b: the strict comparator of the auto-pass window, on two sample forms.
+    pub strict: bool,
+    /// CR 732.2a: a ring walk, a stored sample-form prior against the raw current state.
+    pub ring_walk: bool,
+    /// CR 732.2a + CR 732.2c: fixed settlement and mandatory replay, a [`take_boundary`]
+    /// against a settle frame seeded and sampled the same way.
+    pub settlement: bool,
+}
+
+/// See [`LoopEntryPointVerdicts`].
+#[cfg(any(test, feature = "test-support"))]
+pub fn loop_entry_point_verdicts_for_tests(
+    prior: &GameState,
+    current: &GameState,
+) -> LoopEntryPointVerdicts {
+    let sampled_prior = prior.normalize_for_loop_sample();
+    let frames = crate::analysis::resource::SharedCurrentFrames::new(current);
+    LoopEntryPointVerdicts {
+        strict: crate::types::game_state::loop_states_equal(
+            &sampled_prior,
+            &current.normalize_for_loop_sample(),
+        ),
+        ring_walk: crate::analysis::resource::loop_states_equal_modulo_resources_side(
+            &sampled_prior,
+            &frames,
+        ),
+        settlement: settle_recurs(&take_boundary(prior), &take_boundary(current)),
+    }
 }
 
 /// Drive ONE whole cycle of a confirmed loop shortcut on a fresh clone
@@ -6603,7 +7012,7 @@ fn drive_one_shortcut_cycle(
                 if ring_back_after.is_some() && ring_back_after != ring_back_before {
                     frames_this_cycle += 1;
                 }
-                let norm = work.normalize_for_loop();
+                let norm = work.normalize_for_loop_sample();
                 if settle_recurs(boundary, &norm)
                     || published_period_elapsed(frames_this_cycle, frames_per_period)
                 {
@@ -7251,11 +7660,10 @@ fn materialize_fixed_shortcut(
     // `RespondToShortcut`/`LoopShortcut` at entry (never `Priority`), so seed a settled
     // priority beat before capturing the boundary. `reset_priority` zeroes
     // `priority_pass_count` and sets `priority_player`; `waiting_for` is set explicitly
-    // here (reset_priority does not touch it). `loop_states_equal_modulo_resources` /
-    // `loop_states_cover_modulo_growth` both normalize internally (`project_out_resources`
-    // → `normalize_for_loop`), so the extra `.normalize_for_loop()` here is redundant with
-    // that internal call but harmless (idempotent) — kept for a self-contained boundary
-    // value whose `waiting_for`/ring fields are already canonical at the call sites below.
+    // here (reset_priority does not touch it). `take_boundary` is the SAMPLE normal form:
+    // both consumers (`loop_states_equal_modulo_resources`,
+    // `loop_states_cover_modulo_growth`) project before they rank, so the boundary never
+    // ranks the row-unbounded journal itself.
     let boundary = take_boundary(&committed);
 
     let cycle_beat_cap = auto_pass_loop_max_iterations(&committed);
@@ -9666,6 +10074,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::SacrificeForCost { .. }
                     | PendingCostMoveResume::WardSacrificePayment { .. }
                     | PendingCostMoveResume::ReplacementMayCost { .. }
+                    | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
                     | PendingCostMoveResume::CollectEvidencePayment { .. }
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
@@ -9686,7 +10095,9 @@ pub(crate) fn drain_pending_cost_move_resume(
         // are eligible here too: whether a prevented placement leaves that
         // payment paid or failed is `resume_counter_addition_unless_payment`'s
         // call, argued in its own header; either way the pending unless branch
-        // must resolve here, not wedge.
+        // must resolve here, not wedge. A parked entry MayCost whose draw leg
+        // was skipped is eligible too: the Prevented arm completes the draw
+        // instruction before this drain (CR 614.11a), then the entry resumes.
         CostMoveDrainBoundary::ReplacementPrevented { .. } => matches!(
             state.pending_cost_move_resume,
             Some(
@@ -9694,6 +10105,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::SacrificeForCost { .. }
                     | PendingCostMoveResume::WardSacrificePayment { .. }
                     | PendingCostMoveResume::ReplacementMayCost { .. }
+                    | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
                     | PendingCostMoveResume::Foretell { .. }
                     | PendingCostMoveResume::CollectEvidencePayment { .. }
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
@@ -9717,6 +10129,13 @@ pub(crate) fn drain_pending_cost_move_resume(
                         } | PendingCostMoveResume::ManaAbilityPayment { .. }
                             | PendingCostMoveResume::CounterCostRemovalPayment { .. }
                             | PendingCostMoveResume::TurnFaceUpCostMove { .. }
+                            // CR 614.11a + CR 118.12: an interactive draw
+                            // substitute (Abundance's land/nonland then bottom
+                            // ordering) returns to the priority boundary only
+                            // after its subtree has retired; the owning payment
+                            // still has to resume then.
+                            | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+                            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                     )
                 )
         }
@@ -9747,6 +10166,11 @@ pub(crate) fn drain_pending_cost_move_resume(
         Some(PendingCostMoveResume::ReplacementMayCost { .. })
     ) {
         super::costs::resume_replacement_may_cost_move(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::ReplacementMayCostInnerChoice { .. })
+    ) {
+        super::costs::resume_replacement_may_cost_after_inner_choice(state, events)?
     } else if matches!(
         state.pending_cost_move_resume,
         Some(PendingCostMoveResume::Foretell { .. })
@@ -9815,6 +10239,52 @@ pub(crate) fn drain_pending_cost_move_resume(
 /// `resume_due_counter_cost_root`; the cost-move drain admits it at
 /// `PriorityBoundary`). A repeat needs the position to strictly decrease, so
 /// the loop ends.
+/// CR 118.11 + CR 614.11a: only a bare activation whose own cost is the draw
+/// instruction may resume at the common boundary; a cast or activation paused
+/// on an unrelated choice keeps its existing owner.
+fn pending_cast_is_draw_cost_activation(
+    state: &GameState,
+    pending: &crate::types::game_state::PendingCast,
+) -> bool {
+    // CR 118.12: the retained unpaid suffix can still own the parked draw when
+    // the pause happened before it; the paused-on-draw flag survives the source
+    // leaving or losing the grant.
+    if pending.activation_cost_paused_on_draw
+        || pending
+            .activation_cost
+            .as_ref()
+            .is_some_and(cost_includes_draw_instruction)
+    {
+        return true;
+    }
+    let Some(index) = pending.activation_ability_index else {
+        return false;
+    };
+    crate::game::casting::activated_ability_definitions(state, pending.object_id)
+        .into_iter()
+        .find(|(candidate, _)| *candidate == index)
+        .is_some_and(|(_, definition)| {
+            definition
+                .cost
+                .as_ref()
+                .is_some_and(cost_includes_draw_instruction)
+        })
+}
+
+/// Whether a cost (possibly a composite) contains a printed Draw instruction.
+pub(crate) fn cost_includes_draw_instruction(cost: &crate::types::ability::AbilityCost) -> bool {
+    use crate::types::ability::AbilityCost;
+    match cost {
+        AbilityCost::EffectCost { effect } => {
+            matches!(effect.as_ref(), crate::types::ability::Effect::Draw { .. })
+        }
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            costs.iter().any(cost_includes_draw_instruction)
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn resume_pending_continuation_if_priority(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -9827,6 +10297,21 @@ pub(super) fn resume_pending_continuation_if_priority(
             || state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
             || !after.is_strictly_inside(&before)
         {
+            // CR 614.11a + CR 118.11: a bare cast/activation whose draw cost
+            // paused on an interactive substitute must resume once the whole
+            // draw instruction and its substitute subtree have finished.
+            let draw_cost_activation = state
+                .pending_cast
+                .as_deref()
+                .is_some_and(|pending| pending_cast_is_draw_cost_activation(state, pending));
+            if matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && state.active_ability_continuation().is_none()
+                && draw_cost_activation
+                && super::engine_replacement::resume_active_draw_sequences(state, events).is_none()
+            {
+                state.waiting_for =
+                    super::casting_costs::resume_interrupted_cost_payment(state, events, None)?;
+            }
             return Ok(());
         }
     }
@@ -10691,7 +11176,7 @@ fn pass_priority_once_with_pipeline(
     // CR 732.2a: sample the loop-detection ring ONLY when the user-controllable
     // combo-detector is enabled. With `loop_detection == Off` (the default) the ring
     // is never populated, so the engine pays none of the per-resolution
-    // `normalize_for_loop` clone cost and the reconcile-seam shortcut (which guards on
+    // `normalize_for_loop_sample` clone cost and the reconcile-seam shortcut (which guards on
     // a non-empty ring AND the same flag) cannot fire. `samples()` is true for both `On`
     // and `Interactive`.
     if resolved_this_beat && !in_simulation_probe() && state.loop_detection.samples() {
@@ -11263,6 +11748,12 @@ fn priority_pass_will_close_window(state: &GameState) -> bool {
     !participants.is_empty() && state.priority_passes.len().saturating_add(1) >= participants.len()
 }
 
+#[cfg(test)]
+thread_local! {
+    static AUTO_PASS_WINDOW_SAMPLES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// Auto-pass loop: when a player has an auto-pass flag and receives priority,
 /// automatically pass for them until the goal condition is met or interrupted.
 ///
@@ -11409,8 +11900,10 @@ fn run_auto_pass_loop(
                         if mandatory_iters >= FINGERPRINT_AFTER_ITERS
                             && matches!(result.waiting_for, WaitingFor::Priority { .. })
                         {
+                            #[cfg(test)]
+                            AUTO_PASS_WINDOW_SAMPLES.with(|samples| samples.set(samples.get() + 1));
                             let fingerprint = state.loop_fingerprint();
-                            let normalized = state.normalize_for_loop();
+                            let normalized = state.normalize_for_loop_sample();
                             // CR 732.5: the out verdict is read only for a repeat; it needs each
                             // beat's live state.
                             if loop_window.iter().enumerate().any(|(at, (fp, prior))| {
@@ -12649,8 +13142,49 @@ fn apply_action(
     // owned it (see `elimination::concede`), and queues what the departure triggered
     // (CR 603.6c), since no pipeline scans this action's events.
     if let GameAction::Concede { player_id } = action {
+        // CR 614.17a + CR 118.12: keep the pre-departure base so a staged
+        // payment's already-accepted prefix (including a synchronous leg that
+        // completed before the first prompt) is not re-executed under the
+        // departure's new prohibitions (`settle_after_outside_action`).
+        let pre_action = state.payment_transaction.as_ref().map(|_| state.clone());
         let mut events = Vec::new();
         super::elimination::concede(state, player_id, &mut events);
+        // CR 800.4a + CR 118.12: a surviving staged payment re-materializes on
+        // the base the departure changed (`settle_after_outside_action`). CR
+        // 104.3a: the departure itself must survive a fallible payment recovery,
+        // so a recovery that fails, records an unrepresentable life change, or
+        // would leave a checkpoint that does not describe the departed board
+        // (its seats, or a parked prompt naming an object that left) returns to
+        // the departure and retires the payment.
+        let departed = pre_action.as_ref().map(|_| state.clone());
+        let settled = match payment_transaction::settle_after_outside_action(
+            state,
+            pre_action.as_ref(),
+            player_id,
+        ) {
+            Ok(settled)
+                if boundary_life_change_failure(state).is_none()
+                    && payment_transaction::checkpoint_describes_board(state) =>
+            {
+                settled
+            }
+            outcome => {
+                tracing::debug!(
+                    error = ?outcome.err(),
+                    "staged payment recovery failed after a concession; the departure stands"
+                );
+                if let Some(departed) = departed {
+                    *state = departed;
+                }
+                payment_transaction::abandon_failed_recovery(state);
+                None
+            }
+        };
+        if let Some(settled) = settled {
+            events.extend(settled.events);
+            return Ok(ActionResult::applied(events, state.waiting_for.clone())
+                .with_log_entries(settled.log_entries));
+        }
         return Ok(ActionResult::applied(events, state.waiting_for.clone()));
     }
 
@@ -17180,6 +17714,18 @@ fn apply_non_priority_pass_action(
             GameAction::ChoosePlayDraw { play_first },
         ) => match_flow::handle_choose_play_draw(state, *player, play_first, &mut events)
             .map_err(EngineError::InvalidAction)?,
+        // CR 103.1: the chooser names the seat that takes the first turn.
+        (
+            WaitingFor::ChooseStartingPlayer { player, candidates },
+            GameAction::ChooseStartingPlayer { player: chosen },
+        ) => match_flow::handle_choose_starting_player(
+            state,
+            *player,
+            candidates,
+            chosen,
+            &mut events,
+        )
+        .map_err(EngineError::InvalidAction)?,
         (
             waiting_for @ WaitingFor::AbilityModeChoice { .. },
             GameAction::SelectModes { indices },
@@ -18159,21 +18705,15 @@ fn apply_non_priority_pass_action(
 
     // CR 603.2c + CR 603.7b: inside a staged payment, an answer that opens a
     // further prompt becomes processed replay history, which no later collector
-    // scans. Deliver its still-unclaimed delayed occurrences now, while this
-    // buffer's claims and typed retention owners are live, through the same
-    // collect-only authority as the shared pipeline's non-Priority exit; then end
-    // this buffer's claim coordinates before the next recorded action's buffer.
-    if (state.payment_transaction.is_some() || state.payment_transaction_replay)
-        && state.game_end.is_none()
+    // scans; so does a resumed payment of draws that parks on its next
+    // replacement choice. Queue their still-unclaimed occurrences through the
+    // one paused-exit collector, then end this buffer's claim coordinates
+    // before the next recorded action's buffer. Other unless payments (Ward,
+    // Mana Leak, Rhystic Study) keep their delayed-only exit.
+    let staged = state.payment_transaction.is_some() || state.payment_transaction_replay;
+    if (staged || engine_payment_choices::paused_in_draw_payment(state)) && state.game_end.is_none()
     {
-        let delayed_input = engine_priority::unclaimed_delayed_trigger_input(
-            state,
-            &events,
-            0,
-            &mut Vec::new(),
-            None,
-        );
-        triggers::collect_unclaimed_delayed_triggers_into_deferred(state, &events, &delayed_input);
+        triggers::collect_paused_exit_triggers(state, &events, 0);
         state.consumed_before_priority_trigger_events.clear();
     }
 
@@ -18189,6 +18729,22 @@ pub fn preflight_debug_action(
     action: &DebugAction,
 ) -> Result<(), EngineError> {
     check_debug_action_access(state, actor)?;
+    // CR 118.12: while a recovered payment is parked, its checkpoint is the
+    // executable state and the canonical base is not; a sandbox mutation would
+    // have to run on one and be mirrored onto the other. Every debug action
+    // mutates, so all are refused here, the shared admission authority; a
+    // zero-count create stays the no-op projection, and read-only diagnostics
+    // keep their own access check (`require_explicit_debug_permission`).
+    if !action.is_zero_count_create()
+        && state
+            .payment_transaction
+            .as_ref()
+            .is_some_and(|transaction| transaction.recovered.is_some())
+    {
+        return Err(EngineError::InvalidAction(
+            "sandbox actions are unavailable while a recovered payment is parked".to_string(),
+        ));
+    }
     action
         .validate_create_count()
         .map_err(EngineError::InvalidAction)?;
@@ -21216,27 +21772,26 @@ fn build_contest_rounds(
 
 /// Start game with mulligan flow. If no cards in libraries, skips mulligan.
 ///
-/// CR 103.1: At the start of game 1 of a match the players determine who takes
-/// the first turn "using any mutually agreeable method (flipping a coin,
-/// rolling dice, etc.)". This engine models that determination as an
+/// CR 103.1: At the start of game 1 of a match the players determine which one
+/// of them will choose who takes the first turn, "using any mutually agreeable
+/// method (flipping a coin, rolling dice, etc.)". This engine's method is an
 /// authoritative d20 high-roll contest — one d20 per seat using the game's
 /// seeded RNG (CR 706, rolling a die) — with ties rerolled among the tied top
-/// group. NOTE ON FIDELITY: the literal CR 103.1 sequence is "contest winner
-/// *chooses* who takes the first turn"; this engine collapses that to "contest
-/// winner *becomes* the starting player" (it does not present a play/draw
-/// choice here), an existing, accepted simplification — the annotation does not
-/// claim the choose-step is implemented. Subsequent games in a multi-game match
-/// route through `match_flow::start_next_game`, which uses `next_game_chooser`
-/// instead, so this function is always the game-1 path.
+/// group. The contest determines **who chooses**: the function ends at
+/// `WaitingFor::ChooseStartingPlayer`, and the chooser's answer
+/// (`match_flow::handle_choose_starting_player`) starts the game. Subsequent
+/// games in a multi-game match route through `match_flow::start_next_game`,
+/// which uses `next_game_chooser` instead, so this function is always the
+/// game-1 path.
 ///
 /// The contest is surfaced as a single authoritative
 /// `GameEvent::StartingPlayerContest` carrying the full round structure (round
 /// 1 = all seats, each later round = the prior round's tied-max reroll group)
 /// plus the engine's authoritative `winner`, so downstream consumers render the
-/// contest round by round without re-deriving anything. It is inserted at the
-/// front of the result, ahead of `GameStarted` → `TurnStarted`. This replaces
-/// the prior flat per-roll `DieRolled` batch; in-game die rolls still emit
-/// `DieRolled`.
+/// contest round by round without re-deriving anything. It is the only event
+/// of the start batch; `GameStarted` → `TurnStarted` follow in the answer's
+/// batch. This replaces the prior flat per-roll `DieRolled` batch; in-game die
+/// rolls still emit `DieRolled`.
 ///
 /// DETERMINISM: the contest draws only from `state.rng` (the seeded
 /// `ChaCha20Rng`), never thread/global RNG, so replays and AI search stay
@@ -21245,11 +21800,12 @@ fn build_contest_rounds(
 /// representation change introduces ZERO determinism shift relative to the
 /// prior `DieRolled`-batch implementation. (It still differs from the original
 /// single `random_range(0..len)` pick that predated the contest, an earlier,
-/// accepted shift.)
+/// accepted shift.) The choice itself draws nothing from `state.rng`.
 ///
 /// Callers that need a deterministic starter (tests, fixed scenarios) must use
 /// `start_game_with_starting_player` directly — that path runs no contest and
-/// emits no `StartingPlayerContest` event.
+/// emits no `StartingPlayerContest` event. Callers that predate the choice and
+/// are not about it use `start_game_winner_plays_first`.
 pub fn start_game(state: &mut GameState) -> ActionResult {
     let before = state.clone();
     if state.seat_order.is_empty() {
@@ -21275,11 +21831,11 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
         return start_game_with_starting_player(state, first);
     }
 
-    // CR 103.1 / CR 706: roll one d20 per seat; the high roller becomes the
-    // starting player. Draw order/count is identical to the prior
+    // CR 103.1 / CR 706: roll one d20 per seat; the high roller chooses who
+    // takes the first turn. Draw order/count is identical to the prior
     // implementation — one `random_range(1..=20)` per contender, in seat order.
     let seat_order = state.seat_order.clone();
-    let (rounds, starting_player) = build_contest_rounds(&seat_order, |contenders| {
+    let (rounds, winner) = build_contest_rounds(&seat_order, |contenders| {
         contenders
             .iter()
             .map(|&seat| {
@@ -21291,15 +21847,42 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
             .collect()
     });
 
-    let mut result = start_game_with_starting_player(state, starting_player);
-    // CR 103.1: StartingPlayerContest → GameStarted → TurnStarted.
-    result.events.insert(
-        0,
-        GameEvent::StartingPlayerContest {
-            rounds,
-            winner: starting_player,
-        },
-    );
+    // CR 103.1: the contest decides who chooses; the chooser names the starting
+    // player. CR 103.1a: under shared team turns the chooser and the candidates
+    // are side representatives, so the choice names a starting team.
+    normalize_match_type(state);
+    let events = vec![GameEvent::StartingPlayerContest { rounds, winner }];
+    let waiting_for = WaitingFor::ChooseStartingPlayer {
+        player: super::topology::normalize_shared_turn_recipient(state, winner),
+        candidates: super::topology::turn_representatives(state),
+    };
+    state.waiting_for = waiting_for.clone();
+    bump_state_revision(state);
+    mark_public_state_all_dirty(state);
+    finalize_public_state(state);
+    let log_entries = super::log::resolve_log_entries(&events, &before, state);
+    ActionResult::applied(events, waiting_for).with_log_entries(log_entries)
+}
+
+/// CR 103.1 with the contest winner electing to take the first turn:
+/// `start_game`, then the raw roll winner starts, in every format (under
+/// shared team turns too, where it may be a team's second seat). The single
+/// migration authority for routes that predate the game-one choice (replay
+/// formats 2–3) and for harnesses whose subject is not the choice. Archenemy,
+/// Horde and seatless starts emit no contest and pass through, since
+/// `start_game` already started them.
+pub fn start_game_winner_plays_first(state: &mut GameState) -> ActionResult {
+    let before = state.clone();
+    let mut result = start_game(state);
+    let Some(winner) = result.events.iter().find_map(|event| match event {
+        GameEvent::StartingPlayerContest { winner, .. } => Some(*winner),
+        _ => None,
+    }) else {
+        return result; // Archenemy / Horde / seatless: already started
+    };
+    let start = start_game_with_starting_player(state, winner);
+    result.events.extend(start.events);
+    result.waiting_for = start.waiting_for;
     result.log_entries = super::log::resolve_log_entries(&result.events, &before, state);
     result
 }
@@ -21312,6 +21895,22 @@ fn match_type_within(configured: MatchType, ceiling: MatchType) -> MatchType {
             MatchType::Bo1
         }
     }
+}
+
+/// The match type this game plays: Bo3 only for two-player or Archenemy
+/// games, and never longer than the format's ceiling. Idempotent.
+fn normalize_match_type(state: &mut GameState) {
+    if state.match_config.match_type == MatchType::Bo3
+        && state.players.len() != 2
+        && super::topology::archenemy(state).is_none()
+    {
+        state.match_config.match_type = MatchType::Bo1;
+    }
+    // The ceiling is read from the format, so no host-supplied match config can raise it.
+    state.match_config.match_type = match_type_within(
+        state.match_config.match_type,
+        state.format_config.format.best_of_three_ceiling(),
+    );
 }
 
 /// Start game with a specific player taking the first turn.
@@ -21332,17 +21931,7 @@ pub fn start_game_with_starting_player(
         super::topology::archenemy(state).unwrap_or(starting_player)
     };
 
-    if state.match_config.match_type == MatchType::Bo3
-        && state.players.len() != 2
-        && super::topology::archenemy(state).is_none()
-    {
-        state.match_config.match_type = MatchType::Bo1;
-    }
-    // The ceiling is read from the format, so no host-supplied match config can raise it.
-    state.match_config.match_type = match_type_within(
-        state.match_config.match_type,
-        state.format_config.format.best_of_three_ceiling(),
-    );
+    normalize_match_type(state);
 
     events.push(GameEvent::GameStarted);
 
@@ -23731,6 +24320,14 @@ mod stage2_injector_tests {
 
         // `None`: this row is about the injector arm on a board-recurring targeted loop, so
         // it drives under the same no-signature delimiter every pre-bounded offer uses.
+        //
+        // Cost through the FIXED-CYCLE caller: every settle comparison the drive performs
+        // projects each side once. A strict boundary adds two whole-journal passes per
+        // comparison, so the per-comparison bound below is the revert discriminator for this
+        // caller (a cycle visit touches at most three seats per iteration).
+        let rows = committed.damage_dealt_this_turn.len();
+        use crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS;
+        LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
         let outcome = drive_one_shortcut_cycle(
             &committed,
             &boundary,
@@ -23741,6 +24338,7 @@ mod stage2_injector_tests {
             DepartureStop::EndsRepetition,
         )
         .expect("the fixture's shortcut cycle is representable");
+        let drive_visits = LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
         let CycleOutcome::SeatLeft { state, .. } = outcome else {
             panic!(
                 "CR 800.4a: a staggered wipe stops at the FIRST removal, not at the second; \
@@ -23779,9 +24377,304 @@ mod stage2_injector_tests {
             WaitingFor::Priority {
                 player: state.active_player
             },
-            "the removal is observed at the ACTIVE player's own beat on this rig, which is \
+            "the removal is observed at the ACTIVE PLAYER's own beat on this rig, which is \
              what makes the new arm's position ahead of the settle arm observable: demoted \
              below it, the drive returns one beat later at the next opponent window"
+        );
+        // Both drainers are `DealDamage` carriers that read no recipient, so the
+        // fixed-cycle caller's settle comparisons must do no journal work at all on this
+        // rig; a strict boundary would walk all {rows} rows on each projection.
+        assert_eq!(
+            drive_visits, 0,
+            "{drive_visits} journal visits through the fixed-cycle drive ({rows} rows, \
+             cap {cap}) on a rig whose retained carriers cannot read the recipient"
+        );
+    }
+
+    /// The committed take of the three-player drain rig, primed to a settle beat INSIDE the
+    /// cascade: the printed Vito, Thorn of the Dusk Rose ("Whenever you gain life, target
+    /// opponent loses that much life.") and Exquisite Blood ("Whenever an opponent loses life,
+    /// you gain that much life."), started by a synthetic "You gain 1 life." sorcery, with
+    /// `rows` injected damage rows from Vito to P1's Grizzly Bears. Returns the frame, the
+    /// take's template, the drive's cap, and the dealer and recipient those rows name.
+    fn committed_drain_take(
+        rows: usize,
+    ) -> (GameState, DecisionTemplate, usize, ObjectId, ObjectId) {
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::test_support::shared_card_db;
+        use crate::types::game_state::DamageRecord;
+
+        let db = shared_card_db();
+        let mut scenario = GameScenario::new_n_player(3, 7);
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        scenario.with_life(P0, 20);
+        scenario.with_life(P1, 400);
+        scenario.with_life(P2, 400);
+        let drainer =
+            scenario.add_real_card(P0, "Vito, Thorn of the Dusk Rose", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Exquisite Blood", Zone::Battlefield, db);
+        let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+        let kickoff = scenario
+            .add_spell_to_hand_from_oracle(P0, "Kickoff", false, KICKOFF)
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = LoopDetectionMode::Off;
+        let card_id = runner.state().objects.get(&kickoff).unwrap().card_id;
+        apply_action(
+            runner.state_mut(),
+            P0,
+            GameAction::CastSpell {
+                object_id: kickoff,
+                card_id,
+                targets: vec![],
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            },
+            None,
+        )
+        .expect("cast seed");
+        let source = this_object(drainer);
+        let template = DecisionTemplate {
+            owner: P0,
+            decisions: vec![PinnedDecision::Targets {
+                slot: DecisionSlot {
+                    source: source.clone(),
+                    point: ChoicePoint::AnnouncedTarget,
+                    index: 0,
+                },
+                targets: vec![TargetPin::Player(P1)],
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::UntilLethal,
+            },
+            key: DecisionGroupKey::from_sources(&[source], DecisionKind::LoopChoice),
+        };
+        // Prime to a settle beat INSIDE the cascade: the active player's priority with a
+        // trigger pending, after the first drain has resolved. The earlier beat that still
+        // holds the seed spell never recurs, so it cannot bound a committed take.
+        let mut primed = false;
+        for _ in 0..40 {
+            let wf = runner.state().waiting_for.clone();
+            match wf {
+                WaitingFor::Priority { player }
+                    if player == P0
+                        && !runner.state().stack.is_empty()
+                        && life(runner.state(), P1) < 400 =>
+                {
+                    primed = true;
+                    break;
+                }
+                WaitingFor::Priority { player } => {
+                    apply_action(runner.state_mut(), player, GameAction::PassPriority, None)
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+                    inject_pinned_answer(runner.state_mut(), Some(&template), 0, &wf).unwrap();
+                }
+                _ => break,
+            }
+        }
+        assert!(primed, "must reach a primed Priority{{P0}} settle beat");
+        let mut committed = runner.state().clone();
+        let cap = auto_pass_loop_max_iterations(&committed);
+        let (dealer, recipient) = (drainer, bears);
+        for _ in 0..rows {
+            committed.damage_dealt_this_turn.push_back(DamageRecord {
+                source_id: dealer,
+                source_incarnation: Some(committed.objects[&dealer].incarnation),
+                target: TargetRef::Object(recipient),
+                target_incarnation: Some(committed.objects[&recipient].incarnation),
+                amount: 1,
+                ..Default::default()
+            });
+        }
+        (committed, template, cap, dealer, recipient)
+    }
+
+    /// CR 732.2a + CR 732.2c: the FIXED-CYCLE caller on a take that COMMITS. Vito, Thorn of
+    /// the Dusk Rose and Exquisite Blood in a three-player game ([`committed_drain_take`]):
+    /// each life gain makes exactly one drain, so the cascade holds a constant depth and, with
+    /// the pinned opponent far from lethal, no seat leaves. The drive reaches the settle arm and returns `Recurred`
+    /// ("The game advances to the last proposed ending point").
+    ///
+    /// What the visit count shows, and what it does not: the 256 damage rows are INJECTED
+    /// history unrelated to the take, and the loop is life drain, so no retained carrier
+    /// holds a damage event. The bound is therefore zero, and it discriminates one thing:
+    /// a committed take must not rank or scan damage history nobody in the loop can read
+    /// (a strict boundary alone walks it). The counter is reset BEFORE the boundary is
+    /// built. A take whose own carrier reads a damage recipient pays one journal pass per
+    /// projection; that cost is measured by
+    /// `loop_relational_take_boundary_defers_history_through_first_settle`, not here.
+    #[test]
+    fn drive_one_cycle_recurs_on_a_committed_take_without_reading_unrelated_damage_history() {
+        use crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS;
+
+        const ROWS: usize = 256;
+        let (committed, template, cap, _, _) = committed_drain_take(ROWS);
+        let lives_before = [life(&committed, P1), life(&committed, P2)];
+
+        LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let boundary = take_boundary(&committed);
+        let outcome = drive_one_shortcut_cycle(
+            &committed,
+            &boundary,
+            Some(&template),
+            0,
+            cap,
+            None,
+            DepartureStop::EndsRepetition,
+        )
+        .expect("the fixture's shortcut cycle is representable");
+        let visits = LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
+
+        let state = match outcome {
+            CycleOutcome::Recurred { state, .. } => state,
+            CycleOutcome::SeatLeft { .. } => panic!("expected `Recurred`, got `SeatLeft`"),
+            CycleOutcome::CrossLethal { .. } => panic!("expected `Recurred`, got `CrossLethal`"),
+            CycleOutcome::Abort => panic!("expected `Recurred`, got `Abort`"),
+        };
+        assert_eq!(
+            state.waiting_for,
+            WaitingFor::Priority {
+                player: state.active_player
+            },
+            "CR 732.2a: the committed ending point is the active player's settle beat"
+        );
+        assert!(
+            life(&state, P1) < lives_before[0] && life(&state, P2) == lives_before[1],
+            "the committed take performed the cycle: the pinned opponent lost life and the \
+             other did not ({:?} -> {:?})",
+            lives_before,
+            [life(&state, P1), life(&state, P2)]
+        );
+        assert_eq!(
+            state.players.iter().filter(|p| p.is_eliminated).count(),
+            0,
+            "reach guard: no seat left, so this is the settle arm and not `SeatLeft`"
+        );
+        assert_eq!(
+            state.damage_dealt_this_turn.len(),
+            ROWS,
+            "reach guard: the take carried the whole damage history"
+        );
+        // The drain and feedback triggers are life-change carriers that read no damage
+        // recipient, so the settle comparisons of the whole committed take read no journal
+        // row; a strict boundary alone would rank all {ROWS} rows.
+        assert_eq!(
+            visits, 0,
+            "{visits} journal visits from boundary construction through the committed take"
+        );
+    }
+
+    /// CR 732.2a + CR 732.2c + CR 608.2k: the FIXED-CYCLE caller on a take that COMMITS
+    /// while a recipient reader waits under the loop. The drain rig of
+    /// `drive_one_cycle_recurs_on_a_committed_take_without_reading_unrelated_damage_history`,
+    /// with one more entry at the bottom of the stack: a triggered ability that taps the
+    /// creature its damage event names. Synthetic, standing for Matsu-Tribe Sniper's "tap that
+    /// creature"; its event and the 256 rows from Vito to P1's Grizzly Bears are injected. The period never reaches it (CR 405.5), so every settle frame keeps it and
+    /// every projection keeps its recipient key and must read the history to answer it.
+    ///
+    /// What it shows: the drive returns `Recurred`; the recipient scan reads at most one pass
+    /// of the history per projection; and the identity pass visits the history only through
+    /// that one reduction per projection plus the reduced witnesses, where a strict boundary
+    /// would rank the whole history again.
+    #[test]
+    fn drive_one_cycle_recurs_over_a_buried_recipient_reader_reading_history_once_per_projection() {
+        use crate::analysis::resource::{
+            loop_detect_cost, reset_loop_detect_cost, DAMAGE_RECIPIENT_JOURNAL_VISITS,
+        };
+        use crate::types::ability::{
+            Effect, EffectScope, ResolvedAbility, TapStateChange, TargetFilter,
+        };
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{StackEntry, StackEntryKind, LOOP_DAMAGE_JOURNAL_VISITS};
+
+        const ROWS: usize = 256;
+        let (mut committed, template, cap, dealer, recipient) = committed_drain_take(ROWS);
+        let reader = ObjectId(9_000);
+        committed.stack.push_front(StackEntry {
+            id: reader,
+            source_id: dealer,
+            controller: P0,
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: dealer,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::SetTapState {
+                        target: TargetFilter::EventTarget,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
+                    vec![],
+                    dealer,
+                    P0,
+                )),
+                condition: None,
+                trigger_event: Some(GameEvent::DamageDealt {
+                    source_id: dealer,
+                    source_incarnation: Some(committed.objects[&dealer].incarnation),
+                    target: TargetRef::Object(recipient),
+                    amount: 1,
+                    is_combat: false,
+                    excess: 0,
+                }),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        let lives_before = [life(&committed, P1), life(&committed, P2)];
+
+        reset_loop_detect_cost();
+        DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
+        LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let boundary = take_boundary(&committed);
+        let outcome = drive_one_shortcut_cycle(
+            &committed,
+            &boundary,
+            Some(&template),
+            0,
+            cap,
+            None,
+            DepartureStop::EndsRepetition,
+        )
+        .expect("the fixture's shortcut cycle is representable");
+        let scans = DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get);
+        let ranks = LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
+        let projections = loop_detect_cost().projected_clones as usize;
+
+        let state = match outcome {
+            CycleOutcome::Recurred { state, .. } => state,
+            CycleOutcome::SeatLeft { .. } => panic!("expected `Recurred`, got `SeatLeft`"),
+            CycleOutcome::CrossLethal { .. } => panic!("expected `Recurred`, got `CrossLethal`"),
+            CycleOutcome::Abort => panic!("expected `Recurred`, got `Abort`"),
+        };
+        assert!(
+            life(&state, P1) < lives_before[0] && life(&state, P2) == lives_before[1],
+            "the committed take performed the cycle ({:?} -> {:?})",
+            lives_before,
+            [life(&state, P1), life(&state, P2)]
+        );
+        assert_eq!(
+            state.stack.front().map(|entry| entry.id),
+            Some(reader),
+            "reach guard: the reader is still buried under the loop"
+        );
+        assert!(
+            scans >= ROWS,
+            "reach guard: the buried reader made a projection read the history ({scans} visits)"
+        );
+        assert!(
+            scans <= projections * ROWS,
+            "{scans} recipient-scan visits over {projections} projections of {ROWS} rows: \
+             more than one pass per projection"
+        );
+        // Each projection reduces the history once before it ranks the bounded witnesses;
+        // a strict boundary would rank the whole history on top of that.
+        assert!(
+            ranks <= projections * ROWS + 16,
+            "{ranks} identity-rank visits over {projections} projections of {ROWS} rows: \
+             more than one reduction pass per projection plus the witnesses"
         );
     }
 
@@ -25465,8 +26358,11 @@ mod stage2_injector_tests {
     ///
     /// A producer's key is `file::fn {fields}` — its enclosing column-0 `fn` plus the
     /// whitespace-stripped field text of the construction minted there, so a REPLACEMENT
-    /// inside an already-pinned function moves the key. A reader keys as `file::fn`.
-    fn cr_603_5_sites(rel: &str, text: &str) -> (Vec<String>, Vec<String>, usize) {
+    /// inside an already-pinned function moves the key. A reader keys as `file::fn`. An
+    /// in-test site keys as its FILE, because the fixture that parks a prompt may live in an
+    /// indented `#[cfg(test)] mod` body where the column-0 tracker names no function of its
+    /// own — the file is the coordinate that does not churn.
+    fn cr_603_5_sites(rel: &str, text: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
         use crate::source_census::code as code_of;
 
         /// The `#[cfg(test)]`-attributed column-0 `mod … {` … column-0 `}` spans.
@@ -25543,11 +26439,11 @@ mod stage2_injector_tests {
         // instrument. `..` excludes multi-line READ destructures whose rest-pattern sits on
         // a later line — the inflation the raw grep suffers from.
         let needle = format!("WaitingFor::{}Choice {{", "OptionalEffect");
-        let (mut producers, mut readers, mut in_test) = (Vec::new(), Vec::new(), 0usize);
+        let (mut producers, mut readers, mut in_test) = (Vec::new(), Vec::new(), Vec::new());
         // Enclosing-function tracker for this file: `enclosing` names each site and
         // `fn_start` bounds the qualifying look-back below, so no coordinate is minted.
         // Column-0 `fn` headers only — a producer inside an `impl` method would take the
-        // preceding free function's name; all five producers today are free functions.
+        // preceding free function's name; all four producers today are free functions.
         let (mut enclosing, mut fn_start) = (String::new(), 0usize);
         for (n, line) in lines.iter().enumerate() {
             let code = code_of(line);
@@ -25569,7 +26465,7 @@ mod stage2_injector_tests {
                 continue;
             }
             if test_file || spans.iter().any(|(a, b)| (*a..=*b).contains(&n)) {
-                in_test += 1;
+                in_test.push(rel.to_string());
             } else if code.contains("waiting_for = ")
                 || code.contains("Ok(Some(")
                 // `install_direct_choice_frame` owns the actual `state.waiting_for`
@@ -25603,6 +26499,23 @@ mod stage2_injector_tests {
     /// coordinate is asserted, so movement above a producer is not an event and a REPLACEMENT
     /// inside a pinned function is. The pin is a sorted MULTISET, so a sixth mint in one of them
     /// still fails here; comment text is never a site (`source_census::code`).
+    ///
+    /// **NOT THE SAME BOUNDARY AS THE CONJUNCT CENSUS.** The retained
+    /// `f2c_the_cr_603_5_conjunct_set_has_one_production_assembler` row below counts CONSUMERS
+    /// of the five gate predicates (`has_kind_driven_repeat`, `optional_prompt_player`, …) and
+    /// pins that they are assembled in one place. It cannot see who MINTS
+    /// `WaitingFor::OptionalEffectChoice`, which is what this row counts — so neither row
+    /// subsumes the other.
+    ///
+    /// **THE PARTITION DELTA IS ACCOUNTED, NOT ABSORBED.** This row was first pinned at
+    /// `4 / 11 / 44`; the in-test column is now 45. The single added site is
+    /// `game/effects/phase_out.rs`'s `restore_phase_state` suspension fixture, which parks a
+    /// typed optional prompt on two cloned states to keep a continuation legitimately
+    /// suspended. It is `#[cfg(test)]`-only: it mints no production producer and changes no
+    /// production key. The producer multiset below is byte-identical to the original pin, so
+    /// no producer moved; the assertion that the phase_out file contributes exactly one
+    /// in-test site is what makes that delta an explicit adjudication instead of a number
+    /// bump.
     #[test]
     fn the_cr_603_5_prompt_census_is_pinned_so_a_sixth_producer_is_a_counted_event() {
         /// Every `.rs` under the crate's `src`.
@@ -25623,7 +26536,7 @@ mod stage2_injector_tests {
         files.sort();
         assert!(files.len() > 100, "reach-guard: the walker found the crate");
 
-        let (mut producers, mut readers, mut in_test) = (Vec::new(), Vec::new(), 0usize);
+        let (mut producers, mut readers, mut in_test) = (Vec::new(), Vec::new(), Vec::new());
         for path in &files {
             let text = std::fs::read_to_string(path).expect("readable source file");
             let rel = path
@@ -25639,26 +26552,40 @@ mod stage2_injector_tests {
             let (file_producers, file_readers, file_in_test) = cr_603_5_sites(&rel, &text);
             producers.extend(file_producers);
             readers.extend(file_readers);
-            in_test += file_in_test;
+            in_test.extend(file_in_test);
         }
         producers.sort();
 
         assert_eq!(
-            producers.len() + readers.len() + in_test,
-            59,
+            producers.len() + readers.len() + in_test.len(),
+            60,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one).\n\
              producers={producers:#?}\nreaders={readers:#?}"
         );
         assert_eq!(
-            (producers.len(), readers.len(), in_test),
-            (4, 11, 44),
+            (producers.len(), readers.len(), in_test.len()),
+            (4, 11, 45),
             "the partition, not just the total: four PRODUCTION producers, eleven PRODUCTION \
-             readers (including the two new optional-subject projection reads), and 44 \
-             `#[cfg(test)]` lines, including the ChooseOneOf, retained optional/outer, \
-             and retained repeat/choice restore fixtures.\nproducers={producers:#?}\n\
-             readers={readers:#?}"
+             readers (including the two new optional-subject projection reads), and 45 \
+             `#[cfg(test)]` sites, including the ChooseOneOf, retained optional/outer, \
+             retained repeat/choice restore fixtures, and the `phase_out` suspension fixture \
+             that parks a typed prompt on a clone (test-only: it mints no producer).\n\
+             producers={producers:#?}\nreaders={readers:#?}"
+        );
+        // The one delta against the first pin, named rather than counted away: the `phase_out`
+        // `restore_phase_state` fixture parks an `OptionalEffectChoice` on each of two cloned
+        // states. A SECOND in-test site in that file (or this one disappearing) is an event.
+        assert_eq!(
+            in_test
+                .iter()
+                .filter(|rel| rel.as_str() == "game/effects/phase_out.rs")
+                .count(),
+            1,
+            "the accounted in-test delta is exactly the `restore_phase_state` suspension \
+             fixture's parked prompt; a second parked prompt in that file (or its removal) \
+             changes the in-test column for a reason this row has not adjudicated"
         );
         assert_eq!(
             producers,
@@ -27021,7 +27948,8 @@ mod bounded_offer_conjunct_tests {
         for i in 0..frames {
             let mut frame = state.clone();
             shape(&mut frame, i);
-            // Both halves built exactly as `record_loop_detect_sample` builds them.
+            // The ring content is captured in the strict form; production records the
+            // sample form, and the deferred confirmation path has its own regression.
             state
                 .loop_detect_ring
                 .push_back(std::sync::Arc::new(crate::types::LoopDetectSample {
@@ -31170,20 +32098,16 @@ mod cost_move_drain_priority_boundary_tests {
     use crate::types::mana::ManaCost;
     use crate::types::player::PlayerId;
 
-    /// `engine_payment_choices::resume_counter_addition_unless_payment` maps
-    /// `CostMoveDrainBoundary::PriorityBoundary` to `unreachable!`, and nothing but
-    /// this eligibility table makes that true: it admits only a Delve-commit `Cast`,
-    /// `ManaAbilityPayment`, and a counter-cost root whose replacement subtree has
-    /// retired at that boundary. Nothing else in the crate pinned that
-    /// premise, so widening the table would leave the suite green and abort a live
-    /// session instead.
+    /// CR 614.11a + CR 118.12: an interactive draw substitute returns to the
+    /// priority boundary only after its replacement subtree has retired. The
+    /// owning unless-payment must resume there rather than stay parked until a
+    /// later replacement-delivery boundary that may never arrive.
     ///
-    /// This pins the guard, not the panic. A `#[should_panic]` row would assert the
-    /// panic is *reachable*, which is the inverse of the invariant. Admitting
-    /// `CounterAdditionUnlessPayment` at `PriorityBoundary` turns this row red: the
-    /// root takes the parked continuation and panics before it can return `Ok(None)`.
+    /// The former guard pinned the opposite premise (`unreachable!` at this
+    /// boundary); the resume authority now accepts it, so this row asserts the
+    /// parked continuation is actually drained.
     #[test]
-    fn a_parked_counter_addition_unless_payment_is_never_drained_at_the_priority_boundary() {
+    fn a_parked_counter_addition_unless_payment_resumes_at_the_priority_boundary() {
         let mut state = GameState::new_two_player(42);
         state.pending_cost_move_resume =
             Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
@@ -31201,6 +32125,7 @@ mod cost_move_drain_priority_boundary_tests {
                 trigger_event: None,
                 effect_description: None,
                 remaining: Vec::new(),
+                unpaid_suffix: None,
             });
         let mut events = Vec::new();
 
@@ -31211,17 +32136,13 @@ mod cost_move_drain_priority_boundary_tests {
         );
 
         assert!(
-            matches!(drained, Ok(None)),
-            "the priority boundary must not drain a counter-addition unless-payment"
+            matches!(drained, Ok(Some(_))),
+            "the priority boundary must resume the parked unless-payment: {drained:?}"
         );
         assert!(
-            matches!(
-                state.pending_cost_move_resume,
-                Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
-            ),
-            "the continuation must stay parked for the replacement boundary that owns it"
+            state.pending_cost_move_resume.is_none(),
+            "the resumed continuation must not stay parked"
         );
-        assert!(events.is_empty(), "an ineligible drain must emit no events");
     }
 
     /// CR 616.1 + CR 608.2c: a counter-cost root recorded at an empty stack is
@@ -31832,5 +32753,228 @@ At the beginning of combat on your turn, you may choose two. Each mode must targ
             remembered.state().waiting_for
         );
         assert_eq!(remembered.state().loop_decision_tally.optional, 1);
+    }
+}
+
+#[cfg(test)]
+mod damage_history_priority_cost_tests {
+    use super::*;
+    use crate::types::ability::{QuantityExpr, TargetFilter};
+    use crate::types::game_state::{DamageRecord, LOOP_DAMAGE_JOURNAL_VISITS};
+
+    #[test]
+    fn loop_relational_take_boundary_defers_history_through_first_settle() {
+        use crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS;
+
+        const ROWS: usize = 512;
+        let mut state = GameState::new_two_player(7);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Boundary history source".to_string(),
+            Zone::Battlefield,
+        );
+        let incarnation = state.objects[&source].incarnation;
+        let recipient = crate::game::zones::create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Boundary recipient".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient_incarnation = state.objects[&recipient].incarnation;
+        // A REAL recipient reader, so the journal reduction actually runs on both projected
+        // sides; without it the fixture would measure the empty-request early return.
+        state.stack.push_back(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::SetTapState {
+                        target: TargetFilter::EventTarget,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
+                    vec![],
+                    source,
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: Some(GameEvent::DamageDealt {
+                    source_id: source,
+                    source_incarnation: Some(incarnation),
+                    target: TargetRef::Object(recipient),
+                    amount: 1,
+                    is_combat: false,
+                    excess: 0,
+                }),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        for _ in 0..ROWS {
+            state.damage_dealt_this_turn.push_back(DamageRecord {
+                source_id: source,
+                source_incarnation: Some(incarnation),
+                target: TargetRef::Object(recipient),
+                target_incarnation: Some(recipient_incarnation),
+                amount: 1,
+                ..Default::default()
+            });
+        }
+        // The boundary itself must not rank history: its consumers project first.
+        LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let boundary = take_boundary(&state);
+        assert_eq!(
+            LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get),
+            0,
+            "take_boundary must not rank the row-unbounded journal"
+        );
+        // Boundary construction through the first settle comparison: one reduction pass per
+        // projected side plus a bounded witness rank. A strict boundary would add its own
+        // two journal passes, so the bound discriminates that revert.
+        LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let settled = settle_recurs(&boundary, &state);
+        let whole_path = LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
+        assert!(
+            settled,
+            "the settle beat settles against its own boundary through the public comparator"
+        );
+        assert!(
+            whole_path <= 2 * ROWS + 16,
+            "{whole_path} visits from boundary construction through the first settle \
+             comparison for {ROWS} rows; a strict boundary would add two more passes"
+        );
+        // A REAL board modification must not settle: the comparison is not vacuous.
+        let mut modified = state.clone();
+        modified
+            .objects
+            .get_mut(&recipient)
+            .expect("the fixture keeps its recipient")
+            .tapped = true;
+        assert!(
+            !settle_recurs(&boundary, &modified),
+            "tapping the recipient is a real change the settle comparison must observe"
+        );
+    }
+
+    #[test]
+    fn loop_relational_auto_pass_window_defers_unread_damage_history() {
+        const RESOLUTIONS: usize = 40;
+        let caster = PlayerId(0);
+        let opponent = PlayerId(1);
+        for prefix in [32, 256, 2_048] {
+            let mut state = GameState::new_two_player(7);
+            state.phase = Phase::PreCombatMain;
+            state.active_player = caster;
+            state.priority_player = caster;
+            state.waiting_for = WaitingFor::Priority { player: caster };
+            // Isolate the distinct automatic mandatory window, not the
+            // user-enabled persisted ring's sampling route.
+            state.loop_detection = LoopDetectionMode::Off;
+            for player in state.players.iter_mut() {
+                player.life = 1_000;
+            }
+            let source = crate::game::zones::create_object(
+                &mut state,
+                CardId(1),
+                caster,
+                "Damage history work source".to_string(),
+                Zone::Battlefield,
+            );
+            let source_incarnation = state.objects[&source].incarnation;
+            for _ in 0..prefix {
+                state.damage_dealt_this_turn.push_back(DamageRecord {
+                    source_id: source,
+                    source_incarnation: Some(source_incarnation),
+                    target: TargetRef::Player(opponent),
+                    amount: 1,
+                    ..Default::default()
+                });
+            }
+            for index in 0..RESOLUTIONS {
+                state.stack.push_back(StackEntry {
+                    id: ObjectId(100 + index as u64),
+                    source_id: source,
+                    controller: caster,
+                    kind: StackEntryKind::TriggeredAbility {
+                        source_id: source,
+                        ability: Box::new(ResolvedAbility::new(
+                            Effect::DealDamage {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                                target: TargetFilter::Any,
+                                damage_source: None,
+                                excess: None,
+                            },
+                            vec![TargetRef::Player(opponent)],
+                            source,
+                            caster,
+                        )),
+                        condition: None,
+                        trigger_event: None,
+                        description: None,
+                        source_name: String::new(),
+                        subject_match_count: None,
+                        die_result: None,
+                        provenance: None,
+                    },
+                });
+            }
+            for player in [caster, opponent] {
+                state.auto_pass.insert(
+                    player,
+                    AutoPassMode::UntilStackEmpty {
+                        initial_stack_len: RESOLUTIONS,
+                        policy: StackResolutionPolicy::Committed,
+                    },
+                );
+            }
+            // Positive work-observer control, outside the measured drive.
+            LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+            let _strict = state.normalize_for_loop();
+            assert!(
+                LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get) >= 2 * prefix,
+                "strict journal collection/rewrite must be observable"
+            );
+            LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+            AUTO_PASS_WINDOW_SAMPLES.with(|samples| samples.set(0));
+            let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
+            assert!(
+                run_auto_pass_loop(&mut state, &mut result)
+                    .expect("the finite damage stack resolves"),
+                "the automatic route must advance"
+            );
+            assert!(
+                state.stack.is_empty(),
+                "all pending damage consumers finish"
+            );
+            assert_eq!(state.players[1].life, 1_000 - RESOLUTIONS as i32);
+            assert_eq!(
+                state.damage_dealt_this_turn.len(),
+                prefix + RESOLUTIONS,
+                "actual damage resolution grows history inside the automatic window"
+            );
+            assert!(
+                AUTO_PASS_WINDOW_SAMPLES.with(std::cell::Cell::get) > 0,
+                "the separate post-threshold window must actually sample"
+            );
+            assert_eq!(
+                LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get),
+                0,
+                "auto-pass sampling must defer unread full-history ranking"
+            );
+        }
     }
 }
