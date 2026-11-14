@@ -2436,8 +2436,9 @@ pub enum ParentTargetMissingReason {
     /// self-fallback, and optional cast/play operations avoid offering a
     /// nonexistent card regardless of whether their driver is immediate or
     /// lingering.
-    /// Without the first guard, the Dig's own source (e.g. a reanimated
-    /// Thassa's Oracle) would move into the library it just found empty.
+    /// The guard also protects previously parsed chains that still carry a
+    /// separate placement step. Thassa's Oracle now parses the placement
+    /// into `Dig` itself.
     Dig,
     /// CR 609.3: A `ChooseFromZone` had no cards to choose from. Consumers
     /// that name the missing choice through `ParentTarget` (e.g. a chained

@@ -2568,7 +2568,8 @@ mod tests {
     /// Oracle must still be on the battlefield and the library must still be
     /// empty when the condition is checked.
     ///
-    /// Pre-fix, the `PutAtLibraryPosition` link's `ParentTarget` resolution
+    /// The current parser folds placement into `Dig`. The historical chain
+    /// used a separate `PutAtLibraryPosition` link. Its `ParentTarget` resolution
     /// fell back to "self" (no prior Dig selection, empty `ability.targets`),
     /// moving Thassa's Oracle itself from the battlefield onto its own
     /// library — corrupting devotion (no longer on the battlefield) and the
