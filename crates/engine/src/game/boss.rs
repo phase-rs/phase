@@ -23,7 +23,7 @@
 //! loop consults on each reveal.
 
 use crate::game::effects::change_zone::{execute_zone_move, ZoneMoveResult};
-use crate::game::game_object::GameObject;
+use crate::game::game_object::{DisplaySource, GameObject};
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{
     GameState, HeroEventAnswer, HeroEventApplyStep, HeroEventDepartureCarry, HeroEventKind,
@@ -185,6 +185,10 @@ fn create_boss_deck_card(
     // CR 704.5d sweep spares it and the CR 111.8 movement freeze lets the
     // stage-clear exile proceed.
     obj.is_horde_deck_token = true;
+    // Token-layout art lives behind `token_image_ref`, which the client only
+    // reads when `display_source` is `Token` — stamp it so Bosses never fall
+    // back to name lookup (their display names resolve nowhere).
+    obj.display_source = DisplaySource::Token;
     obj.token_image_ref = token_image_ref.clone();
     obj.source_related_token_ids = token_image_ref
         .map(|image_ref| vec![image_ref.preset_id])
@@ -2081,6 +2085,65 @@ mod tests {
         );
     }
 
+    /// Every Turtle Team-Up enemy-deck card is token-layout on Scryfall and
+    /// carries its art as a pinned `token_image_ref` — so every library object
+    /// must route display as a token. The client only forwards the ref when
+    /// `display_source` is `Token`; without the stamp the lookup falls back to
+    /// the display name ("Event: Bebop's Rampage"), which resolves nowhere,
+    /// and the card renders as a blank placeholder.
+    #[test]
+    fn horde_library_tokens_display_as_tokens() {
+        let (state, horde) = turtle_teamup_game(1);
+        let library: Vec<ObjectId> = state
+            .players
+            .iter()
+            .find(|p| p.id == horde)
+            .expect("horde seat")
+            .library
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(library.len(), 27, "the full event deck loads");
+        for id in library {
+            let obj = state.objects.get(&id).expect("library object");
+            assert!(
+                obj.token_image_ref.is_some(),
+                "{} pins preset art",
+                obj.base_name
+            );
+            assert_eq!(
+                obj.display_source,
+                DisplaySource::Token,
+                "{} must route display as a token",
+                obj.base_name
+            );
+        }
+    }
+
+    /// Same routing for the Boss pile and the deployed stage-1 Boss: both are
+    /// token-layout cards whose only art channel is `token_image_ref`.
+    #[test]
+    fn boss_pile_and_deployed_bosses_display_as_tokens() {
+        let (state, _horde) = turtle_teamup_game(1);
+        assert_eq!(state.boss_deck.len(), 10, "stage 1 deploys one of 11");
+        assert_eq!(bosses_in_command_zone(&state).len(), 1);
+        let pile: Vec<ObjectId> = state.boss_deck.iter().copied().collect();
+        for id in pile.into_iter().chain(bosses_in_command_zone(&state)) {
+            let obj = state.objects.get(&id).expect("boss object");
+            assert!(
+                obj.token_image_ref.is_some(),
+                "{} pins preset art",
+                obj.base_name
+            );
+            assert_eq!(
+                obj.display_source,
+                DisplaySource::Token,
+                "{} must route display as a token",
+                obj.base_name
+            );
+        }
+    }
+
     /// Challenge-deck library loaded raw — no setup hook, no deploy — so the
     /// pile holds the full deck and the id→card mapping is comparable across
     /// seeds.
@@ -2222,10 +2285,12 @@ mod tests {
     }
 
     /// R6-#6 — a hidden Horde library card must not leak token metadata in
-    /// viewer states: `is_token` and `is_horde_deck_token` both redact.
+    /// viewer states: `is_token` and `is_horde_deck_token` both redact, and
+    /// `display_source` resets to `Card` (token art routing would otherwise
+    /// identify the pile position exactly like the flags do).
     /// Exercised on the token-bearing Cyberman deck (100 cards + 200
     /// tokens), asserting both the projected structs and their serialized
-    /// form (all three marker keys skip-serialize when cleared).
+    /// form (all four marker keys skip-serialize when cleared).
     #[test]
     fn hidden_horde_library_redacts_token_metadata() {
         let (state, horde, hero) = horde_library_state_for_deck(ChallengeDeck::CybermanHorde, 42);
@@ -2267,6 +2332,11 @@ mod tests {
                 !obj.is_horde_deck_token,
                 "hidden pile card {id:?} must not show the horde-deck flag"
             );
+            assert_eq!(
+                obj.display_source,
+                DisplaySource::Card,
+                "hidden pile card {id:?} must not route art as a token"
+            );
             assert!(
                 obj.horde_library_rarity.is_none(),
                 "Cyberman pins no rarity; the view must not invent one"
@@ -2275,6 +2345,7 @@ mod tests {
             for key in [
                 "\"is_token\":",
                 "\"is_horde_deck_token\":",
+                "\"display_source\":",
                 "\"horde_library_rarity\":",
             ] {
                 assert!(
@@ -2460,6 +2531,45 @@ mod tests {
         assert!(
             !crate::game::horde::horde_is_defeated(&state),
             "the Horde is not defeated mid-fight"
+        );
+    }
+
+    /// The engine-projected Horde identity tracks a stage clear: stage 1
+    /// projects its one deployed Boss, and after the SBA-driven clear the
+    /// same projection names the two stage-2 Bosses instead of the exiled
+    /// stage-1 Boss. The seat client re-derives from this projection on
+    /// every snapshot, so continuous play and a remount agree.
+    #[test]
+    fn horde_projection_tracks_stage_advance() {
+        let (mut state, horde) = turtle_teamup_game(2);
+        let stage_1 = crate::game::derived_views::derive_views(&state, None)
+            .horde
+            .expect("stage 1 projects a Horde view");
+        assert_eq!(stage_1.horde_seat_ids, vec![horde]);
+        assert_eq!(stage_1.deployed_boss_ids.len(), 1);
+
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == horde)
+            .expect("horde seat")
+            .life = 0;
+        crate::game::sba::check_state_based_actions(&mut state, &mut Vec::new());
+
+        let stage_2 = crate::game::derived_views::derive_views(&state, None)
+            .horde
+            .expect("stage 2 projects a Horde view");
+        assert_eq!(stage_2.horde_seat_ids, vec![horde]);
+        assert_eq!(
+            stage_2.deployed_boss_ids.len(),
+            2,
+            "stage 2 deploys two Bosses"
+        );
+        assert!(
+            !stage_2
+                .deployed_boss_ids
+                .contains(&stage_1.deployed_boss_ids[0]),
+            "the cleared stage-1 Boss is exiled, not re-projected"
         );
     }
 

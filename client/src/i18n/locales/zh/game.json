@@ -2785,6 +2785,8 @@
     "commander": "指挥官",
     "commanderTitle": "指挥官：{{name}}",
     "commanderTitleTax": "指挥官：{{name}}（税：+{{tax}}）",
+    "boss": "头目",
+    "bossTitle": "头目: {{name}}",
     "companion": "行侣",
     "companionActivate": "支付{3}：将{{name}}置于你手上",
     "companionTitle": "行侣：{{name}}",

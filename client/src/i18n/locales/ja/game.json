@@ -706,6 +706,8 @@
     "commander": "統率者",
     "commanderTitle": "統率者: {{name}}",
     "commanderTitleTax": "統率者: {{name}}（税: +{{tax}}）",
+    "boss": "ボス",
+    "bossTitle": "ボス: {{name}}",
     "castCommander": "{{name}}を唱える — ダブルクリックまたはドラッグしてプレイ",
     "castCommanderTax": "{{name}}を唱える（税: +{{tax}}） — ダブルクリックまたはドラッグしてプレイ",
     "ninjutsuCommander": "統率者忍術: {{name}} — クリックしてブロックされていない攻撃クリーチャーを手札に戻し、この統率者をタップ状態で攻撃中に戦場へ出す",

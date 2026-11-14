@@ -46,6 +46,22 @@ export function commandZoneConspiracies(gameState: GameState, playerId: PlayerId
     );
 }
 
+/**
+ * Deployed Bosses this player owns, in the engine's command-zone order — the
+ * exact set BossCardZone renders. The engine SELECTS the set
+ * (`derived.horde.deployed_boss_ids`, face-up Boss cards only — the face-down
+ * Boss pile is never listed); this only splits it per owning seat the way
+ * `commandZoneLeaders` does, and drops ids whose objects are missing from a
+ * partial snapshot rather than guessing.
+ */
+export function commandZoneBosses(gameState: GameState, playerId: PlayerId): GameObject[] {
+  return (gameState.derived?.horde?.deployed_boss_ids ?? [])
+    .map((id) => gameState.objects[id])
+    .filter(
+      (obj): obj is GameObject => obj != null && obj.owner === playerId,
+    );
+}
+
 /** One attacker's commander-damage badges inflicted on a given victim. */
 export interface CommanderDamageEntry {
   /** Attacking commander's controller (PlayerId as string key). */
