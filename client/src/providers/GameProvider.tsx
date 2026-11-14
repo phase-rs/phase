@@ -104,6 +104,7 @@ import {
   fetchBossAvatarUrl,
 } from "../services/playerAvatars";
 import type { PlayerAvatarIdentity } from "../services/playerAvatars";
+import { getSeatCount } from "../viewmodel/gameStateView";
 
 /** Build per-seat AI controller bindings for a game about to start. Reads
  *  the session-scoped `aiSeats` snapshot from `ActiveGameMeta` (written at
@@ -2479,14 +2480,21 @@ export function GameProvider({
     // A generation change is a session replacement, never continuous play
     // (engine snapshots commit without bumping it — only init, resume,
     // and import do). Reset both branches and reseed the random fallback
-    // exactly like a fresh mount, so a replacement neither branch claims
-    // sheds the previous game's themed maps instead of keeping them.
+    // for the replacement snapshot's seats, so a replacement neither
+    // branch claims sheds the previous game's themed maps instead of
+    // keeping them.
     const reselectOnReplace = (state: ReturnType<typeof useGameStore.getState>) => {
       if (state.gameId !== gameId || state.gameSessionGeneration === lastGeneration) return;
       lastGeneration = state.gameSessionGeneration;
       commanderDone = false;
       lastHordeKey = null;
-      setupRandomAvatars(playerCount ?? 2, gameId);
+      // The count comes from the INSTALLED replacement snapshot, never the
+      // mounted route: a debug import replaces the session under the same
+      // route id without navigating, and the replacement game can seat more
+      // players than the route's count — reseeding from the route would
+      // leave the extra seats with generic labels instead of identities.
+      const replacementSeats = state.gameState ? getSeatCount(state.gameState) : 0;
+      setupRandomAvatars(replacementSeats > 0 ? replacementSeats : (playerCount ?? 2), gameId);
     };
     // The projected Horde identity this snapshot themes, or null when no
     // themed seats apply (non-Horde format, other challenge deck, or no

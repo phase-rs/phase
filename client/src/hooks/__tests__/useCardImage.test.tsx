@@ -572,46 +572,73 @@ describe("useCardImage", () => {
     await waitFor(() => expect(result.current.src).toBe("https://img.example/morph.jpg"));
   });
 
-  it("recovers the corrected art for a pre-PR stale token ref through the oracle rung (#10861 R2-F2)", async () => {
+  it("recovers the corrected art for a pre-PR stale token ref through the token-name rung (#10861 R3-F2)", async () => {
     // A pre-PR save pins Smackdown's ORIGINAL typo'd printing id
     // (`...b2fb-444-...`, `444` for `4a44`); the restore repair retains
-    // that ref verbatim and only fixes the display route. The sidecar no
-    // longer indexes the typo'd id, so the `scryfall:` rung misses — but
-    // the ref's oracle id is correct, and the `oracle:` rung must recover
-    // the corrected image. The fixture deliberately omits any token-name
-    // entry: production ALSO has the name lookup as a second net, but
-    // this test pins the oracle rung as an independent recovery path.
+    // that ref verbatim and only fixes the display route. Both sidecars
+    // below are production-shaped: the token-images table indexes the
+    // CORRECTED printing id plus the oracle id suffixed with the
+    // downcased card name — the only oracle keys the generator emits
+    // (gen-scryfall-token-images.sh), so there is deliberately NO bare
+    // `oracle:<id>:` key — and scryfall-data carries the `token:` name
+    // entry (gen-scryfall-images.sh). The restored ref has the typo'd id
+    // and no face name, so both exact ref rungs miss, and the ordinary
+    // token-name lookup must recover the corrected image.
     const CORRECTED_ID = "fac36345-b2fb-4a44-a499-f68bbe87e736";
     const ORACLE_ID = "4e7833c7-e9ff-4550-b2fd-36afe6087e0f";
+    const NAME = "Event: Leatherhead's Smackdown";
     const EXPECTED_ART = `https://cards.scryfall.io/normal/front/f/a/${CORRECTED_ID}.jpg`;
     const smackdownEntry = {
       scryfall_id: CORRECTED_ID,
       oracle_id: ORACLE_ID,
-      face_names: [],
+      face_names: [NAME.toLowerCase()],
       faces: [{ normal: EXPECTED_ART, art_crop: EXPECTED_ART }],
-      name: "Event: Leatherhead's Smackdown",
+      name: NAME,
       layout: "token",
+    };
+    const staleRef = {
+      scryfall_id: "fac36345-b2fb-444-a499-f68bbe87e736",
+      scryfall_oracle_id: ORACLE_ID,
+      preset_id: "f13c9091-91b6-51b4-91d5-214180ff03ee",
     };
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       if (url === "/scryfall-token-images.json") {
         return Promise.resolve(jsonResponse({
           [`scryfall:${CORRECTED_ID}`]: smackdownEntry,
-          [`oracle:${ORACLE_ID}:`]: smackdownEntry,
+          [`oracle:${ORACLE_ID}:${NAME.toLowerCase()}`]: smackdownEntry,
+        }));
+      }
+      if (url === "/scryfall-data.json") {
+        return Promise.resolve(jsonResponse({
+          [`token:${NAME.toLowerCase()}`]: {
+            oracle_id: ORACLE_ID,
+            face_names: [NAME.toLowerCase()],
+            faces: [{ normal: EXPECTED_ART, art_crop: EXPECTED_ART }],
+            name: NAME,
+            mana_cost: "",
+            cmc: 0,
+            type_line: "Token — Event",
+            colors: [],
+            color_identity: [],
+            keywords: [],
+          },
         }));
       }
       return Promise.resolve(jsonResponse({}));
     }));
 
+    // Both exact ref rungs miss against the shipped key shapes: the
+    // printing id is the pre-correction typo and the ref carries no face
+    // name. Re-adding a bare `oracle:<id>:` fixture key reddens here.
+    const { fetchTokenImageAssetByRef } = await import("../../services/scryfall.ts");
+    await expect(fetchTokenImageAssetByRef(staleRef, "normal")).resolves.toBeNull();
+
     const { useCardImage } = await import("../useCardImage");
     const { result } = renderHook(() =>
-      useCardImage("Event: Leatherhead's Smackdown", {
+      useCardImage(NAME, {
         size: "normal",
         isToken: true,
-        tokenImageRef: {
-          scryfall_id: "fac36345-b2fb-444-a499-f68bbe87e736",
-          scryfall_oracle_id: ORACLE_ID,
-          preset_id: "f13c9091-91b6-51b4-91d5-214180ff03ee",
-        },
+        tokenImageRef: staleRef,
       }),
     );
 

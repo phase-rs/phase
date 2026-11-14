@@ -132,6 +132,9 @@ function tmntState(options: {
   return {
     ...buildGameState({
       players: buildPlayers(options.players),
+      // Production snapshots always carry the seat vector (the engine never
+      // removes from it); the replacement reseed counts seats from here.
+      seat_order: options.players.map((player) => player.id),
     }),
     format_config: buildFormatConfig({
       format: "Horde",
@@ -760,6 +763,64 @@ describe("GameProvider Horde seat identities", () => {
     );
     expect(useMultiplayerStore.getState().playerAvatars).toEqual(
       expectedRandom(2, gameId),
+    );
+    expect(fetchTokenImageAssetByRef).toHaveBeenCalledTimes(1);
+  });
+
+  it("seeds the fallback from the replacement snapshot's seats, not the route's (#10861 R3-F1)", async () => {
+    const gameId = "horde-avatars-two-to-four";
+    render(
+      <GameProvider gameId={gameId} mode="ai" playerCount={2}>
+        <div />
+      </GameProvider>,
+    );
+
+    act(() => {
+      useGameStore.setState({
+        gameId,
+        gameState: tmntState({
+          players: [{ id: 0 }, { id: 1 }],
+          hordeSeats: [1],
+          heroes: [0],
+          bosses: [{ id: 100, name: "Shredder, Foot Clan Overlord", owner: 1, ref: SHREDDER_REF }],
+          deployedBossIds: [100],
+        }),
+      });
+    });
+    // Let the Boss portrait merge first: the reseed must clear even the
+    // async entry, not just the synchronous names.
+    await waitFor(() => {
+      expect(useMultiplayerStore.getState().playerAvatars.get(1)).toEqual({
+        kind: "external",
+        url: BOSS_ART_URLS[SHREDDER_REF.scryfall_id],
+      });
+    });
+
+    // A debug import replaces the two-seat themed game with a four-seat
+    // fallback game under the SAME route id: no navigation, so the route
+    // still says two seats. The reseed must cover all four installed
+    // seats — seeding from the route would leave seats 2 and 3 with
+    // generic labels instead of seeded identities.
+    const fourSeatGeneration = useGameStore.getState().gameSessionGeneration;
+    act(() => {
+      useGameStore.setState({
+        gameSessionGeneration: fourSeatGeneration + 1,
+        gameState: tmntState({
+          players: [{ id: 0 }, { id: 1 }, { id: 2 }, { id: 3 }],
+          hordeSeats: [1],
+          heroes: [0, 2, 3],
+          bosses: [],
+          deployedBossIds: [],
+          challengeDeck: "CybermanHorde",
+        }),
+      });
+    });
+
+    expect(useMultiplayerStore.getState().playerNames).toEqual(
+      expectedRandomNames(4, gameId),
+    );
+    expect(useMultiplayerStore.getState().playerAvatars).toEqual(
+      expectedRandom(4, gameId),
     );
     expect(fetchTokenImageAssetByRef).toHaveBeenCalledTimes(1);
   });
