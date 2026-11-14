@@ -1301,25 +1301,64 @@ fn a_loss_and_a_death_in_one_state_based_action_event_trigger_one_or_more_once()
     assert!(runner.state().deferred_triggers.is_empty());
 }
 
-/// CR 603.10a + CR 800.4a: a departed observer cannot trigger for an event that
-/// happens after it left. P0 controls P2's Twilight Diviner ("Whenever one or
-/// more other creatures you control enter, if they entered or were cast from a
-/// graveyard, create a token that's a copy of one of them.") through Turn
-/// Against, controls Grizzly Bears, and has Phyrexian Metamorph as the only
-/// creature card in a graveyard. P0 casts Rise of the Dark Realms ("Put all
+/// The board of the two Rise of the Dark Realms rows: P0 controls P2's Twilight
+/// Diviner ("Whenever one or more other creatures you control enter, if they
+/// entered or were cast from a graveyard, create a token that's a copy of one
+/// of them.") through Turn Against and casts Rise of the Dark Realms ("Put all
 /// creature cards from all graveyards onto the battlefield under your
-/// control."); the Metamorph's optional copy replacement pauses the move before
-/// anything has entered. P2 concedes at that prompt, and the Diviner leaves the
-/// game with its owner. P0 then has the Metamorph enter: nothing had entered
-/// while the Diviner was there, so the Diviner does not trigger.
-#[test]
-fn a_departed_observer_does_not_trigger_for_an_entry_after_it_left() {
+/// control."). Phyrexian Metamorph is in P0's graveyard; its optional copy
+/// replacement pauses the move. `entered_first` puts a Grizzly Bears card in
+/// the graveyard too, which enters before the pause; otherwise a Bears is
+/// already on the battlefield for the Metamorph to copy. `suppressor` gives P2
+/// Hushbringer ("Creatures entering or dying don't cause abilities to
+/// trigger."). P2 concedes at the Metamorph's prompt, so the Diviner (and
+/// Hushbringer) leave the game, and P0 then has the Metamorph enter as a copy
+/// of the Bears. Returns how many Diviner triggers wait or are on the stack.
+fn diviner_triggers_after_its_owner_leaves_mid_rise(
+    entered_first: bool,
+    suppressor: bool,
+) -> usize {
+    // The members of the simultaneous return are delivered in the engine's
+    // order; use the board on which the Bears is on the battlefield when the
+    // Metamorph's prompt opens.
+    [false, true]
+        .into_iter()
+        .find_map(|metamorph_added_first| {
+            diviner_triggers_on_board(entered_first, suppressor, metamorph_added_first)
+        })
+        .expect("reach guard: one board has the Bears on the battlefield at the pause")
+}
+
+fn diviner_triggers_on_board(
+    entered_first: bool,
+    suppressor: bool,
+    metamorph_added_first: bool,
+) -> Option<usize> {
     let db = shared_card_db().expect("integration card fixture must load");
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let diviner = scenario.add_real_card(P2, "Twilight Diviner", Zone::Battlefield, db);
-    scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
-    let metamorph = scenario.add_real_card(P0, "Phyrexian Metamorph", Zone::Graveyard, db);
+    if suppressor {
+        scenario.add_real_card(P2, "Hushbringer", Zone::Battlefield, db);
+    }
+    let bears_zone = if entered_first {
+        Zone::Graveyard
+    } else {
+        Zone::Battlefield
+    };
+    let (metamorph, bears) = if metamorph_added_first {
+        let metamorph = scenario.add_real_card(P0, "Phyrexian Metamorph", Zone::Graveyard, db);
+        (
+            metamorph,
+            scenario.add_real_card(P0, "Grizzly Bears", bears_zone, db),
+        )
+    } else {
+        let bears = scenario.add_real_card(P0, "Grizzly Bears", bears_zone, db);
+        (
+            scenario.add_real_card(P0, "Phyrexian Metamorph", Zone::Graveyard, db),
+            bears,
+        )
+    };
     let turn_against = scenario.add_real_card(P0, "Turn Against", Zone::Hand, db);
     let rise = scenario.add_real_card(P0, "Rise of the Dark Realms", Zone::Hand, db);
     let mut pool = red_mana(5);
@@ -1348,6 +1387,9 @@ fn a_departed_observer_does_not_trigger_for_an_entry_after_it_left() {
         runner.state().waiting_for
     );
     assert_eq!(zone(&runner, metamorph), Zone::Graveyard);
+    if zone(&runner, bears) != Zone::Battlefield {
+        return None;
+    }
 
     runner
         .act(GameAction::Concede { player_id: P2 })
@@ -1368,8 +1410,7 @@ fn a_departed_observer_does_not_trigger_for_an_entry_after_it_left() {
                     })
                     .expect("P0 copies the Bears");
             }
-            WaitingFor::Priority { .. } | WaitingFor::OrderTriggers { .. } => break,
-            other => panic!("unexpected prompt while the Metamorph enters: {other:?}"),
+            _ => break,
         }
     }
     assert_eq!(zone(&runner, metamorph), Zone::Battlefield);
@@ -1382,9 +1423,45 @@ fn a_departed_observer_does_not_trigger_for_an_entry_after_it_left() {
         .chain(runner.state().deferred_triggers.iter())
         .filter(|context| context.pending.source_id == diviner)
         .count();
+    let announcing = runner
+        .state()
+        .pending_trigger
+        .iter()
+        .filter(|pending| pending.source_id == diviner)
+        .count();
+    // An ability being announced is already a stack entry; count it once.
+    Some(queued + triggers_from(&runner, diviner).max(announcing))
+}
+
+/// CR 603.10a + CR 800.4a: a departed observer cannot trigger for an event that
+/// happens after it left. Nothing had entered when P2 conceded, so the Diviner
+/// does not trigger for the Metamorph's later entry.
+#[test]
+fn a_departed_observer_does_not_trigger_for_an_entry_after_it_left() {
     assert_eq!(
-        queued + triggers_from(&runner, diviner),
-        0,
-        "the Diviner had left before anything entered"
+        diviner_triggers_after_its_owner_leaves_mid_rise(false, false),
+        0
+    );
+}
+
+/// CR 603.3a: the positive control of the two rows around it. The Bears entered
+/// from the graveyard while P0 controlled the Diviner, before P2 conceded, so
+/// that ability triggered for P0 and is kept, once.
+#[test]
+fn a_departed_observer_keeps_its_trigger_for_an_entry_completed_before_it_left() {
+    assert_eq!(
+        diviner_triggers_after_its_owner_leaves_mid_rise(true, false),
+        1
+    );
+}
+
+/// CR 603.10a + CR 603.2g: a suppressor that applied when an occurrence
+/// happened still applies to it after its owner leaves. The Bears entered under
+/// Hushbringer, so the Diviner's retained trigger does not fire for it.
+#[test]
+fn a_departed_suppressor_still_applies_to_the_entry_completed_before_its_owner_left() {
+    assert_eq!(
+        diviner_triggers_after_its_owner_leaves_mid_rise(true, true),
+        0
     );
 }
