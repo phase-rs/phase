@@ -24,7 +24,8 @@ use super::oracle_effect::{
 };
 use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::{
-    ConditionObjectAntecedent, ParseContext, TriggerConditionScope, TriggerZoneChangeProvenance,
+    ConditionObjectAntecedent, ParseContext, ResolvedChainRoot, TriggerConditionScope,
+    TriggerZoneChangeProvenance,
 };
 use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::effect_chain::{
@@ -2221,32 +2222,49 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 }
                 let (stripped_text, disposition) =
                     extract_illegal_targets_disposition(&effect_for_parse);
+                // The body is no proven single mandatory-role root when a
+                // trigger-level modifier is stamped on the root after it is
+                // parsed:
+                // - CR 118.12: a hoisted unless-payment with a targeted payer is
+                //   announced before the body's own target;
+                // - CR 603.3d + CR 115.6: the body-wide optional-target phrasing
+                //   (`has_up_to`, from an "up to one" anywhere in the body)
+                //   makes the root's own target declinable;
+                // - CR 101.1 over CR 608.2b: "This ability still resolves if its
+                //   target becomes illegal" lets the ability resolve with the
+                //   root's target pruned, and the gate would read no controller.
+                let body_root = if has_up_to
+                    || matches!(disposition, IllegalTargetsDisposition::StillResolves)
+                    || unless_pay.as_ref().is_some_and(|modifier| {
+                        crate::types::ability::payer_is_declared_target(&modifier.payer)
+                    }) {
+                    ResolvedChainRoot::Unproven
+                } else {
+                    ResolvedChainRoot::Proven
+                };
                 let (chain_text, ir) = match disposition {
                     IllegalTargetsDisposition::DoesNotResolve => {
-                        let ir = parse_effect_chain_ir_ability_root(
-                            &stripped_text,
-                            AbilityKind::Spell,
-                            &mut effect_ctx,
-                        );
+                        let ir =
+                            parse_trigger_body_chain_ir(&stripped_text, &mut effect_ctx, body_root);
                         (stripped_text, ir)
                     }
                     IllegalTargetsDisposition::StillResolves => {
                         // Parse the stripped chain on a clone: it is committed only if kept.
                         let mut stripped_ctx = effect_ctx.clone();
-                        let ir = parse_effect_chain_ir_ability_root(
+                        let ir = parse_trigger_body_chain_ir(
                             &stripped_text,
-                            AbilityKind::Spell,
                             &mut stripped_ctx,
+                            body_root,
                         );
                         if chain_creates_reflexive_ability(&lower_effect_chain_ir(&ir)) {
                             // CR 603.12 + CR 608.2b: a reflexive node is a separate ability
                             // with its own targets; the root stamp would not govern it. Fail
                             // closed: re-parse the unstripped body so the sentence stays a
                             // strict failure and the disposition stays the default.
-                            let ir = parse_effect_chain_ir_ability_root(
+                            let ir = parse_trigger_body_chain_ir(
                                 &effect_for_parse,
-                                AbilityKind::Spell,
                                 &mut effect_ctx,
+                                body_root,
                             );
                             (effect_for_parse.to_string(), ir)
                         } else {
@@ -2606,6 +2624,26 @@ fn condition_binds_scoped_player(condition: &AbilityCondition) -> bool {
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::SourceLacksKeyword { .. } => false,
     }
+}
+
+/// CR 603.1 + CR 608.2c: parse a triggered ability's body, which resolves as
+/// that ability's root node, handing the chain parse the resolved-root proof
+/// ([`ResolvedChainRoot`]). The proof is cleared afterwards even when the parse
+/// never reached a chain body, because `ctx` outlives this one parse.
+///
+/// `root` is `Unproven` when lowering will stamp a trigger-level modifier on
+/// the root that breaks the body's single mandatory-role proof: a hoisted
+/// unless-payment whose payer is a declared target (CR 118.12), or the
+/// body-wide optional-target phrasing (CR 603.3d + CR 115.6).
+fn parse_trigger_body_chain_ir(
+    text: &str,
+    ctx: &mut ParseContext,
+    root: ResolvedChainRoot,
+) -> EffectChainIr {
+    ctx.resolved_chain_root = root;
+    let ir = parse_effect_chain_ir_ability_root(text, AbilityKind::Spell, ctx);
+    ctx.resolved_chain_root = ResolvedChainRoot::Unproven;
+    ir
 }
 
 pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
