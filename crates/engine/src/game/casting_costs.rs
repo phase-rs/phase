@@ -11717,14 +11717,13 @@ fn pay_additional_cost_with_source(
                 return Err(EngineError::ActionNotAllowed("Not enough energy".into()));
             }
             if amount > 0 {
-                state
-                    .resolve_and_apply_player_edit(
-                        player,
-                        crate::types::resolved_commands::ResolvedPlayerEdit::Energy {
-                            delta: -(amount as i32),
-                        },
-                    )
-                    .expect("preflighted cast energy payment must apply");
+                super::effects::life::apply_final_player_resource_edit(
+                    state,
+                    player,
+                    crate::types::resolved_commands::ResolvedPlayerEdit::Energy {
+                        delta: -(amount as i32),
+                    },
+                )?;
             }
             events.push(GameEvent::EnergyChanged {
                 player,

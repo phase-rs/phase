@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "PeriodicDelta gains seat_life_gross (per-seat gross gained/lost life edits) for loop-shortcut headroom; an UntilLethal ShortcutProposal must carry its proven crossing in win_kind_at, and checked restore refuses one without it (#10543)"
+}

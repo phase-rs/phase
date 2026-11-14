@@ -341,6 +341,14 @@ pub(crate) fn altar_board(
     payoff: Option<&str>,
     db: &CardDatabase,
 ) -> (GameRunner, ObjectId, ObjectId) {
+    altar_board_with(payoff, db, |_| {})
+}
+
+pub(crate) fn altar_board_with(
+    payoff: Option<&str>,
+    db: &CardDatabase,
+    customize: impl FnOnce(&mut GameScenario),
+) -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let altar = scenario.add_real_card(P0, "Phyrexian Altar", Zone::Battlefield, db);
@@ -355,6 +363,7 @@ pub(crate) fn altar_board(
             scenario.add_real_card(seat, "Swamp", Zone::Library, db);
         }
     }
+    customize(&mut scenario);
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
     (runner, altar, gravecrawler)

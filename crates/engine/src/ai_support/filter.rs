@@ -3567,6 +3567,7 @@ mod tests {
                     road: OfferRoad::Ring,
                     counted_take: Default::default(),
                     period: Default::default(),
+                    deliverable_capacity: Some(crate::game::engine::MAX_SHORTCUT_CYCLES),
                 },
             };
             state
@@ -3641,6 +3642,7 @@ mod tests {
                     road: OfferRoad::Ring,
                     counted_take,
                     period: Default::default(),
+                    deliverable_capacity: Some(crate::game::engine::MAX_SHORTCUT_CYCLES),
                 },
             };
             state

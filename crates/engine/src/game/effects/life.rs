@@ -549,6 +549,20 @@ fn settle_life_gain(
     Ok(gain_amount)
 }
 
+/// CR 107.14: The most energy ONE checked payment can remove from `player`.
+///
+/// The stored payment is a signed `i32` delta, and the same checked edit that subtracts it
+/// also advances the per-turn paid-or-lost tally (`types::game_state`'s
+/// `apply_resolved_player_edit`), so a reserve larger than the tally's remaining room is not
+/// payable even though the energy total alone would cover it. Shared by the `PayAmountChoice`
+/// mint and the submit-time guard so a prompt never publishes a maximum its settlement refuses.
+pub(crate) fn max_representable_energy_spend(player: &crate::types::player::Player) -> u32 {
+    player
+        .energy
+        .min(u32::MAX.saturating_sub(player.energy_paid_or_lost_this_turn))
+        .min(i32::MAX as u32)
+}
+
 /// Applies the final signed life delta through the checked scalar authority.
 fn apply_final_life_edit(
     state: &mut GameState,
@@ -572,6 +586,9 @@ pub(crate) fn apply_final_player_resource_edit(
     match state.resolve_and_apply_player_edit(player, edit) {
         Ok(()) => Ok(()),
         Err(ResolvedPlayerEditReplayInvariantError::ResourceOverflow) => {
+            if let Some(window) = state.ingress_life_window.as_mut() {
+                window.failed_player.get_or_insert(player);
+            }
             Err(LifeChangeUnrepresentable { player })
         }
         Err(ResolvedPlayerEditReplayInvariantError::UnknownPlayer(_)) => {

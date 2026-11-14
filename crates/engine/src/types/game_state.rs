@@ -14301,6 +14301,56 @@ pub(crate) fn normalize_resolution_cast_offer_allocator(
     Ok(())
 }
 
+/// CR 732.2a + CR 704.5a: re-binds, on restore, a pending `WaitingFor::RespondToShortcut`
+/// proposal's fixed count to the end its sequence can reach
+/// (`ShortcutProposal::bind_count_to_reachable_end`). The declare seam binds every proposal it
+/// builds; a predecessor's did not, and its over-count names repetitions after the crossing that
+/// ends the game. Binding rather than refusing keeps that save loadable, and the take is the same
+/// one either way: its drive ends the game at the crossing.
+pub fn normalize_pending_shortcut_proposal(state: &mut GameState) {
+    if let WaitingFor::RespondToShortcut { proposal, .. } = &mut state.waiting_for {
+        proposal.bind_count_to_reachable_end();
+    }
+}
+
+/// Re-derives, on restore, the maximum an already-parked `WaitingFor::PayAmountChoice` publishes
+/// wherever that maximum is an engine capacity rather than a rules bound, so a prompt written by
+/// a predecessor never shows a number its own reducer refuses:
+///
+/// * CR 614.1 + CR 732.2a: `PayableResource::LoopCollapse` — the repetitions the restored board
+///   can represent, accounting for its live replacements.
+/// * CR 107.14: `PayableResource::Energy` — what one checked payment can remove
+///   (`effects::life::max_representable_energy_spend`), the bound the prompt's mint and the
+///   submit-time guard in `engine_resolution_choices` share. A predecessor minted the bare
+///   reserve, which the guard refuses past the per-turn tally's room.
+///
+/// Only ever narrows, and `min` follows `max` down so the published range stays non-empty.
+pub fn normalize_parked_pay_amount_max(state: &mut GameState) {
+    let bound = match &state.waiting_for {
+        WaitingFor::PayAmountChoice {
+            player,
+            resource: PayableResource::LoopCollapse { .. },
+            ..
+        } => crate::game::turns::materialization_representable_bound(state, *player),
+        WaitingFor::PayAmountChoice {
+            player,
+            resource: PayableResource::Energy,
+            ..
+        } => state
+            .players
+            .iter()
+            .find(|candidate| candidate.id == *player)
+            .map(crate::game::effects::life::max_representable_energy_spend),
+        _ => None,
+    };
+    if let (Some(bound), WaitingFor::PayAmountChoice { min, max, .. }) =
+        (bound, &mut state.waiting_for)
+    {
+        *max = (*max).min(bound);
+        *min = (*min).min(*max);
+    }
+}
+
 /// CR 608.2c + CR 616.1: Checks that serialized instruction-result owners
 /// still name live resolving roots across replacement choices.
 /// A parked batch is necessarily unsettled; its completion is published only
@@ -16310,19 +16360,20 @@ fn delayed_trigger_install_command_mut(
 /// over-refusal this phase exists to remove. The zero in the OFFER'S BOUND and the zero
 /// in a DECLARED COUNT are different values at different seams.
 ///
-/// SCOPED TO `LoopShortcut` ONLY, deliberately. `WaitingFor::RespondToShortcut` carries a
-/// `ShortcutProposal`, which has no `schema` and so no capacity at all — there is no
-/// ceiling to check. Its only reachable zero is `proposal.count`, the ALREADY-DECLARED
-/// count, where `Fixed(0)` is legal; re-refusing it here would re-break the same
-/// over-refusal at a seam no row can see.
+/// SCOPED TO `LoopShortcut`'s schema here. `WaitingFor::RespondToShortcut` carries a
+/// `ShortcutProposal`, whose proved capacity `reject_unproved_shortcut_proposal` checks on its
+/// own host. Its other reachable zero is `proposal.count`, the ALREADY-DECLARED count, where
+/// `Fixed(0)` is legal; re-refusing it here would re-break the same over-refusal at a seam no
+/// row can see.
 ///
 /// `== 0` is the COMPLETE rejection predicate and must not be widened: the capacity is `u32`,
 /// so negatives fail serde before this runs; a capacity AT the budget is the ordinary offer
 /// whose producer measured no threshold, a legitimate state; boundedness is not read off this
 /// value at all any more — `is_bounded()` asks the measured field — so no comparison against
-/// the budget belongs here; and an ABSENT capacity key decodes to the budget through its own
-/// `#[serde(default)]`, while a save written in the pre-split shape has its single legacy count
-/// mapped onto both fields by `migrate_legacy_shortcut_repetition_bound` before serde runs.
+/// the budget belongs here; an ABSENT capacity on the PROPOSAL host is refused by
+/// `reject_unproved_shortcut_proposal` instead of defaulting to the budget; and a save written
+/// in the pre-split shape has its single legacy count mapped onto both fields by
+/// `migrate_legacy_shortcut_repetition_bound` before serde runs.
 /// CR 732.2a: a certified period spanning ZERO frames is not a period.
 ///
 /// Single authority for the field so both wire hosts enforce identically — the offer's
@@ -16339,6 +16390,36 @@ fn reject_zero_frames_per_period(
         return Err(format!(
             "persisted {host} states frames_per_period 0, which delimits every committed cycle \
              at the first priority beat rather than at the certified CR 732.2a period"
+        ));
+    }
+    Ok(())
+}
+
+/// CR 732.2a: a pending proposal states "a specified number of times" the loop repeats, and
+/// the count an accept may drive is the capacity its declaration PROVED
+/// (`ShortcutProposal::deliverable_capacity`). A saved proposal that carries no capacity — written
+/// before the field existed — or one outside `1..=MAX_SHORTCUT_CYCLES` states no proof, and
+/// reading the absence as the engine budget would let an accept drive a count the declaration
+/// never measured. The load fails closed instead.
+fn reject_unproved_shortcut_proposal(
+    proposal: &crate::analysis::loop_check::ShortcutProposal,
+) -> Result<(), String> {
+    if proposal.effective_deliverable_capacity().is_none() {
+        return Err(format!(
+            "persisted RespondToShortcut proposal states deliverable_capacity {:?}, which proves \
+             no count CR 732.2a admits an accept to drive",
+            proposal.deliverable_capacity
+        ));
+    }
+    // CR 732.2a + CR 704.5a: an `UntilLethal` proposal ends at the crossing its offer proved; a
+    // saved one carrying no crossing, or one past its proved capacity, states no ending point. A
+    // fixed count was bound to that crossing by `normalize_pending_shortcut_proposal` before
+    // this validator runs.
+    if !proposal.states_its_ending_point() {
+        return Err(format!(
+            "persisted RespondToShortcut proposal of {:?} with crossing {:?} states no ending \
+             point inside its proved capacity {:?}",
+            proposal.count, proposal.win_kind_at, proposal.deliverable_capacity
         ));
     }
     Ok(())
@@ -16378,6 +16459,25 @@ fn reject_zero_bound_shortcut_offer(state: &GameState) -> Result<(), String> {
                     .to_string(),
             );
         }
+        // A legacy Ring offer from a save written before the headroom measurement existed
+        // decodes with the default schema (iteration_count = Fixed(0), deliverable_capacity = budget).
+        // Such an offer states no measured take and must be refused — the player must play it out.
+        //
+        // A predecessor Ring offer that DID carry a schema still loads, decoded
+        // `RepresentableHeadroom::Unmeasured`: its capacity is the budget standing in for a number
+        // nobody proved, and `game::engine::handle_declare_shortcut` refuses every count whose take
+        // would drive a repetition against it, so the offer can be declined or played out but
+        // never taken past its proof.
+        if *road == crate::analysis::loop_check::OfferRoad::Ring
+            && schema.iteration_count
+                == crate::analysis::decision_template::IterationCount::Fixed(0)
+        {
+            return Err(
+                "persisted Ring offer carries the default schema (iteration_count = 0), which states \
+                 no measured shortcut; the save predates the headroom measurement"
+                    .to_string(),
+            );
+        }
         // After the zero-capacity check, so a corrupt zero bound carrying a period is refused as
         // the zero it is.
         reject_period_on_the_ring_road(*road, period, "LoopShortcut offer")?;
@@ -16411,6 +16511,7 @@ fn reject_zero_bound_shortcut_offer(state: &GameState) -> Result<(), String> {
     // the offer would leave the consumed path open — the restored `RespondToShortcut` state is
     // reached without ever re-entering `LoopShortcut`.
     if let WaitingFor::RespondToShortcut { proposal, .. } = &state.waiting_for {
+        reject_unproved_shortcut_proposal(proposal)?;
         reject_zero_frames_per_period(&proposal.per_cycle, "RespondToShortcut proposal")?;
         reject_period_on_the_ring_road(
             proposal.road,
@@ -28979,6 +29080,8 @@ impl GameStateDecode {
         validate_restored_zone_change_replay_keys(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
+        normalize_parked_pay_amount_max(&mut state);
+        normalize_pending_shortcut_proposal(&mut state);
         // The PERSISTED half of the projection gate; `decode` below carries the other.
         // See the pairing comment there for why one site is not enough.
         reject_viewer_projection_as_authority(&state)?;
@@ -29022,6 +29125,8 @@ impl GameStateDecode {
         let mut state = Self::materialize_prepared(value)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
+        normalize_parked_pay_amount_max(&mut state);
+        normalize_pending_shortcut_proposal(&mut state);
         // NO viewer-projection guard here, deliberately. This is the TRANSPORT decode
         // path as much as a restore path: `ServerMessage::GameStarted { state, .. }`
         // (`server-core/src/protocol.rs`) carries a `filter_state_for_viewer` projection
@@ -40097,6 +40202,7 @@ mod forced_cascade_window_tests {
                         road: crate::analysis::loop_check::OfferRoad::Ring,
                         counted_take: Default::default(),
                         period: Default::default(),
+                        deliverable_capacity: Some(crate::game::engine::MAX_SHORTCUT_CYCLES),
                     },
                 },
             ),
@@ -43088,6 +43194,7 @@ mod tests {
             road: OfferRoad::Ring,
             counted_take,
             period: Default::default(),
+            deliverable_capacity: Some(crate::game::engine::MAX_SHORTCUT_CYCLES),
         };
         let proposed = serde_json::to_value(proposal(unperformable)).unwrap();
         assert_eq!(

@@ -33,6 +33,7 @@
 
 pub mod ability_graph;
 pub mod decision_template;
+pub mod headroom;
 pub mod loop_check;
 pub mod resource;
 #[cfg(any(test, feature = "test-support"))]

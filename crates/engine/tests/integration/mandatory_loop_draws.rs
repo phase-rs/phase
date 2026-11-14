@@ -3844,6 +3844,11 @@ fn a_restored_counted_proposal_over_a_choice_refuses_a_later_place() {
                 panic!("{leg}: {:?}", counted.waiting_for);
             };
             proposal.count = count.clone();
+            // CR 732.2a + CR 704.5a: an `UntilLethal` proposal carries the crossing it ends at,
+            // or restore refuses it for stating no ending point.
+            if count == IterationCount::UntilLethal {
+                proposal.win_kind_at = Some(3);
+            }
             let restored = serde_json::from_value::<PersistedGameState>(
                 serde_json::to_value(&counted).expect("the window encodes"),
             )
@@ -3924,6 +3929,21 @@ fn a_shuffle_only_the_replay_draws_until_stack_empty_is_offered() {
 
 /// Banisher Priest against two Grizzly Bears, passed to P0's offer and declared without end: P1's
 /// response window over a proposal no count above zero is taken from.
+/// A responder window on a proposal WITHOUT END whose counted take performs: Wood Elves beside
+/// P1's Soul Warden. A proposal without end has no ending point, so its places run past the
+/// engine's budget — the one proposal shape whose published range does.
+pub(crate) fn performing_without_end_window() -> Option<GameState> {
+    let leg = "wood elves beside P1's soul warden";
+    let board = Board {
+        soul_warden: Some(P1),
+        ..WOOD_ELVES
+    };
+    let offered = run(board, LoopDetectionMode::Interactive, Drive::Pass, 60)?;
+    assert_out_offer(&offered, leg);
+    assert_counted_take_performs(offered.state(), leg);
+    Some(admitted(offered.state(), P0, DECLARE_WITHOUT_END, leg).0)
+}
+
 pub(crate) fn two_targets_without_end_window() -> Option<GameState> {
     let offered = run(TWO_TARGETS, LoopDetectionMode::Interactive, Drive::Pass, 60)?;
     assert_out_offer(&offered, "two targets");

@@ -3726,6 +3726,11 @@ pub(super) fn handle_resolution_choice(
                     amount, min, max
                 )));
             }
+            if matches!(resource, PayableResource::LoopCollapse { .. })
+                && !super::turns::materialization_count_is_representable(state, player, amount)
+            {
+                return Err(EngineError::LifeChangeUnrepresentable { player });
+            }
             if let Some(pending_mana_ability) = pending_mana_ability {
                 let mut pending = pending_mana_ability.as_ref().clone();
                 // CR 107.1c / CR 107.3a: bind the announced amount to the
@@ -4093,28 +4098,39 @@ pub(super) fn handle_resolution_choice(
                     return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
                 }
                 PayableResource::Energy => {
-                    // CR 107.14: Remove N energy counters from the player.
-                    if let Some(energy) = state
+                    // CR 107.14: Remove N energy counters from the player. The bound is the
+                    // SHARED representable-payment maximum the prompt mint publishes, so a
+                    // restored or stale prompt can never submit an amount its checked
+                    // settlement would refuse (the same edit also advances the per-turn
+                    // paid-or-lost tally and casts the delta to `i32`).
+                    if let Some(candidate) = state
                         .players
                         .iter()
                         .find(|candidate| candidate.id == player)
-                        .map(|candidate| candidate.energy)
                     {
-                        if energy < amount {
+                        if candidate.energy < amount {
                             return Err(EngineError::InvalidAction(format!(
                                 "Player {:?} has {} energy, cannot pay {}",
-                                player, energy, amount
+                                player, candidate.energy, amount
                             )));
                         }
+                        // Beyond the reserve, the shared maximum accounts for the per-turn
+                        // tally and the `i32` delta; an amount past it is the same
+                        // engine-capacity refusal the checked edit reports, not an
+                        // out-of-range choice (the prompt already publishes this bound).
+                        if amount
+                            > crate::game::effects::life::max_representable_energy_spend(candidate)
+                        {
+                            return Err(EngineError::LifeChangeUnrepresentable { player });
+                        }
                         if amount > 0 {
-                            state
-                                .resolve_and_apply_player_edit(
-                                    player,
-                                    crate::types::resolved_commands::ResolvedPlayerEdit::Energy {
-                                        delta: -(amount as i32),
-                                    },
-                                )
-                                .expect("preflighted resolution energy payment must apply");
+                            crate::game::effects::life::apply_final_player_resource_edit(
+                                state,
+                                player,
+                                crate::types::resolved_commands::ResolvedPlayerEdit::Energy {
+                                    delta: -(amount as i32),
+                                },
+                            )?;
                         }
                         events.push(GameEvent::EnergyChanged {
                             player,

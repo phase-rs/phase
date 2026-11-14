@@ -436,7 +436,9 @@ pub struct ShortcutDecisionSchema {
     pub measured_repetition_bound: Option<u32>,
     /// The highest count an accept may legally SPECIFY against this offer: the measured
     /// threshold above, or `MAX_SHORTCUT_CYCLES` where none was measured, capped at
-    /// `MAX_SHORTCUT_CYCLES` either way. A legality ceiling, not a delivery promise — the
+    /// `MAX_SHORTCUT_CYCLES` either way, and at the repetitions whose player-resource edits the
+    /// engine can represent where the producer measured them (`analysis::headroom`). A
+    /// legality ceiling, not a delivery promise — the
     /// consumption seam re-derives its own bound on the board the drive runs against
     /// (`game::engine::shortcut_consumption_bound`) and may stop the drive short of this.
     /// Derived once, in
@@ -453,6 +455,13 @@ pub struct ShortcutDecisionSchema {
     /// *ceiling*, and they are deliberately separate fields.
     #[serde(default = "default_deliverable_capacity")]
     pub deliverable_capacity: u32,
+    /// Whether the producer measured the representable headroom `deliverable_capacity` folds in.
+    /// The capacity alone cannot say: a capacity at the budget is both "measured, and the whole
+    /// budget fits" and "a save written before the measurement existed". Durable because the
+    /// frames a Ring offer measured over (`GameState::loop_detect_ring`) are transient and do not
+    /// survive a save, so nothing after the mint can measure it again.
+    #[serde(default)]
+    pub headroom: RepresentableHeadroom,
     /// The open per-iteration decision-points needing pins. EMPTY for a choice-free drain.
     pub points: Vec<DecisionPoint>,
     /// CR 702.51a: total untapped creatures the controller may tap for convoke across every
@@ -485,9 +494,13 @@ pub struct ShortcutDecisionSchema {
 
 /// A schema deserialized from a pre-bound snapshot carries no capacity. The
 /// forward-compatible default is the global safety limit, which is what every producer
-/// emitted before either field existed. Recovering the BOUNDEDNESS of a pre-split save is
-/// not a default's job — a per-field default cannot read the legacy key that carried both
-/// answers — and is done by `types::game_state`'s migration chain before serde runs.
+/// emitted before either field existed. It is NOT a proof that the take can perform that many
+/// repetitions: `game::engine::handle_declare_shortcut` re-derives the representable headroom on
+/// the board it declares against — from the offer's per-period signature or by replaying its
+/// confirmed period — before any response window opens, so a restored budget never reaches a
+/// proposal unchecked. Recovering the BOUNDEDNESS of a pre-split save is not a default's job — a
+/// per-field default cannot read the legacy key that carried both answers — and is done by
+/// `types::game_state`'s migration chain before serde runs.
 ///
 /// DELIBERATELY NOT MIRRORED in `client/src/adapter/types.ts::ShortcutDecisionSchema`, neither
 /// this capacity nor the measured bound above it: the frontend never reads either, it reads
@@ -499,6 +512,23 @@ fn default_deliverable_capacity() -> u32 {
     crate::game::engine::MAX_SHORTCUT_CYCLES
 }
 
+/// Whether an offer's producer measured how many repetitions the engine can represent
+/// (`analysis::headroom`) — an engine limit, not a rules one, so it carries no CR number.
+///
+/// An offer carrying its per-period signature or its confirmed period has that headroom
+/// re-derived at declare (`game::engine::handle_declare_shortcut`), so this marker is read only
+/// for the offer that carries neither: a Ring offer, whose measurement was taken over the
+/// transient detection ring and can be stated only by the producer that held it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RepresentableHeadroom {
+    /// No measurement: a save written before the field existed. Its capacity is the engine budget
+    /// standing in for a number nobody proved the take can perform.
+    #[default]
+    Unmeasured,
+    /// The producer measured the headroom and folded it into `deliverable_capacity`.
+    Measured,
+}
+
 // CR 732.2a: `IterationCount` carries no `Default` and its `Fixed(u32)` is a tuple variant
 // (so a derived `#[default]` cannot apply) — hand-impl the forward-compat deser default the
 // `#[serde(default)]` on `WaitingFor::LoopShortcut.schema` needs.
@@ -508,6 +538,7 @@ impl Default for ShortcutDecisionSchema {
             iteration_count: IterationCount::Fixed(0),
             measured_repetition_bound: None,
             deliverable_capacity: default_deliverable_capacity(),
+            headroom: RepresentableHeadroom::Unmeasured,
             points: Vec::new(),
             convoke_tappable_count: 0,
             suggested_declaration: None,
@@ -2071,6 +2102,7 @@ mod tests {
             // under both keys cannot pass either.
             measured_repetition_bound: Some(17),
             deliverable_capacity: 23,
+            headroom: RepresentableHeadroom::Measured,
             points: vec![DecisionPoint {
                 slot: DecisionSlot {
                     source: all_copies(7),
@@ -2100,6 +2132,11 @@ mod tests {
             "the deliverable capacity must reach the wire — a `#[serde(default)]` field that \
              is never serialized would silently reset to the budget on every reload"
         );
+        assert_eq!(
+            json["headroom"], "Measured",
+            "the headroom measurement must reach the wire — a Ring offer's measuring frames do \
+             not survive a save, so a dropped key would decode every reload as unmeasured"
+        );
         let back: ShortcutDecisionSchema = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, schema);
         assert_eq!(
@@ -2110,6 +2147,7 @@ mod tests {
                 iteration_count: IterationCount::Fixed(0),
                 measured_repetition_bound: None,
                 deliverable_capacity: crate::game::engine::MAX_SHORTCUT_CYCLES,
+                headroom: RepresentableHeadroom::Unmeasured,
                 points: vec![],
                 convoke_tappable_count: 0,
             }
@@ -2124,9 +2162,15 @@ mod tests {
             .expect("schema serializes as an object");
         fields.remove("measured_repetition_bound");
         fields.remove("deliverable_capacity");
+        fields.remove("headroom");
         let decoded = serde_json::from_value::<ShortcutDecisionSchema>(legacy)
             .expect("a pre-split snapshot still deserializes");
         assert_eq!(decoded.measured_repetition_bound, None);
+        assert_eq!(
+            decoded.headroom,
+            RepresentableHeadroom::Unmeasured,
+            "a predecessor's schema states no headroom measurement"
+        );
         assert!(!decoded.is_bounded());
         assert_eq!(
             decoded.deliverable_capacity,
@@ -3686,6 +3730,7 @@ mod tests {
             iteration_count: IterationCount::Fixed(1),
             measured_repetition_bound: Some(1),
             deliverable_capacity: 1,
+            headroom: crate::analysis::decision_template::RepresentableHeadroom::Measured,
             convoke_tappable_count: 0,
             points: vec![point],
         };

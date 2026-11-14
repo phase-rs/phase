@@ -3229,18 +3229,133 @@ fn interactive_loop_bridge_paths(
             let WaitingFor::Priority { player: proposer } = state.waiting_for else {
                 unreachable!("interactive bridge only runs during priority")
             };
-            // CR 732.2a: a non-targeted drain publishes no decision points, and this path
-            // MEASURES no CR 704 repetition threshold — `UntilLethal` is terminated by the
-            // real SBA, not by a caller-supplied count — so it passes the absence and the
-            // constructor derives the ceiling from the engine's own budget.
-            let schema = build_shortcut_schema(
-                Vec::new(),
-                shortcut_iteration_count(certificate.win_kind),
-                None,
-            );
+            // CR 732.2a: a non-targeted drain publishes no decision points and measures no
+            // caller-supplied repetition ceiling — `UntilLethal` is terminated by the real SBA —
+            // but passes `representable` so the schema is bounded by the engine's scalar headroom.
+            let period_frames: Vec<&GameState> = state
+                .loop_detect_ring
+                .iter()
+                .skip(start)
+                .map(|sample| &sample.live)
+                .chain(std::iter::once(&*state))
+                .collect();
+            let representable =
+                crate::analysis::headroom::PeriodExcursions::representable_over_frames(
+                    &period_frames,
+                    state,
+                    MAX_SHORTCUT_CYCLES,
+                );
+            // CR 704.5a / CR 704.5c: measure how many cycles are required to eliminate every
+            // non-eliminated opponent using the lethal-crossing authority (accounting for dip and net).
+            // If the engine cannot represent that many repetitions, withhold the shortcut so the loop
+            // does not offer a count that overflows before lethal.
+            //
+            // CR 119.3 + CR 704.3: the crossing reads the life-total PATH — each seat's deepest
+            // fall inside the period — not its gross loss. A period that drains a seat, lets it
+            // recover, and drains it again loses more than it dips, and charging the gross loss
+            // would place the crossing earlier than the repetition that actually reaches 0.
+            let frame_wise = delta.with_frame_wise_life_dip(&period_frames);
+            let periodic = crate::analysis::resource::PeriodicDelta {
+                frames_per_period: period_frames.len() as u32,
+                seat_life_gross: None,
+                delta: delta.clone(),
+                victim_slot: Vec::new(),
+                declarable_victims: Vec::new(),
+                seat_life_charge: frame_wise.seat_life_charges(&[]),
+                cleanup: None,
+            };
+            let cycles_to_lethal = state
+                .players
+                .iter()
+                .filter(|p| !p.is_eliminated && p.id != winner)
+                .map(|p| {
+                    let life_cycles = if p.life <= 0 {
+                        0
+                    } else {
+                        let charges = periodic.declared_seat_life_charges(
+                            p.id,
+                            None,
+                            None,
+                            &[],
+                            state,
+                            crate::analysis::resource::ChargeBound::Ceiling,
+                            crate::analysis::resource::AnnouncedLead::None,
+                        );
+                        crate::analysis::resource::PeriodicDelta::first_life_crossing(
+                            charges,
+                            i64::from(p.life),
+                            MAX_SHORTCUT_CYCLES,
+                        )
+                        .map_or(u64::MAX, u64::from)
+                    };
+                    let poison_gain = delta.poison.get(&p.id).copied().unwrap_or(0);
+                    let poison_cycles = if p.poison_counters >= 10 {
+                        0
+                    } else if poison_gain > 0 {
+                        let needed = 10u64.saturating_sub(u64::from(p.poison_counters));
+                        needed.div_ceil(poison_gain as u64)
+                    } else {
+                        u64::MAX
+                    };
+                    life_cycles.min(poison_cycles)
+                })
+                .max()
+                .unwrap_or(0);
+            // CR 732.2a: what one offer can drive. `representable` measured the scalar headroom
+            // over the period's own frames; `None` states that the whole engine budget fits.
+            let reachable = representable.unwrap_or(MAX_SHORTCUT_CYCLES);
+            let lethal_within_reach =
+                cycles_to_lethal != u64::MAX && u64::from(reachable) >= cycles_to_lethal;
+            // CR 732.2a + CR 704.5a: a lethal shortcut's take must end the game inside the
+            // repetitions it promises, so `UntilLethal` is offered only where the crossing lies
+            // within what this offer can drive. Where the drain is real but the crossing is not
+            // — it needs more repetitions than the engine's horizon, or than the scalar widths
+            // can represent — the shortcut is still legal for the repetitions that DO fit: offer
+            // them as a fixed count rather than withholding the offer and making the player play
+            // a thousand repetitions by hand. A `Fixed` count states its own ending point, so it
+            // promises no crossing.
+            //
+            // The ending travels WITH the offer: `predicted_winner` is the offer's proven crossing,
+            // and it is named only where that crossing lies inside the offer. A fixed fallback
+            // names nobody, so the declare handler refuses a raw `UntilLethal` against it (an
+            // offer naming no winner has no ending point where a player loses), the AI's
+            // candidate generator emits none, and settlement crowns no winner the offer never
+            // proved — the same contract every other fixed-count producer keeps.
+            let (iteration_count, predicted_winner) =
+                match shortcut_iteration_count(certificate.win_kind) {
+                    crate::analysis::decision_template::IterationCount::UntilLethal
+                        if !lethal_within_reach && reachable > 0 =>
+                    {
+                        (
+                            crate::analysis::decision_template::IterationCount::Fixed(reachable),
+                            None,
+                        )
+                    }
+                    crate::analysis::decision_template::IterationCount::UntilLethal
+                        if !lethal_within_reach =>
+                    {
+                        return;
+                    }
+                    // CR 732.2a: a non-lethal suggestion keeps the producer's own ending point;
+                    // `cycles_to_lethal` bounds no promise it makes, so the old gate stays.
+                    _ if !lethal_within_reach => return,
+                    other => (other, Some(winner)),
+                };
+            // CR 732.2a + CR 732.2b: an `UntilLethal` offer's ending point is the crossing it
+            // proved, so the repetition count of that crossing rides the certificate beside the
+            // winner it names: the declare seam admits `UntilLethal` only where it lies inside the
+            // capacity, a responder may name only a place before it, and restore and settlement
+            // re-check it. The winner and the capacity alone do not state where the sequence
+            // ends. A fixed fallback states its own ending point and promises no crossing, but the
+            // crossing is still recorded for shortening bounds and restore validation.
+            let mut certificate = certificate;
+            if cycles_to_lethal != u64::MAX {
+                certificate.win_kind_at = u32::try_from(cycles_to_lethal).ok();
+            }
+            let schema = build_shortcut_schema(Vec::new(), iteration_count, None, representable);
             state.waiting_for = WaitingFor::LoopShortcut {
                 proposer,
-                predicted_winner: Some(winner),
+                predicted_winner,
                 certificate,
                 schema,
                 // CR 732.2a: Path A publishes no decision points at all (the pin list above is
@@ -3379,7 +3494,7 @@ fn interactive_loop_bridge_paths(
         }
         // CR 732.2a + CR 732.5: a period of outs and choices proven to continue is offered, not drawn.
         if let Some((idx, counted_take)) = outs_offer {
-            offer_draw_without_end(state, result, &priors[idx].normalized, counted_take);
+            offer_draw_without_end(state, result, &priors[idx..], counted_take);
             return;
         }
     }
@@ -3464,7 +3579,7 @@ fn interactive_loop_bridge_paths(
             })
         };
         if let Some((idx, counted_take)) = hit {
-            offer_draw_without_end(state, result, &priors[idx].normalized, counted_take);
+            offer_draw_without_end(state, result, &priors[idx..], counted_take);
         }
     }
     // else: staggered-pod loss / non-beneficial optional loop ⇒ nothing is offered or decided.
@@ -3618,12 +3733,26 @@ fn option_proof(
 fn offer_draw_without_end(
     state: &mut GameState,
     result: &mut ActionResult,
-    prior: &GameState,
+    period: &[std::sync::Arc<crate::types::LoopDetectSample>],
     counted_take: crate::analysis::loop_check::CountedTake,
 ) {
     let WaitingFor::Priority { player: proposer } = state.waiting_for else {
         unreachable!("interactive bridge only runs during priority")
     };
+    let prior = &period[0].normalized;
+    // The offer states no count, but a declarer may still name a fixed one, and the take of that
+    // count performs the period's player-resource edits. The headroom is measured here, over the
+    // ring period the offer certified, because that ring does not survive a save.
+    let period_frames: Vec<&GameState> = period
+        .iter()
+        .map(|sample| &sample.live)
+        .chain(std::iter::once(&*state))
+        .collect();
+    let representable = crate::analysis::headroom::PeriodExcursions::representable_over_frames(
+        &period_frames,
+        state,
+        MAX_SHORTCUT_CYCLES,
+    );
     state.waiting_for = WaitingFor::LoopShortcut {
         proposer,
         predicted_winner: None,
@@ -3640,6 +3769,7 @@ fn offer_draw_without_end(
             Vec::new(),
             crate::analysis::decision_template::IterationCount::WithoutEnd,
             None,
+            representable,
         ),
         declaration: None,
         road: crate::analysis::loop_check::OfferRoad::Ring,
@@ -4125,6 +4255,7 @@ fn certified_bounded_cycle_offer<'a>(
                 // spans TWO frames (a gain-life resolution then a lose-life one), and
                 // under the old hardcode its accepted drive committed nothing at all.
                 frames_per_period: span,
+                seat_life_gross: None,
                 delta,
                 victim_slot: Vec::new(),
                 declarable_victims: Vec::new(),
@@ -4202,6 +4333,7 @@ fn certified_bounded_cycle_offer<'a>(
                 touch,
                 PeriodicDelta {
                     frames_per_period: k,
+                    seat_life_gross: None,
                     delta,
                     victim_slot: Vec::new(),
                     declarable_victims: Vec::new(),
@@ -4252,6 +4384,9 @@ enum FrameSource<'a, 'v> {
     /// it recorded, so there is no unspecified window to gate and no announced slot to charge.
     Replay {
         answers: &'a [crate::analysis::decision_template::PinnedDecision],
+        /// The repetitions the replayed cycles' player-resource edits leave representable
+        /// (`analysis::headroom`), read off the event stream only a replay has.
+        representable: Option<u32>,
     },
 }
 
@@ -4306,7 +4441,7 @@ fn bounded_offer_tail(
     // exact recurrence (which says nothing about choices) and basis B consults no board
     // predicate at all. And deliberately NOT a second `loop_states_cover_modulo_growth_pinned`
     // call: that predicate refuses on BOARD facts without ever examining a choice.
-    let (touch, recorded) = match source {
+    let (touch, recorded, representable) = match source {
         FrameSource::Ring { touch, verdicts } => {
             let slots: Vec<DecisionSlot> = points.iter().map(|p| p.slot.clone()).collect();
             if !crate::analysis::resource::stack_choices_are_all_specified(
@@ -4318,9 +4453,18 @@ fn bounded_offer_tail(
             ) {
                 return Err(BoundedOfferRefusal::UnspecifiedChoiceWindow);
             }
-            (Some(touch), None)
+            let representable =
+                crate::analysis::headroom::PeriodExcursions::representable_over_frames(
+                    &period_frames,
+                    state,
+                    MAX_SHORTCUT_CYCLES,
+                );
+            (Some(touch), None, representable)
         }
-        FrameSource::Replay { answers } => (None, Some(answers)),
+        FrameSource::Replay {
+            answers,
+            representable,
+        } => (None, Some(answers), representable),
     };
 
     // (7) THE BOUND, derived from the ANNOUNCEMENT authority — never from `points`.
@@ -4381,6 +4525,10 @@ fn bounded_offer_tail(
     // CR 119.3 + CR 704.5a: the per-seat divisor, published and then HANDED to the reduction,
     // so the bound cannot be divided by anything other than what the certificate states.
     periodic.seat_life_charge = frame_wise.seat_life_charges(&charged);
+    // CR 119.3: what each seat gained and lost as separate gross edits, so the representable
+    // headroom steps each per-turn tally by its own edit rather than by a net.
+    periodic.seat_life_gross =
+        Some(crate::analysis::resource::ResourceVector::frame_wise_gross_life(&period_frames));
     // (7b) THE DECLARATION, BEFORE THE SCHEMA. The cascade below is DECLARATION-RELATIVE, so the
     // pins have to exist before there is a count to publish. `pin_journalled_declaration` pins
     // each charged slot to its observed aim and every other point from the journal, and stamps
@@ -4458,13 +4606,58 @@ fn bounded_offer_tail(
         0,
         crate::analysis::resource::EliminationCascade::capacity_count,
     );
-    // THE LARGER OF THE TWO, and that is not an optimisation. `handle_declare_shortcut` refuses
-    // any `Fixed(n)` above `deliverable_capacity`, so a ceiling below the suggestion would have it
-    // refuse the offer's own suggestion; and nothing about the witness's greedy aim guarantees its
-    // count exceeds the own-declaration count. Both members are legal declarations, so the max
-    // keeps "the ceiling is what SOME legal declaration may specify" true and keeps
-    // `deliverable_capacity >= iteration_count` true by construction rather than by luck.
-    let measured_bound = own.capacity_count().max(witness_bound);
+    // CR 732.2a: each suggestion is SIZED BY ITS OWN SCHEDULE. The two declarations pin
+    // different targets, so their scalar headroom is measured separately: a count the own
+    // declaration represents proves nothing about the witness's schedule, and vice versa.
+    // The published capacity below is the LARGER of the two per-schedule ceilings — a legal
+    // declaration may name either count, and `handle_declare_shortcut` refuses a `Fixed(n)`
+    // above `deliverable_capacity`, so a ceiling below either suggestion would have it refuse
+    // a count the engine will drive. Each published count is then clamped to ITS OWN ceiling,
+    // never to that shared maximum.
+    //
+    // CR 732.2a: evaluate representability under each piecewise schedule segment so later pins
+    // cannot escape the scalar headroom cap.
+    let own_cap = own.capacity_count();
+    let own_representable =
+        crate::analysis::headroom::PeriodExcursions::representable_under_schedule(
+            &periodic,
+            pins.as_ref(),
+            pins.as_ref(),
+            &points,
+            state,
+            lead,
+            own_cap,
+        );
+    let witness_representable = witness.as_ref().and_then(|w| {
+        crate::analysis::headroom::PeriodExcursions::representable_under_schedule(
+            &periodic,
+            Some(w),
+            pins.as_ref(),
+            &points,
+            state,
+            lead,
+            witness_bound,
+        )
+    });
+    // THE RULES-DERIVED THRESHOLD STAYS RULES-DERIVED. `measured_bound` is the cascade's own
+    // count and is published verbatim as `measured_repetition_bound`; the scalar headroom is an
+    // engine limit (CR 119.3 sets no maximum), so it narrows `deliverable_capacity` and never
+    // this. It reaches the schema through `representable` below, beside whatever the frame
+    // source measured, which is the constructor's stated contract.
+    let measured_bound = own_cap.max(witness_bound);
+    // Each declaration's own schedule-aware ceiling. `None` states that the whole count fits,
+    // so the cascade's own count is that ceiling.
+    let own_ceiling = own_representable.map_or(own_cap, |r| own_cap.min(r));
+    let witness_ceiling = witness_representable.map_or(witness_bound, |r| witness_bound.min(r));
+    // The schedule-aware ceiling is the largest count a declaration the offer admits may
+    // specify, so the max of the two per-schedule ceilings is the narrowing this producer
+    // contributes — never below what either of them can take. Each published count is clamped
+    // to its own schedule below, so this shared maximum only bounds what an ACCEPT may name.
+    let schedule_representable = Some(own_ceiling.max(witness_ceiling));
+    let representable = [representable, schedule_representable]
+        .into_iter()
+        .flatten()
+        .min();
 
     // (8) The certificate, with the two fields the bounded class states differently from
     // Path A's spelled out at the site rather than mutated after the fact.
@@ -4510,8 +4703,11 @@ fn bounded_offer_tail(
         points,
         IterationCount::Fixed(measured_bound),
         Some(measured_bound),
+        representable,
     );
-    let own_survived = own.survived_count(proposer, schema.deliverable_capacity);
+    // The own declaration's count, sized by the own declaration's schedule: the shared
+    // capacity may be the witness's larger ceiling, which proves nothing about these pins.
+    let own_survived = own.survived_count(proposer, schema.deliverable_capacity.min(own_ceiling));
     // CR 704.5a / CR 704.5b / CR 704.5c + CR 732.2a: no offer when the proposer survives no
     // repetition of its own declaration, the count that declaration would be stamped at.
     if own_survived == 0 {
@@ -4536,8 +4732,11 @@ fn bounded_offer_tail(
     // (11) The SUGGESTION: the witness at the most repetitions the proposer survives, within the
     // capacity, cut to the segments that count reaches, stamped and validated at that count, and
     // published only where it drives further than the declaration's own count and conforms there.
+    // The witness suggestion is sized by the WITNESS's schedule for the same reason: the
+    // shared capacity may be the own declaration's ceiling, and a witness count above its own
+    // representable repetitions is one its take would refuse.
     let suggested_count = witness_cascade.as_ref().map_or(0, |cascade| {
-        cascade.survived_count(proposer, schema.deliverable_capacity)
+        cascade.survived_count(proposer, schema.deliverable_capacity.min(witness_ceiling))
     });
     let suggested = IterationCount::Fixed(suggested_count);
     let suggestion = witness
@@ -5858,6 +6057,15 @@ pub(crate) fn bounded_cycle_charged_targets_for_window(
 /// no CR number — the budget is ours, not the game's, as the declare handler's budget arm
 /// states.
 ///
+/// `representable_repetitions` is the second engine ceiling, applied here beside the budget: the
+/// repetitions whose player-resource edits the stored integer widths can hold
+/// (`analysis::headroom`), as the producer measured it — `None` states that the whole budget
+/// fits, never that nothing was measured, so every producer measures before it calls here and
+/// the schema is stamped `RepresentableHeadroom::Measured`. Like the budget it is ours and not
+/// the game's (CR 119.3 sets no maximum), so it narrows the capacity and never the measured
+/// threshold. Without it an offer states a count whose take is refused with
+/// `EngineError::LifeChangeUnrepresentable` at a repetition the offer promised.
+///
 /// `iteration_count` is the SUGGESTION the frontend seeds its picker with; the capacity is the
 /// LEGAL CEILING the declared-count check enforces. A `Fixed` suggestion is NARROWED to the
 /// capacity here and never raised to it: a suggestion above its own capacity would be refused
@@ -5868,12 +6076,15 @@ fn build_shortcut_schema(
     points: Vec<crate::analysis::decision_template::DecisionPoint>,
     iteration_count: crate::analysis::decision_template::IterationCount,
     measured_repetition_bound: Option<u32>,
+    representable_repetitions: Option<u32>,
 ) -> crate::analysis::decision_template::ShortcutDecisionSchema {
     use crate::analysis::decision_template::{
         DecisionPointKind, IterationCount, ShortcutDecisionSchema,
     };
-    let deliverable_capacity = measured_repetition_bound
-        .map_or(MAX_SHORTCUT_CYCLES, |bound| bound.min(MAX_SHORTCUT_CYCLES));
+    let deliverable_capacity = [measured_repetition_bound, representable_repetitions]
+        .into_iter()
+        .flatten()
+        .fold(MAX_SHORTCUT_CYCLES, u32::min);
     // Wildcard-free so a third `IterationCount` variant build-breaks here instead of
     // inheriting whichever decision this match happens to make.
     let iteration_count = match iteration_count {
@@ -5897,6 +6108,10 @@ fn build_shortcut_schema(
         iteration_count,
         measured_repetition_bound,
         deliverable_capacity,
+        // Every producer hands its measurement in — `None` states that the whole budget fits —
+        // so a schema minted here is measured by construction; only a schema decoded from a save
+        // written before the field existed is not.
+        headroom: crate::analysis::decision_template::RepresentableHeadroom::Measured,
         points,
         convoke_tappable_count,
     }
@@ -6088,10 +6303,14 @@ fn shortcut_consumption_bound(
                 .filter(|entry| entry.repetition <= accepted)
                 .collect()
         });
-    ConsumptionDerivation::Measured(ConsumptionBound {
-        ceiling: ceiling.capacity_count(),
-        entries,
-    })
+    let ceiling = ceiling
+        .capacity_count()
+        .min(proposal.effective_deliverable_capacity().unwrap_or(0));
+    let representable = crate::analysis::headroom::PeriodExcursions::representable_under_schedule(
+        per_cycle, template, published, &points, state, lead, ceiling,
+    );
+    let ceiling = representable.map_or(ceiling, |r| ceiling.min(r));
+    ConsumptionDerivation::Measured(ConsumptionBound { ceiling, entries })
 }
 
 /// CR 115.2 + CR 732.2a: the per-slot published legal sets a consumption-time re-derivation has to
@@ -6178,7 +6397,11 @@ pub(crate) fn shortcut_count_is_drivable(
     proposal: &crate::analysis::loop_check::ShortcutProposal,
     count: u32,
 ) -> bool {
-    count <= MAX_SHORTCUT_CYCLES
+    let Some(capacity) = proposal.effective_deliverable_capacity() else {
+        return false;
+    };
+    count <= capacity
+        && count <= MAX_SHORTCUT_CYCLES
         && match shortcut_consumption_bound(state, proposal, count) {
             // EXHAUSTIVE, no wildcard: the two absences answer ALIKE here, and the arm says so
             // instead of collapsing them by accident. Neither supports a derived ceiling — an
@@ -6337,12 +6560,21 @@ fn apply_confirmed_shortcut(
         // `IterationCount` variant carrying its own unbounded count must build-break here and
         // force a bound decision rather than silently regress either ceiling.
         || match proposal.count {
+            // CR 732.2a + CR 704.5a: a fixed count is also bound to the crossing the offer proved
+            // — the repetitions past it come after the game ends — which a restored proposal
+            // reaches without the declare seam.
             crate::analysis::decision_template::IterationCount::Fixed(n) => {
                 !shortcut_count_is_drivable(state, proposal, n)
+                    || !proposal.states_its_ending_point()
             }
             // Bounded elsewhere by the same constant: `apply_until_lethal_shortcut` drives
-            // `shortcut_drive_period` cycles, which clamps to `MAX_SHORTCUT_CYCLES`.
-            crate::analysis::decision_template::IterationCount::UntilLethal => false,
+            // `shortcut_drive_period` cycles, which clamps to `MAX_SHORTCUT_CYCLES`. CR 732.2a +
+            // CR 704.5a: what this seam re-checks is the ending point — the crossing the offer
+            // proved, inside the capacity the declaration proved — which a restored proposal
+            // reaches without the declare seam.
+            crate::analysis::decision_template::IterationCount::UntilLethal => {
+                !proposal.states_its_ending_point()
+            }
             // The take drives no repetition: the accepted proposal is the draw.
             crate::analysis::decision_template::IterationCount::WithoutEnd => false,
         }
@@ -7886,10 +8118,10 @@ fn materialize_fixed_shortcut(
                     ConsumptionDerivation::Measured(bound) => {
                         match departure_verdict(&bound.entries, &committed, &s, i + 1) {
                             // CR 732.2a: a predicted departure is a beat the accepted count
-                            // CONTAINS. The count is bounded by this same derivation's ceiling at
-                            // the guard, so where the crossing is the last one the count contains
-                            // the `continue` IS the loop's own end and the handback below is
-                            // reached unchanged.
+                            // CONTAINS. The count is bounded by this same derivation's
+                            // ceiling at the guard, so where the crossing is the last one the
+                            // count contains the `continue` IS the loop's own end and the
+                            // handback below is reached unchanged.
                             DepartureVerdict::Predicted => {
                                 committed = *s;
                                 committed_cycles += 1;
@@ -7901,10 +8133,10 @@ fn materialize_fixed_shortcut(
                                 );
                                 continue 'cycles;
                             }
-                            // `NoDeparture` is unreachable under this outcome's own gate, which
-                            // fires on a drop in `seats_in_game`; the arm answers it rather than
-                            // folding it into another verdict. `Unpredicted` drops the cycle
-                            // whole.
+                            // `NoDeparture` is unreachable under this outcome's own gate,
+                            // which fires on a drop in `seats_in_game`; the arm answers it
+                            // rather than folding it into another verdict. `Unpredicted`
+                            // drops the cycle whole.
                             DepartureVerdict::NoDeparture | DepartureVerdict::Unpredicted => {
                                 break 'cycles
                             }
@@ -8694,7 +8926,8 @@ fn try_offer_object_growth_shortcut(
         #[cfg(feature = "test-support")]
         crate::game::perf_counters::record_play_trace(|counters| counters.confirm_asks += 1);
         let confirmation = super::period_confirm::confirm(state, span).ok()?;
-        Some((span, confirmation))
+        // No repetition the board can represent is no shortcut to offer.
+        (confirmation.representable != Some(0)).then_some((span, confirmation))
     })?;
     // CR 732.2a: a period is offered at its stated count — the threshold authority's for a loss
     // period (CR 704.5a), the counting replay's for a spend.
@@ -8753,6 +8986,8 @@ fn try_offer_object_growth_shortcut(
         pinned_decisions_to_points(confirmation.period.choices(), state, caster)?,
         iteration_count,
         None,
+        // The repetitions the board can represent: the offer states no count its take refuses.
+        confirmation.representable,
     );
     super::play_trace::note_offered(state, span);
     Some((certificate, schema, confirmation.period, None))
@@ -8767,6 +9002,7 @@ pub(crate) fn replay_bounded_offer(
     frames: &[GameState],
     choices: &[crate::analysis::decision_template::PinnedDecision],
     cleanup: Option<crate::analysis::resource::CleanupPair>,
+    representable: Option<u32>,
 ) -> Result<super::period_confirm::BoundedOfferParts, BoundedOfferRefusal> {
     let frames: Vec<&GameState> = frames.iter().collect();
     let (&current, window) = frames
@@ -8775,6 +9011,7 @@ pub(crate) fn replay_bounded_offer(
     let &prior = window.first().ok_or(BoundedOfferRefusal::NoCertification)?;
     let periodic = crate::analysis::resource::PeriodicDelta {
         frames_per_period: window.len() as u32,
+        seat_life_gross: None,
         delta: crate::analysis::resource::ResourceVector::period(prior, current),
         victim_slot: Vec::new(),
         declarable_victims: Vec::new(),
@@ -8792,7 +9029,10 @@ pub(crate) fn replay_bounded_offer(
             frames,
             periodic,
             points,
-            source: FrameSource::Replay { answers: choices },
+            source: FrameSource::Replay {
+                answers: choices,
+                representable,
+            },
         },
         false,
         caster,
@@ -8901,6 +9141,7 @@ pub(crate) fn counted_offer(
         per_cycle: Some(crate::analysis::resource::PeriodSignature::OneRepetition(
             crate::analysis::resource::PeriodicDelta {
                 frames_per_period: frames.len() as u32 - 1,
+                seat_life_gross: None,
                 delta: crate::analysis::resource::ResourceVector::period(prior, current),
                 victim_slot: Vec::new(),
                 declarable_victims: Vec::new(),
@@ -8909,10 +9150,13 @@ pub(crate) fn counted_offer(
             },
         )),
     };
+    // The counting replay stopped at the first repetition that did not fit, so `count` is
+    // already representable.
     let schema = build_shortcut_schema(
         points,
         crate::analysis::decision_template::IterationCount::Fixed(suggested),
         Some(count),
+        None,
     );
     (certificate, schema, None)
 }
@@ -9533,7 +9777,82 @@ fn handle_declare_shortcut(
         }
         crate::analysis::decision_template::IterationCount::WithoutEnd => {}
     }
-    let proposal = crate::analysis::loop_check::ShortcutProposal {
+    // CR 732.2a: bind deliverable_capacity to the proposal, evaluated under the declared template
+    // and leading announcement aims so later pins cannot escape the scalar headroom cap.
+    //
+    // RE-PROVED HERE, ON THIS BOARD, rather than copied off the offer. The offer's capacity is
+    // what its producer measured, and an offer restored from a save written before the headroom
+    // measurement existed decodes the engine budget in its place — a number nobody proved the
+    // take can perform. So the headroom is re-derived from what the offer carries before any
+    // response window opens: its per-period signature, or else the confirmed period its take
+    // replays (`representable_on_replay`). An offer carrying neither is a Ring offer, measured
+    // over the transient detection ring at its mint: its capacity is proof only where the schema
+    // says that measurement was taken (`RepresentableHeadroom::Measured`). An unmeasured one — a
+    // predecessor's offer whose capacity is the budget standing in for a number nobody proved —
+    // can perform no repetition this handler can vouch for, so its capacity is zero and any count
+    // that drives one is refused below.
+    let deliverable_capacity =
+        if let Some(crate::analysis::resource::PeriodSignature::EveryRepetition(periodic)) =
+            &offer.certificate.per_cycle
+        {
+            let leading = leading_announcement_aims(state, offer.proposer);
+            let lead = crate::analysis::resource::AnnouncedLead::LeadingRepetition(&leading);
+            let rep = crate::analysis::headroom::PeriodExcursions::representable_under_schedule(
+                periodic,
+                template.as_ref(),
+                offer.declaration,
+                &offer.schema.points,
+                state,
+                lead,
+                offer.schema.deliverable_capacity,
+            );
+            rep.map_or(offer.schema.deliverable_capacity, |r| {
+                offer.schema.deliverable_capacity.min(r)
+            })
+        } else if !offer.period.is_empty() {
+            representable_on_replay(
+                state,
+                offer.proposer,
+                offer.period,
+                offer.schema.deliverable_capacity,
+            )
+            .map_or(offer.schema.deliverable_capacity, |r| {
+                offer.schema.deliverable_capacity.min(r)
+            })
+        } else {
+            match offer.schema.headroom {
+                crate::analysis::decision_template::RepresentableHeadroom::Measured => {
+                    offer.schema.deliverable_capacity
+                }
+                crate::analysis::decision_template::RepresentableHeadroom::Unmeasured => 0,
+            }
+        };
+    // CR 732.2a: the narrowed capacity is the ceiling for THIS declaration, so an over-count is
+    // refused here rather than opening a response window whose take would then commit nothing.
+    // The earlier arm compares against the offer's PUBLISHED capacity; this one compares against
+    // the same ceiling re-derived under the declaration's own template and the board's lead.
+    // Every cap reads the count AS DECLARED; only the proposal built below is bound to the
+    // proved crossing, so an over-cap count is still handed back however early its take ends.
+    if let crate::analysis::decision_template::IterationCount::Fixed(n) = &count {
+        if *n > deliverable_capacity {
+            reject_shortcut_declaration(state, &mut result);
+            return Ok(result);
+        }
+    }
+    // CR 732.2a + CR 704.5a: an `UntilLethal` declaration's ending point is the crossing the offer
+    // proved. Where that crossing is not carried — an offer restored from a save written before it
+    // was — or lies past the capacity this declaration may drive, the sequence names no ending
+    // point the take can reach, so it is handed back before any response window opens.
+    if count == crate::analysis::decision_template::IterationCount::UntilLethal
+        && !crate::analysis::loop_check::crossing_within(
+            offer.certificate.win_kind_at,
+            deliverable_capacity,
+        )
+    {
+        reject_shortcut_declaration(state, &mut result);
+        return Ok(result);
+    }
+    let mut proposal = crate::analysis::loop_check::ShortcutProposal {
         proposer: offer.proposer,
         predicted_winner: offer.predicted_winner,
         count,
@@ -9555,7 +9874,13 @@ fn handle_declare_shortcut(
         road: offer.road,
         counted_take: offer.counted_take,
         period: offer.period.clone(),
+        deliverable_capacity: Some(deliverable_capacity),
     };
+    // CR 732.2a + CR 704.5a: the crossing the offer proved ends the game with the proposer the
+    // winner, so a fixed count past it names repetitions nobody takes. The proposal the table
+    // answers — its count, its shortening places and the outcome it states — names the sequence
+    // that ends at the crossing, which is the one the take performs.
+    proposal.bind_count_to_reachable_end();
     // CR 732.2b: living opponents in APNAP turn order, starting after the proposer.
     let opps: Vec<PlayerId> = crate::game::players::apnap_order_from(
         state,
@@ -9577,6 +9902,41 @@ fn handle_declare_shortcut(
         apply_confirmed_shortcut(state, &mut result, &proposal)?;
     }
     Ok(result)
+}
+
+/// The repetitions, up to `budget`, of a confirmed period that `state` can represent, measured by
+/// replaying two of its cycles on a clone exactly as the take performs them
+/// (`period_confirm::perform_cycle`) and stepping the edits they emitted
+/// (`analysis::headroom`); `None` when the whole budget fits. An engine limit, not a rules one.
+///
+/// A replayed cycle whose own final edit does not fit counts the cycles before it. A replay that
+/// fails for any other reason narrows nothing: the take meets that refusal itself, and it is not
+/// this measurement's to decide.
+fn representable_on_replay(
+    state: &GameState,
+    proposer: PlayerId,
+    period: &super::period_confirm::ConfirmedPeriod,
+    budget: u32,
+) -> Option<u32> {
+    let _probe = SimulationProbeGuard::enter();
+    let mut work = state.clone();
+    priority::reset_priority(&mut work);
+    work.waiting_for = WaitingFor::Priority { player: proposer };
+    let mut cycles: [Vec<GameEvent>; 2] = Default::default();
+    for (performed, events) in cycles.iter_mut().enumerate() {
+        match super::period_confirm::perform_cycle(&mut work, period, proposer, events) {
+            Ok(()) => {}
+            Err(OfferRefusal::LifeChangeUnrepresentable { .. }) => {
+                return Some((performed as u32).min(budget));
+            }
+            Err(_) => return None,
+        }
+    }
+    crate::analysis::headroom::PeriodExcursions::representable_repetitions(
+        &cycles.map(|events| crate::analysis::headroom::PeriodExcursions::of_events(&events)),
+        state,
+        budget,
+    )
 }
 
 /// CR 732.2a: the priority holder MAY decline the auto-offered loop shortcut — "the player
@@ -23131,7 +23491,7 @@ mod shortcut_schema_tests {
             "BOARD CLASS: the seed must sit strictly below the budget, else narrowing and \
              setting-to-capacity publish the same integer and this arm measures nothing"
         );
-        let unmeasured = build_shortcut_schema(Vec::new(), IterationCount::Fixed(seed), None);
+        let unmeasured = build_shortcut_schema(Vec::new(), IterationCount::Fixed(seed), None, None);
         assert!(
             !unmeasured.is_bounded(),
             "REACH-GUARD: this arm's subject is a producer that measured nothing"
@@ -23160,13 +23520,19 @@ mod shortcut_schema_tests {
             Vec::new(),
             IterationCount::Fixed(measured + 4),
             Some(measured),
+            None,
         );
         assert_eq!(over.deliverable_capacity, measured);
         assert_eq!(over.iteration_count, IterationCount::Fixed(measured));
 
         // Hostile sibling: `UntilLethal` names no count, so there is nothing to narrow — the
         // member a `match` collapsing both variants would break.
-        let until = build_shortcut_schema(Vec::new(), IterationCount::UntilLethal, Some(measured));
+        let until = build_shortcut_schema(
+            Vec::new(),
+            IterationCount::UntilLethal,
+            Some(measured),
+            None,
+        );
         assert_eq!(until.iteration_count, IterationCount::UntilLethal);
         assert_eq!(until.deliverable_capacity, measured);
     }
@@ -23240,6 +23606,7 @@ mod bounded_declaration_tests {
             ],
             IterationCount::Fixed(4),
             Some(4),
+            None,
         )
     }
 
@@ -23428,6 +23795,7 @@ mod bounded_declaration_tests {
                 ],
                 IterationCount::Fixed(4),
                 Some(4),
+                None,
             );
             let mut state = recording_state();
             // The OTHER point is answered, so the refusal cannot be attributed to it.
@@ -23489,7 +23857,7 @@ mod bounded_declaration_tests {
     /// fully-answered NON-empty schema — which D1-P-may's positive arm and D3's control refuse.
     #[test]
     fn d4_an_empty_schema_publishes_no_declaration() {
-        let empty = build_shortcut_schema(Vec::new(), IterationCount::Fixed(4), Some(4));
+        let empty = build_shortcut_schema(Vec::new(), IterationCount::Fixed(4), Some(4), None);
         assert!(
             empty.points.is_empty(),
             "reach-guard: this fixture is the empty-schema case"
@@ -24058,7 +24426,7 @@ mod stage2_injector_tests {
             .collect();
         park_on_shortcut_offer(
             &mut state,
-            build_shortcut_schema(points, IterationCount::Fixed(3), None),
+            build_shortcut_schema(points, IterationCount::Fixed(3), None, None),
             crate::analysis::loop_check::OfferRoad::Ring,
         );
         (state, template)
@@ -24319,6 +24687,7 @@ mod stage2_injector_tests {
             road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
+            deliverable_capacity: Some(MAX_SHORTCUT_CYCLES),
         };
         let mut result =
             crate::types::game_state::ActionResult::applied(Vec::new(), state.waiting_for.clone());
@@ -24476,6 +24845,7 @@ mod stage2_injector_tests {
             road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
+            deliverable_capacity: Some(MAX_SHORTCUT_CYCLES),
         };
         let mut result =
             crate::types::game_state::ActionResult::applied(Vec::new(), state.waiting_for.clone());
@@ -26945,6 +27315,8 @@ mod stage2_injector_tests {
                     },
                     kind: DecisionPointKind::MayChoice,
                 }],
+                // A minted offer: every producer measures its headroom.
+                headroom: crate::analysis::decision_template::RepresentableHeadroom::Measured,
                 ..ShortcutDecisionSchema::default()
             },
             crate::analysis::loop_check::OfferRoad::RecordedPeriod,

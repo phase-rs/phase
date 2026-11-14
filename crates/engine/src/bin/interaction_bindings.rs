@@ -14,12 +14,12 @@ use engine::types::interaction::{
     InteractionReasonCode, InteractionRelation, InteractionRelationConstraint,
     InteractionRelationSourceConstraint, InteractionResponse, InteractionResponseSpec,
     InteractionRoleCode, InteractionShortcutCountSpec, InteractionShortcutDecision,
-    InteractionShortcutPin, InteractionShortcutPoint, InteractionShortcutPointKind,
-    InteractionShortcutPreview, InteractionShortcutPreviewEntry, InteractionShortcutPreviewFamily,
-    InteractionShortcutReply, InteractionShortcutResponseCode, InteractionSlotKind,
-    InteractionSubmission, InteractionSummaryCode, InteractionWaitingForCode,
-    InteractionWaitingForKind, InteractionZoneCode, SelectionConstraint, SimultaneousDecisionKind,
-    ViewerInteraction,
+    InteractionShortcutOutcome, InteractionShortcutOutcomeKind, InteractionShortcutPin,
+    InteractionShortcutPoint, InteractionShortcutPointKind, InteractionShortcutPreview,
+    InteractionShortcutPreviewEntry, InteractionShortcutPreviewFamily, InteractionShortcutReply,
+    InteractionShortcutResponseCode, InteractionSlotKind, InteractionSubmission,
+    InteractionSummaryCode, InteractionWaitingForCode, InteractionWaitingForKind,
+    InteractionZoneCode, SelectionConstraint, SimultaneousDecisionKind, ViewerInteraction,
 };
 use ts_rs::{Config, TS};
 
@@ -94,6 +94,8 @@ fn expected_bindings() -> String {
         InteractionShortcutPreviewFamily,
         InteractionShortcutPreviewEntry,
         InteractionShortcutPreview,
+        InteractionShortcutOutcomeKind,
+        InteractionShortcutOutcome,
         InteractionShortcutPointKind,
         InteractionShortcutPoint,
         InteractionShortcutPin,

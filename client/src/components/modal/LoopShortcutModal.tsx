@@ -13,6 +13,7 @@ import type {
   InteractionResponse,
   InteractionResponseSpec,
   InteractionShortcutDecision,
+  InteractionShortcutOutcomeKind,
   InteractionShortcutPin,
   InteractionShortcutPoint,
   InteractionShortcutPreview,
@@ -20,7 +21,7 @@ import type {
   PreviewRequestId,
   ViewerInteraction,
 } from "../../adapter/generated/interaction";
-import type { IterationCount, ResourceAxis, WaitingFor, WinKind } from "../../adapter/types.ts";
+import type { IterationCount, ResourceAxis, WaitingFor } from "../../adapter/types.ts";
 import { dispatchInteraction, previewInteractionResponse } from "../../game/dispatch.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -241,11 +242,12 @@ function countText(t: TFunction<"game">, count: IterationCount): string {
   }
 }
 
-// CR 704.5a/704.5c etc.: the certificate's determinate win kind, a pure key lookup. An outcome the
-// engine decided at one count (`at`) is stated only beside that count.
-function WinKindLine({ kind, at, count }: { kind?: WinKind; at?: number; count: number | null }) {
+// CR 732.2a: the outcome the ENGINE projected for the selected ending, a pure key lookup. The
+// dialog never reads the raw classification: whether an ending reaches an outcome is the engine's
+// answer (`loop_check::outcome_at_ending`), published on the response spec.
+function OutcomeLine({ kind }: { kind: InteractionShortcutOutcomeKind | null }) {
   const { t } = useTranslation("game");
-  if (kind === undefined || (at !== undefined && at !== count)) return null;
+  if (kind === null) return null;
   return <p className="text-sm font-semibold text-white">{t(`comboShortcut.winKind.${kind}`)}</p>;
 }
 
@@ -412,6 +414,12 @@ function DeclareShortcutOffer({
   // is EXACT — no nearest-match, no interpolation, and nothing rendered for a count the engine
   // stated no magnitudes for.
   const previewed = chosen === null ? undefined : spec?.preview?.find((e) => e.count === chosen);
+  // CR 732.2a: the engine's projected outcome, stated either for whatever ending is selected
+  // (`count === null`) or for exactly one picker count — the same exact-match pairing as above.
+  const outcome =
+    spec?.outcome != null && (spec.outcome.count === null || spec.outcome.count === chosen)
+      ? spec.outcome.kind
+      : null;
 
   // CR 732.2a + CR 601.2c: the declared count's partition across the announcement subjects
   // `choice_ids` names. The state is RAW STRINGS keyed by published choice id — the same shape the
@@ -681,7 +689,7 @@ function DeclareShortcutOffer({
       footer={footer}
     >
       <div className="flex flex-col gap-3 px-3 py-3 lg:px-5 lg:py-5">
-        <WinKindLine kind={certificate.win_kind} at={certificate.win_kind_at} count={chosen} />
+        <OutcomeLine kind={outcome} />
         <CountLine count={schema.iteration_count} />
         {countSpec && (
           <AmountInput
@@ -964,11 +972,7 @@ function RespondToShortcut({
       footer={footer}
     >
       <div className="flex flex-col gap-3 px-3 py-3 lg:px-5 lg:py-5">
-        <WinKindLine
-          kind={proposal.win_kind}
-          at={proposal.win_kind_at}
-          count={typeof proposal.count === "object" ? proposal.count.Fixed : null}
-        />
+        <OutcomeLine kind={spec?.outcome ?? null} />
         <CountLine count={proposal.count} />
         <FamilyBadges axes={proposal.unbounded} />
         {declared && <PreviewLines preview={declared} />}
