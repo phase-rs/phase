@@ -22397,7 +22397,20 @@ mod tests {
         use crate::game::engine::entry_publishes_pin_slots;
         use crate::types::ability::{AbilityCost, Effect, QuantityExpr, TargetFilter};
 
-        let (state, src) = u2_relief_board();
+        let (board, src) = u2_relief_board();
+        // CR 118.3 + CR 608.2d: fund the proposer's pool with {1} on the
+        // test-local clone (the shared `u2_relief_board` fixture stays
+        // read-only) so the fixed-Mana offer is genuinely payable and the
+        // `may` slot mints through the state-reading branch again.
+        let mut state = board.clone();
+        state.players[0]
+            .mana_pool
+            .add(crate::types::mana::ManaUnit::new(
+                ManaType::Colorless,
+                src,
+                false,
+                Vec::new(),
+            ));
         let mana = || AbilityCost::Mana {
             cost: crate::types::mana::ManaCost::Cost {
                 shards: vec![],
@@ -24044,7 +24057,20 @@ mod tests {
         use crate::game::engine::entry_publishes_pin_slots;
         use crate::types::ability::{AbilityCost, Effect, TargetFilter};
 
-        let (frame, src) = u2_relief_board();
+        let (board, src) = u2_relief_board();
+        // CR 118.3 + CR 608.2d: fund the proposer's pool with {1} on the
+        // test-local clone (the shared `u2_relief_board` fixture stays
+        // read-only) so the fixed-Mana offer is genuinely payable and the
+        // fixture reaches the mint again.
+        let mut frame = board.clone();
+        frame.players[0]
+            .mana_pool
+            .add(crate::types::mana::ManaUnit::new(
+                ManaType::Colorless,
+                src,
+                false,
+                Vec::new(),
+            ));
         let entry = u2_shape_b_entry(
             src,
             9310,
