@@ -761,6 +761,7 @@ name = "engine-wasm"
 version = "0.124.0"
 dependencies = [
  "console_error_panic_hook",
+ "flate2",
  "getrandom 0.3.4",
  "js-sys",
  "phase-ai",

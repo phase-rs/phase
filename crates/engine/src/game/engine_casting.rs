@@ -1604,9 +1604,11 @@ pub(crate) fn restore_legacy_cast_timing_routes(
     });
     // CR 601.2b + CR 601.3c: an energy debit made during this cast under a timing
     // alternative-cost grant is that cost's election.
-    let paid_alternative = (pending.alternative_cost_election
-        == crate::types::game_state::SpellAlternativeCostElection::Undecided
-        && casting_energy_debited(state, &pending))
+    let paid_alternative = (matches!(
+        pending.alternative_cost_election,
+        crate::types::game_state::SpellAlternativeCostElection::Undecided
+            | crate::types::game_state::SpellAlternativeCostElection::Offered
+    ) && casting_energy_debited(state, &pending))
     .then(|| {
         casting_costs::spell_alternative_cost_for_timing(
             state,
@@ -1634,10 +1636,10 @@ pub(crate) fn restore_legacy_cast_timing_routes(
             // proposal is reversed.
             state.waiting_for = cancel_pending_cast(state, player, &pending, &mut Vec::new())
                 .map_err(|error| {
-                    PersistedRestoreError::LegacyPendingCastNotReversible(error.to_string())
+                    PersistedRestoreError::LegacyPendingCastNotRestorable(error.to_string())
                 })?;
             if !state.live_pending_cast_owners().is_empty() {
-                return Err(PersistedRestoreError::LegacyPendingCastNotReversible(
+                return Err(PersistedRestoreError::LegacyPendingCastNotRestorable(
                     "a pending cast owner survived the reversal".to_string(),
                 ));
             }
@@ -1645,7 +1647,7 @@ pub(crate) fn restore_legacy_cast_timing_routes(
         route => {
             // `Permission` adds no route-specific cost or target requirement to a kept cast.
             let route = route.unwrap_or(CastTimingRoute::Permission);
-            for owner in owners {
+            for owner in owners.iter().copied() {
                 if let Some(live) = state.pending_cast_at_mut(owner) {
                     live.cast_timing_permission = Some(route);
                     if let Some(grant) = &paid_alternative {
@@ -1654,6 +1656,39 @@ pub(crate) fn restore_legacy_cast_timing_routes(
                             grant.once_per_turn_source,
                         );
                     }
+                }
+            }
+            if paid_alternative.is_some()
+                && pending.alternative_cost_election
+                    == crate::types::game_state::SpellAlternativeCostElection::Offered
+            {
+                // CR 118.9a + CR 601.2b: the debit already made this cast's one alternative-cost
+                // election, so the release's second offer of it is retired.
+                let accepted = state
+                    .pending_cast_at(owners[0])
+                    .cloned()
+                    .expect("the legacy cast's owner is live");
+                let mut next = state.clone();
+                let mut events = Vec::new();
+                next.waiting_for = casting_costs::finish_pending_cost_or_cast(
+                    &mut next,
+                    player,
+                    accepted.clone(),
+                    &mut events,
+                )
+                .map_err(|error| {
+                    PersistedRestoreError::LegacyPendingCastNotRestorable(error.to_string())
+                })?;
+                if events.is_empty() {
+                    *state = next;
+                } else {
+                    // CR 601.2g: a cast whose next step acts waits at its mana-payment window, so
+                    // that step runs as the player's next action.
+                    state.pending_cast = Some(Box::new(accepted));
+                    state.waiting_for = WaitingFor::ManaPayment {
+                        player,
+                        convoke_mode: None,
+                    };
                 }
             }
         }

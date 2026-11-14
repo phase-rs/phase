@@ -13350,15 +13350,39 @@ fn migrate_legacy_pending_cast_timing(value: &mut serde_json::Value) {
     }
 }
 
-/// Rewrites every granted `CastWithKeyword { Flash }` static to `CastWithFlash`.
+/// Rewrites every granted `CastWithKeyword { Flash }` static to `CastWithFlash`,
+/// and its ability's resolution choice.
 fn migrate_legacy_as_though_flash_grants(value: &mut serde_json::Value) {
+    fn legacy_grant(value: &serde_json::Value) -> bool {
+        value.get("type").and_then(serde_json::Value::as_str) == Some("GrantStaticAbility")
+            && value.pointer("/definition/mode")
+                == Some(&serde_json::json!({"CastWithKeyword": {"keyword": "Flash"}}))
+    }
+    // CR 601.3 + CR 608.2d: that permission's "may" is exercised by later casts, not chosen while
+    // the grant resolves; its old writer lowered it as a resolution choice.
+    if value.get("optional") == Some(&serde_json::Value::Bool(true))
+        && value
+            .pointer("/effect/type")
+            .and_then(serde_json::Value::as_str)
+            == Some("GenericEffect")
+        && value
+            .pointer("/effect/static_abilities")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|statics| {
+                statics.iter().any(|static_ability| {
+                    static_ability
+                        .get("modifications")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|modifications| modifications.iter().any(legacy_grant))
+                })
+            })
+    {
+        value["optional"] = serde_json::Value::Bool(false);
+    }
     // CR 609.4: "as though it had flash" doesn't give a spell flash, and only
     // that permission's old writer granted CastWithKeyword { Flash } as an ability.
-    if value.get("type").and_then(serde_json::Value::as_str) == Some("GrantStaticAbility") {
-        if let Some(mode) = value
-            .pointer_mut("/definition/mode")
-            .filter(|mode| **mode == serde_json::json!({"CastWithKeyword": {"keyword": "Flash"}}))
-        {
+    if legacy_grant(value) {
+        if let Some(mode) = value.pointer_mut("/definition/mode") {
             *mode = serde_json::Value::from("CastWithFlash");
         }
     }
@@ -17282,8 +17306,8 @@ pub enum PersistedRestoreError {
     /// never inferred, so the save is not resumable.
     #[error("persisted copy announcement for {copy_id:?} has targets before its announcing-opponent election and is not resumable")]
     UnelectedCopyAnnouncer { copy_id: ObjectId },
-    #[error("persisted pending cast has no open timing route and cannot be reversed: {0}")]
-    LegacyPendingCastNotReversible(String),
+    #[error("persisted legacy pending cast cannot be restored: {0}")]
+    LegacyPendingCastNotRestorable(String),
 }
 
 /// CR 118.12 + CR 400.7: the object-naming prompts a staged payment parks

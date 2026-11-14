@@ -5357,61 +5357,68 @@ mod combat_prompt_restore_tests {
 
 #[cfg(test)]
 mod legacy_pending_cast_timing_restore_tests {
+    use std::io::Read;
+
     use super::*;
-    use engine::game::scenario::{CardBuilder, GameRunner, GameScenario, P0, P1};
+    use engine::game::scenario::{GameRunner, P0, P1};
+    use engine::types::ability::{AbilityCost, AdditionalCost};
     use engine::types::actions::GameAction;
+    use engine::types::counter::CounterType;
     use engine::types::game_state::{
-        CastPaymentMode, CastTimingRoute, CastingVariant, SpellAlternativeCostElection,
+        CastPaymentMode, CastTimingRoute, SpellAlternativeCostElection,
     };
-    use engine::types::mana::{ManaCostShard, ManaType, ManaUnit};
+    use engine::types::mana::ManaCostShard;
     use engine::types::phase::Phase;
     use engine::types::zones::Zone;
 
-    const TIMELY_WARD: &str = "You may cast this spell as though it had flash if it targets a \
-commander.\nEnchant creature\nEnchanted creature has indestructible.";
-
-    const LEYLINE_OF_ANTICIPATION: &str = "If this card is in your opening hand, you may begin \
-the game with it on the battlefield.\nYou may cast spells as though they had flash.";
-
-    const PRIMAL_PRAYERS: &str = "When this enchantment enters, you get {E}{E} (two energy \
-counters).\nYou may cast creature spells with mana value 3 or less by paying {E} rather than \
-paying their mana costs. If you cast a spell this way, you may cast it as though it had flash.";
-
-    const WISPMARE: &str = "Flying\nWhen this creature enters, destroy target enchantment.\n\
-Evoke {W} (You may cast this spell for its evoke cost. If you do, it's sacrificed when it enters.)";
-
-    const AZULA_CUNNING_USURPER: &str = "Firebending 2 (Whenever this creature attacks, add \
-{R}{R}. This mana lasts until end of combat.)\nWhen Azula enters, target opponent exiles a \
-nontoken creature they control, then they exile a nonland card from their graveyard.\nDuring \
-your turn, you may cast cards exiled with Azula and you may cast them as though they had flash. \
-Mana of any type can be spent to cast those spells.";
-
-    fn timely_ward(builder: &mut CardBuilder<'_>) -> ObjectId {
-        builder
-            .as_enchantment()
-            .with_subtypes(vec!["Aura"])
-            .with_mana_cost(ManaCost::Cost {
-                shards: vec![ManaCostShard::White],
-                generic: 2,
-            })
-            .from_oracle_text_with_keywords(&["Enchant"], TIMELY_WARD)
-            .id()
+    /// A save written by the released v0.124.0 engine; see `v0_124_0.provenance`.
+    macro_rules! v124 {
+        ($name:literal) => {
+            inflate(include_bytes!(concat!(
+                "../../engine/tests/fixtures/legacy_saves/v0_124_0/",
+                $name,
+                ".json.gz"
+            )))
+        };
     }
 
-    fn mana(color: ManaType, count: usize) -> Vec<ManaUnit> {
-        vec![ManaUnit::new(color, ObjectId(9_900), false, vec![]); count]
+    fn inflate(bytes: &[u8]) -> String {
+        let mut json = String::new();
+        flate2::read::GzDecoder::new(bytes)
+            .read_to_string(&mut json)
+            .expect("the fixture inflates");
+        json
     }
 
-    fn cast(runner: &mut GameRunner, spell: ObjectId, payment_mode: CastPaymentMode) {
-        let card_id = runner.state().objects[&spell].card_id;
-        runner
-            .act(GameAction::CastSpell {
-                object_id: spell,
-                card_id,
-                targets: Vec::new(),
-                payment_mode,
-            })
-            .expect("the cast is announced");
+    fn raw(json: &str) -> serde_json::Value {
+        serde_json::from_str(json).expect("the fixture is JSON")
+    }
+
+    const LEGACY_ROUTE: &str = "\"cast_timing_permission\":\"AsThoughHadFlash\"";
+    const LEGACY_GRANT: &str = "{\"CastWithKeyword\":{\"keyword\":\"Flash\"}}";
+
+    fn restore(json: &str) -> GameState {
+        load_minimal_test_card_database();
+        decode_and_rehydrate_restored_game_state(json, |_| Ok(()))
+            .expect("the legacy save restores")
+            .state
+    }
+
+    /// Restores a save whose pending cast carries only the legacy timing value.
+    fn restore_legacy_cast(json: &str) -> GameState {
+        assert!(json.contains(LEGACY_ROUTE));
+        restore(json)
+    }
+
+    fn object_named(state: &GameState, name: &str) -> ObjectId {
+        let mut ids = state
+            .objects
+            .iter()
+            .filter(|(_, object)| object.name == name)
+            .map(|(id, _)| *id);
+        let id = ids.next().expect("the object is in the save");
+        assert!(ids.next().is_none(), "one {name}");
+        id
     }
 
     fn pending(state: &GameState) -> &engine::types::game_state::PendingCast {
@@ -5426,57 +5433,16 @@ Mana of any type can be spent to cast those spells.";
         pending(state).cast_timing_permission
     }
 
-    /// The persisted save with every copy of the pending cast's `route`, each owner's and any
-    /// reversal undo entry's, written as the pre-route timing value.
-    fn legacy_save(state: &GameState, route: &str) -> String {
-        let json = serde_json::to_string(&PersistedGameState::capture(state.clone()))
-            .expect("persisted state serializes");
-        let current = format!("\"cast_timing_permission\":\"{route}\"");
-        let owners = [
-            state.waiting_for.pending_cast_ref(),
-            state.pending_cast.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .count();
-        assert!(json.matches(&current).count() >= owners, "{current}");
-        json.replace(&current, "\"cast_timing_permission\":\"AsThoughHadFlash\"")
+    fn energy(state: &GameState) -> u32 {
+        state.players[P0.0 as usize].energy
     }
 
-    fn restore(json: &str) -> GameState {
-        load_minimal_test_card_database();
-        decode_and_rehydrate_restored_game_state(json, |_| Ok(()))
-            .expect("the legacy save restores")
-            .state
+    fn pool(state: &GameState) -> usize {
+        state.players[P0.0 as usize].mana_pool.total()
     }
 
-    /// Timely Ward announced in P0's upkeep, paused at target selection, with a commander and a
-    /// noncommander Grizzly Bears to target, and Leyline of Anticipation when `with_leyline`.
-    fn ward_at_target_selection(with_leyline: bool) -> GameRunner {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::Upkeep);
-        if with_leyline {
-            scenario.add_enchantment_from_oracle(
-                P0,
-                "Leyline of Anticipation",
-                LEYLINE_OF_ANTICIPATION,
-            );
-        }
-        let ward = timely_ward(&mut scenario.add_spell_to_hand(P0, "Timely Ward", false));
-        scenario.add_creature(P1, "Grizzly Bears", 2, 2).commander();
-        scenario.add_creature(P0, "Grizzly Bears", 2, 2);
-        scenario.with_mana_pool(P0, mana(ManaType::White, 4));
-        let mut runner = scenario.build();
-        cast(&mut runner, ward, CastPaymentMode::Auto);
-        assert!(
-            matches!(
-                runner.state().waiting_for,
-                WaitingFor::TargetSelection { .. }
-            ),
-            "{:?}",
-            runner.state().waiting_for
-        );
-        runner
+    fn hand(state: &GameState) -> usize {
+        state.players[P0.0 as usize].hand.len()
     }
 
     fn assert_restored_at_target_selection(state: &GameState, route: CastTimingRoute) {
@@ -5486,141 +5452,6 @@ Mana of any type can be spent to cast those spells.";
             state.waiting_for
         );
         assert_eq!(pending_route(state), Some(route));
-    }
-
-    // CR 601.3d: only Timely Ward's own option is open, so that route is recovered.
-    #[test]
-    fn legacy_pending_cast_recovers_the_spells_own_flash_option() {
-        let runner = ward_at_target_selection(false);
-        assert_eq!(
-            pending_route(runner.state()),
-            Some(CastTimingRoute::SpellOption)
-        );
-        let restored = restore(&legacy_save(runner.state(), "SpellOption"));
-        assert_restored_at_target_selection(&restored, CastTimingRoute::SpellOption);
-    }
-
-    // CR 601.3: with Leyline's permission and the spell's own option both open, the permission a
-    // cast proposal records first is recovered.
-    #[test]
-    fn legacy_pending_cast_recovers_the_first_open_route() {
-        let runner = ward_at_target_selection(true);
-        assert_eq!(
-            pending_route(runner.state()),
-            Some(CastTimingRoute::Permission)
-        );
-        let restored = restore(&legacy_save(runner.state(), "Permission"));
-        assert_restored_at_target_selection(&restored, CastTimingRoute::Permission);
-    }
-
-    // CR 601.2a: Azula's permission belongs to its caster, not to the exiled card's controller.
-    #[test]
-    fn legacy_pending_cast_recovers_the_casters_route() {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PostCombatMain);
-        let azula = scenario
-            .add_creature_to_hand_from_oracle(
-                P0,
-                "Azula, Cunning Usurper",
-                4,
-                4,
-                AZULA_CUNNING_USURPER,
-            )
-            .with_mana_cost(ManaCost::Cost {
-                shards: vec![
-                    ManaCostShard::Blue,
-                    ManaCostShard::Black,
-                    ManaCostShard::Black,
-                ],
-                generic: 2,
-            })
-            .id();
-        scenario.add_creature(P0, "Grizzly Bears", 2, 2);
-        scenario.add_creature(P1, "Grizzly Bears", 2, 2);
-        let ward = timely_ward(&mut scenario.add_spell_to_graveyard(P1, "Timely Ward", false));
-        for player in [P0, P1] {
-            scenario.with_library_top(player, &["Library A", "Library B"]);
-        }
-        let mut pool = mana(ManaType::Black, 4);
-        pool.extend(mana(ManaType::Blue, 1));
-        scenario.with_mana_pool(P0, pool);
-        let mut runner = scenario.build();
-
-        cast(&mut runner, azula, CastPaymentMode::Auto);
-        runner.advance_until_stack_empty();
-        assert_eq!(runner.state().objects[&ward].zone, Zone::Exile);
-        for _ in 0..2 {
-            runner.advance_to_phase(Phase::End);
-            runner.advance_to_phase(Phase::Upkeep);
-        }
-        assert_eq!(
-            (runner.state().active_player, runner.state().phase),
-            (P0, Phase::Upkeep)
-        );
-        for unit in mana(ManaType::White, 3) {
-            runner.state_mut().players[P0.0 as usize]
-                .mana_pool
-                .add(unit);
-        }
-        cast(&mut runner, ward, CastPaymentMode::Auto);
-        assert_eq!(
-            pending_route(runner.state()),
-            Some(CastTimingRoute::Permission)
-        );
-        assert_eq!(runner.state().objects[&ward].controller, P1);
-        assert_eq!(
-            runner
-                .state()
-                .waiting_for
-                .pending_cast_ref()
-                .expect("the Ward's cast is pending")
-                .ability
-                .controller,
-            P0
-        );
-
-        let restored = restore(&legacy_save(runner.state(), "Permission"));
-        assert_restored_at_target_selection(&restored, CastTimingRoute::Permission);
-    }
-
-    const NIMBUS_NAIAD: &str = "Bestow {4}{U} (If you cast this card for its bestow cost, it's \
-an Aura spell with enchant creature. It becomes a creature again if it's not attached.)\nFlying\n\
-Enchanted creature gets +2/+2 and has flying.";
-
-    const OPT: &str = "Scry 1. (Look at the top card of your library. You may put that card on \
-the bottom.)\nDraw a card.";
-
-    const SHOCK: &str = "Shock deals 2 damage to any target.";
-
-    /// P0's upkeep with Leyline of Anticipation and `pool` floating; `setup` adds the other cards
-    /// and returns the spell to cast.
-    fn leyline_upkeep(
-        pool: Vec<ManaUnit>,
-        setup: impl FnOnce(&mut GameScenario) -> ObjectId,
-    ) -> (GameRunner, ObjectId, ObjectId) {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::Upkeep);
-        let leyline = scenario
-            .add_enchantment_from_oracle(P0, "Leyline of Anticipation", LEYLINE_OF_ANTICIPATION)
-            .id();
-        let spell = setup(&mut scenario);
-        scenario.with_mana_pool(P0, pool);
-        (scenario.build(), leyline, spell)
-    }
-
-    /// Removes Leyline from the paused cast's board, then restores the legacy save.
-    fn restore_without_leyline(mut runner: GameRunner, leyline: ObjectId) -> GameState {
-        assert_eq!(
-            pending_route(runner.state()),
-            Some(CastTimingRoute::Permission)
-        );
-        engine::game::zones::move_to_zone(
-            runner.state_mut(),
-            leyline,
-            Zone::Graveyard,
-            &mut Vec::new(),
-        );
-        restore(&legacy_save(runner.state(), "Permission"))
     }
 
     fn assert_kept_paying(restored: &GameState, spell: ObjectId) {
@@ -5637,153 +5468,7 @@ the bottom.)\nDraw a card.";
         );
     }
 
-    // CR 601.3 + CR 733.1: with Leyline gone, nothing lets a bestowed Nimbus Naiad begin in the
-    // upkeep, so its open proposal is reversed.
-    #[test]
-    fn legacy_proposal_without_an_open_route_is_reversed() {
-        let (mut runner, leyline, naiad) = leyline_upkeep(mana(ManaType::Blue, 5), |scenario| {
-            scenario.add_creature(P0, "Grizzly Bears", 2, 2);
-            scenario.add_creature(P1, "Grizzly Bears", 2, 2);
-            let mut builder = scenario.add_creature_to_hand(P0, "Nimbus Naiad", 2, 2);
-            builder
-                .with_mana_cost(ManaCost::Cost {
-                    shards: vec![ManaCostShard::Blue],
-                    generic: 2,
-                })
-                .with_subtypes(vec!["Nymph"])
-                .from_oracle_text_with_keywords(&["Bestow", "Flying"], NIMBUS_NAIAD);
-            builder.id()
-        });
-        let naiad_object = runner.state_mut().objects.get_mut(&naiad).unwrap();
-        for types in [
-            &mut naiad_object.card_types.core_types,
-            &mut naiad_object.base_card_types.core_types,
-        ] {
-            types.push(engine::types::card_type::CoreType::Enchantment);
-        }
-        cast(&mut runner, naiad, CastPaymentMode::Auto);
-        assert!(
-            matches!(
-                runner.state().waiting_for,
-                WaitingFor::AlternativeCastChoice { .. }
-            ),
-            "{:?}",
-            runner.state().waiting_for
-        );
-        runner
-            .act(GameAction::ChooseAlternativeCast {
-                choice: engine::types::actions::AlternativeCastDecision::Alternative,
-            })
-            .expect("P0 bestows Nimbus Naiad");
-        assert!(
-            matches!(
-                runner.state().waiting_for,
-                WaitingFor::TargetSelection { .. }
-            ),
-            "{:?}",
-            runner.state().waiting_for
-        );
-
-        let restored = restore_without_leyline(runner, leyline);
-        assert!(
-            matches!(restored.waiting_for, WaitingFor::Priority { player } if player == P0),
-            "{:?}",
-            restored.waiting_for
-        );
-        assert_eq!(restored.objects[&naiad].zone, Zone::Hand);
-        assert!(restored.stack.is_empty());
-        assert_eq!(restored.players[P0.0 as usize].mana_pool.total(), 5);
-    }
-
-    // CR 601.6: Wispmare's evoke cost is already being paid, so losing Leyline does not make the
-    // cast illegal.
-    #[test]
-    fn legacy_cast_paying_its_costs_keeps_going_without_an_open_route() {
-        let (mut runner, leyline, wispmare) =
-            leyline_upkeep(mana(ManaType::White, 1), |scenario| {
-                scenario.add_enchantment_from_oracle(P0, "Primal Prayers", PRIMAL_PRAYERS);
-                scenario
-                    .add_creature_to_hand_from_oracle(P0, "Wispmare", 1, 3, WISPMARE)
-                    .with_mana_cost(ManaCost::Cost {
-                        shards: vec![ManaCostShard::White],
-                        generic: 2,
-                    })
-                    .id()
-            });
-        runner.state_mut().players[P0.0 as usize].energy = 2;
-        cast(&mut runner, wispmare, CastPaymentMode::Manual);
-        assert_eq!(
-            runner
-                .state()
-                .pending_cast
-                .as_deref()
-                .expect("the evoked cast is pending")
-                .casting_variant,
-            CastingVariant::Evoke
-        );
-
-        let restored = restore_without_leyline(runner, leyline);
-        assert_kept_paying(&restored, wispmare);
-        assert_eq!(restored.players[P0.0 as usize].mana_pool.total(), 1);
-        assert_eq!(restored.players[P0.0 as usize].energy, 2);
-    }
-
-    // CR 304.1 + CR 601.6: Opt is an instant, so its cast never depended on Leyline.
-    #[test]
-    fn legacy_instant_paying_its_costs_keeps_going() {
-        let (mut runner, leyline, opt) = leyline_upkeep(mana(ManaType::Blue, 1), |scenario| {
-            scenario
-                .add_spell_to_hand_from_oracle(P0, "Opt", true, OPT)
-                .with_mana_cost(ManaCost::Cost {
-                    shards: vec![ManaCostShard::Blue],
-                    generic: 0,
-                })
-                .id()
-        });
-        cast(&mut runner, opt, CastPaymentMode::Manual);
-
-        let restored = restore_without_leyline(runner, leyline);
-        assert_kept_paying(&restored, opt);
-        assert_eq!(restored.players[P0.0 as usize].mana_pool.total(), 1);
-    }
-
-    // CR 304.1: Shock's proposal stays open after Leyline leaves, because an instant may begin in
-    // the upkeep anyway.
-    #[test]
-    fn legacy_instant_proposal_keeps_going() {
-        let (mut runner, leyline, shock) = leyline_upkeep(mana(ManaType::Red, 1), |scenario| {
-            scenario.add_creature(P1, "Grizzly Bears", 2, 2);
-            scenario
-                .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
-                .with_mana_cost(ManaCost::Cost {
-                    shards: vec![ManaCostShard::Red],
-                    generic: 0,
-                })
-                .id()
-        });
-        cast(&mut runner, shock, CastPaymentMode::Auto);
-        assert!(
-            matches!(
-                runner.state().waiting_for,
-                WaitingFor::TargetSelection { .. }
-            ),
-            "{:?}",
-            runner.state().waiting_for
-        );
-
-        let restored = restore_without_leyline(runner, leyline);
-        assert_restored_at_target_selection(&restored, CastTimingRoute::Permission);
-    }
-
-    const ARC_LIGHTNING: &str =
-        "Arc Lightning deals 3 damage divided as you choose among one, two, or three targets.";
-
-    const DEFILER_OF_VIGOR: &str = "Trample\nAs an additional cost to cast green permanent \
-spells, you may pay 2 life. Those spells cost {G} less to cast if you paid life this way. This \
-effect reduces only the amount of green mana you pay.\nWhenever you cast a green permanent \
-spell, put a +1/+1 counter on each creature you control.";
-
-    fn assert_reversed(restored: &GameState, spell: ObjectId, pool: usize) {
+    fn assert_reversed(restored: &GameState, spell: ObjectId, pool_after: usize) {
         assert!(
             matches!(restored.waiting_for, WaitingFor::Priority { player } if player == P0),
             "{:?}",
@@ -5792,181 +5477,110 @@ spell, put a +1/+1 counter on each creature you control.";
         assert_eq!(restored.objects[&spell].zone, Zone::Hand);
         assert!(restored.stack.is_empty());
         assert!(restored.pending_cast.is_none());
-        assert_eq!(restored.players[P0.0 as usize].mana_pool.total(), pool);
+        assert_eq!(pool(restored), pool_after);
+    }
+
+    // CR 601.3d: only Timely Ward's own option is open, so that route is recovered.
+    #[test]
+    fn legacy_pending_cast_recovers_the_spells_own_flash_option() {
+        let restored = restore_legacy_cast(&v124!("ward_spell_option"));
+        assert_restored_at_target_selection(&restored, CastTimingRoute::SpellOption);
+    }
+
+    // CR 601.3: with Leyline's permission and the spell's own option both open, the permission a
+    // cast proposal records first is recovered.
+    #[test]
+    fn legacy_pending_cast_recovers_the_first_open_route() {
+        let restored = restore_legacy_cast(&v124!("ward_leyline"));
+        assert_restored_at_target_selection(&restored, CastTimingRoute::Permission);
+    }
+
+    // CR 601.2a: Azula's permission belongs to its caster, not to the exiled card's controller.
+    #[test]
+    fn legacy_pending_cast_recovers_the_casters_route() {
+        let restored = restore_legacy_cast(&v124!("azula_ward"));
+        assert_restored_at_target_selection(&restored, CastTimingRoute::Permission);
+        let ward = object_named(&restored, "Timely Ward");
+        assert_eq!(restored.objects[&ward].controller, P1);
+        assert_eq!(pending(&restored).ability.controller, P0);
+    }
+
+    // CR 601.3 + CR 733.1: with Leyline gone, nothing lets a bestowed Nimbus Naiad begin in the
+    // upkeep, so its open proposal is reversed.
+    #[test]
+    fn legacy_proposal_without_an_open_route_is_reversed() {
+        let restored = restore_legacy_cast(&v124!("naiad_bestow_without_leyline"));
+        assert_reversed(&restored, object_named(&restored, "Nimbus Naiad"), 5);
+    }
+
+    // CR 601.6: Wispmare's evoke cost is already being paid, so losing Leyline does not make the
+    // cast illegal.
+    #[test]
+    fn legacy_cast_paying_its_costs_keeps_going_without_an_open_route() {
+        let restored = restore_legacy_cast(&v124!("wispmare_evoke_without_leyline"));
+        assert_kept_paying(&restored, object_named(&restored, "Wispmare"));
+        assert_eq!(pool(&restored), 1);
+        assert_eq!(energy(&restored), 2);
+    }
+
+    // CR 304.1 + CR 601.6: Opt is an instant, so its cast never depended on Leyline.
+    #[test]
+    fn legacy_instant_paying_its_costs_keeps_going() {
+        let restored = restore_legacy_cast(&v124!("opt_paying_without_leyline"));
+        assert_kept_paying(&restored, object_named(&restored, "Opt"));
+        assert_eq!(pool(&restored), 1);
+    }
+
+    // CR 304.1: Shock's proposal stays open after Leyline leaves, because an instant may begin in
+    // the upkeep anyway.
+    #[test]
+    fn legacy_instant_proposal_keeps_going() {
+        let restored = restore_legacy_cast(&v124!("shock_targeting_without_leyline"));
+        assert_restored_at_target_selection(&restored, CastTimingRoute::Permission);
     }
 
     // CR 601.2d + CR 733.1: dividing Arc Lightning's damage is still part of its proposal, so
     // with Leyline gone the sorcery's cast is reversed.
     #[test]
     fn legacy_proposal_at_its_division_is_reversed() {
-        let (mut runner, leyline, (arc, bears)) = {
-            let mut bears = None;
-            let (runner, leyline, arc) = leyline_upkeep(mana(ManaType::Red, 3), |scenario| {
-                bears = Some(scenario.add_creature(P1, "Grizzly Bears", 2, 2).id());
-                scenario
-                    .add_spell_to_hand_from_oracle(P0, "Arc Lightning", false, ARC_LIGHTNING)
-                    .with_mana_cost(ManaCost::Cost {
-                        shards: vec![ManaCostShard::Red],
-                        generic: 2,
-                    })
-                    .id()
-            });
-            (
-                runner,
-                leyline,
-                (arc, bears.expect("Grizzly Bears is added")),
-            )
-        };
-        cast(&mut runner, arc, CastPaymentMode::Auto);
-        runner
-            .act(GameAction::SelectTargets {
-                targets: vec![
-                    engine::types::ability::TargetRef::Object(bears),
-                    engine::types::ability::TargetRef::Player(P1),
-                ],
-            })
-            .expect("P0 chooses two targets");
-        assert!(
-            matches!(
-                runner.state().waiting_for,
-                WaitingFor::DistributeAmong { .. }
-            ),
-            "{:?}",
-            runner.state().waiting_for
-        );
-
-        let restored = restore_without_leyline(runner, leyline);
-        assert_reversed(&restored, arc, 3);
+        let restored = restore_legacy_cast(&v124!("arc_lightning_division_without_leyline"));
+        assert_reversed(&restored, object_named(&restored, "Arc Lightning"), 3);
     }
-
-    const BLAZE: &str = "Blaze deals X damage to any target.";
 
     // CR 601.2b + CR 733.1: announcing Blaze's X is part of its proposal, so with Leyline gone the
     // sorcery's cast is reversed.
     #[test]
     fn legacy_proposal_at_its_x_announcement_is_reversed() {
-        let (mut runner, leyline, blaze) = leyline_upkeep(mana(ManaType::Red, 3), |scenario| {
-            scenario
-                .add_spell_to_hand_from_oracle(P0, "Blaze", false, BLAZE)
-                .with_mana_cost(ManaCost::Cost {
-                    shards: vec![ManaCostShard::X, ManaCostShard::Red],
-                    generic: 0,
-                })
-                .id()
-        });
-        cast(&mut runner, blaze, CastPaymentMode::Auto);
-        runner
-            .act(GameAction::SelectTargets {
-                targets: vec![engine::types::ability::TargetRef::Player(P1)],
-            })
-            .expect("P0 targets P1");
-        assert!(
-            matches!(runner.state().waiting_for, WaitingFor::ChooseXValue { .. }),
-            "{:?}",
-            runner.state().waiting_for
-        );
-        assert!(runner.state().pending_cast.is_some());
-
-        let restored = restore_without_leyline(runner, leyline);
-        assert_reversed(&restored, blaze, 3);
+        let restored = restore_legacy_cast(&v124!("blaze_x_without_leyline"));
+        assert_reversed(&restored, object_named(&restored, "Blaze"), 3);
     }
 
     // CR 601.2b + CR 733.1: Defiler of Vigor's optional life payment is announced in the
     // proposal, so with Leyline gone the creature spell's cast is reversed.
     #[test]
     fn legacy_proposal_at_its_defiler_payment_is_reversed() {
-        let (mut runner, leyline, bears) = leyline_upkeep(mana(ManaType::Green, 4), |scenario| {
-            scenario.add_creature_from_oracle(P0, "Defiler of Vigor", 6, 6, DEFILER_OF_VIGOR);
-            scenario
-                .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
-                .with_mana_cost(ManaCost::Cost {
-                    shards: vec![ManaCostShard::Green],
-                    generic: 1,
-                })
-                .id()
-        });
-        cast(&mut runner, bears, CastPaymentMode::Auto);
-        assert!(
-            matches!(
-                runner.state().waiting_for,
-                WaitingFor::DefilerPayment { .. }
-            ),
-            "{:?}",
-            runner.state().waiting_for
-        );
-
-        let restored = restore_without_leyline(runner, leyline);
-        assert_reversed(&restored, bears, 4);
+        let restored = restore_legacy_cast(&v124!("defiler_payment_without_leyline"));
+        assert_reversed(&restored, object_named(&restored, "Grizzly Bears"), 4);
         assert_eq!(restored.players[P0.0 as usize].life, 20);
-    }
-
-    const GNARLID_COLONY: &str = "Kicker {2}{G} (You may pay an additional {2}{G} as you cast \
-this spell.)\nIf this creature was kicked, it enters with two +1/+1 counters on it.\nEach \
-creature you control with a +1/+1 counter on it has trample. (It can deal excess combat damage \
-to the player or planeswalker it's attacking.)";
-
-    /// `legacy_save`, also writing every owner's accepted alternative cost as v0.124.0 left it.
-    fn v124_alternative_cost_save(state: &GameState, route: &str) -> String {
-        let owners = [
-            state.waiting_for.pending_cast_ref(),
-            state.pending_cast.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .count();
-        let mut json = legacy_save(state, route);
-        for (current, legacy) in [
-            (
-                "\"alternative_cost_election\":\"Accepted\"",
-                "\"alternative_cost_election\":\"Undecided\"",
-            ),
-            (
-                "\"alternative_mana_cost_paid\":true",
-                "\"alternative_mana_cost_paid\":false",
-            ),
-        ] {
-            assert_eq!(json.matches(current).count(), owners, "{current}");
-            json = json.replace(current, legacy);
-        }
-        json
-    }
-
-    fn energy(state: &GameState) -> u32 {
-        state.players[P0.0 as usize].energy
-    }
-
-    /// P0's upkeep with `energy`, six {G} floating and the permanents `setup` adds, with Gnarlid
-    /// Colony cast with manual payment.
-    fn gnarlid_cast(energy: u32, setup: impl FnOnce(&mut GameScenario)) -> (GameRunner, ObjectId) {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::Upkeep);
-        setup(&mut scenario);
-        let gnarlid = scenario
-            .add_creature_to_hand(P0, "Gnarlid Colony", 2, 2)
-            .with_mana_cost(ManaCost::Cost {
-                shards: vec![ManaCostShard::Green],
-                generic: 1,
-            })
-            .with_subtypes(vec!["Beast"])
-            .from_oracle_text_with_keywords(&["Kicker"], GNARLID_COLONY)
-            .id();
-        scenario.with_mana_pool(P0, mana(ManaType::Green, 6));
-        let mut runner = scenario.build();
-        runner.state_mut().players[P0.0 as usize].energy = energy;
-        cast(&mut runner, gnarlid, CastPaymentMode::Manual);
-        (runner, gnarlid)
     }
 
     fn assert_at_kicker(state: &GameState) {
         assert!(
-            matches!(state.waiting_for, WaitingFor::OptionalCostChoice { .. }),
+            matches!(
+                state.waiting_for,
+                WaitingFor::OptionalCostChoice {
+                    cost: AdditionalCost::Kicker { .. },
+                    ..
+                }
+            ),
             "{:?}",
             state.waiting_for
         );
     }
 
     /// Kicks the restored Gnarlid Colony and finishes paying, asserting no further cost prompt.
-    fn kick_and_finish(restored: GameState, gnarlid: ObjectId) -> GameState {
+    fn kick_and_finish(restored: GameState) -> GameState {
+        let gnarlid = object_named(&restored, "Gnarlid Colony");
         let mut runner = GameRunner::from_state(restored);
         runner
             .act(GameAction::DecideOptionalCost { pay: true })
@@ -5989,31 +5603,37 @@ to the player or planeswalker it's attacking.)";
         state
     }
 
-    /// Restores Gnarlid Colony's v0.124.0 save at its kicker choice after Primal Prayers' {E} was
-    /// paid from `start` energy, then kicks and finishes it.
-    fn assert_paid_alternative_cost_kept(start: u32) {
-        let (runner, gnarlid) = gnarlid_cast(start, |scenario| {
-            scenario.add_enchantment_from_oracle(P0, "Primal Prayers", PRIMAL_PRAYERS);
-        });
-        assert_at_kicker(runner.state());
-        assert_eq!(energy(runner.state()), start - 1);
-
-        let restored = restore(&v124_alternative_cost_save(
-            runner.state(),
-            "AlternativeCost",
-        ));
-        assert_at_kicker(&restored);
-        assert_eq!(
-            pending_route(&restored),
-            Some(CastTimingRoute::AlternativeCost)
+    /// The release spent Primal Prayers' {E} at announcement, then offered it again.
+    fn assert_released_second_offer(json: &str) {
+        assert!(json.contains("\"alternative_cost_election\":\"Offered\""));
+        assert!(
+            json.contains(
+                "[{\"amount\":{\"type\":\"Fixed\",\"value\":1},\"type\":\"PayEnergy\"},\
+                 {\"cost\":{\"type\":\"NoCost\"},\"type\":\"Mana\"}],\"type\":\"Choice\""
+            ),
+            "the {{E}} is offered"
         );
+        assert_eq!(raw(json)["state"]["players"][0]["energy"], 1);
+    }
+
+    fn assert_elected(state: &GameState, route: CastTimingRoute) {
+        assert_eq!(pending_route(state), Some(route));
         assert_eq!(
-            pending(&restored).alternative_cost_election,
+            pending(state).alternative_cost_election,
             SpellAlternativeCostElection::Accepted
         );
+    }
 
-        let finished = kick_and_finish(restored, gnarlid);
-        assert_eq!(energy(&finished), start - 1);
+    // CR 601.2b + CR 601.3c: the paid {E} spent P0's last energy, so it alone shows Primal
+    // Prayers' alternative cost was elected.
+    #[test]
+    fn legacy_cast_that_spent_its_last_energy_keeps_its_alternative_cost() {
+        let restored = restore_legacy_cast(&v124!("prayers_gnarlid_energy1"));
+        assert_at_kicker(&restored);
+        assert_elected(&restored, CastTimingRoute::AlternativeCost);
+        let gnarlid = object_named(&restored, "Gnarlid Colony");
+        let finished = kick_and_finish(restored);
+        assert_eq!(energy(&finished), 0);
         assert!(matches!(
             finished.objects[&gnarlid].cast_timing_permission,
             Some((
@@ -6023,81 +5643,127 @@ to the player or planeswalker it's attacking.)";
         ));
     }
 
-    // CR 601.2b + CR 601.3c: the paid {E} spent P0's last energy, so it alone shows Primal
-    // Prayers' alternative cost was elected.
-    #[test]
-    fn legacy_cast_that_spent_its_last_energy_keeps_its_alternative_cost() {
-        assert_paid_alternative_cost_kept(1);
-    }
-
-    // CR 601.2b + CR 601.3c: Primal Prayers' {E} was already paid, so no second {E} is taken.
+    // CR 118.9a + CR 601.2b: the release's second offer of Primal Prayers' paid {E} is retired, so
+    // Gnarlid Colony is kicked without a second {E}.
     #[test]
     fn legacy_cast_with_paid_alternative_cost_keeps_its_election() {
-        assert_paid_alternative_cost_kept(2);
+        let json = v124!("prayers_gnarlid_energy2");
+        assert_released_second_offer(&json);
+        let restored = restore_legacy_cast(&json);
+        assert_at_kicker(&restored);
+        assert_elected(&restored, CastTimingRoute::AlternativeCost);
+        assert_eq!(energy(&restored), 1);
+        let gnarlid = object_named(&restored, "Gnarlid Colony");
+
+        let mut runner = GameRunner::from_state(kick_and_finish(restored));
+        assert_eq!(energy(runner.state()), 1);
+        runner.resolve_top();
+        let gnarlid = &runner.state().objects[&gnarlid];
+        assert_eq!(gnarlid.zone, Zone::Battlefield);
+        assert_eq!(gnarlid.counters.get(&CounterType::Plus1Plus1), Some(&2));
     }
 
     // CR 601.2b + CR 601.3: with Leyline's permission also open, the paid {E} is still Primal
     // Prayers' election.
     #[test]
     fn legacy_permission_cast_with_paid_alternative_cost_keeps_its_election() {
-        let (mut runner, gnarlid) = gnarlid_cast(2, |scenario| {
-            scenario.add_enchantment_from_oracle(
-                P0,
-                "Leyline of Anticipation",
-                LEYLINE_OF_ANTICIPATION,
-            );
-            scenario.add_enchantment_from_oracle(P0, "Primal Prayers", PRIMAL_PRAYERS);
-        });
-        assert_at_kicker(runner.state());
-        runner
-            .act(GameAction::DecideOptionalCost { pay: true })
-            .expect("P0 pays {E}");
-        assert_at_kicker(runner.state());
-        assert_eq!(energy(runner.state()), 1);
+        let json = v124!("leyline_prayers_gnarlid_energy2");
+        assert_released_second_offer(&json);
+        let restored = restore_legacy_cast(&json);
+        assert_at_kicker(&restored);
+        assert_elected(&restored, CastTimingRoute::Permission);
+        assert_eq!(energy(&restored), 1);
+        assert_eq!(energy(&kick_and_finish(restored)), 1);
+    }
 
-        let restored = restore(&v124_alternative_cost_save(runner.state(), "Permission"));
+    // CR 601.2g: nothing is left to decide after Primal Prayers' {E}, so the Grizzly Bears cast
+    // waits at its mana-payment window and Beast Whisperer sees it cast there.
+    #[test]
+    fn legacy_cast_with_nothing_left_to_decide_finishes_in_the_pipeline() {
+        let json = v124!("prayers_bears_whisperer_energy2");
+        assert_released_second_offer(&json);
+        let restored = restore_legacy_cast(&json);
+        assert!(
+            matches!(restored.waiting_for, WaitingFor::ManaPayment { .. }),
+            "{:?}",
+            restored.waiting_for
+        );
+        assert_elected(&restored, CastTimingRoute::AlternativeCost);
+        assert_eq!(energy(&restored), 1);
+        let bears = object_named(&restored, "Grizzly Bears");
+        let whisperer = object_named(&restored, "Beast Whisperer");
+
+        let mut runner = GameRunner::from_state(restored);
+        runner
+            .act(GameAction::PassPriority)
+            .expect("P0 finishes the cast");
+        let state = runner.state();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "{:?}",
+            state.waiting_for
+        );
+        assert_eq!(state.objects[&bears].zone, Zone::Stack);
+        assert_eq!(state.stack.len(), 2);
+        assert_eq!(
+            state.stack.last().map(|entry| entry.source_id),
+            Some(whisperer)
+        );
+        assert_eq!(energy(state), 1);
+        let before = hand(state);
+        runner.resolve_top();
+        assert_eq!(hand(runner.state()), before + 1);
+    }
+
+    // CR 118.9a + CR 601.2b: Fist of Suns' offer was never paid, so it stays to be answered.
+    #[test]
+    fn legacy_unpaid_alternative_cost_offer_stays_answerable() {
+        let json = v124!("leyline_fist_of_suns_offered");
+        let restored = restore_legacy_cast(&json);
+        let wubrg = ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::White,
+                ManaCostShard::Blue,
+                ManaCostShard::Black,
+                ManaCostShard::Red,
+                ManaCostShard::Green,
+            ],
+            generic: 0,
+        };
+        let printed = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        };
+        match &restored.waiting_for {
+            WaitingFor::OptionalCostChoice {
+                cost:
+                    AdditionalCost::Choice(AbilityCost::Mana { cost: alt }, AbilityCost::Mana { cost }),
+                ..
+            } => assert_eq!((alt, cost), (&wubrg, &printed)),
+            other => panic!("expected Fist of Suns' offer, got {other:?}"),
+        }
         assert_eq!(pending_route(&restored), Some(CastTimingRoute::Permission));
         assert_eq!(
             pending(&restored).alternative_cost_election,
-            SpellAlternativeCostElection::Accepted
+            SpellAlternativeCostElection::Offered
         );
-        assert_eq!(energy(&kick_and_finish(restored, gnarlid)), 1);
-    }
 
-    // CR 601.3 + CR 733.1: no cost has been paid at Gnarlid Colony's kicker choice, so with
-    // Leyline gone its proposal is reversed.
-    #[test]
-    fn legacy_proposal_at_its_kicker_choice_is_reversed() {
-        let mut leyline = None;
-        let (runner, gnarlid) = gnarlid_cast(0, |scenario| {
-            leyline = Some(
-                scenario
-                    .add_enchantment_from_oracle(
-                        P0,
-                        "Leyline of Anticipation",
-                        LEYLINE_OF_ANTICIPATION,
-                    )
-                    .id(),
-            );
-        });
-        assert_at_kicker(runner.state());
-        let restored = restore_without_leyline(runner, leyline.expect("Leyline is added"));
-        assert_reversed(&restored, gnarlid, 6);
+        let mut runner = GameRunner::from_state(restored);
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("P0 accepts Fist of Suns' cost");
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(pending(runner.state()).cost, wubrg);
     }
 
     // CR 601.2b: Primal Prayers is unpayable without energy, so nothing elected it.
     #[test]
     fn legacy_cast_without_an_energy_payment_leaves_the_alternative_undecided() {
-        let (runner, _) = gnarlid_cast(0, |scenario| {
-            scenario.add_enchantment_from_oracle(
-                P0,
-                "Leyline of Anticipation",
-                LEYLINE_OF_ANTICIPATION,
-            );
-            scenario.add_enchantment_from_oracle(P0, "Primal Prayers", PRIMAL_PRAYERS);
-        });
-        assert_at_kicker(runner.state());
-        let restored = restore(&legacy_save(runner.state(), "Permission"));
+        let restored = restore_legacy_cast(&v124!("leyline_prayers_gnarlid_energy0"));
         assert_at_kicker(&restored);
         assert_eq!(pending_route(&restored), Some(CastTimingRoute::Permission));
         assert_eq!(
@@ -6109,23 +5775,7 @@ to the player or planeswalker it's attacking.)";
     // CR 601.2b: Defiler of Vigor's paid life is not Primal Prayers' {E}.
     #[test]
     fn legacy_cast_with_another_paid_cost_leaves_the_alternative_undecided() {
-        let (mut runner, _, bears) = leyline_upkeep(mana(ManaType::Green, 4), |scenario| {
-            scenario.add_enchantment_from_oracle(P0, "Primal Prayers", PRIMAL_PRAYERS);
-            scenario.add_creature_from_oracle(P0, "Defiler of Vigor", 6, 6, DEFILER_OF_VIGOR);
-            scenario
-                .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
-                .with_mana_cost(ManaCost::Cost {
-                    shards: vec![ManaCostShard::Green],
-                    generic: 1,
-                })
-                .id()
-        });
-        cast(&mut runner, bears, CastPaymentMode::Manual);
-        runner
-            .act(GameAction::DecideOptionalCost { pay: true })
-            .expect("P0 pays 2 life");
-
-        let restored = restore(&legacy_save(runner.state(), "Permission"));
+        let restored = restore_legacy_cast(&v124!("leyline_prayers_defiler_life_paid"));
         assert!(
             matches!(restored.waiting_for, WaitingFor::ManaPayment { .. }),
             "{:?}",
@@ -6141,71 +5791,26 @@ to the player or planeswalker it's attacking.)";
         assert!(!pending.ability.context.alternative_mana_cost_paid);
     }
 
-    const BORNE_UPON_A_WIND: &str =
-        "You may cast spells this turn as though they had flash.\nDraw a card.";
-
-    const SLITHERWISP: &str = "Flash\nWhenever you cast another spell that has flash, you draw a \
-card and each opponent loses 1 life.";
-
-    const CHEA_FRIEND_TO_MAYBE_TOO_MANY: &str = "Familiar spells you cast have flash. (Bats, \
-Birds, Cats, Dragons, Faeries, Foxes, Frogs, Imps, Lizards, and Spiders are familiars, as well as \
-any creature with \"Familiar\" in its name.)\n{T}: Add X {G} and each opponent loses X life, \
-where X is the number of familiars you control.";
-
-    /// The persisted save with every "as though they had flash" grant in the shape v0.124.0
-    /// wrote.
-    fn v124_flash_grant_save(state: &GameState) -> String {
-        let json = serde_json::to_string(&PersistedGameState::capture(state.clone()))
-            .expect("persisted state serializes");
-        let current = "\"mode\":\"CastWithFlash\"";
-        assert!(json.contains(current), "the grant is saved");
-        let json = json.replace(
-            current,
-            "\"mode\":{\"CastWithKeyword\":{\"keyword\":\"Flash\"}}",
-        );
-        assert!(!json.contains(current));
-        json
-    }
-
-    /// P0's upkeep with Slitherwisp, `setup`'s cards and {U}{U}{G}{G}{G}{W}{W} floating, with
-    /// Borne Upon a Wind cast; `setup` returns the creature spell cast later.
-    fn borne_upkeep(setup: impl FnOnce(&mut GameScenario) -> ObjectId) -> (GameRunner, ObjectId) {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::Upkeep);
-        scenario.add_creature_from_oracle(P0, "Slitherwisp", 3, 2, SLITHERWISP);
-        let borne = scenario
-            .add_spell_to_hand_from_oracle(P0, "Borne Upon a Wind", true, BORNE_UPON_A_WIND)
-            .with_mana_cost(ManaCost::Cost {
-                shards: vec![ManaCostShard::Blue],
-                generic: 1,
-            })
-            .id();
-        let spell = setup(&mut scenario);
-        scenario.with_library_top(P0, &["Library A", "Library B", "Library C"]);
-        let mut pool = mana(ManaType::Blue, 2);
-        pool.extend(mana(ManaType::Green, 3));
-        pool.extend(mana(ManaType::White, 2));
-        scenario.with_mana_pool(P0, pool);
-        let mut runner = scenario.build();
-        cast(&mut runner, borne, CastPaymentMode::Auto);
-        assert_eq!(runner.state().stack.len(), 1);
-        (runner, spell)
-    }
-
-    fn grizzly_bears(scenario: &mut GameScenario) -> ObjectId {
-        scenario
-            .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
-            .with_mana_cost(ManaCost::Cost {
-                shards: vec![ManaCostShard::Green],
-                generic: 1,
-            })
-            .id()
+    // CR 601.3 + CR 733.1: no cost has been paid at Gnarlid Colony's kicker choice, so with
+    // Leyline gone its proposal is reversed.
+    #[test]
+    fn legacy_proposal_at_its_kicker_choice_is_reversed() {
+        let restored = restore_legacy_cast(&v124!("gnarlid_kicker_without_leyline"));
+        assert_reversed(&restored, object_named(&restored, "Gnarlid Colony"), 6);
     }
 
     /// Casts `spell` from the restored `state` and returns the state once it is on the stack.
     fn cast_after_restore(state: GameState, spell: ObjectId) -> GameState {
         let mut runner = GameRunner::from_state(state);
-        cast(&mut runner, spell, CastPaymentMode::Manual);
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Manual,
+            })
+            .expect("the cast is announced");
         runner
             .act(GameAction::PassPriority)
             .expect("P0 finishes paying");
@@ -6219,75 +5824,147 @@ where X is the number of familiars you control.";
             .contains(&engine::types::keywords::Keyword::Flash)
     }
 
-    /// Resolves Borne Upon a Wind, restores the old-shape save and casts `spell`.
-    fn cast_under_resolved_v124_grant(mut runner: GameRunner, spell: ObjectId) -> GameState {
-        runner.resolve_top();
-        assert!(runner.state().stack.is_empty());
-        cast_after_restore(restore(&v124_flash_grant_save(runner.state())), spell)
+    /// Resolves the restored save's Borne Upon a Wind, asserting it asks nothing and draws a card.
+    fn resolve_borne_on_the_stack() -> GameState {
+        let json = v124!("borne_on_the_stack");
+        let ability = &raw(&json)["state"]["stack"][0]["kind"]["data"]["ability"];
+        assert_eq!(ability["optional"], true);
+        assert!(ability["effect"].to_string().contains(LEGACY_GRANT));
+        let restored = restore(&json);
+        let before = hand(&restored);
+        let mut runner = GameRunner::from_state(restored);
+        for _ in 0..2 {
+            runner
+                .act(GameAction::PassPriority)
+                .expect("priority passes");
+        }
+        let state = runner.state().clone();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "{:?}",
+            state.waiting_for
+        );
+        assert!(state.stack.is_empty());
+        assert_eq!(hand(&state), before + 1);
+        state
     }
 
-    // CR 609.4 + CR 702.8a: an old save's Borne Upon a Wind grant lets Grizzly Bears be cast as
-    // though it had flash, without giving the spell flash, so Slitherwisp does not trigger.
+    // CR 601.3 + CR 608.2d + CR 609.4: a released Borne Upon a Wind still on the stack grants its
+    // permission without asking, and Grizzly Bears cast under it doesn't have flash.
     #[test]
-    fn legacy_as_though_flash_grant_does_not_give_flash() {
-        let (runner, bears) = borne_upkeep(grizzly_bears);
-        let state = cast_under_resolved_v124_grant(runner, bears);
+    fn legacy_as_though_flash_grant_on_the_stack_does_not_give_flash() {
+        let state = resolve_borne_on_the_stack();
+        let bears = object_named(&state, "Grizzly Bears");
+        let state = cast_after_restore(state, bears);
         assert!(!cast_with_flash(&state, bears));
         assert_eq!(state.stack.len(), 1);
+        assert_eq!(state.phase, Phase::Upkeep);
     }
 
-    // CR 702.8a: Ambush Viper's own flash survives the old save, and Slitherwisp sees it.
+    // CR 702.8a: Ambush Viper's own flash survives the old grant, and Slitherwisp sees it.
     #[test]
-    fn legacy_as_though_flash_grant_keeps_printed_flash() {
-        let (runner, viper) = borne_upkeep(|scenario| {
-            scenario
-                .add_creature_to_hand(P0, "Ambush Viper", 2, 1)
-                .with_mana_cost(ManaCost::Cost {
-                    shards: vec![ManaCostShard::Green],
-                    generic: 1,
-                })
-                .with_subtypes(vec!["Snake"])
-                .from_oracle_text_with_keywords(&["Flash", "Deathtouch"], "Flash\nDeathtouch")
-                .id()
-        });
-        let state = cast_under_resolved_v124_grant(runner, viper);
+    fn legacy_as_though_flash_grant_on_the_stack_keeps_printed_flash() {
+        let state = resolve_borne_on_the_stack();
+        let viper = object_named(&state, "Ambush Viper");
+        let state = cast_after_restore(state, viper);
         assert!(cast_with_flash(&state, viper));
         assert_eq!(state.stack.len(), 2);
+    }
+
+    // CR 608.2d: Crawling Barrens' "you may have it become a creature" is chosen while it
+    // resolves, so its saved choice stays.
+    #[test]
+    fn legacy_unrelated_optional_ability_keeps_its_choice() {
+        let json = v124!("crawling_barrens_on_the_stack");
+        assert!(json.contains("\"optional\":true"));
+        assert!(!json.contains(LEGACY_GRANT));
+        let restored = restore(&json);
+        let barrens = object_named(&restored, "Crawling Barrens");
+        let mut runner = GameRunner::from_state(restored);
+        for _ in 0..2 {
+            runner
+                .act(GameAction::PassPriority)
+                .expect("priority passes");
+        }
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(
+            runner.state().objects[&barrens]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&2)
+        );
+    }
+
+    // CR 609.4: a save paused at the release's resolution prompt restores there, and accepting it
+    // grants the permission without flash.
+    #[test]
+    fn legacy_as_though_flash_grant_prompt_stays_answerable() {
+        let json = v124!("borne_resolving_optional_prompt");
+        assert!(json.contains(LEGACY_GRANT));
+        let restored = restore(&json);
+        assert!(
+            matches!(
+                restored.waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "{:?}",
+            restored.waiting_for
+        );
+        let before = hand(&restored);
+        let bears = object_named(&restored, "Grizzly Bears");
+        let mut runner = GameRunner::from_state(restored);
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("P0 accepts");
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(hand(runner.state()), before + 1);
+        let state = cast_after_restore(runner.state().clone(), bears);
+        assert!(!cast_with_flash(&state, bears));
+    }
+
+    // CR 609.4 + CR 702.8a: an old save's resolved Borne Upon a Wind grant lets Grizzly Bears be
+    // cast as though it had flash, without giving the spell flash, so Slitherwisp does not
+    // trigger.
+    #[test]
+    fn legacy_as_though_flash_grant_does_not_give_flash() {
+        let restored = restore_legacy_cast(&v124!("borne_resolved_bears_paying"));
+        assert!(
+            matches!(restored.waiting_for, WaitingFor::ManaPayment { .. }),
+            "{:?}",
+            restored.waiting_for
+        );
+        assert_eq!(pending_route(&restored), Some(CastTimingRoute::Permission));
+        let bears = object_named(&restored, "Grizzly Bears");
+        let mut runner = GameRunner::from_state(restored);
+        runner
+            .act(GameAction::PassPriority)
+            .expect("P0 finishes paying");
+        let state = runner.state();
+        assert_eq!(state.objects[&bears].zone, Zone::Stack);
+        assert!(!cast_with_flash(state, bears));
+        assert_eq!(state.stack.len(), 1);
     }
 
     // CR 702.8a: Chea's "Familiar spells you cast have flash" survives the old save.
     #[test]
     fn legacy_as_though_flash_grant_keeps_granted_flash() {
-        let (runner, lions) = borne_upkeep(|scenario| {
-            scenario.add_creature_from_oracle(
-                P0,
-                "Chea, Friend to Maybe Too Many",
-                2,
-                4,
-                CHEA_FRIEND_TO_MAYBE_TOO_MANY,
-            );
-            scenario
-                .add_creature_to_hand(P0, "Savannah Lions", 2, 1)
-                .with_mana_cost(ManaCost::Cost {
-                    shards: vec![ManaCostShard::White],
-                    generic: 0,
-                })
-                .with_subtypes(vec!["Cat"])
-                .id()
-        });
-        let state = cast_under_resolved_v124_grant(runner, lions);
+        let json = v124!("borne_resolved_chea");
+        assert!(json.contains(LEGACY_GRANT));
+        let restored = restore(&json);
+        let lions = object_named(&restored, "Savannah Lions");
+        let state = cast_after_restore(restored, lions);
         assert!(cast_with_flash(&state, lions));
-    }
-
-    // CR 609.4: an old save with Borne Upon a Wind still on the stack resolves to the same grant.
-    #[test]
-    fn legacy_as_though_flash_grant_on_the_stack_does_not_give_flash() {
-        let (runner, bears) = borne_upkeep(grizzly_bears);
-        let mut restored = GameRunner::from_state(restore(&v124_flash_grant_save(runner.state())));
-        restored.resolve_top();
-        assert!(restored.state().stack.is_empty());
-        let state = cast_after_restore(restored.state().clone(), bears);
-        assert!(!cast_with_flash(&state, bears));
     }
 }
 
