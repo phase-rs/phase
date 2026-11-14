@@ -29566,9 +29566,9 @@ fn withhold_resolution_timing_from_choices_feeding_printed_targets(clauses: &mut
 /// a clause that prints no "target". Runs before
 /// `withhold_resolution_timing_from_choices_feeding_printed_targets`, whose
 /// withheld choices are kept at cast for their own reason and do not hold the rest
-/// of the chain back; so an independent choice written before such a withheld one
-/// still resolves at resolution, which is the intended split (the printed target's
-/// antecedent is announced at cast, CR 601.2c).
+/// of the chain back, so an independent earlier choice still happens at resolution.
+/// CR 601.2c requires announcing the printed recipient. The antecedent keeps its
+/// legacy cast-time timing while the recipient's slot remains collapsed (#10688).
 fn withhold_resolution_timing_beside_a_cast_time_choice(
     clauses: &mut [ClauseIr],
     ctx: &ParseContext,

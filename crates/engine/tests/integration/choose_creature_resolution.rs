@@ -6,7 +6,7 @@ use engine::game::game_object::AttachTarget;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::{Effect, TargetChoiceTiming, TargetRef};
+use engine::types::ability::{DelayedTriggerCondition, Effect, TargetChoiceTiming, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::Supertype;
 use engine::types::counter::CounterType;
@@ -1290,8 +1290,6 @@ fn wraith_at_payment_prompt(own_land_colors: &[ManaColor]) -> WraithBoard {
     wraith_board_at_payment_prompt(own_land_colors, false)
 }
 
-const A_GOOD_DAY_TO_DIE: &str = "Target creature gets +2/+0 until end of turn. When that creature dies this turn, you draw a card.";
-
 /// As above; with `good_day`, P0 first casts A Good Day to Die on the Wraith in
 /// the main phase (paid with the board's Black land, which `own_land_colors`
 /// must include), so a delayed "when that creature dies this turn" trigger is
@@ -1300,10 +1298,8 @@ fn wraith_board_at_payment_prompt(own_land_colors: &[ManaColor], good_day: bool)
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let day = good_day.then(|| {
-        scenario
-            .add_spell_to_hand_from_oracle(P0, "A Good Day to Die", false, A_GOOD_DAY_TO_DIE)
-            .with_mana_cost(parse_mtgjson_mana_cost("{B}"))
-            .id()
+        let db = load_db().expect("the committed card-data fixture carries A Good Day to Die");
+        scenario.add_real_card(P0, "A Good Day to Die", Zone::Hand, db)
     });
     let wraith = scenario
         .add_creature_from_oracle(P0, "Canoptek Wraith", 2, 1, CANOPTEK_WRAITH_ORACLE)
@@ -1343,7 +1339,14 @@ fn wraith_board_at_payment_prompt(own_land_colors: &[ManaColor], good_day: bool)
         assert_eq!(
             runner.state().objects[&day].zone,
             Zone::Graveyard,
-            "reach guard: A Good Day to Die resolved, so its delayed trigger exists"
+            "reach guard: A Good Day to Die resolved"
+        );
+        assert!(
+            runner.state().delayed_triggers.iter().any(|trigger| {
+                trigger.source_id == day
+                    && matches!(&trigger.condition, DelayedTriggerCondition::WhenDies { .. })
+            }),
+            "reach guard: A Good Day to Die installed its delayed death trigger"
         );
     }
     run_combat(&mut runner, vec![wraith], vec![]);
