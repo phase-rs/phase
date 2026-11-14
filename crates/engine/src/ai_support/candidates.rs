@@ -11049,6 +11049,7 @@ mod tests {
             ],
         };
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards: vec![a, b],
             count: 2,
