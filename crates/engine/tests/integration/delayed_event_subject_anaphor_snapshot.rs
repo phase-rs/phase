@@ -23,25 +23,36 @@
 
 use super::rules::{GameScenario, Phase, P0, P1};
 use engine::game::combat::AttackTarget;
+use engine::game::engine::{loop_entry_point_verdicts_for_tests, LoopEntryPointVerdicts};
 use engine::game::scenario::GameRunner;
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
-    AbilityDefinition, Effect, TargetFilter, TargetRef, TriggerDefinition,
+    AbilityDefinition, Effect, ResolvedAbility, TargetFilter, TargetRef, TriggerDefinition,
 };
 use engine::types::actions::GameAction;
+use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::zones::Zone;
+
+use crate::support::shared_card_db;
 
 const OHRAN_VIPER: &str =
     "Whenever this creature deals combat damage to a creature, destroy that creature at end of combat.";
 const DELAYED_SLIVER: &str =
     "Whenever a Sliver deals combat damage to a creature, destroy that creature at end of combat.";
 const SIMIC_BASILISK_GRANT: &str = "{1}{G}: Until end of turn, target creature with a +1/+1 counter on it gains \"Whenever this creature deals combat damage to a creature, destroy that creature at end of combat.\"";
-/// Verbatim Oracle text (Scryfall). An instant, so it can be cast in the
-/// combat-damage step's priority window — which is the only place a blink can
-/// land BETWEEN the delayed trigger's creation and its end-of-combat firing.
-/// "Creature you control" is satisfiable here because the damage RECIPIENT is
-/// by construction controlled by the trigger controller's opponent.
+/// Ephemerate's first paragraph, verbatim. The printed card also has Rebound
+/// ("If you cast this spell from your hand, exile it as it resolves. At the
+/// beginning of your next upkeep, you may cast this card from exile without
+/// paying its mana cost."), which these blink fixtures leave out: none of them
+/// reaches the caster's next upkeep. The loop-comparison tests at the end of
+/// this file build the printed card instead. An instant, so it can be cast in
+/// the combat-damage step's priority window — which is the only place a blink
+/// can land BETWEEN the delayed trigger's creation and its end-of-combat
+/// firing. "Creature you control" is satisfiable here because the damage
+/// RECIPIENT is by construction controlled by the trigger controller's
+/// opponent.
 const EPHEMERATE: &str =
     "Exile target creature you control, then return it to the battlefield under its owner's control.";
 
@@ -240,6 +251,41 @@ fn granted_delayed_damage_trigger_snapshots_its_own_creation_event() {
     );
 }
 
+/// Drive combat until the damage trigger has RESOLVED and installed its
+/// delayed trigger, stopping in the combat-damage step's priority window
+/// rather than running on to end of combat.
+///
+/// Stopping merely at "damage is marked" is too early: the damage trigger is
+/// still on the stack at that point and `CreateDelayedTrigger` has not run.
+fn deal_combat_damage_and_hold_priority(runner: &mut GameRunner, viper: ObjectId, wall: ObjectId) {
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(viper, AttackTarget::Player(P1))])
+        .expect("declare attackers");
+    pass_into_declare_blockers(runner);
+    runner
+        .declare_blockers(&[(wall, viper)])
+        .expect("declare blockers");
+    for _ in 0..16 {
+        if !runner.state().delayed_triggers.is_empty() {
+            return;
+        }
+        assert_ne!(
+            runner.state().phase,
+            Phase::EndCombat,
+            "reached end of combat before the damage trigger installed its \
+             delayed trigger — the blink would have nothing to race"
+        );
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority toward the combat damage step");
+    }
+    panic!(
+        "combat damage never installed a delayed trigger (damage marked: {})",
+        runner.state().objects[&wall].damage_marked
+    );
+}
+
 /// CR 400.7 + CR 603.7c: the PIN, exercised through the production pipeline.
 ///
 /// "If that object leaves the battlefield and returns, it becomes a new object
@@ -256,45 +302,6 @@ fn granted_delayed_damage_trigger_snapshots_its_own_creation_event() {
 /// controller's opponent, so Ephemerate's "creature you control" is satisfied.
 #[test]
 fn delayed_destroy_does_not_affect_a_blinked_and_returned_recipient() {
-    /// Drive combat until the damage trigger has RESOLVED and installed its
-    /// delayed trigger, stopping in the combat-damage step's priority window
-    /// rather than running on to end of combat.
-    ///
-    /// Stopping merely at "damage is marked" is too early: the damage trigger is
-    /// still on the stack at that point and `CreateDelayedTrigger` has not run.
-    fn deal_combat_damage_and_hold_priority(
-        runner: &mut GameRunner,
-        viper: ObjectId,
-        wall: ObjectId,
-    ) {
-        runner.advance_to_combat();
-        runner
-            .declare_attackers(&[(viper, AttackTarget::Player(P1))])
-            .expect("declare attackers");
-        pass_into_declare_blockers(runner);
-        runner
-            .declare_blockers(&[(wall, viper)])
-            .expect("declare blockers");
-        for _ in 0..16 {
-            if !runner.state().delayed_triggers.is_empty() {
-                return;
-            }
-            assert_ne!(
-                runner.state().phase,
-                Phase::EndCombat,
-                "reached end of combat before the damage trigger installed its \
-                 delayed trigger — the blink would have nothing to race"
-            );
-            runner
-                .act(GameAction::PassPriority)
-                .expect("pass priority toward the combat damage step");
-        }
-        panic!(
-            "combat damage never installed a delayed trigger (damage marked: {})",
-            runner.state().objects[&wall].damage_marked
-        );
-    }
-
     // ---- Arm 1 (reach-guard): no blink, the delayed destroy DOES land. ----
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -1201,4 +1208,404 @@ fn a_delayed_exclusion_expires_when_its_referent_blinks() {
          is still destroyed. This cell separates 'exclusion expired' from \
          'whole effect suppressed'"
     );
+}
+
+// ---------------------------------------------------------------------------
+// CR 104.4b + CR 732.2a: the pin under loop comparison.
+//
+// The resolver distinguishes a delayed trigger whose pin still names the live
+// recipient from one whose recipient left and returned (CR 603.7c: "it's a new
+// object and thus won't be affected"). A loop comparator that equates the two
+// frames certifies a repetition the game does not perform. Each test below takes
+// the real blinked frame, builds its twin with the one pin re-pointed at the live
+// incarnation (the frame the trigger would have produced had it been created
+// after the blink), shows the RUNTIME treats the two differently, and requires
+// every comparator entry point to tell them apart through production
+// normalization, on the registered delayed trigger and again after it fired.
+// ---------------------------------------------------------------------------
+
+const ALL_RECUR: LoopEntryPointVerdicts = LoopEntryPointVerdicts {
+    strict: true,
+    ring_walk: true,
+    settlement: true,
+};
+const NONE_RECUR: LoopEntryPointVerdicts = LoopEntryPointVerdicts {
+    strict: false,
+    ring_walk: false,
+    settlement: false,
+};
+
+/// Every keyed pin (CR 603.7c) `ability`'s chain holds on `object`.
+fn keyed_pins(ability: &ResolvedAbility, object: ObjectId) -> Vec<u64> {
+    let mut pins: Vec<u64> = ability
+        .target_incarnations
+        .iter()
+        .filter(|pin| pin.object_id == object)
+        .map(|pin| pin.incarnation)
+        .collect();
+    for (_, child) in ability.child_links() {
+        pins.extend(keyed_pins(child, object));
+    }
+    pins
+}
+
+fn repin(ability: &mut ResolvedAbility, object: ObjectId, incarnation: u64) {
+    for pin in ability
+        .target_incarnations
+        .iter_mut()
+        .filter(|pin| pin.object_id == object)
+    {
+        pin.incarnation = incarnation;
+    }
+    for (_, child) in ability.child_links_mut() {
+        repin(child, object, incarnation);
+    }
+}
+
+/// Whether a registered delayed trigger pins `object`: the one under test, told
+/// apart by its pin from the other delayed triggers the frame holds (Ephemerate's
+/// Rebound, cast from hand, registers one too).
+fn pins_registered(state: &GameState, object: ObjectId) -> bool {
+    state
+        .delayed_triggers
+        .iter()
+        .any(|trigger| !keyed_pins(&trigger.ability, object).is_empty())
+}
+
+/// The frame `stale` would be had the delayed trigger pinning `object` been
+/// created after `object` returned: that trigger's pin names the live
+/// incarnation. Nothing else differs.
+fn with_live_pin(stale: &GameState, object: ObjectId) -> GameState {
+    let mut live = stale.clone();
+    let incarnation = live.objects[&object].incarnation;
+    let trigger = live
+        .delayed_triggers
+        .iter_mut()
+        .find(|trigger| !keyed_pins(&trigger.ability, object).is_empty())
+        .expect("the frame holds the registered delayed trigger");
+    assert!(
+        keyed_pins(&trigger.ability, object)
+            .iter()
+            .all(|pin| *pin != incarnation),
+        "reach guard: the registered pin is stale before it is re-pointed"
+    );
+    repin(&mut trigger.ability, object, incarnation);
+    live
+}
+
+fn pass_until(runner: &mut GameRunner, what: &str, done: impl Fn(&GameState) -> bool) {
+    for _ in 0..40 {
+        if done(runner.state()) {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .unwrap_or_else(|error| panic!("{what}: {error:?}"));
+    }
+    panic!("{what}: not reached within the beat cap");
+}
+
+/// The frame with the delayed trigger pinning `object` fired onto the stack and
+/// nobody having passed yet.
+fn fired(registered: &GameState, object: ObjectId) -> GameState {
+    let mut runner = GameRunner::from_state(registered.clone());
+    pass_until(&mut runner, "fire the delayed trigger", |state| {
+        !pins_registered(state, object) && !state.stack.is_empty()
+    });
+    let state = runner.state().clone();
+    let ability = state
+        .stack
+        .back()
+        .and_then(|entry| entry.ability())
+        .expect("the fired delayed trigger is the top stack entry");
+    assert!(
+        !keyed_pins(ability, object).is_empty(),
+        "reach guard: the fired entry still carries the captured pin"
+    );
+    state
+}
+
+/// Where `object` is once the delayed trigger pinning it has fired and resolved.
+fn zone_after_the_trigger_resolves(frame: &GameState, object: ObjectId) -> Zone {
+    let mut runner = GameRunner::from_state(frame.clone());
+    pass_until(&mut runner, "resolve the delayed trigger", |state| {
+        !pins_registered(state, object) && state.stack.is_empty()
+    });
+    zone_of(&runner, object)
+}
+
+/// Neither frame recurs against the other at any entry point, in either order; and
+/// each recurs against itself, the reach guard that keeps those negative verdicts
+/// from being vacuous. The cross pair is asserted FIRST so that a comparator which
+/// merges the two fails on the claim itself.
+fn assert_different_loop_positions(stale: &GameState, live: &GameState, what: &str) {
+    assert!(stale != live, "{what}: reach guard, the raw frames differ");
+    for (prior, current, order) in [
+        (stale, live, "stale then live"),
+        (live, stale, "live then stale"),
+    ] {
+        assert_eq!(
+            loop_entry_point_verdicts_for_tests(prior, current),
+            NONE_RECUR,
+            "{what} ({order}): CR 400.7, a pin on the live object is not the position \
+             of a pin on an object that left and returned"
+        );
+    }
+    for (name, frame) in [("stale", stale), ("live", live)] {
+        assert_eq!(
+            loop_entry_point_verdicts_for_tests(frame, &frame.clone()),
+            ALL_RECUR,
+            "{what}: reach guard, the {name} frame recurs against itself"
+        );
+    }
+}
+
+/// CR 603.7c + CR 104.4b + CR 732.2a: Ohran Viper ("Whenever this creature deals
+/// combat damage to a creature, destroy that creature at end of combat. Whenever
+/// this creature deals combat damage to a player, you may draw a card.") is
+/// blocked by Wall of Stone ("Defender") and damages it; Ephemerate ("Exile
+/// target creature you control, then return it to the battlefield under its
+/// owner's control." plus Rebound) then blinks the Wall. All three are the printed
+/// cards from the card database. The registered delayed trigger and the fired
+/// stack entry each keep the recipient pin through loop normalization.
+#[test]
+fn loop_comparison_tells_a_live_delayed_destroy_pin_from_a_stale_one() {
+    let db = shared_card_db().expect("the card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P1, vec![mana(ManaType::White), mana(ManaType::White)]);
+    let viper = scenario.add_real_card(P0, "Ohran Viper", Zone::Battlefield, db);
+    let wall = scenario.add_real_card(P1, "Wall of Stone", Zone::Battlefield, db);
+    let ephemerate = scenario.add_real_card(P1, "Ephemerate", Zone::Hand, db);
+
+    let mut runner = scenario.build();
+    deal_combat_damage_and_hold_priority(&mut runner, viper, wall);
+    let created_at = runner.state().objects[&wall].incarnation;
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "reach guard: only the Viper's delayed destroy is registered"
+    );
+    assert_eq!(
+        keyed_pins(&runner.state().delayed_triggers[0].ability, wall),
+        vec![created_at],
+        "reach guard: the delayed trigger pinned the recipient it was created for"
+    );
+    for _ in 0..4 {
+        if runner.state().waiting_for.acting_players().first().copied() == Some(P1) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass active-player priority so the blinker can respond");
+    }
+    let _ = runner
+        .state_mut()
+        .add_mana_to_pool(P1, mana(ManaType::White));
+    let blinked = runner.cast(ephemerate).target_object(wall).resolve();
+    assert_eq!(blinked.zone_of(wall), Zone::Battlefield);
+    assert_ne!(
+        runner.state().objects[&wall].incarnation,
+        created_at,
+        "reach guard: the blink made the recipient a new object (CR 400.7)"
+    );
+
+    // Registered carrier.
+    let stale = runner.state().clone();
+    let live = with_live_pin(&stale, wall);
+    assert_eq!(
+        zone_after_the_trigger_resolves(&stale, wall),
+        Zone::Battlefield,
+        "runtime: the stale pin spares the returned creature"
+    );
+    assert_eq!(
+        zone_after_the_trigger_resolves(&live, wall),
+        Zone::Graveyard,
+        "runtime: the live pin destroys it, so the two frames are different positions"
+    );
+    assert_different_loop_positions(&stale, &live, "registered delayed destroy");
+
+    // Fired carrier.
+    assert_different_loop_positions(
+        &fired(&stale, wall),
+        &fired(&live, wall),
+        "fired delayed destroy",
+    );
+}
+
+/// The Sacrifice-shaped sibling. Footsteps of the Goryo ("Return target creature
+/// card from your graveyard to the battlefield. Sacrifice that creature at the
+/// beginning of the next end step.") pins the creature it returned; Ephemerate
+/// makes it a new object, which the delayed sacrifice no longer affects. Ephemerate
+/// and Grizzly Bears are the printed cards from the card database; Footsteps of the
+/// Goryo, absent from the test fixture, is built from its printed Oracle text.
+#[test]
+fn loop_comparison_tells_a_live_delayed_sacrifice_pin_from_a_stale_one() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            mana(ManaType::Black),
+            mana(ManaType::Black),
+            mana(ManaType::Black),
+            mana(ManaType::White),
+            mana(ManaType::White),
+        ],
+    );
+    let db = shared_card_db().expect("the card fixture");
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Graveyard, db);
+    // Not in the test card fixture: built from its printed Oracle text.
+    let footsteps = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Footsteps of the Goryo",
+            false,
+            "Return target creature card from your graveyard to the battlefield. Sacrifice that creature at the beginning of the next end step.",
+        )
+        .id();
+    let ephemerate = scenario.add_real_card(P0, "Ephemerate", Zone::Hand, db);
+
+    let mut runner = scenario.build();
+    let returned = runner.cast(footsteps).target_object(bears).resolve();
+    assert_eq!(
+        returned.zone_of(bears),
+        Zone::Battlefield,
+        "reach guard: Footsteps of the Goryo returned the creature"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "reach guard: the delayed sacrifice is registered"
+    );
+    let created_at = runner.state().objects[&bears].incarnation;
+    assert_eq!(
+        keyed_pins(&runner.state().delayed_triggers[0].ability, bears),
+        vec![created_at],
+        "reach guard: the delayed sacrifice pinned the creature it returned"
+    );
+    let _ = runner
+        .state_mut()
+        .add_mana_to_pool(P0, mana(ManaType::White));
+    let blinked = runner.cast(ephemerate).target_object(bears).resolve();
+    assert_eq!(blinked.zone_of(bears), Zone::Battlefield);
+    assert_ne!(runner.state().objects[&bears].incarnation, created_at);
+
+    let stale = runner.state().clone();
+    let live = with_live_pin(&stale, bears);
+    assert_eq!(
+        zone_after_the_trigger_resolves(&stale, bears),
+        Zone::Battlefield,
+        "runtime: the stale pin spares the returned creature"
+    );
+    assert_eq!(
+        zone_after_the_trigger_resolves(&live, bears),
+        Zone::Graveyard,
+        "runtime: the live pin sacrifices it"
+    );
+    assert_different_loop_positions(&stale, &live, "registered delayed sacrifice");
+    assert_different_loop_positions(
+        &fired(&stale, bears),
+        &fired(&live, bears),
+        "fired delayed sacrifice",
+    );
+}
+
+/// The frame `stale` would be had the ability on top of the stack been created
+/// while its source was the object now on the battlefield: the source incarnation
+/// it captured, and the triggered-source identity a trigger captures with it, name
+/// the live incarnation. Nothing else differs.
+fn with_live_source(stale: &GameState, source: ObjectId) -> GameState {
+    fn repoint(ability: &mut ResolvedAbility, incarnation: u64) {
+        ability.source_incarnation = Some(incarnation);
+        if let Some(trigger_source) = ability.trigger_source.as_mut() {
+            trigger_source.identity.reference.incarnation = incarnation;
+        }
+        for (_, child) in ability.child_links_mut() {
+            repoint(child, incarnation);
+        }
+    }
+    let mut live = stale.clone();
+    let incarnation = live.objects[&source].incarnation;
+    let ability = live
+        .stack
+        .back_mut()
+        .and_then(|entry| entry.ability_mut())
+        .expect("the trigger is on top of the stack");
+    assert!(
+        ability
+            .source_incarnation
+            .is_some_and(|captured| captured != incarnation),
+        "reach guard: the captured source is stale before it is re-pointed"
+    );
+    repoint(ability, incarnation);
+    live
+}
+
+/// CR 400.7 + CR 104.4b + CR 732.2a: Ball Lightning ("At the beginning of the end
+/// step, sacrifice this creature.") has its end-step trigger on the stack when
+/// Ephemerate ("Exile target creature you control, then return it to the
+/// battlefield under its owner's control." plus Rebound) blinks it. The returned
+/// creature is a new object, so the trigger, whose captured source is the old one,
+/// sacrifices nothing. Both are the printed cards from the card database. The
+/// trigger's twin, whose captured source is the live incarnation, does sacrifice
+/// it, and every comparator entry point must tell the two frames apart.
+#[test]
+fn loop_comparison_tells_a_live_trigger_source_from_a_stale_one() {
+    let db = shared_card_db().expect("the card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PostCombatMain);
+    let ball = scenario.add_real_card(P0, "Ball Lightning", Zone::Battlefield, db);
+    let ephemerate = scenario.add_real_card(P0, "Ephemerate", Zone::Hand, db);
+
+    let mut runner = scenario.build();
+    pass_until(
+        &mut runner,
+        "the end-step trigger goes on the stack",
+        |state| state.phase == Phase::End && !state.stack.is_empty(),
+    );
+    let created_at = runner.state().objects[&ball].incarnation;
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: only Ball Lightning's trigger is on the stack"
+    );
+    let _ = runner
+        .state_mut()
+        .add_mana_to_pool(P0, mana(ManaType::White));
+    // Commit Ephemerate above the trigger and let only it resolve.
+    drop(runner.cast(ephemerate).target_object(ball).commit());
+    pass_until(&mut runner, "Ephemerate resolves", |state| {
+        state.stack.len() == 1 && state.objects[&ball].incarnation != created_at
+    });
+    assert_eq!(zone_of(&runner, ball), Zone::Battlefield);
+    assert!(
+        runner
+            .state()
+            .stack
+            .back()
+            .is_some_and(|entry| entry.source_id == ball),
+        "reach guard: Ball Lightning's trigger is still on the stack"
+    );
+
+    let stale = runner.state().clone();
+    let live = with_live_source(&stale, ball);
+    let zone_after_resolution = |frame: &GameState| {
+        let mut runner = GameRunner::from_state(frame.clone());
+        pass_until(&mut runner, "resolve the end-step trigger", |state| {
+            state.stack.is_empty()
+        });
+        zone_of(&runner, ball)
+    };
+    assert_eq!(
+        zone_after_resolution(&stale),
+        Zone::Battlefield,
+        "runtime: the trigger whose source left and returned sacrifices nothing"
+    );
+    assert_eq!(
+        zone_after_resolution(&live),
+        Zone::Graveyard,
+        "runtime: the trigger whose source is the live object sacrifices it"
+    );
+    assert_different_loop_positions(&stale, &live, "end-step self-sacrifice");
 }
