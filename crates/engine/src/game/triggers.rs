@@ -3373,6 +3373,21 @@ fn collect_matching_triggers_inner(
             } else {
                 trig_def.trigger_zones.contains(&zone)
             };
+            // CR 603.10: the game immediately after the event has no source
+            // on the battlefield that left it in the event, the moving source
+            // included, so an after-read admits it only through the zone it
+            // moved to.
+            if use_latched_trigger_entries
+                && matches!(visit, TriggerSourceVisit::EventSubject)
+                && matches!(
+                    collection,
+                    LogicalZoneTriggerCollection::Observed(
+                        TriggerObservationTime::ImmediatelyAfter
+                    )
+                )
+            {
+                zones_match = false;
+            }
             // A zone-change record may let the moving source's own trigger
             // function from its destination zone. An observer's LKI only
             // proves it functioned from `zone_filter` immediately before the

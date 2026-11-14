@@ -1527,6 +1527,75 @@ fn diviner_triggers_on_board(
     Some(queued + triggers_from(&runner, diviner).max(announcing))
 }
 
+/// CR 603.6c + CR 603.10: a "from anywhere" ability is read in the game after
+/// the event, so a permanent that left the battlefield in it, the moving
+/// source included, does not trigger. P1 owns a Profane Memento that P0
+/// controls through their Steal Artifact; March of the Machines ("Each
+/// noncreature artifact is an artifact creature with power and toughness each
+/// equal to its mana value.") makes it a 1/1 creature. P0's Earthquake for 2
+/// leaves only P2 at lethal life, so in one state-based-action check P2 loses
+/// and the Memento dies into P1's graveyard, an opponent's. It is not on the
+/// battlefield after that, so it does not trigger for itself.
+#[test]
+fn a_from_anywhere_source_that_died_in_the_event_does_not_trigger_for_itself() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let memento = scenario.add_real_card(P1, "Profane Memento", Zone::Battlefield, db);
+    let steal = scenario.add_real_card(P0, "Steal Artifact", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "March of the Machines", Zone::Battlefield, db);
+    let earthquake = scenario.add_real_card(P0, "Earthquake", Zone::Hand, db);
+    scenario.with_mana_pool(P0, red_mana(8));
+    scenario.with_life(P2, 2);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.objects.get_mut(&steal).unwrap().attached_to = Some(AttachTarget::Object(memento));
+        state
+            .objects
+            .get_mut(&memento)
+            .unwrap()
+            .attachments
+            .push(steal);
+        state.layers_dirty.mark_full();
+        engine::game::layers::flush_layers(state);
+    }
+    assert_eq!(
+        runner.state().objects[&memento].controller,
+        P0,
+        "reach guard: Steal Artifact gives P0 the Memento"
+    );
+    assert!(
+        runner.state().objects[&memento]
+            .card_types
+            .core_types
+            .contains(&engine::types::card_type::CoreType::Creature),
+        "reach guard: March of the Machines makes the Memento a creature"
+    );
+    runner.cast(earthquake).x(2).commit();
+    for _ in 0..4 {
+        if runner.state().players[2].is_eliminated {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Earthquake resolves");
+    }
+    assert!(runner.state().players[2].is_eliminated);
+    assert_eq!(zone(&runner, memento), Zone::Graveyard);
+    let state = runner.state();
+    let queued = state
+        .pending_trigger_order
+        .iter()
+        .flat_map(|order| order.groups.iter())
+        .flat_map(|group| group.triggers.iter())
+        .chain(state.deferred_triggers.iter())
+        .filter(|context| context.pending.source_id == memento)
+        .count();
+    assert_eq!(queued + triggers_from(&runner, memento), 0);
+}
+
 /// Welcoming Vampire ("Whenever one or more other creatures you control with
 /// power 2 or less enter, draw a card. This ability triggers only once each
 /// turn.") and Sol Ring on P0's side; with `suppressor`, Hushbringer
