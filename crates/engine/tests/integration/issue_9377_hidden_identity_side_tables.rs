@@ -3191,6 +3191,12 @@ fn frost_titan_pili_pala_payment_window_blanks_hidden_mana_source() {
         // Public spine: with the payment vector restored, the activation (resume,
         // retained ability and cost-move resume included) equals the raw one.
         let mut spine = window_parts(&view).0.clone();
+        // B4 redaction (Matt review 5895578196): the viewer boundary clears the
+        // engine-only announced key; trusted save/restore retains it.
+        assert_eq!(
+            spine.announced_usage_key, None,
+            "{label}: viewer redacts the announced usage key"
+        );
         let ManaAbilityResume::UnlessPayment { pending_effect, .. } = &mut spine.resume else {
             panic!("{label}: the window still resumes the unless-payment");
         };
@@ -3199,8 +3205,11 @@ fn frost_titan_pili_pala_payment_window_blanks_hidden_mana_source() {
             .as_mut()
             .expect("the latched source context is kept")
             .mana_spent_source_snapshots = raw_window_payment.clone();
+        // The trusted key is the only remaining delta beside the payment vector.
+        let mut expected = PendingManaAbility::clone(raw_pending);
+        expected.announced_usage_key = None;
         assert_eq!(
-            &spine, raw_pending,
+            &spine, &expected,
             "{label}: only the payment vector changed in the window"
         );
     }
@@ -3238,9 +3247,18 @@ fn frost_titan_pili_pala_payment_window_blanks_hidden_mana_source() {
 
     let p0 = filter_state_for_viewer(&raw, P0);
     assert_eq!(p0.objects[&island_a].name, "Island", "owner sees own hand");
+    // B4 redaction (Matt review 5895578196) applies to every viewer, owner
+    // included: the engine-only announced key is cleared while the activation
+    // itself stays intact.
+    assert_eq!(
+        window_parts(&p0).0.announced_usage_key, None,
+        "owner view redacts the announced usage key"
+    );
+    let mut expected = PendingManaAbility::clone(raw_pending);
+    expected.announced_usage_key = None;
     assert_eq!(
         window_parts(&p0).0,
-        raw_pending,
+        &expected,
         "the owner keeps the window's activation intact"
     );
     assert_eq!(
