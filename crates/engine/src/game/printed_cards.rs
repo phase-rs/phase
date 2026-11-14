@@ -2148,7 +2148,12 @@ mod tests {
     ///
     /// The old-save shape is exact, not hand-waved: the state serializes,
     /// every `display_source` key is stripped (the pre-PR `skip_serializing_if`
-    /// omission), and the stripped JSON deserializes before rehydration.
+    /// omission), and the stripped JSON deserializes before rehydration. The
+    /// pinned art ref is the ORIGINAL pre-PR value — including the typo'd
+    /// `scryfall_id` (`444` for `4a44`) the overlay fix later corrected —
+    /// because the repair retains the ref verbatim rather than correcting
+    /// it; the corrected image resolves client-side through the ref's
+    /// oracle-id fallback rung (see the stale-ref `useCardImage` test).
     #[test]
     fn restore_repairs_horde_token_display_routes_but_keeps_hidden_piles_concealed() {
         use crate::game::game_object::DisplaySource;
@@ -2156,8 +2161,8 @@ mod tests {
         use crate::types::player::PlayerId;
 
         let mut state = GameState::new_two_player(42);
-        let smackdown_ref = || TokenImageRef {
-            scryfall_id: "fac36345-b2fb-4a44-a499-f68bbe87e736".to_string(),
+        let original_smackdown_ref = || TokenImageRef {
+            scryfall_id: "fac36345-b2fb-444-a499-f68bbe87e736".to_string(),
             scryfall_oracle_id: Some("4e7833c7-e9ff-4550-b2fd-36afe6087e0f".to_string()),
             face_name: None,
             preset_id: "f13c9091-91b6-51b4-91d5-214180ff03ee".to_string(),
@@ -2175,7 +2180,7 @@ mod tests {
             let obj = state.objects.get_mut(&event).expect("graveyard Event");
             obj.is_token = true;
             obj.is_horde_deck_token = true;
-            obj.token_image_ref = Some(smackdown_ref());
+            obj.token_image_ref = Some(original_smackdown_ref());
             obj.display_source = DisplaySource::Card;
         }
         // A hidden Horde library card and a face-down Boss-pile card.
@@ -2193,7 +2198,7 @@ mod tests {
                 .expect("library card");
             obj.is_token = true;
             obj.is_horde_deck_token = true;
-            obj.token_image_ref = Some(smackdown_ref());
+            obj.token_image_ref = Some(original_smackdown_ref());
             obj.display_source = DisplaySource::Card;
         }
         let pile_boss = create_object(
@@ -2208,7 +2213,7 @@ mod tests {
             let obj = state.objects.get_mut(&pile_boss).expect("pile Boss");
             obj.is_token = true;
             obj.is_horde_deck_token = true;
-            obj.token_image_ref = Some(smackdown_ref());
+            obj.token_image_ref = Some(original_smackdown_ref());
             obj.display_source = DisplaySource::Card;
             obj.face_down = true;
         }
@@ -2272,14 +2277,14 @@ mod tests {
             DisplaySource::Token,
             "the revealed Event routes as a token after restore"
         );
-        assert!(
+        assert_eq!(
             restored
                 .objects
                 .get(&event)
                 .expect("rehydrated Event")
-                .token_image_ref
-                .is_some(),
-            "the repair keeps the pinned art ref the client resolves"
+                .token_image_ref,
+            Some(original_smackdown_ref()),
+            "the repair retains the original art ref verbatim for the client to resolve"
         );
         assert_eq!(
             restored
@@ -2296,9 +2301,10 @@ mod tests {
         let filtered = crate::game::visibility::filter_state_for_viewer(&restored, PlayerId(0));
         let shown = filtered.objects.get(&event).expect("projected Event");
         assert_eq!(shown.display_source, DisplaySource::Token);
-        assert!(
-            shown.token_image_ref.is_some(),
-            "the public Event exposes its token art ref"
+        assert_eq!(
+            shown.token_image_ref,
+            Some(original_smackdown_ref()),
+            "the public Event exposes the original token art ref"
         );
         for (id, what) in [(hidden_library, "library card"), (pile_boss, "pile Boss")] {
             let hidden = filtered.objects.get(&id).expect(what);

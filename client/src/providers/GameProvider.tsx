@@ -2464,14 +2464,30 @@ export function GameProvider({
     if (mode !== "ai") return;
     // Horde games with themed seats take Horde identities; everything else
     // falls through to the commander derivation. The commander branch is
-    // one-shot — it applies as soon as the state carries a commander, in
-    // whatever zone it is in (see `setupCommanderAvatars` for why the
-    // command zone is the wrong gate), then unsubscribes. The Horde branch
-    // is continuous: a stage clear replaces the deployed Boss under the
-    // same session, so the seat must re-derive whenever the engine's
-    // projected identity changes. Only the commander branch unsubscribes.
+    // one-shot per session — it applies as soon as the state carries a
+    // commander, in whatever zone it is in (see `setupCommanderAvatars`
+    // for why the command zone is the wrong gate). The Horde branch is
+    // continuous: a stage clear replaces the deployed Boss under the same
+    // session, so the seat must re-derive whenever the engine's projected
+    // identity changes. Neither branch unsubscribes: a debug import can
+    // replace the session under this same route (bumping only the session
+    // generation), and a Turtle→Cyberman or Commander→Turtle replacement
+    // must reselect identities instead of keeping the previous game's.
     let commanderDone = false;
     let lastHordeKey: string | null = null;
+    let lastGeneration = useGameStore.getState().gameSessionGeneration;
+    // A generation change is a session replacement, never continuous play
+    // (engine snapshots commit without bumping it — only init, resume,
+    // and import do). Reset both branches and reseed the random fallback
+    // exactly like a fresh mount, so a replacement neither branch claims
+    // sheds the previous game's themed maps instead of keeping them.
+    const reselectOnReplace = (state: ReturnType<typeof useGameStore.getState>) => {
+      if (state.gameId !== gameId || state.gameSessionGeneration === lastGeneration) return;
+      lastGeneration = state.gameSessionGeneration;
+      commanderDone = false;
+      lastHordeKey = null;
+      setupRandomAvatars(playerCount ?? 2, gameId);
+    };
     // The projected Horde identity this snapshot themes, or null when no
     // themed seats apply (non-Horde format, other challenge deck, or no
     // Boss deployed yet). Bound to the game id and the session generation
@@ -2513,19 +2529,19 @@ export function GameProvider({
       return true;
     };
     const unsub = useGameStore.subscribe((state) => {
+      reselectOnReplace(state);
       if (applyHordeAvatars(state)) return;
       if (applyCommanderAvatars(state)) {
         commanderDone = true;
-        unsub();
       }
     });
     const state = useGameStore.getState();
+    reselectOnReplace(state);
     if (!applyHordeAvatars(state) && applyCommanderAvatars(state)) {
       commanderDone = true;
-      unsub();
     }
     return unsub;
-  }, [mode, gameId]);
+  }, [mode, gameId, playerCount]);
 
   return (
     <GameDispatchContext.Provider value={dispatchAction}>

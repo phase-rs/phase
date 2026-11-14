@@ -572,6 +572,52 @@ describe("useCardImage", () => {
     await waitFor(() => expect(result.current.src).toBe("https://img.example/morph.jpg"));
   });
 
+  it("recovers the corrected art for a pre-PR stale token ref through the oracle rung (#10861 R2-F2)", async () => {
+    // A pre-PR save pins Smackdown's ORIGINAL typo'd printing id
+    // (`...b2fb-444-...`, `444` for `4a44`); the restore repair retains
+    // that ref verbatim and only fixes the display route. The sidecar no
+    // longer indexes the typo'd id, so the `scryfall:` rung misses — but
+    // the ref's oracle id is correct, and the `oracle:` rung must recover
+    // the corrected image. The fixture deliberately omits any token-name
+    // entry: production ALSO has the name lookup as a second net, but
+    // this test pins the oracle rung as an independent recovery path.
+    const CORRECTED_ID = "fac36345-b2fb-4a44-a499-f68bbe87e736";
+    const ORACLE_ID = "4e7833c7-e9ff-4550-b2fd-36afe6087e0f";
+    const EXPECTED_ART = `https://cards.scryfall.io/normal/front/f/a/${CORRECTED_ID}.jpg`;
+    const smackdownEntry = {
+      scryfall_id: CORRECTED_ID,
+      oracle_id: ORACLE_ID,
+      face_names: [],
+      faces: [{ normal: EXPECTED_ART, art_crop: EXPECTED_ART }],
+      name: "Event: Leatherhead's Smackdown",
+      layout: "token",
+    };
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url === "/scryfall-token-images.json") {
+        return Promise.resolve(jsonResponse({
+          [`scryfall:${CORRECTED_ID}`]: smackdownEntry,
+          [`oracle:${ORACLE_ID}:`]: smackdownEntry,
+        }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    }));
+
+    const { useCardImage } = await import("../useCardImage");
+    const { result } = renderHook(() =>
+      useCardImage("Event: Leatherhead's Smackdown", {
+        size: "normal",
+        isToken: true,
+        tokenImageRef: {
+          scryfall_id: "fac36345-b2fb-444-a499-f68bbe87e736",
+          scryfall_oracle_id: ORACLE_ID,
+          preset_id: "f13c9091-91b6-51b4-91d5-214180ff03ee",
+        },
+      }),
+    );
+
+    await waitFor(() => expect(result.current.src).toBe(EXPECTED_ART));
+  });
+
   it("fetches nothing for a token ref that names no printing — both ids empty (#7550 review)", async () => {
     // A `TokenImageRef` is only a pointer when it carries at least one id.
     // With BOTH `scryfall_id` and `scryfall_oracle_id` empty there is nothing

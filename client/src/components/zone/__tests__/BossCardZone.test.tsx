@@ -32,8 +32,11 @@ vi.mock("../../../hooks/useEngineCardData.ts", () => ({
   useLocalizedCardName: (name: string | null) => localizedNames.get(name ?? "") ?? name,
 }));
 
-// Card art keyed by requested name: each Boss must resolve through the
-// token-image path with its OWN art, so a shared stub would hide a mixup.
+// Card art keyed by the requested PRINTING ref: each Boss must resolve
+// through the token-image path with its OWN ref, so a name-keyed stub
+// would stay green while the dock showed swapped portraits.
+const KRANG_REF = "8742baf6-2bf9-48ac-af68-6427704b3593";
+const SLASH_REF = "6d84f8fc-0da6-4acc-9da2-9993daabd9f4";
 const KRANG_ART = "https://cards.scryfall.io/normal/front/8/7/krang.jpg";
 const SLASH_ART = "https://cards.scryfall.io/normal/front/6/d/slash.jpg";
 const cardImage = vi.hoisted(() => ({
@@ -43,11 +46,12 @@ const cardImage = vi.hoisted(() => ({
 vi.mock("../../../hooks/useCardImage.ts", () => ({
   useCardImage: (name: string, options?: Record<string, unknown>) => {
     cardImage.calls.push({ name, options });
-    const artByName: Record<string, string> = {
-      "Krang, Dimension X Overlord": KRANG_ART,
-      "Slash, the Dark Mirror": SLASH_ART,
+    const artByRef: Record<string, string> = {
+      [KRANG_REF]: KRANG_ART,
+      [SLASH_REF]: SLASH_ART,
     };
-    return { src: artByName[name] ?? null, isLoading: false };
+    const ref = (options?.tokenImageRef as { scryfall_id?: string } | undefined)?.scryfall_id;
+    return { src: (ref && artByRef[ref]) ?? null, isLoading: false };
   },
 }));
 
@@ -81,16 +85,16 @@ function bossObject(options: {
 }
 
 /** Stage-2 shape: two deployed Bosses plus one still face down in the pile. */
-function seedStage2() {
+function seedStage2(refs: { krangRef?: string; slashRef?: string } = {}) {
   const krang = bossObject({
     id: KRANG_ID,
     name: "Krang, Dimension X Overlord",
-    scryfallId: "8742baf6-2bf9-48ac-af68-6427704b3593",
+    scryfallId: refs.krangRef ?? KRANG_REF,
   });
   const slash = bossObject({
     id: SLASH_ID,
     name: "Slash, the Dark Mirror",
-    scryfallId: "6d84f8fc-0da6-4acc-9da2-9993daabd9f4",
+    scryfallId: refs.slashRef ?? SLASH_REF,
   });
   // Hostile shape: the pile Boss sits in the objects map with its real
   // name (production redacts it to "Hidden Card", which would let a
@@ -163,14 +167,33 @@ describe("CommandDock Horde Bosses", () => {
     expect(
       document.querySelector(`[data-object-id="${PILE_BOSS_ID}"]`),
     ).toBeNull();
-    // Both cards resolve through the token-image path the engine stamped.
-    const tokenCalls = cardImage.calls.filter(
-      (call) => (call.options?.tokenImageRef as { scryfall_id?: string } | undefined)?.scryfall_id,
+    // Both cards resolve through the token-image path the engine stamped,
+    // each with its OWN printing ref — a swapped ref renders the other
+    // Boss's art under the ref-keyed mock and fails the src checks above.
+    const refFor = (name: string) =>
+      (cardImage.calls.find((call) => call.name === name)?.options?.tokenImageRef as {
+        scryfall_id?: string;
+      } | undefined)?.scryfall_id;
+    expect(refFor("Krang, Dimension X Overlord")).toBe(KRANG_REF);
+    expect(refFor("Slash, the Dark Mirror")).toBe(SLASH_REF);
+  });
+
+  it("renders the requested printing's art when the refs are swapped", () => {
+    // Krang's card carrying Slash's ref and vice versa: the portraits must
+    // follow the refs, proving the art mock (and the dock wiring) keys by
+    // printing rather than by card name. A name-keyed mock fails here.
+    seedStage2({ krangRef: SLASH_REF, slashRef: KRANG_REF });
+
+    render(<CommandDock playerId={1} isMirrored={false} />);
+
+    expect(screen.getByRole("img", { name: "Krang, Dimension X Overlord" })).toHaveAttribute(
+      "src",
+      SLASH_ART,
     );
-    expect(tokenCalls.map((call) => call.name).sort()).toEqual([
-      "Krang, Dimension X Overlord",
-      "Slash, the Dark Mirror",
-    ]);
+    expect(screen.getByRole("img", { name: "Slash, the Dark Mirror" })).toHaveAttribute(
+      "src",
+      KRANG_ART,
+    );
   });
 
   it("inspects (never dispatches) when a Boss is clicked", () => {
@@ -194,6 +217,32 @@ describe("CommandDock Horde Bosses", () => {
       KRANG_ART,
     );
     expect(screen.getByText("×2")).toBeInTheDocument();
+  });
+
+  it("opens the compact dock to both deployed Bosses with their own art", () => {
+    dockDisplay.mode = "compact";
+    seedStage2();
+
+    render(<CommandDock playerId={1} isMirrored={false} />);
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+
+    // The popover carries the full Boss zone: Krang appears twice (pile
+    // thumbnail + popover card) with his own art in both places, Slash
+    // once with his, and the face-down pile Boss in neither.
+    const krangImgs = screen.getAllByRole("img", { name: "Krang, Dimension X Overlord" });
+    expect(krangImgs).toHaveLength(2);
+    for (const img of krangImgs) {
+      expect(img).toHaveAttribute("src", KRANG_ART);
+    }
+    expect(screen.getByRole("img", { name: "Slash, the Dark Mirror" })).toHaveAttribute(
+      "src",
+      SLASH_ART,
+    );
+    expect(screen.getByRole("button", { name: /Slash/ })).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Chrome Dome, Cyber-Ninja" })).toBeNull();
+    expect(
+      document.querySelector(`[data-object-id="${PILE_BOSS_ID}"]`),
+    ).toBeNull();
   });
 
   it("renders nothing for the Horde seat with no deployed Bosses", () => {

@@ -37,6 +37,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import {
+  buildCommanderFormatConfig,
   buildFormatConfig,
   buildGameState,
   buildPlayers,
@@ -159,6 +160,26 @@ function expectedRandom(playerCount: number, seed: string) {
       { kind: "card" as const, cardName: avatar.cardName },
     ]),
   );
+}
+
+function expectedRandomNames(playerCount: number, seed: string) {
+  const names = new Map<number, string>([[0, "You"]]);
+  for (const [playerId, avatar] of assignRandomAvatars(playerCount, seed).entries()) {
+    if (playerId > 0) names.set(playerId, avatar.name);
+  }
+  return names;
+}
+
+/** Two-seat Commander game: the commander branch derives both seats. */
+function commanderState() {
+  return {
+    ...buildGameState({ players: buildPlayers([{ id: 0 }, { id: 1 }]) }),
+    format_config: buildCommanderFormatConfig(),
+    objects: {
+      1: { name: "Atraxa, Praetors' Voice", owner: 0, is_commander: true },
+      2: { name: "Muldrotha, the Gravetide", owner: 1, is_commander: true },
+    },
+  } as never;
 }
 
 describe("GameProvider Horde seat identities", () => {
@@ -683,5 +704,108 @@ describe("GameProvider Horde seat identities", () => {
     expect(useMultiplayerStore.getState().playerAvatars).toEqual(new Map([
       [0, { kind: "card", cardName: "Leonardo, Sewer Samurai" }],
     ]));
+  });
+
+  it("sheds Turtle theming when a replacement session deploys no themed Boss", async () => {
+    const gameId = "horde-avatars-turtle-to-cyberman";
+    render(
+      <GameProvider gameId={gameId} mode="ai" playerCount={2}>
+        <div />
+      </GameProvider>,
+    );
+
+    act(() => {
+      useGameStore.setState({
+        gameId,
+        gameState: tmntState({
+          players: [{ id: 0 }, { id: 1 }],
+          hordeSeats: [1],
+          heroes: [0],
+          bosses: [{ id: 100, name: "Shredder, Foot Clan Overlord", owner: 1, ref: SHREDDER_REF }],
+          deployedBossIds: [100],
+        }),
+      });
+    });
+    // Let the Boss portrait merge first: the reseed must clear even the
+    // async entry, not just the synchronous names.
+    await waitFor(() => {
+      expect(useMultiplayerStore.getState().playerAvatars.get(1)).toEqual({
+        kind: "external",
+        url: BOSS_ART_URLS[SHREDDER_REF.scryfall_id],
+      });
+    });
+
+    // A debug import swaps the deck under the same route id: only the
+    // generation advances, and neither branch claims the replacement.
+    // Bumped from the store's own value like the other replacement tests:
+    // the module counter can lag the store after earlier `+ 1` bumps, so
+    // `nextGameSessionGeneration()` could return the value already stored.
+    const cyberGeneration = useGameStore.getState().gameSessionGeneration;
+    act(() => {
+      useGameStore.setState({
+        gameSessionGeneration: cyberGeneration + 1,
+        gameState: tmntState({
+          players: [{ id: 0 }, { id: 1 }],
+          hordeSeats: [1],
+          heroes: [0],
+          bosses: [],
+          deployedBossIds: [],
+          challengeDeck: "CybermanHorde",
+        }),
+      });
+    });
+
+    expect(useMultiplayerStore.getState().playerNames).toEqual(
+      expectedRandomNames(2, gameId),
+    );
+    expect(useMultiplayerStore.getState().playerAvatars).toEqual(
+      expectedRandom(2, gameId),
+    );
+    expect(fetchTokenImageAssetByRef).toHaveBeenCalledTimes(1);
+  });
+
+  it("selects Turtle theming when a replacement session follows a Commander game", async () => {
+    const gameId = "horde-avatars-commander-to-turtle";
+    render(
+      <GameProvider gameId={gameId} mode="ai" playerCount={2}>
+        <div />
+      </GameProvider>,
+    );
+
+    act(() => {
+      useGameStore.setState({ gameId, gameState: commanderState() });
+    });
+    // The commander one-shot fires — and must not deafen the provider to
+    // the replacement that follows.
+    expect(useMultiplayerStore.getState().playerNames).toEqual(
+      new Map([[0, "Atraxa"], [1, "Muldrotha"]]),
+    );
+
+    const turtleGeneration = useGameStore.getState().gameSessionGeneration;
+    act(() => {
+      useGameStore.setState({
+        gameSessionGeneration: turtleGeneration + 1,
+        gameState: tmntState({
+          players: [{ id: 0 }, { id: 1 }],
+          hordeSeats: [1],
+          heroes: [0],
+          bosses: [{ id: 100, name: "Shredder, Foot Clan Overlord", owner: 1, ref: SHREDDER_REF }],
+          deployedBossIds: [100],
+        }),
+      });
+    });
+
+    expect(useMultiplayerStore.getState().playerNames).toEqual(
+      new Map([[0, "Leonardo"], [1, "Shredder"]]),
+    );
+    expect(useMultiplayerStore.getState().playerAvatars).toEqual(new Map([
+      [0, { kind: "card", cardName: "Leonardo, Sewer Samurai" }],
+    ]));
+    await waitFor(() => {
+      expect(useMultiplayerStore.getState().playerAvatars.get(1)).toEqual({
+        kind: "external",
+        url: BOSS_ART_URLS[SHREDDER_REF.scryfall_id],
+      });
+    });
   });
 });
