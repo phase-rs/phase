@@ -1816,6 +1816,79 @@ fn a_token_copy_of_a_from_anywhere_ability_triggers_though_it_has_ceased_to_exis
     );
 }
 
+/// CR 603.3b + CR 510.3a + CR 704.3: what a player's departure in an earlier
+/// state-based-action check triggered is put on the stack in the same batch as
+/// the combat-damage triggers, so its controller orders all of them together.
+/// P0 controls Profane Memento and three 4/4 fliers, each with "Whenever this
+/// creature deals combat damage to a player, you gain 1 life." (a stand-in
+/// for Bident of Thassa's draw trigger); P1 controls Platinum Angel; P1 and P2
+/// are at 4 life. P0 attacks P1 with two fliers and P2 with the third; the
+/// Angel blocks one of those at P1. In the first check P2 loses and the Angel
+/// and the blocked flier die, while P1 is protected; P1 loses in the second.
+/// The Angel went to an opponent's graveyard, so the Memento triggers; it and
+/// the two damage triggers are P0's, ordered in one prompt.
+#[test]
+fn an_earlier_checks_departure_trigger_is_ordered_with_the_combat_damage_triggers() {
+    const FLIER_ORACLE: &str = "Flying\n\
+         Whenever this creature deals combat damage to a player, you gain 1 life.";
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let memento = scenario.add_real_card(P0, "Profane Memento", Zone::Battlefield, db);
+    let angel = scenario.add_real_card(P1, "Platinum Angel", Zone::Battlefield, db);
+    let mut flier = |scenario: &mut GameScenario| {
+        scenario
+            .add_creature_from_oracle(P0, "Air Elemental", 4, 4, FLIER_ORACLE)
+            .id()
+    };
+    let blocked = flier(&mut scenario);
+    let at_p2 = flier(&mut scenario);
+    let at_p1 = flier(&mut scenario);
+    scenario.with_life(P1, 4);
+    scenario.with_life(P2, 4);
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[
+            (blocked, AttackTarget::Player(P1)),
+            (at_p2, AttackTarget::Player(P2)),
+            (at_p1, AttackTarget::Player(P1)),
+        ])
+        .expect("the attack is legal");
+    let mut ordered = None;
+    for _ in 0..12 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareBlockers { player, .. } => {
+                let blocks: Vec<(ObjectId, ObjectId)> = if player == P1 {
+                    vec![(angel, blocked)]
+                } else {
+                    vec![]
+                };
+                runner
+                    .declare_blockers(&blocks)
+                    .expect("the blockers are legal");
+            }
+            WaitingFor::OrderTriggers { player, triggers } => {
+                ordered = Some((player, triggers.len()));
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority passes through combat");
+            }
+            other => panic!("unexpected prompt in combat: {other:?}"),
+        }
+    }
+    assert!(runner.state().players[2].is_eliminated);
+    assert!(runner.state().players[1].is_eliminated);
+    assert_eq!(
+        ordered,
+        Some((P0, 3)),
+        "the Memento trigger and both damage triggers are ordered together (Memento {memento:?})"
+    );
+}
+
 /// Welcoming Vampire ("Whenever one or more other creatures you control with
 /// power 2 or less enter, draw a card. This ability triggers only once each
 /// turn.") and Sol Ring on P0's side; with `suppressor`, Hushbringer

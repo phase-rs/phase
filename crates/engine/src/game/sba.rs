@@ -147,7 +147,7 @@ fn run_state_based_actions(
 ) -> (DepartureResume, usize) {
     let mut departed = Vec::new();
     let mut iteration_starts = Vec::new();
-    let mut queued_by_earlier_iterations = 0;
+    let mut held_by_earlier_checks = Vec::new();
     let resume = run_state_based_action_iterations(
         state,
         events,
@@ -155,8 +155,12 @@ fn run_state_based_actions(
         departures,
         &mut departed,
         &mut iteration_starts,
-        &mut queued_by_earlier_iterations,
+        &mut held_by_earlier_checks,
     );
+    // CR 603.3b: what the earlier checks' departures triggered joins the queue
+    // now, ahead of the last check's, as one batch with the caller's own.
+    let queued_by_earlier_iterations = held_by_earlier_checks.len();
+    state.deferred_triggers.extend(held_by_earlier_checks);
     // CR 704.3 + CR 603.10a: the state-based-action event is complete and stamped
     // as one simultaneous event, so the abilities a player's departure in it
     // triggered are collected now, once, against the observers latched before
@@ -184,7 +188,7 @@ fn run_state_based_action_iterations(
     departures: DepartureTriggers,
     departed: &mut Vec<LookedBackDeparture>,
     iteration_starts: &mut Vec<usize>,
-    queued_by_earlier_iterations: &mut usize,
+    held_by_earlier_checks: &mut Vec<crate::game::triggers::PendingTriggerContext>,
 ) -> DepartureResume {
     // CR 604.2: Re-evaluate layers so computed P/T reflects current static abilities.
     if state.layers_dirty.is_dirty() {
@@ -226,10 +230,14 @@ fn run_state_based_action_iterations(
         // departure in an earlier check triggered is read in the game
         // immediately after that check, before this one changes it (a player
         // this check removes takes their permanents with them).
-        *queued_by_earlier_iterations += std::mem::take(departed)
-            .into_iter()
-            .map(|departure| departure.collect(state, events, iteration_events_start))
-            .sum::<usize>();
+        // The collected abilities are held out of the queue until the checks
+        // are over: a later check's elimination drains the queue, and these
+        // belong to the batch of the caller that runs the checks.
+        let first_collected = state.deferred_triggers.len();
+        for departure in std::mem::take(departed) {
+            departure.collect(state, events, iteration_events_start);
+        }
+        held_by_earlier_checks.extend(state.deferred_triggers.split_off(first_collected));
         iteration_starts.push(iteration_events_start);
 
         // CR 704.3 + CR 104.4a + CR 704.5a-c + CR 704.6c: Every player-loss
