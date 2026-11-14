@@ -1449,6 +1449,50 @@ pub fn combat_damage_to_defender(
     to_player
 }
 
+/// CR 510.2 + CR 120.3b + CR 120.3g + CR 702.70a: the board after each unblocked attacker deals one step of combat damage to its player and the selected triggers that damage fires resolve, on a copy; None when either stops for a choice.
+pub fn preview_unblocked_combat_damage(
+    state: &GameState,
+    attacks: &[(ObjectId, PlayerId)],
+    resolves: impl Fn(&crate::types::ability::ResolvedAbility) -> bool,
+) -> Option<GameState> {
+    let mut preview = state.clone();
+    let assignments: Vec<(ObjectId, DamageAssignment)> = attacks
+        .iter()
+        .filter_map(|&(attacker, player)| {
+            let amount = combat_damage_amount(preview.objects.get(&attacker)?);
+            Some((
+                attacker,
+                DamageAssignment {
+                    target: DamageTarget::Player(player),
+                    amount,
+                },
+            ))
+        })
+        .collect();
+    let damage_events =
+        match apply_combat_damage(&mut preview, &assignments, CombatDamageSubStep::Regular) {
+            CombatDamageBatch::Complete(events) => events,
+            CombatDamageBatch::Paused { .. } => return None,
+        };
+    let waiting_for = preview.waiting_for.clone();
+    let mut events = Vec::new();
+    for fired in triggers::collect_triggers_for_batch(&mut preview, &damage_events) {
+        let source = fired.pending.source_id;
+        if !(attacks.iter().any(|&(attacker, _)| attacker == source)
+            && resolves(&fired.pending.ability))
+        {
+            continue;
+        }
+        // CR 603.3 + CR 702.70a: the trigger's controller gives its counters when it resolves.
+        triggers::push_pending_trigger_to_stack(&mut preview, fired.pending, &mut events);
+        crate::game::stack::resolve_top(&mut preview, &mut events);
+        if preview.waiting_for != waiting_for {
+            return None;
+        }
+    }
+    Some(preview)
+}
+
 /// One combat damage step's worth of assignment from a single attacker, returning
 /// the damage that reaches the defending player and consuming the blockers it
 /// kills. See `combat_damage_to_defender` for the governing rules.

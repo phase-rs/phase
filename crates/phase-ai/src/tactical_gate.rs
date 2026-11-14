@@ -10076,6 +10076,87 @@ mod tests {
         assert_ne!(assess_candidate(&ctx), GateDecision::Reject);
     }
 
+    /// The gate's verdict when the AI targets The Serpent Society (controlled by
+    /// `controller`) with 4 damage, lethal to its 3/4 body, so only its poison
+    /// Ward can reject.
+    fn serpent_society_ward_gate(
+        format: engine::types::format::FormatConfig,
+        players: u8,
+        controller: PlayerId,
+        poison: &[(PlayerId, u32)],
+    ) -> GateDecision {
+        use engine::game::scenario_db::GameScenarioDbExt;
+        let mut scenario = GameScenario::new_with_format(format, players, 42);
+        let creature = scenario.add_real_card(
+            controller,
+            "The Serpent Society",
+            Zone::Battlefield,
+            crate::test_support::shared_integration_card_db(),
+        );
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        for &(seat, count) in poison {
+            state.players[seat.0 as usize].poison_counters = count;
+        }
+        let decision = damage_target_decision(creature, 4);
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assess_candidate(&ctx)
+    }
+
+    /// CR 702.21a + CR 704.5c: a poison Ward payment is lethal only against the
+    /// configured threshold.
+    #[test]
+    fn poison_ward_reads_the_configured_threshold() {
+        use engine::types::format::FormatConfig;
+        let threshold = |t| FormatConfig {
+            poison_counter_threshold: Some(t),
+            ..FormatConfig::standard()
+        };
+        assert_ne!(
+            serpent_society_ward_gate(threshold(15), 2, P1, &[(P0, 5)]),
+            GateDecision::Reject
+        );
+        assert_eq!(
+            serpent_society_ward_gate(threshold(5), 2, P1, &[]),
+            GateDecision::Reject
+        );
+        assert_eq!(
+            serpent_society_ward_gate(threshold(10), 2, P1, &[(P0, 5)]),
+            GateDecision::Reject
+        );
+        assert_ne!(
+            serpent_society_ward_gate(threshold(10), 2, P1, &[(P0, 4)]),
+            GateDecision::Reject
+        );
+    }
+
+    /// CR 702.21a + CR 704.6b: in Two-Headed Giant the Ward payment is weighed
+    /// against the AI team's shared total and fifteen.
+    #[test]
+    fn poison_ward_reads_the_team_total() {
+        let two_hg = engine::types::format::FormatConfig::two_headed_giant;
+        let opponent = PlayerId(2);
+        assert_eq!(
+            serpent_society_ward_gate(two_hg(), 4, opponent, &[(P0, 3), (P1, 7)]),
+            GateDecision::Reject
+        );
+        assert_ne!(
+            serpent_society_ward_gate(two_hg(), 4, opponent, &[(P0, 3), (P1, 6)]),
+            GateDecision::Reject
+        );
+    }
+
     /// CR 702.21a + CR 104.3d: two individually-nonlethal poison sub-costs in
     /// a `Compound` Ward can be jointly lethal — the aggregate across every
     /// sub-cost must be checked, not each sub-cost against the same
