@@ -27,6 +27,7 @@ fn sin_prodder_upkeep_acceptor_receives_source_damage_equal_to_top_mana_value() 
     let p1_life = life(&runner, P1);
 
     runner.auto_advance_to_main_phase();
+    reach_sin_prodder_choice(&mut runner);
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::OptionalEffectChoice { player: P1, .. }
@@ -75,6 +76,7 @@ fn sin_prodder_upkeep_prompts_successive_opponents_when_all_decline() {
     ];
 
     runner.auto_advance_to_main_phase();
+    reach_sin_prodder_choice(&mut runner);
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::OptionalEffectChoice { player: P1, .. }
@@ -243,6 +245,8 @@ fn craig_boone_second_attack_with_no_target_deals_no_damage() {
 fn craig_after_first_attack() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new_n_player(2, 0xC2_A19);
     scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Craig's draw"]);
+    scenario.with_library_top(P1, &["Opponent's draw"]);
     let craig = scenario
         .add_creature_from_oracle(P0, "Craig Boone", 2, 2, CRAIG_BOONE_ORACLE)
         .id();
@@ -400,6 +404,34 @@ fn advance_to_next_p0_precombat(runner: &mut GameRunner) {
     }
     panic!(
         "did not reach Craig's next precombat main: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+fn reach_sin_prodder_choice(runner: &mut GameRunner) {
+    for _ in 0..48 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalEffectChoice { .. } => return,
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
+                panic!("Sin Prodder's upkeep trigger did not reach its choice")
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority to resolve Sin Prodder's upkeep trigger");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order upkeep triggers before resolving Sin Prodder");
+            }
+            other => panic!("unexpected prompt resolving Sin Prodder: {other:?}"),
+        }
+    }
+    panic!(
+        "Sin Prodder's upkeep trigger did not reach its choice: {:?}",
         runner.state().waiting_for
     );
 }
