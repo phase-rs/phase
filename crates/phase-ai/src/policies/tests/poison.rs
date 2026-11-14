@@ -1954,7 +1954,8 @@ fn hexproof_opponent_is_not_a_lethal_target() {
 
 /// Valkmira, Protector's Shield: "Whenever you or another permanent you control becomes the target
 /// of a spell or ability an opponent controls, counter that spell or ability unless its controller
-/// pays {1}." Vraska's −9 still names the opponent, so its trigger withholds lethal, not the read.
+/// pays {1}." Vraska's −9 still names the opponent, so Valkmira's trigger lands above it and the
+/// read withholds.
 #[test]
 fn a_becomes_target_trigger_on_the_seat_withholds_the_lethal_read() {
     for (valkmira, kind) in [
@@ -1978,8 +1979,8 @@ fn a_becomes_target_trigger_on_the_seat_withholds_the_lethal_read() {
     }
 }
 
-/// Vraska's 0: "You draw a card and lose 1 life. Proliferate." At 1 life the AI hits 0 life as the
-/// opponent reaches nine poison, a draw (CR 104.4a), not a win; at 2 life it wins.
+/// Vraska's 0: "You draw a card and lose 1 life. Proliferate." At 1 life the AI is not read as
+/// winning; at 2 life it wins.
 #[test]
 fn vraska_zero_is_lethal_only_when_the_ai_survives_it() {
     for life in [1, 2] {
