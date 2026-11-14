@@ -184,6 +184,19 @@ async function llmActionProposal(
   const history = (logHistory ?? []).slice(-LLM_HISTORY_TRANSFER_LIMIT);
   const endpointJson = JSON.stringify(resolvedEndpointOf(profile));
   const historyJson = JSON.stringify(history);
+  // The seat's settings can change during any await below: message threads
+  // turned off, or another endpoint, model or key. A request is built and sent
+  // only for the configuration `endpointJson` captured, so the settings are
+  // read again after each await that precedes a build or a send. When they
+  // changed, nothing more goes to the provider, and the decision ends as the
+  // player's choice rather than the provider's failure.
+  const endedBySettingsChange = (): boolean => {
+    const current = profileForSeat(useLlmStore.getState(), llmSeatIndex, catalog);
+    if (current && JSON.stringify(resolvedEndpointOf(current)) === endpointJson) return false;
+    console.info(`[LLM] seat ${llmSeatIndex}: the provider settings changed; not asking`);
+    setCharged(false);
+    return true;
+  };
   for (let resends = 0; ; resends += 1) {
     const built = await adapter.buildLlmDecisionRequest(
       difficulty,
@@ -206,6 +219,7 @@ async function llmActionProposal(
     if (built?.proposal) {
       return built.proposal;
     }
+    if (endedBySettingsChange()) return null;
     // From here the provider is in play, so an outcome without a proposal counts.
     setCharged(true);
     if (!built?.request || !built.fingerprint) {
@@ -253,17 +267,8 @@ async function llmActionProposal(
       return resolved.proposal;
     }
     if (resolved?.errorKind?.kind === "threadUnavailable" && resends < LLM_THREAD_RESENDS) {
-      // The seat's settings can change while a request is out: message threads
-      // turned off, or another endpoint, model or key. The resend goes only to
-      // the configuration the first request used. For any other it is dropped,
-      // and the decision ends as the player's choice rather than the
-      // provider's failure.
-      const current = profileForSeat(useLlmStore.getState(), llmSeatIndex, catalog);
-      if (!current || JSON.stringify(resolvedEndpointOf(current)) !== endpointJson) {
-        console.info(`[LLM] seat ${llmSeatIndex}: the provider settings changed; not asking again`);
-        setCharged(false);
-        return null;
-      }
+      // Settings changed while the request was out leave nothing to resend.
+      if (endedBySettingsChange()) return null;
       // Console only, like every provider diagnostic: the game log is
       // prompt-renderable (see `diagnostics.ts`).
       console.info(

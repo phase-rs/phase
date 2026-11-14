@@ -1065,6 +1065,95 @@ describe("LLM seats on a message thread", () => {
     controller.dispose();
   });
 
+  // The same two changes, made while the resend is being built: the resend is
+  // built for the configuration the first request used, and never sent.
+  it.each([
+    ["turns message threads off", { decisionContext: "selfContained" }],
+    ["switches the seat's model", { model: "gpt-5-mini" }],
+  ] as const)("drops the resend when the player %s while it is being built", async (
+    _change,
+    settingsChange,
+  ) => {
+    bindSeatToProvider();
+    const profileId = useLlmStore.getState().profiles[0]?.id ?? "";
+    useLlmStore.getState().updateProfile(profileId, { decisionContext: "messageThread" });
+    const adapter = threadedAdapter(() => THREAD_LOST);
+    const built = {
+      fingerprint: "fp-1",
+      optionCount: 2,
+      promptChars: 100,
+      request: HTTP_SPEC,
+      threadTurn: THREAD_TURN,
+    };
+    let releaseResend: () => void = () => {};
+    adapter.buildLlmDecisionRequest
+      .mockImplementationOnce(async () => built)
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        releaseResend = () => resolve(built);
+      }));
+    llmMocks.executeLlmRequest.mockResolvedValue({ status: 404, body: "{}" });
+    endGameOnDispatch();
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await runOnce();
+    await runOnce();
+    // The first request's thread was lost, and the resend is being built.
+    expect(adapter.buildLlmDecisionRequest).toHaveBeenCalledTimes(2);
+    expect(llmMocks.executeLlmRequest).toHaveBeenCalledTimes(1);
+
+    useLlmStore.getState().updateProfile(profileId, settingsChange);
+    releaseResend();
+    await runOnce();
+
+    expect(llmMocks.executeLlmRequest).toHaveBeenCalledTimes(1);
+    expect(adapter.getAiActionProposalFromLlmResponse).toHaveBeenCalledTimes(1);
+    expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(adapter.heuristic);
+    controller.dispose();
+  });
+
+  it("never counts a resend dropped while it was being built against the provider", async () => {
+    bindSeatToProvider();
+    const profileId = useLlmStore.getState().profiles[0]?.id ?? "";
+    const adapter = threadedAdapter(() => THREAD_LOST);
+    // Every decision's thread is lost, and the player switches the model while
+    // its resend is being built.
+    let builds = 0;
+    let model = "gpt-5";
+    adapter.buildLlmDecisionRequest.mockImplementation(async () => {
+      builds += 1;
+      if (builds % 2 === 0) {
+        model = model === "gpt-5" ? "gpt-5-mini" : "gpt-5";
+        useLlmStore.getState().updateProfile(profileId, { model });
+      }
+      return {
+        fingerprint: "fp-1",
+        optionCount: 2,
+        promptChars: 100,
+        request: HTTP_SPEC,
+        threadTurn: THREAD_TURN,
+      };
+    });
+    llmMocks.executeLlmRequest.mockResolvedValue({ status: 404, body: "{}" });
+    dispatchMocks.dispatchAiActionProposal.mockResolvedValue({ status: "stale" });
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    for (let decision = 0; decision < 12; decision += 1) await runOnce();
+
+    // Well past the three-failure ceiling, the provider is still asked, and
+    // only once a decision: no resend went out.
+    expect(llmMocks.executeLlmRequest.mock.calls.length).toBeGreaterThan(8);
+    expect(adapter.buildLlmDecisionRequest.mock.calls.length).toBe(
+      2 * llmMocks.executeLlmRequest.mock.calls.length,
+    );
+    controller.dispose();
+  });
+
   it("never counts a resend dropped for a settings change against the provider", async () => {
     bindSeatToProvider();
     const profileId = useLlmStore.getState().profiles[0]?.id ?? "";
