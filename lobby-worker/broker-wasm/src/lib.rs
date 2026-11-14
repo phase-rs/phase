@@ -186,6 +186,7 @@ fn mutates_lobby(msg: &LobbyClientMessage) -> bool {
         | LobbyClientMessage::JoinTournament { .. }
         | LobbyClientMessage::StartTournamentRound { .. }
         | LobbyClientMessage::ReportMatchResult { .. }
+        | LobbyClientMessage::SubmitTournamentDeck { .. }
         | LobbyClientMessage::DropFromTournament { .. }
         | LobbyClientMessage::EndTournament { .. }
         // Rotation REPLACES the stored secret, so it writes tournament state
@@ -321,6 +322,20 @@ impl WasmBroker {
             ParsedFrame::Malformed(e) => {
                 let reason = format!("malformed frame: {e}");
                 (reject_reply(&reason), false, Some(reason))
+            }
+            // A correlated tournament action (today `SubmitTournamentDeck`) whose
+            // deck failed its bounds. Answer with a correlated
+            // `TournamentActionRejected` so the client's correlated authority
+            // settles the pending submission instead of ignoring a bare `Error`.
+            // Nothing mutated, so still flag `reject` and skip the snapshot.
+            ParsedFrame::RejectedTournamentAction { request_id, reason } => {
+                let outbounds = vec![Outbound::ToSelf(
+                    LobbyServerMessage::TournamentActionRejected {
+                        request_id,
+                        message: reason.clone(),
+                    },
+                )];
+                (outbounds, false, Some(reason))
             }
         };
 
@@ -570,6 +585,12 @@ mod tests {
                 pairing_id: 0,
                 player_token: "tok".into(),
                 outcome: PodOutcome::Draw,
+                request_id: None,
+            },
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: "TOUR01".into(),
+                player_token: "tok".into(),
+                deck: Default::default(),
                 request_id: None,
             },
             LobbyClientMessage::DropFromTournament {

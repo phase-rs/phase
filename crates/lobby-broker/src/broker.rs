@@ -55,6 +55,35 @@ pub const MAX_LOBBY_ENTRIES: usize = 200;
 /// and still a hard bound.
 pub const MAX_TOURNAMENT_ENTRIES: usize = 200;
 
+/// Hard ceiling on the encoded size of the *complete* persisted broker — every
+/// lobby row, every tournament's entrant list, pairing history, standings and
+/// retained decks — serialized as one value.
+///
+/// The whole broker is persisted under a single Durable Object storage key
+/// (`ctx.storage.put(SNAPSHOT_KEY, broker.snapshot())`, where
+/// [`WasmBroker::snapshot`](../../../lobby-worker/broker-wasm) is
+/// `serde_json::to_string(&broker)`). Cloudflare's SQLite-backed Durable Objects
+/// document that a write's *key and value combined cannot exceed 8 MB* (the same
+/// 8 MB is the maximum row/string/BLOB size) — so a snapshot that crosses it
+/// fails the `put` and the broker silently stops persisting, losing every later
+/// mutation on the next hibernation. No single sub-budget can stand in for this:
+/// the per-deck and per-event deck caps bound *deck* bytes, but a Swiss field is
+/// unbounded and entrant/pairing metadata grows in the same value independently
+/// of any deck, so the only correct bound is on the full serialized
+/// representation. Enforced by measuring the exact candidate before a
+/// state-growing admission commits (see [`Broker::snapshot_encoded_bytes`] and
+/// its use in [`Broker::handle_submit_tournament_deck`]); a refusal rolls the
+/// growth back so the last persistable state — decks and readiness included —
+/// is preserved.
+///
+/// Set to 6 MiB, a deliberate margin below the 8 MB ceiling: it absorbs the
+/// storage key's own bytes, SQLite per-row overhead, the ambiguity between 8 MB
+/// as 8·10⁶ and 8·2²⁰, and future `Broker` fields, while still leaving room for
+/// a dozen events at the full per-event deck budget. Conservative on purpose —
+/// the cost of refusing one late submission is far lower than the cost of a
+/// snapshot that cannot be written at all.
+pub const MAX_SNAPSHOT_ENCODED_BYTES: usize = 6 * 1024 * 1024;
+
 /// Cap on the per-connection tournament bookkeeping lists
 /// ([`ConnState::organized_tournaments`] and [`ConnState::joined_tournaments`]).
 ///
@@ -794,6 +823,16 @@ impl Broker {
             } => {
                 let outcome =
                     self.handle_report_match_result(code, pairing_id, player_token, reported, env);
+                self.settle_gated(request_id, outcome)
+            }
+
+            LobbyClientMessage::SubmitTournamentDeck {
+                code,
+                player_token,
+                deck,
+                request_id,
+            } => {
+                let outcome = self.handle_submit_tournament_deck(code, player_token, deck, env);
                 self.settle_gated(request_id, outcome)
             }
 
@@ -1541,6 +1580,17 @@ impl Broker {
         Ok(player.player_key.clone())
     }
 
+    /// The exact byte length of the complete persisted snapshot — the whole
+    /// broker encoded with the same `serde_json` codec the Durable Object stores
+    /// it under (`WasmBroker::snapshot` is `to_string`; `to_vec` yields the same
+    /// UTF-8 bytes). This is the quantity Cloudflare's 8 MB key+value ceiling
+    /// applies to, so it is measured directly rather than approximated from any
+    /// per-field budget. A hypothetical serialization failure yields
+    /// [`usize::MAX`], so the admission check refuses rather than under-counts.
+    fn snapshot_encoded_bytes(&self) -> usize {
+        serde_json::to_vec(self).map_or(usize::MAX, |bytes| bytes.len())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn handle_create_tournament(
         &mut self,
@@ -1796,6 +1846,65 @@ impl Broker {
         // so broadcasting the whole list here would be a no-op re-render for
         // every subscriber. That reasoning is now the justification for a typed
         // field rather than for an unwritten convention.
+        Ok(GatedEffect {
+            code,
+            view,
+            list_row: ListRowEffect::Unchanged,
+        })
+    }
+
+    /// Player-gated: store the token owner's submitted deck for hosted play.
+    /// Resolving the token to its owner ([`Self::authorize_player`]) confines a
+    /// submission to the presenting entrant — the key is never taken from the
+    /// payload, so a client cannot submit a deck on someone else's behalf. Unlike
+    /// [`Self::handle_report_match_result`], no pairing-seat check applies: a deck
+    /// is per-event, not per-pairing.
+    fn handle_submit_tournament_deck(
+        &mut self,
+        code: String,
+        player_token: String,
+        deck: engine::starter_decks::DeckData,
+        env: &impl BrokerEnv,
+    ) -> Result<GatedEffect, String> {
+        let player_key = match self.authorize_player(&code, &player_token, env) {
+            Ok(key) => key,
+            Err(reason) => {
+                warn!(tournament = %code, %reason, "SubmitTournamentDeck rejected — player not authorized");
+                return Err(reason);
+            }
+        };
+        // Apply the submission to a clone of the tournament registry first: the
+        // per-deck and per-event deck gates run there (`submit_deck`), and only a
+        // candidate that clears them is measured against the complete-snapshot
+        // ceiling. `authorize_player` above is `&self`, so nothing has mutated yet
+        // — a deck-gate refusal here returns with `self` untouched.
+        let mut next = self.tournaments.clone();
+        next.submit_deck(&code, &player_key, deck, env)?;
+        // Tentatively adopt the candidate, then enforce the real persistence bound
+        // on the *whole* broker as it would be serialized to the single Durable
+        // Object key (deck bytes + unbounded entrant/pairing metadata + lobby). The
+        // deck budgets cannot stand in for this: metadata in the same value grows
+        // independently of decks. If the candidate would cross
+        // [`MAX_SNAPSHOT_ENCODED_BYTES`], swap the prior registry back — a
+        // state-preserving refusal that leaves every retained deck, its readiness
+        // and each event's last-activity stamp exactly as they were.
+        let prior = std::mem::replace(&mut self.tournaments, next);
+        if self.snapshot_encoded_bytes() > MAX_SNAPSHOT_ENCODED_BYTES {
+            self.tournaments = prior;
+            return Err(format!(
+                "Deck rejected: the server's persisted tournament state is at capacity \
+                 ({MAX_SNAPSHOT_ENCODED_BYTES} encoded bytes); it can be resubmitted once \
+                 activity subsides"
+            ));
+        }
+        let Some(view) = self.tournament_view(&code) else {
+            return Err(format!("Tournament not found: {code}"));
+        };
+        info!(tournament = %code, player = %player_key, "tournament deck submitted");
+
+        // A submission flips only `PlayerSummary.deck_submitted`, a detail-view
+        // field — no `TournamentSummary` field changes, so the list row is
+        // untouched, exactly like a result report.
         Ok(GatedEffect {
             code,
             view,
@@ -4981,6 +5090,728 @@ mod tests {
         assert!(
             has_list_update(&ended),
             "completion moves status: {ended:?}"
+        );
+    }
+
+    /// Drives submission through `Broker::handle`, proving its dispatch,
+    /// token-to-entrant authority, private storage, and correlated settlement.
+    #[test]
+    fn submit_tournament_deck_via_broker_handle_stores_privately_and_correlates_outcomes() {
+        const SUBMISSION_ID: TournamentRequestId = TournamentRequestId(51);
+        const REFUSAL_ID: TournamentRequestId = TournamentRequestId(52);
+        const PRIVATE_CARD: &str = "Private Submission Card Sentinel";
+
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut organizer = ConnState::default();
+        let mut alice = ConnState::default();
+        let mut bob = ConnState::default();
+
+        let (code, _organizer_token) =
+            make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+        let alice_token = join_tournament(&mut alice, &mut broker, &env, &code, "key-a", "Alice");
+        join_tournament(&mut bob, &mut broker, &env, &code, "key-b", "Bob");
+
+        let submitted_deck = engine::starter_decks::DeckData {
+            main_deck: vec![PRIVATE_CARD.into()],
+            ..Default::default()
+        };
+        let submitted = broker.handle(
+            &mut alice,
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: code.clone(),
+                player_token: alice_token.clone(),
+                deck: submitted_deck.clone(),
+                request_id: Some(SUBMISSION_ID),
+            },
+            &env,
+        );
+
+        let (ack_id, ack_code, ack_view) = ack_of(&submitted);
+        assert_eq!(ack_id, SUBMISSION_ID);
+        assert_eq!(ack_code, code);
+        assert_eq!(correlators(&submitted), vec![SUBMISSION_ID]);
+        let public_view = subscriber_update_view(&submitted);
+        assert_eq!(ack_view, public_view);
+        assert_eq!(subscriber_msgs(&submitted).len(), 1);
+        assert!(!has_list_update(&submitted));
+        assert!(
+            public_view
+                .players
+                .iter()
+                .find(|player| player.player_key == "key-a")
+                .expect("Alice is in the public view")
+                .deck_submitted,
+            "the submission broadcast must expose updated readiness"
+        );
+        assert!(
+            !public_view
+                .players
+                .iter()
+                .find(|player| player.player_key == "key-b")
+                .expect("Bob is in the public view")
+                .deck_submitted,
+            "Alice's submission must not make the opponent appear ready"
+        );
+        assert!(
+            !outbounds_contain(&submitted, PRIVATE_CARD),
+            "the private deck card leaked in submission outbounds: {submitted:?}"
+        );
+        assert!(
+            !outbounds_contain(&submitted, &alice_token),
+            "the player's credential leaked in submission outbounds: {submitted:?}"
+        );
+
+        let event = broker.tournaments().get(&code).expect("event");
+        assert_eq!(
+            event
+                .players
+                .iter()
+                .find(|player| player.player_key == "key-a")
+                .expect("Alice is registered")
+                .deck
+                .as_ref(),
+            Some(&submitted_deck),
+            "Broker::handle must store the exact submitted deck for its token owner"
+        );
+        assert!(
+            event
+                .players
+                .iter()
+                .find(|player| player.player_key == "key-b")
+                .expect("Bob is registered")
+                .deck
+                .is_none(),
+            "Alice's submission must not change the opponent's stored deck"
+        );
+
+        let refused = broker.handle(
+            &mut alice,
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: code.clone(),
+                player_token: "valid-shape-wrong-token".into(),
+                deck: engine::starter_decks::DeckData {
+                    main_deck: vec!["Rejected Submission Card Sentinel".into()],
+                    ..Default::default()
+                },
+                request_id: Some(REFUSAL_ID),
+            },
+            &env,
+        );
+        let (refusal_id, reason) = rejection_of(&refused);
+        assert_eq!(refusal_id, REFUSAL_ID);
+        assert!(
+            reason.starts_with("Invalid player token for tournament "),
+            "valid-shape wrong token must reach player authorization, got: {reason}"
+        );
+        assert_eq!(correlators(&refused), vec![REFUSAL_ID]);
+        assert!(subscriber_msgs(&refused).is_empty());
+
+        let event = broker.tournaments().get(&code).expect("event");
+        assert_eq!(
+            event
+                .players
+                .iter()
+                .find(|player| player.player_key == "key-a")
+                .expect("Alice is registered")
+                .deck
+                .as_ref(),
+            Some(&submitted_deck),
+            "a refused submission must leave Alice's stored deck unchanged"
+        );
+        assert!(
+            event
+                .players
+                .iter()
+                .find(|player| player.player_key == "key-b")
+                .expect("Bob is registered")
+                .deck
+                .is_none(),
+            "a refused submission must leave Bob's stored deck unchanged"
+        );
+    }
+
+    /// Per-event persistence regression at the transport path — the HIGH the
+    /// name-list-only accounting missed. Decks that each pass the per-deck inbound
+    /// guard (empty name lists plus a large `printings` sidecar) but together would
+    /// push one event's retained decks past
+    /// [`crate::tournament::MAX_EVENT_DECK_ENCODED_BYTES`] are refused through
+    /// `Broker::handle` with a correlated `TournamentActionRejected`, leaving every
+    /// retained deck and readiness flag untouched. Replacing a heavy slot with a
+    /// modest deck then frees the budget for the previously-refused entrant,
+    /// proving the replaced slot is excluded from the retained sum. REVERT-FAIL:
+    /// restore the name-list-only accounting and both printing-heavy decks are
+    /// admitted, overrunning the per-event budget that keeps one event's deck
+    /// footprint isolated.
+    #[test]
+    fn event_deck_budget_counts_printings_through_the_broker_path() {
+        // Empty name lists, `entries` printings at the per-entry caps — the
+        // review's witness: individually guard-accepted, but a large persisted
+        // contribution a name-list sum scores as zero.
+        fn printings_only_deck(entries: usize) -> engine::starter_decks::DeckData {
+            use engine::types::card_printing::{
+                CardPrinting, DeckPrinting, DeckSection, MAX_DECK_CARD_NAME_LEN,
+                MAX_PRINTING_COLLECTOR_NUMBER_LEN, MAX_PRINTING_SET_CODE_LEN,
+            };
+            engine::starter_decks::DeckData {
+                printings: (0..entries)
+                    .map(|_| DeckPrinting {
+                        section: DeckSection::MainDeck,
+                        name: "x".repeat(MAX_DECK_CARD_NAME_LEN),
+                        count: 1,
+                        printing: CardPrinting {
+                            set_code: "s".repeat(MAX_PRINTING_SET_CODE_LEN),
+                            collector_number: "c".repeat(MAX_PRINTING_COLLECTOR_NUMBER_LEN),
+                        },
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+        }
+
+        const REPLACE_ID: TournamentRequestId = TournamentRequestId(73);
+        const ZOE_ID: TournamentRequestId = TournamentRequestId(79);
+        const ZOE_RETRY_ID: TournamentRequestId = TournamentRequestId(80);
+
+        let budget = crate::tournament::MAX_EVENT_DECK_ENCODED_BYTES;
+        // A printings-only deck under the per-deck cap. Its name lists are empty, so
+        // a sum scoring only name lists would score it zero — the witness for
+        // counting the *persisted* encoding. No single deck may exceed 1/8 of the
+        // per-event budget (the per-deck cap), so it takes several to fill it.
+        let heavy = printings_only_deck(120);
+        let each = serde_json::to_vec(&heavy).expect("deck serializes").len();
+        assert!(
+            each < crate::tournament::MAX_SINGLE_DECK_ENCODED_BYTES,
+            "each witness deck must clear the per-deck cap (encoded {each})"
+        );
+        assert!(
+            heavy.main_deck.is_empty() && each > 0,
+            "the witness deck's cost must come from printings, not name lists"
+        );
+        // The number of such decks that fit one event; the next submission into it
+        // overflows its per-event budget.
+        let fill = budget / each;
+        assert!(
+            fill >= 2,
+            "fixture must need several decks to fill the budget"
+        );
+        // A one-card replacement deck, with the headroom proof that swapping one
+        // heavy slot down to it re-admits Zoe: her retry lands the event total at
+        // `fill*each + light_bytes`, which must stay within budget.
+        let light = engine::starter_decks::DeckData {
+            main_deck: vec!["Island".into()],
+            ..Default::default()
+        };
+        let light_bytes = serde_json::to_vec(&light).expect("deck serializes").len();
+        assert!(
+            light_bytes <= budget - fill * each,
+            "fixture: post-replacement headroom ({}) must admit the light deck ({light_bytes})",
+            budget - fill * each
+        );
+        // Each heavy deck is individually accepted by the per-deck inbound guard —
+        // the precondition for "accepted production inputs" the review required.
+        assert!(
+            crate::inbound_guard::guard_inbound(&LobbyClientMessage::SubmitTournamentDeck {
+                code: "PLACEHOLDER".into(),
+                player_token: "placeholder".into(),
+                deck: heavy.clone(),
+                request_id: Some(REPLACE_ID),
+            })
+            .is_ok(),
+            "the witness deck must pass the per-deck inbound bounds guard"
+        );
+
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut organizer = ConnState::default();
+        let (code, _org) = make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+
+        // Entrant 0 is kept addressable so it can later replace its deck.
+        let mut first = ConnState::default();
+        let first_token = join_tournament(&mut first, &mut broker, &env, &code, "key-0", "P0");
+        let admitted = broker.handle(
+            &mut first,
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: code.clone(),
+                player_token: first_token.clone(),
+                deck: heavy.clone(),
+                request_id: Some(TournamentRequestId(100)),
+            },
+            &env,
+        );
+        assert_eq!(ack_of(&admitted).0, TournamentRequestId(100));
+
+        // The remaining fill entrants top this event up to just under its budget.
+        for i in 1..fill {
+            let mut conn = ConnState::default();
+            let token = join_tournament(
+                &mut conn,
+                &mut broker,
+                &env,
+                &code,
+                &format!("key-{i}"),
+                &format!("P{i}"),
+            );
+            let out = broker.handle(
+                &mut conn,
+                LobbyClientMessage::SubmitTournamentDeck {
+                    code: code.clone(),
+                    player_token: token,
+                    deck: heavy.clone(),
+                    request_id: Some(TournamentRequestId(100 + i as u64)),
+                },
+                &env,
+            );
+            assert_eq!(
+                ack_of(&out).0,
+                TournamentRequestId(100 + i as u64),
+                "fill deck {i} must be admitted within budget"
+            );
+        }
+
+        // Zoe's equally heavy deck would push this event past its per-event budget
+        // → a correlated refusal naming the event budget, and no broadcast.
+        let mut zoe = ConnState::default();
+        let zoe_token = join_tournament(&mut zoe, &mut broker, &env, &code, "key-zoe", "Zoe");
+        let refused = broker.handle(
+            &mut zoe,
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: code.clone(),
+                player_token: zoe_token.clone(),
+                deck: heavy.clone(),
+                request_id: Some(ZOE_ID),
+            },
+            &env,
+        );
+        let (refusal_id, reason) = rejection_of(&refused);
+        assert_eq!(refusal_id, ZOE_ID);
+        assert!(
+            reason.contains("this event's deck budget"),
+            "the refusal must name the per-event budget, got: {reason}"
+        );
+        assert!(
+            subscriber_msgs(&refused).is_empty(),
+            "a refused submission must not broadcast"
+        );
+        assert!(
+            broker
+                .tournaments()
+                .get(&code)
+                .expect("event")
+                .players
+                .iter()
+                .find(|player| player.player_key == "key-zoe")
+                .expect("Zoe is registered")
+                .deck
+                .is_none(),
+            "Zoe's refused deck must not be stored"
+        );
+
+        // Replacement frees the budget: entrant 0 overwrites its heavy deck with the
+        // modest one, so Zoe's heavy deck now fits — proving the replaced slot is
+        // excluded from the retained sum rather than double-counted.
+        let replaced = broker.handle(
+            &mut first,
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: code.clone(),
+                player_token: first_token,
+                deck: light,
+                request_id: Some(REPLACE_ID),
+            },
+            &env,
+        );
+        assert_eq!(ack_of(&replaced).0, REPLACE_ID);
+
+        let zoe_retry = broker.handle(
+            &mut zoe,
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: code.clone(),
+                player_token: zoe_token,
+                deck: heavy,
+                request_id: Some(ZOE_RETRY_ID),
+            },
+            &env,
+        );
+        assert_eq!(
+            ack_of(&zoe_retry).0,
+            ZOE_RETRY_ID,
+            "Zoe's heavy deck fits once entrant 0's heavy slot is replaced by a modest deck"
+        );
+    }
+
+    /// Event isolation — the cross-event starvation a shared global deck pool would
+    /// leave open. Each event's retained decks are bounded by its own
+    /// [`crate::tournament::MAX_EVENT_DECK_ENCODED_BYTES`] and nothing else: there is
+    /// no shared cross-event deck budget, so a single event — even filled to its cap
+    /// through caller-chosen entrant keys — cannot consume the capacity an
+    /// *unrelated, still-live* event needs. Through the production `Broker::handle`
+    /// path: event A is filled to its per-event budget and its next entrant is
+    /// refused naming the event budget; an unrelated live event B then admits the
+    /// identical submission while A stays live, demonstrating B's allowance is wholly
+    /// its own (this is the "an already admitted unrelated event can still submit"
+    /// property). REVERT-FAIL: drop the per-event gate and A's overflow deck is
+    /// admitted (the complete-snapshot bound has ample room), so the per-event
+    /// refusal this asserts never fires.
+    #[test]
+    fn an_events_deck_budget_is_isolated_from_other_live_events() {
+        fn heavy_deck(entries: usize) -> engine::starter_decks::DeckData {
+            use engine::types::card_printing::{
+                CardPrinting, DeckPrinting, DeckSection, MAX_DECK_CARD_NAME_LEN,
+                MAX_PRINTING_COLLECTOR_NUMBER_LEN, MAX_PRINTING_SET_CODE_LEN,
+            };
+            engine::starter_decks::DeckData {
+                printings: (0..entries)
+                    .map(|_| DeckPrinting {
+                        section: DeckSection::MainDeck,
+                        name: "x".repeat(MAX_DECK_CARD_NAME_LEN),
+                        count: 1,
+                        printing: CardPrinting {
+                            set_code: "s".repeat(MAX_PRINTING_SET_CODE_LEN),
+                            collector_number: "c".repeat(MAX_PRINTING_COLLECTOR_NUMBER_LEN),
+                        },
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+        }
+
+        // A deck under the per-deck cap, so each is individually admitted; several
+        // fill one event's per-event budget.
+        let heavy = heavy_deck(120);
+        let each = serde_json::to_vec(&heavy).expect("serializes").len();
+        assert!(
+            each < crate::tournament::MAX_SINGLE_DECK_ENCODED_BYTES,
+            "each deck must pass the per-deck cap (was {each})"
+        );
+        let fill = crate::tournament::MAX_EVENT_DECK_ENCODED_BYTES / each;
+        assert!(
+            fill >= 2,
+            "fixture must need more than one deck to fill the per-event budget"
+        );
+
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut organizer = ConnState::default();
+
+        // Event A: fill it to its per-event budget with `fill` guard-accepted decks.
+        let (code_a, _org_a) =
+            make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+        for i in 0..fill {
+            let mut conn = ConnState::default();
+            let token = join_tournament(
+                &mut conn,
+                &mut broker,
+                &env,
+                &code_a,
+                &format!("key-a{i}"),
+                &format!("A{i}"),
+            );
+            let out = broker.handle(
+                &mut conn,
+                LobbyClientMessage::SubmitTournamentDeck {
+                    code: code_a.clone(),
+                    player_token: token,
+                    deck: heavy.clone(),
+                    request_id: Some(TournamentRequestId(100 + i as u64)),
+                },
+                &env,
+            );
+            assert_eq!(
+                ack_of(&out).0,
+                TournamentRequestId(100 + i as u64),
+                "fill deck {i} must be admitted"
+            );
+        }
+
+        // One more entrant in A is refused — A has reached its own per-event budget.
+        const A_OVER_ID: TournamentRequestId = TournamentRequestId(200);
+        let mut a_over = ConnState::default();
+        let a_over_token = join_tournament(
+            &mut a_over,
+            &mut broker,
+            &env,
+            &code_a,
+            "key-a-over",
+            "AOver",
+        );
+        let a_refused = broker.handle(
+            &mut a_over,
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: code_a.clone(),
+                player_token: a_over_token,
+                deck: heavy.clone(),
+                request_id: Some(A_OVER_ID),
+            },
+            &env,
+        );
+        let (a_refusal_id, a_reason) = rejection_of(&a_refused);
+        assert_eq!(a_refusal_id, A_OVER_ID);
+        assert!(
+            a_reason.contains("this event's deck budget"),
+            "A's overflow must name the per-event budget, got: {a_reason}"
+        );
+
+        // Unrelated event B, still live: its entrant submits the identical heavy deck
+        // and is ADMITTED — event A sitting at its full per-event budget did not
+        // starve B, because A's footprint is bounded to its own per-event budget and
+        // no shared cross-event pool exists for A to have drained.
+        const B_ID: TournamentRequestId = TournamentRequestId(300);
+        let mut bob = ConnState::default();
+        let (code_b, _org_b) =
+            make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+        let bob_token = join_tournament(&mut bob, &mut broker, &env, &code_b, "key-b", "Bob");
+        let admitted = broker.handle(
+            &mut bob,
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: code_b.clone(),
+                player_token: bob_token,
+                deck: heavy,
+                request_id: Some(B_ID),
+            },
+            &env,
+        );
+        assert_eq!(
+            ack_of(&admitted).0,
+            B_ID,
+            "an unrelated live event must still admit a deck while another event sits at its per-event cap"
+        );
+    }
+
+    /// A terminal event stops charging the deck budget: when the real inactivity
+    /// sweep ([`Broker::reap_expired`]) abandons an in-progress event, its retained
+    /// decks are released, so they hold neither the per-event budget nor the
+    /// complete-snapshot bound through the 30-day retention window. REVERT-FAIL: drop the
+    /// `release_retained_decks` call in the abandon arm and the abandoned event keeps
+    /// every deck, charging the budget for pairings it can no longer host.
+    #[test]
+    fn a_terminal_event_releases_its_deck_budget_on_abandonment() {
+        fn heavy_deck(entries: usize) -> engine::starter_decks::DeckData {
+            use engine::types::card_printing::{
+                CardPrinting, DeckPrinting, DeckSection, MAX_DECK_CARD_NAME_LEN,
+                MAX_PRINTING_COLLECTOR_NUMBER_LEN, MAX_PRINTING_SET_CODE_LEN,
+            };
+            engine::starter_decks::DeckData {
+                printings: (0..entries)
+                    .map(|_| DeckPrinting {
+                        section: DeckSection::MainDeck,
+                        name: "x".repeat(MAX_DECK_CARD_NAME_LEN),
+                        count: 1,
+                        printing: CardPrinting {
+                            set_code: "s".repeat(MAX_PRINTING_SET_CODE_LEN),
+                            collector_number: "c".repeat(MAX_PRINTING_COLLECTOR_NUMBER_LEN),
+                        },
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+        }
+
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut organizer = ConnState::default();
+
+        // Event A: two entrants submit decks while it is still in registration.
+        let (code_a, org_a) =
+            make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+        let heavy = heavy_deck(120);
+        for (i, (key, name)) in [("key-a0", "A0"), ("key-a1", "A1")].iter().enumerate() {
+            let mut conn = ConnState::default();
+            let token = join_tournament(&mut conn, &mut broker, &env, &code_a, key, name);
+            let out = broker.handle(
+                &mut conn,
+                LobbyClientMessage::SubmitTournamentDeck {
+                    code: code_a.clone(),
+                    player_token: token,
+                    deck: heavy.clone(),
+                    request_id: Some(TournamentRequestId(100 + i as u64)),
+                },
+                &env,
+            );
+            assert_eq!(ack_of(&out).0, TournamentRequestId(100 + i as u64));
+        }
+
+        // Start it, then idle it past the in-progress abandon window and run the
+        // real sweep.
+        broker.handle(
+            &mut organizer,
+            LobbyClientMessage::StartTournamentRound {
+                code: code_a.clone(),
+                organizer_token: org_a,
+                request_id: None,
+            },
+            &env,
+        );
+        assert_eq!(
+            broker.tournaments().get(&code_a).expect("A").status,
+            TournamentStatus::InProgress
+        );
+        env.advance_secs(IN_PROGRESS_ABANDON_SECS + 1);
+        broker.reap_expired(300, &env);
+
+        let a = broker.tournaments().get(&code_a).expect("A retained");
+        assert_eq!(a.status, TournamentStatus::Abandoned);
+        assert!(
+            a.players.iter().all(|p| p.deck.is_none()),
+            "the abandoned event must retain no decks — its budget is reclaimed"
+        );
+    }
+
+    /// Blocker-1 proof: the complete-snapshot bound caps the *whole* persisted
+    /// broker — every event's entrant/pairing metadata as well as its decks — not
+    /// deck bytes alone, and a submission that would cross it is a state-preserving
+    /// refusal. Heavy decks are admitted across many fresh events (each within its
+    /// own per-event budget) until the growing single-key snapshot would exceed
+    /// [`MAX_SNAPSHOT_ENCODED_BYTES`]; that submission is refused through the
+    /// production `Broker::handle` path naming the persistence ceiling, while a deck
+    /// admitted earlier — and the slot that readiness derives from — is left exactly
+    /// as it was, and the refused entrant's own slot stays empty. REVERT-FAIL: drop
+    /// the snapshot guard in `handle_submit_tournament_deck` and the submission is
+    /// admitted, letting the persisted snapshot grow past the 8 MB Durable Object
+    /// key ceiling that silently fails the next `put`.
+    #[test]
+    fn a_submission_past_the_snapshot_budget_is_refused_without_losing_state() {
+        fn heavy_deck(entries: usize) -> engine::starter_decks::DeckData {
+            use engine::types::card_printing::{
+                CardPrinting, DeckPrinting, DeckSection, MAX_DECK_CARD_NAME_LEN,
+                MAX_PRINTING_COLLECTOR_NUMBER_LEN, MAX_PRINTING_SET_CODE_LEN,
+            };
+            engine::starter_decks::DeckData {
+                printings: (0..entries)
+                    .map(|_| DeckPrinting {
+                        section: DeckSection::MainDeck,
+                        name: "x".repeat(MAX_DECK_CARD_NAME_LEN),
+                        count: 1,
+                        printing: CardPrinting {
+                            set_code: "s".repeat(MAX_PRINTING_SET_CODE_LEN),
+                            collector_number: "c".repeat(MAX_PRINTING_COLLECTOR_NUMBER_LEN),
+                        },
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+        }
+
+        // Non-panicking classifiers, so the fill loop can tell an admit from either
+        // kind of refusal (per-event budget vs. the complete-snapshot ceiling).
+        fn ack_id(out: &[Outbound]) -> Option<TournamentRequestId> {
+            out.iter().find_map(|ob| match ob {
+                Outbound::ToSelf(LobbyServerMessage::TournamentActionAck {
+                    request_id, ..
+                }) => Some(*request_id),
+                _ => None,
+            })
+        }
+        fn reject_reason(out: &[Outbound]) -> Option<String> {
+            out.iter().find_map(|ob| match ob {
+                Outbound::ToSelf(LobbyServerMessage::TournamentActionRejected {
+                    message, ..
+                }) => Some(message.clone()),
+                _ => None,
+            })
+        }
+
+        // A deck under the per-deck cap, so each is individually admitted; many of
+        // them across many events grow the single-key snapshot toward its ceiling.
+        let heavy = heavy_deck(120);
+        let each = serde_json::to_vec(&heavy).expect("serializes").len();
+        assert!(
+            each < crate::tournament::MAX_SINGLE_DECK_ENCODED_BYTES,
+            "each deck must pass the per-deck cap (was {each})"
+        );
+
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut organizer = ConnState::default();
+
+        // The first deck we admit — kept to prove it survives the later refusal.
+        let mut witness: Option<(String, String)> = None; // (code, player_key)
+        let mut refused: Option<(String, String, String)> = None; // (code, player_key, reason)
+
+        // Fill event after event, each to its own per-event budget, until a
+        // submission is refused by the complete-snapshot guard rather than a
+        // per-event budget. 64 events at the 512 KiB per-event cap is 32 MiB of
+        // decks — far past the 6 MiB snapshot ceiling — so the guard fires well
+        // inside the bound; the `expect` below is a fixture tripwire, not the path.
+        'fill: for ev in 0..64 {
+            let (code, _org) =
+                make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+            for seat in 0..16u64 {
+                let key = format!("k{ev}-{seat}");
+                let mut conn = ConnState::default();
+                let token = join_tournament(
+                    &mut conn,
+                    &mut broker,
+                    &env,
+                    &code,
+                    &key,
+                    &format!("P{ev}-{seat}"),
+                );
+                let id = TournamentRequestId(1_000_000 + (ev as u64) * 100 + seat);
+                let out = broker.handle(
+                    &mut conn,
+                    LobbyClientMessage::SubmitTournamentDeck {
+                        code: code.clone(),
+                        player_token: token,
+                        deck: heavy.clone(),
+                        request_id: Some(id),
+                    },
+                    &env,
+                );
+                if ack_id(&out) == Some(id) {
+                    witness.get_or_insert_with(|| (code.clone(), key.clone()));
+                    continue;
+                }
+                let reason =
+                    reject_reason(&out).expect("a submission is either admitted or refused");
+                if reason.contains("persisted tournament state is at capacity") {
+                    refused = Some((code.clone(), key.clone(), reason));
+                    break 'fill;
+                }
+                // Otherwise this event reached its own per-event budget; the snapshot
+                // is not yet full. Move to a fresh event.
+                assert!(
+                    reason.contains("this event's deck budget"),
+                    "the only other refusal is the per-event budget, got: {reason}"
+                );
+                break;
+            }
+        }
+
+        let (witness_code, witness_key) =
+            witness.expect("at least one deck must be admitted before the snapshot fills");
+        let (refused_code, refused_key, reason) =
+            refused.expect("the snapshot guard must eventually refuse a submission");
+
+        assert!(
+            reason.contains("persisted tournament state is at capacity"),
+            "the refusal must name the persistence ceiling, got: {reason}"
+        );
+        // State-preserving refusal: the refused entrant's own slot stays empty.
+        let refused_player = broker
+            .tournaments()
+            .get(&refused_code)
+            .expect("refused event retained")
+            .players
+            .iter()
+            .find(|p| p.player_key == refused_key)
+            .expect("refused entrant retained");
+        assert!(
+            refused_player.deck.is_none(),
+            "a snapshot-refused submission must leave the entrant's slot empty"
+        );
+        // And a deck admitted before the guard fired — the slot `deck_submitted`
+        // readiness derives from — is left exactly as it was.
+        let witness_player = broker
+            .tournaments()
+            .get(&witness_code)
+            .expect("witness event retained")
+            .players
+            .iter()
+            .find(|p| p.player_key == witness_key)
+            .expect("witness entrant retained");
+        assert!(
+            witness_player.deck.is_some(),
+            "a deck admitted before the snapshot filled must survive a later refusal"
         );
     }
 

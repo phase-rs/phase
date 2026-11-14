@@ -1044,6 +1044,12 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * PROTOCOL_VERSION moved twice for GameState-only changes and the derived lobby
  * window went disjoint from the deployed broker's.
  *
+ * 22 — Tournament deck submission: a new `SubmitTournamentDeck` client message
+ *      (carries a DeckData) and a `deck_submitted` readiness flag on
+ *      PlayerSummary. Both additive; MIN_SUPPORTED stays 2. The deck is private
+ *      and never projected. Mirrored in types.ts (ClientMessage + PlayerSummary).
+ * 21 — DeckData/PlayerDeckList gain an optional name-keyed printings sidecar
+ *      (owner-chosen printings, display-only), merged from main. Additive.
  * 19 — Prospective: no lobby variant or field changes shape in this bump.
  *      Moved ahead of the `PlanechaseCommander` GameFormat variant — see
  *      LOBBY_PROTOCOL_VERSION's own `/// 19` entry in
