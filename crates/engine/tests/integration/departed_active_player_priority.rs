@@ -11,7 +11,7 @@ use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::trigger_index::reindex_object_triggers;
-use engine::types::ability::{Duration, TargetRef};
+use engine::types::ability::{ChosenAttribute, Duration, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::format::{ChallengeDeck, FormatConfig};
@@ -35,6 +35,7 @@ const RELENTLESS_ASSAULT: &str = "Untap all creatures that attacked this turn. A
 const MOMENT_OF_SILENCE: &str = "Target player skips their next combat phase this turn.";
 const REVENANT_PATRIARCH: &str = "When this creature enters, if {W} was spent to cast it, target player skips their next combat phase.\nThis creature can't block.";
 const DOOR_TO_NOTHINGNESS: &str = "This artifact enters tapped.\n{W}{W}{U}{U}{B}{B}{R}{R}{G}{G}, {T}, Sacrifice this artifact: Target player loses the game.";
+const PARADOX_HAZE: &str = "Enchant player\nAt the beginning of enchanted player's first upkeep each turn, that player gets an additional upkeep step after this step.";
 const TENUOUS_TRUCE: &str = "Enchant opponent\nAt the beginning of enchanted opponent's end step, you and that player each draw a card.\nWhen you attack enchanted opponent or a planeswalker they control or when they attack you or a planeswalker you control, sacrifice this Aura.";
 
 fn mana(types: &[ManaType]) -> Vec<ManaUnit> {
@@ -1722,5 +1723,212 @@ fn the_speed_holders_turn_is_its_teams_and_only_opponents_raise_it() {
         if upkeep == "Bitterblossom" {
             assert_eq!(state.players[0].life, life - 1, "{label}");
         }
+    }
+}
+
+/// Gives `seat` priority at the current step.
+fn priority_to(runner: &mut GameRunner, seat: PlayerId) {
+    let state = runner.state_mut();
+    state.priority_player = seat;
+    state.waiting_for = WaitingFor::Priority { player: seat };
+}
+
+/// CR 726.2 + CR 805.4: "At the beginning of the upkeep of the player who has the initiative,
+/// that player ventures into Undercity" triggers in the team's upkeep whichever of its players has
+/// the initiative.
+#[test]
+fn the_initiative_holders_upkeep_is_its_teams() {
+    for holder in [P1, P0] {
+        let mut runner = two_headed_giant(Phase::Untap).build();
+        runner.state_mut().initiative = Some(holder);
+        answer_while(&mut runner, |s| s.phase != Phase::Draw);
+        let ventured: Vec<PlayerId> = runner.state().dungeon_progress.keys().copied().collect();
+        assert_eq!(ventured, [holder], "{holder:?}");
+    }
+}
+
+/// CR 805.4 + CR 810.8a: Pact of Negation's "At the beginning of your next upkeep, pay
+/// {3}{U}{U}. If you don't, you lose the game." triggers in the team's next upkeep whichever of
+/// its players cast it, and that player's team loses when it goes unpaid.
+#[test]
+fn your_next_upkeep_is_your_teams() {
+    let db = shared_card_db().expect("card db");
+    for caster in [P1, P0] {
+        let mut scenario = two_headed_giant(Phase::End);
+        let bolt = scenario.add_real_card(caster, "Lightning Bolt", Zone::Hand, db);
+        let pact = scenario.add_real_card(caster, "Pact of Negation", Zone::Hand, db);
+        scenario.with_mana_pool(caster, mana(&[ManaType::Red]));
+        let mut runner = scenario.build();
+        opposing_teams_turn(&mut runner);
+        priority_to(&mut runner, caster);
+        runner.cast(bolt).target_player(P2).commit();
+        runner.cast(pact).target_object(bolt).commit();
+        let stacked = answer_while(&mut runner, |s| {
+            !matches!(s.waiting_for, WaitingFor::GameOver { .. })
+                && !(s.active_player == P0 && s.phase == Phase::Draw)
+        });
+        assert_eq!(
+            stacked_for(&stacked, "Pact of Negation"),
+            [None],
+            "{caster:?}"
+        );
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::GameOver { .. }),
+            "{caster:?}: {:?}",
+            runner.state().waiting_for
+        );
+    }
+}
+
+/// CR 805.4 + CR 603.2: Valgavoth's "Whenever an opponent loses life for the first time during
+/// each of their turns" triggers once in the team's turn for each of its players, representative
+/// or not, however often that player loses life.
+#[test]
+fn an_opponents_first_life_loss_each_turn_is_on_its_teams_turn() {
+    let db = shared_card_db().expect("card db");
+    for loser in [P1, P0] {
+        let mut scenario = two_headed_giant(Phase::Untap);
+        let valgavoth =
+            scenario.add_real_card(P2, "Valgavoth, Harrower of Souls", Zone::Battlefield, db);
+        scenario.add_real_card(loser, "Bitterblossom", Zone::Battlefield, db);
+        scenario.add_real_card(loser, "Bitterblossom", Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        let stacked = answer_while(&mut runner, |s| s.phase != Phase::Draw);
+        assert_eq!(
+            stacked_for(&stacked, "Bitterblossom"),
+            [None, None],
+            "{loser:?}"
+        );
+        assert_eq!(
+            stacked_for(&stacked, "Valgavoth, Harrower of Souls"),
+            [None],
+            "{loser:?}"
+        );
+        assert_eq!(counters(runner.state(), valgavoth), 1, "{loser:?}");
+    }
+}
+
+/// CR 505.1 + CR 805.4: Frontier Siege's "At the beginning of each of your main phases, add
+/// {G}{G}" (Khans chosen) triggers in the team's main phase whichever of its players controls it.
+#[test]
+fn your_main_phase_is_your_teams() {
+    let db = shared_card_db().expect("card db");
+    for controller in [P1, P0] {
+        let mut scenario = two_headed_giant(Phase::Upkeep);
+        let siege = scenario.add_real_card(controller, "Frontier Siege", Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        // The Siege's as-enters choice is abandoned during setup, leaving its controller a
+        // priority prompt that is the representative's.
+        priority_to(&mut runner, P0);
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&siege)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Label("Khans".to_string()));
+        let stacked = answer_while(&mut runner, |s| {
+            s.phase != Phase::PreCombatMain || !s.stack.is_empty()
+        });
+        assert_eq!(
+            stacked_for(&stacked, "Frontier Siege"),
+            [None],
+            "{controller:?}"
+        );
+        assert_eq!(
+            runner.state().players[controller.0 as usize]
+                .mana_pool
+                .total(),
+            2,
+            "{controller:?}"
+        );
+    }
+}
+
+/// CR 102.1 + CR 805.4: Kefka's "Whenever an opponent loses life during your turn, you draw that
+/// many cards" triggers in the team's turn whichever of its players controls it.
+#[test]
+fn during_your_turn_is_during_your_teams() {
+    let db = shared_card_db().expect("card db");
+    for controller in [P1, P0] {
+        let mut scenario = two_headed_giant(Phase::Untap);
+        scenario.add_real_card(controller, "Kefka, Ruler of Ruin", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Consuming Sepulcher", Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        let before = libraries(&runner, &[controller]);
+        let stacked = answer_while(&mut runner, |s| s.phase != Phase::Draw);
+        assert_eq!(
+            stacked_for(&stacked, "Kefka, Ruler of Ruin"),
+            [None, None],
+            "{controller:?}"
+        );
+        // Kefka's two draws, then the draw step's.
+        assert_eq!(drawn(&runner, &before), [3], "{controller:?}");
+    }
+}
+
+/// CR 102.1 + CR 805.4: The Council of Four's "Whenever a player draws their second card during
+/// their turn, you draw a card" triggers for each player of the active team, its representative
+/// and the other, once Well of Ideas has each of them draw an additional card.
+#[test]
+fn during_their_turn_is_during_each_team_members() {
+    let db = shared_card_db().expect("card db");
+    let mut scenario = two_headed_giant(Phase::Upkeep);
+    scenario.add_real_card(P2, "Well of Ideas", Zone::Battlefield, db);
+    scenario.add_real_card(P2, "The Council of Four", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    let before = libraries(&runner, &[P0, P1, P2]);
+    let stacked = answer_while(&mut runner, |s| s.phase != Phase::PreCombatMain);
+    assert_eq!(drawn(&runner, &before), [2, 2, 2]);
+    assert_eq!(stacked_for(&stacked, "The Council of Four"), [None, None]);
+}
+
+/// CR 504.1 + CR 805.4: Orcish Bowmasters' "whenever an opponent draws a card except the first one
+/// they draw in each of their draw steps" skips the first draw of each player of the active team
+/// and pings for the additional card Well of Ideas has each of them draw.
+#[test]
+fn each_team_members_first_draw_in_its_draw_step_is_excepted() {
+    let db = shared_card_db().expect("card db");
+    let mut scenario = two_headed_giant(Phase::Upkeep);
+    scenario.add_real_card(P2, "Well of Ideas", Zone::Battlefield, db);
+    scenario.add_real_card(P2, "Orcish Bowmasters", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    let before = libraries(&runner, &[P0, P1]);
+    let stacked = answer_while(&mut runner, |s| s.phase != Phase::PreCombatMain);
+    assert_eq!(drawn(&runner, &before), [2, 2]);
+    assert_eq!(stacked_for(&stacked, "Orcish Bowmasters"), [None, None]);
+}
+
+/// CR 500.10a + CR 805.4d: Paradox Haze's "At the beginning of enchanted player's first upkeep each
+/// turn, that player gets an additional upkeep step after this step" adds the step to the team's
+/// turn whichever of its players is enchanted, so Bitterblossom's "your upkeep" triggers twice.
+#[test]
+fn an_enchanted_team_member_gets_its_additional_upkeep() {
+    let db = shared_card_db().expect("card db");
+    for enchanted in [P1, P0] {
+        let mut scenario = two_headed_giant(Phase::Untap);
+        let haze = {
+            let mut aura =
+                scenario.add_creature_from_oracle(P2, "Paradox Haze", 0, 0, PARADOX_HAZE);
+            aura.as_enchantment();
+            aura.with_subtypes(vec!["Aura"]);
+            aura.id()
+        };
+        scenario.add_real_card(P0, "Bitterblossom", Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        attach_to_player(runner.state_mut(), haze, enchanted);
+        evaluate_layers(runner.state_mut());
+        reindex_object_triggers(runner.state_mut(), haze);
+        let stacked = answer_while(&mut runner, |s| s.phase != Phase::Draw);
+        assert_eq!(
+            stacked_for(&stacked, "Paradox Haze"),
+            [Some(enchanted)],
+            "{enchanted:?}"
+        );
+        assert_eq!(
+            stacked_for(&stacked, "Bitterblossom"),
+            [None, None],
+            "{enchanted:?}"
+        );
     }
 }

@@ -1881,9 +1881,6 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        // CR 608.2d: `chooser` (controller / declared-target read) is subsumed
-        // by CONSERVATIVE on every axis; a future refinement of this arm must
-        // destructure the field and classify it per-axis.
         Effect::Choose {
             choice_type,
             chooser,
@@ -3494,10 +3491,8 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             history: HistoryReads::NONE,
             that_player: false,
         },
-        // Deliberately coarse: `Axes::CONSERVATIVE` is FAIL-CLOSED, so a new
-        // `CardTypeSetSource` variant reached through this compiler-blind `{ .. }`
-        // pattern can only over-report, never under-report. The population axis is
-        // not decomposed here because no caller needs a narrower answer.
+        // The population axis is not decomposed here because no caller needs a
+        // narrower answer.
         QuantityRef::DistinctCardTypes { source } | QuantityRef::SharedCardTypes { source } => {
             Axes::CONSERVATIVE.or(scan_property_aggregate_source(source, mode))
         }
@@ -7287,8 +7282,8 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes<'_> 
         starting_with,
         target_chooser,
         repeat_until,
-        // ---- conservative-when-present: inner cost/filter payloads the walk does
-        //      not descend into, each able to express a board-scoped read ----
+        // ---- conservative-when-present: inner cost/filter payloads, each able to
+        //      express a board-scoped read ----
         unless_pay,
         distribute,
         cost_reduction,
@@ -7398,7 +7393,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes<'_> 
     if let Some(ru) = repeat_until {
         acc = acc.or(scan_repeat_continuation(ru, mode));
     }
-    // Conservative fail-closed for present-but-undescended cost/filter payloads:
+    // Conservative fail-closed for cost/filter payloads:
     // an `unless pay {1} for each artifact` or a divide/distribute filter can each
     // express a board-scoped read.
     if let Some(UnlessPayModifier { cost, payer }) = unless_pay {

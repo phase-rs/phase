@@ -1945,16 +1945,18 @@ impl FiringGroup {
 /// The shapes, in precedence order: per-recipient counters, the whole-event
 /// received-damage fold, per-player-recipient damage, per-attacked-player
 /// attack batches ("one or more creatures attack <player>"), batched ("one or
-/// more") subjects, the per-occurrence fan-out, the event-source force-block
-/// singleton fallback, and the single event. The first five read the whole
-/// batch, so a caller asks for them once per batch (`fires_once_per_batch`).
+/// more") subjects, the per-player phase firing (CR 805.4d), the per-occurrence
+/// fan-out, the event-source force-block singleton fallback, and the single
+/// event. The first five read the whole batch, so a caller asks for them once
+/// per batch (`fires_once_per_batch`).
 ///
 /// Conditions are checked where the printed path always checked them: on the
 /// raw event before expansion (except for `Attacks`-mode triggers, whose
 /// condition reads the attacked-player context of each narrowed firing — for
 /// the per-attacked-player batch shape the check runs once per group against
-/// that group's narrowed event), per candidate inside the batch shapes, and on
-/// each narrowed firing for every non-batched shape.
+/// that group's narrowed event — and per-player phase firings, whose condition
+/// is checked once per group against that player's event), per candidate inside
+/// the batch shapes, and on each narrowed firing for every non-batched shape.
 /// `admitted` is the raw index of `event` in `event_batch` when the caller
 /// knows it.
 #[allow(clippy::too_many_arguments)] // Each input is an independent collection fact.

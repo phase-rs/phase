@@ -79,7 +79,8 @@ fn added_to_turn_in_progress(
             })
         }
     };
-    player == Some(state.active_player)
+    // CR 500.10a + CR 805.4: on a shared team turn the turn is each member's.
+    player.is_some_and(|p| crate::game::players::is_turn_player(state, p))
 }
 
 /// CR 500.8: Add extra phases to the current turn via a LIFO stack.
