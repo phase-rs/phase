@@ -3213,7 +3213,6 @@ fn collect_matching_triggers_inner(
         TriggerSource::Context(_) => true,
     };
     let obj_id = source_context.identity.reference.object_id;
-    let controller = source_context.lki.controller;
     if event_is_suppressed_by_static_triggers_cached(
         state,
         event,
@@ -3307,6 +3306,18 @@ fn collect_matching_triggers_inner(
     } else {
         None
     };
+    // CR 108.4a + CR 113.8: an ability a card has outside the battlefield and
+    // the stack is controlled by the card's owner, not by the player who
+    // controlled the permanent it was.
+    let source_context = match after_read_destination_object {
+        Some(Some(object)) => {
+            let mut context = source_context;
+            context.lki.controller = object.owner;
+            context
+        }
+        _ => source_context,
+    };
+    let controller = source_context.lki.controller;
     let printed_trigger_count = if let Some(live) = after_read_destination_object {
         live.map_or(0, |object| {
             super::functioning_abilities::active_trigger_definitions(state, object).count()

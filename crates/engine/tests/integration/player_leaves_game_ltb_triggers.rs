@@ -1822,14 +1822,21 @@ fn a_from_anywhere_trigger_of_an_earlier_check_survives_its_source_leaving_in_th
 /// on the battlefield. P0's Earthquake for 1 leaves only P2 at lethal life, so
 /// in one state-based-action check P2 loses and Dread dies; in the graveyard
 /// it has its ability again and triggers once.
-#[test]
-fn an_ability_regained_in_the_graveyard_triggers_for_the_card_that_died_in_the_event() {
+/// The controllers of the Dread triggers queued or on the stack after the
+/// Humility row's Earthquake. With `thief`, that player first casts Turn Against
+/// ("Gain control of target creature until end of turn.") on P0's Dread at
+/// instant speed, so Dread dies under their control.
+fn dread_triggers_under_humility(thief: Option<PlayerId>) -> Vec<PlayerId> {
     let db = shared_card_db().expect("integration card fixture must load");
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let dread = scenario.add_real_card(P0, "Dread", Zone::Battlefield, db);
     scenario.add_real_card(P0, "Humility", Zone::Battlefield, db);
     let earthquake = scenario.add_real_card(P0, "Earthquake", Zone::Hand, db);
+    let turn_against = thief.map(|thief| {
+        scenario.with_mana_pool(thief, red_mana(6));
+        scenario.add_real_card(thief, "Turn Against", Zone::Hand, db)
+    });
     scenario.with_mana_pool(P0, red_mana(4));
     scenario.with_life(P2, 1);
     scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
@@ -1845,6 +1852,24 @@ fn an_ability_regained_in_the_graveyard_triggers_for_the_card_that_died_in_the_e
         0,
         "reach guard: Humility removed Dread's abilities on the battlefield"
     );
+    if let (Some(thief), Some(turn_against)) = (thief, turn_against) {
+        {
+            let state = runner.state_mut();
+            state.priority_player = thief;
+            state.waiting_for = WaitingFor::Priority { player: thief };
+        }
+        runner.cast(turn_against).target_object(dread).resolve();
+        {
+            let state = runner.state_mut();
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        assert_eq!(
+            runner.state().objects[&dread].controller,
+            thief,
+            "reach guard: the thief controls Dread"
+        );
+    }
     runner.cast(earthquake).x(1).commit();
     for _ in 0..4 {
         if runner.state().players[2].is_eliminated {
@@ -1857,16 +1882,36 @@ fn an_ability_regained_in_the_graveyard_triggers_for_the_card_that_died_in_the_e
     assert!(runner.state().players[2].is_eliminated);
     assert_eq!(zone(&runner, dread), Zone::Graveyard);
     let state = runner.state();
-    let from_dread = state
+    let mut controllers: Vec<PlayerId> = state
         .pending_trigger_order
         .iter()
         .flat_map(|order| order.groups.iter())
         .flat_map(|group| group.triggers.iter())
         .chain(state.deferred_triggers.iter())
         .filter(|context| context.pending.source_id == dread)
-        .count()
-        + triggers_from(&runner, dread);
-    assert_eq!(from_dread, 1);
+        .map(|context| context.pending.controller)
+        .collect();
+    controllers.extend(
+        state
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == dread)
+            .map(|entry| entry.controller),
+    );
+    controllers
+}
+
+#[test]
+fn an_ability_regained_in_the_graveyard_triggers_for_the_card_that_died_in_the_event() {
+    assert_eq!(dread_triggers_under_humility(None), vec![P0]);
+}
+
+/// CR 108.4a + CR 113.8: the same board with P1 controlling Dread when it dies.
+/// The ability Dread has in the graveyard belongs to the card's owner, so the
+/// trigger is P0's, not the thief's.
+#[test]
+fn a_regained_graveyard_ability_is_controlled_by_the_cards_owner_not_the_thief() {
+    assert_eq!(dread_triggers_under_humility(Some(P1)), vec![P0]);
 }
 
 /// CR 111.7 + CR 603.6c + CR 603.10: a token's ability triggers before it ceases
