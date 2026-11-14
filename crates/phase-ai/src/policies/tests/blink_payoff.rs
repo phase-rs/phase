@@ -103,6 +103,7 @@ fn push_trigger(state: &mut GameState, oid: ObjectId, trigger: TriggerDefinition
 
 fn change_zone(destination: Zone, target: TargetFilter) -> Effect {
     Effect::ChangeZone {
+        actor: engine::types::ability::LibraryInstructionActor::Controller,
         library_shuffle: Default::default(),
         origin: None,
         destination,

@@ -362,6 +362,7 @@ fn prompt_resolution_tap_untap_choice(
     }
 
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: ability.controller,
         cards: eligible,
         count: bounds.max,
@@ -384,6 +385,7 @@ fn prompt_resolution_tap_untap_choice(
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,

@@ -24,14 +24,15 @@ use crate::game::combat_damage::combat_damage_to_defender;
 use crate::game::effects::deal_damage::DamageContext;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{AttachTarget, DisplaySource, GameObject};
+use crate::game::players::{poison_loss_measure, PoisonLossScope};
 use crate::game::stack::{
     effective_stack_ability, stack_display_groups, stack_display_groups_revealing,
     stack_revealed_card_names, StackDisplayGroup,
 };
 use crate::game::topology::Side;
 use crate::types::ability::{
-    ContinuousModification, Duration, GameRestriction, KeywordAction, ProhibitedActivity,
-    RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
+    AbilityCost, ContinuousModification, Duration, Effect, GameRestriction, KeywordAction,
+    ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card::{PrintedCardRef, TokenImageRef};
@@ -644,6 +645,30 @@ pub struct SharedPilesView {
     pub graveyard: Option<PlayerId>,
 }
 
+/// CR 121.1 + CR 702.24a: the resolved draw an unless-payment prompt asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlessDrawCostView {
+    /// Cards one printed instruction draws (CR 107.1b: a negative count is 0).
+    pub cards: u32,
+    /// Printed instructions the payment performs, each drawing `cards`.
+    pub instructions: u32,
+    /// Whether the payer may still decline.
+    pub stage: UnlessDrawPaymentStage,
+}
+
+/// CR 702.24a: where a draw unless-payment prompt stands. "Either the entire set
+/// of costs is paid, or none of them is paid": once part of a repeated payment
+/// is performed, the prompt only continues it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnlessDrawPaymentStage {
+    /// The payer chooses whether to pay.
+    #[default]
+    Offered,
+    /// The payer chose to pay and part of the payment is performed; the prompt
+    /// continues the instructions still owed and cannot be declined.
+    Continuing,
+}
+
 /// CR 510.1a + CR 702.4b + CR 120.3a/b: display-only projection, at the current
 /// state, of what a creature that may attack would do to a player if it attacks
 /// and is not blocked. Computed before replacement and prevention effects
@@ -695,6 +720,13 @@ pub struct DerivedViews {
     /// seat whose `Player` container stores each shared pile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_piles: Option<SharedPilesView>,
+    /// CR 121.1 + CR 702.24a: the draw an open unless-payment prompt asks the
+    /// payer to perform — the resolved card count of one printed draw
+    /// instruction and how many times it repeats (one per age counter for
+    /// cumulative upkeep). Present only while that prompt is a draw cost, so
+    /// the client renders these numbers instead of decoding the cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unless_draw_cost: Option<UnlessDrawCostView>,
     /// The live (post-layer) keyword badges each battlefield permanent should
     /// display. The engine classifies the complete keyword list so the client
     /// can render the compact strip without reinterpreting keyword timing.
@@ -808,6 +840,14 @@ pub struct DerivedViews {
     /// projection is not viewer-filtered.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dungeon_rooms: BTreeMap<PlayerId, DungeonRoomView>,
+
+    /// CR 704.5c / CR 704.6b + CR 810.8d / CR 904.13c: the poison-loss rule each
+    /// player with a nonzero poison-loss count is measured against, so the HUD
+    /// states the threshold the SBA actually uses (a house-rule dial, or the
+    /// shared fifteen) instead of a client literal. Keyed by PlayerId; omitted
+    /// when nobody is poisoned. Poison counters and the format are public.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub poison_loss: BTreeMap<PlayerId, PoisonLossView>,
 
     /// Engine-authored coalesced view of the stack. Adjacent entries with
     /// the same (source, kind, description, targets) signature collapse
@@ -1426,6 +1466,60 @@ fn dungeon_rooms(state: &GameState) -> BTreeMap<PlayerId, DungeonRoomView> {
         .collect()
 }
 
+/// The poison-loss rule one player is measured against, projected from
+/// `players::poison_loss_measure` — the authority the poison SBA reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoisonLossView {
+    pub scope: PoisonLossScope,
+    pub threshold: u32,
+    pub proximity: PoisonLossProximity,
+}
+
+/// Display classification (no CR): how close a player's poison-loss count is
+/// to its threshold, which the HUD badge styles from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PoisonLossProximity {
+    /// More than `POISON_NEAR_LETHAL_MARGIN` counters short of the threshold.
+    Normal,
+    /// Within `POISON_NEAR_LETHAL_MARGIN` counters of the threshold.
+    NearLethal,
+}
+
+/// Display-only: how many counters short of the loss threshold the HUD starts
+/// warning. 2 reproduces the badge's pre-dial `value >= 8` at the CR default
+/// of ten. No CR governs it.
+const POISON_NEAR_LETHAL_MARGIN: u32 = 2;
+
+/// CR 704.5c / CR 704.6b + CR 810.8d: the poison-loss rule for every player
+/// with a nonzero poison-loss count, read from the same measure the SBA uses.
+/// Empty (and omitted from the wire) when nobody is poisoned.
+fn poison_loss(state: &GameState) -> BTreeMap<PlayerId, PoisonLossView> {
+    state
+        .players
+        .iter()
+        .filter_map(|player| {
+            let measure = poison_loss_measure(state, player)?;
+            (measure.count > 0).then(|| {
+                let proximity = if measure.count.saturating_add(POISON_NEAR_LETHAL_MARGIN)
+                    >= measure.threshold
+                {
+                    PoisonLossProximity::NearLethal
+                } else {
+                    PoisonLossProximity::Normal
+                };
+                (
+                    player.id,
+                    PoisonLossView {
+                        scope: measure.scope,
+                        threshold: measure.threshold,
+                        proximity,
+                    },
+                )
+            })
+        })
+        .collect()
+}
+
 /// CR 115.1 + CR 601.2c: classify what the LIVE target announcement is offering
 /// the announcing player, so the client can name the choice instead of
 /// re-deriving it from raw object fields.
@@ -1678,8 +1772,10 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         blocker_assignment_pairs: blocker_assignment_pairs(state),
         debug_library_cards: debug_library_cards(state, viewer),
         shared_piles: shared_piles(state),
+        unless_draw_cost: unless_draw_cost(state),
         current_target_kind: current_target_kind(state),
         dungeon_rooms: dungeon_rooms(state),
+        poison_loss: poison_loss(state),
         storm_count: storm_count(state),
         unblocked_attack_previews: unblocked_attack_previews(state),
         attack_targets: attack_targets(state),
@@ -2308,6 +2404,11 @@ pub fn derive_filtered_views(
 ) -> DerivedViews {
     let mut views = derive_views(filtered_state, viewer);
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    // CR 702.24a: whether the prompt continues a payment already begun is read
+    // from the payment's parked owner, which the viewer projection drops.
+    if let Some(draw) = views.unless_draw_cost.as_mut() {
+        draw.stage = unless_draw_payment_stage(authoritative_state);
+    }
     views.scry_prompt_id = viewer.and_then(|viewer| {
         crate::game::interaction::scry_prompt_id_for_viewer(authoritative_state, viewer)
     });
@@ -2429,6 +2530,41 @@ fn visible_exile_object_ids(state: &GameState) -> BTreeMap<PlayerId, Vec<ObjectI
             (!object_ids.is_empty()).then_some((player.id, object_ids))
         })
         .collect()
+}
+
+/// CR 121.1 + CR 702.24a: the draw the open unless-payment prompt asks for,
+/// with its count resolved against the pending ability as the payment would
+/// resolve it, and its repetition.
+fn unless_draw_cost(state: &GameState) -> Option<UnlessDrawCostView> {
+    let WaitingFor::UnlessPayment {
+        cost: AbilityCost::EffectCost { effect },
+        pending_effect,
+        repeat,
+        ..
+    } = &state.waiting_for
+    else {
+        return None;
+    };
+    let Effect::Draw { count, .. } = effect.as_ref() else {
+        return None;
+    };
+    let resolved =
+        crate::game::quantity::resolve_quantity_with_targets(state, count, pending_effect);
+    Some(UnlessDrawCostView {
+        cards: u32::try_from(resolved).unwrap_or(0),
+        instructions: repeat.unwrap_or(1),
+        stage: unless_draw_payment_stage(state),
+    })
+}
+
+/// CR 702.24a: the stage of the open draw unless-payment prompt, read from the
+/// rules state that holds the payment's parked owner.
+fn unless_draw_payment_stage(state: &GameState) -> UnlessDrawPaymentStage {
+    if crate::game::engine_payment_choices::awaits_payment_continuation(state) {
+        UnlessDrawPaymentStage::Continuing
+    } else {
+        UnlessDrawPaymentStage::Offered
+    }
 }
 
 fn shared_piles(state: &GameState) -> Option<SharedPilesView> {
@@ -2560,18 +2696,7 @@ fn turn_order_views(
         return (Vec::new(), None);
     }
 
-    let mut seen = BTreeSet::new();
-    let representatives: Vec<PlayerId> = state
-        .seat_order
-        .iter()
-        .copied()
-        .filter(|&player| crate::game::players::is_alive(state, player))
-        .filter_map(|player| {
-            let representative =
-                crate::game::topology::normalize_shared_turn_recipient(state, player);
-            seen.insert(representative).then_some(representative)
-        })
-        .collect();
+    let representatives = crate::game::topology::turn_representatives(state);
 
     if representatives.len() <= 2 {
         return (Vec::new(), None);
@@ -10379,6 +10504,89 @@ mod tests {
         state.library_of_mut(PlayerId(1)).push_back(card);
         assert!(state.players[0].library.contains(&card));
         assert!(state.players[1].library.is_empty());
+    }
+
+    /// CR 121.1 + CR 702.24a: the unless-payment draw view resolves the
+    /// instruction's count against the pending ability (fixed, zero and
+    /// dynamic) and carries the repetition; any other prompt has none.
+    #[test]
+    fn unless_draw_cost_resolves_the_count_and_repetition() {
+        use crate::types::ability::{
+            AbilityCost, Effect, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility,
+        };
+        let mut state = GameState::new_two_player(42);
+        assert_eq!(derive_views(&state, None).unless_draw_cost, None);
+        let draw = |count: QuantityExpr| AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count,
+                target: TargetFilter::Controller,
+            }),
+        };
+        let prompt = |cost: AbilityCost, repeat: Option<u32>| WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost,
+            pending_effect: Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+            repeat,
+        };
+        for (count, repeat, expected) in [
+            (QuantityExpr::Fixed { value: 1 }, None, (1, 1)),
+            (QuantityExpr::Fixed { value: 3 }, None, (3, 1)),
+            (QuantityExpr::Fixed { value: 0 }, None, (0, 1)),
+            (QuantityExpr::Fixed { value: -2 }, None, (0, 1)),
+            (QuantityExpr::Fixed { value: 1 }, Some(65), (1, 65)),
+        ] {
+            state.waiting_for = prompt(draw(count), repeat);
+            assert_eq!(
+                derive_views(&state, None).unless_draw_cost,
+                Some(UnlessDrawCostView {
+                    cards: expected.0,
+                    instructions: expected.1,
+                    stage: UnlessDrawPaymentStage::Offered,
+                })
+            );
+        }
+        // A dynamic count is resolved by the engine, here P0's hand size.
+        for _ in 0..4 {
+            create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                "Hand Card".to_string(),
+                Zone::Hand,
+            );
+        }
+        state.waiting_for = prompt(
+            draw(QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Controller,
+                },
+            }),
+            None,
+        );
+        assert_eq!(
+            derive_views(&state, None).unless_draw_cost,
+            Some(UnlessDrawCostView {
+                cards: 4,
+                instructions: 1,
+                stage: UnlessDrawPaymentStage::Offered,
+            })
+        );
+        // A non-draw unless cost has no draw view.
+        state.waiting_for = prompt(
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            None,
+        );
+        assert_eq!(derive_views(&state, None).unless_draw_cost, None);
     }
 
     #[test]

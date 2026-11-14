@@ -1672,6 +1672,7 @@ mod tests {
             // Patron of the Moon: lands from hand onto the battlefield.
             let put_lands = own_top(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: Some(Zone::Hand),
                     destination: Zone::Battlefield,
@@ -1695,6 +1696,7 @@ mod tests {
             // operand naming the found card.
             let found_card_to_hand = own_top(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Hand,
@@ -1949,6 +1951,7 @@ mod tests {
             let (mut state, forest, _) = board();
             let rest_on_bottom = own_top(
                 Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::TrackedSet {

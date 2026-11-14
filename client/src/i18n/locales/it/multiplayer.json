@@ -253,6 +253,7 @@
     "bo3": "BO3",
     "bo3Note": "Il BO3 è disponibile solo per le partite a 2 giocatori.",
     "commanderDamage": "Danno da comandante",
+    "poisonCounters": "Segnalini veleno",
     "playerSeats": "Posti giocatore",
     "seat": "Posto {{number}}",
     "youHost": "Tu (Host)",
