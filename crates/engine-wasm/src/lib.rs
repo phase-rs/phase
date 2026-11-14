@@ -265,6 +265,24 @@ fn resolve_and_validate_initialize_format_config(
     Ok(format_config)
 }
 
+/// A local or P2P-host start may reuse a config persisted by an earlier engine,
+/// so it takes the persisted migration.
+fn decode_initialize_format_config(mut config: serde_json::Value) -> Result<FormatConfig, String> {
+    FormatConfig::migrate_persisted(&mut config);
+    serde_json::from_value(config).map_err(|error| error.to_string())
+}
+
+/// The P2P host's saved pregame seat state may carry a format persisted by an
+/// earlier engine, so its `format` takes the persisted migration.
+fn decode_persisted_seat_state(json: &str) -> Result<SeatState, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    if let Some(format) = value.get_mut("format") {
+        FormatConfig::migrate_persisted(format);
+    }
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
 fn parse_initialize_format_config(
     decoded: Result<FormatConfig, String>,
 ) -> Result<FormatConfig, serde_json::Value> {
@@ -281,8 +299,11 @@ mod external_format_config_tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use engine::types::custom_format::CustomFormatId;
+    use engine::types::custom_format::{
+        CommandZoneMode, CommanderEligibilityRule, CustomFormatDef, CustomFormatId,
+    };
     use engine::types::format::RangeOfInfluenceConfig;
+    use seat_reducer::types::SeatKind;
 
     #[test]
     fn best_of_three_ceiling_reads_the_format_axis_and_fails_closed() {
@@ -462,6 +483,104 @@ mod external_format_config_tests {
             resolve_and_validate_initialize_format_config(Some(commander_draft), 2)
                 .expect_err("2 players is outside CommanderDraft's 3-8 registry range")
                 .contains("player_count")
+        );
+    }
+
+    fn with_damage_threshold(config: FormatConfig) -> serde_json::Value {
+        let mut value = serde_json::to_value(config).expect("config serializes");
+        value["commander_damage_threshold"] = serde_json::json!(21);
+        value
+    }
+
+    /// A Custom config with Standard eligibility and no threshold, stored with the
+    /// `uses_commander: false` an earlier engine derived for it.
+    fn legacy_custom_config() -> (FormatConfig, serde_json::Value) {
+        let mut rules =
+            CustomFormatDef::from_lobby_config("Legacy".to_string(), &FormatConfig::commander())
+                .expect("Commander saves as a custom format")
+                .rules;
+        rules.structural.command_zone_mode = CommandZoneMode::Enabled {
+            commander_damage_threshold: None,
+            eligibility_rule: CommanderEligibilityRule::Standard,
+        };
+        let current = FormatConfig::for_custom_rules(&rules);
+        assert!(current.uses_commander);
+        let mut legacy = serde_json::to_value(&current).expect("config serializes");
+        legacy["uses_commander"] = false.into();
+        (current, legacy)
+    }
+
+    /// Each persisted config paired with the config today's rules install for it.
+    fn legacy_config_rows() -> Vec<(serde_json::Value, FormatConfig)> {
+        let (custom, legacy_custom) = legacy_custom_config();
+        let mut commander = FormatConfig::commander();
+        commander.commander_damage_threshold = Some(21);
+        vec![
+            (
+                with_damage_threshold(FormatConfig::brawl()),
+                FormatConfig::brawl(),
+            ),
+            (
+                with_damage_threshold(FormatConfig::historic_brawl()),
+                FormatConfig::historic_brawl(),
+            ),
+            (legacy_custom, custom),
+            (with_damage_threshold(FormatConfig::commander()), commander),
+        ]
+    }
+
+    #[test]
+    fn public_initializer_starts_a_legacy_config_under_current_rules() {
+        for (persisted, expected) in legacy_config_rows() {
+            let label = expected.format;
+            clear_game_state();
+            initialize_game_inner(
+                None,
+                42,
+                Some(Ok(persisted)),
+                MatchConfig::default(),
+                2,
+                Some(0),
+                InitSessionKind::Local,
+            )
+            .unwrap_or_else(|error| panic!("{label:?}: {error}"));
+            let installed = with_installed_state(|state| state.format_config.clone())
+                .unwrap_or_else(|error| panic!("{label:?}: {error}"));
+            let recorded = REPLAY_LOG.with(|cell| {
+                let log = cell.take();
+                let recorded = log.as_ref().map(|log| log.header.format_config.clone());
+                cell.set(log);
+                recorded
+            });
+            assert_eq!(installed, expected, "{label:?}");
+            assert_eq!(recorded, Some(expected), "{label:?}");
+        }
+        clear_game_state();
+    }
+
+    #[test]
+    fn persisted_seat_state_decodes_a_legacy_format_under_current_rules() {
+        for (persisted, expected) in legacy_config_rows() {
+            let label = expected.format;
+            let mut seat_state = serde_json::to_value(SeatState {
+                seats: vec![SeatKind::HostHuman, SeatKind::WaitingHuman],
+                tokens: vec!["host-token".to_string(), String::new()],
+                format: FormatConfig::standard(),
+                game_started: false,
+            })
+            .expect("seat state serializes");
+            seat_state["format"] = persisted;
+            let decoded = decode_persisted_seat_state(&seat_state.to_string())
+                .unwrap_or_else(|error| panic!("{label:?}: {error}"));
+            assert_eq!(decoded.format, expected, "{label:?}");
+        }
+    }
+
+    #[test]
+    fn direct_format_config_decode_still_rejects_a_brawl_damage_threshold() {
+        assert!(
+            serde_json::from_value::<FormatConfig>(with_damage_threshold(FormatConfig::brawl()))
+                .is_err()
         );
     }
 
@@ -2057,30 +2176,59 @@ fn initialize_game_impl(
     first_player: Option<u8>,
     kind: InitSessionKind,
 ) -> JsValue {
-    let seed = seed.map(|s| s as u64).unwrap_or(42);
-
-    // Resolved before the format config: an undeclared config's default must
-    // be chosen FOR this seat count (see
-    // `resolve_and_validate_initialize_format_config`), so `count` has to be
-    // known first.
-    let count = player_count.unwrap_or(2);
-
-    let decoded_format_config = if !format_config_js.is_null() && !format_config_js.is_undefined() {
-        match parse_initialize_format_config(
-            serde_wasm_bindgen::from_value::<FormatConfig>(format_config_js)
-                .map_err(|error| error.to_string()),
-        ) {
-            Ok(config) => Some(config),
-            Err(error) => return to_js(&error),
-        }
+    let deck_data = (!deck_data.is_null() && !deck_data.is_undefined()).then(|| {
+        serde_wasm_bindgen::from_value::<DeckList>(deck_data).map_err(|error| error.to_string())
+    });
+    let format_config =
+        (!format_config_js.is_null() && !format_config_js.is_undefined()).then(|| {
+            serde_wasm_bindgen::from_value::<serde_json::Value>(format_config_js)
+                .map_err(|error| error.to_string())
+        });
+    let match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
+        serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
+            .unwrap_or_else(|_| MatchConfig::default())
     } else {
-        None
+        MatchConfig::default()
+    };
+    match initialize_game_inner(
+        deck_data,
+        seed.map(|s| s as u64).unwrap_or(42),
+        format_config,
+        match_config,
+        player_count.unwrap_or(2),
+        first_player,
+        kind,
+    ) {
+        Ok(result) => to_js(&result),
+        Err(error) => to_js(&error),
+    }
+}
+
+/// Natively callable body of `initialize_game_impl`, after the
+/// `restore_game_state_inner` precedent.
+fn initialize_game_inner(
+    deck_data: Option<Result<DeckList, String>>,
+    seed: u64,
+    format_config: Option<Result<serde_json::Value, String>>,
+    match_config: MatchConfig,
+    count: u8,
+    first_player: Option<u8>,
+    kind: InitSessionKind,
+) -> Result<ActionResult, serde_json::Value> {
+    // `count` is resolved before the format config: an undeclared config's
+    // default must be chosen FOR this seat count (see
+    // `resolve_and_validate_initialize_format_config`).
+    let decoded_format_config = match format_config {
+        Some(config) => Some(parse_initialize_format_config(
+            config.and_then(decode_initialize_format_config),
+        )?),
+        None => None,
     };
     let format_config =
         match resolve_and_validate_initialize_format_config(decoded_format_config, count) {
             Ok(config) => config,
             Err(reason) => {
-                return to_js(&serde_json::json!({
+                return Err(serde_json::json!({
                     "error": true,
                     "reasons": [reason],
                 }));
@@ -2093,12 +2241,6 @@ fn initialize_game_impl(
     // thread-local is still clear here and a host game would otherwise be given
     // local debug permissions.
     initialize_debug_permissions(&mut state, kind == InitSessionKind::MultiplayerHost);
-    let match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
-        serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
-            .unwrap_or_else(|_| MatchConfig::default())
-    } else {
-        MatchConfig::default()
-    };
     // CR 732.2a: project the immutable match config (incl. the combo-detector opt-in)
     // onto the runtime `loop_detection` gate via the single engine authority shared
     // with the server path. The detector is player-count-agnostic, so it carries
@@ -2121,11 +2263,11 @@ fn initialize_game_impl(
     // (wasm-adapter.ts:701) already throws on `{ error: true, reasons }`, so
     // returning that envelope here gives the user a real failure message
     // instead of a silently-broken match.
-    if !deck_data.is_null() && !deck_data.is_undefined() {
-        let deck_list = match serde_wasm_bindgen::from_value::<DeckList>(deck_data) {
+    if let Some(deck_data) = deck_data {
+        let deck_list = match deck_data {
             Ok(d) => d,
             Err(e) => {
-                return to_js(&serde_json::json!({
+                return Err(serde_json::json!({
                     "error": true,
                     "reasons": [format!("Deck payload deserialization failed: {e}")],
                 }));
@@ -2134,7 +2276,7 @@ fn initialize_game_impl(
         // Resource bound on every seat's printings sidecar (the decoder has already
         // refused more than the entry cap): refused before the list is recorded.
         if let Some(reasons) = deck_list_printings_violations(&deck_list) {
-            return to_js(&serde_json::json!({
+            return Err(serde_json::json!({
                 "error": true,
                 "reasons": reasons,
             }));
@@ -2143,7 +2285,7 @@ fn initialize_game_impl(
 
         let card_db_missing = CARD_DB.with(|cell| cell.borrow().is_none());
         if card_db_missing {
-            return to_js(&serde_json::json!({
+            return Err(serde_json::json!({
                 "error": true,
                 "reasons": [
                     "Card database not loaded in engine worker. \
@@ -2186,7 +2328,7 @@ fn initialize_game_impl(
         });
 
         if let Some(reasons) = validation_error {
-            return to_js(&serde_json::json!({
+            return Err(serde_json::json!({
                 "error": true,
                 "reasons": reasons,
             }));
@@ -2214,7 +2356,7 @@ fn initialize_game_impl(
                     .map(|e| vec![e.to_string()])
             });
             if let Some(reasons) = cedh_error {
-                return to_js(&serde_json::json!({
+                return Err(serde_json::json!({
                     "error": true,
                     "cedh_bracket_violation": true,
                     "reasons": reasons,
@@ -2236,7 +2378,7 @@ fn initialize_game_impl(
             .map(|seat| seat.0)
             .collect();
         if !empty_seats.is_empty() {
-            return to_js(&serde_json::json!({
+            return Err(serde_json::json!({
                 "error": true,
                 "reasons": [format!(
                     "Empty library after deck load for seat(s): {empty_seats:?}. \
@@ -2281,7 +2423,7 @@ fn initialize_game_impl(
     invalidate_ai_proposals();
     reset_hand_disclosure();
 
-    to_js(&result)
+    Ok(result)
 }
 
 /// Submit a game action on behalf of `actor` and return the ActionResult
@@ -6602,7 +6744,7 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
         }
     }
 
-    let mut state: SeatState = serde_json::from_str(state_json)
+    let mut state = decode_persisted_seat_state(state_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid SeatState: {e}")))?;
     let mutation: SeatMutation = serde_json::from_str(mutation_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid SeatMutation: {e}")))?;
@@ -6629,7 +6771,7 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
 /// need to understand format topology details.
 #[wasm_bindgen]
 pub fn project_seat_view(state_json: &str) -> Result<JsValue, JsValue> {
-    let state: SeatState = serde_json::from_str(state_json)
+    let state = decode_persisted_seat_state(state_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid SeatState: {e}")))?;
     Ok(to_js(&state.to_view()))
 }
