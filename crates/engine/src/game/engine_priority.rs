@@ -331,7 +331,7 @@ fn run_post_action_pipeline_core(
     // parked trigger drains.
     if !skip_trigger_scan || state.pending_resolution_completion.is_some() {
         // CR 904.9 + CR 603.1: resolve "as you set this scheme in motion"
-        // choices before anything collects. An "as" choice is part of the
+        // choices from the raw scheme events. An "as" choice is part of the
         // turn-based action, not a trigger: offering it here (rather than
         // inside `finish_enter_phase`, whose prompt would not survive the
         // pass pipeline's `sync_waiting_for`) reads the raw events. The
