@@ -11,18 +11,22 @@
 //! Temporal Distortion's bare-plural population ("permanents that player
 //! controls") is covered in `controller_anaphor_binds_through_context.rs`.
 
+use engine::database::mtgjson::AtomicCard;
+use engine::database::synthesis::build_oracle_face;
 use engine::game::coverage::card_face_gaps;
 use engine::game::game_object::{PhaseOutCause, PhaseStatus};
+use engine::game::log::resolve_log_entries;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
-use engine::types::ability::CounterTriggerFilter;
+use engine::types::ability::{AbilityKind, CounterTriggerFilter, Effect, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
+use engine::types::log::{GameLogEntry, LogSegment};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::triggers::TriggerMode;
@@ -504,22 +508,28 @@ fn creature_face(name: &str, text: &str, keywords: &[&str], subtypes: &[&str]) -
     }
 }
 
-/// CR 603.2c: Protean Hydra's "Whenever a +1/+1 counter is removed" must fire
-/// once per counter, and its own prevention clause removes several at once;
-/// the engine's removal event is aggregate, so the trigger is an honest
-/// unknown trigger and coverage does not claim it. Aeon Chronicler's
-/// time-counter trigger, the same passive head with the kind the suspend
-/// upkeep removes one at a time, stays modelled with no trigger gap.
+/// CR 122.1 + CR 603.2c: Protean Hydra's "Whenever a +1/+1 counter is
+/// removed from this creature" is a live self-bound `CounterRemoved` trigger
+/// with a typed +1/+1 filter, so it is not a trigger gap. It fires once per
+/// removal event; a single event carrying N +1/+1 counters under-fires (the
+/// 2009-10-01 ruling wants N), tracked in #10901 and kept visible by the
+/// export-time `wrong_count` confirmed-misparse row, which this parse-only
+/// face does not apply. Aeon Chronicler's time-counter trigger, the same
+/// passive head, is the positive control.
 #[test]
-fn protean_hydra_trigger_is_not_claimed() {
+fn protean_hydra_trigger_is_a_typed_counter_removed() {
     let hydra = creature_face("Protean Hydra", PROTEAN_HYDRA, &[], &["Hydra"]);
     let [trigger] = hydra.triggers.as_slice() else {
         panic!("expected one trigger, got {:?}", hydra.triggers);
     };
-    assert!(
-        matches!(trigger.mode, TriggerMode::Unknown(_)),
-        "{:?}",
-        trigger.mode
+    assert_eq!(trigger.mode, TriggerMode::CounterRemoved);
+    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        trigger.counter_filter,
+        Some(CounterTriggerFilter {
+            counter_type: CounterType::Plus1Plus1,
+            threshold: None,
+        })
     );
     assert!(
         !hydra.replacements.is_empty(),
@@ -527,8 +537,8 @@ fn protean_hydra_trigger_is_not_claimed() {
     );
     let gaps = card_face_gaps(&hydra);
     assert!(
-        gaps.iter().any(|gap| gap.starts_with("Trigger:")),
-        "the refused trigger is a coverage gap: {gaps:?}"
+        !gaps.iter().any(|gap| gap.starts_with("Trigger:")),
+        "the typed trigger is not a coverage gap: {gaps:?}"
     );
 
     // Positive reach guard: the same head with the time kind is modelled.
@@ -554,6 +564,415 @@ fn protean_hydra_trigger_is_not_claimed() {
     assert!(
         !gaps.iter().any(|gap| gap.starts_with("Trigger:")),
         "the time-counter trigger is not a gap: {gaps:?}"
+    );
+}
+
+const GLORIOUS_ANTHEM: &str = "Creatures you control get +1/+1.";
+const BOON_OF_SAFETY: &str = "Put a shield counter on target creature. (If it would be dealt damage or destroyed, remove a shield counter from it instead.)\nScry 1.";
+const VAMPIRE_HEXMAGE: &str =
+    "First strike\nSacrifice this creature: Remove all counters from target permanent.";
+
+/// The `n`th activated ability (printed order) of `source`.
+fn activated_index(runner: &GameRunner, source: ObjectId, n: usize) -> usize {
+    runner.state().objects[&source]
+        .abilities
+        .iter()
+        .enumerate()
+        .filter(|(_, ability)| matches!(ability.kind, AbilityKind::Activated))
+        .map(|(index, _)| index)
+        .nth(n)
+        .unwrap_or_else(|| panic!("source must expose activated ability #{n}"))
+}
+
+/// Delayed triggers sourced by `source`.
+fn delayed_from(runner: &GameRunner, source: ObjectId) -> usize {
+    runner
+        .state()
+        .delayed_triggers
+        .iter()
+        .filter(|delayed| delayed.source_id == source)
+        .count()
+}
+
+/// Whether `id` is still on the battlefield.
+fn on_battlefield(runner: &GameRunner, id: ObjectId) -> bool {
+    runner
+        .state()
+        .objects
+        .get(&id)
+        .is_some_and(|obj| obj.zone == Zone::Battlefield)
+}
+
+/// Drives the current turn from its main phase to its end step: declines to
+/// attack, passes priority, and orders simultaneously fired triggers (CR
+/// 603.3b). Stops once the end step's stack is empty with no delayed trigger
+/// still waiting, or at cleanup, whatever the counters on the board.
+fn drive_to_settled_end_step(runner: &mut GameRunner) {
+    for _ in 0..80 {
+        let state = runner.state();
+        let settled_end_step = state.phase == Phase::End
+            && state.stack.is_empty()
+            && state.delayed_triggers.is_empty()
+            && matches!(state.waiting_for, WaitingFor::Priority { .. });
+        if settled_end_step || state.phase == Phase::Cleanup {
+            break;
+        }
+        match state.waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    })
+                    .expect("declare no attackers");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order triggers");
+            }
+            other => panic!("unexpected prompt before the end step: {other:?}"),
+        }
+    }
+    let state = runner.state();
+    assert!(
+        matches!(state.phase, Phase::End | Phase::Cleanup),
+        "the drive must reach the end step; phase={:?}",
+        state.phase
+    );
+}
+
+/// Protean Hydra (printed 0/0) with `plus1` +1/+1 counters, kept alive by
+/// Glorious Anthem, given `shields` shield counters by real Boon of Safety
+/// casts paid with real {W}; then Vampire Hexmage's "Sacrifice this creature:
+/// Remove all counters from target permanent." is activated on it through the
+/// production activation path. Returns the runner (with the Hydra's triggers
+/// resolved), the Hydra and the removal events of the Hexmage resolution.
+///
+/// Scaffolding (not under test): the +1/+1 counters stand in for casting the
+/// Hydra with X = `plus1`.
+fn hydra_under_hexmage(
+    plus1: u32,
+    shields: u32,
+) -> (GameRunner, ObjectId, Vec<(ObjectId, CounterType, u32)>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let hydra = scenario
+        .add_creature_from_oracle(P0, "Protean Hydra", 0, 0, PROTEAN_HYDRA)
+        .id();
+    if plus1 > 0 {
+        scenario.with_counter(hydra, CounterType::Plus1Plus1, plus1);
+    }
+    scenario.add_enchantment_from_oracle(P0, "Glorious Anthem", GLORIOUS_ANTHEM);
+    let hexmage = scenario
+        .add_creature_from_oracle(P0, "Vampire Hexmage", 2, 1, VAMPIRE_HEXMAGE)
+        .id();
+    let boons: Vec<ObjectId> = (0..shields)
+        .map(|_| {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, "Boon of Safety", true, BOON_OF_SAFETY)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 0,
+                })
+                .id()
+        })
+        .collect();
+    scenario.with_mana_pool(
+        P0,
+        (0..shields)
+            .map(|_| ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+
+    for boon in boons {
+        runner.cast(boon).target_object(hydra).resolve();
+    }
+    // Reach guards: both kinds are on the living Hydra before the removal.
+    assert_eq!(count_of(&runner, hydra, &CounterType::Plus1Plus1), plus1);
+    assert_eq!(count_of(&runner, hydra, &CounterType::Shield), shields);
+    assert!(on_battlefield(&runner, hydra));
+
+    let ability = activated_index(&runner, hexmage, 0);
+    let outcome = runner
+        .activate(hexmage, ability)
+        .target_object(hydra)
+        .resolve();
+    let removed = removals(outcome.events());
+    runner.advance_until_stack_empty();
+    assert_eq!(count_of(&runner, hydra, &CounterType::Plus1Plus1), 0);
+    assert_eq!(count_of(&runner, hydra, &CounterType::Shield), 0);
+    assert!(
+        on_battlefield(&runner, hydra),
+        "Glorious Anthem keeps the 0/0 Hydra alive as a 1/1"
+    );
+    (runner, hydra, removed)
+}
+
+/// F1 (review of f1cf70cf3): the printed play sequence. Vampire Hexmage
+/// removes Protean Hydra's only +1/+1 counter; the Hydra's "Whenever a +1/+1
+/// counter is removed from this creature, put two +1/+1 counters on it at the
+/// beginning of the next end step." fires once (CR 603.2c: one event, one
+/// counter), creating one delayed trigger (CR 603.7) that puts two +1/+1
+/// counters on it at the next end step.
+#[test]
+fn hexmage_removing_hydras_only_counter_schedules_two_counters_at_next_end_step() {
+    let (mut runner, hydra, removed) = hydra_under_hexmage(1, 0);
+    assert_eq!(removed, vec![(hydra, CounterType::Plus1Plus1, 1)]);
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "one Hydra firing for the one +1/+1 counter removed"
+    );
+    assert_eq!(delayed_from(&runner, hydra), 1);
+
+    drive_to_settled_end_step(&mut runner);
+    assert_eq!(runner.state().phase, Phase::End);
+    assert_eq!(
+        count_of(&runner, hydra, &CounterType::Plus1Plus1),
+        2,
+        "the delayed trigger puts two +1/+1 counters on the Hydra"
+    );
+}
+
+/// F1 (CR 122.1): the typed +1/+1 filter means a shield removal never fires
+/// Protean Hydra's trigger.
+#[test]
+fn hexmage_removing_only_a_shield_never_triggers_protean_hydra() {
+    let (mut runner, hydra, removed) = hydra_under_hexmage(0, 1);
+    // Reach guard: the shield removal happened on the living Hydra.
+    assert_eq!(removed, vec![(hydra, CounterType::Shield, 1)]);
+    assert!(runner.state().delayed_triggers.is_empty());
+
+    drive_to_settled_end_step(&mut runner);
+    assert_eq!(runner.state().phase, Phase::End);
+    assert_eq!(count_of(&runner, hydra, &CounterType::Plus1Plus1), 0);
+}
+
+/// F1 (CR 122.1 + CR 603.2c): one +1/+1 counter and one shield counter removed
+/// together fire the Hydra once, for the +1/+1 event only; the co-removed
+/// shield fires nothing, so the next end step restores two counters, not four.
+#[test]
+fn hexmage_removing_plus_one_and_shield_fires_once_for_the_plus_one_only() {
+    let (mut runner, hydra, removed) = hydra_under_hexmage(1, 1);
+    assert!(
+        removed.contains(&(hydra, CounterType::Plus1Plus1, 1)),
+        "{removed:?}"
+    );
+    assert!(
+        removed.contains(&(hydra, CounterType::Shield, 1)),
+        "{removed:?}"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "the shield removal does not fire the +1/+1 trigger"
+    );
+
+    drive_to_settled_end_step(&mut runner);
+    assert_eq!(count_of(&runner, hydra, &CounterType::Plus1Plus1), 2);
+}
+
+/// A card face built by the production card-data face builder (parse plus
+/// keyword synthesis) from the card's MTGJSON `AtomicCards` record.
+fn printed_face(record: serde_json::Value) -> CardFace {
+    let card: AtomicCard = serde_json::from_value(record).expect("MTGJSON AtomicCard record");
+    build_oracle_face(&card, None)
+}
+
+/// MTGJSON 5.3.0+20261101 `AtomicCards` records (the fields the face builder
+/// reads), verbatim.
+fn chandra_fire_artisan() -> serde_json::Value {
+    serde_json::json!({
+        "name": "Chandra, Fire Artisan", "manaCost": "{2}{R}{R}",
+        "type": "Legendary Planeswalker \u{2014} Chandra", "types": ["Planeswalker"],
+        "subtypes": ["Chandra"], "supertypes": ["Legendary"], "loyalty": "4",
+        "colors": ["R"], "colorIdentity": ["R"], "manaValue": 4.0, "layout": "normal",
+        "identifiers": {},
+        "text": "Whenever one or more loyalty counters are removed from Chandra, she deals that much damage to target opponent or planeswalker.\n[+1]: Exile the top card of your library. You may play it this turn.\n[\u{2212}7]: Exile the top seven cards of your library. You may play them this turn."
+    })
+}
+
+fn cloudsculpt_armorer() -> serde_json::Value {
+    serde_json::json!({
+        "name": "Cloudsculpt Armorer", "manaCost": "{3}{U}",
+        "type": "Creature \u{2014} Jellyfish Artificer", "types": ["Creature"],
+        "subtypes": ["Jellyfish", "Artificer"], "supertypes": [], "keywords": ["Seek"],
+        "power": "3", "toughness": "3",
+        "colors": ["U"], "colorIdentity": ["U"], "manaValue": 4.0, "layout": "normal",
+        "identifiers": {},
+        "text": "When this creature enters, put a shield counter on target artifact or creature.\nWhenever one or more counters are removed from a permanent you control, seek a nonland card."
+    })
+}
+
+fn regenerations_restored() -> serde_json::Value {
+    serde_json::json!({
+        "name": "Regenerations Restored", "manaCost": "{W}{U}",
+        "type": "Enchantment", "types": ["Enchantment"],
+        "subtypes": [], "supertypes": [], "keywords": ["Scry", "Vanishing"],
+        "colors": ["U", "W"], "colorIdentity": ["U", "W"], "manaValue": 2.0, "layout": "normal",
+        "identifiers": {},
+        "text": "Vanishing 12 (This enchantment enters with twelve time counters on it. At the beginning of your upkeep, remove a time counter from it. When the last is removed, sacrifice it.)\nWhenever one or more time counters are removed from this enchantment, scry 1 and you gain 1 life. Then if this enchantment has no time counters on it, exile it. When you do, take an extra turn after this one."
+    })
+}
+
+fn orcish_mine() -> serde_json::Value {
+    serde_json::json!({
+        "name": "Orcish Mine", "manaCost": "{1}{R}{R}",
+        "type": "Enchantment \u{2014} Aura", "types": ["Enchantment"],
+        "subtypes": ["Aura"], "supertypes": [], "keywords": ["Enchant"],
+        "colors": ["R"], "colorIdentity": ["R"], "manaValue": 3.0, "layout": "normal",
+        "identifiers": {},
+        "text": "Enchant land\nThis Aura enters with three ore counters on it.\nAt the beginning of your upkeep and whenever enchanted land becomes tapped, remove an ore counter from this Aura.\nWhen the last ore counter is removed from this Aura, destroy enchanted land and this Aura deals 2 damage to that land's controller."
+    })
+}
+
+fn search_for_tomorrow() -> serde_json::Value {
+    serde_json::json!({
+        "name": "Search for Tomorrow", "manaCost": "{2}{G}",
+        "type": "Sorcery", "types": ["Sorcery"],
+        "subtypes": [], "supertypes": [], "keywords": ["Suspend"],
+        "colors": ["G"], "colorIdentity": ["G"], "manaValue": 3.0, "layout": "normal",
+        "identifiers": {},
+        "text": "Search your library for a basic land card, put it onto the battlefield, then shuffle.\nSuspend 2\u{2014}{G} (Rather than cast this card from your hand, you may pay {G} and exile it with two time counters on it. At the beginning of your upkeep, remove a time counter. When the last is removed, you may cast it without paying its mana cost.)"
+    })
+}
+
+/// F3 (review of f1cf70cf3; CR 603.2c): the four printed batched ("one or
+/// more counters are removed") and last-counter clauses are not modelled. Each
+/// lowers to an honest `TriggerMode::Unknown` with the exact printed payload,
+/// and that trigger is the card face's only coverage gap, so the card stays
+/// unsupported. A changed mode, a changed label or a missing definition fails.
+#[test]
+fn batched_and_last_counter_clauses_are_unsupported_with_exact_gaps() {
+    for (record, payload) in [
+        (
+            chandra_fire_artisan(),
+            "Whenever one or more loyalty counters are removed from ~",
+        ),
+        (
+            cloudsculpt_armorer(),
+            "Whenever one or more counters are removed from a permanent you control",
+        ),
+        (
+            regenerations_restored(),
+            "Whenever one or more time counters are removed from ~",
+        ),
+        (orcish_mine(), "When the last ore counter is removed from ~"),
+    ] {
+        let face = printed_face(record);
+        let name = face.name.clone();
+        let unknown = TriggerMode::Unknown(payload.to_string());
+        assert_eq!(
+            face.triggers.iter().filter(|t| t.mode == unknown).count(),
+            1,
+            "{name}: {:?}",
+            face.triggers
+        );
+        assert!(
+            !face
+                .triggers
+                .iter()
+                .any(|t| matches!(t.mode, TriggerMode::Unknown(_)) && t.mode != unknown),
+            "{name}: no other unknown trigger: {:?}",
+            face.triggers
+        );
+        assert_eq!(
+            card_face_gaps(&face),
+            vec![format!("Trigger:{payload}")],
+            "{name}"
+        );
+    }
+
+    // Regenerations Restored's supported neighbours: the Vanishing upkeep
+    // removal and its last-counter sacrifice (CR 702.63a) are both present.
+    let restored = printed_face(regenerations_restored());
+    assert!(
+        restored
+            .triggers
+            .iter()
+            .any(|t| t.mode == TriggerMode::Phase),
+        "{:?}",
+        restored.triggers
+    );
+    assert!(
+        restored
+            .triggers
+            .iter()
+            .any(|t| t.mode == TriggerMode::CounterRemoved
+                && t.counter_filter
+                    == Some(CounterTriggerFilter {
+                        counter_type: CounterType::Time,
+                        threshold: Some(0),
+                    })),
+        "{:?}",
+        restored.triggers
+    );
+
+    // Positive reach guard: the same builder lowers the singular passive
+    // time-kind head to a live trigger with no trigger gap.
+    let chronicler = creature_face(
+        "Aeon Chronicler",
+        AEON_CHRONICLER,
+        &["Suspend"],
+        &["Avatar"],
+    );
+    assert!(chronicler
+        .triggers
+        .iter()
+        .any(|t| t.mode == TriggerMode::CounterRemoved));
+    assert!(!card_face_gaps(&chronicler)
+        .iter()
+        .any(|gap| gap.starts_with("Trigger:")));
+}
+
+/// F3 supported threshold control (CR 702.62a: "When the last is removed, you
+/// may cast it without paying its mana cost"): Search for Tomorrow's
+/// synthesized last-counter trigger is a live `CounterRemoved` with
+/// `threshold: Some(0)` from exile, and the card has no coverage gap. Its
+/// runtime liveness is `issue_3271_search_for_tomorrow_suspend::
+/// search_for_tomorrow_last_counter_accept_casts_onto_stack`.
+#[test]
+fn search_for_tomorrow_threshold_trigger_is_supported() {
+    let face = printed_face(search_for_tomorrow());
+    let removed: Vec<_> = face
+        .triggers
+        .iter()
+        .filter(|t| t.mode == TriggerMode::CounterRemoved)
+        .collect();
+    let [last] = removed.as_slice() else {
+        panic!("expected one CounterRemoved trigger: {:?}", face.triggers);
+    };
+    assert_eq!(
+        last.counter_filter,
+        Some(CounterTriggerFilter {
+            counter_type: CounterType::Time,
+            threshold: Some(0),
+        })
+    );
+    assert_eq!(last.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(last.trigger_zones, vec![Zone::Exile]);
+    assert!(
+        matches!(
+            last.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::CastFromZone {
+                without_paying_mana_cost: true,
+                ..
+            })
+        ),
+        "{:?}",
+        last.execute
+    );
+    assert!(
+        card_face_gaps(&face).is_empty(),
+        "{:?}",
+        card_face_gaps(&face)
     );
 }
 
@@ -600,9 +1019,16 @@ fn cornucopia_board(cornucopias: usize) -> (GameRunner, ObjectId, Vec<ObjectId>,
 }
 
 /// CR 701.10e: each Vorel activation gives the target as many of each kind of
-/// counter as it already has. Asserts the exact count after every doubling, so
-/// a silently dropped addition is caught at the step where it happens.
-fn double_with_vorel(runner: &mut GameRunner, vorel: ObjectId, target: ObjectId, doublings: u32) {
+/// counter as it already has. Asserts the exact `kind` count after every
+/// doubling (starting from one counter), so a silently dropped addition is
+/// caught at the step where it happens.
+fn double_with_vorel(
+    runner: &mut GameRunner,
+    vorel: ObjectId,
+    target: ObjectId,
+    kind: &CounterType,
+    doublings: u32,
+) {
     for k in 1..=doublings {
         {
             let state = runner.state_mut();
@@ -612,24 +1038,64 @@ fn double_with_vorel(runner: &mut GameRunner, vorel: ObjectId, target: ObjectId,
             }
         }
         runner.activate(vorel, 0).target_object(target).resolve();
-        assert_eq!(
-            count_of(runner, target, &charge()),
-            1 << k,
-            "after doubling {k}"
-        );
+        assert_eq!(count_of(runner, target, kind), 1 << k, "after doubling {k}");
     }
+}
+
+/// Each log entry's object ids and its segments flattened to plain text.
+fn log_text(entries: &[GameLogEntry]) -> Vec<(Vec<ObjectId>, String)> {
+    entries
+        .iter()
+        .map(|entry| {
+            let mut ids = Vec::new();
+            let mut line = String::new();
+            for segment in &entry.segments {
+                match segment {
+                    LogSegment::Text(s) | LogSegment::Keyword(s) | LogSegment::Mana(s) => {
+                        line.push_str(s)
+                    }
+                    LogSegment::Number(n) => line.push_str(&n.to_string()),
+                    LogSegment::CardName { name, object_id } => {
+                        ids.push(*object_id);
+                        line.push_str(name);
+                    }
+                    LogSegment::PlayerName { name, .. } => line.push_str(name),
+                    LogSegment::Zone(zone) => line.push_str(&format!("{zone:?}")),
+                }
+            }
+            (ids, line)
+        })
+        .collect()
+}
+
+/// The one log line removing `kind` counters (its display word) from `id`.
+fn removal_line<'a>(lines: &'a [(Vec<ObjectId>, String)], id: ObjectId, kind: &str) -> &'a str {
+    let matching: Vec<&str> = lines
+        .iter()
+        .filter(|(ids, line)| {
+            ids.contains(&id)
+                && line.contains(&format!(" {kind} counter"))
+                && line.contains(" removed from ")
+        })
+        .map(|(_, line)| line.as_str())
+        .collect();
+    let [line] = matching.as_slice() else {
+        panic!("expected one {kind} counter-removal line for {id:?}: {lines:?}");
+    };
+    line
 }
 
 /// F2 witness (PR #10814): two Astral Cornucopias doubled to 2^31 charge
 /// counters each by 31 real Vorel activations apiece, then Aether Snap. The
 /// removal total (2^32) does not fit `u32` and the counters removed this way
 /// do not fit `i32`; neither aggregate may wrap or panic. Both Cornucopias end
-/// with no counters and each removal event carries its true count.
+/// with no counters, each removal event carries its true count, and the game
+/// log (review of f1cf70cf3, F2) shows that true count, 2147483648, for each.
 #[test]
 fn aether_snap_clears_two_cornucopias_at_two_to_the_thirty_one() {
     let (mut runner, vorel, relics, snap) = cornucopia_board(2);
     for relic in &relics {
-        double_with_vorel(&mut runner, vorel, *relic, 31);
+        double_with_vorel(&mut runner, vorel, *relic, &charge(), 31);
     }
     for relic in &relics {
         assert_eq!(count_of(&runner, *relic, &charge()), 2_147_483_648);
@@ -652,13 +1118,25 @@ fn aether_snap_clears_two_cornucopias_at_two_to_the_thirty_one() {
     for relic in &relics {
         assert_eq!(count_of(&runner, *relic, &charge()), 0);
     }
+
+    // Production log path: each relic's removal line shows the exact count.
+    let lines = log_text(&resolve_log_entries(
+        outcome.events(),
+        runner.state(),
+        runner.state(),
+    ));
+    for relic in &relics {
+        let line = removal_line(&lines, *relic, "charge");
+        assert!(line.contains("2147483648"), "{line}");
+        assert!(!line.contains("2147483647"), "{line}");
+    }
 }
 
 /// Control for the witness: one Cornucopia at 2^31 fits every aggregate.
 #[test]
 fn aether_snap_clears_one_cornucopia_at_two_to_the_thirty_one() {
     let (mut runner, vorel, relics, snap) = cornucopia_board(1);
-    double_with_vorel(&mut runner, vorel, relics[0], 31);
+    double_with_vorel(&mut runner, vorel, relics[0], &charge(), 31);
 
     let outcome = runner.cast(snap).resolve();
     assert!(matches!(
@@ -670,6 +1148,99 @@ fn aether_snap_clears_one_cornucopia_at_two_to_the_thirty_one() {
         vec![(relics[0], charge(), 1u32 << 31)]
     );
     assert_eq!(count_of(&runner, relics[0], &charge()), 0);
+    let lines = log_text(&resolve_log_entries(
+        outcome.events(),
+        runner.state(),
+        runner.state(),
+    ));
+    let line = removal_line(&lines, relics[0], "charge");
+    assert!(line.contains("2147483648"), "{line}");
+}
+
+/// Protean Hydra (printed 0/0) with one +1/+1 counter, Glorious Anthem,
+/// Vorel of the Hull Clade, and Aether Snap in hand at {0}.
+///
+/// Scaffolding (not under test): the one +1/+1 counter stands in for casting
+/// the Hydra with X = 1.
+fn hydra_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let vorel = scenario
+        .add_creature_from_oracle(P0, "Vorel of the Hull Clade", 1, 4, VOREL_OF_THE_HULL_CLADE)
+        .id();
+    let hydra = scenario
+        .add_creature_from_oracle(P0, "Protean Hydra", 0, 0, PROTEAN_HYDRA)
+        .id();
+    scenario.with_counter(hydra, CounterType::Plus1Plus1, 1);
+    scenario.add_enchantment_from_oracle(P0, "Glorious Anthem", GLORIOUS_ANTHEM);
+    let snap = scenario
+        .add_spell_to_hand_from_oracle(P0, "Aether Snap", false, AETHER_SNAP)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    (scenario.build(), vorel, hydra, snap)
+}
+
+/// F1 (review of f1cf70cf3): a large aggregate removal never materializes an
+/// unbounded batch ahead of the shared firing and stack boundary. 31 real
+/// Vorel activations give Protean Hydra 2^31 +1/+1 counters; Aether Snap
+/// removes them in one event, and the Hydra's trigger materializes at most one
+/// firing per removal event.
+///
+/// This bound is the maintainer's no-unbounded-batch contract, NOT the CR
+/// count. CR 603.2c and the 2009-10-01 Protean Hydra ruling ("If multiple
+/// +1/+1 counters are removed from Protean Hydra at once, its last ability
+/// will trigger that many times.") want 2^31 firings for this removal; the
+/// engine fires once per removal event, as at base and as for the
+/// time-counter producers; tracked in #10901 (a fix there changes the final
+/// relation below). The test asserts "bounded by the number of removal
+/// events", never "exactly once is correct".
+#[test]
+fn aether_snap_clears_hydra_at_two_to_the_thirty_one_with_a_bounded_firing() {
+    let (mut runner, vorel, hydra, snap) = hydra_board();
+    double_with_vorel(&mut runner, vorel, hydra, &CounterType::Plus1Plus1, 31);
+    assert_eq!(
+        count_of(&runner, hydra, &CounterType::Plus1Plus1),
+        2_147_483_648
+    );
+
+    let outcome = runner.cast(snap).resolve();
+    let removed = removals(outcome.events());
+    assert_eq!(
+        removed
+            .iter()
+            .filter(|entry| **entry == (hydra, CounterType::Plus1Plus1, 1u32 << 31))
+            .count(),
+        1,
+        "one 2^31 removal event, not 2^31 events: {removed:?}"
+    );
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the spell resolves to a priority boundary: {:?}",
+        outcome.final_waiting_for()
+    );
+    assert!(runner.state().stack.is_empty());
+    let plus1_events = removed
+        .iter()
+        .filter(|(id, kind, _)| *id == hydra && *kind == CounterType::Plus1Plus1)
+        .count();
+    let fired = delayed_from(&runner, hydra);
+    assert!(fired >= 1, "the Hydra's trigger is live");
+    assert!(
+        fired <= plus1_events,
+        "at most one firing per removal event: {fired} firings, {plus1_events} events"
+    );
+    assert_eq!(count_of(&runner, hydra, &CounterType::Plus1Plus1), 0);
+    assert!(
+        on_battlefield(&runner, hydra),
+        "Glorious Anthem keeps the 0/0 Hydra alive as a 1/1"
+    );
+
+    drive_to_settled_end_step(&mut runner);
+    assert_eq!(
+        count_of(&runner, hydra, &CounterType::Plus1Plus1),
+        2 * fired as u32,
+        "each firing's delayed trigger puts two +1/+1 counters on the Hydra"
+    );
 }
 
 /// Boundary seed (scaffolding: `u32::MAX` charge counters placed directly):
@@ -700,6 +1271,18 @@ fn aether_snap_clears_a_full_counter_stack_plus_one() {
         vec![(relics[0], ice(), 1), (relics[0], charge(), u32::MAX)]
     );
     assert!(runner.state().objects[&relics[0]].counters.is_empty());
+    let lines = log_text(&resolve_log_entries(
+        outcome.events(),
+        runner.state(),
+        runner.state(),
+    ));
+    let charge_line = removal_line(&lines, relics[0], "charge");
+    assert!(charge_line.contains("4294967295"), "{charge_line}");
+    let ice_line = removal_line(&lines, relics[0], "ice");
+    assert!(
+        ice_line.starts_with("1 ice counter removed from"),
+        "{ice_line}"
+    );
 }
 
 /// `PlayerCounterChanged` deltas for `player`'s `kind`, in emission order.

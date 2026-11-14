@@ -28025,51 +28025,93 @@ fn trigger_passive_time_counter_removed_keeps_typed_filter() {
     }
 }
 
-/// CR 603.2c: a singular "a [kind] counter is removed" trigger fires once per
-/// removed counter, but the engine's removal event is aggregate, so a
-/// non-time kind (Protean Hydra's +1/+1 counter, removed several at once by
-/// its own prevention clause) is refused as `TriggerMode::Unknown` rather than
-/// modelled as `CounterRemoved` firing once per event. The untyped form stays
-/// unparsed, as at base; a multi-word kind, which no printed card uses here
-/// and which base accepted with no filter, is refused too.
+/// CR 122.1 + CR 603.2c: the singular "a [kind] counter is removed from
+/// [subject]" head lowers to a live `CounterRemoved` trigger whose printed
+/// kind is a typed `counter_filter` (a shield removal never fires a +1/+1
+/// trigger). It fires once per removal event; a single event carrying N
+/// counters of the printed kind therefore under-fires (the 2009-10-01
+/// Protean Hydra ruling wants N), the same as the time-counter producers;
+/// tracked in #10901. The untyped form stays unparsed, and a multi-word kind
+/// yields no counter-removal trigger.
 #[test]
-fn trigger_passive_non_time_counter_removed_is_unknown_not_per_event() {
-    // Positive reach guard: the same passive head with the time kind reaches
-    // the arm and is modelled, so the refusals below come from the gate.
+fn trigger_passive_typed_counter_removed_lowers_to_typed_filter() {
+    // Positive reach guard: the time-kind passive head reaches the same arm.
     let chronicler = parse_trigger_line(
         "Whenever a time counter is removed from this card while it's exiled, draw a card.",
         "Aeon Chronicler",
     );
     assert_eq!(chronicler.mode, TriggerMode::CounterRemoved);
 
+    // Protean Hydra, verbatim: a live self-bound typed +1/+1 trigger whose
+    // body sets up a delayed trigger at the next end step.
     let hydra = parse_trigger_line(
         "Whenever a +1/+1 counter is removed from this creature, put two +1/+1 counters on it at the beginning of the next end step.",
         "Protean Hydra",
     );
-    assert!(
-        matches!(hydra.mode, TriggerMode::Unknown(_)),
-        "{:?}",
-        hydra.mode
+    assert_eq!(hydra.mode, TriggerMode::CounterRemoved);
+    assert_eq!(hydra.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        hydra.counter_filter,
+        Some(crate::types::ability::CounterTriggerFilter {
+            counter_type: CounterType::Plus1Plus1,
+            threshold: None,
+        })
     );
-    assert!(hydra.counter_filter.is_none());
+    assert_eq!(hydra.trigger_zones, vec![Zone::Battlefield]);
+    assert!(
+        matches!(
+            hydra.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase {
+                    phase: crate::types::phase::Phase::End
+                },
+                ..
+            })
+        ),
+        "{:?}",
+        hydra.execute
+    );
 
-    // No printed card has a passive typed removal trigger with a shield
-    // counter or a non-self subject, nor an active-voice "you remove a
-    // +1/+1 counter" trigger; the nearest printed card is Protean Hydra.
-    // These rows test the gate across the kind, subject and voice axes.
-    for text in [
+    // Building-block rows across the kind, subject and voice axes. No printed
+    // card has a passive shield-kind removal trigger, a non-self subject on
+    // this head, or an active-voice typed "you remove a +1/+1 counter"
+    // trigger; these test the arms, not a card.
+    let plus1 = Some(crate::types::ability::CounterTriggerFilter {
+        counter_type: CounterType::Plus1Plus1,
+        threshold: None,
+    });
+    let shield = parse_trigger_line(
         "Whenever a shield counter is removed from ~, draw a card.",
+        "Test Removal Card",
+    );
+    assert_eq!(shield.mode, TriggerMode::CounterRemoved);
+    assert_eq!(shield.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        shield.counter_filter,
+        Some(crate::types::ability::CounterTriggerFilter {
+            counter_type: CounterType::Shield,
+            threshold: None,
+        })
+    );
+
+    let subject = parse_trigger_line(
         "Whenever a +1/+1 counter is removed from a creature you control, draw a card.",
+        "Test Removal Card",
+    );
+    assert_eq!(subject.mode, TriggerMode::CounterRemoved);
+    assert_eq!(subject.counter_filter, plus1);
+    let (expected_subject, _) =
+        parse_single_subject("a creature you control", &mut ParseContext::default());
+    assert_eq!(subject.valid_card, Some(expected_subject));
+    assert_ne!(subject.valid_card, Some(TargetFilter::SelfRef));
+
+    let active = parse_trigger_line(
         "Whenever you remove a +1/+1 counter from ~, draw a card.",
-    ] {
-        let def = parse_trigger_line(text, "Test Removal Card");
-        assert!(
-            matches!(def.mode, TriggerMode::Unknown(_)),
-            "{text}: {:?}",
-            def.mode
-        );
-        assert!(def.counter_filter.is_none(), "{text}");
-    }
+        "Test Removal Card",
+    );
+    assert_eq!(active.mode, TriggerMode::CounterRemoved);
+    assert_eq!(active.counter_filter, plus1);
+    assert_eq!(active.valid_card, Some(TargetFilter::SelfRef));
 
     // An untyped removal and a multi-word kind yield no counter-removal
     // trigger.
@@ -28084,39 +28126,84 @@ fn trigger_passive_non_time_counter_removed_is_unknown_not_per_event() {
 
 /// CR 603.2c: the batched "one or more counters are removed" form fires once
 /// per event (Chandra, Fire Artisan ruling 2019-05-03) and the "last counter"
-/// threshold form fires once when the last counter goes. Neither reaches the
-/// singular passive arm or its gate, so neither is claimed as a per-counter
-/// `CounterRemoved` trigger.
+/// threshold form fires once when the last counter goes. Neither is modelled
+/// by the singular passive arm: each of the four printed clauses lowers to
+/// exactly one honest `TriggerMode::Unknown` definition (never fires) with
+/// its printed body. The pin is exact, so a changed mode, filter, subject,
+/// body or a missing definition fails.
 #[test]
 fn trigger_batched_and_threshold_counter_removal_forms_are_unchanged() {
-    // Reach guard: the singular passive arm is live for the time kind.
+    // Reach guards: the singular passive arm is live for the time kind and for
+    // Protean Hydra's +1/+1 kind.
     let chronicler = parse_trigger_line(
         "Whenever a time counter is removed from this card while it's exiled, draw a card.",
         "Aeon Chronicler",
     );
     assert_eq!(chronicler.mode, TriggerMode::CounterRemoved);
+    let hydra = parse_trigger_line(
+        "Whenever a +1/+1 counter is removed from this creature, put two +1/+1 counters on it at the beginning of the next end step.",
+        "Protean Hydra",
+    );
+    assert_eq!(hydra.mode, TriggerMode::CounterRemoved);
 
-    for (name, text) in [
+    let rows: [(&str, &str, &str, fn(&Effect) -> bool); 4] = [
         (
             "Chandra, Fire Artisan",
             "Whenever one or more loyalty counters are removed from Chandra, she deals that much damage to target opponent or planeswalker.",
+            "Whenever one or more loyalty counters are removed from ~",
+            |e| matches!(e, Effect::DealDamage { .. }),
         ),
         (
             "Cloudsculpt Armorer",
             "Whenever one or more counters are removed from a permanent you control, seek a nonland card.",
+            "Whenever one or more counters are removed from a permanent you control",
+            |e| matches!(e, Effect::Seek { .. }),
         ),
         (
             "Regenerations Restored",
             "Whenever one or more time counters are removed from this enchantment, scry 1 and you gain 1 life. Then if this enchantment has no time counters on it, exile it. When you do, take an extra turn after this one.",
+            "Whenever one or more time counters are removed from ~",
+            |e| matches!(e, Effect::Scry { .. }),
         ),
         (
             "Orcish Mine",
             "When the last ore counter is removed from this Aura, destroy enchanted land and this Aura deals 2 damage to that land's controller.",
+            "When the last ore counter is removed from ~",
+            |e| matches!(e, Effect::Destroy { .. }),
         ),
-    ] {
-        let def = parse_trigger_line(text, name);
-        assert_ne!(def.mode, TriggerMode::CounterRemoved, "{name}");
+    ];
+    for (name, text, payload, body) in rows {
+        let defs = parse_trigger_lines(text, name);
+        assert_eq!(defs.len(), 1, "{name}: {defs:?}");
+        let def = &defs[0];
+        assert_eq!(
+            def.mode,
+            TriggerMode::Unknown(payload.to_string()),
+            "{name}"
+        );
+        assert!(def.counter_filter.is_none(), "{name}");
+        assert!(def.valid_card.is_none(), "{name}");
+        assert!(!def.batched, "{name}");
+        let effect = def
+            .execute
+            .as_deref()
+            .map(|a| &*a.effect)
+            .unwrap_or_else(|| panic!("{name}: no execute"));
+        assert!(body(effect), "{name}: {effect:?}");
     }
+
+    // Regenerations Restored's body continues into the life gain.
+    let restored = parse_trigger_line(rows[2].1, rows[2].0);
+    let gain = restored
+        .execute
+        .as_deref()
+        .and_then(|a| a.sub_ability.as_deref())
+        .map(|a| &*a.effect);
+    assert!(
+        matches!(gain, Some(Effect::GainLife { .. })),
+        "{:?}",
+        restored.execute
+    );
 }
 
 #[test]

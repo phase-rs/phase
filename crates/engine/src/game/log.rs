@@ -827,6 +827,18 @@ fn num(n: i32) -> LogSegment {
     LogSegment::Number(n)
 }
 
+/// CR 107.1 + CR 107.1c + CR 122.1: no rule caps a count (game numbers are
+/// integers; a player may have any number of counters on a permanent or
+/// choose any number); the engine stores it as `u32`. A count that fits
+/// `i32` stays a `Number` chip; a larger count is carried exactly as text
+/// rather than saturated or wrapped, so the log never misreports the amount.
+fn exact_u32_segment(n: u32) -> LogSegment {
+    match i32::try_from(n) {
+        Ok(n) => num(n),
+        Err(_) => LogSegment::Text(n.to_string()),
+    }
+}
+
 fn phase_label(phase: Phase) -> &'static str {
     match phase {
         Phase::Untap => "Untap step",
@@ -1393,7 +1405,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 }
                 segments.push(player_seg(state, *player));
                 segments.push(text(" "));
-                segments.push(num(crate::game::arithmetic::u32_to_i32_saturating(*value)));
+                segments.push(exact_u32_segment(*value));
             }
             segments
         }
@@ -1667,9 +1679,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             // not surfaced).
             ..
         } => vec![
-            // CR 122.1: counter counts are `u32`; the log number saturates at
-            // `i32::MAX` (the event keeps the true count).
-            num(crate::game::arithmetic::u32_to_i32_saturating(*count)),
+            exact_u32_segment(*count),
             text(" "),
             LogSegment::Keyword(counter_type.display_phrase().into_owned()),
             text(if *count == 1 {
@@ -1695,7 +1705,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             counter_type,
             count,
         } => vec![
-            num(crate::game::arithmetic::u32_to_i32_saturating(*count)),
+            exact_u32_segment(*count),
             text(" "),
             LogSegment::Keyword(counter_type.display_phrase().into_owned()),
             text(if *count == 1 {
@@ -2156,9 +2166,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" stationed by "),
             card_seg(state, *creature_id),
             text(" (+"),
-            num(crate::game::arithmetic::u32_to_i32_saturating(
-                *counters_added,
-            )),
+            exact_u32_segment(*counters_added),
             text(" charge)"),
         ],
         GameEvent::Saddled {
@@ -4102,20 +4110,31 @@ mod counter_count_log_tests {
         )
     }
 
-    /// CR 122.1: a count above `i32::MAX` logs `i32::MAX`, never a wrapped
-    /// negative number; the event itself keeps the true count.
+    /// CR 107.1 + CR 122.1: a count above `i32::MAX` logs its exact value as
+    /// text, never saturated to `i32::MAX` nor wrapped negative; a count that
+    /// fits `i32` stays a `Number`.
     #[test]
-    fn counter_counts_past_i32_max_log_saturated() {
+    fn counter_counts_past_i32_max_log_exactly() {
         let mut state = GameState::new_two_player(7);
         let id = relic(&mut state);
-        let removed = GameEvent::CounterRemoved {
+        let removed = |count: u32| GameEvent::CounterRemoved {
             object_id: id,
             counter_type: charge(),
-            count: 1 << 31,
+            count,
         };
-        let segments = format_segments(&removed, &state);
-        assert_eq!(segments[0], LogSegment::Number(i32::MAX));
+        let segments = format_segments(&removed(1 << 31), &state);
+        assert_eq!(segments[0], LogSegment::Text("2147483648".into()));
         assert_eq!(segments[3], text(" counters removed from "));
+
+        // Boundary: `i32::MAX` is still a `Number`; one more is exact text.
+        assert_eq!(
+            format_segments(&removed(i32::MAX as u32), &state)[0],
+            LogSegment::Number(i32::MAX)
+        );
+        assert_eq!(
+            format_segments(&removed(i32::MAX as u32 + 1), &state)[0],
+            LogSegment::Text("2147483648".into())
+        );
 
         let added = GameEvent::CounterAdded {
             object_id: id,
@@ -4124,7 +4143,7 @@ mod counter_count_log_tests {
             actor: PlayerId(0),
         };
         let segments = format_segments(&added, &state);
-        assert_eq!(segments[0], LogSegment::Number(i32::MAX));
+        assert_eq!(segments[0], LogSegment::Text("4294967295".into()));
         assert_eq!(segments[3], text(" counters on "));
 
         let stationed = GameEvent::Stationed {
@@ -4133,7 +4152,20 @@ mod counter_count_log_tests {
             counters_added: 1 << 31,
         };
         let segments = format_segments(&stationed, &state);
-        assert_eq!(segments[4], LogSegment::Number(i32::MAX));
+        assert_eq!(segments[4], LogSegment::Text("2147483648".into()));
+    }
+
+    /// CR 107.1c: a revealed "any number" choice above `i32::MAX` logs its
+    /// exact value; a small number in the same reveal stays a `Number`.
+    #[test]
+    fn chosen_numbers_past_i32_max_log_exactly() {
+        let state = GameState::new_two_player(7);
+        let revealed = GameEvent::ChosenNumbersRevealed {
+            numbers: vec![(PlayerId(0), 3_000_000_000), (PlayerId(1), 7)],
+        };
+        let segments = format_segments(&revealed, &state);
+        assert_eq!(segments[3], LogSegment::Text("3000000000".into()));
+        assert_eq!(segments[7], LogSegment::Number(7));
     }
 
     #[test]

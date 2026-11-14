@@ -23039,9 +23039,11 @@ fn parse_counter_type_prefix(prefix: &str) -> Option<CounterTriggerFilter> {
 
 /// CR 122.1: Parse "a [type] counter is removed from [subject]" patterns.
 /// Also handles zone constraints like "while it's exiled" (e.g. suspend cards).
-/// A singular per-counter trigger is modelled only for the time kind; any
-/// other typed kind returns `TriggerMode::Unknown` (CR 603.2c, see
-/// `per_counter_removal_is_modelled`).
+/// CR 603.2c: one removal event fires this trigger once; a single event
+/// carrying N counters of the printed kind therefore under-fires (the
+/// 2009-10-01 Protean Hydra ruling wants N). Same under-firing as the
+/// time-counter producers; tracked in #10901. No per-counter expansion is
+/// modelled here.
 fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     // Pattern: "a [type] counter is removed from [subject] [while ...]"
     let (after_prefix, _) = opt(alt((
@@ -23053,29 +23055,18 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     // CR 122.1 + CR 603.12: active voice — "you remove a [type] counter [from
     // <subject>]" ("When you remove a counter this way", Immard, the
     // Stormcleaver). With no "from" subject any object's removal matches.
-    if let Ok((rest, (article, counter_type))) = (
+    if let Ok((rest, counter_type)) = (
         tag::<_, _, OracleError<'_>>("you remove "),
-        alt((
-            value(RemovedCounterArticle::Each, alt((tag("a "), tag("an ")))),
-            value(RemovedCounterArticle::OneOrMore, tag("one or more ")),
-        )),
+        alt((tag("a "), tag("an "), tag("one or more "))),
         opt(terminated(
             nom_primitives::parse_counter_type_typed,
             tag::<_, _, OracleError<'_>>(" "),
         )),
         alt((tag("counters"), tag("counter"))),
     )
-        .map(|(_, article, counter_type, _)| (article, counter_type))
+        .map(|(_, _, counter_type, _)| counter_type)
         .parse(after_prefix)
     {
-        // CR 603.2c: a singular typed kind needs one firing per removed
-        // counter; refuse the kinds the aggregate removal event can't honour
-        // (see `per_counter_removal_is_modelled`).
-        if let (RemovedCounterArticle::Each, Some(kind)) = (article, counter_type.as_ref()) {
-            if !per_counter_removal_is_modelled(kind) {
-                return Some(unknown_trigger_definition(lower));
-            }
-        }
         let mut def = make_base();
         def.mode = TriggerMode::CounterRemoved;
         if let Ok((subject, _)) = tag::<_, _, OracleError<'_>>(" from ").parse(rest) {
@@ -23100,18 +23091,10 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
         return Some((TriggerMode::CounterRemoved, def));
     }
     // CR 122.1: passive voice — "a [type] counter is removed from [subject]".
-    // The printed counter kind becomes a typed filter, so a time-counter
-    // trigger matches only removals of time counters, never a removed counter
-    // of another kind.
+    // The printed counter kind becomes a typed filter, so the trigger matches
+    // only removals of that kind, never a removed counter of another kind (a
+    // shield removal never fires a +1/+1 trigger).
     let (subject_rest, counter_type) = parse_counter_removed_head(after_prefix).ok()?;
-    // CR 603.2c: "a [kind] counter" triggers once per removed counter, but the
-    // engine's removal event is aggregate (one event for N counters of a
-    // kind), so the trigger fires once per event. Non-time kinds are refused
-    // as an honest unknown trigger rather than under-firing on a multi-counter
-    // removal (see `per_counter_removal_is_modelled`).
-    if !per_counter_removal_is_modelled(&counter_type) {
-        return Some(unknown_trigger_definition(lower));
-    }
     let subject_rest = subject_rest.trim();
 
     let mut def = make_base();
@@ -23161,30 +23144,6 @@ fn parse_counter_removed_head(input: &str) -> OracleResult<'_, CounterType> {
         ),
     )
     .parse(input)
-}
-
-/// The article in front of the counter kind in an active-voice removal
-/// trigger: "a"/"an" (once per removed counter, CR 603.2c) or "one or more"
-/// (once per removal event).
-#[derive(Clone, Copy)]
-enum RemovedCounterArticle {
-    Each,
-    OneOrMore,
-}
-
-/// CR 603.2c + CR 702.62a + CR 702.63a: whether a singular "a [kind] counter
-/// is removed" trigger can be modelled on the engine's aggregate removal
-/// event, which carries N counters of one kind and so fires the trigger once
-/// where CR 603.2c needs N firings. Only the time kind is modelled: its
-/// recurring producer, the suspend / vanishing upkeep trigger, removes one
-/// counter per resolution (CR 702.62a / CR 702.63a), so once per event is
-/// once per counter there. A multi-counter time removal (e.g. Fury Charm's
-/// "Remove two time counters") still fires it once, as before this gate.
-/// Every other kind is refused: Protean Hydra's "+1/+1 counter is removed"
-/// trigger is the printed card this keeps from being claimed, since its own
-/// prevention clause and mass removal remove several counters in one event.
-fn per_counter_removal_is_modelled(kind: &CounterType) -> bool {
-    matches!(kind, CounterType::Time)
 }
 
 /// The "while it's exiled" / "while ~ is exiled" rider closing a passive

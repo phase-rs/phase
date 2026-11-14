@@ -1943,7 +1943,7 @@ face = [
   { key = "prophetic bolt", class = "wrong_zone", clauses = ["Put one of those cards into your hand and the rest on the bottom of your library in any order."] },
   { key = "prophetic titan", class = "wrong_count", clauses = ["When this creature enters, choose one. If there are four or more card types among cards in your graveyard, choose both instead.", "Look at the top four cards of your library. Put one of them into your hand and the rest on the bottom of your library in a random order."] },
   { key = "prosperity tycoon", class = "wrong_object", clauses = ["Tap it."] },
-  { key = "protean hydra", class = "dropped_qualifier", clauses = ["Whenever a +1/+1 counter is removed from this creature, put two +1/+1 counters on it at the beginning of the next end step."] },
+  { key = "protean hydra", class = "wrong_count", clauses = ["Whenever a +1/+1 counter is removed from this creature, put two +1/+1 counters on it at the beginning of the next end step."] },
   { key = "protean raider", class = "condition_wrong", clauses = ["If you attacked this turn, you may have this creature enter as a copy of any creature on the battlefield."] },
   { key = "protective sphere", class = "dropped_qualifier", clauses = ["{1}, Pay 1 life: Prevent all damage that would be dealt to you this turn by a source of your choice that shares a color with the mana spent on this activation cost."] },
   { key = "providence of night", class = "dropped_qualifier", clauses = ["Whenever you cast a spell with hybrid mana in its mana cost, copy it."] },
