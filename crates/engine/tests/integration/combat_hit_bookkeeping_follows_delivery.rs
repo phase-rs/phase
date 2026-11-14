@@ -8,6 +8,7 @@
 //! the player still counted for that player.
 
 use engine::game::combat::AttackTarget;
+use engine::game::effects::attach::attach_to;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::ReplacementMode;
 use engine::types::actions::GameAction;
@@ -271,4 +272,139 @@ fn lifelink_gain_choices_follow_the_gaining_seats_apnap_order() {
     // P0: Angel first (2 + 1) x 2 = 6. P1: Rhox first 2 x 2 + 1 = 5.
     assert_eq!(runner.life(P0), 26, "P0's own answer, gained once");
     assert_eq!(runner.life(P1), 25, "P1's own answer, gained once");
+}
+
+const P2: PlayerId = PlayerId(2);
+const PARIAH_ORACLE: &str = "Enchant creature\nAll damage that would be dealt to you is dealt to enchanted creature instead.";
+const VIGOR_ORACLE: &str = "Trample\nIf damage would be dealt to another creature you control, prevent that damage. Put a +1/+1 counter on that creature for each 1 damage prevented this way.\nWhen Vigor is put into a graveyard from anywhere, shuffle it into its owner's library.";
+const FURNACE_ORACLE: &str = "If a source would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.";
+const TORBRAN_ORACLE: &str = "If a red source you control would deal damage to an opponent or a permanent an opponent controls, it deals that much damage plus 2 instead.";
+const KARN_ORACLE: &str = "+4: Target player exiles a card from their hand.\n\u{2212}3: Exile target permanent.\n\u{2212}14: Restart the game, leaving in exile all non-Aura permanent cards exiled with Karn. Then put those cards onto the battlefield under your control.";
+
+/// CR 616.1 + CR 101.4 + CR 614.9: simultaneous replacement choices are made
+/// in APNAP order of the player who actually owes each one, and the earlier
+/// seat makes all of its choices first. P0 attacks with two red 3/3s under
+/// Torbran, with Furnace of Rath out:
+/// - one hits P1, who wears Pariah on P2's creature, so the damage is
+///   redirected to that creature, where P2 (not P1) orders Torbran, Furnace of
+///   Rath and Vigor;
+/// - the other hits Karn Liberated, a P1 permanent, so P1 orders Torbran and
+///   Furnace of Rath.
+///
+/// The Pariah leg is assigned first and its first choice is P1's, but once P1
+/// has answered it the leg's NEXT choice belongs to P2 — P1's other leg still
+/// owes P1 a choice, which APNAP order puts first. Each leg then finishes with
+/// its own survivor: Karn takes the P1 leg's answer, the P2 creature the P2
+/// leg's, and P1 takes nothing.
+#[test]
+fn redirected_leg_yields_its_next_choice_to_an_earlier_seats_outstanding_choice() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let red = vec![engine::types::mana::ManaColor::Red];
+    let to_player = scenario
+        .add_creature(P0, "Redirected Attacker", 3, 3)
+        .with_color(red.clone())
+        .id();
+    let to_karn = scenario
+        .add_creature(P0, "Karn Attacker", 3, 3)
+        .with_color(red)
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Torbran, Thane of Red Fell", TORBRAN_ORACLE);
+    scenario.add_enchantment_from_oracle(P0, "Furnace of Rath", FURNACE_ORACLE);
+    let karn = scenario
+        .add_planeswalker_from_oracle(P1, "Karn Liberated", "Karn", 14, KARN_ORACLE)
+        .id();
+    let host = scenario.add_creature(P2, "Pariah Host", 0, 20).id();
+    scenario.add_creature_from_oracle(P2, "Vigor", 6, 6, VIGOR_ORACLE);
+    let pariah = scenario
+        .add_creature(P1, "Pariah", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(PARIAH_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), pariah, host);
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[
+            (to_player, AttackTarget::Player(P1)),
+            (to_karn, AttackTarget::Planeswalker(karn)),
+        ])
+        .expect("declare attackers");
+
+    // Which source a seat picks first at each prompt, by card name.
+    let preference = |chooser: PlayerId, names: &[String], step: usize| -> usize {
+        let want = match (chooser, step) {
+            // P1's first prompt belongs to the Pariah leg: redirect first.
+            (P1, 0) => "Pariah",
+            // P1's Karn leg: Furnace first, (3 x 2) + 2 = 8.
+            (P1, _) => "Furnace of Rath",
+            // P2's redirected leg: Torbran, then Furnace, then Vigor
+            // prevents (3 + 2) x 2 = 10 and puts ten counters on its host.
+            (_, 0) => "Torbran, Thane of Red Fell",
+            _ => "Furnace of Rath",
+        };
+        names
+            .iter()
+            .position(|name| name == want)
+            .unwrap_or_else(|| panic!("{chooser:?} step {step}: {want} not among {names:?}"))
+    };
+    let mut prompts: Vec<PlayerId> = Vec::new();
+    let mut steps = [0usize; 3];
+    for _ in 0..64 {
+        let past_combat = matches!(
+            runner.state().phase,
+            Phase::EndCombat | Phase::PostCombatMain
+        );
+        if past_combat && runner.state().stack.is_empty() {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } => {
+                prompts.push(player);
+                let names: Vec<String> = candidates
+                    .iter()
+                    .map(|candidate| candidate.source_name.clone())
+                    .collect();
+                let index = preference(player, &names, steps[player.0 as usize]);
+                steps[player.0 as usize] += 1;
+                if prompts.len() == 2 {
+                    // The Pariah leg is parked behind P1's other leg: the whole
+                    // parked batch must survive a save/load round trip intact.
+                    let saved = serde_json::to_string(runner.state()).expect("serialize");
+                    *runner.state_mut() = serde_json::from_str(&saved).expect("deserialize");
+                }
+                runner
+                    .act(GameAction::ChooseReplacement { index })
+                    .expect("answer replacement choice");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        prompts,
+        vec![P1, P1, P2, P2],
+        "CR 101.4: P1's outstanding Karn choice precedes P2's, the redirected leg's next chooser"
+    );
+    assert_eq!(runner.life(P1), 20, "the redirected hit never reached P1");
+    assert_eq!(
+        runner.state().objects[&karn].loyalty,
+        Some(14 - 8),
+        "Karn takes P1's own answer, once"
+    );
+    let host = &runner.state().objects[&host];
+    assert_eq!(host.damage_marked, 0, "Vigor prevented the redirected hit");
+    assert_eq!(
+        host.counters
+            .get(&engine::types::counter::CounterType::Plus1Plus1)
+            .copied(),
+        Some(10),
+        "the host takes P2's own answer, once"
+    );
 }

@@ -15,9 +15,9 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CombatDamageAssignmentMode, CombatDamageSubStep, DamageSlot, GameState,
-    PendingCombatDamageAwait, PendingCombatDamageEntry, PendingCombatDamageReplacement,
-    PendingCombatLeg, PendingCombatLifelink, PendingCombatPhaseCRemnant, PendingLifelinkGain,
-    PerPlayerCombatDamage, WaitingFor,
+    PendingCombatDamageEntry, PendingCombatDamageReplacement, PendingCombatLeg,
+    PendingCombatLegProgress, PendingCombatLifelink, PendingCombatPhaseCRemnant,
+    PendingLifelinkGain, PerPlayerCombatDamage, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
@@ -1867,12 +1867,17 @@ fn complete_combat_phase_c_remnant(
 }
 
 /// CR 101.4: a player's position in APNAP order (active player first, then
-/// each other living player in turn order); players outside it sort last.
-fn apnap_rank(state: &GameState, player: PlayerId) -> usize {
-    super::players::apnap_order(state)
-        .iter()
-        .position(|seat| *seat == player)
-        .unwrap_or(usize::MAX)
+/// each other living player in turn order); players outside it sort last. The
+/// order is computed once, so a sort key built from the returned closure does
+/// not rebuild it per comparison.
+fn apnap_ranker(state: &GameState) -> impl Fn(PlayerId) -> usize {
+    let order = super::players::apnap_order(state);
+    move |player| {
+        order
+            .iter()
+            .position(|seat| *seat == player)
+            .unwrap_or(usize::MAX)
+    }
 }
 
 /// CR 702.15e + CR 616.1 + CR 101.4: each lifelink source's gain is its own
@@ -1886,7 +1891,8 @@ fn lifelink_gains_in_apnap_order(
     lifelink_by_source: Vec<(ObjectId, PlayerId, u32)>,
 ) -> VecDeque<PendingLifelinkGain> {
     let mut gains = lifelink_by_source;
-    gains.sort_by_key(|(_, controller, _)| apnap_rank(state, *controller));
+    let rank = apnap_ranker(state);
+    gains.sort_by_key(|(_, controller, _)| rank(*controller));
     gains
         .into_iter()
         .map(|(_source_id, controller, amount)| PendingLifelinkGain { controller, amount })
@@ -1904,20 +1910,30 @@ fn lifelink_gains_in_apnap_order(
 /// active player first, then each nonactive player in turn order. The sort is
 /// stable: one seat's events keep their assignment order, and `entries` stays
 /// aligned 1:1 with the events.
+/// CR 616.1: the seat that chooses among replacements for a proposed damage
+/// event as first proposed — a damaged player, or the controller of a damaged
+/// permanent. `None` for a non-damage event or a recipient that left the game.
+pub(crate) fn combat_damage_affected_seat(
+    state: &GameState,
+    event: &ProposedEvent,
+) -> Option<PlayerId> {
+    let ProposedEvent::Damage { target, .. } = event else {
+        return None;
+    };
+    match target {
+        TargetRef::Player(player) => Some(*player),
+        TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
+    }
+}
+
 fn order_batch_by_affected_seat(
     state: &GameState,
     entries: &mut Vec<PendingCombatDamageEntry>,
     proposed_events: &mut VecDeque<ProposedEvent>,
 ) {
+    let rank_of_seat = apnap_ranker(state);
     let rank = |event: &ProposedEvent| -> usize {
-        let ProposedEvent::Damage { target, .. } = event else {
-            return usize::MAX;
-        };
-        let affected = match target {
-            TargetRef::Player(player) => Some(*player),
-            TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
-        };
-        affected.map_or(usize::MAX, |player| apnap_rank(state, player))
+        combat_damage_affected_seat(state, event).map_or(usize::MAX, &rank_of_seat)
     };
     let mut paired: Vec<(PendingCombatDamageEntry, ProposedEvent)> = std::mem::take(entries)
         .into_iter()
@@ -2054,10 +2070,7 @@ fn run_combat_damage_replacements(
         replacement::CombatDamageReplacementOutcome::Complete => {
             apply_combat_damage_survivors(state, record, entries, pass)
         }
-        replacement::CombatDamageReplacementOutcome::Paused {
-            awaiting,
-            waiting_for,
-        } => {
+        replacement::CombatDamageReplacementOutcome::Paused { waiting_for } => {
             // CR 616.1: nothing of this batch has been dealt; park all of it.
             // The tally is carried as a `Vec` (an enum key is not a JSON map key)
             // and reinstalled on resume. CR 615.8: the one-shot application
@@ -2072,7 +2085,6 @@ fn run_combat_damage_replacements(
                 entries,
                 resolved: pass.resolved,
                 unstarted: pass.unstarted,
-                awaiting,
                 one_shot_applications: pass.one_shot_applications,
             });
             state.waiting_for = (*waiting_for).clone();
@@ -2098,14 +2110,7 @@ fn resume_combat_damage_replacements(
     let Some(parked) = record.replacement.take() else {
         return drain_combat_lifelink(state, record);
     };
-    let resume = match parked.awaiting {
-        PendingCombatDamageAwait::ReplacementChoice => {
-            replacement::CombatDamageReplacementResume::Choice(choice)
-        }
-        PendingCombatDamageAwait::Continuation { survivor } => {
-            replacement::CombatDamageReplacementResume::ContinuationSettled(survivor)
-        }
-    };
+    let resume = replacement::CombatDamageReplacementResume { choice };
     let pass = replacement::CombatDamageReplacementPass {
         resolved: parked.resolved,
         unstarted: parked.unstarted,
@@ -2128,7 +2133,12 @@ pub(crate) fn parked_combat_damage_awaits_replacement_choice(state: &GameState) 
         .as_ref()
         .is_some_and(|record| {
             record.replacement.as_ref().is_some_and(|parked| {
-                matches!(parked.awaiting, PendingCombatDamageAwait::ReplacementChoice)
+                parked.resolved.iter().any(|leg| {
+                    matches!(
+                        leg,
+                        PendingCombatLegProgress::AwaitingChoice { parked: None, .. }
+                    )
+                })
             })
         })
 }
@@ -2167,7 +2177,7 @@ fn apply_combat_damage_survivors(
     // --- Phase C: Apply survivors + combat bookkeeping (CR 120.3 + CR 510.2) ---
     // Owned legs so a leg pause parks the unapplied tail in the remnant and the
     // resume shares the same runner.
-    let survivors = pass.resolved;
+    let survivors = replacement::settled_survivors(pass.resolved);
     debug_assert_eq!(
         entries.len(),
         survivors.len(),

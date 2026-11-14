@@ -1731,7 +1731,11 @@ mod tests {
             crate::game::replacement::CombatDamageReplacementOutcome::Complete
         ));
         let tally = pass.tally;
-        assert_eq!(pass.resolved, vec![None], "all 3 combat damage prevented");
+        assert_eq!(
+            crate::game::replacement::settled_survivors(pass.resolved),
+            vec![None],
+            "all 3 combat damage prevented"
+        );
         // CR 615.7: the shield aggregated 3 prevented damage.
         let total: i32 = tally.values().sum();
         assert_eq!(total, 3);

@@ -27,8 +27,8 @@ use super::filter::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     DrainStatus, GameState, LiminalEntry, LiminalEntryKind, NamedChoiceSource,
-    NamedChoiceSourceBinding, PayableResource, PendingCombatDamageAwait, PendingCostMoveResume,
-    PendingReplacement, PostReplacementDrain, ReplacementAutoChoiceId,
+    NamedChoiceSourceBinding, PayableResource, PendingCombatLegChoice, PendingCombatLegProgress,
+    PendingCostMoveResume, PendingReplacement, PostReplacementDrain, ReplacementAutoChoiceId,
     ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey, ReplacementAutoChoiceRecord,
     ReplacementAutoChoiceTail, ReplacementCandidateSummary, ReplacementChoiceKind,
     ReplacementIndexEntry, ResidentDrainPolicy, ResolutionPaymentOrigin, WaitingFor,
@@ -13854,10 +13854,13 @@ pub fn replace_event(
 ///
 /// The batch is resumable. A CR 616.1 ordering choice on one of its events, or
 /// a prompt raised by a replacement's own continuation (CR 616.1g: the
-/// substitute's counters or mill), parks the pass — `pass` keeps every settled
-/// outcome, every unstarted event and the tally so far — and the caller parks
+/// substitute's counters or mill), parks the pass — `pass` keeps every leg's
+/// progress, every unstarted event and the tally so far — and the caller parks
 /// the batch around it (`combat_damage::CombatDamageBatch::Paused`). CR 510.2
-/// rules out a priority window here, not these choices.
+/// rules out a priority window here, not these choices. When several legs owe
+/// a choice the prompts follow CR 101.4 APNAP order of the actual chooser, so a
+/// leg that a redirect handed to another seat yields to an earlier seat's
+/// outstanding choice and resumes, intact, afterwards.
 ///
 /// When the pass completes, `pass.resolved` is aligned 1:1 with the batch's
 /// events: `Some(event)` is a survivor post-replacement `Damage` event for
@@ -13888,63 +13891,139 @@ pub(crate) fn replace_combat_damage_batch(
     // this batch). Suspending the ledger isolates independent events; it does not rebase its keys after
     // such a mutation. Printed cards in this class run no such follow-up between portions.
 
-    let mut step = resume.map(|resume| match resume {
-        CombatDamageReplacementResume::Choice(Some(index))
-            if state.pending_replacement.is_some() =>
-        {
-            let result = continue_replacement(state, index, events);
-            settle_combat_damage_replacement(state, result, events)
-        }
-        // CR 800.4a + CR 800.4e: no answer can arrive — the seat that owed it
-        // left the game and `elimination` cleared the pending event. Combat
-        // damage to a player who has left is not dealt, so the event settles
-        // with no survivor. strict-failure: when the departed seat only
-        // CONTROLLED a damaged permanent it does not own, CR 800.4h would have
-        // the next player choose; that event is skipped here as well, exactly
-        // as every combat-damage ordering choice was before the batch could
-        // park.
-        CombatDamageReplacementResume::Choice(_) => {
-            state.pending_replacement = None;
-            CombatDamageReplacementStep::Settled(None)
-        }
-        CombatDamageReplacementResume::ContinuationSettled(survivor) => {
-            drain_combat_damage_continuation(state, survivor, events)
-        }
+    let mut step = resume.map(|resume| {
+        let (leg, awaiting) = pass.take_surfaced_leg();
+        let step = match awaiting {
+            PendingCombatLegProgress::AwaitingChoice { .. } => match resume.choice {
+                Some(index) if state.pending_replacement.is_some() => {
+                    let result = continue_replacement(state, index, events);
+                    settle_combat_damage_replacement(state, result, events)
+                }
+                // CR 800.4a + CR 800.4e: no answer can arrive — the seat that
+                // owed it left the game and `elimination` cleared the pending
+                // event. Combat damage to a player who has left is not dealt,
+                // so the event settles with no survivor. strict-failure: when
+                // the departed seat only CONTROLLED a damaged permanent it does
+                // not own, CR 800.4h would have the next player choose; that
+                // event is skipped here as well, exactly as every combat-damage
+                // ordering choice was before the batch could park.
+                _ => {
+                    state.pending_replacement = None;
+                    CombatDamageReplacementStep::Settled(None)
+                }
+            },
+            PendingCombatLegProgress::AwaitingContinuation { survivor } => {
+                drain_combat_damage_continuation(state, survivor, events)
+            }
+            PendingCombatLegProgress::Settled(_) => {
+                unreachable!("a surfaced leg is never settled")
+            }
+        };
+        (leg, step)
     });
 
     let outcome = loop {
-        let current = match step.take() {
-            Some(current) => current,
-            None => match pass.unstarted.pop_front() {
-                Some(event) => {
-                    prepare_replacement_index_for_pipeline(state);
-                    let result = pipeline_loop(state, event, 0, replacement_registry(), events);
-                    clear_replacement_index_pipeline(state);
-                    settle_combat_damage_replacement(state, result, events)
+        // File the leg that just advanced. A leg that needs its next choice
+        // lifts its record out of the single `pending_replacement` slot, so any
+        // outstanding leg can be surfaced next without losing it.
+        if let Some((leg, advanced)) = step.take() {
+            match advanced {
+                CombatDamageReplacementStep::Settled(survivor) => {
+                    pass.resolved[leg] = PendingCombatLegProgress::Settled(survivor);
                 }
-                None => break CombatDamageReplacementOutcome::Complete,
-            },
-        };
-        match current {
-            CombatDamageReplacementStep::Settled(survivor) => pass.resolved.push(survivor),
-            // CR 616.1: the affected player chooses which replacement applies
-            // first. `state.pending_replacement` holds the event; the batch
-            // parks until `ChooseReplacement` answers it.
-            CombatDamageReplacementStep::NeedsChoice(player) => {
+                // CR 616.1: the affected player chooses which replacement
+                // applies first; `state.pending_replacement` holds the event.
+                CombatDamageReplacementStep::NeedsChoice(chooser) => {
+                    let pending = state
+                        .pending_replacement
+                        .take()
+                        .expect("a leg that needs a choice parks its pending replacement");
+                    pass.resolved[leg] = PendingCombatLegProgress::AwaitingChoice {
+                        chooser,
+                        parked: Some(Box::new(PendingCombatLegChoice {
+                            pending,
+                            auto_choice_tail: state.replacement_auto_choice_tail.take(),
+                        })),
+                    };
+                }
+                // CR 616.1g: the event settled, but its substitute raised a
+                // prompt. That prompt is already open, so the batch parks on it.
+                CombatDamageReplacementStep::ContinuationPaused {
+                    survivor,
+                    waiting_for,
+                } => {
+                    pass.resolved[leg] =
+                        PendingCombatLegProgress::AwaitingContinuation { survivor };
+                    break CombatDamageReplacementOutcome::Paused { waiting_for };
+                }
+            }
+        }
+        // CR 616.1 + CR 101.4: simultaneous replacement choices are made in
+        // APNAP order. The next prompt is the earliest-ranked chooser among
+        // every outstanding choice: a started leg's next choice, whoever now
+        // owns it after a redirect, and an unstarted leg's first choice, which
+        // sits with its affected seat. A started leg wins a tie, which keeps a
+        // seat's own legs in assignment order.
+        // CR 800.4a + CR 800.4e: a parked leg whose chooser has left the game
+        // can never be answered; its event settles with no survivor, as a
+        // surfaced leg's does (see the resume above).
+        for progress in &mut pass.resolved {
+            if matches!(
+                progress,
+                PendingCombatLegProgress::AwaitingChoice { chooser, parked: Some(_) }
+                    if !super::players::is_alive(state, *chooser)
+            ) {
+                *progress = PendingCombatLegProgress::Settled(None);
+            }
+        }
+        let apnap = super::players::apnap_order(state);
+        let rank = |player: PlayerId| apnap.iter().position(|seat| *seat == player);
+        let waiting_leg = pass
+            .resolved
+            .iter()
+            .enumerate()
+            .filter_map(|(leg, progress)| match progress {
+                PendingCombatLegProgress::AwaitingChoice {
+                    chooser,
+                    parked: Some(_),
+                } => Some((rank(*chooser).unwrap_or(usize::MAX), leg)),
+                _ => None,
+            })
+            .min();
+        let unstarted_rank = pass.unstarted.front().map(|event| {
+            super::combat_damage::combat_damage_affected_seat(state, event)
+                .and_then(rank)
+                .unwrap_or(usize::MAX)
+        });
+        match (waiting_leg, unstarted_rank) {
+            (None, None) => break CombatDamageReplacementOutcome::Complete,
+            (Some((waiting_rank, leg)), unstarted)
+                if unstarted.is_none_or(|unstarted| waiting_rank <= unstarted) =>
+            {
+                let PendingCombatLegProgress::AwaitingChoice { chooser, parked } =
+                    &mut pass.resolved[leg]
+                else {
+                    unreachable!("the waiting leg was selected as awaiting a choice");
+                };
+                let chooser = *chooser;
+                let parked = parked.take().expect("the waiting leg is parked");
+                state.pending_replacement = Some(parked.pending);
+                state.replacement_auto_choice_tail = parked.auto_choice_tail;
                 break CombatDamageReplacementOutcome::Paused {
-                    awaiting: PendingCombatDamageAwait::ReplacementChoice,
-                    waiting_for: Box::new(replacement_choice_waiting_for(player, state)),
+                    waiting_for: Box::new(replacement_choice_waiting_for(chooser, state)),
                 };
             }
-            // CR 616.1g: the event settled, but its substitute raised a prompt.
-            CombatDamageReplacementStep::ContinuationPaused {
-                survivor,
-                waiting_for,
-            } => {
-                break CombatDamageReplacementOutcome::Paused {
-                    awaiting: PendingCombatDamageAwait::Continuation { survivor },
-                    waiting_for,
-                };
+            _ => {
+                let event = pass
+                    .unstarted
+                    .pop_front()
+                    .expect("an unstarted leg was ranked");
+                let leg = pass.resolved.len();
+                pass.resolved.push(PendingCombatLegProgress::Settled(None));
+                prepare_replacement_index_for_pipeline(state);
+                let result = pipeline_loop(state, event, 0, replacement_registry(), events);
+                clear_replacement_index_pipeline(state);
+                step = Some((leg, settle_combat_damage_replacement(state, result, events)));
             }
         }
     };
@@ -13960,12 +14039,12 @@ pub(crate) fn replace_combat_damage_batch(
 }
 
 /// CR 510.2 + CR 616.1: the progress of one combat-damage batch's replacement
-/// pass. `resolved` holds the settled outcome of each event in batch order;
-/// `unstarted` the events not yet proposed; `tally` the `Prevention::All`
-/// aggregate so far.
+/// pass. `resolved` holds every proposed event's leg in batch order (settled, or
+/// still owing a choice); `unstarted` the events not yet proposed; `tally` the
+/// `Prevention::All` aggregate so far.
 #[derive(Debug, Default)]
 pub(crate) struct CombatDamageReplacementPass {
-    pub(crate) resolved: Vec<Option<ProposedEvent>>,
+    pub(crate) resolved: Vec<PendingCombatLegProgress>,
     pub(crate) unstarted: std::collections::VecDeque<ProposedEvent>,
     pub(crate) tally: HashMap<AppliedReplacementKey, i32>,
     /// CR 615.8: successful one-shot applications so far (see
@@ -13973,15 +14052,56 @@ pub(crate) struct CombatDamageReplacementPass {
     pub(crate) one_shot_applications: Vec<(AppliedReplacementKey, ObjectId)>,
 }
 
-/// How a parked [`CombatDamageReplacementPass`] resumes.
+impl CombatDamageReplacementPass {
+    /// Take the surfaced leg — the one whose prompt is open — out of the pass
+    /// for the resume to advance, leaving a placeholder the resume overwrites.
+    fn take_surfaced_leg(&mut self) -> (usize, PendingCombatLegProgress) {
+        let leg = self
+            .resolved
+            .iter()
+            .position(|leg| {
+                matches!(
+                    leg,
+                    PendingCombatLegProgress::AwaitingChoice { parked: None, .. }
+                        | PendingCombatLegProgress::AwaitingContinuation { .. }
+                )
+            })
+            .expect("a parked combat-damage pass has a surfaced leg");
+        let progress = std::mem::replace(
+            &mut self.resolved[leg],
+            PendingCombatLegProgress::Settled(None),
+        );
+        (leg, progress)
+    }
+}
+
+/// The settled outcome of every leg of a completed pass, aligned 1:1 with the
+/// batch's events: `Some(event)` is a survivor post-replacement `Damage` event
+/// for Phase C to apply; `None` means that source's damage was fully prevented
+/// or replaced.
+pub(crate) fn settled_survivors(
+    resolved: Vec<PendingCombatLegProgress>,
+) -> Vec<Option<ProposedEvent>> {
+    resolved
+        .into_iter()
+        .map(|leg| match leg {
+            PendingCombatLegProgress::Settled(survivor) => survivor,
+            PendingCombatLegProgress::AwaitingChoice { .. }
+            | PendingCombatLegProgress::AwaitingContinuation { .. } => {
+                unreachable!("a completed pass has no leg owing a choice")
+            }
+        })
+        .collect()
+}
+
+/// How a parked [`CombatDamageReplacementPass`] resumes: the surfaced leg is
+/// advanced by whatever it was awaiting.
 #[derive(Debug)]
-pub(crate) enum CombatDamageReplacementResume {
-    /// CR 616.1: the answer to the parked event's ordering choice. `None` when
-    /// no answer can arrive (the chooser left the game).
-    Choice(Option<usize>),
-    /// CR 616.1g: the parked event settled to this survivor and its
-    /// continuation's prompt has been answered.
-    ContinuationSettled(Option<ProposedEvent>),
+pub(crate) struct CombatDamageReplacementResume {
+    /// CR 616.1: the answer to a surfaced ordering choice. `None` when no answer
+    /// can arrive (the chooser left the game); unused for a continuation, whose
+    /// prompt its own dispatcher already answered.
+    pub(crate) choice: Option<usize>,
 }
 
 /// Result of driving a [`CombatDamageReplacementPass`].
@@ -13989,13 +14109,10 @@ pub(crate) enum CombatDamageReplacementResume {
 pub(crate) enum CombatDamageReplacementOutcome {
     /// Every event of the batch has a settled outcome in `pass.resolved`.
     Complete,
-    /// The entry after `pass.resolved` is waiting on `waiting_for` (boxed, as
-    /// in `combat_damage::CombatDamageBatch::Paused`: `WaitingFor` dwarfs the
+    /// One leg is waiting on `waiting_for` (boxed, as in
+    /// `combat_damage::CombatDamageBatch::Paused`: `WaitingFor` dwarfs the
     /// other variants).
-    Paused {
-        awaiting: PendingCombatDamageAwait,
-        waiting_for: Box<WaitingFor>,
-    },
+    Paused { waiting_for: Box<WaitingFor> },
 }
 
 /// One damage event's progress through the combat replacement pass.

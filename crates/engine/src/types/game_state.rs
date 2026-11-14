@@ -20855,14 +20855,12 @@ pub struct PendingCombatLifelink {
 pub struct PendingCombatDamageReplacement {
     /// Every assignment that passed the pre-replacement gate, in batch order.
     pub entries: Vec<PendingCombatDamageEntry>,
-    /// The settled replacement outcome of `entries[..resolved.len()]`:
-    /// `Some(event)` survives to Phase C, `None` was fully replaced/prevented.
-    pub resolved: Vec<Option<ProposedEvent>>,
-    /// The events of `entries[resolved.len() + 1..]`, not yet proposed. The
-    /// parked entry's own event is owned by `awaiting`.
+    /// The progress of `entries[..resolved.len()]` — every leg whose event has
+    /// been proposed, aligned 1:1 with `entries`. A leg is settled, or still
+    /// owes a choice (see [`PendingCombatLegProgress`]).
+    pub resolved: Vec<PendingCombatLegProgress>,
+    /// The events of `entries[resolved.len()..]`, not yet proposed.
     pub unstarted: VecDeque<ProposedEvent>,
-    /// What the parked entry `entries[resolved.len()]` is waiting on.
-    pub awaiting: PendingCombatDamageAwait,
     /// CR 510.2 + CR 615.8: the one-shot shields that already applied to an
     /// earlier portion of this simultaneous instance, keyed by damage source. A
     /// "the next time [source] would deal damage" shield prevents the source's
@@ -20873,19 +20871,42 @@ pub struct PendingCombatDamageReplacement {
     pub one_shot_applications: Vec<(AppliedReplacementKey, ObjectId)>,
 }
 
-/// CR 616.1 / CR 616.1g: why the parked entry of a
-/// [`PendingCombatDamageReplacement`] has not settled.
+/// CR 616.1 + CR 616.1g + CR 101.4: where one proposed damage leg of a parked
+/// combat-damage batch stands. The batch interleaves its legs: a leg's next
+/// ordering choice can belong to a different seat than its first (CR 614.6:
+/// a redirect hands the damage to another player's permanent), so the prompts
+/// are surfaced in APNAP order of the *actual* chooser across all outstanding
+/// legs, and a leg that is not the one being asked keeps its in-progress
+/// event here until its turn comes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
-pub enum PendingCombatDamageAwait {
-    /// CR 616.1: the affected player orders two or more applicable
-    /// replacements. `state.pending_replacement` holds the entry's damage event
-    /// and is the resume's authority.
-    ReplacementChoice,
-    /// CR 616.1g: the entry's event settled to `survivor`, but the
+pub enum PendingCombatLegProgress {
+    /// The leg's event has settled: `Some(event)` survives to Phase C, `None`
+    /// was fully replaced or prevented.
+    Settled(Option<ProposedEvent>),
+    /// CR 616.1: `chooser` orders two or more applicable replacements for this
+    /// leg. `parked` holds the leg's in-progress record while another leg's
+    /// prompt is open; it is `None` for the surfaced leg, whose record is
+    /// `state.pending_replacement` and is the resume's authority.
+    AwaitingChoice {
+        chooser: PlayerId,
+        parked: Option<Box<PendingCombatLegChoice>>,
+    },
+    /// CR 616.1g: the surfaced leg's event settled to `survivor`, but the
     /// replacement's own continuation (the substitute event) raised a prompt.
     /// The batch resumes once that continuation has fully drained.
-    Continuation { survivor: Option<ProposedEvent> },
+    AwaitingContinuation { survivor: Option<ProposedEvent> },
+}
+
+/// CR 616.1: the in-progress state of a leg that owes a choice while another
+/// leg's prompt is open, lifted out of the single `pending_replacement` /
+/// `replacement_auto_choice_tail` slots and reinstalled losslessly when the
+/// leg's prompt is surfaced.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingCombatLegChoice {
+    pub pending: PendingReplacement,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_choice_tail: Option<ReplacementAutoChoiceTail>,
 }
 
 /// CR 510.2: one collected combat-damage assignment of a parked batch — what
