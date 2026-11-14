@@ -16886,6 +16886,8 @@ fn optional_pay_cost_affordability_is_decidable(cost: &AbilityCost) -> bool {
         AbilityCost::TapCreatures { .. } | AbilityCost::SayPhrase { .. }
     ) || matches!(cost, AbilityCost::PayLife { amount }
             if !crate::types::ability::is_pay_any_amount(amount))
+        || matches!(cost, AbilityCost::Mana { cost }
+            if !crate::game::casting_costs::cost_has_x(cost))
 }
 
 /// CR 608.2d: "A player can't choose an impossible option." An optional effect
@@ -59358,7 +59360,11 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.total(), 0);
     }
 
-    /// Accept extort with no {W/B} available — drain must not run (CR 702.101a).
+    /// Extort with no {W/B} available — the offer is never made (CR 608.2d via
+    /// the F1 feasibility gate) and the drain must not run (CR 702.101a).
+    /// Post-F1 this replaces the old accept-path pin: an infeasible offer has
+    /// no accept leg to exercise, so the test asserts suppression (no prompt)
+    /// plus the same terminal no-drain invariant.
     #[test]
     fn issue_1972_extort_accept_without_payable_mana_does_not_drain() {
         let mut face = CardFace::default();
@@ -59384,22 +59390,11 @@ mod tests {
         let mut events = Vec::new();
         resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
         assert!(
-            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
-            "extort must prompt before draining, got {:?}",
+            !matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "an infeasible extort offer must be suppressed, got {:?}",
             state.waiting_for
         );
 
-        crate::game::engine_payment_choices::handle_optional_effect_choice(
-            &mut state,
-            true,
-            &mut events,
-        )
-        .unwrap();
-
-        assert!(
-            state.cost_payment_failed_flag,
-            "PayCost with no W/B must set cost_payment_failed_flag"
-        );
         assert_eq!(
             (
                 state.players[0].life,
@@ -59407,8 +59402,9 @@ mod tests {
                 state.players[2].life
             ),
             (20, 20, 20),
-            "accepting without payable mana must not drain opponents or grant life"
+            "a suppressed offer must not drain opponents or grant life"
         );
+        assert_eq!(state.players[0].mana_pool.total(), 0, "nothing was spent");
     }
 
     #[test]

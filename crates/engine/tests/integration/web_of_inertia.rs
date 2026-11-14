@@ -463,14 +463,17 @@ fn web_of_inertia_two_cards_reach_opponent_selection() {
     );
 }
 
-/// CR 805.4d — shared opposing combat (2HG): P0+P1 vs P2+P3, Web under P0.
-/// On team B's shared combat the trigger fires ONCE PER OPPONENT — two exile
-/// offers, one per seat, each bound to its own seat. P2 exiles a card (no
-/// ban for P2) while P3 declines (P3 banned) — one seat's exile leaves the
-/// other's restriction intact. Prompt order is read off the prompts
-/// (order-adaptive), never assumed.
-/// REVERT-FAIL (single firing): only one offer surfaces and the second
-/// seat's legality assertion fails.
+/// CR 805.4d — shared opposing combat (2HG) through the REAL transition:
+/// P0+P1 vs P2+P3, Web under P0. On team B's shared combat the trigger fires
+/// ONCE PER OPPONENT — two exile offers, one per seat, each bound to its own
+/// seat. P2 exiles a card (no ban for P2) while P3 declines (P3 banned) — one
+/// seat's exile leaves the other's restriction intact. Prompt order is read
+/// off the prompts (order-adaptive), never assumed.
+/// The `OrderTriggers{len 2}` guard pins the fan-out delivery shape (fails if
+/// the builder regresses for any reason). REVERT-FAIL (delivery injected):
+/// the reach-guards below fail — the verdicts alone would pass vacuously.
+/// (Web carries no intervening-if, so this row does not discriminate the U2
+/// pre-check skip — see the J1 note; it proves U2 left this fan-out intact.)
 #[test]
 fn web_of_inertia_shared_combat_fires_once_per_opponent() {
     let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
@@ -484,10 +487,18 @@ fn web_of_inertia_shared_combat_fires_once_per_opponent() {
     // Team B's shared turn: P2 holds the turn as representative.
     runner.state_mut().active_player = P2;
     runner.state_mut().priority_player = P2;
-    runner.state_mut().phase = Phase::BeginCombat;
     runner.state_mut().waiting_for = WaitingFor::Priority { player: P2 };
 
-    fire_begin_combat(&mut runner);
+    runner.advance_to_phase(Phase::BeginCombat);
+    assert_eq!(
+        runner.state().phase,
+        Phase::BeginCombat,
+        "reach-guard: the runner must reach beginning of combat, else the \
+         firings below never happen"
+    );
+
+    // Order the two firings (the two-occurrence proof), then answer each
+    // seat's offer without draining: the sibling firing is still on the stack.
     let mut prompted = Vec::new();
     for _ in 0..2 {
         let seat = drive_to_seat_prompt(&mut runner);
@@ -508,6 +519,9 @@ fn web_of_inertia_shared_combat_fires_once_per_opponent() {
     );
     drive_to_idle(&mut runner);
 
+    // Exile proof: P2's card left the graveyard for exile, P3's stayed.
+    // (The funded/offered positive — P2 prompted — vs the declined negative —
+    // P3 banned — proves the verdicts below ride production delivery.)
     assert!(
         runner
             .state()
@@ -524,10 +538,37 @@ fn web_of_inertia_shared_combat_fires_once_per_opponent() {
             .any(|o| o.name == "P3 Spare" && o.zone == Zone::Graveyard),
         "P3's declined card stays in their graveyard"
     );
+    assert!(has_attack_ban(&runner), "P3's decline installs the ban");
+    // Public verdicts, declining seat first (empty combat proves "commits
+    // nothing"), then the exiling seat's commit.
+    let error = runner
+        .declare_attackers(&[(p3_attacker, AttackTarget::Player(P0))])
+        .expect_err("CR 508.1c: P3's banned attack must fail");
     assert!(
-        attack_is_legal(&runner, P2, p2_attacker, AttackTarget::Player(P0)),
-        "P2 attacks P0 freely after exiling"
+        format!("{error:?}").contains("(CR 508.1c/d attack restriction)"),
+        "CR 508.1c: unexpected rejection (want the attack-restriction marker): {error:?}"
     );
+    assert!(
+        runner
+            .state()
+            .combat
+            .as_ref()
+            .is_none_or(|combat| combat.attackers.is_empty()),
+        "P3's rejected declaration must not commit any attackers"
+    );
+    runner
+        .declare_attackers(&[(p2_attacker, AttackTarget::Player(P0))])
+        .expect("P2 attacks P0 freely after exiling");
+    assert!(
+        runner
+            .state()
+            .combat
+            .as_ref()
+            .is_some_and(|combat| combat.attackers.iter().any(|a| a.object_id == p2_attacker)),
+        "P2's attack commits"
+    );
+    // Secondary negative after the public verdicts (the only retained
+    // `attack_is_legal` uses in this test): P3 stays banned.
     assert!(
         !attack_is_legal(&runner, P3, p3_attacker, AttackTarget::Player(P0)),
         "P3 is banned after declining — P2's exile lifted nothing for P3"

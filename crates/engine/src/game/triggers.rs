@@ -2153,10 +2153,23 @@ fn trigger_firing_groups(
     conditions: FiringConditions<'_>,
     ability: &ResolvedAbility,
 ) -> Vec<FiringGroup> {
+    // CR 805.4d + CR 603.4: on a shared team turn, an opponent-scoped phase
+    // trigger fires once per eligible opponent. The raw `PhaseChanged` event
+    // names nobody (its `ScopedPlayer` reads the representative seat), so the
+    // raw-event pre-check below is the wrong gate for a fanned trigger — each
+    // `PhaseChangedForPlayer` occurrence is evaluated on its own at the
+    // per-occurrence filter instead. Collective triggers (Bow) never fan out
+    // and keep the raw gate.
+    let fan_out = if trig_def.mode == TriggerMode::Phase {
+        shared_turn_phase_occurrences(event, trig_def, state, ability)
+    } else {
+        None
+    };
     // CR 508.5 + CR 603.4: Attacks triggers with intervening-if clauses read
     // the defending player from each expanded attack event; the batch-level
     // event is the wrong context, so their check waits for the narrowed firing.
-    if !trig_def.batched
+    if fan_out.is_none()
+        && !trig_def.batched
         && !matches!(trig_def.mode, TriggerMode::Attacks)
         && !conditions.hold(state, controller, source_context, event)
     {
@@ -2239,8 +2252,8 @@ fn trigger_firing_groups(
         } else {
             vec![FiringGroup::from_indexed(members)]
         }
-    } else if let Some(occurrences) =
-        occurrence_trigger_events(event, trig_def, source_context, state, ability)
+    } else if let Some(occurrences) = fan_out
+        .or_else(|| occurrence_trigger_events(event, trig_def, source_context, state, ability))
     {
         occurrences
             .into_iter()
@@ -31529,6 +31542,156 @@ pub mod tests {
                 Some(&phase_event),
             ),
             "opponent with three creatures vs controller with one (keeper) must satisfy intervening-if",
+        );
+    }
+
+    /// Shared 2HG board for the Keeper per-occurrence rows: team B holds the
+    /// turn (P2 representative); P0 controls Keeper plus one extra creature
+    /// (2 total); P2/P3 hold `p2_n`/`p3_n` creatures. Returns the state, the
+    /// Keeper source, and the parsed creature-trigger definition.
+    fn keeper_shared_intervening_if_board(
+        p2_n: usize,
+        p3_n: usize,
+    ) -> (GameState, ObjectId, TriggerDefinition) {
+        let controller = PlayerId(0);
+        let (p2, p3) = (PlayerId(2), PlayerId(3));
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        state.active_player = p2;
+        let source = make_creature(&mut state, controller, "Keeper of the Accord", 3, 4);
+        make_creature(&mut state, controller, "Mine", 1, 1);
+        for i in 0..p2_n {
+            make_creature(&mut state, p2, &format!("Theirs P2-{i}"), 1, 1);
+        }
+        for i in 0..p3_n {
+            make_creature(&mut state, p3, &format!("Theirs P3-{i}"), 1, 1);
+        }
+        let trig_def = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player controls more creatures than you, create a 1/1 white Soldier creature token.",
+            "Keeper of the Accord",
+        );
+        (state, source, trig_def)
+    }
+
+    /// Drive a raw end-step event through the production firing pipeline
+    /// (matcher → constraint → `trigger_firing_groups`) on a shared-turn
+    /// board. The reach-guard asserts prove the trigger reaches the fan-out
+    /// path (the fix's domain) rather than dying at an upstream gate.
+    fn keeper_shared_firing_groups(
+        state: &GameState,
+        source: ObjectId,
+        trig_def: &TriggerDefinition,
+    ) -> Vec<FiringGroup> {
+        let controller = PlayerId(0);
+        let source_context = trigger_source_context_for_latch(state, &state.objects[&source]);
+        let ability = build_triggered_ability_from_context(state, trig_def, &source_context, None);
+        // Keeper's turn-player reference lives in the intervening-if CONDITION,
+        // not the effect tree (which only creates a token for the controller):
+        // the effect gate answers false. The fan-out admission below must come
+        // from the condition-aware path (the F2 fix), never from this gate —
+        // asserting the negation pins that the test exercises the condition
+        // arm rather than re-proving an effect reference that does not exist.
+        assert!(
+            !phase_trigger_effect_references_turn_player(&ability),
+            "Keeper's EFFECT names no turn player — fan-out must ride the condition"
+        );
+        let raw = GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::End,
+        };
+        let matcher = trigger_matcher(TriggerMode::Phase).expect("Phase mode has a matcher");
+        assert!(
+            matcher(&raw, trig_def, &source_context, state),
+            "the Phase matcher admits the raw end-step event"
+        );
+        assert!(
+            check_trigger_constraint_with_ref(
+                state,
+                trig_def,
+                None,
+                Some(&source_context),
+                controller,
+                Some(&raw),
+            ),
+            "OnlyDuringOpponentsTurn holds on the shared turn"
+        );
+        assert_eq!(
+            shared_turn_phase_occurrences(&raw, trig_def, state, &ability)
+                .map(|occurrences| occurrences.len()),
+            Some(2),
+            "the builder fans out to both opposing seats"
+        );
+        trigger_firing_groups(
+            state,
+            &raw,
+            None,
+            &[raw.clone()],
+            trig_def,
+            &source_context,
+            controller,
+            matcher,
+            &[],
+            FiringConditions::printed(trig_def, None),
+            &ability,
+        )
+    }
+
+    /// K1 (CR 805.4d): on a shared 2HG turn, an intervening-if phase trigger
+    /// is evaluated per occurrence, not once from the representative seat.
+    /// Only the nonrepresentative seat (P3) is ahead here, so exactly one
+    /// firing rides P3's occurrence.
+    /// Currently RED (stop-and-return): the fan-out builder reads only the
+    /// effect tree, so condition-scoped Keeper never fans out and zero groups
+    /// fire. The F2 fix must admit condition-scoped turn-player references;
+    /// the U2 per-occurrence evaluation below then yields exactly this firing.
+    #[test]
+    fn keeper_shared_turn_fires_only_for_qualifying_nonrepresentative_seat() {
+        let (state, source, trig_def) = keeper_shared_intervening_if_board(1, 3);
+        let groups = keeper_shared_firing_groups(&state, source, &trig_def);
+        assert_eq!(
+            groups.len(),
+            1,
+            "only the qualifying seat fires, got {}",
+            groups.len()
+        );
+        assert!(
+            matches!(
+                groups[0].events.first(),
+                Some(GameEvent::PhaseChangedForPlayer { player_id, .. })
+                    if *player_id == PlayerId(3)
+            ),
+            "the single firing rides P3's occurrence, got {:?}",
+            groups[0].events.first()
+        );
+    }
+
+    /// K2 (CR 805.4d): both seats qualify, so both occurrences fire — one
+    /// group per seat, each bound to its own player.
+    /// Currently RED (stop-and-return): same builder-gate cause as K1 — zero
+    /// groups fire until the F2 fix admits condition-scoped references.
+    #[test]
+    fn keeper_shared_turn_fires_once_per_qualifying_seat() {
+        let (state, source, trig_def) = keeper_shared_intervening_if_board(3, 3);
+        let groups = keeper_shared_firing_groups(&state, source, &trig_def);
+        assert_eq!(
+            groups.len(),
+            2,
+            "both qualifying seats fire, got {}",
+            groups.len()
+        );
+        let seats: Vec<PlayerId> = groups
+            .iter()
+            .map(|group| match group.events.first() {
+                Some(GameEvent::PhaseChangedForPlayer { player_id, .. }) => *player_id,
+                other => panic!("each firing rides its own occurrence, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(seats.len(), 2);
+        assert!(
+            seats.contains(&PlayerId(2)) && seats.contains(&PlayerId(3)),
+            "each firing is bound to its own seat, got {seats:?}"
         );
     }
 
