@@ -2336,8 +2336,13 @@ pub(crate) fn change_zone_member_requests(
             // The legacy mover passes `Silent` for this constructor.
             request.mods.chain_referent = crate::types::zones::ChainReferentIntent::Silent;
             request.mods.attach_to = ctx.enter_attached_to;
-            // CR 608.2c: attribution follows the captured instruction performer.
-            request.mods.performed_by = Some(ctx.performed_by);
+            // CR 608.2c: attribution follows the captured instruction performer;
+            // entry ownership (`EntryOwnership::ActorOwns`) keeps reading the
+            // family controller, as the direct, mass and single-member paths do.
+            request = request.actors(crate::game::zone_pipeline::MoveActors {
+                performed_by: Some(ctx.performed_by),
+                ownership_actor: Some(ctx.controller),
+            });
             request.placement = ctx.library_placement.clone();
             // CR 701.24a: a terminal-shuffle move keeps its mode on every member.
             request.library_shuffle = ctx.library_shuffle;

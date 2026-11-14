@@ -17,6 +17,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::ChosenAttribute;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::format::FormatConfig;
 use engine::types::game_state::{PersistedGameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost};
@@ -2923,4 +2924,56 @@ fn a_destroy_population_member_without_a_performer_still_restores() {
     choose_source(&mut restored, hyena);
     finish(&mut restored);
     assert_eq!(zone(&restored, plain), Zone::Graveyard);
+}
+
+const PRAETORS_COUNSEL: &str = "Return all cards from your graveyard to your hand. Exile Praetor's Counsel. You have no maximum hand size for the rest of the game.";
+
+/// CR 400.3 + CR 108.3 + CR 701.8a: in Dandân (`EntryOwnership::ActorOwns`) the
+/// graveyard is shared, so Praetor's Counsel ("Return all cards from your
+/// graveyard to your hand") takes P1's two cards into P0's hand and they become
+/// P0's. The mass return is a staged population (two members), whose requests
+/// must carry the instruction's controller as the ownership actor, apart from
+/// the performer; the single-member path and the former serial sweep did.
+///
+/// Revert sensitivity: a staged request without the ownership actor sends each
+/// card to its owner's hand, P1's, still owned by P1.
+#[test]
+fn a_dandan_staged_mass_return_gives_the_caster_the_cards_it_takes() {
+    let mut scenario = GameScenario::new_with_format(FormatConfig::dandan(), 2, 11);
+    scenario.at_phase(Phase::PreCombatMain);
+    let counsel = zero_cost_spell(&mut scenario, "Praetor's Counsel", PRAETORS_COUNSEL);
+    let cards: Vec<ObjectId> = (0..2)
+        .map(|i| {
+            scenario
+                .add_spell_to_graveyard(P1, &format!("P1 Grave Spell {i}"), true)
+                .id()
+        })
+        .collect();
+    let mut runner = scenario.build();
+    runner.cast(counsel).commit();
+    for _ in 0..8 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes");
+    }
+    assert_eq!(
+        zone(&runner, counsel),
+        Zone::Exile,
+        "reach guard: the printed spell resolved through its exile clause"
+    );
+    for card in cards {
+        assert_eq!(zone(&runner, card), Zone::Hand, "{card:?}");
+        assert!(
+            runner.state().players[P0.0 as usize].hand.contains(&card),
+            "the card is in the caster's hand"
+        );
+        assert_eq!(
+            runner.state().objects[&card].owner,
+            P0,
+            "the Dandân caster owns the card they took into hand"
+        );
+    }
 }
