@@ -1536,11 +1536,14 @@ fn diviner_triggers_on_board(
 /// Phyrexian Metamorph, whose optional copy replacement pauses the move. P2
 /// concedes there, and P0 has the Metamorph enter as a copy of Sol Ring.
 /// Returns how many Vampire triggers wait or are on the stack.
-fn vampire_triggers_after_a_concession_mid_tooth_and_nail(suppressor: bool) -> usize {
+fn vampire_triggers_after_a_concession_mid_tooth_and_nail(
+    suppressor: bool,
+    vampire_owner: PlayerId,
+) -> usize {
     let db = shared_card_db().expect("integration card fixture must load");
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    let vampire = scenario.add_real_card(P0, "Welcoming Vampire", Zone::Battlefield, db);
+    let vampire = scenario.add_real_card(vampire_owner, "Welcoming Vampire", Zone::Battlefield, db);
     scenario.add_real_card(P0, "Sol Ring", Zone::Battlefield, db);
     if suppressor {
         scenario.add_real_card(P2, "Hushbringer", Zone::Battlefield, db);
@@ -1548,12 +1551,16 @@ fn vampire_triggers_after_a_concession_mid_tooth_and_nail(suppressor: bool) -> u
     let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
     let metamorph = scenario.add_real_card(P0, "Phyrexian Metamorph", Zone::Hand, db);
     let tooth_and_nail = scenario.add_real_card(P0, "Tooth and Nail", Zone::Hand, db);
-    let mut pool = (0..5)
-        .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
-        .collect::<Vec<_>>();
-    pool.extend((0..2).map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![])));
+    let turn_against = scenario.add_real_card(P0, "Turn Against", Zone::Hand, db);
+    let mut pool = red_mana(8);
+    pool.extend((0..8).map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![])));
+    pool.extend((0..4).map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![])));
     scenario.with_mana_pool(P0, pool);
     let mut runner = scenario.build();
+    if vampire_owner != P0 {
+        runner.cast(turn_against).target_object(vampire).resolve();
+        assert_eq!(runner.state().objects[&vampire].controller, P0);
+    }
     runner.cast(tooth_and_nail).modes(&[1]).commit();
     for _ in 0..8 {
         if matches!(
@@ -1635,7 +1642,7 @@ fn vampire_triggers_after_a_concession_mid_tooth_and_nail(suppressor: bool) -> u
 #[test]
 fn a_departed_suppressor_still_applies_to_the_hand_entry_completed_before_its_owner_left() {
     assert_eq!(
-        vampire_triggers_after_a_concession_mid_tooth_and_nail(true),
+        vampire_triggers_after_a_concession_mid_tooth_and_nail(true, P0),
         0
     );
 }
@@ -1646,7 +1653,20 @@ fn a_departed_suppressor_still_applies_to_the_hand_entry_completed_before_its_ow
 #[test]
 fn a_hand_entry_completed_before_a_concession_triggers_the_survivors_observer_once() {
     assert_eq!(
-        vampire_triggers_after_a_concession_mid_tooth_and_nail(false),
+        vampire_triggers_after_a_concession_mid_tooth_and_nail(false, P0),
+        1
+    );
+}
+
+/// CR 603.6a + CR 603.10 + CR 603.3a: a survivor-controlled observer whose
+/// source leaves with its owner keeps the trigger for the entry completed
+/// before it left, on the hand-to-battlefield path. P0 controls P2's Welcoming
+/// Vampire (Turn Against); the Bears enters, P2 concedes at the Metamorph's
+/// copy choice, and the Vampire triggers for P0 once.
+#[test]
+fn a_stolen_observer_keeps_its_trigger_for_the_hand_entry_completed_before_its_owner_left() {
+    assert_eq!(
+        vampire_triggers_after_a_concession_mid_tooth_and_nail(false, P2),
         1
     );
 }

@@ -1596,6 +1596,10 @@ fn do_eliminate(
 ) -> RulesExecutionNodeRef {
     let planar_handoff =
         crate::game::planechase::prepare_player_left_game_handoff(state, player, leaving_set);
+    // CR 603.10 + CR 800.4a: the post-event authority their objects hold, read
+    // while the player is still in the game (a departed owner's sources no
+    // longer function), for the logical owners their departure interrupts.
+    let owned_after = super::triggers::departing_owner_after_authority(state, player);
 
     // CR 733 + CR 800.4: open the leave's own execution node BEFORE the sweep, so
     // every command it settles below — the owned-object exiles, the control
@@ -1620,7 +1624,7 @@ fn do_eliminate(
     let leaving_is_latched_chooser = state.waiting_for.acting_player() == Some(player);
 
     abandon_source_bound_resolution_prompt(state, player, leaving_set, events);
-    retire_pending_zone_change_contexts_owned_by(state, player);
+    retire_pending_zone_change_contexts_owned_by(state, player, &owned_after);
     abandon_change_zone_family_for_controller(state, player, leaving_set, events);
 
     crate::game::planechase::preserve_phenomenon_stack_abilities_for_handoff(state, planar_handoff);
@@ -2095,7 +2099,11 @@ pub fn apply_resolved_player_leave(
 /// original simultaneous action. Retire contexts owned by a player who has
 /// left before any remaining member resumes; otherwise a pre-pause latch could
 /// fire from an object that no longer exists in the game.
-fn retire_pending_zone_change_contexts_owned_by(state: &mut GameState, player: PlayerId) {
+fn retire_pending_zone_change_contexts_owned_by(
+    state: &mut GameState,
+    player: PlayerId,
+    owned_after: &crate::types::game_state::DepartingOwnerAfterAuthority,
+) {
     // CR 730.3: a linked component child holds occurrences its announcing owner
     // has completed but not yet been handed.
     let held_by_child: Vec<crate::types::game_state::CollectedZoneChange> = state
@@ -2112,16 +2120,15 @@ fn retire_pending_zone_change_contexts_owned_by(state: &mut GameState, player: P
                 .collect()
         })
         .unwrap_or_default();
-    let owned_after = super::triggers::departing_owner_after_authority(state, player);
     state
         .resolution_stack
         .visit_active_zone_change_owners_mut(|owner| match owner {
             ZoneChangeOwnerMut::Batch(pending) => pending
                 .logical_zone_change_group
-                .retire_contexts_owned_by(player, &held_by_child, &owned_after),
+                .retire_contexts_owned_by(player, &held_by_child, owned_after),
             ZoneChangeOwnerMut::ChangeZone(pending) => pending
                 .logical_zone_change_group
-                .retire_contexts_owned_by(player, &held_by_child, &owned_after),
+                .retire_contexts_owned_by(player, &held_by_child, owned_after),
         });
 }
 
