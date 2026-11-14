@@ -919,6 +919,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         // CR 732.2a: which object moves is the proposal's choice; the scan reads what the
         // move's own fields read. The three entry riders stay unscanned: prover incomplete here.
         Effect::ChangeZone {
+            actor,
             target,
             enters_under,
             enter_with_counters,
@@ -944,6 +945,8 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             }
             ScanMode::LoopFirewall => {
                 let mut acc = scan_target_filter(target, target_ctx, mode);
+                // CR 608.2c: the performer reads what its player filter reads.
+                acc = acc.or(scan_library_instruction_actor(actor, target_ctx, mode));
                 if let Some(controller) = enters_under {
                     acc = acc.or(scan_controller_ref(controller));
                 }
@@ -5590,7 +5593,8 @@ fn scan_player_scope(x: &PlayerScope) -> Axes {
 }
 
 /// CR 608.2c: the reads of the player who performs a library instruction
-/// (`Effect::ExileTop.actor`). The resolver (`effects/exile_top.rs`) reads the
+/// (`Effect::ExileTop.actor`, `Effect::ChangeZone.actor`). The resolver
+/// (`effects/exile_top.rs`, `effects/change_zone.rs`) reads the
 /// named subject through the same context the instruction's own `player`
 /// selector uses, so `ctx` is the effect's target context.
 fn scan_library_instruction_actor(
@@ -8739,6 +8743,38 @@ mod tests {
                 "{mode:?}: the targeted opponent keeps the Typed event read"
             );
         }
+    }
+
+    /// CR 608.2c: a zone move's performer is read through its own filter in
+    /// LoopFirewall mode, as `ExileTop`'s is: the controller adds no axis, a
+    /// triggering-player subject ("that player exiles a card from their hand")
+    /// is an event read.
+    /// Revert-probe: bind `actor: _` in the `ChangeZone` arm ⇒ the
+    /// triggering-player row equals the controller row.
+    #[test]
+    fn change_zone_actor_is_read_as_its_player_filter() {
+        let pick = |actor| Effect::ChangeZone {
+            actor,
+            library_shuffle: Default::default(),
+            origin: Some(Zone::Hand),
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        };
+        let event = |actor| scan_effect(&pick(actor), ScanMode::LoopFirewall).event;
+        assert!(!event(LibraryInstructionActor::Controller));
+        assert!(event(LibraryInstructionActor::Player {
+            player: TargetFilter::TriggeringPlayer,
+        }));
     }
 
     /// The actor read survives nesting — a subject filter composed inside
@@ -12170,6 +12206,7 @@ mod tests {
 
     fn move_onto_battlefield_with(edit: impl FnOnce(&mut Effect)) -> (bool, bool, bool) {
         let mut effect = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,

@@ -5716,6 +5716,7 @@ mod tests {
 
     fn move_zone_effect(origin: Option<Zone>, destination: Zone, target: TargetFilter) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin,
             destination,

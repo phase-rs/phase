@@ -362,6 +362,7 @@ fn prompt_resolution_tap_untap_choice(
     }
 
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: ability.controller,
         cards: eligible,
         count: bounds.max,
