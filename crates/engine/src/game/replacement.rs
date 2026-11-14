@@ -14587,6 +14587,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: state.ingress_life_policy(),
+            source_incarnation: None,
         };
         assert_eq!(pending_replacement_option_count(&state, &pending), 2);
         assert!(pending_candidates_are_current(&state, &pending));
