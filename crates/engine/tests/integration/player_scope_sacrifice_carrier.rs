@@ -25,8 +25,8 @@ use std::collections::HashSet;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
-    ContinuousModification, Duration, Effect, EffectKind, QuantityExpr, ResolvedAbility,
-    TargetFilter, TargetRef,
+    AbilityDefinition, AbilityKind, ContinuousModification, Duration, Effect, EffectKind,
+    QuantityExpr, ReplacementDefinition, ReplacementMode, ResolvedAbility, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -36,9 +36,10 @@ use engine::types::game_state::{
     PendingPlayerScopeSacrificeCompletion, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
@@ -1679,4 +1680,86 @@ fn a_departure_settled_batch_asks_for_its_observers_target() {
     assert_eq!(life(state, P0), l0 + 1);
     assert_eq!(plus_one_counters(&run.runner, run.feeder), 1);
     assert_settled(state);
+}
+
+// ---------------------------------------------------------------------------
+// EXT-DEPARTURE-SETTLEMENT: a departure that settles a staged population
+// ---------------------------------------------------------------------------
+
+/// CR 800.4a + CR 608.2m + CR 608.2n: when the departure itself settles a
+/// staged destruction population, the departing controller's resolving spell
+/// keeps its owed final part, and the action boundary's final-part convergence
+/// reports it resolved exactly once with no stranded carrier.
+///
+/// Discriminator: the staged reconciliation's typed `DepartureSettlement` is
+/// the only signal that distinguishes "this instruction actually settled during
+/// the departure" from "its last unanswered question was abandoned". Without
+/// that signal the retirement guard sees two `NotSettled` legacy settlements,
+/// a departed controller, a card that has left the Stack and finished
+/// instructions — and retires the carrier as `Eliminated`, which never reports
+/// `StackResolved`.
+#[test]
+fn a_departure_that_settles_a_staged_population_still_reports_the_spell_resolved() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let wrath = scenario
+        .add_spell_to_hand_from_oracle(P0, "Day of Judgment", false, "Destroy all creatures.")
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    // The whole staged population is P0's, so the concession abandons every
+    // member and the reconciliation has nothing left to deliver.
+    let pausing = {
+        let mut builder = scenario.add_creature(P0, "Pausing Bear", 2, 2);
+        let id = builder.id();
+        // Infrastructure exception: Drudge Skeletons' regeneration shield is
+        // the nearest printed destroy replacement. This optional NoOp isolates
+        // the concession boundary without claiming a full-card witness.
+        builder.with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::Destroy)
+                .mode(ReplacementMode::Optional { decline: None })
+                .valid_card(TargetFilter::SelfRef)
+                .description("pause the destroy".to_string())
+                .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+        );
+        id
+    };
+    let plain = scenario.add_creature(P0, "Plain Bear", 2, 2).id();
+    let mut runner = scenario.build();
+
+    // The engine's own loop drives the cast to its first replacement pause;
+    // nothing is constructed by hand.
+    runner.cast(wrath).commit();
+    pass_until_a_prompt(&mut runner);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "premise: the staged population is parked on a replacement choice, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // P0, the spell's controller and the staged population's owner, concedes at
+    // that prompt.
+    let mut events = concede(&mut runner, P0);
+    events.extend(run_until_settled(&mut runner, answer_replacements));
+
+    let state = runner.state();
+    assert_eq!(
+        stack_resolved_count(&events, wrath),
+        1,
+        "the settled resolution is reported resolved exactly once"
+    );
+    assert_settled(state);
+    assert_eq!(state.objects[&pausing].zone, Zone::Exile);
+    assert_eq!(state.objects[&plain].zone, Zone::Exile);
+    // CR 800.4a: the card itself left the game with its owner (the departure
+    // sweep exiles the resolving spell's card), so the final part reports the
+    // resolution without putting it into a graveyard. That is exactly why the
+    // retirement decision cannot key on the card's zone.
+    assert_eq!(
+        state.objects[&wrath].zone,
+        Zone::Exile,
+        "the spell's card left with its departed owner"
+    );
 }

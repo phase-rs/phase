@@ -1,3 +1,6 @@
+// The auto-trait proof for the im-backed game states an `AiSession` caches and
+// shares across threads exceeds the default limit of 128.
+#![recursion_limit = "256"]
 pub mod ability_chain;
 pub mod auto_play;
 pub mod card_advantage;

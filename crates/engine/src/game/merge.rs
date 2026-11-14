@@ -359,7 +359,7 @@ pub(crate) fn install_merge_layer_effect(
 ///
 /// CR 730.3d (replacement propagation): this raw primitive is retained only
 /// for callers that intentionally bypass the zone pipeline. Normal gameplay
-/// instead enters [`move_merged_permanent_on_leave`], which seeds each component
+/// instead enters [`move_merged_permanent_for_parent`], which seeds each component
 /// with the merged event's applied set and lets the shared batch pipeline consult
 /// only still-applicable component replacements. That preserves the rule's
 /// direction that applying a replacement to the merged object applies it to all
@@ -464,6 +464,29 @@ pub fn split_merged_permanent_on_leave(
     // `reset_for_battlefield_exit` during the subsequent `move_to_zone`.
 }
 
+/// Test-only standalone entry; production delivery supplies its parent link to
+/// [`move_merged_permanent_for_parent`].
+#[cfg(test)]
+pub(crate) fn move_merged_permanent_on_leave(
+    state: &mut GameState,
+    merged_id: ObjectId,
+    dest: Zone,
+    library_placement: Option<&LibraryPosition>,
+    applied: &HashSet<AppliedReplacementKey>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    move_merged_permanent_for_parent(
+        state,
+        merged_id,
+        dest,
+        library_placement,
+        LibraryShuffleMode::PerObject,
+        applied,
+        None,
+        events,
+    )
+}
+
 /// CR 730.3d: "If multiple replacement effects could be applied to the event
 /// of a merged permanent leaving the battlefield or being put into the new
 /// zone, applying one of those replacement effects to the object applies it to
@@ -484,19 +507,21 @@ pub fn split_merged_permanent_on_leave(
 /// Hand/Library replacement, only that component's request changes to Command;
 /// noncommander components remain routed to their appropriate zones.
 ///
-/// CR 701.24a + CR 730.3: a library position reaches the components only when
-/// the move is the move component of a terminal-shuffle operation, where the
-/// position is transient and the chained `Shuffle` randomizes the library
-/// once. Any other library placement leaves each component at the zone
-/// default; the owner's CR 730.3a arrangement of an ordered placement is not
-/// modeled here.
-pub(crate) fn move_merged_permanent_on_leave(
+/// CR 701.24a + CR 730.3: every component inherits the approved library
+/// position together with the move's shuffle mode. Under a terminal shuffle
+/// the position is transient and the chained `Shuffle` randomizes the library
+/// once. Under an ordinary placement the components arrive at that position
+/// as one group, which their owner arranges (CR 730.3a + CR 401.4) through
+/// the staged batch.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn move_merged_permanent_for_parent(
     state: &mut GameState,
     merged_id: ObjectId,
     dest: Zone,
     library_placement: Option<&LibraryPosition>,
     library_shuffle: LibraryShuffleMode,
     applied: &HashSet<AppliedReplacementKey>,
+    parent: Option<crate::types::game_state::PendingComponentDeliveryParent>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
     let Some(survivor) = state.objects.get(&merged_id) else {
@@ -532,16 +557,18 @@ pub(crate) fn move_merged_permanent_on_leave(
                     .expect("merged component exists")
                     .split_from_merge_survivor = Some(survivor_successor);
             }
-            let placement = match library_shuffle {
-                LibraryShuffleMode::TerminalShuffle => library_placement.cloned(),
-                LibraryShuffleMode::PerObject => None,
+            // CR 730.3: every component inherits the final approved destination
+            // and position; its own replacement consult may redirect it again.
+            let placement = match (dest, library_placement) {
+                (Zone::Library, Some(position)) => Some(position.clone()),
+                _ => None,
             };
             ZoneMoveRequest::merged_component(component_id, dest, placement, library_shuffle)
                 .with_replacement_applied(applied.clone())
         })
         .collect();
 
-    zone_pipeline::move_objects_simultaneously_then(state, requests, None, events)
+    zone_pipeline::move_component_batch_then(state, requests, None, parent, events)
 }
 
 /// CR 730.2d + CR 400.7 + CR 111.7: restore the survivor's intrinsic token-ness

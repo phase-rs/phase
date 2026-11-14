@@ -1103,7 +1103,6 @@ fn perform_creature_deaths(
                         source_id: source,
                         exile_links: ExileLinkSpec::default(),
                         drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                        library_placement: None,
                     };
                     if let ZoneDeliveryResult::NeedsChoice(_) =
                         zone_pipeline::deliver(state, approved, ctx, events)
@@ -1190,9 +1189,6 @@ fn perform_creature_deaths(
                                     source_id: source,
                                     exile_links: ExileLinkSpec::default(),
                                     drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                                    // SBA destroy/sacrifice deliveries target the
-                                    // graveyard — never a library placement.
-                                    library_placement: None,
                                 };
                                 // CR 704.3: completing all SBAs may require a
                                 // replacement choice surfaced by the delivery tail

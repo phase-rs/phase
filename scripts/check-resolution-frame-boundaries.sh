@@ -244,21 +244,24 @@ def legacy_allowlist_spans(source: str) -> list[tuple[int, int]]:
     if inventory_match is None:
         raise ValueError("missing legacy resolution key inventory")
 
-    live_roots_match = re.search(
-        r"\bconst\s+LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS\s*:\s*&\[&str\]\s*=\s*&\[",
-        source,
-    )
-    if live_roots_match is None:
-        raise ValueError("missing legacy live ZoneChanged root census")
-    live_roots_end = source.find("];", live_roots_match.end())
-    if live_roots_end == -1:
-        raise ValueError("unterminated legacy live ZoneChanged root census")
-
     spans = [
         block_span(source, v1_match),
         block_span(source, inventory_match),
-        (live_roots_match.start(), live_roots_end + 2),
     ]
+    for name in (
+        "LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS",
+        "LEGACY_REPLACEMENT_PLACEMENT_OWNER_ROOTS",
+    ):
+        roots_match = re.search(
+            rf"\bconst\s+{name}\s*:\s*&\[&str\]\s*=\s*&\[",
+            source,
+        )
+        if roots_match is None:
+            raise ValueError(f"missing legacy root census {name}")
+        roots_end = source.find("];", roots_match.end())
+        if roots_end == -1:
+            raise ValueError(f"unterminated legacy root census {name}")
+        spans.append((roots_match.start(), roots_end + 2))
     legacy_struct = re.compile(r"\bstruct\s+Legacy\w+Wire\b[^\{]*\{")
     spans.extend(block_span(source, match) for match in legacy_struct.finditer(source))
     return spans

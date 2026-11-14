@@ -4912,10 +4912,13 @@ pub(crate) fn sync_logical_zone_change_departure_stamps(
 /// occurrence ordinal keeps byte-identical events distinct, so the generic
 /// collector still sees every unrelated event from the same action exactly
 /// once.
+/// CR 603.7b: an ordinary-only claim preserves the event for delayed triggers
+/// whose next matching occurrence has not yet been collected.
 pub(crate) fn mark_logical_zone_events_consumed_before_priority(
     state: &mut GameState,
     group: &LogicalZoneChangeGroup,
     events: &[GameEvent],
+    scope: ConsumedTriggerEventScope,
 ) {
     let mut unclaimed_owned_zone_events: Vec<_> = group
         .all_origin_occurrences
@@ -4938,7 +4941,7 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority(
                     ConsumedTriggerEventOccurrence {
                         event: event.clone(),
                         occurrence: trigger_event_occurrence(events, index),
-                        scope: ConsumedTriggerEventScope::AllCollectors,
+                        scope,
                     }
                 })
         })
@@ -4968,6 +4971,9 @@ pub(crate) fn collect_logical_zone_trigger_settlement(
         .iter()
         .map(|occurrence| occurrence.event.clone())
         .collect();
+    // CR 603.10a: departed observers read their retained pre-departure triggers;
+    // members with no such triggers cannot observe another member's departure.
+    let observer_index = CoDepartureObserverIndex::build(state, &all_events);
     let mut pending = Vec::new();
 
     for member_index in 0..group.prospective_battlefield_members.len() {
@@ -4975,13 +4981,25 @@ pub(crate) fn collect_logical_zone_trigger_settlement(
         if matches!(
             group.terminal_outcomes[member_index],
             LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft
+                | LogicalZoneChangeTerminalOutcome::Preempted
         ) {
+            continue;
+        }
+        let moved = matches!(
+            group.terminal_outcomes[member_index],
+            LogicalZoneChangeTerminalOutcome::Moved { .. }
+        );
+        if moved && !observer_index.may_observe(member.object_id) {
             continue;
         }
         let source_context = group.settlement_member_source_context(member_index)?;
         for occurrence in &group.all_origin_occurrences {
             if group.is_member_own_occurrence(member, occurrence) {
                 continue;
+            }
+            #[cfg(feature = "test-support")]
+            if moved {
+                super::perf_counters::record_co_departure_observer_resolution();
             }
             let mut batched_this_pass = HashSet::new();
             let mut registered_this_event = HashSet::new();
@@ -13798,23 +13816,27 @@ pub(crate) fn filter_consumed_trigger_events(
 /// 1. `consumed` — occurrences explicitly claimed by
 ///    [`mark_logical_zone_events_consumed_before_priority`]. Required wherever an
 ///    intervening `drain_deferred_trigger_queue` has already emptied
-///    `deferred_triggers`. Only three owners mark, and their ordinals are NOT
+///    `deferred_triggers`. Four sites mark, and their ordinals are NOT
 ///    uniformly exact: `effects/mod.rs` passes the whole action buffer (exact);
-///    `zone_pipeline.rs`'s synchronous-completion site passes a sub-slice, so its
-///    ordinals are rebased; and `zone_pipeline.rs`'s batch-drain site passes the
-///    whole buffer only after `drain_pending_batch_deliveries` has moved it out
-///    and re-assembled it, so its ordinals are computed against a re-ordered
-///    buffer. See the warning on [`filter_consumed_trigger_events_from`].
+///    `zone_pipeline.rs`'s two synchronous-completion sites pass sub-slices, so
+///    their ordinals are rebased; its batch-drain site passes the whole buffer
+///    only after `drain_pending_batch_deliveries` has moved it out and
+///    re-assembled it, so its ordinals use a re-ordered buffer. See the warning
+///    on [`filter_consumed_trigger_events_from`]. Staged ChangeZone and Destroy
+///    population completions claim ordinary collectors only; legacy drains and
+///    the shared synchronous arm of `move_arranged_batch_then` claim all
+///    collectors. Its callers are `move_owner_arranged_batch_then`,
+///    `move_objects_simultaneously_then`, and `move_component_batch_then`.
 /// 2. `state.deferred_triggers` — the `ZoneChanged` values carried by contexts
 ///    that [`complete_logical_zone_trigger_collection`] and
 ///    [`append_and_collect_logical_zone_trigger_segment`] already queued. This is
 ///    the only witness for the four owners that deliberately do NOT mark
 ///    (`effects/change_zone.rs` x2, `engine_resolution_choices.rs` x2). Do NOT
-///    "fix" that asymmetry by adding `mark_`: claiming an occurrence also hides
-///    it from `check_delayed_triggers` (`engine_priority.rs`), which would
-///    silently kill the CR 603.7b leaves-the-battlefield delayed family (an
-///    ability triggers only the next time its trigger event occurs; hide the
-///    event and it never triggers).
+///    add an `AllCollectors` claim where only ordinary triggers were collected:
+///    it also hides the occurrence from `check_delayed_triggers`
+///    (`engine_priority.rs`), silently killing the CR 603.7b
+///    leaves-the-battlefield delayed family. An ordinary-only claim preserves
+///    that family's next matching occurrence.
 ///
 /// WITNESS 2 IS A BOUND, NOT AN OCCURRENCE COUNT. `deferred_triggers` holds one
 /// context per matching observer, not one entry per occurrence (every zone-change
@@ -52878,6 +52900,23 @@ pub mod tests {
         crate::game::effects::change_zone::resolve_all(&mut state, &ability, &mut events)
             .expect("mass change-zone resolves (pausing on the first MayCost member)");
 
+        // CR 101.4c + CR 616.1: the staged sweep consulted all three members,
+        // so P0 holds both pausing members' decisions and first chooses which
+        // to make; announcement order keeps the original sequence.
+        assert_eq!(
+            state.waiting_for,
+            WaitingFor::ReplacementDecisionOrder {
+                player: PlayerId(0),
+                objects: vec![member_b, observer],
+            }
+        );
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![member_b],
+            },
+        )
+        .expect("P0 makes member B's decision first (announcement order)");
         // Resolve each replacement choice (accept, index 0) until the batch
         // settles. Keeping the real repeated-choice path proves the logical
         // group preserves its authority across each pause/resume boundary.
@@ -53013,6 +53052,70 @@ pub mod tests {
                 );
             }
         }
+    }
+
+    /// R4c (option i): the staged ChangeZone family parks a
+    /// `[ChangeZone{awaiting_batch}, BatchDelivery]` pair instead of a legacy
+    /// `pending` carrier. Assert that exact staged representation and return
+    /// the batch owner that now owns the logical group.
+    fn assert_staged_change_zone_owner(
+        state: &GameState,
+    ) -> &crate::types::game_state::PendingBatchDeliveries {
+        let marker = state
+            .resolution_stack
+            .iter()
+            .find_map(|frame| match frame {
+                crate::types::resolution::ResolutionFrame::ChangeZone(frame)
+                    if frame.awaiting_batch.is_some() =>
+                {
+                    Some(&**frame)
+                }
+                _ => None,
+            })
+            .expect("staged ChangeZone marker is parked");
+        assert!(
+            marker.pending.is_none(),
+            "a staged marker owns no legacy iteration suffix"
+        );
+        let group_id = marker
+            .awaiting_batch
+            .expect("checked awaiting_batch marker")
+            .group_id;
+        state
+            .resolution_stack
+            .iter()
+            .find_map(|frame| match frame {
+                crate::types::resolution::ResolutionFrame::BatchDelivery(batch)
+                    if batch.is_change_zone_population()
+                        && batch.logical_zone_change_group.logical_group_id == group_id =>
+                {
+                    Some(&**batch)
+                }
+                _ => None,
+            })
+            .expect("staged ChangeZone batch matching the marker is parked")
+    }
+
+    /// The logical group of a parked staged ChangeZone owner (the batch child is
+    /// the single logical owner; the marker holds no group).
+    fn staged_change_zone_group(
+        state: &GameState,
+    ) -> &crate::types::game_state::LogicalZoneChangeGroup {
+        // A one-member population keeps the legacy carrier (>=2 is the staged
+        // threshold); both representations own the exact logical group while
+        // parked, and exactly one of them is present.
+        if let Some(frame) = state.active_change_zone_frame() {
+            assert!(
+                frame.pending.is_some(),
+                "singleton ChangeZone carrier is parked as a legacy iteration"
+            );
+            return &frame
+                .pending
+                .as_ref()
+                .expect("checked legacy pending carrier")
+                .logical_zone_change_group;
+        }
+        &assert_staged_change_zone_owner(state).logical_zone_change_group
     }
 
     /// A batched trigger carries its complete match set in the stack side table
@@ -53798,12 +53901,12 @@ pub mod tests {
                     "{carrier:?} slot {paused_index} must reach the real replacement prompt"
                 );
                 match carrier {
-                    LogicalZoneProductionCarrier::ChangeZone => assert!(
-                        state
-                            .active_change_zone_frame()
-                            .is_some_and(|frame| frame.pending.is_some()),
-                        "ChangeZone slot {paused_index} must retain its production carrier"
-                    ),
+                    LogicalZoneProductionCarrier::ChangeZone => {
+                        // R4c: the staged representation is marker + batch; the
+                        // marker owns no legacy suffix and the batch owns the
+                        // exact logical group.
+                        assert_staged_change_zone_owner(&state);
+                    }
                     LogicalZoneProductionCarrier::BatchDelivery => assert!(
                         state.active_batch_delivery().is_some(),
                         "BatchDelivery slot {paused_index} must retain its production carrier"
@@ -53889,6 +53992,30 @@ pub mod tests {
 
             let mut events = Vec::new();
             resolve_ltb_production_carrier(&mut state, carrier, ObjectId(91_100), &mut events);
+
+            // CR 101.4c + CR 616.1: the staged ChangeZone population's sweep
+            // consults every member before asking, so P0 holds both pausing
+            // members' decisions and first chooses which to make. That prompt
+            // also survives the save; announcement order keeps the original
+            // sequence. The BounceAll carrier still pauses member by member.
+            if matches!(carrier, LogicalZoneProductionCarrier::ChangeZone) {
+                assert_eq!(
+                    state.waiting_for,
+                    WaitingFor::ReplacementDecisionOrder {
+                        player: PlayerId(0),
+                        objects: vec![last, observer],
+                    }
+                );
+                let saved =
+                    serde_json::to_value(&state).expect("the parked decision order serializes");
+                state =
+                    serde_json::from_value(saved).expect("the parked decision order deserializes");
+                crate::game::engine::apply_as_current(
+                    &mut state,
+                    GameAction::SelectCards { cards: vec![last] },
+                )
+                .expect("P0 makes the last member's decision first (announcement order)");
+            }
 
             for pause in 1..=2 {
                 assert!(
@@ -54256,12 +54383,11 @@ pub mod tests {
                     "{carrier:?} all_origins={all_origins}: the batched observer remains in its declared off-zone source zone"
                 );
                 match carrier {
-                    LogicalZoneProductionCarrier::ChangeZone => assert!(
-                        state
-                            .active_change_zone_frame()
-                            .is_some_and(|frame| frame.pending.is_some()),
-                        "ChangeZone must retain the mixed-origin owner while parked"
-                    ),
+                    LogicalZoneProductionCarrier::ChangeZone => {
+                        // R4c: the mixed-origin population is owned by the staged
+                        // batch child, with the marker as its structural parent.
+                        assert_staged_change_zone_owner(&state);
+                    }
                     LogicalZoneProductionCarrier::BatchDelivery => assert!(
                         state.active_batch_delivery().is_some(),
                         "BatchDelivery must retain the mixed-origin owner while parked"
@@ -54621,11 +54747,22 @@ pub mod tests {
                 Zone::Battlefield,
                 &mut events,
             );
-            assert_eq!(
-                state.objects[&early].zone,
-                Zone::Battlefield,
-                "{carrier:?} positive reach guard: the graveyard member supplies the immediately-before occurrence before the real ordering pause"
-            );
+            // R4c staged order: the immediately-before occurrence is captured
+            // from the initial board, and the member itself is still in its
+            // origin zone at the later consultation pause (approvals precede
+            // delivery).
+            match carrier {
+                LogicalZoneProductionCarrier::ChangeZone => assert_eq!(
+                    state.objects[&early].zone,
+                    Zone::Graveyard,
+                    "{carrier:?} staged approvals precede delivery: the graveyard member supplies the immediately-before occurrence while still in its origin zone"
+                ),
+                LogicalZoneProductionCarrier::BatchDelivery => assert_eq!(
+                    state.objects[&early].zone,
+                    Zone::Battlefield,
+                    "{carrier:?} sequential delivery moves the early member before the later pause"
+                ),
+            }
             assert!(
                 matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
                 "{carrier:?} positive reach guard: two material Moved redirects surface the CR 616.1 production prompt"
@@ -54640,6 +54777,11 @@ pub mod tests {
             )
             .expect("the ordering choice resumes the saved logical owner");
 
+            assert_eq!(
+                state.objects[&early].zone,
+                Zone::Battlefield,
+                "{carrier:?} the early member is delivered after the pause and supplies the immediately-after observation"
+            );
             assert!(
                 state.objects[&recipient].zone == Zone::Battlefield
                     && state.objects[&provider].zone == Zone::Battlefield,
@@ -55187,13 +55329,7 @@ pub mod tests {
                     "{carrier:?} co_departing={co_departing}: positive reach guard reaches the saved replacement"
                 );
                 let logical_group = match carrier {
-                    LogicalZoneProductionCarrier::ChangeZone => {
-                        &state
-                            .active_change_zone_frame()
-                            .and_then(|frame| frame.pending.as_ref())
-                            .expect("ChangeZone suppressor owner is parked")
-                            .logical_zone_change_group
-                    }
+                    LogicalZoneProductionCarrier::ChangeZone => staged_change_zone_group(&state),
                     LogicalZoneProductionCarrier::BatchDelivery => {
                         &state
                             .active_batch_delivery()
@@ -55396,13 +55532,7 @@ pub mod tests {
                 "{carrier:?} positive reach guard parks the simultaneous entry"
             );
             let logical_group = match carrier {
-                LogicalZoneProductionCarrier::ChangeZone => {
-                    &state
-                        .active_change_zone_frame()
-                        .and_then(|frame| frame.pending.as_ref())
-                        .expect("ChangeZone entering-suppressor owner is parked")
-                        .logical_zone_change_group
-                }
+                LogicalZoneProductionCarrier::ChangeZone => staged_change_zone_group(&state),
                 LogicalZoneProductionCarrier::BatchDelivery => {
                     &state
                         .active_batch_delivery()
@@ -55702,10 +55832,13 @@ pub mod tests {
                 matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
                 "{carrier:?} positive reach guard parks after the observer is in its off-zone trigger zone"
             );
+            // R4c staged order: every member is approved before any delivery,
+            // so at this consultation pause the earlier observer has not moved
+            // yet; the later assertions pin that it does move on delivery.
             assert_eq!(
                 state.objects[&observer].zone,
-                Zone::Graveyard,
-                "{carrier:?} positive reach guard moves the observer before the later segment"
+                Zone::Battlefield,
+                "{carrier:?} staged approvals precede delivery: the early observer is still in its origin zone at the later consultation pause"
             );
             let saved =
                 serde_json::to_value(&state).expect("parked early-observer carrier serializes");
@@ -55932,7 +56065,6 @@ pub mod tests {
                     None,
                     false,
                     crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                    None,
                     events,
                 );
             }

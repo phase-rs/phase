@@ -5366,8 +5366,8 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // ── the classifier's own reach-guard: the enum was actually found ──
     let total = enum_variants(&enum_src, "WaitingFor").len();
     assert_eq!(
-        total, 148,
-        "`WaitingFor` has 148 variants at this tip, read off the `syn` parse. This number is \
+        total, 149,
+        "`WaitingFor` has 149 variants at this tip, read off the `syn` parse. This number is \
          pinned so a variant REMOVED is as visible as one added; if you added a variant and it \
          carries no `DecisionTemplate`, update this number. A wildly different count means the \
          reader lost its anchor, and every assertion below would then be measuring an empty enum"
@@ -5463,6 +5463,11 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // It is also deliberately absent from the `filter_state_for_scope` redaction loop: its
     // fields are seat ids, which are public, the same reasoning that leaves
     // `BetweenGamesChoosePlayDraw` unredacted.
+    // 148 ⇒ 149 is ADJUDICATED: the staged replacement-choice scheduler (CR 101.4c +
+    // CR 616.1) added `ReplacementDecisionOrder { player, objects }`, answered with
+    // `GameAction::SelectCards` in `engine_resolution_choices`. Measured, not inferred
+    // from the diff: that body holds NO `DecisionTemplate` (zero matches), so it is not a
+    // third carrier and the carrier assertion below is unchanged by it.
 
     let carriers = carriers_in_source(&enum_src, "WaitingFor", &corpus, &marker, true);
     assert_eq!(

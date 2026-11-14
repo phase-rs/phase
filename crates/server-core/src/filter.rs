@@ -470,9 +470,11 @@ mod tests {
         );
         let members = [card_a, card_b]
             .into_iter()
-            .map(|id| MassLibraryOrderMember {
-                identity: ObjectIncarnationRef::from_object(&state.objects[&id]),
-                origin: Zone::Library,
+            .map(|id| {
+                MassLibraryOrderMember::card(
+                    ObjectIncarnationRef::from_object(&state.objects[&id]),
+                    Zone::Library,
+                )
             })
             .collect();
 
@@ -517,19 +519,21 @@ mod tests {
                 owner: PlayerId(1),
                 members: [queued_card_a, queued_card_b]
                     .into_iter()
-                    .map(|id| MassLibraryOrderMember {
-                        identity: ObjectIncarnationRef::from_object(&state.objects[&id]),
-                        origin: Zone::Library,
+                    .map(|id| {
+                        MassLibraryOrderMember::card(
+                            ObjectIncarnationRef::from_object(&state.objects[&id]),
+                            Zone::Library,
+                        )
                     })
                     .collect(),
                 arranger: None,
             }]),
             arranged_batches: vec![MassLibraryOrderBatch {
                 owner: PlayerId(0),
-                members: vec![MassLibraryOrderMember {
-                    identity: ObjectIncarnationRef::from_object(&state.objects[&card_a]),
-                    origin: Zone::Library,
-                }],
+                members: vec![MassLibraryOrderMember::card(
+                    ObjectIncarnationRef::from_object(&state.objects[&card_a]),
+                    Zone::Library,
+                )],
                 arranger: None,
             }],
             resolving_entry: Some(ObjectId(1)),

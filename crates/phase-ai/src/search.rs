@@ -2120,6 +2120,11 @@ pub fn fallback_action(
 
         // Replacement choice: pick the first option.
         WaitingFor::ReplacementChoice { .. } => Some(GameAction::ChooseReplacement { index: 0 }),
+        // CR 101.4c: which of the player's decisions to make first: the first
+        // engine-issued one.
+        WaitingFor::ReplacementDecisionOrder { .. } => {
+            issued(|action| matches!(action, GameAction::SelectCards { .. }))
+        }
         WaitingFor::EntryControllerChoice { candidates, .. } => candidates
             .first()
             .copied()

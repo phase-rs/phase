@@ -7964,6 +7964,22 @@ impl TypedFilter {
             || !self.properties.is_empty()
     }
 
+    /// Whether best-effort target parsing retained no standalone selection constraint.
+    ///
+    /// CR 115.1a + CR 115.1c: a target phrase describes the affected object or
+    /// player. An empty filter or `Another` alone does not preserve that
+    /// description; the latter only excludes a relative referent. CR 115.4:
+    /// damage-target wording has its own domain, which this filter alone
+    /// cannot establish. Every other property remains a real constraint.
+    pub fn lacks_standalone_selection_constraint(&self) -> bool {
+        self.type_filters.is_empty()
+            && self.controller.is_none()
+            && self
+                .properties
+                .iter()
+                .all(|property| *property == FilterProp::Another)
+    }
+
     pub fn normalized(mut self) -> Self {
         self.type_filters = normalized_type_filters(self.type_filters);
         self.properties = normalized_filter_props(self.properties);
@@ -21063,6 +21079,20 @@ impl LibraryPosition {
     /// Serde skip-helper: `Top` is the default and is omitted from JSON.
     pub fn is_top(&self) -> bool {
         matches!(self, Self::Top)
+    }
+
+    /// CR 401.4 + CR 401.7: whether several arrivals at this position are
+    /// grouped into one owner arrangement prompt. The one position contract for
+    /// both the staged producer and checked persistence: fixed positions (`Top`,
+    /// `Bottom`, a numbered slot, and a statically known "beneath the top X") are
+    /// arrangeable; a depth known only at resolution time and the random Alchemy
+    /// slot are not.
+    pub fn is_owner_arrangeable(&self) -> bool {
+        match self {
+            Self::Top | Self::Bottom | Self::NthFromTop { .. } => true,
+            Self::BeneathTop { depth } => matches!(depth, QuantityExpr::Fixed { .. }),
+            Self::RandomWithinTop { .. } => false,
+        }
     }
 }
 

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Carry retained simultaneous batch approvals and owner library arrangements across saves"
+}

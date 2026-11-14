@@ -2843,6 +2843,13 @@ fn finish_action_boundary_with_lifecycle(
             EngineError::LifeChangeUnrepresentable { player },
         );
     }
+    // This transient, nonserialized producer-tail anchor expires at the first
+    // action boundary at the latest; depth-zero ability-chain exit retires it
+    // earlier for direct chains. Clearing here is retirement, not leak detection.
+    // In-action behavior is covered by devour_co_entry_regression's
+    // twilights_call_two_devourers_one_fodder_keeps_producer_tail_below_batch
+    // and twilights_call_two_devourers_under_censor_each_order_then_devour.
+    state.staged_population_parent = None;
     #[cfg(debug_assertions)]
     super::perf_counters::outside_take_cost(|| debug_assert_runtime_resolution_invariants(state));
     let lifecycle_facts = if reversed {
@@ -12916,6 +12923,11 @@ fn apply_action(
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
             | WaitingFor::DigBottomOrder { .. }
+            // CR 701.20a + CR 101.4c: choosing which of a staged population's
+            // replacement decisions to make first answers none of them, so
+            // cards revealed before the selection stay public across it. The
+            // decision it publishes is then cleared or kept by its own arm.
+            | WaitingFor::ReplacementDecisionOrder { .. }
     ) && !ripple_resolution_cast_in_flight(state)
     {
         state.revealed_cards.clear();
@@ -13117,11 +13129,10 @@ fn apply_action(
         return Ok(ActionResult::applied(vec![], state.waiting_for.clone()));
     }
 
-    // CR 104.3a: A player may concede at any time. Concede bypasses the WaitingFor
-    // dispatch entirely — there is no priority/state check. Eliminating the player
-    // performs CR 800.4a object cleanup and advances `waiting_for` if the conceder
-    // owned it (see `elimination::concede`), and queues what the departure triggered
-    // (CR 603.6c), since no pipeline scans this action's events.
+    // CR 104.3a: Concede bypasses WaitingFor dispatch. CR 800.4a + CR 603.6c:
+    // the departure owns collection of its own and resumed events. CR 608.2m
+    // + CR 704.3: its final part, SBAs and one combined trigger placement still
+    // converge before priority, starting after that already-collected buffer.
     if let GameAction::Concede { player_id } = action {
         // CR 614.17a + CR 118.12: keep the pre-departure base so a staged
         // payment's already-accepted prefix (including a synchronous leg that
@@ -13129,15 +13140,20 @@ fn apply_action(
         // departure's new prohibitions (`settle_after_outside_action`).
         let pre_action = state.payment_transaction.as_ref().map(|_| state.clone());
         let mut events = Vec::new();
-        super::elimination::concede(state, player_id, &mut events);
-        // CR 800.4a + CR 118.12: a surviving staged payment re-materializes on
-        // the base the departure changed (`settle_after_outside_action`). CR
+        let collected_through = super::elimination::concede(state, player_id, &mut events)?;
+        // CR 800.4a + CR 603.10: the departure is immediate and its own events
+        // were collected above, as they were when the player left, so no later
+        // step can change what a leaves-the-game look-back sees.
+        //
+        // CR 800.4a + CR 118.12: a surviving staged payment then re-materializes
+        // on the base the departure changed (`settle_after_outside_action`). CR
         // 104.3a: the departure itself must survive a fallible payment recovery,
         // so a recovery that fails, records an unrepresentable life change, or
         // would leave a checkpoint that does not describe the departed board
         // (its seats, or a parked prompt naming an object that left) returns to
         // the departure and retires the payment.
         let departed = pre_action.as_ref().map(|_| state.clone());
+        let payment_survived = state.payment_transaction.is_some();
         let settled = match payment_transaction::settle_after_outside_action(
             state,
             pre_action.as_ref(),
@@ -13161,12 +13177,36 @@ fn apply_action(
                 None
             }
         };
+        // CR 117.2e: a staged payment owns the priority window until it ends,
+        // whether it survived the departure or its recovery failed and it was
+        // retired, so the canonical tail below (final part, state-based
+        // actions, trigger placement) is not run over it; the action boundary
+        // settles it, as it did before this tail existed. With no staged
+        // payment the tail runs now, after the departure's own events were
+        // collected.
         if let Some(settled) = settled {
             events.extend(settled.events);
             return Ok(ActionResult::applied(events, state.waiting_for.clone())
                 .with_log_entries(settled.log_entries));
         }
-        return Ok(ActionResult::applied(events, state.waiting_for.clone()));
+        if payment_survived {
+            return Ok(ActionResult::applied(events, state.waiting_for.clone()));
+        }
+        let mut result = ActionResult::applied(events, state.waiting_for.clone());
+        if let Some(collected_through) = collected_through {
+            // Both scans start at END: no self-collected instruction event
+            // or departure-prefix observer can be collected a second time.
+            let waiting_for = engine_priority::run_post_action_pipeline_for_canonical_tail(
+                state,
+                &mut result.events,
+                collected_through,
+                &result.waiting_for,
+                None,
+            )?;
+            state.waiting_for = waiting_for.clone();
+            result.waiting_for = waiting_for;
+        }
+        return Ok(result);
     }
 
     // Debug actions bypass WaitingFor dispatch — gated on debug_mode flag
@@ -16886,7 +16926,15 @@ fn apply_non_priority_pass_action(
                     let resumes_change_zone_iteration = state
                         .active_change_zone_frame()
                         .is_some_and(|frame| frame.pending.is_some());
-                    if !resumes_change_zone_iteration {
+                    // CR 608.2c: a staged ChangeZone batch owns the completion
+                    // event; its `ChangeZonePopulationSettled` tail emits the
+                    // single canonical `EffectResolved` after delivery.
+                    let staged_change_zone_owns_completion = state
+                        .active_batch_delivery()
+                        .is_some_and(
+                        crate::types::game_state::PendingBatchDeliveries::is_change_zone_population,
+                    );
+                    if !resumes_change_zone_iteration && !staged_change_zone_owns_completion {
                         events.push(crate::types::events::GameEvent::EffectResolved {
                             kind: crate::types::ability::EffectKind::ChangeZone,
                             source_id: pending.source_id,
@@ -20401,8 +20449,6 @@ fn commit_land_play(
                         source_id: None,
                         exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
                         drain: crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
-                        // This resume delivery is not a library placement.
-                        library_placement: None,
                     },
                     events,
                 ) {

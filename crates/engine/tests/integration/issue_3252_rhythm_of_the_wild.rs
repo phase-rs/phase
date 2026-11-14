@@ -103,17 +103,31 @@ fn rhythm_of_the_wild_grants_riot_on_library_to_battlefield_put() {
     resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0).unwrap();
 
     assert_riot_replacement_choice(&runner);
+    // A singleton must retain the legacy carrier, never a staged batch.
+    let legacy_carrier = usize::from(runner.state().active_change_zone_frame().is_some());
+    let staged_carrier = usize::from(runner.state().resolution_stack.iter().any(|frame| {
+        matches!(
+            frame,
+            engine::types::resolution::ResolutionFrame::BatchDelivery(batch)
+                if batch.staged.is_some()
+        )
+    }));
     assert!(
-        runner.state().active_change_zone_frame().is_some(),
-        "the real ChangeZone delivery must park its resume frame at the replacement choice"
+        legacy_carrier == 1 && staged_carrier == 0,
+        "singleton resume carriers: legacy={legacy_carrier}, staged={staged_carrier}"
     );
 
     runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("choose Riot counter");
     assert!(
-        runner.state().active_change_zone_frame().is_none(),
-        "answering the replacement choice must drain the parked ChangeZone iteration"
+        runner.state().active_change_zone_frame().is_none()
+            && !runner.state().resolution_stack.iter().any(|frame| matches!(
+                frame,
+                engine::types::resolution::ResolutionFrame::BatchDelivery(batch)
+                    if batch.staged.is_some()
+            )),
+        "answering the replacement choice must drain the parked ChangeZone owner"
     );
     assert_eq!(
         runner.state().objects[&wurm].zone,
@@ -132,6 +146,12 @@ fn rhythm_of_the_wild_grants_riot_on_library_to_battlefield_put() {
         Some(1),
         "accepting Riot should make the creature enter with a +1/+1 counter"
     );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
 }
 
 #[test]

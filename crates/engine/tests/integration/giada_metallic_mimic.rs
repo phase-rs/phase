@@ -229,6 +229,12 @@ enum Prompt {
     },
     /// A CR 616.1 `ReplacementChoice`, by its candidates' source names.
     Order { sources: Vec<String> },
+    /// A CR 101.4c `ReplacementDecisionOrder`: `player` holds the staged
+    /// population's decisions about `objects` and chooses which to make first.
+    DecisionOrder {
+        player: PlayerId,
+        objects: Vec<ObjectId>,
+    },
 }
 
 /// Drive to quiescence. Named choices take `answers` in order; an ordering prompt
@@ -270,6 +276,14 @@ fn drive(runner: &mut GameRunner, answers: &[&str], first: Option<&str>) -> Vec<
                 runner
                     .act(GameAction::ChooseReplacement { index })
                     .expect("order the replacements");
+            }
+            // CR 101.4c: make the held decisions in announcement order.
+            WaitingFor::ReplacementDecisionOrder { player, objects } => {
+                let first = objects[0];
+                prompts.push(Prompt::DecisionOrder { player, objects });
+                runner
+                    .act(GameAction::SelectCards { cards: vec![first] })
+                    .expect("choose which held decision to make first");
             }
             _ if !runner.state().stack.is_empty() => runner.advance_until_stack_empty(),
             _ => break,
@@ -610,6 +624,17 @@ fn open_the_vaults_returns_two_mimics_each_choosing_before_entry() {
     cast(&mut runner, vaults);
     let prompts = drive(&mut runner, &["Angel", "Angel"], None);
 
+    // CR 101.4c + CR 616.1: the staged population's sweep consults both
+    // entries before any prompt, so P0 holds both Mimics' choices and first
+    // chooses which to make (`drive` makes them in announcement order).
+    assert_eq!(
+        prompts.first(),
+        Some(&Prompt::DecisionOrder {
+            player: P0,
+            objects: vec![first, second],
+        }),
+        "P0 orders its two held entry choices first, {prompts:?}"
+    );
     assert_eq!(
         prompts.iter().filter(|prompt| is_named(prompt)).count(),
         2,
@@ -883,6 +908,16 @@ fn open_the_vaults_under_censor_reparks_each_choice_on_its_owner() {
     cast(&mut runner, vaults);
     let prompts = drive(&mut runner, &["Angel", "Angel"], Some("Phyrexian Censor"));
 
+    // CR 101.4c + CR 616.1: the staged sweep consults both entries first, so
+    // P0 holds both Censor orderings and first chooses which to make.
+    assert_eq!(
+        prompts.first(),
+        Some(&Prompt::DecisionOrder {
+            player: P0,
+            objects: vec![first, second],
+        }),
+        "P0 orders its two held entry orderings first, {prompts:?}"
+    );
     assert_eq!(
         prompts.iter().filter(|prompt| is_named(prompt)).count(),
         2,

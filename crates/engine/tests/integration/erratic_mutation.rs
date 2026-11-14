@@ -283,15 +283,55 @@ fn erratic_mutation_replacement_pause_preserves_mana_value_referent() {
         .replacement_choice(0)
         .resolve();
 
+    // CR 101.4c + CR 616.1: the staged bottom batch consults all three revealed
+    // cards before any prompt, so P0 holds one ordering decision per card and
+    // first chooses which to make. The harness stops at that prompt; make the
+    // decisions in announcement order (choosing the order while two or more
+    // remain) and answer each choice with index 0, as the policy did.
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::ReplacementDecisionOrder { player: P0, .. }
+    ));
+    let mut decision_orders = 0;
+    let mut replacement_choices = 0;
+    for _ in 0..12 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementDecisionOrder { player, objects } => {
+                assert_eq!(player, P0);
+                decision_orders += 1;
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![objects[0]],
+                    })
+                    .expect("P0 makes the first announced card's decision first");
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                replacement_choices += 1;
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("answer the redirect ordering");
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(
+        decision_orders, 2,
+        "P0 orders three, then two held decisions"
+    );
+    assert_eq!(
+        replacement_choices, 3,
+        "every revealed card's choice is asked"
+    );
+
     // All revealed cards (land1, land2, nonland) were redirected to Exile by the replacement effect.
-    let state = outcome.state();
+    let state = runner.state();
     assert_eq!(state.objects[&nonland].zone, Zone::Exile);
     assert_eq!(state.objects[&land1].zone, Zone::Exile);
     assert_eq!(state.objects[&land2].zone, Zone::Exile);
     assert_eq!(state.objects[&other].zone, Zone::Library);
 
     // After resolution, check victim P/T: base 2/5 + 3/-3 (Divination MV 3) -> 5/2.
-    let victim_obj = &outcome.state().objects[&victim];
+    let victim_obj = &runner.state().objects[&victim];
     assert_eq!(
         victim_obj.power,
         Some(5),

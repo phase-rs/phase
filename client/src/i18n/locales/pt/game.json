@@ -2137,6 +2137,13 @@
     "title": "Escolher controlador ao entrar",
     "subtitle": "Escolha qual oponente controla esta permanente ao entrar."
   },
+  "replacementDecisionOrder": {
+    "title": "Escolha qual decisão tomar primeiro",
+    "subtitle": "Estas escolhas de substituição acontecem ao mesmo tempo. Escolha qual fazer primeiro.",
+    "unknownObject": "Objeto desconhecido",
+    "attachedTo": "Em {{host}}",
+    "attachments": "Com {{names}}"
+  },
   "optionalCost": {
     "gift": {
       "title": "Prometer um presente?",

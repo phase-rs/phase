@@ -1,0 +1,3522 @@
+{
+  "precast_shortcut_runtime": {
+    "materializing": false,
+    "must_diverge": null,
+    "next_epoch": 0,
+    "offer": null,
+    "suppressed_cast": null
+  },
+  "state": {
+    "ability_onset_record": "Recorded",
+    "active_player": 0,
+    "all_creature_types": [],
+    "allows_cancel_cast": false,
+    "alt_cost_grant_permissions_used": [],
+    "attacked_defenders_this_turn": {},
+    "attacking_creatures_this_turn": {},
+    "battlefield": [
+      2
+    ],
+    "cancelled_casts": [],
+    "cards_discarded_this_turn_by_player": {},
+    "combat": null,
+    "combat_phase_skip_next_turn": [
+      {
+        "active": false,
+        "pending": 0
+      },
+      {
+        "active": false,
+        "pending": 0
+      }
+    ],
+    "command_zone": [],
+    "commander_cast_count": {},
+    "commander_damage": [],
+    "creature_attacked_defenders_this_turn": {},
+    "creature_blocked_attackers_this_turn": [],
+    "creatures_attacked_this_turn": [],
+    "creatures_blocked_this_turn": [],
+    "crew_activated_this_turn": [],
+    "crew_resolved_this_turn": [],
+    "current_combat_attacker_restriction": null,
+    "current_combat_attacker_restriction_source": null,
+    "current_starting_player": 0,
+    "damage_dealt_this_turn": [],
+    "day_night": null,
+    "debug_mode": false,
+    "debug_permitted": [],
+    "deck_pools": [],
+    "delayed_triggers": [],
+    "eliminated_players": [],
+    "exerted_this_turn": [],
+    "exile": [],
+    "exile_cast_permissions_used": [],
+    "exile_links": [],
+    "exile_play_permissions_used": [],
+    "exile_play_single_use_consumed": [],
+    "extra_loyalty_activations_this_turn": {},
+    "extra_phase_resume": [],
+    "extra_phases": [],
+    "extra_turn_sequence_anchor": null,
+    "extra_turns": [],
+    "format_config": {
+      "allow_debug_actions": false,
+      "command_zone": true,
+      "commander_damage_threshold": 21,
+      "deck_size": {
+        "data": 100,
+        "type": "Exactly"
+      },
+      "default_deck_copy_limit": {
+        "data": 1,
+        "type": "UpTo"
+      },
+      "format": "Commander",
+      "max_players": 6,
+      "min_players": 2,
+      "range_of_influence": null,
+      "sideboard_policy": {
+        "type": "Forbidden"
+      },
+      "singleton": true,
+      "starting_life": 40,
+      "supplies_fixed_deck": false,
+      "team_based": false,
+      "uses_commander": true
+    },
+    "game_number": 1,
+    "graveyard_cast_permissions_used": [],
+    "graveyard_cast_permissions_used_per_type": [],
+    "hand_cast_free_permissions_used": [],
+    "has_pending_cast": false,
+    "lands_played_this_turn": 0,
+    "lands_played_this_turn_by_player": {},
+    "last_vote_ballots": [],
+    "lki_by_incarnation": {
+      "3": {
+        "0": {
+          "attachments": [],
+          "base_power": 4,
+          "base_toughness": 4,
+          "card_types": [
+            "Creature"
+          ],
+          "chosen_attributes": [],
+          "colors": [],
+          "controller": 0,
+          "counters": {},
+          "intensity": 0,
+          "is_suspected": false,
+          "keywords": [
+            "Reach",
+            "Trample",
+            {
+              "Mutate": {
+                "generic": 1,
+                "shards": [
+                  "Green",
+                  "Green"
+                ],
+                "type": "Cost"
+              }
+            }
+          ],
+          "mana_value": 0,
+          "name": "Gemrazer",
+          "owner": 0,
+          "power": 4,
+          "subtypes": [
+            "Beast"
+          ],
+          "supertypes": [],
+          "tapped": false,
+          "toughness": 4,
+          "was_prepared": false
+        }
+      }
+    },
+    "lki_cache": {
+      "3": {
+        "attachments": [],
+        "base_power": 4,
+        "base_toughness": 4,
+        "card_types": [
+          "Creature"
+        ],
+        "chosen_attributes": [],
+        "colors": [],
+        "controller": 0,
+        "counters": {},
+        "intensity": 0,
+        "is_suspected": false,
+        "keywords": [
+          "Reach",
+          "Trample",
+          {
+            "Mutate": {
+              "generic": 1,
+              "shards": [
+                "Green",
+                "Green"
+              ],
+              "type": "Cost"
+            }
+          }
+        ],
+        "mana_value": 0,
+        "name": "Gemrazer",
+        "owner": 0,
+        "power": 4,
+        "subtypes": [
+          "Beast"
+        ],
+        "supertypes": [],
+        "tapped": false,
+        "toughness": 4,
+        "was_prepared": false
+      }
+    },
+    "lki_copiable_values": {
+      "3": {
+        "abilities": [],
+        "card_types": {
+          "core_types": [
+            "Creature"
+          ],
+          "subtypes": [
+            "Beast"
+          ],
+          "supertypes": []
+        },
+        "color": [],
+        "keywords": [
+          "Reach",
+          "Trample",
+          {
+            "Mutate": {
+              "generic": 1,
+              "shards": [
+                "Green",
+                "Green"
+              ],
+              "type": "Cost"
+            }
+          }
+        ],
+        "loyalty": null,
+        "mana_cost": {
+          "generic": 0,
+          "shards": [],
+          "type": "Cost"
+        },
+        "name": "Gemrazer",
+        "name_origin": "Source",
+        "power": 4,
+        "replacement_definitions": [],
+        "static_definitions": [],
+        "toughness": 4,
+        "trigger_definitions": [
+          {
+            "batched": false,
+            "condition": null,
+            "constraint": null,
+            "damage_kind": "Any",
+            "description": "Whenever ~ mutates, destroy target artifact or enchantment an opponent controls.",
+            "destination": null,
+            "execute": {
+              "condition": null,
+              "cost": null,
+              "description": null,
+              "duration": null,
+              "effect": {
+                "cant_regenerate": false,
+                "target": {
+                  "filters": [
+                    {
+                      "controller": "Opponent",
+                      "properties": [],
+                      "type": "Typed",
+                      "type_filters": [
+                        "Artifact"
+                      ]
+                    },
+                    {
+                      "controller": "Opponent",
+                      "properties": [],
+                      "type": "Typed",
+                      "type_filters": [
+                        "Enchantment"
+                      ]
+                    }
+                  ],
+                  "type": "Or"
+                },
+                "type": "Destroy"
+              },
+              "forward_result": false,
+              "kind": "Spell",
+              "optional": false,
+              "optional_targeting": false,
+              "sub_ability": null,
+              "target_prompt": null
+            },
+            "mode": "Mutates",
+            "optional": false,
+            "origin": null,
+            "phase": null,
+            "secondary": false,
+            "trigger_zones": [
+              "Battlefield"
+            ],
+            "valid_card": {
+              "type": "SelfRef"
+            },
+            "valid_source": null,
+            "valid_target": null
+          }
+        ],
+        "trigger_printed_origins": [
+          null
+        ]
+      }
+    },
+    "lki_copiable_values_by_incarnation": {
+      "3": {
+        "0": {
+          "abilities": [],
+          "card_types": {
+            "core_types": [
+              "Creature"
+            ],
+            "subtypes": [
+              "Beast"
+            ],
+            "supertypes": []
+          },
+          "color": [],
+          "keywords": [
+            "Reach",
+            "Trample",
+            {
+              "Mutate": {
+                "generic": 1,
+                "shards": [
+                  "Green",
+                  "Green"
+                ],
+                "type": "Cost"
+              }
+            }
+          ],
+          "loyalty": null,
+          "mana_cost": {
+            "generic": 0,
+            "shards": [],
+            "type": "Cost"
+          },
+          "name": "Gemrazer",
+          "name_origin": "Source",
+          "power": 4,
+          "replacement_definitions": [],
+          "static_definitions": [],
+          "toughness": 4,
+          "trigger_definitions": [
+            {
+              "batched": false,
+              "condition": null,
+              "constraint": null,
+              "damage_kind": "Any",
+              "description": "Whenever ~ mutates, destroy target artifact or enchantment an opponent controls.",
+              "destination": null,
+              "execute": {
+                "condition": null,
+                "cost": null,
+                "description": null,
+                "duration": null,
+                "effect": {
+                  "cant_regenerate": false,
+                  "target": {
+                    "filters": [
+                      {
+                        "controller": "Opponent",
+                        "properties": [],
+                        "type": "Typed",
+                        "type_filters": [
+                          "Artifact"
+                        ]
+                      },
+                      {
+                        "controller": "Opponent",
+                        "properties": [],
+                        "type": "Typed",
+                        "type_filters": [
+                          "Enchantment"
+                        ]
+                      }
+                    ],
+                    "type": "Or"
+                  },
+                  "type": "Destroy"
+                },
+                "forward_result": false,
+                "kind": "Spell",
+                "optional": false,
+                "optional_targeting": false,
+                "sub_ability": null,
+                "target_prompt": null
+              },
+              "mode": "Mutates",
+              "optional": false,
+              "origin": null,
+              "phase": null,
+              "secondary": false,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "valid_card": {
+                "type": "SelfRef"
+              },
+              "valid_source": null,
+              "valid_target": null
+            }
+          ],
+          "trigger_printed_origins": [
+            null
+          ]
+        }
+      }
+    },
+    "loop_detection": {
+      "type": "Off"
+    },
+    "loyalty_abilities_activated_this_turn": {},
+    "mana_spent_on_spells_this_turn": {
+      "0": 5
+    },
+    "match_config": {
+      "match_type": "Bo1"
+    },
+    "match_phase": "InGame",
+    "match_score": {
+      "draws": 0,
+      "p0_wins": 0,
+      "p1_wins": 0
+    },
+    "max_lands_per_turn": 1,
+    "modal_modes_chosen_this_game": [],
+    "modal_modes_chosen_this_turn": [],
+    "next_continuous_effect_id": 2,
+    "next_delayed_trigger_instance": 1,
+    "next_delayed_trigger_token": 1,
+    "next_end_effect_group_id": 1,
+    "next_extra_phase_id": 1,
+    "next_game_chooser": null,
+    "next_logical_zone_change_group_id": 3,
+    "next_object_id": 5,
+    "next_pip_id": 6,
+    "next_resolution_cast_offer_id": 1,
+    "next_resolve_all_consent_epoch": 1,
+    "next_return_result_occurrence_id": 1,
+    "next_spell_announcement": 1,
+    "next_timestamp": 4,
+    "next_tracked_set_id": 1,
+    "objects": {
+      "1": {
+        "abilities": [],
+        "attached_to": null,
+        "attachments": [],
+        "base_color": [],
+        "base_controller": 0,
+        "base_keywords": [],
+        "base_name": "Sentinel",
+        "base_power": null,
+        "base_toughness": null,
+        "card_id": 1,
+        "card_types": {
+          "core_types": [],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "color": [],
+        "controller": 0,
+        "counters": {},
+        "damage_marked": 0,
+        "dealt_deathtouch_damage": false,
+        "entered_battlefield_turn": null,
+        "face_down": false,
+        "flipped": false,
+        "id": 1,
+        "keywords": [],
+        "loyalty": null,
+        "mana_cost": {
+          "generic": 0,
+          "shards": [],
+          "type": "Cost"
+        },
+        "name": "Sentinel",
+        "owner": 0,
+        "power": null,
+        "replacement_definitions": [],
+        "static_definitions": [],
+        "tapped": false,
+        "timestamp": 0,
+        "toughness": null,
+        "transformed": false,
+        "trigger_definitions": [],
+        "zone": "Library"
+      },
+      "2": {
+        "abilities": [],
+        "attached_to": null,
+        "attachments": [],
+        "base_card_types": {
+          "core_types": [
+            "Creature"
+          ],
+          "subtypes": [
+            "Nightmare",
+            "Beast"
+          ],
+          "supertypes": [
+            "Legendary"
+          ]
+        },
+        "base_characteristics_initialized": true,
+        "base_color": [],
+        "base_controller": 0,
+        "base_keywords": [
+          "Trample",
+          {
+            "Mutate": {
+              "generic": 1,
+              "shards": [
+                "Black",
+                "Green",
+                "Blue"
+              ],
+              "type": "Cost"
+            }
+          }
+        ],
+        "base_name": "Otrimi, the Ever-Playful",
+        "base_power": 6,
+        "base_toughness": 6,
+        "base_trigger_definitions": [
+          {
+            "batched": false,
+            "condition": null,
+            "constraint": null,
+            "damage_kind": "CombatOnly",
+            "description": "Whenever ~ deals combat damage to a player, return target creature card with mutate from your graveyard to your hand.",
+            "destination": null,
+            "execute": {
+              "condition": null,
+              "cost": null,
+              "description": null,
+              "duration": null,
+              "effect": {
+                "destination": "Hand",
+                "enter_tapped": false,
+                "enter_transformed": false,
+                "enters_attacking": false,
+                "origin": "Graveyard",
+                "owner_library": false,
+                "target": {
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "HasKeywordKind",
+                      "value": "Mutate"
+                    },
+                    {
+                      "type": "InZone",
+                      "zone": "Graveyard"
+                    }
+                  ],
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ]
+                },
+                "type": "ChangeZone"
+              },
+              "forward_result": false,
+              "kind": "Spell",
+              "optional": false,
+              "optional_targeting": false,
+              "sub_ability": null,
+              "target_prompt": null
+            },
+            "mode": "DamageDone",
+            "optional": false,
+            "origin": null,
+            "phase": null,
+            "secondary": false,
+            "trigger_zones": [
+              "Battlefield"
+            ],
+            "valid_card": null,
+            "valid_source": {
+              "type": "SelfRef"
+            },
+            "valid_target": {
+              "type": "Player"
+            }
+          }
+        ],
+        "card_id": 2,
+        "card_types": {
+          "core_types": [
+            "Creature"
+          ],
+          "subtypes": [
+            "Nightmare",
+            "Beast"
+          ],
+          "supertypes": [
+            "Legendary"
+          ]
+        },
+        "color": [],
+        "commander_tax": 0,
+        "controller": 0,
+        "counters": {},
+        "damage_marked": 0,
+        "dealt_deathtouch_damage": false,
+        "entered_battlefield_turn": 1,
+        "face_down": false,
+        "flipped": false,
+        "id": 2,
+        "is_commander": true,
+        "keywords": [
+          "Trample",
+          {
+            "Mutate": {
+              "generic": 1,
+              "shards": [
+                "Black",
+                "Green",
+                "Blue"
+              ],
+              "type": "Cost"
+            }
+          }
+        ],
+        "layer_base_power": 6,
+        "layer_base_toughness": 6,
+        "loyalty": null,
+        "mana_cost": {
+          "generic": 0,
+          "shards": [],
+          "type": "Cost"
+        },
+        "name": "Otrimi, the Ever-Playful",
+        "owner": 0,
+        "power": 6,
+        "replacement_definitions": [],
+        "static_definitions": [],
+        "tapped": false,
+        "timestamp": 1,
+        "toughness": 6,
+        "transformed": false,
+        "trigger_definitions": [
+          {
+            "definition": {
+              "batched": false,
+              "condition": null,
+              "constraint": null,
+              "damage_kind": "CombatOnly",
+              "description": "Whenever ~ deals combat damage to a player, return target creature card with mutate from your graveyard to your hand.",
+              "destination": null,
+              "execute": {
+                "condition": null,
+                "cost": null,
+                "description": null,
+                "duration": null,
+                "effect": {
+                  "destination": "Hand",
+                  "enter_tapped": false,
+                  "enter_transformed": false,
+                  "enters_attacking": false,
+                  "origin": "Graveyard",
+                  "owner_library": false,
+                  "target": {
+                    "controller": "You",
+                    "properties": [
+                      {
+                        "type": "HasKeywordKind",
+                        "value": "Mutate"
+                      },
+                      {
+                        "type": "InZone",
+                        "zone": "Graveyard"
+                      }
+                    ],
+                    "type": "Typed",
+                    "type_filters": [
+                      "Creature"
+                    ]
+                  },
+                  "type": "ChangeZone"
+                },
+                "forward_result": false,
+                "kind": "Spell",
+                "optional": false,
+                "optional_targeting": false,
+                "sub_ability": null,
+                "target_prompt": null
+              },
+              "mode": "DamageDone",
+              "optional": false,
+              "origin": null,
+              "phase": null,
+              "secondary": false,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "valid_card": null,
+              "valid_source": {
+                "type": "SelfRef"
+              },
+              "valid_target": {
+                "type": "Player"
+              }
+            },
+            "occurrence": {
+              "data": {
+                "base_set": 1,
+                "printed_index": 0
+              },
+              "type": "Printed"
+            }
+          }
+        ],
+        "zone": "Battlefield"
+      },
+      "3": {
+        "abilities": [],
+        "attached_to": null,
+        "attachments": [],
+        "base_card_types": {
+          "core_types": [
+            "Creature"
+          ],
+          "subtypes": [
+            "Beast"
+          ],
+          "supertypes": []
+        },
+        "base_characteristics_initialized": true,
+        "base_color": [],
+        "base_controller": 0,
+        "base_keywords": [
+          "Reach",
+          "Trample",
+          {
+            "Mutate": {
+              "generic": 1,
+              "shards": [
+                "Green",
+                "Green"
+              ],
+              "type": "Cost"
+            }
+          }
+        ],
+        "base_name": "Gemrazer",
+        "base_power": 4,
+        "base_toughness": 4,
+        "base_trigger_definitions": [
+          {
+            "batched": false,
+            "condition": null,
+            "constraint": null,
+            "damage_kind": "Any",
+            "description": "Whenever ~ mutates, destroy target artifact or enchantment an opponent controls.",
+            "destination": null,
+            "execute": {
+              "condition": null,
+              "cost": null,
+              "description": null,
+              "duration": null,
+              "effect": {
+                "cant_regenerate": false,
+                "target": {
+                  "filters": [
+                    {
+                      "controller": "Opponent",
+                      "properties": [],
+                      "type": "Typed",
+                      "type_filters": [
+                        "Artifact"
+                      ]
+                    },
+                    {
+                      "controller": "Opponent",
+                      "properties": [],
+                      "type": "Typed",
+                      "type_filters": [
+                        "Enchantment"
+                      ]
+                    }
+                  ],
+                  "type": "Or"
+                },
+                "type": "Destroy"
+              },
+              "forward_result": false,
+              "kind": "Spell",
+              "optional": false,
+              "optional_targeting": false,
+              "sub_ability": null,
+              "target_prompt": null
+            },
+            "mode": "Mutates",
+            "optional": false,
+            "origin": null,
+            "phase": null,
+            "secondary": false,
+            "trigger_zones": [
+              "Battlefield"
+            ],
+            "valid_card": {
+              "type": "SelfRef"
+            },
+            "valid_source": null,
+            "valid_target": null
+          }
+        ],
+        "card_id": 3,
+        "card_types": {
+          "core_types": [
+            "Creature"
+          ],
+          "subtypes": [
+            "Beast"
+          ],
+          "supertypes": []
+        },
+        "color": [],
+        "controller": 0,
+        "counters": {},
+        "damage_marked": 0,
+        "dealt_deathtouch_damage": false,
+        "entered_battlefield_turn": 1,
+        "face_down": false,
+        "flipped": false,
+        "id": 3,
+        "incarnation": 1,
+        "keywords": [
+          "Reach",
+          "Trample",
+          {
+            "Mutate": {
+              "generic": 1,
+              "shards": [
+                "Green",
+                "Green"
+              ],
+              "type": "Cost"
+            }
+          }
+        ],
+        "layer_base_power": 4,
+        "layer_base_toughness": 4,
+        "loyalty": null,
+        "mana_cost": {
+          "generic": 0,
+          "shards": [],
+          "type": "Cost"
+        },
+        "name": "Gemrazer",
+        "owner": 0,
+        "power": 4,
+        "replacement_definitions": [],
+        "split_from_merge_survivor": {
+          "incarnation": 1,
+          "object_id": 2
+        },
+        "static_definitions": [],
+        "tapped": false,
+        "timestamp": 2,
+        "toughness": 4,
+        "transformed": false,
+        "trigger_definitions": [
+          {
+            "definition": {
+              "batched": false,
+              "condition": null,
+              "constraint": null,
+              "damage_kind": "Any",
+              "description": "Whenever ~ mutates, destroy target artifact or enchantment an opponent controls.",
+              "destination": null,
+              "execute": {
+                "condition": null,
+                "cost": null,
+                "description": null,
+                "duration": null,
+                "effect": {
+                  "cant_regenerate": false,
+                  "target": {
+                    "filters": [
+                      {
+                        "controller": "Opponent",
+                        "properties": [],
+                        "type": "Typed",
+                        "type_filters": [
+                          "Artifact"
+                        ]
+                      },
+                      {
+                        "controller": "Opponent",
+                        "properties": [],
+                        "type": "Typed",
+                        "type_filters": [
+                          "Enchantment"
+                        ]
+                      }
+                    ],
+                    "type": "Or"
+                  },
+                  "type": "Destroy"
+                },
+                "forward_result": false,
+                "kind": "Spell",
+                "optional": false,
+                "optional_targeting": false,
+                "sub_ability": null,
+                "target_prompt": null
+              },
+              "mode": "Mutates",
+              "optional": false,
+              "origin": null,
+              "phase": null,
+              "secondary": false,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "valid_card": {
+                "type": "SelfRef"
+              },
+              "valid_source": null,
+              "valid_target": null
+            },
+            "occurrence": {
+              "data": {
+                "base_set": 1,
+                "printed_index": 0
+              },
+              "type": "Printed"
+            }
+          }
+        ],
+        "zone": "Library"
+      },
+      "4": {
+        "abilities": [
+          {
+            "condition": null,
+            "cost": null,
+            "description": "Put all creatures on the bottom of their owners' libraries.",
+            "duration": null,
+            "effect": {
+              "destination": "Library",
+              "library_position": {
+                "type": "Bottom"
+              },
+              "origin": null,
+              "target": {
+                "controller": null,
+                "properties": [],
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ]
+              },
+              "type": "ChangeZoneAll"
+            },
+            "forward_result": false,
+            "kind": "Spell",
+            "optional": false,
+            "optional_targeting": false,
+            "sub_ability": null,
+            "target_prompt": null
+          }
+        ],
+        "attached_to": null,
+        "attachments": [],
+        "base_abilities": [
+          {
+            "condition": null,
+            "cost": null,
+            "description": "Put all creatures on the bottom of their owners' libraries.",
+            "duration": null,
+            "effect": {
+              "destination": "Library",
+              "library_position": {
+                "type": "Bottom"
+              },
+              "origin": null,
+              "target": {
+                "controller": null,
+                "properties": [],
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ]
+              },
+              "type": "ChangeZoneAll"
+            },
+            "forward_result": false,
+            "kind": "Spell",
+            "optional": false,
+            "optional_targeting": false,
+            "sub_ability": null,
+            "target_prompt": null
+          }
+        ],
+        "base_card_types": {
+          "core_types": [
+            "Sorcery"
+          ],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "base_characteristics_initialized": true,
+        "base_color": [
+          "White"
+        ],
+        "base_controller": 0,
+        "base_keywords": [],
+        "base_mana_cost": {
+          "generic": 3,
+          "shards": [
+            "White",
+            "White"
+          ],
+          "type": "Cost"
+        },
+        "base_name": "Hallowed Burial",
+        "base_power": null,
+        "base_toughness": null,
+        "card_id": 4,
+        "card_types": {
+          "core_types": [
+            "Sorcery"
+          ],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "cast_controller": 0,
+        "cast_from_zone": "Hand",
+        "cast_occurrence": {
+          "caster": 0,
+          "turn_journal_index": 0
+        },
+        "color": [
+          "White"
+        ],
+        "colors_spent_to_cast": {
+          "white": 2
+        },
+        "controller": 0,
+        "counters": {},
+        "damage_marked": 0,
+        "dealt_deathtouch_damage": false,
+        "entered_battlefield_turn": null,
+        "face_down": false,
+        "flipped": false,
+        "id": 4,
+        "incarnation": 1,
+        "keywords": [],
+        "loyalty": null,
+        "mana_cost": {
+          "generic": 3,
+          "shards": [
+            "White",
+            "White"
+          ],
+          "type": "Cost"
+        },
+        "mana_spent_to_cast": true,
+        "mana_spent_to_cast_amount": 5,
+        "name": "Hallowed Burial",
+        "owner": 0,
+        "power": null,
+        "replacement_definitions": [],
+        "spell_announcement": 1,
+        "static_definitions": [],
+        "tapped": false,
+        "timestamp": 0,
+        "toughness": null,
+        "transformed": false,
+        "trigger_definitions": [],
+        "zone": "Stack"
+      }
+    },
+    "pending_combat_phase_skips": [],
+    "pending_replacement": {
+      "candidates": [
+        {
+          "index": 18446744073709551609,
+          "source": 2
+        }
+      ],
+      "choice_player": 0,
+      "depth": 0,
+      "excess_recipient": null,
+      "exile_controller": null,
+      "exile_duration": null,
+      "exile_tracking": "None",
+      "is_optional": true,
+      "library_placement": null,
+      "lifelink_bonus": 0,
+      "proposed": {
+        "ZoneChange": {
+          "applied": [],
+          "cause": 2,
+          "enter_tapped": "Unspecified",
+          "enter_transformed": false,
+          "enters_attacking": false,
+          "from": "Battlefield",
+          "object_id": 2,
+          "to": "Library"
+        }
+      },
+      "unrepresentable_life_change": "Reject"
+    },
+    "pending_trigger": null,
+    "phase": "PreCombatMain",
+    "players": [
+      {
+        "attraction_deck": [],
+        "bending_types_this_turn": [],
+        "can_look_at_top_of_library": false,
+        "cards_drawn_this_step": 0,
+        "cards_drawn_this_turn": 0,
+        "commander_color_identity": [],
+        "contraption_crank_sprocket": 3,
+        "contraption_deck": [],
+        "crimes_committed_this_turn": 0,
+        "descended_this_turn": false,
+        "drew_from_empty_library": false,
+        "energy": 0,
+        "graveyard": [],
+        "hand": [],
+        "has_drawn_this_turn": false,
+        "id": 0,
+        "is_eliminated": false,
+        "lands_played_this_turn": 0,
+        "library": [
+          1,
+          3
+        ],
+        "life": 40,
+        "life_gained_this_turn": 0,
+        "life_lost_last_turn": 0,
+        "life_lost_this_turn": 0,
+        "mana_pool": {
+          "mana": []
+        },
+        "poison_counters": 0,
+        "speed_trigger_used_this_turn": false,
+        "status": {
+          "type": "Active"
+        },
+        "turns_taken": 0
+      },
+      {
+        "attraction_deck": [],
+        "bending_types_this_turn": [],
+        "can_look_at_top_of_library": false,
+        "cards_drawn_this_step": 0,
+        "cards_drawn_this_turn": 0,
+        "commander_color_identity": [],
+        "contraption_crank_sprocket": 3,
+        "contraption_deck": [],
+        "crimes_committed_this_turn": 0,
+        "descended_this_turn": false,
+        "drew_from_empty_library": false,
+        "energy": 0,
+        "graveyard": [],
+        "hand": [],
+        "has_drawn_this_turn": false,
+        "id": 1,
+        "is_eliminated": false,
+        "lands_played_this_turn": 0,
+        "library": [],
+        "life": 40,
+        "life_gained_this_turn": 0,
+        "life_lost_last_turn": 0,
+        "life_lost_this_turn": 0,
+        "mana_pool": {
+          "mana": []
+        },
+        "opponent_spells_cast_since_own_last_turn": 1,
+        "poison_counters": 0,
+        "speed_trigger_used_this_turn": false,
+        "status": {
+          "type": "Active"
+        },
+        "turns_taken": 0
+      }
+    ],
+    "players_attacked_this_step": [],
+    "players_attacked_this_turn": [],
+    "players_who_created_token_this_turn": [],
+    "players_who_discarded_card_this_turn": [],
+    "players_who_flipped_coins_this_turn": [],
+    "players_who_sacrificed_artifact_this_turn": [],
+    "players_who_searched_library_this_turn": [],
+    "priority_pass_count": 0,
+    "priority_passes": [],
+    "priority_player": 0,
+    "public_revealed_cards": [],
+    "resolution_frames": {
+      "frames": [
+        {
+          "data": {
+            "attempted": [
+              2,
+              3
+            ],
+            "destination": "Library",
+            "exile_tracking": "None",
+            "logical_zone_change_group": {
+              "all_origin_occurrences": [],
+              "immediately_after_batched_triggers": [],
+              "immediately_after_latched": false,
+              "immediately_after_suppress_triggers": [],
+              "immediately_before_batched_triggers": [],
+              "immediately_before_latched": true,
+              "immediately_before_suppress_triggers": [],
+              "logical_group_id": 2,
+              "post_event_member_contexts": [
+                null
+              ],
+              "prospective_battlefield_members": [
+                {
+                  "identity": {
+                    "incarnation": 0,
+                    "object_id": 2
+                  }
+                }
+              ],
+              "terminal_outcomes": [
+                {
+                  "type": "pending"
+                }
+              ]
+            },
+            "paused_current": {
+              "count": "NeedsCount",
+              "delivery_events": [],
+              "expected_event": {
+                "ZoneChange": {
+                  "applied": [],
+                  "cause": 2,
+                  "enter_tapped": "Unspecified",
+                  "enter_transformed": false,
+                  "enters_attacking": false,
+                  "from": "Battlefield",
+                  "object_id": 2,
+                  "to": "Library"
+                }
+              },
+              "member": {
+                "incarnation": 0,
+                "object_id": 2
+              },
+              "terminal_completion": null
+            },
+            "remaining": [
+              3
+            ],
+            "requests": [
+              {
+                "cause": {
+                  "type": "merged_component_routing"
+                },
+                "destination": "Library",
+                "enter_transformed": false,
+                "exile_tracking": "None",
+                "object_id": 3
+              }
+            ],
+            "zone_change_record_start": 2
+          },
+          "type": "BatchDelivery"
+        },
+        {
+          "data": {
+            "attempted": [
+              3,
+              2
+            ],
+            "completion": {
+              "EffectZonePutAtLibraryPositionComplete": {
+                "chosen": [
+                  3,
+                  2
+                ],
+                "library_origin": [],
+                "library_position": {
+                  "type": "Bottom"
+                },
+                "player": 0,
+                "source_id": 4
+              }
+            },
+            "deferred_events": [
+              {
+                "data": {
+                  "from": "Battlefield",
+                  "object_id": 3,
+                  "record": {
+                    "arrival": {
+                      "controller": 0,
+                      "owner": 0
+                    },
+                    "attached_to": null,
+                    "attachments": [],
+                    "base_power": 4,
+                    "base_toughness": 4,
+                    "cast_from_zone": null,
+                    "co_departed": [],
+                    "colors": [],
+                    "combat_status": {
+                      "attack_target": null,
+                      "attack_target_identity": null,
+                      "attacking": false,
+                      "attacking_alone": false,
+                      "blocked": false,
+                      "blocking": false,
+                      "blocking_alone": false,
+                      "defending_player": null
+                    },
+                    "controller": 0,
+                    "core_types": [
+                      "Creature"
+                    ],
+                    "entered_incarnation": null,
+                    "from_zone": "Battlefield",
+                    "is_suspected": false,
+                    "is_token": false,
+                    "keywords": [
+                      "Reach",
+                      "Trample",
+                      {
+                        "Mutate": {
+                          "generic": 1,
+                          "shards": [
+                            "Green",
+                            "Green"
+                          ],
+                          "type": "Cost"
+                        }
+                      }
+                    ],
+                    "linked_exile_snapshot": [],
+                    "mana_value": 0,
+                    "name": "Gemrazer",
+                    "object_id": 3,
+                    "owner": 0,
+                    "played_from_zone": null,
+                    "power": 4,
+                    "recorded_turn_number": 2,
+                    "subtypes": [
+                      "Beast"
+                    ],
+                    "supertypes": [],
+                    "to_zone": "Library",
+                    "toughness": 4,
+                    "trigger_definitions": [
+                      {
+                        "definition": {
+                          "batched": false,
+                          "condition": null,
+                          "constraint": null,
+                          "damage_kind": "Any",
+                          "description": "Whenever ~ mutates, destroy target artifact or enchantment an opponent controls.",
+                          "destination": null,
+                          "execute": {
+                            "condition": null,
+                            "cost": null,
+                            "description": null,
+                            "duration": null,
+                            "effect": {
+                              "cant_regenerate": false,
+                              "target": {
+                                "filters": [
+                                  {
+                                    "controller": "Opponent",
+                                    "properties": [],
+                                    "type": "Typed",
+                                    "type_filters": [
+                                      "Artifact"
+                                    ]
+                                  },
+                                  {
+                                    "controller": "Opponent",
+                                    "properties": [],
+                                    "type": "Typed",
+                                    "type_filters": [
+                                      "Enchantment"
+                                    ]
+                                  }
+                                ],
+                                "type": "Or"
+                              },
+                              "type": "Destroy"
+                            },
+                            "forward_result": false,
+                            "kind": "Spell",
+                            "optional": false,
+                            "optional_targeting": false,
+                            "sub_ability": null,
+                            "target_prompt": null
+                          },
+                          "mode": "Mutates",
+                          "optional": false,
+                          "origin": null,
+                          "phase": null,
+                          "secondary": false,
+                          "trigger_zones": [
+                            "Battlefield"
+                          ],
+                          "valid_card": {
+                            "type": "SelfRef"
+                          },
+                          "valid_source": null,
+                          "valid_target": null
+                        },
+                        "occurrence": {
+                          "data": {
+                            "base_set": 1,
+                            "printed_index": 0
+                          },
+                          "type": "Printed"
+                        }
+                      }
+                    ],
+                    "trigger_source_context": {
+                      "card_id": 3,
+                      "combat_status": {
+                        "attack_target": null,
+                        "attack_target_identity": null,
+                        "attacking": false,
+                        "attacking_alone": false,
+                        "blocked": false,
+                        "blocking": false,
+                        "blocking_alone": false,
+                        "defending_player": null
+                      },
+                      "entered_battlefield_turn": 1,
+                      "face_down": false,
+                      "identity": {
+                        "expected_zone": "Battlefield",
+                        "reference": {
+                          "incarnation": 0,
+                          "object_id": 3
+                        }
+                      },
+                      "is_renowned": false,
+                      "is_saddled": false,
+                      "is_token": false,
+                      "lki": {
+                        "attachments": [],
+                        "base_power": 4,
+                        "base_toughness": 4,
+                        "card_types": [
+                          "Creature"
+                        ],
+                        "chosen_attributes": [],
+                        "colors": [],
+                        "controller": 0,
+                        "counters": {},
+                        "intensity": 0,
+                        "is_suspected": false,
+                        "keywords": [
+                          "Reach",
+                          "Trample",
+                          {
+                            "Mutate": {
+                              "generic": 1,
+                              "shards": [
+                                "Green",
+                                "Green"
+                              ],
+                              "type": "Cost"
+                            }
+                          }
+                        ],
+                        "mana_value": 0,
+                        "name": "Gemrazer",
+                        "owner": 0,
+                        "power": 4,
+                        "subtypes": [
+                          "Beast"
+                        ],
+                        "supertypes": [],
+                        "tapped": false,
+                        "toughness": 4,
+                        "was_prepared": false
+                      },
+                      "mana_cost": {
+                        "generic": 0,
+                        "shards": [],
+                        "type": "Cost"
+                      },
+                      "mana_spent_to_cast": false,
+                      "phase_status": {
+                        "status": "PhasedIn"
+                      },
+                      "timestamp": 2,
+                      "transformed": false,
+                      "trigger_entries": [
+                        {
+                          "definition": {
+                            "batched": false,
+                            "condition": null,
+                            "constraint": null,
+                            "damage_kind": "Any",
+                            "description": "Whenever ~ mutates, destroy target artifact or enchantment an opponent controls.",
+                            "destination": null,
+                            "execute": {
+                              "condition": null,
+                              "cost": null,
+                              "description": null,
+                              "duration": null,
+                              "effect": {
+                                "cant_regenerate": false,
+                                "target": {
+                                  "filters": [
+                                    {
+                                      "controller": "Opponent",
+                                      "properties": [],
+                                      "type": "Typed",
+                                      "type_filters": [
+                                        "Artifact"
+                                      ]
+                                    },
+                                    {
+                                      "controller": "Opponent",
+                                      "properties": [],
+                                      "type": "Typed",
+                                      "type_filters": [
+                                        "Enchantment"
+                                      ]
+                                    }
+                                  ],
+                                  "type": "Or"
+                                },
+                                "type": "Destroy"
+                              },
+                              "forward_result": false,
+                              "kind": "Spell",
+                              "optional": false,
+                              "optional_targeting": false,
+                              "sub_ability": null,
+                              "target_prompt": null
+                            },
+                            "mode": "Mutates",
+                            "optional": false,
+                            "origin": null,
+                            "phase": null,
+                            "secondary": false,
+                            "trigger_zones": [
+                              "Battlefield"
+                            ],
+                            "valid_card": {
+                              "type": "SelfRef"
+                            },
+                            "valid_source": null,
+                            "valid_target": null
+                          },
+                          "occurrence": {
+                            "data": {
+                              "base_set": 1,
+                              "printed_index": 0
+                            },
+                            "type": "Printed"
+                          }
+                        }
+                      ]
+                    },
+                    "turn_zone_change_index": 1,
+                    "was_prepared": false
+                  },
+                  "to": "Library"
+                },
+                "type": "ZoneChanged"
+              }
+            ],
+            "destination": "Library",
+            "exile_tracking": "None",
+            "logical_zone_change_group": {
+              "all_origin_occurrences": [
+                {
+                  "event": {
+                    "data": {
+                      "from": "Battlefield",
+                      "object_id": 3,
+                      "record": {
+                        "arrival": {
+                          "controller": 0,
+                          "owner": 0
+                        },
+                        "attached_to": null,
+                        "attachments": [],
+                        "base_power": 4,
+                        "base_toughness": 4,
+                        "cast_from_zone": null,
+                        "co_departed": [],
+                        "colors": [],
+                        "combat_status": {
+                          "attack_target": null,
+                          "attack_target_identity": null,
+                          "attacking": false,
+                          "attacking_alone": false,
+                          "blocked": false,
+                          "blocking": false,
+                          "blocking_alone": false,
+                          "defending_player": null
+                        },
+                        "controller": 0,
+                        "core_types": [
+                          "Creature"
+                        ],
+                        "entered_incarnation": null,
+                        "from_zone": "Battlefield",
+                        "is_suspected": false,
+                        "is_token": false,
+                        "keywords": [
+                          "Reach",
+                          "Trample",
+                          {
+                            "Mutate": {
+                              "generic": 1,
+                              "shards": [
+                                "Green",
+                                "Green"
+                              ],
+                              "type": "Cost"
+                            }
+                          }
+                        ],
+                        "linked_exile_snapshot": [],
+                        "mana_value": 0,
+                        "name": "Gemrazer",
+                        "object_id": 3,
+                        "owner": 0,
+                        "played_from_zone": null,
+                        "power": 4,
+                        "recorded_turn_number": 2,
+                        "subtypes": [
+                          "Beast"
+                        ],
+                        "supertypes": [],
+                        "to_zone": "Library",
+                        "toughness": 4,
+                        "trigger_definitions": [
+                          {
+                            "definition": {
+                              "batched": false,
+                              "condition": null,
+                              "constraint": null,
+                              "damage_kind": "Any",
+                              "description": "Whenever ~ mutates, destroy target artifact or enchantment an opponent controls.",
+                              "destination": null,
+                              "execute": {
+                                "condition": null,
+                                "cost": null,
+                                "description": null,
+                                "duration": null,
+                                "effect": {
+                                  "cant_regenerate": false,
+                                  "target": {
+                                    "filters": [
+                                      {
+                                        "controller": "Opponent",
+                                        "properties": [],
+                                        "type": "Typed",
+                                        "type_filters": [
+                                          "Artifact"
+                                        ]
+                                      },
+                                      {
+                                        "controller": "Opponent",
+                                        "properties": [],
+                                        "type": "Typed",
+                                        "type_filters": [
+                                          "Enchantment"
+                                        ]
+                                      }
+                                    ],
+                                    "type": "Or"
+                                  },
+                                  "type": "Destroy"
+                                },
+                                "forward_result": false,
+                                "kind": "Spell",
+                                "optional": false,
+                                "optional_targeting": false,
+                                "sub_ability": null,
+                                "target_prompt": null
+                              },
+                              "mode": "Mutates",
+                              "optional": false,
+                              "origin": null,
+                              "phase": null,
+                              "secondary": false,
+                              "trigger_zones": [
+                                "Battlefield"
+                              ],
+                              "valid_card": {
+                                "type": "SelfRef"
+                              },
+                              "valid_source": null,
+                              "valid_target": null
+                            },
+                            "occurrence": {
+                              "data": {
+                                "base_set": 1,
+                                "printed_index": 0
+                              },
+                              "type": "Printed"
+                            }
+                          }
+                        ],
+                        "trigger_source_context": {
+                          "card_id": 3,
+                          "combat_status": {
+                            "attack_target": null,
+                            "attack_target_identity": null,
+                            "attacking": false,
+                            "attacking_alone": false,
+                            "blocked": false,
+                            "blocking": false,
+                            "blocking_alone": false,
+                            "defending_player": null
+                          },
+                          "entered_battlefield_turn": 1,
+                          "face_down": false,
+                          "identity": {
+                            "expected_zone": "Battlefield",
+                            "reference": {
+                              "incarnation": 0,
+                              "object_id": 3
+                            }
+                          },
+                          "is_renowned": false,
+                          "is_saddled": false,
+                          "is_token": false,
+                          "lki": {
+                            "attachments": [],
+                            "base_power": 4,
+                            "base_toughness": 4,
+                            "card_types": [
+                              "Creature"
+                            ],
+                            "chosen_attributes": [],
+                            "colors": [],
+                            "controller": 0,
+                            "counters": {},
+                            "intensity": 0,
+                            "is_suspected": false,
+                            "keywords": [
+                              "Reach",
+                              "Trample",
+                              {
+                                "Mutate": {
+                                  "generic": 1,
+                                  "shards": [
+                                    "Green",
+                                    "Green"
+                                  ],
+                                  "type": "Cost"
+                                }
+                              }
+                            ],
+                            "mana_value": 0,
+                            "name": "Gemrazer",
+                            "owner": 0,
+                            "power": 4,
+                            "subtypes": [
+                              "Beast"
+                            ],
+                            "supertypes": [],
+                            "tapped": false,
+                            "toughness": 4,
+                            "was_prepared": false
+                          },
+                          "mana_cost": {
+                            "generic": 0,
+                            "shards": [],
+                            "type": "Cost"
+                          },
+                          "mana_spent_to_cast": false,
+                          "phase_status": {
+                            "status": "PhasedIn"
+                          },
+                          "timestamp": 2,
+                          "transformed": false,
+                          "trigger_entries": [
+                            {
+                              "definition": {
+                                "batched": false,
+                                "condition": null,
+                                "constraint": null,
+                                "damage_kind": "Any",
+                                "description": "Whenever ~ mutates, destroy target artifact or enchantment an opponent controls.",
+                                "destination": null,
+                                "execute": {
+                                  "condition": null,
+                                  "cost": null,
+                                  "description": null,
+                                  "duration": null,
+                                  "effect": {
+                                    "cant_regenerate": false,
+                                    "target": {
+                                      "filters": [
+                                        {
+                                          "controller": "Opponent",
+                                          "properties": [],
+                                          "type": "Typed",
+                                          "type_filters": [
+                                            "Artifact"
+                                          ]
+                                        },
+                                        {
+                                          "controller": "Opponent",
+                                          "properties": [],
+                                          "type": "Typed",
+                                          "type_filters": [
+                                            "Enchantment"
+                                          ]
+                                        }
+                                      ],
+                                      "type": "Or"
+                                    },
+                                    "type": "Destroy"
+                                  },
+                                  "forward_result": false,
+                                  "kind": "Spell",
+                                  "optional": false,
+                                  "optional_targeting": false,
+                                  "sub_ability": null,
+                                  "target_prompt": null
+                                },
+                                "mode": "Mutates",
+                                "optional": false,
+                                "origin": null,
+                                "phase": null,
+                                "secondary": false,
+                                "trigger_zones": [
+                                  "Battlefield"
+                                ],
+                                "valid_card": {
+                                  "type": "SelfRef"
+                                },
+                                "valid_source": null,
+                                "valid_target": null
+                              },
+                              "occurrence": {
+                                "data": {
+                                  "base_set": 1,
+                                  "printed_index": 0
+                                },
+                                "type": "Printed"
+                              }
+                            }
+                          ]
+                        },
+                        "turn_zone_change_index": 1,
+                        "was_prepared": false
+                      },
+                      "to": "Library"
+                    },
+                    "type": "ZoneChanged"
+                  },
+                  "ordinal": 0
+                }
+              ],
+              "immediately_after_batched_triggers": [],
+              "immediately_after_latched": false,
+              "immediately_after_suppress_triggers": [],
+              "immediately_before_batched_triggers": [],
+              "immediately_before_latched": true,
+              "immediately_before_suppress_triggers": [],
+              "logical_group_id": 1,
+              "post_event_member_contexts": [
+                null,
+                null
+              ],
+              "prospective_battlefield_members": [
+                {
+                  "identity": {
+                    "incarnation": 0,
+                    "object_id": 3
+                  }
+                },
+                {
+                  "identity": {
+                    "incarnation": 0,
+                    "object_id": 2
+                  }
+                }
+              ],
+              "terminal_outcomes": [
+                {
+                  "data": {
+                    "occurrence_ordinal": 0
+                  },
+                  "type": "moved"
+                },
+                {
+                  "type": "pending"
+                }
+              ]
+            },
+            "paused_current": {
+              "count": "NeedsCount",
+              "delivery_events": [],
+              "expected_event": {
+                "ZoneChange": {
+                  "applied": [],
+                  "cause": 2,
+                  "enter_tapped": "Unspecified",
+                  "enter_transformed": false,
+                  "enters_attacking": false,
+                  "from": "Battlefield",
+                  "object_id": 2,
+                  "to": "Library"
+                }
+              },
+              "member": {
+                "incarnation": 0,
+                "object_id": 2
+              },
+              "terminal_completion": null
+            },
+            "remaining": [],
+            "zone_change_record_start": 1
+          },
+          "type": "BatchDelivery"
+        }
+      ],
+      "last_post_replacement_frame_id": 0,
+      "next_discard_frame_id": 0,
+      "next_draw_sequence_frame_id": 0
+    },
+    "resolution_state_version": 11,
+    "resolved_rules_journal": {
+      "entries": [
+        {
+          "node": {
+            "Proposal": 0
+          },
+          "ordinal": 0
+        },
+        {
+          "command": {
+            "ManaInsert": {
+              "player": 0,
+              "producer": {
+                "Proposal": 0
+              },
+              "unit": {
+                "color": "White",
+                "pip_id": 1,
+                "restrictions": [],
+                "snow": false,
+                "source_id": 0
+              }
+            }
+          },
+          "node": {
+            "Proposal": 0
+          },
+          "ordinal": 1
+        },
+        {
+          "node": {
+            "Proposal": 2
+          },
+          "ordinal": 2
+        },
+        {
+          "command": {
+            "ManaInsert": {
+              "player": 0,
+              "producer": {
+                "Proposal": 2
+              },
+              "unit": {
+                "color": "White",
+                "pip_id": 2,
+                "restrictions": [],
+                "snow": false,
+                "source_id": 0
+              }
+            }
+          },
+          "node": {
+            "Proposal": 2
+          },
+          "ordinal": 3
+        },
+        {
+          "node": {
+            "Proposal": 4
+          },
+          "ordinal": 4
+        },
+        {
+          "command": {
+            "ManaInsert": {
+              "player": 0,
+              "producer": {
+                "Proposal": 4
+              },
+              "unit": {
+                "color": "Colorless",
+                "pip_id": 3,
+                "restrictions": [],
+                "snow": false,
+                "source_id": 0
+              }
+            }
+          },
+          "node": {
+            "Proposal": 4
+          },
+          "ordinal": 5
+        },
+        {
+          "node": {
+            "Proposal": 6
+          },
+          "ordinal": 6
+        },
+        {
+          "command": {
+            "ManaInsert": {
+              "player": 0,
+              "producer": {
+                "Proposal": 6
+              },
+              "unit": {
+                "color": "Colorless",
+                "pip_id": 4,
+                "restrictions": [],
+                "snow": false,
+                "source_id": 0
+              }
+            }
+          },
+          "node": {
+            "Proposal": 6
+          },
+          "ordinal": 7
+        },
+        {
+          "node": {
+            "Proposal": 8
+          },
+          "ordinal": 8
+        },
+        {
+          "command": {
+            "ManaInsert": {
+              "player": 0,
+              "producer": {
+                "Proposal": 8
+              },
+              "unit": {
+                "color": "Colorless",
+                "pip_id": 5,
+                "restrictions": [],
+                "snow": false,
+                "source_id": 0
+              }
+            }
+          },
+          "node": {
+            "Proposal": 8
+          },
+          "ordinal": 9
+        },
+        {
+          "node": {
+            "Proposal": 10
+          },
+          "ordinal": 10
+        },
+        {
+          "command": {
+            "ContinuousEffect": {
+              "Install": {
+                "cause": {
+                  "Proposal": 10
+                },
+                "effect": {
+                  "affected": {
+                    "id": 2,
+                    "type": "SpecificObject"
+                  },
+                  "controller": 0,
+                  "duration": "Permanent",
+                  "id": 1,
+                  "modifications": [
+                    {
+                      "display_source": "Card",
+                      "printed_ref": null,
+                      "token_art": null,
+                      "token_image_ref": null,
+                      "type": "CopyValues",
+                      "values": {
+                        "abilities": [],
+                        "card_types": {
+                          "core_types": [
+                            "Creature"
+                          ],
+                          "subtypes": [
+                            "Nightmare",
+                            "Beast"
+                          ],
+                          "supertypes": [
+                            "Legendary"
+                          ]
+                        },
+                        "color": [],
+                        "keywords": [
+                          "Trample",
+                          {
+                            "Mutate": {
+                              "generic": 1,
+                              "shards": [
+                                "Black",
+                                "Green",
+                                "Blue"
+                              ],
+                              "type": "Cost"
+                            }
+                          },
+                          "Reach",
+                          {
+                            "Mutate": {
+                              "generic": 1,
+                              "shards": [
+                                "Green",
+                                "Green"
+                              ],
+                              "type": "Cost"
+                            }
+                          }
+                        ],
+                        "loyalty": null,
+                        "mana_cost": {
+                          "generic": 0,
+                          "shards": [],
+                          "type": "Cost"
+                        },
+                        "name": "Otrimi, the Ever-Playful",
+                        "name_origin": "Source",
+                        "power": 6,
+                        "replacement_definitions": [],
+                        "static_definitions": [],
+                        "toughness": 6,
+                        "trigger_definitions": [
+                          {
+                            "batched": false,
+                            "condition": null,
+                            "constraint": null,
+                            "damage_kind": "CombatOnly",
+                            "description": "Whenever ~ deals combat damage to a player, return target creature card with mutate from your graveyard to your hand.",
+                            "destination": null,
+                            "execute": {
+                              "condition": null,
+                              "cost": null,
+                              "description": null,
+                              "duration": null,
+                              "effect": {
+                                "destination": "Hand",
+                                "enter_tapped": false,
+                                "enter_transformed": false,
+                                "enters_attacking": false,
+                                "origin": "Graveyard",
+                                "owner_library": false,
+                                "target": {
+                                  "controller": "You",
+                                  "properties": [
+                                    {
+                                      "type": "HasKeywordKind",
+                                      "value": "Mutate"
+                                    },
+                                    {
+                                      "type": "InZone",
+                                      "zone": "Graveyard"
+                                    }
+                                  ],
+                                  "type": "Typed",
+                                  "type_filters": [
+                                    "Creature"
+                                  ]
+                                },
+                                "type": "ChangeZone"
+                              },
+                              "forward_result": false,
+                              "kind": "Spell",
+                              "optional": false,
+                              "optional_targeting": false,
+                              "sub_ability": null,
+                              "target_prompt": null
+                            },
+                            "mode": "DamageDone",
+                            "optional": false,
+                            "origin": null,
+                            "phase": null,
+                            "secondary": false,
+                            "trigger_zones": [
+                              "Battlefield"
+                            ],
+                            "valid_card": null,
+                            "valid_source": {
+                              "type": "SelfRef"
+                            },
+                            "valid_target": {
+                              "type": "Player"
+                            }
+                          },
+                          {
+                            "batched": false,
+                            "condition": null,
+                            "constraint": null,
+                            "damage_kind": "Any",
+                            "description": "Whenever ~ mutates, destroy target artifact or enchantment an opponent controls.",
+                            "destination": null,
+                            "execute": {
+                              "condition": null,
+                              "cost": null,
+                              "description": null,
+                              "duration": null,
+                              "effect": {
+                                "cant_regenerate": false,
+                                "target": {
+                                  "filters": [
+                                    {
+                                      "controller": "Opponent",
+                                      "properties": [],
+                                      "type": "Typed",
+                                      "type_filters": [
+                                        "Artifact"
+                                      ]
+                                    },
+                                    {
+                                      "controller": "Opponent",
+                                      "properties": [],
+                                      "type": "Typed",
+                                      "type_filters": [
+                                        "Enchantment"
+                                      ]
+                                    }
+                                  ],
+                                  "type": "Or"
+                                },
+                                "type": "Destroy"
+                              },
+                              "forward_result": false,
+                              "kind": "Spell",
+                              "optional": false,
+                              "optional_targeting": false,
+                              "sub_ability": null,
+                              "target_prompt": null
+                            },
+                            "mode": "Mutates",
+                            "optional": false,
+                            "origin": null,
+                            "phase": null,
+                            "secondary": false,
+                            "trigger_zones": [
+                              "Battlefield"
+                            ],
+                            "valid_card": {
+                              "type": "SelfRef"
+                            },
+                            "valid_source": null,
+                            "valid_target": null
+                          }
+                        ],
+                        "trigger_printed_origins": [
+                          null,
+                          null
+                        ]
+                      }
+                    }
+                  ],
+                  "source_id": 2,
+                  "source_name": "Otrimi, the Ever-Playful",
+                  "timestamp": 3
+                },
+                "expected_installed_count": 0,
+                "resulting_next_continuous_effect_id": 2,
+                "resulting_next_end_effect_group_id": 1,
+                "resulting_next_timestamp": 4
+              }
+            }
+          },
+          "node": {
+            "Proposal": 10
+          },
+          "ordinal": 11
+        },
+        {
+          "node": {
+            "Proposal": 12
+          },
+          "ordinal": 12
+        },
+        {
+          "command": {
+            "StackPush": {
+              "cause": {
+                "Proposal": 12
+              },
+              "entry": {
+                "controller": 0,
+                "id": 4,
+                "kind": {
+                  "data": {
+                    "actual_mana_spent": 0,
+                    "card_id": 4,
+                    "casting_variant": "Normal"
+                  },
+                  "type": "Spell"
+                },
+                "source_id": 4
+              },
+              "origin": "Put",
+              "resulting_position": 0,
+              "spell_announcement": 1
+            }
+          },
+          "node": {
+            "Proposal": 12
+          },
+          "ordinal": 13
+        },
+        {
+          "node": {
+            "Payment": 7
+          },
+          "ordinal": 14
+        },
+        {
+          "command": {
+            "ManaSpend": {
+              "payer": 0,
+              "payment": {
+                "Payment": 7
+              },
+              "recipient": {
+                "Object": {
+                  "incarnation": 0,
+                  "object_id": 4
+                }
+              },
+              "units": [
+                {
+                  "producer": {
+                    "Proposal": 0
+                  },
+                  "unit": {
+                    "color": "White",
+                    "pip_id": 1,
+                    "restrictions": [],
+                    "snow": false,
+                    "source_id": 0
+                  }
+                },
+                {
+                  "producer": {
+                    "Proposal": 2
+                  },
+                  "unit": {
+                    "color": "White",
+                    "pip_id": 2,
+                    "restrictions": [],
+                    "snow": false,
+                    "source_id": 0
+                  }
+                },
+                {
+                  "producer": {
+                    "Proposal": 8
+                  },
+                  "unit": {
+                    "color": "Colorless",
+                    "pip_id": 5,
+                    "restrictions": [],
+                    "snow": false,
+                    "source_id": 0
+                  }
+                },
+                {
+                  "producer": {
+                    "Proposal": 4
+                  },
+                  "unit": {
+                    "color": "Colorless",
+                    "pip_id": 3,
+                    "restrictions": [],
+                    "snow": false,
+                    "source_id": 0
+                  }
+                },
+                {
+                  "producer": {
+                    "Proposal": 6
+                  },
+                  "unit": {
+                    "color": "Colorless",
+                    "pip_id": 4,
+                    "restrictions": [],
+                    "snow": false,
+                    "source_id": 0
+                  }
+                }
+              ]
+            }
+          },
+          "node": {
+            "Payment": 7
+          },
+          "ordinal": 15
+        },
+        {
+          "node": {
+            "Proposal": 16
+          },
+          "ordinal": 16
+        },
+        {
+          "command": {
+            "LedgerEdit": {
+              "cause": {
+                "Proposal": 16
+              },
+              "edit": {
+                "SpellCast": {
+                  "expected_game_count": 0,
+                  "expected_game_history_len": 0,
+                  "expected_turn_count": 0,
+                  "expected_turn_history_len": 0,
+                  "player": 0,
+                  "record": {
+                    "cast_variant": "Normal",
+                    "colors": [
+                      "White"
+                    ],
+                    "core_types": [
+                      "Sorcery"
+                    ],
+                    "from_zone": "Hand",
+                    "keywords": [],
+                    "mana_value": 5,
+                    "name": "Hallowed Burial",
+                    "spell_object_id": 4,
+                    "subtypes": [],
+                    "supertypes": []
+                  }
+                }
+              }
+            }
+          },
+          "node": {
+            "Proposal": 16
+          },
+          "ordinal": 17
+        },
+        {
+          "node": {
+            "Proposal": 18
+          },
+          "ordinal": 18
+        },
+        {
+          "command": {
+            "StackEntryFinalize": {
+              "cause": {
+                "Proposal": 18
+              },
+              "entry_position": 0,
+              "expected_old_kind": {
+                "data": {
+                  "actual_mana_spent": 0,
+                  "card_id": 4,
+                  "casting_variant": "Normal"
+                },
+                "type": "Spell"
+              },
+              "expected_old_paid_facts": null,
+              "object": 4,
+              "resulting_cast_occurrence": {
+                "caster": 0,
+                "turn_journal_index": 0
+              },
+              "resulting_kind": {
+                "data": {
+                  "ability": {
+                    "cast_occurrence": {
+                      "caster": 0,
+                      "turn_journal_index": 0
+                    },
+                    "chosen_target_slots": [],
+                    "condition": null,
+                    "context": {
+                      "additional_cost_paid": false,
+                      "alternative_mana_cost_paid": false,
+                      "cast_active_player": 0,
+                      "cast_controller": 0,
+                      "cast_from_zone": "Hand",
+                      "cast_phase": "PreCombatMain",
+                      "optional_effect_performed": false
+                    },
+                    "controller": 0,
+                    "description": "Put all creatures on the bottom of their owners' libraries.",
+                    "detached_remainder": "NoProducer",
+                    "duration": null,
+                    "effect": {
+                      "destination": "Library",
+                      "library_position": {
+                        "type": "Bottom"
+                      },
+                      "origin": null,
+                      "target": {
+                        "controller": null,
+                        "properties": [],
+                        "type": "Typed",
+                        "type_filters": [
+                          "Creature"
+                        ]
+                      },
+                      "type": "ChangeZoneAll"
+                    },
+                    "forward_result": false,
+                    "kind": "Spell",
+                    "optional": false,
+                    "optional_targeting": false,
+                    "source_id": 4,
+                    "sub_ability": null,
+                    "targets": []
+                  },
+                  "actual_mana_spent": 5,
+                  "card_id": 4,
+                  "casting_variant": "Normal"
+                },
+                "type": "Spell"
+              },
+              "resulting_paid_facts": {
+                "actual_mana_spent": 5,
+                "distinct_colors_spent": 1
+              }
+            }
+          },
+          "node": {
+            "Proposal": 18
+          },
+          "ordinal": 19
+        },
+        {
+          "node": {
+            "Proposal": 20
+          },
+          "ordinal": 20
+        },
+        {
+          "command": {
+            "StackRemoval": {
+              "cause": {
+                "Proposal": 20
+              },
+              "entry": {
+                "controller": 0,
+                "id": 4,
+                "kind": {
+                  "data": {
+                    "ability": {
+                      "cast_occurrence": {
+                        "caster": 0,
+                        "turn_journal_index": 0
+                      },
+                      "chosen_target_slots": [],
+                      "condition": null,
+                      "context": {
+                        "additional_cost_paid": false,
+                        "alternative_mana_cost_paid": false,
+                        "cast_active_player": 0,
+                        "cast_controller": 0,
+                        "cast_from_zone": "Hand",
+                        "cast_phase": "PreCombatMain",
+                        "optional_effect_performed": false
+                      },
+                      "controller": 0,
+                      "description": "Put all creatures on the bottom of their owners' libraries.",
+                      "detached_remainder": "NoProducer",
+                      "duration": null,
+                      "effect": {
+                        "destination": "Library",
+                        "library_position": {
+                          "type": "Bottom"
+                        },
+                        "origin": null,
+                        "target": {
+                          "controller": null,
+                          "properties": [],
+                          "type": "Typed",
+                          "type_filters": [
+                            "Creature"
+                          ]
+                        },
+                        "type": "ChangeZoneAll"
+                      },
+                      "forward_result": false,
+                      "kind": "Spell",
+                      "optional": false,
+                      "optional_targeting": false,
+                      "source_id": 4,
+                      "sub_ability": null,
+                      "targets": []
+                    },
+                    "actual_mana_spent": 5,
+                    "card_id": 4,
+                    "casting_variant": "Normal"
+                  },
+                  "type": "Spell"
+                },
+                "source_id": 4
+              },
+              "index": 0,
+              "resulting_depth": 0
+            }
+          },
+          "node": {
+            "Proposal": 20
+          },
+          "ordinal": 21
+        }
+      ],
+      "next_command_ordinal": 22,
+      "next_settlement_node_ordinal": 11,
+      "nodes": [
+        {
+          "identity": {
+            "Proposal": 0
+          },
+          "journal_ordinals": [
+            0,
+            1
+          ],
+          "kind": "Proposal",
+          "ordinal": 0,
+          "produced_pips": [
+            1
+          ]
+        },
+        {
+          "identity": {
+            "Proposal": 2
+          },
+          "journal_ordinals": [
+            2,
+            3
+          ],
+          "kind": "Proposal",
+          "ordinal": 1,
+          "produced_pips": [
+            2
+          ]
+        },
+        {
+          "identity": {
+            "Proposal": 4
+          },
+          "journal_ordinals": [
+            4,
+            5
+          ],
+          "kind": "Proposal",
+          "ordinal": 2,
+          "produced_pips": [
+            3
+          ]
+        },
+        {
+          "identity": {
+            "Proposal": 6
+          },
+          "journal_ordinals": [
+            6,
+            7
+          ],
+          "kind": "Proposal",
+          "ordinal": 3,
+          "produced_pips": [
+            4
+          ]
+        },
+        {
+          "identity": {
+            "Proposal": 8
+          },
+          "journal_ordinals": [
+            8,
+            9
+          ],
+          "kind": "Proposal",
+          "ordinal": 4,
+          "produced_pips": [
+            5
+          ]
+        },
+        {
+          "identity": {
+            "Proposal": 10
+          },
+          "journal_ordinals": [
+            10,
+            11
+          ],
+          "kind": "Proposal",
+          "ordinal": 5
+        },
+        {
+          "identity": {
+            "Proposal": 12
+          },
+          "journal_ordinals": [
+            12,
+            13
+          ],
+          "kind": "Proposal",
+          "ordinal": 6
+        },
+        {
+          "depends_on": [
+            {
+              "Proposal": 0
+            },
+            {
+              "Proposal": 2
+            },
+            {
+              "Proposal": 8
+            },
+            {
+              "Proposal": 4
+            },
+            {
+              "Proposal": 6
+            }
+          ],
+          "identity": {
+            "Payment": 7
+          },
+          "journal_ordinals": [
+            14,
+            15
+          ],
+          "kind": {
+            "Payment": {
+              "payer": 0,
+              "recipient": {
+                "Object": {
+                  "incarnation": 0,
+                  "object_id": 4
+                }
+              }
+            }
+          },
+          "ordinal": 7,
+          "spent_pips": [
+            1,
+            2,
+            5,
+            3,
+            4
+          ]
+        },
+        {
+          "identity": {
+            "Proposal": 16
+          },
+          "journal_ordinals": [
+            16,
+            17
+          ],
+          "kind": "Proposal",
+          "ordinal": 8
+        },
+        {
+          "identity": {
+            "Proposal": 18
+          },
+          "journal_ordinals": [
+            18,
+            19
+          ],
+          "kind": "Proposal",
+          "ordinal": 9
+        },
+        {
+          "identity": {
+            "Proposal": 20
+          },
+          "journal_ordinals": [
+            20,
+            21
+          ],
+          "kind": "Proposal",
+          "ordinal": 10
+        }
+      ],
+      "produced_mana": [
+        {
+          "producer": {
+            "Proposal": 0
+          },
+          "unit": {
+            "color": "White",
+            "pip_id": 1,
+            "restrictions": [],
+            "snow": false,
+            "source_id": 0
+          }
+        },
+        {
+          "producer": {
+            "Proposal": 2
+          },
+          "unit": {
+            "color": "White",
+            "pip_id": 2,
+            "restrictions": [],
+            "snow": false,
+            "source_id": 0
+          }
+        },
+        {
+          "producer": {
+            "Proposal": 4
+          },
+          "unit": {
+            "color": "Colorless",
+            "pip_id": 3,
+            "restrictions": [],
+            "snow": false,
+            "source_id": 0
+          }
+        },
+        {
+          "producer": {
+            "Proposal": 6
+          },
+          "unit": {
+            "color": "Colorless",
+            "pip_id": 4,
+            "restrictions": [],
+            "snow": false,
+            "source_id": 0
+          }
+        },
+        {
+          "producer": {
+            "Proposal": 8
+          },
+          "unit": {
+            "color": "Colorless",
+            "pip_id": 5,
+            "restrictions": [],
+            "snow": false,
+            "source_id": 0
+          }
+        }
+      ],
+      "spent_mana": [
+        {
+          "payment": {
+            "Payment": 7
+          },
+          "producer": {
+            "Proposal": 0
+          },
+          "recipient": {
+            "Object": {
+              "incarnation": 0,
+              "object_id": 4
+            }
+          },
+          "unit": {
+            "color": "White",
+            "pip_id": 1,
+            "restrictions": [],
+            "snow": false,
+            "source_id": 0
+          }
+        },
+        {
+          "payment": {
+            "Payment": 7
+          },
+          "producer": {
+            "Proposal": 2
+          },
+          "recipient": {
+            "Object": {
+              "incarnation": 0,
+              "object_id": 4
+            }
+          },
+          "unit": {
+            "color": "White",
+            "pip_id": 2,
+            "restrictions": [],
+            "snow": false,
+            "source_id": 0
+          }
+        },
+        {
+          "payment": {
+            "Payment": 7
+          },
+          "producer": {
+            "Proposal": 8
+          },
+          "recipient": {
+            "Object": {
+              "incarnation": 0,
+              "object_id": 4
+            }
+          },
+          "unit": {
+            "color": "Colorless",
+            "pip_id": 5,
+            "restrictions": [],
+            "snow": false,
+            "source_id": 0
+          }
+        },
+        {
+          "payment": {
+            "Payment": 7
+          },
+          "producer": {
+            "Proposal": 4
+          },
+          "recipient": {
+            "Object": {
+              "incarnation": 0,
+              "object_id": 4
+            }
+          },
+          "unit": {
+            "color": "Colorless",
+            "pip_id": 3,
+            "restrictions": [],
+            "snow": false,
+            "source_id": 0
+          }
+        },
+        {
+          "payment": {
+            "Payment": 7
+          },
+          "producer": {
+            "Proposal": 6
+          },
+          "recipient": {
+            "Object": {
+              "incarnation": 0,
+              "object_id": 4
+            }
+          },
+          "unit": {
+            "color": "Colorless",
+            "pip_id": 4,
+            "restrictions": [],
+            "snow": false,
+            "source_id": 0
+          }
+        }
+      ]
+    },
+    "resolving_spell_final_part": {
+      "spell": 4
+    },
+    "resolving_stack_entry": {
+      "controller": 0,
+      "id": 4,
+      "kind": {
+        "data": {
+          "ability": {
+            "cast_occurrence": {
+              "caster": 0,
+              "turn_journal_index": 0
+            },
+            "chosen_target_slots": [],
+            "condition": null,
+            "context": {
+              "additional_cost_paid": false,
+              "alternative_mana_cost_paid": false,
+              "cast_active_player": 0,
+              "cast_controller": 0,
+              "cast_from_zone": "Hand",
+              "cast_phase": "PreCombatMain",
+              "optional_effect_performed": false
+            },
+            "controller": 0,
+            "description": "Put all creatures on the bottom of their owners' libraries.",
+            "detached_remainder": "NoProducer",
+            "duration": null,
+            "effect": {
+              "destination": "Library",
+              "library_position": {
+                "type": "Bottom"
+              },
+              "origin": null,
+              "target": {
+                "controller": null,
+                "properties": [],
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ]
+              },
+              "type": "ChangeZoneAll"
+            },
+            "forward_result": false,
+            "kind": "Spell",
+            "optional": false,
+            "optional_targeting": false,
+            "source_id": 4,
+            "sub_ability": null,
+            "targets": []
+          },
+          "actual_mana_spent": 5,
+          "card_id": 4,
+          "casting_variant": "Normal"
+        },
+        "type": "Spell"
+      },
+      "source_id": 4
+    },
+    "resolving_stack_object": {
+      "incarnation": 1,
+      "object_id": 4
+    },
+    "revealed_cards": [],
+    "ring_bearer": {},
+    "ring_level": {},
+    "rng_seed": 42,
+    "rng_word_pos": 0,
+    "scheduled_turn_controls": [],
+    "seat_order": [
+      0,
+      1
+    ],
+    "sideboard_submitted": [],
+    "spells_cast_last_turn": null,
+    "spells_cast_this_game": {
+      "0": 1
+    },
+    "spells_cast_this_game_by_player": {
+      "0": [
+        {
+          "cast_variant": "Normal",
+          "colors": [
+            "White"
+          ],
+          "core_types": [
+            "Sorcery"
+          ],
+          "from_zone": "Hand",
+          "keywords": [],
+          "mana_value": 5,
+          "name": "Hallowed Burial",
+          "spell_object_id": 4,
+          "subtypes": [],
+          "supertypes": []
+        }
+      ]
+    },
+    "spells_cast_this_turn": 1,
+    "spells_cast_this_turn_by_player": {
+      "0": [
+        {
+          "cast_variant": "Normal",
+          "colors": [
+            "White"
+          ],
+          "core_types": [
+            "Sorcery"
+          ],
+          "from_zone": "Hand",
+          "keywords": [],
+          "mana_value": 5,
+          "name": "Hallowed Burial",
+          "spell_object_id": 4,
+          "subtypes": [],
+          "supertypes": []
+        }
+      ]
+    },
+    "stack": [],
+    "steps_to_skip": [
+      {},
+      {}
+    ],
+    "top_of_library_cast_permissions_used": [],
+    "tracked_object_sets": {},
+    "transient_continuous_effects": [],
+    "trigger_indicated_actions_this_turn": [],
+    "triggered_abilities_added_mana_this_turn": [],
+    "triggers_fired_this_game": [],
+    "triggers_fired_this_turn": [],
+    "triggers_fired_this_turn_per_opponent": [],
+    "turn_direction": "Normal",
+    "turn_number": 2,
+    "turns_to_skip": [
+      0,
+      0
+    ],
+    "waiting_for": {
+      "data": {
+        "candidate_count": 2,
+        "candidates": [
+          {
+            "description": "Move to command zone",
+            "source_id": 2,
+            "source_name": "Otrimi, the Ever-Playful"
+          },
+          {
+            "description": "Put into library",
+            "source_id": 2,
+            "source_name": "Otrimi, the Ever-Playful"
+          }
+        ],
+        "kind": {
+          "type": "OptionalBranch"
+        },
+        "last_applied_decides": false,
+        "player": 0
+      },
+      "type": "ReplacementChoice"
+    },
+    "zone_change_library_knowledge_stamps": [
+      {
+        "destination": {
+          "boundary_generation": 1,
+          "library_owner": 0
+        },
+        "recorded_turn_number": 2,
+        "turn_zone_change_index": 1
+      }
+    ],
+    "zone_changes_this_turn": [
+      {
+        "arrival": {
+          "controller": 0,
+          "owner": 0
+        },
+        "attached_to": null,
+        "attachments": [],
+        "base_power": null,
+        "base_toughness": null,
+        "cast_from_zone": "Hand",
+        "co_departed": [],
+        "colors": [
+          "White"
+        ],
+        "combat_status": {
+          "attack_target": null,
+          "attack_target_identity": null,
+          "attacking": false,
+          "attacking_alone": false,
+          "blocked": false,
+          "blocking": false,
+          "blocking_alone": false,
+          "defending_player": null
+        },
+        "controller": 0,
+        "core_types": [
+          "Sorcery"
+        ],
+        "entered_incarnation": null,
+        "from_zone": "Hand",
+        "is_suspected": false,
+        "is_token": false,
+        "keywords": [],
+        "linked_exile_snapshot": [],
+        "mana_value": 5,
+        "name": "Hallowed Burial",
+        "object_id": 4,
+        "owner": 0,
+        "played_from_zone": null,
+        "power": null,
+        "recorded_turn_number": 2,
+        "subtypes": [],
+        "supertypes": [],
+        "to_zone": "Stack",
+        "toughness": null,
+        "trigger_source_context": {
+          "card_id": 4,
+          "cast_controller": 0,
+          "cast_from_zone": "Hand",
+          "colors_spent_to_cast": {
+            "white": 2
+          },
+          "combat_status": {
+            "attack_target": null,
+            "attack_target_identity": null,
+            "attacking": false,
+            "attacking_alone": false,
+            "blocked": false,
+            "blocking": false,
+            "blocking_alone": false,
+            "defending_player": null
+          },
+          "face_down": false,
+          "identity": {
+            "expected_zone": "Hand",
+            "reference": {
+              "incarnation": 0,
+              "object_id": 4
+            }
+          },
+          "is_renowned": false,
+          "is_saddled": false,
+          "is_token": false,
+          "lki": {
+            "attachments": [],
+            "base_power": null,
+            "base_toughness": null,
+            "card_types": [
+              "Sorcery"
+            ],
+            "chosen_attributes": [],
+            "colors": [
+              "White"
+            ],
+            "controller": 0,
+            "counters": {},
+            "intensity": 0,
+            "is_suspected": false,
+            "keywords": [],
+            "mana_value": 5,
+            "name": "Hallowed Burial",
+            "owner": 0,
+            "power": null,
+            "subtypes": [],
+            "supertypes": [],
+            "tapped": false,
+            "toughness": null,
+            "was_prepared": false
+          },
+          "mana_cost": {
+            "generic": 3,
+            "shards": [
+              "White",
+              "White"
+            ],
+            "type": "Cost"
+          },
+          "mana_spent_to_cast": true,
+          "mana_spent_to_cast_amount": 5,
+          "phase_status": {
+            "status": "PhasedIn"
+          },
+          "timestamp": 0,
+          "transformed": false
+        },
+        "turn_zone_change_index": 0,
+        "was_prepared": false
+      },
+      {
+        "arrival": {
+          "controller": 0,
+          "owner": 0
+        },
+        "attached_to": null,
+        "attachments": [],
+        "base_power": 4,
+        "base_toughness": 4,
+        "cast_from_zone": null,
+        "co_departed": [],
+        "colors": [],
+        "combat_status": {
+          "attack_target": null,
+          "attack_target_identity": null,
+          "attacking": false,
+          "attacking_alone": false,
+          "blocked": false,
+          "blocking": false,
+          "blocking_alone": false,
+          "defending_player": null
+        },
+        "controller": 0,
+        "core_types": [
+          "Creature"
+        ],
+        "entered_incarnation": null,
+        "from_zone": "Battlefield",
+        "is_suspected": false,
+        "is_token": false,
+        "keywords": [
+          "Reach",
+          "Trample",
+          {
+            "Mutate": {
+              "generic": 1,
+              "shards": [
+                "Green",
+                "Green"
+              ],
+              "type": "Cost"
+            }
+          }
+        ],
+        "linked_exile_snapshot": [],
+        "mana_value": 0,
+        "name": "Gemrazer",
+        "object_id": 3,
+        "owner": 0,
+        "played_from_zone": null,
+        "power": 4,
+        "recorded_turn_number": 2,
+        "subtypes": [
+          "Beast"
+        ],
+        "supertypes": [],
+        "to_zone": "Library",
+        "toughness": 4,
+        "trigger_definitions": [
+          {
+            "definition": {
+              "batched": false,
+              "condition": null,
+              "constraint": null,
+              "damage_kind": "Any",
+              "description": "Whenever ~ mutates, destroy target artifact or enchantment an opponent controls.",
+              "destination": null,
+              "execute": {
+                "condition": null,
+                "cost": null,
+                "description": null,
+                "duration": null,
+                "effect": {
+                  "cant_regenerate": false,
+                  "target": {
+                    "filters": [
+                      {
+                        "controller": "Opponent",
+                        "properties": [],
+                        "type": "Typed",
+                        "type_filters": [
+                          "Artifact"
+                        ]
+                      },
+                      {
+                        "controller": "Opponent",
+                        "properties": [],
+                        "type": "Typed",
+                        "type_filters": [
+                          "Enchantment"
+                        ]
+                      }
+                    ],
+                    "type": "Or"
+                  },
+                  "type": "Destroy"
+                },
+                "forward_result": false,
+                "kind": "Spell",
+                "optional": false,
+                "optional_targeting": false,
+                "sub_ability": null,
+                "target_prompt": null
+              },
+              "mode": "Mutates",
+              "optional": false,
+              "origin": null,
+              "phase": null,
+              "secondary": false,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "valid_card": {
+                "type": "SelfRef"
+              },
+              "valid_source": null,
+              "valid_target": null
+            },
+            "occurrence": {
+              "data": {
+                "base_set": 1,
+                "printed_index": 0
+              },
+              "type": "Printed"
+            }
+          }
+        ],
+        "trigger_source_context": {
+          "card_id": 3,
+          "combat_status": {
+            "attack_target": null,
+            "attack_target_identity": null,
+            "attacking": false,
+            "attacking_alone": false,
+            "blocked": false,
+            "blocking": false,
+            "blocking_alone": false,
+            "defending_player": null
+          },
+          "entered_battlefield_turn": 1,
+          "face_down": false,
+          "identity": {
+            "expected_zone": "Battlefield",
+            "reference": {
+              "incarnation": 0,
+              "object_id": 3
+            }
+          },
+          "is_renowned": false,
+          "is_saddled": false,
+          "is_token": false,
+          "lki": {
+            "attachments": [],
+            "base_power": 4,
+            "base_toughness": 4,
+            "card_types": [
+              "Creature"
+            ],
+            "chosen_attributes": [],
+            "colors": [],
+            "controller": 0,
+            "counters": {},
+            "intensity": 0,
+            "is_suspected": false,
+            "keywords": [
+              "Reach",
+              "Trample",
+              {
+                "Mutate": {
+                  "generic": 1,
+                  "shards": [
+                    "Green",
+                    "Green"
+                  ],
+                  "type": "Cost"
+                }
+              }
+            ],
+            "mana_value": 0,
+            "name": "Gemrazer",
+            "owner": 0,
+            "power": 4,
+            "subtypes": [
+              "Beast"
+            ],
+            "supertypes": [],
+            "tapped": false,
+            "toughness": 4,
+            "was_prepared": false
+          },
+          "mana_cost": {
+            "generic": 0,
+            "shards": [],
+            "type": "Cost"
+          },
+          "mana_spent_to_cast": false,
+          "phase_status": {
+            "status": "PhasedIn"
+          },
+          "timestamp": 2,
+          "transformed": false,
+          "trigger_entries": [
+            {
+              "definition": {
+                "batched": false,
+                "condition": null,
+                "constraint": null,
+                "damage_kind": "Any",
+                "description": "Whenever ~ mutates, destroy target artifact or enchantment an opponent controls.",
+                "destination": null,
+                "execute": {
+                  "condition": null,
+                  "cost": null,
+                  "description": null,
+                  "duration": null,
+                  "effect": {
+                    "cant_regenerate": false,
+                    "target": {
+                      "filters": [
+                        {
+                          "controller": "Opponent",
+                          "properties": [],
+                          "type": "Typed",
+                          "type_filters": [
+                            "Artifact"
+                          ]
+                        },
+                        {
+                          "controller": "Opponent",
+                          "properties": [],
+                          "type": "Typed",
+                          "type_filters": [
+                            "Enchantment"
+                          ]
+                        }
+                      ],
+                      "type": "Or"
+                    },
+                    "type": "Destroy"
+                  },
+                  "forward_result": false,
+                  "kind": "Spell",
+                  "optional": false,
+                  "optional_targeting": false,
+                  "sub_ability": null,
+                  "target_prompt": null
+                },
+                "mode": "Mutates",
+                "optional": false,
+                "origin": null,
+                "phase": null,
+                "secondary": false,
+                "trigger_zones": [
+                  "Battlefield"
+                ],
+                "valid_card": {
+                  "type": "SelfRef"
+                },
+                "valid_source": null,
+                "valid_target": null
+              },
+              "occurrence": {
+                "data": {
+                  "base_set": 1,
+                  "printed_index": 0
+                },
+                "type": "Printed"
+              }
+            }
+          ]
+        },
+        "turn_zone_change_index": 1,
+        "was_prepared": false
+      }
+    ]
+  }
+}

@@ -248,10 +248,10 @@ fn mass_library_order_rejects_stale_typed_incarnation_and_legacy_origin() {
         .expect("fixture current member exists");
     let batch = MassLibraryOrderBatch {
         owner: PlayerId(0),
-        members: vec![MassLibraryOrderMember {
-            identity: ObjectIncarnationRef::from_object(object),
-            origin: Zone::Battlefield,
-        }],
+        members: vec![MassLibraryOrderMember::card(
+            ObjectIncarnationRef::from_object(object),
+            Zone::Battlefield,
+        )],
         arranger: None,
     };
     let WaitingFor::EffectZoneChoice {

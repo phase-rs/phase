@@ -468,8 +468,8 @@ mod tests {
         }
 
         // Two creatures in the controller's library to seek to the graveyard.
-        add_library_creature(&mut state, 1, PlayerId(0), "Bear 1");
-        add_library_creature(&mut state, 2, PlayerId(0), "Bear 2");
+        let bear1 = add_library_creature(&mut state, 1, PlayerId(0), "Bear 1");
+        let bear2 = add_library_creature(&mut state, 2, PlayerId(0), "Bear 2");
 
         let ability = ResolvedAbility::new(
             Effect::Seek {
@@ -487,14 +487,25 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         // The first card's CR 616.1 prompt must be parked, the tail stashed, and
-        // EffectResolved NOT emitted over the parked prompt.
-        assert!(
-            matches!(
-                state.waiting_for,
-                crate::types::game_state::WaitingFor::ReplacementChoice { .. }
-            ),
-            "per-card ordering prompt must be parked"
-        );
+        // EffectResolved NOT emitted over the parked prompt. Since the live
+        // staged scheduler, both seeked cards are consulted before any prompt
+        // appears and P0 holds both ordering decisions, so the parked prompt is
+        // first P0's CR 101.4c choice of which to make first (the seek's random
+        // pick fixes the announcement order, so the set is pinned).
+        let crate::types::game_state::WaitingFor::ReplacementDecisionOrder { player, objects } =
+            state.waiting_for.clone()
+        else {
+            panic!(
+                "per-card ordering prompt must be parked, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(player, PlayerId(0));
+        let mut held = objects.clone();
+        held.sort();
+        let mut seeked = vec![bear1, bear2];
+        seeked.sort();
+        assert_eq!(held, seeked, "one held ordering decision per seeked card");
         let stash = state
             .active_batch_delivery()
             .expect("the undelivered tail must be stashed for the resume path");
@@ -515,6 +526,29 @@ mod tests {
                 }
             )),
             "EffectResolved must not be pushed over a parked replacement prompt"
+        );
+
+        // Making the first card's decision first publishes its per-card prompt.
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SelectCards {
+                cards: vec![objects[0]],
+            },
+        )
+        .expect("P0 makes the first seeked card's decision first");
+        assert!(
+            matches!(
+                state.waiting_for,
+                crate::types::game_state::WaitingFor::ReplacementChoice { .. }
+            ),
+            "per-card ordering prompt must be parked"
+        );
+        assert_eq!(
+            state
+                .pending_replacement
+                .as_ref()
+                .and_then(|pending| pending.proposed.affected_object_id()),
+            Some(objects[0])
         );
     }
 

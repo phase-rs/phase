@@ -404,10 +404,23 @@ fn corpseberry_exile_replacement_pause_completes_after_restore() {
             .expect("select cards for replacement-paused forage")
             .events,
     );
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementChoice { .. }
-    ));
+    // CR 101.4c + CR 616.1: the staged exile batch consults all three cards
+    // before any prompt, so P0 holds one ordering decision per card and the
+    // operation first pauses on P0's choice of which to make.
+    let WaitingFor::ReplacementDecisionOrder { player, objects } =
+        runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected the held exile orderings, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0);
+    let mut held = objects.clone();
+    held.sort();
+    let mut selected = chosen.clone();
+    selected.sort();
+    assert_eq!(held, selected, "one held ordering decision per exiled card");
     assert_eq!(forage_action_count(&events), 0);
 
     let serialized = serde_json::to_string(runner.state())
@@ -415,18 +428,40 @@ fn corpseberry_exile_replacement_pause_completes_after_restore() {
     *runner.state_mut() = serde_json::from_str(&serialized)
         .expect("replacement-paused exile Forage state deserializes");
 
-    for _ in 0..chosen.len() {
-        assert!(matches!(
-            runner.state().waiting_for,
-            WaitingFor::ReplacementChoice { .. }
-        ));
-        events.extend(
-            runner
-                .act(GameAction::ChooseReplacement { index: 0 })
-                .expect("order exile replacement")
-                .events,
-        );
+    // Make the decisions in announcement order: P0 chooses the order while two
+    // or more remain, and every card's ordering choice is answered.
+    let mut answered = 0;
+    for _ in 0..2 * chosen.len() {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementDecisionOrder { player, objects } => {
+                assert_eq!(player, P0);
+                events.extend(
+                    runner
+                        .act(GameAction::SelectCards {
+                            cards: vec![objects[0]],
+                        })
+                        .expect("P0 makes the first announced card's decision first")
+                        .events,
+                );
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                assert_eq!(forage_action_count(&events), 0);
+                events.extend(
+                    runner
+                        .act(GameAction::ChooseReplacement { index: 0 })
+                        .expect("order exile replacement")
+                        .events,
+                );
+                answered += 1;
+            }
+            _ => break,
+        }
     }
+    assert_eq!(
+        answered,
+        chosen.len(),
+        "every exiled card's ordering is asked"
+    );
     drain_stack(&mut runner, &mut events);
 
     assert!(chosen

@@ -1225,6 +1225,7 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         | WaitingFor::SeparatePilesPartition { .. }
         | WaitingFor::SeparatePilesChoice { .. }
         | WaitingFor::ChooseLegend { .. }
+        | WaitingFor::ReplacementDecisionOrder { .. }
         | WaitingFor::BattleProtectorChoice { .. }
         | WaitingFor::CategoryChoice { .. }
         | WaitingFor::KeepExactPermanentsChoice { .. }

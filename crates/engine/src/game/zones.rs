@@ -2754,6 +2754,57 @@ pub(crate) fn reorder_within_library(
     crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
 }
 
+/// CR 401.4 + CR 401.7: the insertion index for one member of a private
+/// owner-arranged fixed-position group, after removing the current member.
+/// Top counts present lower ranks; Bottom subtracts present higher ranks from
+/// the post-removal length. Numbered groups anchor their contiguous block at
+/// the numbered slot, clamped against the length without any present members
+/// (CR 401.7), then offset by the present lower ranks.
+///
+/// `delivered_ranks` are the final-order ranks of this group's members that
+/// have already been delivered; `rank` is this member's final-order rank.
+pub(crate) fn arranged_library_slot(
+    library_len_after_current_removal: usize,
+    delivered_ranks: impl Iterator<Item = usize>,
+    rank: usize,
+    position: &crate::types::ability::LibraryPosition,
+) -> usize {
+    match position {
+        crate::types::ability::LibraryPosition::Top => {
+            delivered_ranks.filter(|other| *other < rank).count()
+        }
+        crate::types::ability::LibraryPosition::Bottom => library_len_after_current_removal
+            .saturating_sub(delivered_ranks.filter(|other| *other > rank).count()),
+        crate::types::ability::LibraryPosition::NthFromTop { n } => {
+            let (present, before) = delivered_ranks
+                .fold((0usize, 0usize), |(present, before), other| {
+                    (present + 1, before + usize::from(other < rank))
+                });
+            (n.saturating_sub(1) as usize)
+                .min(library_len_after_current_removal.saturating_sub(present))
+                + before
+        }
+        // CR 401.7: "just beneath the top X cards" is the fixed slot X
+        // (0-based index X) and shares the numbered-block insertion math.
+        crate::types::ability::LibraryPosition::BeneathTop { depth } => {
+            let crate::types::ability::QuantityExpr::Fixed { value } = depth else {
+                debug_assert!(false, "arranged BeneathTop needs a fixed depth");
+                return 0;
+            };
+            let (present, before) = delivered_ranks
+                .fold((0usize, 0usize), |(present, before), other| {
+                    (present + 1, before + usize::from(other < rank))
+                });
+            (*value as usize).min(library_len_after_current_removal.saturating_sub(present))
+                + before
+        }
+        crate::types::ability::LibraryPosition::RandomWithinTop { .. } => {
+            debug_assert!(false, "unsupported arranged library position");
+            0
+        }
+    }
+}
+
 /// Move an object to a specific position in its owner's library (top or bottom), emitting a ZoneChanged event.
 /// Convention: library[0] = top of library.
 pub fn move_to_library_position(
@@ -3500,6 +3551,7 @@ mod tests {
 
     use super::*;
     use crate::game::game_object::CleaveFormState;
+    use crate::types::ability::LibraryPosition;
     use crate::types::ability::{
         ContinuousModification, ControllerRef, FilterProp, StaticCondition, StaticDefinition,
         TargetFilter, TypeFilter, TypedFilter,
@@ -5312,6 +5364,413 @@ mod tests {
         assert_eq!(
             state.players[0].library.iter().copied().collect::<Vec<_>>(),
             [second, third, first]
+        );
+    }
+
+    /// R4b S2 slot unit: `Top` counts already-delivered lower ranks, `Bottom`
+    /// subtracts already-delivered higher ranks from the post-removal length.
+    #[test]
+    fn arranged_library_slot_counts_delivered_ranks_at_the_anchored_end() {
+        assert_eq!(
+            arranged_library_slot(5, [2usize, 4].into_iter(), 3, &LibraryPosition::Top),
+            1
+        );
+        assert_eq!(
+            arranged_library_slot(5, [0usize, 1].into_iter(), 2, &LibraryPosition::Bottom),
+            5
+        );
+        assert_eq!(
+            arranged_library_slot(0, std::iter::empty(), 0, &LibraryPosition::Bottom),
+            0
+        );
+    }
+
+    fn deliver_grouped(
+        state: &mut GameState,
+        final_order: &[ObjectId],
+        announcement: &[ObjectId],
+        position: &crate::types::ability::LibraryPosition,
+        owner: PlayerId,
+        events: &mut Vec<GameEvent>,
+    ) {
+        let mut delivered: Vec<usize> = Vec::new();
+        for id in announcement {
+            let rank = final_order
+                .iter()
+                .position(|entry| entry == id)
+                .expect("announcement member is in the final order");
+            let in_library = state
+                .objects
+                .get(id)
+                .is_some_and(|object| object.zone == Zone::Library)
+                && state.library_of(owner).contains(id);
+            let len_after_removal = state.library_of(owner).len() - usize::from(in_library);
+            let slot =
+                arranged_library_slot(len_after_removal, delivered.iter().copied(), rank, position);
+            move_to_library_at_index(state, *id, Some(slot), events);
+            delivered.push(rank);
+        }
+    }
+
+    /// CR 401.4 + CR 401.7: numbered groups keep the submitted block together,
+    /// clamping its base to the bottom of a short library.
+    #[test]
+    fn arranged_library_slot_numbered_block_clamps_without_splitting() {
+        for count in [3, 1, 0] {
+            let mut state = setup();
+            let sentinels: Vec<_> = (0..count)
+                .map(|index| {
+                    create_object(
+                        &mut state,
+                        CardId(index + 10),
+                        PlayerId(0),
+                        format!("L{index}"),
+                        Zone::Library,
+                    )
+                })
+                .collect();
+            state.players[0].library = sentinels.iter().copied().collect();
+            let a = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "A".into(),
+                Zone::Graveyard,
+            );
+            let b = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "B".into(),
+                Zone::Graveyard,
+            );
+            deliver_grouped(
+                &mut state,
+                &[b, a],
+                &[a, b],
+                &LibraryPosition::NthFromTop { n: 2 },
+                PlayerId(0),
+                &mut Vec::new(),
+            );
+            let mut expected = sentinels;
+            let base = expected.len().min(1);
+            expected.splice(base..base, [b, a]);
+            assert_eq!(
+                state
+                    .library_of(PlayerId(0))
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                expected,
+                "initial library length {count}"
+            );
+        }
+        // Present ranks need not be consecutive: a later rank may arrive first.
+        assert_eq!(
+            arranged_library_slot(
+                5,
+                [0, 2].into_iter(),
+                1,
+                &LibraryPosition::NthFromTop { n: 2 },
+            ),
+            2
+        );
+    }
+
+    /// CR 401.4 + CR 401.7: either submitted order controls the final numbered
+    /// block, including the identity order that same-depth insertion reverses.
+    #[test]
+    fn arranged_library_slot_numbered_block_follows_both_submitted_orders() {
+        for reverse in [false, true] {
+            for count in [3, 1, 0] {
+                let mut state = setup();
+                let sentinels: Vec<_> = (0..count)
+                    .map(|index| {
+                        create_object(
+                            &mut state,
+                            CardId(index + 10),
+                            PlayerId(0),
+                            format!("L{index}"),
+                            Zone::Library,
+                        )
+                    })
+                    .collect();
+                state.players[0].library = sentinels.iter().copied().collect();
+                let a = create_object(
+                    &mut state,
+                    CardId(1),
+                    PlayerId(0),
+                    "A".into(),
+                    Zone::Graveyard,
+                );
+                let b = create_object(
+                    &mut state,
+                    CardId(2),
+                    PlayerId(0),
+                    "B".into(),
+                    Zone::Graveyard,
+                );
+                let order = if reverse { [b, a] } else { [a, b] };
+                deliver_grouped(
+                    &mut state,
+                    &order,
+                    &[a, b],
+                    &LibraryPosition::NthFromTop { n: 2 },
+                    PlayerId(0),
+                    &mut Vec::new(),
+                );
+                let mut expected = sentinels;
+                let base = expected.len().min(1);
+                expected.splice(base..base, order);
+                assert_eq!(
+                    state
+                        .library_of(PlayerId(0))
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "initial library length {count}, reverse {reverse}"
+                );
+            }
+        }
+    }
+
+    /// CR 401.7: a singleton numbered group uses the ordinary clamped slot.
+    #[test]
+    fn arranged_library_slot_numbered_singleton_matches_ordinary_insertion() {
+        for count in [0, 1, 3] {
+            let mut state = setup();
+            let sentinels: Vec<_> = (0..count)
+                .map(|index| {
+                    create_object(
+                        &mut state,
+                        CardId(index + 10),
+                        PlayerId(0),
+                        format!("L{index}"),
+                        Zone::Library,
+                    )
+                })
+                .collect();
+            state.players[0].library = sentinels.into_iter().collect();
+            let card = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Singleton".into(),
+                Zone::Graveyard,
+            );
+            let mut ordinary = state.clone();
+            deliver_grouped(
+                &mut state,
+                &[card],
+                &[card],
+                &LibraryPosition::NthFromTop { n: 2 },
+                PlayerId(0),
+                &mut Vec::new(),
+            );
+            move_to_library_at_index(&mut ordinary, card, Some(1), &mut Vec::new());
+            assert_eq!(
+                state.library_of(PlayerId(0)),
+                ordinary.library_of(PlayerId(0))
+            );
+        }
+    }
+
+    /// R4b S2a (F1 control): a nonidentity Bottom permutation of three
+    /// library-origin cards reproduces the pre-R4b append-after-removal order,
+    /// emits no `ZoneChanged`, and never bumps an incarnation.
+    #[test]
+    fn arranged_bottom_slot_reproduces_library_origin_append_order() {
+        let mut state = setup();
+        let sentinel = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sentinel".to_string(),
+            Zone::Library,
+        );
+        let c0 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "C0".into(),
+            Zone::Library,
+        );
+        let c1 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "C1".into(),
+            Zone::Library,
+        );
+        let c2 = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "C2".into(),
+            Zone::Library,
+        );
+        state.players[0].library = crate::im::vector![sentinel, c0, c1, c2];
+        let incarnation_before = state.objects[&c0].incarnation;
+        let epoch_before = state.library_knowledge_boundary_generation(PlayerId(0));
+
+        // Submitted permutation [C1, C2, C0]; announcement/request order
+        // [C2, C0, C1] is different, so a fixed-base formula would fail.
+        let mut events = Vec::new();
+        deliver_grouped(
+            &mut state,
+            &[c1, c2, c0],
+            &[c2, c0, c1],
+            &LibraryPosition::Bottom,
+            PlayerId(0),
+            &mut events,
+        );
+
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [sentinel, c1, c2, c0],
+            "the submitted tail replaces the legacy block, with the sentinel at the same index"
+        );
+        assert!(events.is_empty(), "library reorders emit no ZoneChanged");
+        assert_eq!(
+            state.objects[&c0].incarnation, incarnation_before,
+            "a within-library reorder must not bump the incarnation"
+        );
+        assert!(
+            state.zone_changes_this_turn.is_empty(),
+            "a within-library reorder does not enter the zone-change ledger"
+        );
+        assert_eq!(
+            state.library_knowledge_boundary_generation(PlayerId(0)),
+            epoch_before + 3,
+            "one knowledge boundary generation per reinsertion"
+        );
+    }
+
+    /// R4b S2b (F1 control): a mixed cross-zone/library-origin Bottom group
+    /// reproduces the plan's replacement-origin trace and the request-origin
+    /// twin. Library-origin members emit no `ZoneChanged`; cross-zone members
+    /// emit exactly one each.
+    #[test]
+    fn arranged_bottom_slot_handles_mixed_cross_zone_and_library_origin_members() {
+        let mut state = setup();
+        let p = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P".into(),
+            Zone::Library,
+        );
+        let l2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "L2".into(),
+            Zone::Library,
+        );
+        let l1 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "L1".into(),
+            Zone::Library,
+        );
+        state.players[0].library = crate::im::vector![p, l2, l1];
+        let x0 = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "X0".into(),
+            Zone::Graveyard,
+        );
+        let x2 = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "X2".into(),
+            Zone::Graveyard,
+        );
+
+        let mut events = Vec::new();
+        deliver_grouped(
+            &mut state,
+            &[x0, l1, x2],
+            &[l1, x0, x2],
+            &LibraryPosition::Bottom,
+            PlayerId(0),
+            &mut events,
+        );
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [p, l2, x0, l1, x2],
+            "the mixed trace is the submitted tail"
+        );
+        let moved: Vec<ObjectId> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(moved, [x0, x2], "library-origin L1 emits no ZoneChanged");
+    }
+
+    /// R4b S2b request-origin twin: the derived (announcement) order equals the
+    /// pre-R4b append-after-removal result and needs no prompt.
+    #[test]
+    fn arranged_bottom_slot_reproduces_request_origin_announcement_order() {
+        let mut state = setup();
+        let p = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P".into(),
+            Zone::Library,
+        );
+        let l2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "L2".into(),
+            Zone::Library,
+        );
+        let l1 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "L1".into(),
+            Zone::Library,
+        );
+        state.players[0].library = crate::im::vector![p, l2, l1];
+        let x2 = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "X2".into(),
+            Zone::Graveyard,
+        );
+        let x0 = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "X0".into(),
+            Zone::Graveyard,
+        );
+
+        let announcement = [x2, l1, x0];
+        let mut events = Vec::new();
+        deliver_grouped(
+            &mut state,
+            &announcement,
+            &announcement,
+            &LibraryPosition::Bottom,
+            PlayerId(0),
+            &mut events,
+        );
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [p, l2, x2, l1, x0],
+            "a request-origin group keeps the legacy append-after-removal order"
         );
     }
 

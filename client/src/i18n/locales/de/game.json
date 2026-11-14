@@ -2137,6 +2137,13 @@
     "title": "Kontrolleur beim Eintreten wählen",
     "subtitle": "Wähle, welcher Gegner diese bleibende Karte beim Eintreten kontrolliert."
   },
+  "replacementDecisionOrder": {
+    "title": "Wähle die erste Entscheidung",
+    "subtitle": "Diese Ersetzungsentscheidungen fallen gleichzeitig an. Wähle, welche du zuerst triffst.",
+    "unknownObject": "Unbekanntes Objekt",
+    "attachedTo": "An {{host}}",
+    "attachments": "Mit {{names}}"
+  },
   "optionalCost": {
     "gift": {
       "title": "Ein Geschenk versprechen?",

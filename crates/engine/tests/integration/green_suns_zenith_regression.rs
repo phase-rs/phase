@@ -3,8 +3,8 @@
 //! Shuffle ~ into its owner's library.
 //!
 //! Building-block regression: the terminal "Shuffle ~ into its owner's library"
-//! clause must parse to a `ChangeZone` + `Shuffle` chain that routes ~ back to
-//! its owner's library (CR 400.3), not lower to `Effect::Unimplemented`.
+//! clause routes the original spell to its owner's library (CR 400.3), leaving
+//! the searched-for creature on the battlefield.
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;

@@ -632,6 +632,7 @@ impl ScriptedGame {
             | WaitingFor::EnlistChoice { .. }
             | WaitingFor::GameOver { .. }
             | WaitingFor::ReplacementChoice { .. }
+            | WaitingFor::ReplacementDecisionOrder { .. }
             | WaitingFor::EntryControllerChoice { .. }
             | WaitingFor::OrderTriggers { .. }
             | WaitingFor::CopyTargetChoice { .. }

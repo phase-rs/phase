@@ -1215,6 +1215,7 @@ const PARTITION_FIXTURES: Record<
   GameOver: NO_TARGET_REF_LEGAL_SET,
   ReplacementChoice: NO_TARGET_REF_LEGAL_SET,
   EntryControllerChoice: NO_TARGET_REF_LEGAL_SET,
+  ReplacementDecisionOrder: NO_TARGET_REF_LEGAL_SET,
   OrderTriggers: NO_TARGET_REF_LEGAL_SET,
   CopyTargetChoice: NO_TARGET_REF_LEGAL_SET,
   ExploreChoice: NO_TARGET_REF_LEGAL_SET,
