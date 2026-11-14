@@ -3710,7 +3710,9 @@ fn b7_board(with_leyline: bool, round_trip: bool) -> B7Run {
 /// 3, doubler first 3 -> 6 -> 3. The Hawk's 1 damage: P1 loses 1 and P0 gains
 /// 1, Boon first 1 -> 2 -> 3 (CR 120.3a/f, CR 702.15b). At P0's prompt the
 /// whole batch is still parked (both legs, the Hawk's gain marker cleared, no
-/// event yet): P1 is still at 20 only because Ruric's own leg can prompt.
+/// event yet): P1 is still at 20 only because Ruric's own leg can prompt. The
+/// staged gain settles with the batch (CR 101.4), so its `LifeChanged` follows
+/// the damage it comes from.
 #[test]
 fn b7_1_active_players_gain_choice_precedes_the_defenders_poison_choice() {
     let run = b7_board(true, false);
@@ -3733,17 +3735,17 @@ fn b7_1_active_players_gain_choice_precedes_the_defenders_poison_choice() {
     assert_eq!(
         run.seq,
         vec![
-            "Gain(P0)",
             "DamageDealt",
             "Loss(P1)",
             "DamageDealt",
+            "Gain(P0)",
             "Agg(P1,4)"
         ]
     );
 }
 
 /// B7-2 - the same board without Leyline of Hope: a lone mandatory doubler
-/// opens no choice, so nothing is settled early and the batch keeps the
+/// opens no choice, so nothing is staged ahead of a leg and the batch keeps the
 /// established order (CR 510.2 specifies no order inside a simultaneous
 /// batch; preserved deliberately). Gain 1 -> 2; poison 3.
 #[test]
@@ -3796,11 +3798,13 @@ fn b7_9_parked_early_gain_round_trips() {
 }
 
 /// B7-3 - CR 101.4c: one player's own simultaneous choices (P1 is both
-/// poisoned and gaining) keep the engine's fixed legs-first order. P1's 2/5
-/// lifelink blocker deals 2 to the Bear: Boon first 2 -> 4 -> 5; Ruric's
-/// infect 3: doubler first 3. P1 ends at 25 with 3 poison.
+/// poisoned and gaining) follow the engine's fixed gains-first order: the gain
+/// is staged before P1's own leg writes the board, so both read the pre-batch
+/// board and the order cannot change either result. P1's 2/5 lifelink blocker
+/// deals 2 to the Bear: Boon first 2 -> 4 -> 5; Ruric's infect 3: doubler
+/// first 3. P1 ends at 25 with 3 poison.
 #[test]
-fn b7_3_equal_owner_keeps_legs_first() {
+fn b7_3_equal_owner_stages_its_gain_first() {
     let mut scenario = base_scenario();
     let ruric = add_ruric_with(&mut scenario, P0, 3, &[Keyword::Infect]);
     let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
@@ -3822,7 +3826,7 @@ fn b7_3_equal_owner_keeps_legs_first() {
             }
         },
     );
-    assert_eq!(prompts, vec![(P1, "poison"), (P1, "gain")]);
+    assert_eq!(prompts, vec![(P1, "gain"), (P1, "poison")]);
     assert_eq!(runner.state().players[1].life, 25);
     assert_eq!(runner.state().players[1].poison_counters, 3);
 }
@@ -3955,7 +3959,7 @@ fn b7_6_earlier_players_gain_precedes_a_later_players_poison() {
 
 /// B7-13 - CR 732.2a: P0 active; a Bear and a Healer's Hawk hit P1 (no
 /// choice), Ruric (infect) hits P2 under the pair, P0 holds Leyline + Boon.
-/// P1's legs apply first (P1 loses 3), then P0's gain is settled ahead of
+/// P1's legs apply first (P1 loses 3), then P0's gain is staged ahead of
 /// P2's leg and pauses: the batch already moved a life total, so the
 /// loop-detection ring seeded after the declaration is gone at the prompt.
 #[test]
@@ -4919,4 +4923,943 @@ fn b9_3_each_target_power_park_keeps_the_dealing_incarnation() {
             "legacy={legacy}: the Guardian dealt damage, so an opponent can target it"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// B11: simultaneous combat lifelink gains are staged (every replacement choice
+// made against the pre-batch board) and settle together at the end of the
+// batch (CR 101.4, CR 616.1, CR 616.1f, CR 702.15b).
+// ---------------------------------------------------------------------------
+
+/// What one B11 run observed.
+struct B11Run {
+    prompts: Vec<(PlayerId, &'static str, usize)>,
+    /// `(P0 life, P1 life)` at each prompt, in prompt order.
+    lives_at_prompt: Vec<(i32, i32)>,
+    /// The candidate sources of each gain prompt, in prompt order.
+    gain_candidates: Vec<Vec<ObjectId>>,
+    p0_life: i32,
+    p1_life: i32,
+    gains: Vec<i32>,
+}
+
+/// The B11 sources of P0's life-gain replacements.
+struct B11Sources {
+    leyline: Option<ObjectId>,
+    phial: ObjectId,
+}
+
+/// B11 board: P0 active at `life`, two Healer's Hawks and Phial of Galadriel
+/// (plus Leyline of Hope when `with_leyline`), all printed cards. With
+/// `with_ruric`, a Phyresis-infect Ruric (power 3) also attacks under the
+/// Vorinclex pair, so P1's poison result opens P1's own choice. Every
+/// attacker hits P1 unblocked. Gain answers: the first gain prompt picks
+/// Phial first, the second Leyline first; poison answers pick the doubler.
+/// `on_prompt` sees the runner and the 1-based prompt number before the answer.
+fn b11_board(
+    life: i32,
+    with_leyline: bool,
+    with_ruric: bool,
+    mut on_prompt: impl FnMut(&mut GameRunner, usize),
+) -> B11Run {
+    let db = shared_card_db().expect("integration card fixture must be available");
+    let mut scenario = base_scenario();
+    scenario.with_life(P0, life);
+    let ruric = with_ruric.then(|| (add_ruric(&mut scenario, P0, 3), add_phyresis(&mut scenario)));
+    let hawk_a = scenario.add_real_card(P0, "Healer's Hawk", Zone::Battlefield, db);
+    let hawk_b = scenario.add_real_card(P0, "Healer's Hawk", Zone::Battlefield, db);
+    let sources = B11Sources {
+        leyline: with_leyline
+            .then(|| scenario.add_real_card(P0, "Leyline of Hope", Zone::Battlefield, db)),
+        phial: scenario.add_real_card(P0, "Phial of Galadriel", Zone::Battlefield, db),
+    };
+    let doubler = with_ruric.then(|| add_two_vorinclex(&mut scenario).0);
+    let mut runner = scenario.build();
+    assert_phial_gain_threshold(runner.state(), sources.phial);
+    let mut attackers = Vec::new();
+    if let Some((ruric, phyresis)) = ruric {
+        attach_phyresis(&mut runner, phyresis, ruric);
+        attackers.push(ruric);
+    }
+    attackers.extend([hawk_a, hawk_b]);
+    let mut prompts = Vec::new();
+    let mut lives_at_prompt = Vec::new();
+    let mut gain_candidates = Vec::new();
+    let drive = drive_combat(&mut runner, &attackers, &[], |runner, n| {
+        let (chooser, kind) = choice_kind(runner);
+        let WaitingFor::ReplacementChoice {
+            candidate_count, ..
+        } = runner.state().waiting_for
+        else {
+            unreachable!()
+        };
+        prompts.push((chooser, kind, candidate_count));
+        lives_at_prompt.push((
+            runner.state().players[0].life,
+            runner.state().players[1].life,
+        ));
+        on_prompt(runner, n);
+        match kind {
+            "gain" => {
+                let candidates: Vec<ObjectId> = runner
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .expect("the gain choice is pending")
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.source)
+                    .collect();
+                let first_gain = gain_candidates.is_empty();
+                gain_candidates.push(candidates);
+                match (first_gain, sources.leyline) {
+                    (false, Some(leyline)) => candidate_from(runner, leyline),
+                    _ => candidate_from(runner, sources.phial),
+                }
+            }
+            _ => candidate_from(runner, doubler.expect("only Ruric's leg prompts poison")),
+        }
+    });
+    let state = runner.state();
+    B11Run {
+        prompts,
+        lives_at_prompt,
+        gain_candidates,
+        p0_life: state.players[0].life,
+        p1_life: state.players[1].life,
+        gains: gains_of(&drive.events, P0),
+    }
+}
+
+/// Guards a stale fixture export: Phial of Galadriel's life-gain clause is the
+/// "while you have 5 or less life" threshold (CR 614.1a), read live when the
+/// replacement's applicability is checked.
+fn assert_phial_gain_threshold(state: &GameState, phial: ObjectId) {
+    use engine::types::ability::{
+        Comparator, PlayerScope, QuantityExpr, QuantityRef, ReplacementCondition,
+    };
+    let gain = state.objects[&phial]
+        .replacement_definitions
+        .iter_unchecked()
+        .find(|def| def.event == ReplacementEvent::GainLife)
+        .expect("Phial of Galadriel carries a life-gain replacement");
+    assert!(
+        matches!(
+            &gain.condition,
+            Some(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller
+                    }
+                },
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+                ..
+            })
+        ),
+        "Phial's gain replacement must be gated on its controller's life <= 5, got {:?}",
+        gain.condition
+    );
+}
+
+/// B11-1 - CR 101.4 + CR 616.1 + CR 616.1f + CR 702.15b: P0 at 5 life with
+/// two Hawks, Leyline of Hope and Phial of Galadriel; Ruric's infect leg opens
+/// P1's poison choice, so P0's two gains are asked first (APNAP). Both gains
+/// are results of one simultaneous batch, so each one's replacements are
+/// checked against the pre-batch board: P0 has 5 life at BOTH gain prompts and
+/// both offer Leyline and Phial. Gain 1, Phial first: 1 -> 2 -> 3. Gain 2,
+/// Leyline first: 1 -> 2 -> 4. P0 ends at 5 + 3 + 4 = 12.
+#[test]
+fn b11_1_both_gains_see_the_pre_batch_board() {
+    let mut parked = Vec::new();
+    let run = b11_board(5, true, true, |runner, _| parked.push(staged_at(runner)));
+    assert_eq!(
+        parked,
+        vec![(0, true), (1, true), (2, false)],
+        "the answered gains wait staged on the parked remnant; only a gain \
+         prompt awaits a staged answer"
+    );
+    assert_eq!(
+        run.prompts,
+        vec![(P0, "gain", 2), (P0, "gain", 2), (P1, "poison", 2)],
+        "both gains prompt (APNAP: P0 first), then P1's poison"
+    );
+    for candidates in &run.gain_candidates {
+        assert_eq!(candidates.len(), 2, "reach-guard: Leyline and Phial");
+    }
+    assert_eq!(
+        run.lives_at_prompt
+            .iter()
+            .map(|(p0, _)| *p0)
+            .collect::<Vec<_>>(),
+        vec![5, 5, 5],
+        "no gain is settled while a choice of the batch is still open"
+    );
+    assert_eq!(run.gains, vec![3, 4], "Phial first 3, Leyline first 4");
+    assert_eq!(run.p0_life, 12);
+    assert_eq!(run.p1_life, 18, "the two Hawks dealt 1 each");
+}
+
+/// The parked batch at a prompt: (gains staged on the Phase C remnant,
+/// whether the batch awaits a staged gain's answer).
+fn staged_at(runner: &GameRunner) -> (usize, bool) {
+    let record = runner
+        .state()
+        .pending_combat_lifelink
+        .as_ref()
+        .expect("reach-guard: the combat batch is parked");
+    let remnant = record
+        .phase_c_remnant
+        .as_ref()
+        .expect("reach-guard: a Phase C remnant is parked");
+    assert!(record.staged_gains.is_empty(), "staged on the remnant");
+    (remnant.staged_gains.len(), record.awaiting_staged_gain)
+}
+
+/// B11-4 - the B11-1 batch parked at P0's SECOND gain prompt (one gain
+/// already staged on the remnant, the batch awaiting the second) round-trips
+/// through serde and resumes from the decoded record to the same final state.
+#[test]
+fn b11_4_staged_gains_round_trip() {
+    let run = b11_board(5, true, true, |runner, n| {
+        if n != 2 {
+            return;
+        }
+        assert_eq!(staged_at(runner), (1, true), "reach-guard");
+        let parked = runner
+            .state()
+            .pending_combat_lifelink
+            .clone()
+            .expect("the combat batch is parked");
+        let json = serde_json::to_string(&parked).expect("serialize");
+        assert!(json.contains("\"staged_gains\"") && json.contains("\"awaiting_staged_gain\""));
+        let decoded = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(*parked, decoded, "the parked record round-trips");
+        runner.state_mut().pending_combat_lifelink = Some(Box::new(decoded));
+    });
+    assert_eq!(run.prompts.len(), 3);
+    assert_eq!(run.gains, vec![3, 4]);
+    assert_eq!(run.p0_life, 12);
+}
+
+/// B11-2 - threshold control for B11-1: the same board at 6 life. Phial is not
+/// applicable to either gain (6 > 5), so Leyline applies alone (mandatory, no
+/// choice): each gain is 1 + 1. Only P1's poison choice prompts. 6 + 2 + 2.
+#[test]
+fn b11_2_threshold_control_at_six_life() {
+    let run = b11_board(6, true, true, |_, _| {});
+    assert_eq!(run.prompts, vec![(P1, "poison", 2)]);
+    assert_eq!(run.gains, vec![2, 2]);
+    assert_eq!(run.p0_life, 10);
+}
+
+/// B11-3 - CR 616.1f + CR 702.15b: no prompt at all. Phial alone and two
+/// Hawks at 5 life: each gain's replacement is checked against the pre-batch
+/// 5 life, so both are doubled: 5 + 2 + 2 = 9. At 6 life Phial applies to
+/// neither (control): 6 + 1 + 1 = 8.
+#[test]
+fn b11_3_phial_alone_doubles_both_gains() {
+    let run = b11_board(5, false, false, |_, _| {});
+    assert!(
+        run.prompts.is_empty(),
+        "a lone mandatory modifier opens no choice"
+    );
+    assert_eq!(run.gains, vec![2, 2]);
+    assert_eq!(run.p0_life, 9);
+
+    let control = b11_board(6, false, false, |_, _| {});
+    assert!(control.prompts.is_empty());
+    assert_eq!(control.gains, vec![1, 1]);
+    assert_eq!(control.p0_life, 8);
+}
+
+/// B11-7 - the tail path (no later player's choice): two Hawks with Leyline
+/// and Phial at 5 life. Both gains prompt against the pre-batch 5 life, and
+/// the damage is already dealt at both prompts (P0's gains are asked after
+/// P1's legs: no leg of the batch can prompt). 5 + 3 + 4 = 12.
+#[test]
+fn b11_7_tail_gains_see_the_pre_batch_board() {
+    let run = b11_board(5, true, false, |_, _| {});
+    assert_eq!(run.prompts, vec![(P0, "gain", 2), (P0, "gain", 2)]);
+    assert_eq!(run.lives_at_prompt, vec![(5, 18), (5, 18)]);
+    assert_eq!(run.gains, vec![3, 4]);
+    assert_eq!(run.p0_life, 12);
+}
+
+/// One player-owned lifelink blocker scenario for B11-5 / B11-6: P0 (active)
+/// attacks with a 2/2 that P1's 2/5 lifelink blocker blocks and, when
+/// `unblocked`, a separate unblocked 3/3 that hits P1 for 3. Returns the
+/// runner, the attackers and the blocker.
+fn owner_damaged_board(
+    p1_life: i32,
+    unblocked: bool,
+    add_replacements: impl FnOnce(&mut GameScenario),
+) -> (GameRunner, Vec<ObjectId>, ObjectId) {
+    let mut scenario = base_scenario();
+    scenario.with_life(P1, p1_life);
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let mut attackers = vec![bear];
+    if unblocked {
+        attackers.push(scenario.add_creature(P0, "Brute", 3, 3).id());
+    }
+    let blocker = add_lifelink_blocker(&mut scenario, P1, "Blocker");
+    add_replacements(&mut scenario);
+    (scenario.build(), attackers, blocker)
+}
+
+/// B11-5 - CR 101.4c + CR 616.1: P1's lifelink blocker (Leyline + Boon) gains
+/// 2 while P0's unblocked 3/3 hits P1. P1 owns both the gain and the damaged
+/// player's results, so the gain is staged before that leg applies: at P1's
+/// gain prompt P1 still has 20. Boon first: 2 -> 4 -> 5; 20 - 3 + 5 = 22.
+#[test]
+fn b11_5_owner_damaged_gain_is_asked_before_its_own_leg() {
+    let mut boon = None;
+    let (mut runner, attackers, blocker) = owner_damaged_board(20, true, |scenario| {
+        boon = Some(add_leyline_and_boon(scenario, P1).1);
+    });
+    let boon = boon.expect("Boon Reflection");
+    let mut life_at_prompt = Vec::new();
+    drive_combat(
+        &mut runner,
+        &attackers,
+        &[(blocker, attackers[0])],
+        |runner, _| {
+            assert_eq!(choice_kind(runner), (P1, "gain"), "reach-guard: P1's gain");
+            life_at_prompt.push(runner.state().players[1].life);
+            candidate_from(runner, boon)
+        },
+    );
+    assert_eq!(
+        life_at_prompt,
+        vec![20],
+        "the gain is asked on the pre-batch board"
+    );
+    assert_eq!(runner.state().players[1].life, 22);
+}
+
+/// B11-6 - CR 616.1f + CR 702.15b: a gain that cannot prompt is still staged
+/// before its owner's own leg. P1 at 7 life with Phial of Galadriel; its 2/5
+/// lifelink blocker deals 2 while P0's unblocked 3/3 hits P1 for 3. Phial
+/// reads the pre-batch 7 life: inapplicable, so P1 ends at 7 - 3 + 2 = 6
+/// (legs first would read 4 and double the gain: 8). Control: no unblocked
+/// attacker and P1 at 5: the gain is doubled, 5 + 4 = 9.
+#[test]
+fn b11_6_owner_damaged_non_choice_gain_reads_the_pre_batch_board() {
+    let db = shared_card_db().expect("integration card fixture must be available");
+    let mut phial = None;
+    let (mut runner, attackers, blocker) = owner_damaged_board(7, true, |scenario| {
+        phial = Some(scenario.add_real_card(P1, "Phial of Galadriel", Zone::Battlefield, db));
+    });
+    assert_phial_gain_threshold(runner.state(), phial.expect("Phial"));
+    let drive = drive_combat(
+        &mut runner,
+        &attackers,
+        &[(blocker, attackers[0])],
+        |_, _| panic!("no choice opens"),
+    );
+    assert_eq!(drive.prompts, 0);
+    assert_eq!(gains_of(&drive.events, P1), vec![2]);
+    assert_eq!(runner.state().players[1].life, 6);
+
+    let (mut control, attackers, blocker) = owner_damaged_board(5, false, |scenario| {
+        scenario.add_real_card(P1, "Phial of Galadriel", Zone::Battlefield, db);
+    });
+    let drive = drive_combat(
+        &mut control,
+        &attackers,
+        &[(blocker, attackers[0])],
+        |_, _| panic!("no choice opens"),
+    );
+    assert_eq!(
+        gains_of(&drive.events, P1),
+        vec![4],
+        "control: Phial is live"
+    );
+    assert_eq!(control.state().players[1].life, 9);
+}
+
+/// Drives a combat in which `leaver` concedes at the prompt `concede_at`
+/// (1-based): every other `ReplacementChoice` is answered by `answer`,
+/// blockers are declared from `blocks` by their own controller, and the
+/// departure's own windows are pumped until the batch drains. Returns every
+/// event and the record seen just before the concession.
+fn drive_with_concession(
+    runner: &mut GameRunner,
+    attacks: &[(ObjectId, AttackTarget)],
+    blocks: &[(ObjectId, ObjectId)],
+    leaver: PlayerId,
+    concede_at: usize,
+    mut answer: impl FnMut(&GameRunner) -> usize,
+) -> (
+    Vec<GameEvent>,
+    Box<engine::types::game_state::PendingCombatLifelink>,
+) {
+    runner.advance_to_combat();
+    let mut events = runner
+        .declare_attackers(attacks)
+        .expect("attack declaration must succeed")
+        .events;
+    let mut prompts = 0;
+    let mut before = None;
+    for _ in 0..120 {
+        if runner.state().pending_combat_lifelink.is_none()
+            && before.is_some()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        let result = match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
+            WaitingFor::OrderTriggers { triggers, .. } => runner.act(GameAction::OrderTriggers {
+                order: (0..triggers.len()).collect(),
+            }),
+            WaitingFor::DeclareBlockers { player, .. } => {
+                let own: Vec<_> = blocks
+                    .iter()
+                    .copied()
+                    .filter(|(blocker, _)| runner.state().objects[blocker].controller == player)
+                    .collect();
+                runner.declare_blockers(&own)
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                prompts += 1;
+                if prompts == concede_at {
+                    before = runner.state().pending_combat_lifelink.clone();
+                    runner.act(GameAction::Concede { player_id: leaver })
+                } else {
+                    let index = answer(runner);
+                    runner.act(GameAction::ChooseReplacement { index })
+                }
+            }
+            other => panic!("unexpected window: {other:?}"),
+        }
+        .expect("the action must be accepted");
+        events.extend(result.events);
+    }
+    assert!(
+        runner.state().pending_combat_lifelink.is_none(),
+        "CR 800.4: the batch drains after the departure"
+    );
+    (
+        events,
+        before.expect("reach-guard: the concession happened"),
+    )
+}
+
+/// B11-8a - a departed seat's gain staged on the RECORD (the tail path). P0's
+/// 3/6 lifelinker and 1/6 attacker are blocked by P1's two 2/5 lifelinkers;
+/// P1 holds Leyline + Boon. P1 answers its first gain (staged on the record:
+/// Boon first 2 -> 4 -> 5) and concedes at its second gain's prompt. A
+/// leaving player gains no life: the staged gain is swept with the seat, so
+/// P1 gets no `LifeChanged` and stays at 20; P0's gain (3) still lands.
+#[test]
+fn b11_8a_departed_seat_forfeits_a_gain_staged_on_the_record() {
+    let mut scenario = three_player_scenario();
+    let lifelinker = scenario
+        .add_creature(P0, "Attacking Lifelinker", 3, 6)
+        .lifelink()
+        .id();
+    let plain = scenario.add_creature(P0, "Plain Attacker", 1, 6).id();
+    let first = add_lifelink_blocker(&mut scenario, P1, "First Blocker");
+    let second = add_lifelink_blocker(&mut scenario, P1, "Second Blocker");
+    let (_, boon) = add_leyline_and_boon(&mut scenario, P1);
+    let mut runner = scenario.build();
+    let (events, before) = drive_with_concession(
+        &mut runner,
+        &[
+            (lifelinker, AttackTarget::Player(P1)),
+            (plain, AttackTarget::Player(P1)),
+        ],
+        &[(first, lifelinker), (second, plain)],
+        P1,
+        2,
+        |runner| {
+            assert_eq!(choice_kind(runner), (P1, "gain"), "reach-guard: P1's gain");
+            candidate_from(runner, boon)
+        },
+    );
+    assert!(
+        before.phase_c_remnant.is_none(),
+        "reach-guard: the tail path"
+    );
+    assert_eq!(
+        before
+            .staged_gains
+            .iter()
+            .filter(|gain| gain.controller == P1)
+            .map(|gain| gain.amount)
+            .collect::<Vec<_>>(),
+        vec![5],
+        "reach-guard: P1's answered gain is staged on the record"
+    );
+    assert!(
+        gains_of(&events, P1).is_empty(),
+        "no life gain for the departed seat"
+    );
+    assert_eq!(runner.state().players[1].life, 20);
+    assert_eq!(
+        runner.state().players[0].life,
+        23,
+        "the survivor's gain lands"
+    );
+}
+
+/// B11-8b - a departed seat's gain staged on the Phase C REMNANT. P0 active;
+/// Ruric (infect 3) attacks P2 under P0's and P2's Vorinclex (P2 chooses its
+/// poison), a Bear attacks P1 and is blocked by P1's 2/5 lifelinker (P1 holds
+/// Leyline + Boon), and a P0 Hawk hits P2. P1's gain is staged ahead of P2's
+/// leg (APNAP) and sits on the remnant while P2's poison prompt is open; P1
+/// concedes there. P1 gains nothing and stays at 20; the batch completes
+/// (P2 poison 3 with the doubler first) and P0's Hawk gain (1) lands.
+#[test]
+fn b11_8b_departed_seat_forfeits_a_gain_staged_on_the_remnant() {
+    let db = shared_card_db().expect("integration card fixture must be available");
+    let mut scenario = three_player_scenario();
+    let p2 = PlayerId(2);
+    let ruric = add_ruric_with(&mut scenario, P0, 3, &[Keyword::Infect]);
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let hawk = scenario.add_real_card(P0, "Healer's Hawk", Zone::Battlefield, db);
+    let blocker = add_lifelink_blocker(&mut scenario, P1, "L1");
+    let (_, boon) = add_leyline_and_boon(&mut scenario, P1);
+    let doubler = scenario.add_real_card(P0, VORINCLEX, Zone::Battlefield, db);
+    scenario.add_real_card(p2, VORINCLEX, Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    let (events, before) = drive_with_concession(
+        &mut runner,
+        &[
+            (ruric, AttackTarget::Player(p2)),
+            (bear, AttackTarget::Player(P1)),
+            (hawk, AttackTarget::Player(p2)),
+        ],
+        &[(blocker, bear)],
+        P1,
+        2,
+        |runner| match choice_kind(runner) {
+            (chooser, "gain") if chooser == P1 => candidate_from(runner, boon),
+            (chooser, "poison") if chooser == p2 => candidate_from(runner, doubler),
+            other => panic!("unexpected choice {other:?}"),
+        },
+    );
+    let remnant = before
+        .phase_c_remnant
+        .as_ref()
+        .expect("reach-guard: P2's poison prompt parks a remnant");
+    assert_eq!(
+        remnant
+            .staged_gains
+            .iter()
+            .map(|gain| (gain.controller, gain.amount))
+            .collect::<Vec<_>>(),
+        vec![(P1, 5)],
+        "reach-guard: P1's answered gain is staged on the remnant"
+    );
+    assert!(!before.awaiting_staged_gain, "the open prompt is a leg's");
+    assert!(
+        gains_of(&events, P1).is_empty(),
+        "no life gain for the departed seat"
+    );
+    assert_eq!(runner.state().players[1].life, 20);
+    assert_eq!(runner.state().players[2].poison_counters, 3);
+    assert_eq!(gains_of(&events, P0), vec![1], "the survivor's gain lands");
+}
+
+/// B11-9 - CR 119.7: one controller under "can't gain life". P0's Hawk hits
+/// P1 unblocked while P0's Bear is blocked by P1's 2/5 lifelinker; P0 holds
+/// "Your opponents can't gain life." P1's gain never reaches the pipeline
+/// (nothing staged for it, P1 stays at 20 - 1 = 19) and P0's Hawk gain (1)
+/// still lands.
+#[test]
+fn b11_9_cant_gain_life_gain_is_skipped_and_the_other_gain_lands() {
+    let db = shared_card_db().expect("integration card fixture must be available");
+    let mut scenario = base_scenario();
+    let hawk = scenario.add_real_card(P0, "Healer's Hawk", Zone::Battlefield, db);
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let blocker = add_lifelink_blocker(&mut scenario, P1, "Blocker");
+    scenario.add_enchantment_from_oracle(P0, "Life Lock", "Your opponents can't gain life.");
+    let mut runner = scenario.build();
+    let drive = drive_combat(&mut runner, &[hawk, bear], &[(blocker, bear)], |_, _| {
+        panic!("no choice opens")
+    });
+    assert_eq!(gains_of(&drive.events, P0), vec![1], "P0's gain lands");
+    assert!(
+        gains_of(&drive.events, P1).is_empty(),
+        "CR 119.7: P1 gains nothing"
+    );
+    assert_eq!(runner.state().players[0].life, 21);
+    assert_eq!(runner.state().players[1].life, 19);
+}
+
+// ---------------------------------------------------------------------------
+// B12: an activated ability's damage is dealt by the incarnation it was
+// activated from (CR 113.7a, CR 400.7, CR 608.2h, CR 702.15c).
+// ---------------------------------------------------------------------------
+
+/// The B12 board: what `longbow_guardian` built.
+type LongbowBoard = (
+    GameRunner,
+    ObjectId,
+    ObjectId,
+    ObjectId,
+    Option<ObjectId>,
+    Option<ObjectId>,
+);
+
+/// A Karakyk Guardian equipped with a printed Viridian Longbow, Cloudshift
+/// and a Plains for P0, and a probing bolt for P1. With `red_ordering`, the
+/// Guardian is red and also wears Loxodon Warhammer (lifelink), and Furnace of
+/// Rath and Torbran make its damage to P1 an ordering choice. Returns
+/// `(runner, guardian, cloudshift, opp_bolt, torbran, warhammer)`.
+fn longbow_guardian(red_ordering: bool) -> LongbowBoard {
+    let db = shared_card_db().expect("integration card fixture must be available");
+    let mut scenario = base_scenario();
+    let guardian = {
+        let mut builder = scenario.add_creature(P0, "Karakyk Guardian", 6, 6);
+        builder.from_oracle_text_with_keywords(
+            &["Flying", "Vigilance", "Trample"],
+            KARAKYK_ORACLE_TEXT,
+        );
+        if red_ordering {
+            builder.with_color(vec![ManaColor::Red]);
+        }
+        builder.id()
+    };
+    let longbow = scenario.add_real_card(P0, "Viridian Longbow", Zone::Battlefield, db);
+    let cloudshift = scenario.add_real_card(P0, "Cloudshift", Zone::Hand, db);
+    scenario.add_basic_land(P0, ManaColor::White);
+    let hammer = red_ordering.then(|| {
+        scenario
+            .add_artifact_from_oracle(P0, "Loxodon Warhammer", WARHAMMER_ORACLE_TEXT)
+            .with_subtypes(vec!["Equipment"])
+            .id()
+    });
+    let torbran = red_ordering.then(|| {
+        scenario.add_real_card(P0, "Furnace of Rath", Zone::Battlefield, db);
+        scenario
+            .add_creature(P0, "Torbran, Thane of Red Fell", 2, 4)
+            .from_oracle_text(TORBRAN_ORACLE_TEXT)
+            .id()
+    });
+    let opp_bolt = scenario.add_bolt_to_hand(P1);
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), longbow, guardian);
+    if let Some(hammer) = hammer {
+        attach_to(runner.state_mut(), hammer, guardian);
+    }
+    flush_layers(runner.state_mut());
+    assert_eq!(
+        runner.state().objects[&longbow].attached_to,
+        Some(AttachTarget::Object(guardian)),
+        "reach-guard: the Longbow equips the Guardian"
+    );
+    assert!(hexproof_now(runner.state(), guardian), "premise: hexproof");
+    (runner, guardian, cloudshift, opp_bolt, torbran, hammer)
+}
+
+/// Activates the Longbow-granted "{T}: This creature deals 1 damage to any
+/// target." on the Guardian at P1, leaving it on the stack.
+fn activate_longbow_ping(runner: &mut GameRunner, guardian: ObjectId) -> Vec<GameEvent> {
+    let index = runner.state().objects[&guardian]
+        .abilities
+        .iter()
+        .position(|ability| {
+            matches!(
+                *ability.effect,
+                engine::types::ability::Effect::DealDamage { .. }
+            )
+        })
+        .expect("reach-guard: the Longbow grants the Guardian its ping");
+    let mut events = runner
+        .act(GameAction::ActivateAbility {
+            source_id: guardian,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate the granted ping")
+        .events;
+    if let WaitingFor::TargetSelection { .. } = runner.state().waiting_for {
+        events.extend(
+            runner
+                .act(GameAction::SelectTargets {
+                    targets: vec![TargetRef::Player(P1)],
+                })
+                .expect("target P1")
+                .events,
+        );
+    }
+    assert_eq!(runner.state().stack.len(), 1, "reach-guard: the ping waits");
+    events
+}
+
+/// The Guardian's damage records as `(incarnation, amount)`.
+fn guardian_records(state: &GameState, guardian: ObjectId) -> Vec<(Option<u64>, u32)> {
+    state
+        .damage_dealt_this_turn
+        .iter()
+        .filter(|record| record.source_id == guardian)
+        .map(|record| (record.source_incarnation, record.amount))
+        .collect()
+}
+
+/// B12-1 - CR 113.7a + CR 400.7 + CR 608.2h: the Guardian activates the
+/// Longbow-granted ping; Cloudshift blinks it in response. The ability still
+/// deals 1 to P1, from the incarnation it was activated from (its last known
+/// information); the returned Guardian is a new object that dealt nothing, so
+/// it keeps hexproof. Control (no blink): both stores written, hexproof gone.
+#[test]
+fn b12_1_blinked_activated_source_deals_from_its_old_incarnation() {
+    for blink in [true, false] {
+        let (mut runner, guardian, cloudshift, opp_bolt, _, _) = longbow_guardian(false);
+        let old = runner.state().objects[&guardian].incarnation;
+        let mut events = activate_longbow_ping(&mut runner, guardian);
+        if blink {
+            events.extend(
+                runner
+                    .cast(cloudshift)
+                    .target_object(guardian)
+                    .resolve()
+                    .events()
+                    .to_vec(),
+            );
+            assert_ne!(
+                runner.state().objects[&guardian].incarnation,
+                old,
+                "reach-guard: CR 400.7 new object"
+            );
+        }
+        for _ in 0..6 {
+            if runner.state().stack.is_empty() {
+                break;
+            }
+            events.extend(runner.act(GameAction::PassPriority).expect("pass").events);
+        }
+        assert!(runner.state().stack.is_empty());
+        if blink {
+            // Reach-guard: the blink resolved BEFORE the ping dealt its damage.
+            let exiled_at = events.iter().position(|event| {
+                matches!(event, GameEvent::ZoneChanged { object_id, to: Zone::Exile, .. }
+                    if *object_id == guardian)
+            });
+            let dealt_at = events.iter().position(|event| {
+                matches!(event, GameEvent::DamageDealt { source_id, .. } if *source_id == guardian)
+            });
+            assert!(
+                exiled_at.is_some() && exiled_at < dealt_at,
+                "reach-guard: Cloudshift resolved before the ping ({exiled_at:?} < {dealt_at:?})"
+            );
+        }
+        let state = runner.state();
+        assert_eq!(state.players[1].life, 19, "blink={blink}: the ping dealt 1");
+        assert_eq!(
+            guardian_records(state, guardian),
+            vec![(Some(old), 1)],
+            "blink={blink}: the occurrence carries the activating incarnation"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt { source_id, source_incarnation, .. }
+                if *source_id == guardian && *source_incarnation == Some(old)
+        )));
+        let stale = blink;
+        assert_eq!(state.objects_that_dealt_damage.contains(&guardian), !stale);
+        assert_eq!(
+            state.objects[&guardian].dealt_damage_kinds.is_empty(),
+            stale
+        );
+        assert_eq!(hexproof_now(state, guardian), stale);
+        let legal = bolt_legal_targets(&mut runner, P1, opp_bolt);
+        assert_eq!(
+            can_target(&legal, guardian, P0),
+            !stale,
+            "blink={blink}: an opponent can target only the damage-dealt incarnation"
+        );
+    }
+}
+
+/// B12-2 - CR 400.7 + CR 616.1 + CR 702.15c: the B12-1 board with a red
+/// Guardian also wearing Loxodon Warhammer (lifelink), Furnace of Rath and
+/// Torbran, so the ping meets P1's replacement ORDER prompt. The answer
+/// resumes the damage from the parked incarnation's context: after the blink
+/// that is its last known information, which has lifelink (the returned
+/// Guardian, a new object, wears nothing). Torbran first: (1 + 2) * 2 = 6
+/// (P1 20 -> 14, P0 gains 6). With the blink the occurrence keeps the old
+/// incarnation and the returned Guardian keeps hexproof; control (no blink):
+/// the same totals, both stores written and hexproof gone.
+#[test]
+fn b12_2_blinked_activated_source_survives_a_damage_ordering_prompt() {
+    for blink in [true, false] {
+        let (mut runner, guardian, cloudshift, opp_bolt, torbran, hammer) = longbow_guardian(true);
+        let torbran = torbran.expect("Torbran");
+        let hammer = hammer.expect("Loxodon Warhammer");
+        assert!(
+            runner.state().objects[&guardian]
+                .keywords
+                .contains(&Keyword::Lifelink),
+            "reach-guard: the Warhammer grants lifelink ({hammer:?})"
+        );
+        let old = runner.state().objects[&guardian].incarnation;
+        let mut events = activate_longbow_ping(&mut runner, guardian);
+        if blink {
+            events.extend(
+                runner
+                    .cast(cloudshift)
+                    .target_object(guardian)
+                    .resolve()
+                    .events()
+                    .to_vec(),
+            );
+            assert_ne!(runner.state().objects[&guardian].incarnation, old);
+        }
+        for _ in 0..4 {
+            if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                || runner.state().stack.is_empty()
+            {
+                break;
+            }
+            events.extend(runner.act(GameAction::PassPriority).expect("pass").events);
+        }
+        assert_eq!(
+            choice_kind(&runner),
+            (P1, "damage"),
+            "blink={blink}: reach-guard: the damage ordering prompt"
+        );
+        assert_eq!(
+            runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .unwrap()
+                .source_incarnation,
+            Some(old),
+            "blink={blink}: the park captured the activating incarnation"
+        );
+        let (prompts, _) = drive_waits(&mut runner, &mut events, |runner| {
+            candidate_from(runner, torbran)
+        });
+        assert_eq!(prompts, vec![(P1, "damage", false)]);
+        let state = runner.state();
+        assert_eq!(state.players[1].life, 14, "Torbran first: (1 + 2) * 2");
+        assert_eq!(
+            gains_of(&events, P0),
+            vec![6],
+            "blink={blink}: CR 702.15c: the dealing incarnation's lifelink"
+        );
+        assert_eq!(guardian_records(state, guardian), vec![(Some(old), 6)]);
+        let stale = blink;
+        assert_eq!(state.objects_that_dealt_damage.contains(&guardian), !stale);
+        assert_eq!(
+            state.objects[&guardian].dealt_damage_kinds.is_empty(),
+            stale
+        );
+        assert_eq!(hexproof_now(state, guardian), stale);
+        let legal = bolt_legal_targets(&mut runner, P1, opp_bolt);
+        assert_eq!(can_target(&legal, guardian, P0), !stale, "blink={blink}");
+    }
+}
+
+/// Verbatim current Oracle text of Mogg Fanatic.
+const MOGG_FANATIC_ORACLE_TEXT: &str = "Sacrifice this creature: It deals 1 damage to any target.";
+
+/// B12-5 - CR 113.7a + CR 608.2h + CR 702.15c: a source moved by its OWN cost.
+/// Mogg Fanatic equipped with Loxodon Warhammer (granted lifelink) sacrifices
+/// itself: the ability deals 1 to P1 from the sacrificed incarnation, whose
+/// last known information has lifelink, so P0 gains 1 (the card in the
+/// graveyard is a new object without the Warhammer's grant).
+#[test]
+fn b12_5_self_sacrificed_source_deals_with_its_last_known_lifelink() {
+    let mut scenario = base_scenario();
+    let fanatic = scenario
+        .add_creature(P0, "Mogg Fanatic", 1, 1)
+        .from_oracle_text(MOGG_FANATIC_ORACLE_TEXT)
+        .id();
+    let hammer = scenario
+        .add_artifact_from_oracle(P0, "Loxodon Warhammer", WARHAMMER_ORACLE_TEXT)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), hammer, fanatic);
+    flush_layers(runner.state_mut());
+    assert!(
+        runner.state().objects[&fanatic]
+            .keywords
+            .contains(&Keyword::Lifelink),
+        "reach-guard: the Warhammer grants lifelink"
+    );
+    let old = runner.state().objects[&fanatic].incarnation;
+    let outcome = runner.activate(fanatic, 0).target_player(P1).resolve();
+    let events = outcome.events().to_vec();
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&fanatic].zone,
+        Zone::Graveyard,
+        "reach-guard: sacrificed"
+    );
+    assert_eq!(state.players[1].life, 19, "the ability still deals 1");
+    assert_eq!(
+        state.players[0].life, 21,
+        "CR 702.15c: LKI lifelink gains 1"
+    );
+    assert_eq!(gains_of(&events, P0), vec![1]);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        GameEvent::DamageDealt { source_id, source_incarnation, .. }
+            if *source_id == fanatic && *source_incarnation == Some(old)
+    )));
+}
+
+/// Verbatim Oracle text of Ghost-Lit Raider.
+const GHOST_LIT_RAIDER_ORACLE_TEXT: &str = "{2}{R}, {T}: This creature deals 2 damage to target creature.\nChannel — {3}{R}, Discard this card: It deals 4 damage to target creature.";
+
+/// B12-6 - CR 113.7a + CR 608.2h: a source moved by its own cost into a
+/// hidden-to-public move that records no exit LKI (Channel: discarded from
+/// hand). The activation's source incarnation has no surviving record, so the
+/// context fails closed: the damage is still dealt, from the announced
+/// incarnation, by the activator (no keyword riders).
+#[test]
+fn b12_6_channel_discarded_source_still_deals_its_damage() {
+    let mut scenario = base_scenario();
+    let raider = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Ghost-Lit Raider",
+            2,
+            1,
+            GHOST_LIT_RAIDER_ORACLE_TEXT,
+        )
+        .id();
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    let wall = scenario.add_vanilla(P1, 0, 8);
+    let mut runner = scenario.build();
+    let announced = runner.state().objects[&raider].incarnation;
+    let channel = runner.state().objects[&raider]
+        .abilities
+        .iter()
+        .position(|ability| {
+            matches!(
+                *ability.effect,
+                engine::types::ability::Effect::DealDamage { .. }
+            ) && ability.activation_zone == Some(Zone::Hand)
+        })
+        .expect("reach-guard: the Channel ability parsed");
+    let outcome = runner
+        .activate(raider, channel)
+        .target_object(wall)
+        .resolve();
+    let events = outcome.events().to_vec();
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&raider].zone,
+        Zone::Graveyard,
+        "reach-guard: discarded"
+    );
+    assert_eq!(
+        state.objects[&wall].damage_marked, 4,
+        "the Channel ability deals 4"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        GameEvent::DamageDealt { source_id, amount: 4, source_incarnation, .. }
+            if *source_id == raider && *source_incarnation == Some(announced)
+    )));
 }

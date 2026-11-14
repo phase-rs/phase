@@ -19,7 +19,9 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{DamageRecord, DistributionScope, GameState, TriggerSourceRead};
+use crate::types::game_state::{
+    DamageRecord, DistributionScope, GameState, LKISnapshot, TriggerSourceRead,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::player::{PlayerCounterKind, PlayerId};
@@ -1776,10 +1778,26 @@ fn remaining_damage_chain(
     damage_source_id: ObjectId,
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
 ) -> Option<ResolvedAbility> {
+    // CR 113.7a + CR 400.7: a node dealing the ability's OWN source damage keeps
+    // the activation's source stamps, so the resumed share is dealt by the same
+    // incarnation. A node whose source is a target creature (or anything other
+    // than the ability's own source) must not inherit them.
+    let own_source = damage_source_id == ability.source_id
+        && match &ability.effect {
+            Effect::DealDamage { damage_source, .. } | Effect::DamageAll { damage_source, .. } => {
+                damage_source.is_none()
+            }
+            Effect::DamageEachPlayer { .. } => true,
+            _ => false,
+        };
     let node = |target, amount| {
         let mut node =
             build_remaining_damage_node(damage_source_id, ability.controller, target, amount);
         node.trigger_source = ability.trigger_source.clone();
+        if own_source {
+            node.source_incarnation = ability.source_incarnation;
+            node.announced_source_incarnation = ability.announced_source_incarnation;
+        }
         node
     };
     let mut iter = remaining.into_iter();
@@ -2249,8 +2267,9 @@ pub fn resolve_post_replacement(
 ///   so a non-token Clone in the graveyard or a token that ceased to exist retains its
 ///   battlefield last-known name.
 ///
-/// When absent (e.g. non-triggered abilities), falls back to `DamageContext::from_source` /
-/// `DamageContext::fallback`.
+/// When absent (e.g. activated abilities), the ability's own source is read through
+/// its activation stamp (`damage_context_for_stamp`): the live object only while it
+/// is still the announced incarnation, else that incarnation's exit LKI.
 fn damage_context_from_ability(state: &GameState, ability: &ResolvedAbility) -> DamageContext {
     let source_read = ability
         .trigger_source
@@ -2274,35 +2293,98 @@ fn damage_context_from_ability(state: &GameState, ability: &ResolvedAbility) -> 
                 latched.identity.reference.incarnation,
             )
             .unwrap_or(&latched.lki);
-            // allow-raw-authority: reading characteristic snapshot from departed-source LKI
-            let has_keyword = |kind: KeywordKind| lki.keywords.iter().any(|k| k.kind() == kind);
-            let mut ctx = DamageContext::fallback(ability.source_id, lki.controller);
-            ctx.source_incarnation = Some(latched.identity.reference.incarnation);
-            ctx.source_name = Some(lki.name.clone());
-            ctx.source_is_creature = lki.card_types.contains(&CoreType::Creature);
-            ctx.has_deathtouch = has_keyword(KeywordKind::Deathtouch);
-            ctx.has_lifelink = has_keyword(KeywordKind::Lifelink);
-            ctx.has_wither = has_keyword(KeywordKind::Wither);
-            ctx.has_infect = has_keyword(KeywordKind::Infect);
-            ctx.combat_damage_poison = lki
-                .keywords
-                .iter()
-                .map(|k| match k {
-                    Keyword::Toxic(n) => *n,
-                    _ => 0,
-                })
-                .sum();
-            ctx
+            damage_context_from_lki(
+                ability.source_id,
+                latched.identity.reference.incarnation,
+                lki,
+            )
         }
         None => {
-            let mut ctx = DamageContext::from_source(state, ability.source_id)
-                .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller));
+            // CR 113.7a + CR 400.7: an activated ability exists independently of
+            // its source; the announced incarnation (else the stack-placement
+            // one) is the object that deals the damage.
+            let mut ctx = damage_context_for_stamp(
+                state,
+                ability.source_id,
+                ability.controller,
+                ability
+                    .announced_source_incarnation
+                    .or(ability.source_incarnation),
+            );
             if ctx.source_name.is_none() {
                 ctx.source_name = state
                     .objects
                     .get(&ability.source_id)
                     .map(|o| o.name.clone());
             }
+            ctx
+        }
+    }
+}
+
+/// CR 608.2h + CR 702.15c: the damage context of a departed source incarnation,
+/// read from its last known information: controller, name, creature-ness, and
+/// the keywords that change how its damage is dealt (deathtouch, lifelink,
+/// wither, infect, toxic).
+fn damage_context_from_lki(
+    source_id: ObjectId,
+    incarnation: u64,
+    lki: &LKISnapshot,
+) -> DamageContext {
+    // allow-raw-authority: reading characteristic snapshot from departed-source LKI
+    let has_keyword = |kind: KeywordKind| lki.keywords.iter().any(|k| k.kind() == kind);
+    let mut ctx = DamageContext::fallback(source_id, lki.controller);
+    ctx.source_incarnation = Some(incarnation);
+    ctx.source_name = Some(lki.name.clone());
+    ctx.source_is_creature = lki.card_types.contains(&CoreType::Creature);
+    ctx.has_deathtouch = has_keyword(KeywordKind::Deathtouch);
+    ctx.has_lifelink = has_keyword(KeywordKind::Lifelink);
+    ctx.has_wither = has_keyword(KeywordKind::Wither);
+    ctx.has_infect = has_keyword(KeywordKind::Infect);
+    ctx.combat_damage_poison = lki
+        .keywords
+        .iter()
+        .map(|k| match k {
+            Keyword::Toxic(n) => *n,
+            _ => 0,
+        })
+        .sum();
+    ctx
+}
+
+/// CR 400.7 + CR 608.2h + CR 113.7a + CR 702.15c: the damage context of the
+/// source incarnation `stamp` names (the activation's announced incarnation,
+/// or one captured when a damage event parked).
+/// - No stamp: the live object (`from_source`), else `fallback` with
+///   `fallback_controller` — unstamped spells and nodes read as before.
+/// - The live object is still that incarnation: the live object.
+/// - Otherwise the source left its zone since (a new object, CR 400.7): the
+///   stamped incarnation's exit last known information.
+/// - No exact record survives (a hidden-zone departure, a ceased token): fail
+///   closed — the damage is still dealt from that exact incarnation, by
+///   `fallback_controller`, with no keyword riders; a later object at the same
+///   id never answers in its place.
+pub(crate) fn damage_context_for_stamp(
+    state: &GameState,
+    source_id: ObjectId,
+    fallback_controller: PlayerId,
+    stamp: Option<u64>,
+) -> DamageContext {
+    let live = state.objects.get(&source_id);
+    let Some(incarnation) = stamp else {
+        return DamageContext::from_source(state, source_id)
+            .unwrap_or_else(|| DamageContext::fallback(source_id, fallback_controller));
+    };
+    if live.is_some_and(|obj| obj.incarnation == incarnation) {
+        if let Some(ctx) = DamageContext::from_source(state, source_id) {
+            return ctx;
+        }
+    }
+    match filter::exit_lki_for_incarnation(state, source_id, incarnation) {
+        Some(lki) => damage_context_from_lki(source_id, incarnation, lki),
+        None => {
+            let mut ctx = DamageContext::fallback(source_id, fallback_controller);
+            ctx.source_incarnation = Some(incarnation);
             ctx
         }
     }
@@ -10822,5 +10904,174 @@ mod attacked_referent_recipient_tests {
             node = n.sub_ability.as_deref();
         }
         assert_eq!(count, 3, "positive guard: every recipient node was visited");
+    }
+
+    /// A P0 creature with deathtouch and lifelink on the battlefield.
+    fn keyworded_creature(state: &mut GameState, card: u64) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            PlayerId(0),
+            "Pinger".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.keywords.push(Keyword::Deathtouch);
+        obj.keywords.push(Keyword::Lifelink);
+        id
+    }
+
+    /// Blink `id` (battlefield -> exile -> battlefield): CR 400.7 new object,
+    /// the old incarnation's exit LKI recorded. Returns the old incarnation.
+    fn blink(state: &mut GameState, id: ObjectId) -> u64 {
+        let old = state.objects[&id].incarnation;
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(state, id, Zone::Exile, &mut events);
+        crate::game::zones::move_to_zone(state, id, Zone::Battlefield, &mut events);
+        assert_ne!(
+            state.objects[&id].incarnation, old,
+            "reach-guard: new object"
+        );
+        old
+    }
+
+    /// CR 400.7 + CR 608.2h + CR 702.15c: `damage_context_for_stamp`. (a) no
+    /// stamp: the live object. (b) the stamp names the live incarnation: the
+    /// live object. (c) the source was blinked since the stamp, and the new
+    /// object lost its keywords: the stamped incarnation's exit LKI (old
+    /// incarnation, LKI keywords, LKI controller) — never the new object.
+    /// (d) no exact record survives: fail closed — the stamped incarnation,
+    /// the fallback controller, no keyword riders.
+    #[test]
+    fn damage_context_for_stamp_reads_the_stamped_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let id = keyworded_creature(&mut state, 7);
+        let live = state.objects[&id].incarnation;
+
+        // (a) + (b)
+        for stamp in [None, Some(live)] {
+            let ctx = damage_context_for_stamp(&state, id, PlayerId(1), stamp);
+            assert_eq!(ctx.source_incarnation, Some(live), "stamp={stamp:?}");
+            assert!(ctx.has_lifelink && ctx.has_deathtouch, "stamp={stamp:?}");
+        }
+
+        // (c)
+        let old = blink(&mut state, id);
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.keywords.clear();
+            obj.controller = PlayerId(1);
+        }
+        let ctx = damage_context_for_stamp(&state, id, PlayerId(1), Some(old));
+        assert_eq!(ctx.source_incarnation, Some(old), "(c) the old incarnation");
+        assert!(ctx.has_lifelink && ctx.has_deathtouch, "(c) LKI keywords");
+        assert_eq!(ctx.controller, PlayerId(0), "(c) LKI controller");
+        assert!(ctx.source_is_creature);
+        let live_ctx = damage_context_for_stamp(&state, id, PlayerId(1), None);
+        assert!(
+            !live_ctx.has_lifelink,
+            "(c) control: the new object has none"
+        );
+
+        // (d)
+        state.lki_by_incarnation.clear();
+        let ctx = damage_context_for_stamp(&state, id, PlayerId(0), Some(old));
+        assert_eq!(ctx.source_incarnation, Some(old), "(d) exact identity kept");
+        assert_eq!(ctx.controller, PlayerId(0), "(d) the fallback controller");
+        assert!(!ctx.has_lifelink && !ctx.has_deathtouch, "(d) fail closed");
+    }
+
+    /// CR 113.7a + CR 400.7: the remaining-recipient continuation nodes of an
+    /// activated own-source damage ability carry its source stamps, so the
+    /// resumed shares are dealt by the stamped incarnation (LKI after a
+    /// blink). A node whose damage source is a TARGET creature
+    /// (`DamageSource::Target`) keeps them unset and the resumed share reads
+    /// the live target (its deathtouch kept). `DamageAll` (own source) and
+    /// `DamageEachPlayer` carry them; `DamageAll` with a target source does not.
+    #[test]
+    fn remaining_damage_chain_nodes_carry_only_own_source_stamps() {
+        let mut state = GameState::new_two_player(42);
+        let source = keyworded_creature(&mut state, 8);
+        let target_creature = keyworded_creature(&mut state, 9);
+        let old = blink(&mut state, source);
+        state.objects.get_mut(&source).unwrap().keywords.clear();
+        let recipients = [
+            (TargetRef::Player(PlayerId(1)), 1),
+            (TargetRef::Player(PlayerId(1)), 2),
+        ];
+        let stamped = |effect: Effect, source_id: ObjectId| {
+            let mut ability = ResolvedAbility::new(effect, vec![], source_id, PlayerId(0));
+            ability.source_incarnation = Some(old);
+            ability.announced_source_incarnation = Some(old);
+            ability
+        };
+        let nodes = |head: ResolvedAbility| {
+            let mut out = Vec::new();
+            let mut node = Some(head);
+            while let Some(n) = node {
+                node = n.sub_ability.as_deref().cloned();
+                out.push(n);
+            }
+            out
+        };
+        let deal = |damage_source| Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Any,
+            damage_source,
+            excess: None,
+        };
+        let all = |damage_source| Effect::DamageAll {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Any,
+            player_filter: None,
+            damage_source,
+        };
+
+        // Own source: DealDamage, DamageAll, DamageEachPlayer.
+        for effect in [
+            deal(None),
+            all(None),
+            Effect::DamageEachPlayer {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player_filter: crate::types::ability::PlayerFilter::Opponent,
+            },
+        ] {
+            let ability = stamped(effect.clone(), source);
+            let chain = nodes(
+                remaining_damage_chain(&ability, source, recipients.clone())
+                    .expect("two recipients"),
+            );
+            assert_eq!(chain.len(), 2, "reach-guard: {effect:?}");
+            for node in &chain {
+                assert_eq!(node.source_incarnation, Some(old), "{effect:?}");
+                assert_eq!(node.announced_source_incarnation, Some(old), "{effect:?}");
+                let ctx = damage_context_from_ability(&state, node);
+                assert_eq!(ctx.source_incarnation, Some(old), "{effect:?}");
+                assert!(ctx.has_lifelink, "{effect:?}: the resumed share reads LKI");
+            }
+        }
+
+        // Target source: the node's source is the target creature.
+        for effect in [
+            deal(Some(DamageSource::Target)),
+            all(Some(DamageSource::Target)),
+        ] {
+            let ability = stamped(effect.clone(), source);
+            let chain = nodes(
+                remaining_damage_chain(&ability, target_creature, recipients.clone())
+                    .expect("two recipients"),
+            );
+            assert_eq!(chain.len(), 2, "reach-guard: {effect:?}");
+            for node in &chain {
+                assert_eq!(node.source_incarnation, None, "{effect:?}");
+                assert_eq!(node.announced_source_incarnation, None, "{effect:?}");
+                let ctx = damage_context_from_ability(&state, node);
+                assert!(
+                    ctx.has_deathtouch,
+                    "{effect:?}: the live target's deathtouch"
+                );
+            }
+        }
     }
 }

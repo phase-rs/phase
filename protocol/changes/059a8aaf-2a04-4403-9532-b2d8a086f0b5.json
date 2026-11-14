@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "StaticCondition::SourceHasDealtDamage gains kind (CR 120.2a/b); GameObject gains dealt_damage_kinds. An older peer drops both and evaluates the condition as Any; PendingDamagePostLoss gains toxic_poison (CR 120.3g): an older peer drops it and loses the toxic poison of a parked damage occurrence; PendingReplacement gains source_incarnation (CR 400.7): an older peer drops it."
+  "reason": "StaticCondition::SourceHasDealtDamage gains kind (CR 120.2a/b); GameObject gains dealt_damage_kinds. An older peer drops both and evaluates the condition as Any; PendingDamagePostLoss gains toxic_poison (CR 120.3g): an older peer drops it and loses the toxic poison of a parked damage occurrence; PendingReplacement gains source_incarnation (CR 400.7): an older peer drops it; PendingCombatLifelink and its Phase C remnant gain staged lifelink gains (CR 616.1 + CR 101.4): an older peer drops them and loses the not-yet-settled gain, plus the awaiting-staged-gain marker that routes the resumed gain answer."
 }

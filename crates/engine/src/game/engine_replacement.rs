@@ -26,7 +26,9 @@ use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def_with_targets;
 use super::effects;
-use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext, DamageResult};
+use super::effects::deal_damage::{
+    apply_damage_after_replacement, damage_context_for_stamp, DamageResult,
+};
 use super::effects::destroy::apply_destroy_after_replacement;
 use super::effects::draw::{apply_draw_after_replacement, settle_draw_instruction};
 use super::effects::life::{
@@ -714,31 +716,31 @@ fn handle_replacement_choice_inner(
                     is_combat,
                     ..
                 } => {
-                    let mut ctx =
-                        DamageContext::from_source(state, source_id).unwrap_or_else(|| {
-                            let controller = state
-                                .objects
-                                .get(&source_id)
-                                .map(|obj| obj.controller)
-                                .unwrap_or(state.active_player);
-                            DamageContext::fallback(source_id, controller)
-                        });
+                    // CR 400.7 + CR 608.2h + CR 702.15c: rebuild the context of
+                    // the incarnation captured when the damage parked
+                    // (`park_damage_context`): the live object while it is still
+                    // that incarnation, else that incarnation's exit LKI — never
+                    // a later object at the same id. `None` = not captured (a
+                    // record saved before the field, or a park that never passed
+                    // through the helper): the live read, exactly as before the
+                    // field existed.
+                    let fallback_controller = state
+                        .objects
+                        .get(&source_id)
+                        .map(|obj| obj.controller)
+                        .unwrap_or(state.active_player);
+                    let mut ctx = damage_context_for_stamp(
+                        state,
+                        source_id,
+                        fallback_controller,
+                        parked_source_incarnation,
+                    );
                     // CR 120.4a + CR 702.15b: restore the excess-redirect rider and
                     // the deferred lifelink bonus dropped by the source-derived ctx
                     // rebuild, so the resumed hit still redirects and a resumed redirect
                     // leg still gains the combined lifelink total.
                     ctx.excess_recipient = parked_excess_recipient;
                     ctx.lifelink_bonus = parked_lifelink_bonus;
-                    // CR 400.7: the rebuild read the LIVE object's incarnation; a
-                    // source that left and returned since dealing the damage is a
-                    // new object, so restore the captured one. `Some` = captured
-                    // at park time (`park_damage_context`); `None` = not captured
-                    // (a record saved before the field, or a park that never
-                    // passed through the helper), so keep the rebuilt live value
-                    // exactly as before the field existed.
-                    if let Some(incarnation) = parked_source_incarnation {
-                        ctx.source_incarnation = Some(incarnation);
-                    }
                     if matches!(
                         apply_damage_after_replacement(state, &ctx, damage, is_combat, events),
                         DamageResult::NeedsChoice
@@ -1022,18 +1024,25 @@ fn handle_replacement_choice_inner(
                 // `Reject` fails the answer (the boundary restores the record and
                 // its prompt), `IgnoreImpossible` skips the change and resumes.
                 gain @ ProposedEvent::LifeGain { .. } => {
-                    // A settle that parks a prompt (the Horde loss redirect's
-                    // mill choice; gain itself never pauses) early-returns the
-                    // parked prompt like the Mill arm above, so the
-                    // unconditional `waiting_for = Priority` reset below does
-                    // not clobber it.
-                    match settle_life_gain_after_choice(state, gain, parked_life_policy, events) {
-                        Ok(_) => {}
-                        Err(LifeChangeError::Deferred(_)) => {
-                            return Ok(state.waiting_for.clone());
-                        }
-                        Err(LifeChangeError::Unrepresentable(unrepresentable)) => {
-                            return Err(unrepresentable.into());
+                    // CR 101.4 + CR 616.1: a combat lifelink gain being staged
+                    // is recorded on its parked batch, not settled: it settles
+                    // with the batch's other gains once every choice is made.
+                    // Only an unclaimed event settles here.
+                    if let Some(gain) = super::combat_damage::take_staged_answer(state, gain) {
+                        // A settle that parks a prompt (the Horde loss
+                        // redirect's mill choice; gain itself never pauses)
+                        // early-returns the parked prompt like the Mill arm
+                        // above, so the unconditional `waiting_for = Priority`
+                        // reset below does not clobber it.
+                        match settle_life_gain_after_choice(state, gain, parked_life_policy, events)
+                        {
+                            Ok(_) => {}
+                            Err(LifeChangeError::Deferred(_)) => {
+                                return Ok(state.waiting_for.clone());
+                            }
+                            Err(LifeChangeError::Unrepresentable(unrepresentable)) => {
+                                return Err(unrepresentable.into());
+                            }
                         }
                     }
                 }

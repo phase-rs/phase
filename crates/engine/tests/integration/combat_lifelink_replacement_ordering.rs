@@ -387,14 +387,15 @@ fn parked_board() -> (GameRunner, ObjectId) {
     (runner, lifelinker)
 }
 
-/// B7-11 — CR 510.2 + CR 616.1 + CR 101.4: the early settlement of an
-/// earlier-APNAP player's gain exists only ahead of a LATER player's result
-/// CHOICE. On T1's board P1 has no result replacements, so the leg cannot
-/// prompt and nothing is settled early: at P0's gain prompt the damage is
+/// B7-11 — CR 510.2 + CR 616.1 + CR 101.4: staging an earlier-APNAP
+/// player's gain ahead of a leg exists only ahead of a LATER player's result
+/// CHOICE (or a leg at the gainer itself). On T1's board P1 has no result
+/// replacements, so the leg cannot prompt and nothing is staged early: at
+/// P0's gain prompt the damage is
 /// already dealt (P1 at 17), no Phase C remnant is parked (every leg applied),
 /// and the parked batch keeps the established order — P1's loss, then the
 /// `DamageDealt`, and no gain yet. (Positive pair: the Ruric file's B7-1,
-/// whose infect leg CAN prompt, settles P0's gain first.)
+/// whose infect leg CAN prompt, stages P0's gain first.)
 #[test]
 fn ordinary_lifelink_gain_is_not_settled_ahead_of_a_leg_that_cannot_prompt() {
     let (runner, _) = parked_board();

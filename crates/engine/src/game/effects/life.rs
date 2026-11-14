@@ -437,6 +437,73 @@ pub fn apply_life_gain(
     ))
 }
 
+/// What staging one life gain produced (see [`stage_life_gain`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum StagedLifeGain {
+    /// The final post-replacement `ProposedEvent::LifeGain`, NOT yet applied:
+    /// the caller settles it later through [`apply_life_gain_after_replacement`].
+    Final(ProposedEvent),
+    /// Nothing is left to settle: the gain never reached the pipeline (amount
+    /// 0, or CR 119.7 "can't gain life"), was fully replaced, or settled inline
+    /// for this amount because a substitute continuation had to run with it.
+    Settled(u32),
+}
+
+/// CR 101.4 + CR 616.1: run one life gain's replacement pipeline WITHOUT
+/// writing the board, for a caller that settles several simultaneous gains
+/// together once every choice of the batch has been made. Every gain staged
+/// before the first settle reads the same board, so each one's replacement
+/// applicability (a "while you have N or less life" condition) is the
+/// pre-batch state, as CR 101.4 requires ("the actions happen
+/// simultaneously" once all choices are made).
+///
+/// The sibling of [`apply_life_gain`] (whose body is unchanged): the arms are
+/// the same except that a plain `Execute` returns the final event instead of
+/// settling it. Two arms cannot be deferred and finish inline exactly as
+/// [`apply_life_gain`] does: a fully replaced gain (`Prevented`) and an
+/// `Execute` with a resident post-replacement continuation.
+/// CR 614.6 + CR 704.3: the substitute must run in the same step as the root change, and its
+/// continuation stash holds one drain at a time. A CR 616.1 choice parks
+/// exactly as in [`apply_life_gain`]: nothing applied, `state.pending_replacement`
+/// owns the event and `Err(ReplacementChoice)` is returned.
+pub(crate) fn stage_life_gain(
+    state: &mut GameState,
+    player_id: PlayerId,
+    amount: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<StagedLifeGain, ReplacementDeferred> {
+    let Some(proposed) = proposed_life_gain(state, player_id, amount) else {
+        return Ok(StagedLifeGain::Settled(0));
+    };
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) if !state.has_post_replacement_drain() => {
+            Ok(StagedLifeGain::Final(event))
+        }
+        ReplacementResult::Execute(event) => {
+            let applied = apply_life_gain_after_replacement(state, event, events);
+            match drain_substitution_continuation(state, events) {
+                SubstitutionDrainOutcome::Completed => Ok(StagedLifeGain::Settled(applied)),
+                SubstitutionDrainOutcome::Deferred => {
+                    Err(ReplacementDeferred::SubstitutionContinuation { applied })
+                }
+            }
+        }
+        // CR 614.1a + CR 614.6: a cross-event substitute (Lich class).
+        ReplacementResult::Prevented => match drain_substitution_continuation(state, events) {
+            SubstitutionDrainOutcome::Completed => Ok(StagedLifeGain::Settled(0)),
+            SubstitutionDrainOutcome::Deferred => {
+                Err(ReplacementDeferred::SubstitutionContinuation { applied: 0 })
+            }
+        },
+        // CR 616.1: competing replacements, the affected player chooses.
+        ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
+            Err(ReplacementDeferred::ReplacementChoice)
+        }
+    }
+}
+
 /// Action-ingress life gain: like [`apply_life_gain`], except that a final
 /// result the engine cannot represent is reported as
 /// [`LifeChangeError::Unrepresentable`] so the caller rejects the action and
@@ -2345,6 +2412,153 @@ mod tests {
     /// "draw that many cards" must resolve against the original prevented
     /// gain quantity (via `state.last_effect_count` per the CR 615.5
     /// fallback path).
+    /// CR 101.4 + CR 616.1: `stage_life_gain` arms. (a) amount 0 and CR 119.7
+    /// "can't gain life" never reach the pipeline: `Settled(0)`, no change.
+    /// (b) a cross-event substitute (Lich: "draw that many cards instead")
+    /// cannot be deferred: it finishes inline (`Settled(0)`, cards drawn), and
+    /// an interactive substitute reports `SubstitutionContinuation`. (c) a
+    /// plain gain under a lone doubler stages its FINAL event and writes
+    /// nothing: no life change and no `LifeChanged` until the caller settles
+    /// it, then the settle applies exactly that event.
+    #[test]
+    fn stage_life_gain_arms() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, PlayerFilter, ReplacementDefinition,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        // (a)
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+        assert_eq!(
+            stage_life_gain(&mut state, PlayerId(0), 0, &mut events),
+            Ok(StagedLifeGain::Settled(0))
+        );
+        add_life_lock_permanent(
+            &mut state,
+            PlayerId(0),
+            StaticMode::CantGainLife,
+            ControllerRef::You,
+        );
+        assert_eq!(
+            stage_life_gain(&mut state, PlayerId(0), 3, &mut events),
+            Ok(StagedLifeGain::Settled(0))
+        );
+        assert_eq!(state.players[0].life, 20);
+        assert!(events.is_empty());
+
+        // (b) Lich: drawn inline, nothing left to settle.
+        let mut state = GameState::new_two_player(42);
+        let lich = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Lich".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&lich)
+            .unwrap()
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::GainLife)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    target: TargetFilter::Controller,
+                },
+            ))]
+        .into();
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(600 + i),
+                PlayerId(0),
+                format!("Library {i}"),
+                Zone::Library,
+            );
+        }
+        let hand_before = state.players[0].hand.len();
+        assert_eq!(
+            stage_life_gain(&mut state, PlayerId(0), 3, &mut Vec::new()),
+            Ok(StagedLifeGain::Settled(0))
+        );
+        assert_eq!(state.players[0].hand.len(), hand_before + 3, "(b) drew 3");
+        assert_eq!(state.players[0].life, 20);
+        assert!(!state.has_post_replacement_drain());
+
+        // (b) interactive substitute: the deferral is reported, not staged.
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(702),
+            PlayerId(0),
+            "Interactive Lich".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::GainLife)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                    )],
+                    kind: ChooseOneOfKind::Ordinary,
+                },
+            ))]
+        .into();
+        assert_eq!(
+            stage_life_gain(&mut state, PlayerId(0), 4, &mut Vec::new()),
+            Err(ReplacementDeferred::SubstitutionContinuation { applied: 0 })
+        );
+
+        // (c) a lone doubler: the final event is 6, nothing written yet.
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        scenario.add_enchantment_from_oracle(
+            PlayerId(0),
+            "Twice",
+            "If you would gain life, you gain twice that much life instead.",
+        );
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        let mut events = Vec::new();
+        let staged = stage_life_gain(state, PlayerId(0), 3, &mut events);
+        let Ok(StagedLifeGain::Final(event)) = staged else {
+            panic!("(c) expected a staged final event, got {staged:?}");
+        };
+        assert!(
+            matches!(
+                event,
+                ProposedEvent::LifeGain {
+                    player_id: PlayerId(0),
+                    amount: 6,
+                    ..
+                }
+            ),
+            "(c) the doubled final event, got {event:?}"
+        );
+        assert_eq!(state.players[0].life, 20, "(c) staging writes nothing");
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::LifeChanged { .. })));
+        assert_eq!(
+            apply_life_gain_after_replacement(state, event, &mut events),
+            6
+        );
+        assert_eq!(state.players[0].life, 26);
+    }
+
     #[test]
     fn lich_gain_life_substituted_by_draw_cards_instead() {
         use crate::types::ability::{AbilityDefinition, AbilityKind, ReplacementDefinition};

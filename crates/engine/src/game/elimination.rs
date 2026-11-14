@@ -1632,6 +1632,11 @@ fn do_eliminate(
         state.replacement_may_cost_paused = false;
         super::replacement::abandon_post_replacement_continuation(state);
         super::turns::abandon_phase_begin_choice(state);
+        // The abandoned choice may be a combat lifelink gain being staged; no
+        // answer will arrive for it, so the batch must not wait to claim one.
+        if let Some(record) = state.pending_combat_lifelink.as_mut() {
+            record.awaiting_staged_gain = false;
+        }
     }
 
     // A leaving player gains no life: they are no longer a player in the game, so
@@ -1660,8 +1665,28 @@ fn do_eliminate(
     // turn skip. (An earlier revision of this comment claimed the batch "can no
     // longer complete at all" and that `turns::enter_phase` owned that case; both
     // halves are false now that the discharge exists.)
+    //
+    // The seat's owed gains live in four places: the tail queue, the gains
+    // already staged (on the record, or on the Phase C remnant while a later
+    // leg's prompt is open), and the remnant's not-yet-staged per-source sums
+    // with their legs' markers. Left behind, a staged gain would settle for a
+    // departed seat (a life change and `LifeChanged` event for it).
     if let Some(record) = state.pending_combat_lifelink.as_mut() {
         record.remaining.retain(|gain| gain.controller != player);
+        record.staged_gains.retain(|gain| gain.controller != player);
+        if let Some(remnant) = record.phase_c_remnant.as_mut() {
+            remnant
+                .staged_gains
+                .retain(|gain| gain.controller != player);
+            remnant
+                .lifelink_by_source
+                .retain(|(_, controller, _)| *controller != player);
+            for leg in remnant.remaining.iter_mut() {
+                if leg.lifelink_controller == Some(player) {
+                    leg.lifelink_controller = None;
+                }
+            }
+        }
     }
 
     // CR 800.4a: A coupled ETB spell-resolution context can outlive its

@@ -20353,9 +20353,10 @@ pub struct PendingCombatLeg {
     pub target: TargetRef,
     /// CR 119.3 + CR 702.15b: the controller this source gains lifelink for
     /// (`None` when the source has no lifelink, or when the source's gain
-    /// already settled early: CR 616.1 + CR 101.4, an earlier-APNAP player's
-    /// gain is asked before a later player's result choice, and the cleared
-    /// marker keeps the later fold from gaining it again).
+    /// was already staged ahead of a leg: CR 616.1 + CR 101.4, an
+    /// earlier-APNAP player's gain is asked before a later player's result
+    /// choice and a player's own gain before that player's own leg, and the
+    /// cleared marker keeps the later fold from gaining it again).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifelink_controller: Option<PlayerId>,
     /// Post-Phase-B survivor (`None` = fully prevented: applies as 0 with
@@ -20386,13 +20387,20 @@ pub struct PendingCombatPhaseCRemnant {
     pub remaining: Vec<PendingCombatLeg>,
     /// CR 119.3 + CR 702.15b: per-source lifelink sums so far, in
     /// first-appearance order — `(source_id, controller, total_dealt)`,
-    /// excluding sources whose gain already settled early (CR 616.1 +
-    /// CR 101.4).
+    /// excluding sources whose gain was already staged ahead of a leg
+    /// (CR 616.1 + CR 101.4; those ride `staged_gains`).
     pub lifelink_by_source: Vec<(ObjectId, PlayerId, u32)>,
     /// CR 510.2: per-player, per-source damage so far.
     pub combat_damage_to_players: Vec<PerPlayerCombatDamage>,
     /// CR 400.7: each applied source's incarnation.
     pub source_incarnations: Vec<ObjectIncarnationRef>,
+    /// CR 101.4 + CR 616.1 + CR 702.15b: lifelink gains already staged ahead
+    /// of a leg (their replacement choices made, their final post-replacement
+    /// amounts recorded) but NOT yet settled: every gain of the batch settles
+    /// together once the batch's last choice is made, so no gain's pipeline
+    /// reads a board an earlier gain has changed. In stage order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub staged_gains: Vec<PendingLifelinkGain>,
 }
 
 /// `Eq` is absent because the Phase C remnant holds `ProposedEvent`
@@ -20407,6 +20415,19 @@ pub struct PendingCombatLifelink {
     /// completed by `engine_replacement::handle_replacement_choice`. Re-queueing
     /// it here would gain the life twice.
     pub remaining: VecDeque<PendingLifelinkGain>,
+    /// CR 101.4 + CR 616.1 + CR 702.15b: gains already staged (their
+    /// replacement choices made, their final post-replacement amounts
+    /// recorded) but not yet settled. The drain settles them, in stage order,
+    /// after the last gain is staged and before the per-player aggregate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub staged_gains: Vec<PendingLifelinkGain>,
+    /// True while `state.pending_replacement` holds one of THIS batch's
+    /// lifelink gains being staged: the answered gain's final event is then
+    /// recorded as staged instead of settled (`take_staged_answer`). Cleared
+    /// whenever that answer is taken, the batch resumes, or the chooser leaves
+    /// the game, so a later unrelated life-gain answer is never claimed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub awaiting_staged_gain: bool,
     /// CR 510.2 + CR 603.3b: every event this batch has produced. Each resume
     /// appends the events its own replacement round trip produced, so the
     /// lifelink `LifeChanged` and the combat-damage events reach
@@ -44504,6 +44525,8 @@ mod tests {
                 controller: PlayerId(1),
                 amount: 3,
             }]),
+            staged_gains: Vec::new(),
+            awaiting_staged_gain: false,
             batch_events: vec![persisted_zone_change_event(record)],
             damage_to_players: vec![GameEvent::CombatDamageDealtToPlayer {
                 player_id: PlayerId(1),
