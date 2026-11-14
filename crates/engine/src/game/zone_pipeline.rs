@@ -4473,8 +4473,12 @@ pub(crate) fn deliver_replaced_zone_change(
         }
         // CR 303.4f + CR 701.3a: A non-spell Aura entry carries its chosen
         // enchant host through the ZoneChange event so it is attached before
-        // the effect finishes resolving.
-        if to == Zone::Battlefield {
+        // the effect finishes resolving. CR 614.17d: gated on
+        // `entered_battlefield` (the delivered entry), not the intended
+        // destination: when a "can't enter the battlefield" static refused the
+        // entry the Aura never entered, so nothing attaches and no
+        // `GameEvent::Attached` reaches attachment observers.
+        if entered_battlefield {
             if let Some(target) = attach_to {
                 match target {
                     crate::game::game_object::AttachTarget::Object(target_id) => {

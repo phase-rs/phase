@@ -330,3 +330,93 @@ fn bramble_elemental_triggers_on_first_attachment_after_replacement_pause() {
         "first attachment on replacement resume must trigger Bramble Elemental once"
     );
 }
+
+/// Bramble Elemental enters as a Ninja (Maskwood Nexus: "Creatures you control
+/// are every creature type") while Smoke Shroud waits in P0's graveyard. Smoke
+/// Shroud: "When a Ninja you control enters, you may return this card from your
+/// graveyard to the battlefield attached to that creature." Bramble Elemental
+/// observes the attachment. `runestone` adds P1's Weathered Runestone
+/// ("Nonland permanent cards in graveyards and libraries can't enter the
+/// battlefield."). Returns the runner, Smoke Shroud, and every emitted event.
+fn smoke_shroud_returns_onto_entering_ninja(
+    runestone: bool,
+) -> (
+    engine::game::scenario::GameRunner,
+    ObjectId,
+    Vec<engine::types::events::GameEvent>,
+) {
+    use engine::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::support::shared_card_db().expect("the committed integration fixture loads");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Maskwood Nexus", Zone::Battlefield, db);
+    if runestone {
+        scenario.add_artifact_from_oracle(
+            P0,
+            "Weathered Runestone",
+            "Nonland permanent cards in graveyards and libraries can't enter the battlefield.\nPlayers can't cast spells from graveyards or libraries.",
+        );
+    }
+    let smoke_shroud = scenario.add_real_card(P0, "Smoke Shroud", Zone::Graveyard, db);
+    let bramble = scenario.add_real_card(P0, "Bramble Elemental", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Green, ObjectId(9_990), false, vec![]),
+            ManaUnit::new(ManaType::Green, ObjectId(9_991), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_992), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_993), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_994), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    // Changeling-class "every creature type" matching consults the game's
+    // creature-type universe, which a deck load normally populates.
+    runner.state_mut().all_creature_types = vec!["Elemental".to_string(), "Ninja".to_string()];
+    let outcome = runner.cast(bramble).accept_optional().resolve();
+    let events = outcome.events().to_vec();
+    drop(outcome);
+    runner.advance_until_stack_empty();
+    (runner, smoke_shroud, events)
+}
+
+fn attached_events(events: &[engine::types::events::GameEvent], attachment: ObjectId) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                engine::types::events::GameEvent::Attached { attachment_id, .. }
+                    if *attachment_id == attachment
+            )
+        })
+        .count()
+}
+
+/// Control: with no entry prohibition, Smoke Shroud returns attached to the
+/// entering Ninja (CR 303.4f + CR 701.3a), publishes exactly one `Attached`
+/// event, and Bramble Elemental's observer triggers once (two Saprolings).
+#[test]
+fn smoke_shroud_return_attaches_once_and_triggers_bramble_once() {
+    let (runner, smoke_shroud, events) = smoke_shroud_returns_onto_entering_ninja(false);
+    let aura = &runner.state().objects[&smoke_shroud];
+    assert_eq!(aura.zone, Zone::Battlefield);
+    assert!(matches!(aura.attached_to, Some(AttachTarget::Object(_))));
+    assert_eq!(attached_events(&events, smoke_shroud), 1);
+    assert_eq!(saproling_tokens(&runner).len(), 2);
+}
+
+/// CR 614.17d: Weathered Runestone refuses Smoke Shroud's battlefield entry
+/// from the graveyard. The Aura never entered, so it does not attach, no
+/// `Attached` event reaches Bramble Elemental, and no Saprolings are created.
+#[test]
+fn refused_graveyard_aura_entry_does_not_attach_or_notify_observers() {
+    let (runner, smoke_shroud, events) = smoke_shroud_returns_onto_entering_ninja(true);
+    let aura = &runner.state().objects[&smoke_shroud];
+    assert_eq!(aura.zone, Zone::Graveyard, "Runestone refuses the entry");
+    assert_eq!(aura.attached_to, None);
+    assert_eq!(attached_events(&events, smoke_shroud), 0);
+    assert_eq!(saproling_tokens(&runner).len(), 0);
+}
