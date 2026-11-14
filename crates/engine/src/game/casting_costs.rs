@@ -683,6 +683,95 @@ fn propagate_shared_cast_context(ability: &mut ResolvedAbility, shared: &SpellCo
     }
 }
 
+/// CR 118.9 + CR 118.9b + CR 601.2b: raise the alternative-cost Choice the
+/// alternative-cost arm offered, once a matching Defiler's offer (if any) has
+/// been answered. The alternative is re-selected under settled terms: an
+/// accepted Defiler counts through the reductions the cast carries and its
+/// life is already paid; an undecided one is never credited, since the Defiler
+/// is announced once (`continue_cost_declarations`). If the alternative is no
+/// longer payable, it can't be chosen (CR 601.2h), so the cast continues at
+/// the printed cost.
+fn raise_offered_alternative_cost_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let offered = select_offered_alternative_cost(
+        state,
+        player,
+        pending.object_id,
+        pending.cast_timing_permission,
+        pending.casting_permission_index,
+        AltCostTerms::settled(&pending.accepted_cost_reductions),
+    );
+    let Some(alt_cost) = offered else {
+        pending.alternative_cost_election =
+            crate::types::game_state::SpellAlternativeCostElection::Declined;
+        return finish_pending_cost_or_cast(state, player, pending, events);
+    };
+    pending.alt_cost_grant_source = alt_cost.once_per_turn_source;
+    // CR 601.2f: the declined branch's printed total includes the reductions
+    // the cast carries (an accepted Defiler's).
+    let fallback = super::casting::recompute_pending_mana_total_with(
+        state,
+        player,
+        &pending,
+        pending.ability.chosen_x,
+        &super::casting::CostFinalizeContext::from_pending(&pending),
+    );
+    pending.cost = ManaCost::NoCost;
+    Ok(make_optional_cost_choice(
+        state,
+        player,
+        AdditionalCost::Choice(alt_cost.cost, AbilityCost::Mana { cost: fallback }),
+        0,
+        pending,
+    ))
+}
+
+/// CR 118.9 + CR 601.2b + CR 601.2h: apply an alternative cost the cast must
+/// use (its grant is what opens the cast's timing, or the printed cost doesn't
+/// exist), then hand the cast's declarations to `continue_cost_declarations`,
+/// so a matching Defiler is announced with them (CR 118.9d). A mana
+/// alternative becomes the cast's base; a non-mana one rides the tail as the
+/// cast's residual (CR 601.2h: costs are paid in any order).
+fn apply_required_alternative_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    alt_cost: PayableSpellAlternativeCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    pending.alternative_cost_election =
+        crate::types::game_state::SpellAlternativeCostElection::Accepted;
+    pending.ability.context.alternative_mana_cost_paid = true;
+    // CR 118.9 + CR 601.2b: no Choice is answered on this route, so the grant
+    // source is stamped for finalize to consume its per-turn slot.
+    pending.ability.context.alt_cost_grant_source = alt_cost.once_per_turn_source;
+    pending.alt_cost_grant_source = alt_cost.once_per_turn_source;
+    // CR 118.9 + CR 601.2f: the alternative replaces the mana cost, so its mana
+    // part ({0} when it has none) is the base the cast's total is determined
+    // from (modifiers and reductions, floors last); its other legs ride the
+    // tail as the cast's residual.
+    let (alt_mana, residual) = super::casting::split_alt_cost_components(&alt_cost.cost);
+    pending.base_cost = Some(alt_mana.unwrap_or_else(ManaCost::zero));
+    pending.cost = super::casting::recompute_pending_mana_total(
+        state,
+        player,
+        &pending,
+        pending.ability.chosen_x,
+    );
+    continue_cost_declarations(
+        state,
+        player,
+        pending,
+        residual,
+        DeclarationExit::Finish,
+        events,
+    )
+}
+
 /// CR 118.6a + CR 601.2b + CR 601.2h: apply a spell's alternative cost
 /// without asking, because the printed cost it would replace doesn't exist.
 /// Records it as an accepted alternative would be (its once-per-turn grant is
@@ -875,14 +964,15 @@ pub(crate) fn handle_decide_additional_cost(
                     // finalize_cast consumes its per-turn slot. Declining (below)
                     // leaves it `None` — the printed cost was paid, nothing spent.
                     ability.context.alt_cost_grant_source = pending.alt_cost_grant_source;
-                    match preferred {
-                        AbilityCost::Mana { cost } => {
-                            alternative_base_override = Some(cost.clone());
-                            recompute_choice_cost = true;
-                            None
-                        }
-                        _ => Some(preferred.clone()),
-                    }
+                    // CR 118.9 + CR 601.2f: the alternative replaces the mana
+                    // cost: its mana part ({0} when it has none) becomes the
+                    // base the total is determined from, so the board's
+                    // modifiers and an accepted Defiler's reduction apply to it
+                    // (CR 118.9d), and its other legs are paid with the total.
+                    let (alt_mana, residual) = super::casting::split_alt_cost_components(preferred);
+                    alternative_base_override = Some(alt_mana.unwrap_or_else(ManaCost::zero));
+                    recompute_choice_cost = true;
+                    residual
                 } else {
                     Some(preferred.clone())
                 }
@@ -1090,10 +1180,86 @@ pub(crate) struct PayableSpellAlternativeCost {
     pub(crate) once_per_turn_source: Option<ObjectId>,
 }
 
+/// CR 601.2b + CR 601.2f: the terms an Oracle alternative cost's payability is
+/// judged under. `ANNOUNCED` is the default for a cast whose declarations are
+/// still ahead: a matching Defiler can still be announced, so its reduction
+/// counts (the alternative-cost arm offers it through
+/// `continue_cost_declarations`). `settled` judges a cast whose Defiler
+/// decision is made, crediting only the reductions it carries.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct AltCostTerms<'a> {
+    defiler: super::casting::DefilerCredit,
+    accepted: &'a [CostReductionEntry],
+}
+
+impl AltCostTerms<'static> {
+    pub(super) const ANNOUNCED: Self = Self {
+        defiler: super::casting::DefilerCredit::Offerable { committed_life: 0 },
+        accepted: &[],
+    };
+}
+
+impl<'a> AltCostTerms<'a> {
+    /// The cast's declarations are still ahead (a matching Defiler can still
+    /// be announced); `accepted` holds the reductions it already carries.
+    pub(super) fn announced(accepted: &'a [CostReductionEntry]) -> Self {
+        Self {
+            defiler: super::casting::DefilerCredit::Offerable { committed_life: 0 },
+            accepted,
+        }
+    }
+
+    pub(super) fn settled(accepted: &'a [CostReductionEntry]) -> Self {
+        Self {
+            defiler: super::casting::DefilerCredit::Settled,
+            accepted,
+        }
+    }
+}
+
+/// CR 118.9 + CR 118.9a + CR 601.2b: the one alternative cost the cast offers:
+/// a grant that also opens the cast's timing (Primal Prayers), else the spell's
+/// own or a granted alternative under the elected permission. The
+/// alternative-cost arm and the resumed offer in `finish_pending_cost_or_cast`
+/// both select through this, under their own `terms`.
+fn select_offered_alternative_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cast_timing_permission: Option<CastTimingPermission>,
+    casting_permission_index: Option<CastingPermissionIndex>,
+    terms: AltCostTerms<'_>,
+) -> Option<PayableSpellAlternativeCost> {
+    cast_timing_permission
+        .and_then(|permission| {
+            payable_spell_alternative_cost_for_timing_with(
+                state, player, object_id, permission, terms,
+            )
+        })
+        .or_else(|| {
+            payable_spell_alternative_cost_details_at_index_with(
+                state,
+                player,
+                object_id,
+                casting_permission_index,
+                terms,
+            )
+        })
+}
+
 pub(crate) fn payable_spell_alternative_cost_details(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
+) -> Option<PayableSpellAlternativeCost> {
+    payable_spell_alternative_cost_details_with(state, player, object_id, AltCostTerms::ANNOUNCED)
+}
+
+pub(super) fn payable_spell_alternative_cost_details_with(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    terms: AltCostTerms<'_>,
 ) -> Option<PayableSpellAlternativeCost> {
     let obj = state.objects.get(&object_id)?;
     let casting_permission_index = match state
@@ -1104,11 +1270,12 @@ pub(crate) fn payable_spell_alternative_cost_details(
         Some(pending) => pending.casting_permission_index,
         None => super::casting::selected_object_cast_permission_index(state, obj, player, None),
     };
-    payable_spell_alternative_cost_details_at_index(
+    payable_spell_alternative_cost_details_at_index_with(
         state,
         player,
         object_id,
         casting_permission_index,
+        terms,
     )
 }
 
@@ -1118,6 +1285,32 @@ pub(super) fn payable_spell_alternative_cost_details_at_index(
     object_id: ObjectId,
     casting_permission_index: Option<CastingPermissionIndex>,
 ) -> Option<PayableSpellAlternativeCost> {
+    payable_spell_alternative_cost_details_at_index_with(
+        state,
+        player,
+        object_id,
+        casting_permission_index,
+        AltCostTerms::ANNOUNCED,
+    )
+}
+
+pub(super) fn payable_spell_alternative_cost_details_at_index_with(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_permission_index: Option<CastingPermissionIndex>,
+    terms: AltCostTerms<'_>,
+) -> Option<PayableSpellAlternativeCost> {
+    let payable = |cost: &AbilityCost| {
+        spell_alternative_cost_is_payable(
+            state,
+            player,
+            object_id,
+            cost,
+            casting_permission_index,
+            terms,
+        )
+    };
     let obj = state.objects.get(&object_id)?;
     // CR 601.2a: the offer is scoped by the cast's ORIGIN zone (the object may
     // already sit on the stack when a pending cast re-asks).
@@ -1180,7 +1373,7 @@ pub(super) fn payable_spell_alternative_cost_details_at_index(
                     return None;
                 }
             };
-            if spell_alternative_cost_is_payable(state, player, object_id, &cost) {
+            if payable(&cost) {
                 Some(PayableSpellAlternativeCost {
                     cost,
                     timing_permission: None,
@@ -1229,7 +1422,7 @@ pub(super) fn payable_spell_alternative_cost_details_at_index(
             } => Some((cost.clone(), *timing_permission)),
             _ => None,
         })
-        .find(|(cost, _)| spell_alternative_cost_is_payable(state, player, object_id, cost));
+        .find(|(cost, _)| payable(cost));
     if let Some((cost, timing_permission)) = granted_self {
         return Some(PayableSpellAlternativeCost {
             cost,
@@ -1246,13 +1439,11 @@ pub(super) fn payable_spell_alternative_cost_details_at_index(
     // `granted_spell_alternative_cost` — hand casts match normally, a non-hand
     // origin only through an origin-scoped filter branch.
     let granted = super::casting::granted_spell_alternative_cost(state, player, object_id)?;
-    spell_alternative_cost_is_payable(state, player, object_id, &granted.cost).then_some(
-        PayableSpellAlternativeCost {
-            cost: granted.cost,
-            timing_permission: granted.timing_permission,
-            once_per_turn_source: granted.once_per_turn_source,
-        },
-    )
+    payable(&granted.cost).then_some(PayableSpellAlternativeCost {
+        cost: granted.cost,
+        timing_permission: granted.timing_permission,
+        once_per_turn_source: granted.once_per_turn_source,
+    })
 }
 
 pub(crate) fn payable_spell_alternative_cost_for_timing(
@@ -1260,6 +1451,22 @@ pub(crate) fn payable_spell_alternative_cost_for_timing(
     player: PlayerId,
     object_id: ObjectId,
     timing_permission: CastTimingPermission,
+) -> Option<PayableSpellAlternativeCost> {
+    payable_spell_alternative_cost_for_timing_with(
+        state,
+        player,
+        object_id,
+        timing_permission,
+        AltCostTerms::ANNOUNCED,
+    )
+}
+
+pub(super) fn payable_spell_alternative_cost_for_timing_with(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    timing_permission: CastTimingPermission,
+    terms: AltCostTerms<'_>,
 ) -> Option<PayableSpellAlternativeCost> {
     let obj = state.objects.get(&object_id)?;
     if obj.zone != Zone::Hand || obj.controller != player {
@@ -1270,31 +1477,67 @@ pub(crate) fn payable_spell_alternative_cost_for_timing(
     if granted.timing_permission != Some(timing_permission) {
         return None;
     }
-    spell_alternative_cost_is_payable(state, player, object_id, &granted.cost).then_some(
-        PayableSpellAlternativeCost {
+    spell_alternative_cost_is_payable(state, player, object_id, &granted.cost, None, terms)
+        .then_some(PayableSpellAlternativeCost {
             cost: granted.cost,
             timing_permission: granted.timing_permission,
             once_per_turn_source: granted.once_per_turn_source,
-        },
-    )
+        })
 }
 
+/// CR 118.9 + CR 601.2f + CR 601.2h: whether an Oracle alternative cost can be
+/// paid. Its mana is priced by `cast_mana_totals` (the board's modifiers, the
+/// reductions `terms` carries and, while announceable, a matching Defiler's;
+/// floors last), as the payment's total will be.
 fn spell_alternative_cost_is_payable(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
     cost: &AbilityCost,
+    permission: Option<CastingPermissionIndex>,
+    terms: AltCostTerms<'_>,
 ) -> bool {
     match cost {
-        AbilityCost::Mana { cost } => {
-            super::casting::can_pay_cost_after_auto_tap(state, player, object_id, cost)
-        }
+        AbilityCost::Mana { cost } => super::casting::cast_mana_affordable(
+            state,
+            player,
+            object_id,
+            cost,
+            &super::casting::CastPricing {
+                variant: Some(CastingVariant::Normal),
+                permission,
+                accepted: terms.accepted,
+                defiler: terms.defiler,
+            },
+        ),
         // CR 118.3 + CR 601.2h: every leg must be payable, and multiple chosen
         // hand-discard legs must be payable together (one card cannot serve two).
         // Spell costs prompt their object legs without look-ahead.
+        // CR 119.4: a Defiler is credited to the mana leg only when its life is
+        // payable alongside the life the other legs pay.
         AbilityCost::Composite { costs } => {
+            let defiler = match terms.defiler {
+                super::casting::DefilerCredit::Offerable { committed_life } => {
+                    super::casting::DefilerCredit::Offerable {
+                        committed_life: committed_life
+                            + committed_life_of(
+                                state,
+                                player,
+                                object_id,
+                                costs
+                                    .iter()
+                                    .filter(|leg| !matches!(leg, AbilityCost::Mana { .. }))
+                                    .map(Some),
+                            ),
+                    }
+                }
+                super::casting::DefilerCredit::Settled => super::casting::DefilerCredit::Settled,
+            };
+            let leg_terms = AltCostTerms { defiler, ..terms };
             costs.iter().all(|sub_cost| {
-                spell_alternative_cost_is_payable(state, player, object_id, sub_cost)
+                spell_alternative_cost_is_payable(
+                    state, player, object_id, sub_cost, permission, leg_terms,
+                )
             }) && super::cost_payability::object_cost_legs_jointly_payable(
                 state,
                 player,
@@ -1571,14 +1814,29 @@ pub(crate) fn finish_pending_cost_or_cast(
             crate::types::game_state::SpellAlternativeCostElection::Accepted;
         pending.ability.context.alternative_mana_cost_paid = true;
     }
+    // CR 118.9 + CR 601.2b: the alternative-cost arm offered an alternative and
+    // handed the cast's declarations to `continue_cost_declarations`, which
+    // offered a matching Defiler first (or found none). Raise the Choice now.
+    if pending.activation_ability_index.is_none()
+        && pending.alternative_cost_election
+            == crate::types::game_state::SpellAlternativeCostElection::Offered
+    {
+        return raise_offered_alternative_cost_choice(state, player, pending, events);
+    }
     if pending.activation_ability_index.is_none()
         && pending.casting_variant == CastingVariant::Normal
         && pending.alternative_cost_election
             == crate::types::game_state::SpellAlternativeCostElection::Undecided
     {
-        if let Some(alt_cost) =
-            payable_spell_alternative_cost_details(state, player, pending.object_id)
-        {
+        // CR 601.2b + CR 601.2f: this offer raises the Choice without the
+        // declaration tail, so no Defiler is announced ahead of it: judge the
+        // alternative on the reductions the cast already carries.
+        if let Some(alt_cost) = payable_spell_alternative_cost_details_with(
+            state,
+            player,
+            pending.object_id,
+            AltCostTerms::settled(&pending.accepted_cost_reductions),
+        ) {
             pending.alt_cost_grant_source = alt_cost.once_per_turn_source;
             if state.objects.get(&pending.object_id).is_some_and(|obj| {
                 super::casting::cast_pays_nonexistent_printed_cost(
@@ -6488,6 +6746,36 @@ pub(crate) fn handle_exile_permanent_for_cost(
     )
 }
 
+/// CR 107.3a + CR 118.9: whether this cast pays its own alternative cost and
+/// that cost exiles a card "with mana value X" (the Shoals), so X is the exiled
+/// card's mana value rather than an announced value. Read off the card's own
+/// alternative cost, not off the cast's mana total, which an accepted
+/// alternative re-bases (CR 601.2f).
+fn accepted_alternative_defines_x_by_exiled_mana_value(
+    state: &GameState,
+    pending: &PendingCast,
+) -> bool {
+    fn exiles_by_x_mana_value(cost: &AbilityCost) -> bool {
+        match cost {
+            AbilityCost::Exile {
+                filter: Some(filter),
+                ..
+            } => super::cost_payability::target_filter_has_x_mana_value_constraint(filter),
+            AbilityCost::Composite { costs } => costs.iter().any(exiles_by_x_mana_value),
+            _ => false,
+        }
+    }
+    pending.alternative_cost_election
+        == crate::types::game_state::SpellAlternativeCostElection::Accepted
+        && state.objects.get(&pending.object_id).is_some_and(|spell| {
+            cost_has_x(&spell.mana_cost)
+                && spell.casting_options.iter().any(|option| {
+                    option.kind == SpellCastingOptionKind::AlternativeCost
+                        && option.cost.as_ref().is_some_and(exiles_by_x_mana_value)
+                })
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn finish_exile_selection_for_cost(
     state: &mut GameState,
@@ -6558,8 +6846,7 @@ fn finish_exile_selection_for_cost(
             // [color] card with mana value X") define X from the pitched card's
             // mana value rather than a prior announcement.
             if pending.ability.chosen_x.is_none()
-                && pending.cost == crate::types::mana::ManaCost::NoCost
-                && pending.base_cost.as_ref().is_some_and(cost_has_x)
+                && accepted_alternative_defines_x_by_exiled_mana_value(state, &pending)
             {
                 // CR 202.3d + CR 709.4b: the pitched card is exiled from hand
                 // (off the stack), so a split card defines X from its combined
@@ -8680,8 +8967,18 @@ pub(super) fn finish_pending_cast_cost_or_pay(
             )
         })
     {
+        // CR 118.6a: this route applies the alternative without the declaration
+        // tail (no Defiler is offered), so it is judged on the cast's own
+        // reductions.
         let Some(alt_cost) = (pending.casting_variant == CastingVariant::Normal)
-            .then(|| payable_spell_alternative_cost_details(state, player, pending.object_id))
+            .then(|| {
+                payable_spell_alternative_cost_details_with(
+                    state,
+                    player,
+                    pending.object_id,
+                    AltCostTerms::settled(&pending.accepted_cost_reductions),
+                )
+            })
             .flatten()
         else {
             return Err(EngineError::SpellCastReversed {
@@ -9640,25 +9937,24 @@ fn check_additional_cost_or_pay_with_kept_cost(
 
     // CR 118.9 + CR 601.2b/f/h: Oracle text alternative costs are announced
     // before total cost determination and paid rather than the spell's mana
-    // cost. Reuse the existing `AdditionalCost::Choice` prompt shape by making
-    // the pending spell mana cost `NoCost`: accepting pays the alternative cost,
-    // declining pays the printed mana cost as the fallback branch.
+    // cost. Reuse the existing `AdditionalCost::Choice` prompt shape: accepting
+    // pays the alternative cost, declining pays the printed mana cost as the
+    // fallback branch.
     if casting_variant == CastingVariant::Normal
         && lock.alternative_cost_election
             == crate::types::game_state::SpellAlternativeCostElection::Undecided
     {
-        let alt_cost = cast_timing_permission
-            .and_then(|permission| {
-                payable_spell_alternative_cost_for_timing(state, player, object_id, permission)
-            })
-            .or_else(|| {
-                payable_spell_alternative_cost_details_at_index(
-                    state,
-                    player,
-                    object_id,
-                    casting_permission_index,
-                )
-            });
+        // CR 601.2b: the cast's declarations are ahead (every route below
+        // reaches `continue_cost_declarations`), so a matching Defiler that
+        // can still be announced counts toward the alternative's payability.
+        let alt_cost = select_offered_alternative_cost(
+            state,
+            player,
+            object_id,
+            cast_timing_permission,
+            casting_permission_index,
+            AltCostTerms::announced(&lock.accepted),
+        );
         if let Some(alt_cost) = alt_cost {
             // CR 118.9 + CR 601.2b: carry the once-per-turn grant source (As
             // Foretold) across the choice round-trip so its per-turn slot is
@@ -9697,41 +9993,11 @@ fn check_additional_cost_or_pay_with_kept_cost(
             }
             let alt_cost_required_for_timing = cast_timing_permission.is_some()
                 && alt_cost.timing_permission == cast_timing_permission;
-            if alt_cost_required_for_timing {
-                match alt_cost.cost {
-                    AbilityCost::Mana { cost: alt_mana } => {
-                        pending.alternative_cost_election =
-                            crate::types::game_state::SpellAlternativeCostElection::Accepted;
-                        pending.ability.context.alternative_mana_cost_paid = true;
-                        // CR 118.9 + CR 601.2b: timing-immediate-pay branch skips
-                        // the accept handler, so stamp the grant source directly on
-                        // the ability context for finalize to consume.
-                        pending.ability.context.alt_cost_grant_source = alt_cost_grant_source;
-                        pending.base_cost = Some(alt_mana);
-                        pending.cost = super::casting::recompute_pending_mana_total(
-                            state,
-                            player,
-                            &pending,
-                            pending.ability.chosen_x,
-                        );
-                        return finish_pending_cost_or_cast(state, player, pending, events);
-                    }
-                    cost => {
-                        return pay_additional_cost_with_source(
-                            state,
-                            player,
-                            cost,
-                            SpellCostSource::Other,
-                            pending,
-                            events,
-                        );
-                    }
-                }
-            }
             // CR 601.2h: "Unpayable costs can't be paid." With no printed mana
             // cost the alternative is the only way to cast the card, so there
-            // is nothing to choose.
-            if state.objects.get(&object_id).is_some_and(|obj| {
+            // is nothing to choose; nor is there when the alternative's grant
+            // is what opens the cast's timing.
+            let printed_cost_nonexistent = state.objects.get(&object_id).is_some_and(|obj| {
                 super::casting::cast_pays_nonexistent_printed_cost(
                     state,
                     player,
@@ -9739,20 +10005,25 @@ fn check_additional_cost_or_pay_with_kept_cost(
                     casting_permission_index,
                     casting_variant,
                 )
-            }) {
-                return apply_only_payable_alternative_cost(
-                    state, player, pending, alt_cost, events,
-                );
+            });
+            if alt_cost_required_for_timing || printed_cost_nonexistent {
+                return apply_required_alternative_cost(state, player, pending, alt_cost, events);
             }
+            // CR 601.2b + CR 118.9d: the alternative is offered once the cast's
+            // declarations reach `finish_pending_cost_or_cast`, after a matching
+            // Defiler's offer (`continue_cost_declarations`); the pending keeps
+            // the printed total for the Choice's declined branch.
+            pending.cost = cost.clone();
             pending.alternative_cost_election =
                 crate::types::game_state::SpellAlternativeCostElection::Offered;
-            return Ok(make_optional_cost_choice(
+            return continue_cost_declarations(
                 state,
                 player,
-                AdditionalCost::Choice(alt_cost.cost, AbilityCost::Mana { cost: cost.clone() }),
-                0,
                 pending,
-            ));
+                None,
+                DeclarationExit::Finish,
+                events,
+            );
         }
     }
 
@@ -9798,6 +10069,23 @@ fn check_additional_cost_or_pay_with_kept_cost(
         if additional.is_some() {
             pending.deferred_required_additional_cost =
                 required_cost_from_additional(deferred_required.clone());
+        }
+        // CR 601.2f + CR 601.2h + CR 118.9d: a non-mana alternative (Bolas's
+        // Citadel's life) is owed with the cast's other costs, so it rides the
+        // declaration tail as the cast's residual, after a matching Defiler's
+        // offer. An alternative with a mana part keeps its direct payment.
+        let (alt_mana_part, _) = super::casting::split_alt_cost_components(&alt_cost);
+        if alt_mana_part.is_none()
+            && !matches!(alt_cost, AbilityCost::KeywordCostOfCastSpell { .. })
+        {
+            return continue_cost_declarations(
+                state,
+                player,
+                pending,
+                Some(alt_cost),
+                DeclarationExit::Finish,
+                events,
+            );
         }
         return pay_additional_cost(state, player, alt_cost, pending, events);
     }
@@ -10764,34 +11052,6 @@ fn sacrifice_reduction_entry(
     }
 }
 
-/// CR 601.2f + CR 118.7: Preview the locked mana obligation after an
-/// affordable Defiler life-payment reduction, without paying life or mutating
-/// the spell's announced cost.
-pub(crate) fn defiler_reduced_cost(
-    state: &GameState,
-    caster: PlayerId,
-    spell_id: ObjectId,
-    cost: &ManaCost,
-) -> Option<ManaCost> {
-    defiler_reduced_cost_alongside(state, caster, spell_id, cost, 0)
-}
-
-/// CR 601.2f + CR 601.2h + CR 119.4: `defiler_reduced_cost` for a cast whose
-/// total already pays `committed_life` (see `committed_life_besides_defiler`),
-/// the same eligibility the Defiler payment prompt applies.
-pub(crate) fn defiler_reduced_cost_alongside(
-    state: &GameState,
-    caster: PlayerId,
-    spell_id: ObjectId,
-    cost: &ManaCost,
-    committed_life: u32,
-) -> Option<ManaCost> {
-    let reduction = defiler_reduction_alongside(state, caster, spell_id, committed_life)?;
-    let mut reduced = cost.clone();
-    apply_defiler_mana_reduction(&mut reduced, &reduction.mana_reduction, reduction.reach);
-    Some(reduced)
-}
-
 /// CR 601.2b + CR 601.2f: the reduction entry an affordable Defiler life
 /// payment would add to the cast, for pricing the cast through the ordered
 /// reduction set (floors last) without paying life.
@@ -10800,7 +11060,19 @@ pub(crate) fn defiler_reduction_entry_if_affordable(
     caster: PlayerId,
     spell_id: ObjectId,
 ) -> Option<CostReductionEntry> {
-    let reduction = defiler_reduction_alongside(state, caster, spell_id, 0)?;
+    defiler_reduction_entry_alongside(state, caster, spell_id, 0)
+}
+
+/// CR 601.2f + CR 601.2h + CR 119.4: `defiler_reduction_entry_if_affordable`
+/// for a cast whose total already pays `committed_life`, the same eligibility
+/// the Defiler payment prompt applies.
+pub(crate) fn defiler_reduction_entry_alongside(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    committed_life: u32,
+) -> Option<CostReductionEntry> {
+    let reduction = defiler_reduction_alongside(state, caster, spell_id, committed_life)?;
     Some(accepted_defiler_reduction_entry(
         state,
         caster,
@@ -10829,11 +11101,14 @@ pub(crate) fn pending_carries_unpaid_committed_costs(pending: &PendingCast) -> b
 /// pending rather than rebuilding the cast: it still owes committed costs
 /// (`pending_carries_unpaid_committed_costs`) or still has declarations to make
 /// on its flow or queue, which a rebuild through `pay_and_push_with_lock` would
-/// drop.
+/// drop. CR 118.9 + CR 601.2b: so does an offered alternative cost whose Choice
+/// follows the Defiler decision (`raise_offered_alternative_cost_choice`).
 fn defiler_resume_keeps_pending(pending: &PendingCast) -> bool {
     pending_carries_unpaid_committed_costs(pending)
         || pending.additional_cost_flow.is_some()
         || !pending.additional_cost_queue.is_empty()
+        || pending.alternative_cost_election
+            == crate::types::game_state::SpellAlternativeCostElection::Offered
 }
 
 /// CR 601.2b: Handle the player's decision on Defiler life payment.
@@ -11077,44 +11352,6 @@ pub(crate) fn handle_order_cost_reductions(
         lock,
         events,
     )
-}
-
-fn apply_defiler_mana_reduction(
-    spell_cost: &mut crate::types::mana::ManaCost,
-    reduction: &crate::types::mana::ManaCost,
-    reach: CostReductionReach,
-) {
-    let crate::types::mana::ManaCost::Cost {
-        shards: spell_shards,
-        generic: spell_generic,
-    } = spell_cost
-    else {
-        return;
-    };
-    let crate::types::mana::ManaCost::Cost {
-        shards: reduction_shards,
-        generic: reduction_generic,
-    } = reduction
-    else {
-        return;
-    };
-
-    // CR 118.7b/c/d + card text: every printed Defiler reads "This effect
-    // reduces only the amount of [color] mana you pay", which overrides the
-    // default spillover — a reduction unit with no matching pip in the spell's
-    // cost is lost rather than shaved off the generic component. (A white
-    // permanent spell whose cost carries no {W} — a color-indicator card or an
-    // MDFC back face — is exactly the case this protects.) `reach` is read off
-    // the static rather than assumed, so a Defiler-shaped ability parsed
-    // without that rider still gets the CR 118.7b default.
-    for shard in reduction_shards {
-        super::casting::apply_shard_reduction(spell_shards, spell_generic, *shard, reach);
-    }
-    // CR 118.7a: the same rider confines the reduction to colored mana, so an
-    // explicit generic component may only apply under the default reach.
-    if matches!(reach, CostReductionReach::SpillsToGeneric) {
-        *spell_generic = spell_generic.saturating_sub(*reduction_generic);
-    }
 }
 
 /// CR 601.2b: Pay an additional cost, returning a WaitingFor if interactive input is needed
@@ -12191,12 +12428,21 @@ pub(super) fn emerge_sacrifice_cost(sacrifice_filter: TargetFilter) -> AbilityCo
 
 /// CR 702.119a-b: Emerge can be paid only if a matching permanent can be
 /// sacrificed and the resulting reduced emerge mana cost can be paid.
+///
+/// CR 601.2f + CR 118.9d: `emerge_base` is the printed emerge cost. Each
+/// candidate's reduction (generic mana equal to its mana value) joins the
+/// ordered reduction set with the board's modifiers and a matching Defiler's
+/// optional reduction (`cast_mana_totals`); reductions saturate at {0} and the
+/// floor applies last. The candidate is still on the battlefield as the cost is
+/// determined, so a sacrificed Defiler's own reduction counts (CR 702.119c).
 pub(super) fn can_pay_emerge_cost(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
-    emerge_cost: &ManaCost,
+    emerge_base: &ManaCost,
     sacrifice_filter: &TargetFilter,
+    variant: Option<CastingVariant>,
+    permission: Option<CastingPermissionIndex>,
 ) -> bool {
     super::casting::find_eligible_sacrifice_targets(
         state,
@@ -12207,14 +12453,26 @@ pub(super) fn can_pay_emerge_cost(
     )
     .into_iter()
     .any(|permanent| {
-        let mut reduced = emerge_cost.clone();
-        apply_emerge_cost_reduction(state, permanent, &mut reduced);
-        // CR 601.2f + CR 702.119a: Affordability probes must include the
-        // final Trinisphere-class floor after Emerge's sacrifice reduction.
-        if !cost_has_x(&reduced) {
-            super::casting::apply_cost_floor(state, player, object_id, &mut reduced);
-        }
-        super::casting::can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
+        let Some(candidate) = state.objects.get(&permanent) else {
+            return false;
+        };
+        let accepted = [sacrifice_reduction_entry(
+            candidate,
+            ManaCost::generic(candidate.effective_mana_value()),
+            SpellCostSource::Emerge,
+        )];
+        super::casting::cast_mana_affordable(
+            state,
+            player,
+            object_id,
+            emerge_base,
+            &super::casting::CastPricing {
+                variant,
+                permission,
+                accepted: &accepted,
+                defiler: super::casting::DefilerCredit::Offerable { committed_life: 0 },
+            },
+        )
     })
 }
 

@@ -26,9 +26,17 @@ const MULLDRIFTER: &str = "Flying\nWhen this creature enters, draw two cards.\nE
 
 const GOBLIN_HEELCUTTER: &str = "Whenever this creature attacks, target creature can't block this turn.\nDash {2}{R} (You may cast this spell for its dash cost. If you do, it gains haste, and it's returned from the battlefield to its owner's hand at the beginning of the next end step.)";
 
-/// Put a Defiler on P0's battlefield with the statics its Oracle text parses to
-/// (not its cast trigger, which would add an unrelated prompt).
-fn add_defiler(scenario: &mut GameScenario, name: &str, oracle: &str, keyword: &str) {
+/// Put a Defiler on P0's battlefield, with its printed mana cost and colour and
+/// the statics its Oracle text parses to (not its cast trigger, which would add
+/// an unrelated prompt).
+fn add_defiler(
+    scenario: &mut GameScenario,
+    name: &str,
+    oracle: &str,
+    keyword: &str,
+    mana_cost: ManaCost,
+    color: ManaColor,
+) -> ObjectId {
     let parsed = parse_oracle_text(oracle, name, &[keyword.into()], &["Creature".into()], &[]);
     assert!(
         parsed
@@ -38,10 +46,42 @@ fn add_defiler(scenario: &mut GameScenario, name: &str, oracle: &str, keyword: &
         "{name} must parse to a Defiler cost reduction, got {:?}",
         parsed.statics
     );
-    let mut defiler = scenario.add_creature(P0, name, 3, 3);
+    let mut defiler = scenario.add_creature(P0, name, 4, 4);
+    defiler.with_mana_cost(mana_cost).with_color(vec![color]);
     for s in parsed.statics {
         defiler.with_static_definition(s);
     }
+    defiler.id()
+}
+
+/// Defiler of Dreams, {3}{U}{U}.
+fn add_defiler_of_dreams(scenario: &mut GameScenario) -> ObjectId {
+    add_defiler(
+        scenario,
+        "Defiler of Dreams",
+        DEFILER_OF_DREAMS,
+        "Flying",
+        ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+        },
+        ManaColor::Blue,
+    )
+}
+
+/// Defiler of Flesh, {2}{B}{B}.
+fn add_defiler_of_flesh(scenario: &mut GameScenario) -> ObjectId {
+    add_defiler(
+        scenario,
+        "Defiler of Flesh",
+        DEFILER_OF_FLESH,
+        "Menace",
+        ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+        },
+        ManaColor::Black,
+    )
 }
 
 fn add_colorless_mana(runner: &mut GameRunner, amount: usize) {
@@ -89,12 +129,8 @@ fn cast_accepting_the_defiler(runner: &mut GameRunner, spell: ObjectId) -> i32 {
 fn evoke_affordable_only_with_a_defiler_is_offered() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    add_defiler(
-        &mut scenario,
-        "Defiler of Dreams",
-        DEFILER_OF_DREAMS,
-        "Flying",
-    );
+    add_defiler_of_dreams(&mut scenario);
+
     let mulldrifter = scenario
         .add_creature_to_hand_from_oracle(P0, "Mulldrifter", 2, 2, MULLDRIFTER)
         .with_mana_cost(ManaCost::Cost {
@@ -129,6 +165,11 @@ fn dash_affordable_only_with_a_defiler_is_offered() {
         "Defiler of Instinct",
         DEFILER_OF_INSTINCT,
         "First strike",
+        ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+        },
+        ManaColor::Red,
     );
     let heelcutter = scenario
         .add_creature_to_hand_from_oracle(P0, "Goblin Heelcutter", 3, 2, GOBLIN_HEELCUTTER)
@@ -184,12 +225,8 @@ fn underdog_with_defiler_and_mana(life: i32, black: usize) -> (GameRunner, Objec
         .clone();
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    add_defiler(
-        &mut scenario,
-        "Defiler of Flesh",
-        DEFILER_OF_FLESH,
-        "Menace",
-    );
+    add_defiler_of_flesh(&mut scenario);
+
     let underdog = scenario
         .add_creature_to_graveyard(P0, "Tenacious Underdog", 3, 2)
         .with_static_definition(own_rider)
@@ -457,4 +494,730 @@ fn blitz_with_a_defiler_and_an_imposed_life_tax_completes_when_payable() {
     }
     assert_eq!(runner.state().players[0].life, 0, "all 6 life paid");
     assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// #9781: Spectacle, Emerge, Prowl, Prototype and More Than Meets the Eye offers
+// and the printed-cost side, priced as the cost lock prices them (CR 601.2f:
+// reductions, a Defiler's included, then the floor).
+// ---------------------------------------------------------------------------
+
+use engine::types::actions::AlternativeCastDecision;
+use engine::types::keywords::Keyword;
+
+const SPAWN_OF_MAYHEM: &str = "Spectacle {1}{B}{B} (You may cast this spell for its spectacle cost rather than its mana cost if an opponent lost life this turn.)\nFlying, trample\nAt the beginning of your upkeep, this creature deals 1 damage to each player. Then if you have 10 or less life, put a +1/+1 counter on this creature.";
+
+const CRESTING_MOSASAURUS: &str = "Emerge {6}{U} (You may cast this spell by sacrificing a creature and paying the emerge cost reduced by that creature's mana value.)\nWhen this creature enters, if you cast it, return each non-Dinosaur creature to its owner's hand.";
+
+const EARWIG_SQUAD: &str = "Prowl {2}{B} (You may cast this for its prowl cost if you dealt combat damage to a player this turn with a Goblin or Rogue.)\nWhen this creature enters, if its prowl cost was paid, search target opponent's library for three cards and exile them. Then that player shuffles.";
+
+const TRINISPHERE: &str = "As long as this artifact is untapped, each spell that would cost less than three mana to cast costs three mana to cast. (Additional mana in the cost may be paid with any color of mana or colorless mana. For example, a spell that would cost {1}{B} to cast costs {2}{B} to cast instead.)";
+
+const PHYREXIAN_FLESHGORGER: &str = "Prototype {1}{B}{B} \u{2014} 3/3 (You may cast this spell with different mana cost, color, and size. It keeps its abilities and types.)\nMenace, lifelink\nWard\u{2014}Pay life equal to this creature's power.";
+
+const SPIKEWHEEL_ACROBAT: &str = "Spectacle {2}{R} (You may cast this spell for its spectacle cost rather than its mana cost if an opponent lost life this turn.)";
+
+const WORLD_WAR_HULK: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI \u{2014} The next red or green creature spell you cast this turn can be cast without paying its mana cost.\nII \u{2014} Put three +1/+1 counters on target creature you control.\nIII \u{2014} Choose target creature you control. Until end of turn, double its power and toughness and it gains trample.";
+
+const HEARTLESS_SUMMONING: &str =
+    "Creature spells you cast cost {2} less to cast.\nCreatures you control get -1/-1.";
+
+fn pool_of(ty: ManaType, n: usize) -> Vec<ManaUnit> {
+    (0..n)
+        .map(|_| ManaUnit::new(ty, ObjectId(0), false, vec![]))
+        .collect()
+}
+
+fn cost(generic: u32, shards: &[ManaCostShard]) -> ManaCost {
+    ManaCost::Cost {
+        generic,
+        shards: shards.to_vec(),
+    }
+}
+
+/// How a cast of a spell from hand answers its prompts.
+#[derive(Default)]
+struct Answers {
+    /// `Some` answers an `AlternativeCastChoice`; `None` treats one as a stop.
+    alternative: Option<AlternativeCastDecision>,
+    /// The permanent a `PayCost` selection (an emerge sacrifice) picks.
+    sacrifice: Option<ObjectId>,
+}
+
+/// Cast `spell`, accept the Defiler, and answer the rest from `answers`.
+/// Returns the prompts seen until the spell reached the stack (the completion
+/// boundary: P0 holds priority with the spell on the stack), or where the cast
+/// stopped.
+fn cast_with_defiler(
+    runner: &mut GameRunner,
+    spell: ObjectId,
+    answers: &Answers,
+) -> Result<Vec<&'static str>, String> {
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .map_err(|e| format!("CastSpell rejected: {e:?}"))?;
+    let mut prompts = Vec::new();
+    for _ in 0..8 {
+        let next = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().objects[&spell].zone == Zone::Stack => {
+                return Ok(prompts);
+            }
+            WaitingFor::AlternativeCastChoice { .. } => match answers.alternative {
+                Some(choice) => GameAction::ChooseAlternativeCast { choice },
+                None => return Err(format!("unexpected choice after {prompts:?}")),
+            },
+            WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost { pay: true },
+            WaitingFor::PayCost { .. } => match answers.sacrifice {
+                Some(id) => GameAction::SelectCards { cards: vec![id] },
+                None => return Err(format!("unexpected PayCost after {prompts:?}")),
+            },
+            WaitingFor::ManaPayment { .. } => GameAction::PassPriority,
+            other => return Err(format!("cast stopped at {other:?} after {prompts:?}")),
+        };
+        prompts.push(match &runner.state().waiting_for {
+            WaitingFor::AlternativeCastChoice { .. } => "AlternativeCastChoice",
+            _ => runner.waiting_for_kind(),
+        });
+        runner
+            .act(next.clone())
+            .map_err(|e| format!("{next:?} rejected after {prompts:?}: {e:?}"))?;
+    }
+    Err(format!("cast did not complete: {prompts:?}"))
+}
+
+fn offered(runner: &GameRunner, spell: ObjectId) -> bool {
+    engine::ai_support::legal_actions(runner.state())
+        .iter()
+        .any(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == spell))
+}
+
+/// The cast is not a legal action, and the handler can't complete it: it is
+/// refused at once or once the Defiler is accepted, with nothing paid.
+fn assert_refused(runner: &mut GameRunner, spell: ObjectId) {
+    assert!(
+        !offered(runner, spell),
+        "the cast must not be a legal action"
+    );
+    let life = runner.state().players[0].life;
+    let pool = runner.state().players[0].mana_pool.total();
+    let result = cast_with_defiler(runner, spell, &Answers::default());
+    assert!(result.is_err(), "the cast must not complete: {result:?}");
+    assert_eq!(runner.state().players[0].life, life, "no life paid");
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        pool,
+        "no mana paid"
+    );
+}
+/// An untapped Trinisphere under P1's control, its floor parsed from Oracle text.
+fn add_trinisphere(scenario: &mut GameScenario) {
+    let parsed = parse_oracle_text(TRINISPHERE, "Trinisphere", &[], &["Artifact".into()], &[]);
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|s| format!("{s:?}").contains("Minimum")),
+        "reach: Trinisphere parses to a cost floor, got {:?}",
+        parsed.statics
+    );
+    let mut trinisphere = scenario.add_creature(engine::game::scenario::P1, "Trinisphere", 0, 1);
+    trinisphere.as_artifact();
+    for s in parsed.statics {
+        trinisphere.with_static_definition(s);
+    }
+}
+
+/// Defiler of Flesh, Spawn of Mayhem in hand, `black` black mana, and an
+/// opponent who lost life this turn (CR 702.137a's spectacle gate).
+fn spawn_with_defiler(black: usize, trinisphere: bool) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    add_defiler_of_flesh(&mut scenario);
+    if trinisphere {
+        add_trinisphere(&mut scenario);
+    }
+    let spawn = scenario
+        .add_creature_to_hand(P0, "Spawn of Mayhem", 4, 4)
+        .from_oracle_text_with_keywords(&["Spectacle", "Flying", "Trample"], SPAWN_OF_MAYHEM)
+        .with_mana_cost(cost(2, &[ManaCostShard::Black, ManaCostShard::Black]))
+        .with_color(vec![ManaColor::Black])
+        .id();
+    scenario.with_mana_pool(P0, pool_of(ManaType::Black, black));
+    let mut runner = scenario.build();
+    runner.state_mut().players[1].life_lost_this_turn = 1;
+    assert!(
+        runner.state().objects[&spawn]
+            .keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Spectacle(_))),
+        "reach: Spawn of Mayhem carries Spectacle"
+    );
+    (runner, spawn)
+}
+
+/// CR 702.137a + CR 118.9d: spectacle {1}{B}{B} less the Defiler's {B} is {1}{B}.
+/// With {B}{B} the printed {2}{B}{B} (even reduced to {2}{B}) is unaffordable, so
+/// the spectacle cast is the only one, taken for {B}{B} and 2 life.
+#[test]
+fn spectacle_affordable_only_with_a_defiler_is_offered_and_completes() {
+    let (mut runner, spawn) = spawn_with_defiler(2, false);
+    let life_before = runner.state().players[0].life;
+    assert!(
+        offered(&runner, spawn),
+        "the spectacle cast is a legal action"
+    );
+
+    let result = cast_with_defiler(&mut runner, spawn, &Answers::default());
+
+    assert_eq!(result, Ok(vec!["DefilerPayment"]));
+    assert_eq!(runner.state().players[0].life, life_before - 2);
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "{{1}}{{B}}{{B}} less {{B}} takes both black mana"
+    );
+}
+
+/// CR 118.9b: alternative costs are optional. With {B}{B}{B} the printed
+/// {2}{B}{B} is affordable only with the Defiler ({2}{B}) and spectacle
+/// {1}{B}{B} is affordable outright, so the player chooses; choosing the printed
+/// cost completes through the Defiler.
+#[test]
+fn printed_cost_affordable_only_with_a_defiler_keeps_the_spectacle_choice() {
+    let (mut runner, spawn) = spawn_with_defiler(3, false);
+    let life_before = runner.state().players[0].life;
+
+    let result = cast_with_defiler(
+        &mut runner,
+        spawn,
+        &Answers {
+            alternative: Some(AlternativeCastDecision::Normal),
+            ..Answers::default()
+        },
+    );
+
+    assert_eq!(
+        result,
+        Ok(vec!["AlternativeCastChoice", "DefilerPayment"]),
+        "both casts are payable, so the player must be asked"
+    );
+    assert_eq!(runner.state().players[0].life, life_before - 2);
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "{{2}}{{B}}{{B}} less {{B}} takes all three black mana"
+    );
+}
+
+/// CR 601.2f: Trinisphere's floor applies after every reduction. Spectacle
+/// {1}{B}{B} less the Defiler's {B} is {1}{B}, floored to {2}{B}; the printed
+/// {2}{B}{B} less {B} is {2}{B}. Neither can be paid with {B}{B}.
+#[test]
+fn spectacle_with_a_defiler_under_trinisphere_is_not_offered_for_two_mana() {
+    let (mut runner, spawn) = spawn_with_defiler(2, true);
+    assert_refused(&mut runner, spawn);
+}
+
+/// Control: with {B}{B}{B} both floored totals are payable; the spectacle cast
+/// with the Defiler takes all three mana.
+#[test]
+fn spectacle_with_a_defiler_under_trinisphere_pays_the_floor() {
+    let (mut runner, spawn) = spawn_with_defiler(3, true);
+    let life_before = runner.state().players[0].life;
+
+    let result = cast_with_defiler(
+        &mut runner,
+        spawn,
+        &Answers {
+            alternative: Some(AlternativeCastDecision::Alternative),
+            ..Answers::default()
+        },
+    );
+
+    assert_eq!(result, Ok(vec!["AlternativeCastChoice", "DefilerPayment"]));
+    assert_eq!(runner.state().players[0].life, life_before - 2);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+}
+
+/// Cresting Mosasaurus in hand with Defiler of Dreams, `fodder` (name, mana
+/// cost) on P0's battlefield, `colorless` colourless mana and optionally an
+/// untapped Trinisphere.
+fn mosasaurus_board(
+    fodder: Option<(&str, ManaCost)>,
+    colorless: usize,
+    trinisphere: bool,
+) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let defiler = add_defiler_of_dreams(&mut scenario);
+    if trinisphere {
+        add_trinisphere(&mut scenario);
+    }
+    let fodder = fodder.map(|(name, mana_cost)| {
+        scenario
+            .add_creature(P0, name, 2, 2)
+            .with_mana_cost(mana_cost)
+            .id()
+    });
+    let mosasaurus = scenario
+        .add_creature_to_hand_from_oracle(P0, "Cresting Mosasaurus", 4, 8, CRESTING_MOSASAURUS)
+        .with_subtypes(vec!["Dinosaur"])
+        .with_mana_cost(cost(6, &[ManaCostShard::Blue, ManaCostShard::Blue]))
+        .with_color(vec![ManaColor::Blue])
+        .id();
+    scenario.with_mana_pool(P0, pool_of(ManaType::Colorless, colorless));
+    let runner = scenario.build();
+    assert!(
+        runner.state().objects[&mosasaurus]
+            .keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Emerge(_))),
+        "reach: Cresting Mosasaurus carries Emerge"
+    );
+    (runner, mosasaurus, defiler, fodder)
+}
+
+/// CR 702.119a + CR 118.9d: emerge {6}{U} less the sacrificed mana value 2 is
+/// {4}{U}; less the Defiler's {U} it is {4}. With four colourless mana the emerge
+/// cast is the only one, taken for the sacrifice, {4} and 2 life.
+#[test]
+fn emerge_affordable_only_with_a_defiler_is_offered_and_completes() {
+    let (mut runner, mosasaurus, _, bears) = mosasaurus_board(
+        Some(("Grizzly Bears", cost(1, &[ManaCostShard::Green]))),
+        4,
+        false,
+    );
+    let bears = bears.unwrap();
+    assert!(
+        offered(&runner, mosasaurus),
+        "the emerge cast is a legal action"
+    );
+    let life_before = runner.state().players[0].life;
+
+    let result = cast_with_defiler(
+        &mut runner,
+        mosasaurus,
+        &Answers {
+            sacrifice: Some(bears),
+            ..Answers::default()
+        },
+    );
+
+    assert!(result.is_ok(), "the emerge cast completes: {result:?}");
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[0].life, life_before - 2);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0, "{{4}} paid");
+}
+
+/// CR 702.119c + CR 601.2f: the permanent to sacrifice is chosen as the emerge
+/// cost is announced and sacrificed as the total is paid, after the total is
+/// locked, so a sacrificed Defiler's own reduction still applies. Emerge {6}{U}
+/// less Defiler of Dreams' mana value 5, less its {U}, is {1}.
+#[test]
+fn emerge_sacrificing_the_defiler_keeps_its_reduction() {
+    let (mut runner, mosasaurus, defiler, _) = mosasaurus_board(None, 1, false);
+    assert_eq!(
+        runner.state().objects[&defiler].effective_mana_value(),
+        5,
+        "reach: Defiler of Dreams has mana value 5"
+    );
+    assert!(
+        offered(&runner, mosasaurus),
+        "the emerge cast is a legal action"
+    );
+    let life_before = runner.state().players[0].life;
+
+    let result = cast_with_defiler(
+        &mut runner,
+        mosasaurus,
+        &Answers {
+            sacrifice: Some(defiler),
+            ..Answers::default()
+        },
+    );
+
+    assert!(result.is_ok(), "the emerge cast completes: {result:?}");
+    assert_eq!(runner.state().objects[&defiler].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[0].life, life_before - 2);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0, "{{1}} paid");
+}
+
+/// CR 601.2f: emerge {6}{U} less a mana value 4 sacrifice, less the Defiler's
+/// {U}, is {2}; Trinisphere's floor, applied last, makes it {3}. Two mana can't
+/// pay it.
+#[test]
+fn emerge_with_a_defiler_under_trinisphere_is_not_offered_for_two_mana() {
+    let (mut runner, mosasaurus, _, _) = mosasaurus_board(
+        Some(("Hill Giant", cost(3, &[ManaCostShard::Red]))),
+        2,
+        true,
+    );
+    assert_refused(&mut runner, mosasaurus);
+}
+
+/// Control: with three mana the floored {3} is paid exactly.
+#[test]
+fn emerge_with_a_defiler_under_trinisphere_pays_exactly_the_floor() {
+    let (mut runner, mosasaurus, _, giant) = mosasaurus_board(
+        Some(("Hill Giant", cost(3, &[ManaCostShard::Red]))),
+        3,
+        true,
+    );
+    let giant = giant.unwrap();
+    assert!(
+        offered(&runner, mosasaurus),
+        "the emerge cast is a legal action"
+    );
+    let life_before = runner.state().players[0].life;
+
+    let result = cast_with_defiler(
+        &mut runner,
+        mosasaurus,
+        &Answers {
+            sacrifice: Some(giant),
+            ..Answers::default()
+        },
+    );
+
+    assert!(result.is_ok(), "the emerge cast completes: {result:?}");
+    assert_eq!(runner.state().objects[&giant].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[0].life, life_before - 2);
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "the floored {{3}} takes all three mana"
+    );
+}
+
+/// CR 702.76a + CR 118.9d: prowl {2}{B} less the Defiler's {B} is {2}. With two
+/// colourless mana the printed {3}{B}{B} (reduced {3}{B}) and the raw prowl cost
+/// are unaffordable, so the prowl cast is the only one, taken for {2} and 2 life.
+#[test]
+fn prowl_affordable_only_with_a_defiler_is_offered_and_completes() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    add_defiler_of_flesh(&mut scenario);
+    let squad = scenario
+        .add_creature_to_hand_from_oracle(P0, "Earwig Squad", 5, 3, EARWIG_SQUAD)
+        .with_subtypes(vec!["Goblin", "Rogue"])
+        .with_mana_cost(cost(3, &[ManaCostShard::Black, ManaCostShard::Black]))
+        .with_color(vec![ManaColor::Black])
+        .id();
+    scenario.with_mana_pool(P0, pool_of(ManaType::Colorless, 2));
+    let mut runner = scenario.build();
+    // CR 702.76a: a Goblin the caster controlled dealt combat damage to a player.
+    runner
+        .state_mut()
+        .creature_types_dealt_combat_damage_this_turn
+        .insert((P0, "Goblin".to_string()));
+    assert!(
+        runner.state().objects[&squad]
+            .keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Prowl(_))),
+        "reach: Earwig Squad carries Prowl"
+    );
+    let life_before = runner.state().players[0].life;
+
+    let result = cast_with_defiler(&mut runner, squad, &Answers::default());
+
+    assert_eq!(result, Ok(vec!["DefilerPayment"]));
+    assert_eq!(runner.state().players[0].life, life_before - 2);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0, "{{2}} paid");
+}
+
+/// CR 118.9b + CR 118.9d: Mulldrifter's printed {4}{U} less the Defiler's {U}
+/// is {4} and evoke {2}{U} less {U} is {2}, so with four colourless mana both
+/// are payable and the player chooses; the printed cast completes through the
+/// Defiler.
+#[test]
+fn evoke_with_a_printed_cost_payable_only_with_a_defiler_keeps_the_choice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    add_defiler_of_dreams(&mut scenario);
+    let mulldrifter = scenario
+        .add_creature_to_hand_from_oracle(P0, "Mulldrifter", 2, 2, MULLDRIFTER)
+        .with_mana_cost(cost(4, &[ManaCostShard::Blue]))
+        .with_color(vec![ManaColor::Blue])
+        .id();
+    scenario.with_mana_pool(P0, pool_of(ManaType::Colorless, 4));
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[0].life;
+
+    let result = cast_with_defiler(
+        &mut runner,
+        mulldrifter,
+        &Answers {
+            alternative: Some(AlternativeCastDecision::Normal),
+            ..Answers::default()
+        },
+    );
+
+    assert_eq!(result, Ok(vec!["AlternativeCastChoice", "DefilerPayment"]));
+    assert_eq!(runner.state().players[0].life, life_before - 2);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0, "{{4}} paid");
+}
+
+/// Phyrexian Fleshgorger ({7} colourless artifact creature; prototype
+/// {1}{B}{B}, 3/3) in hand with Defiler of Flesh and `black` black mana.
+fn fleshgorger_with_defiler(black: usize) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    add_defiler_of_flesh(&mut scenario);
+    let fleshgorger = scenario
+        .add_creature_to_hand(P0, "Phyrexian Fleshgorger", 7, 5)
+        .as_artifact_creature()
+        .from_oracle_text_with_keywords(
+            &["Prototype", "Menace", "Lifelink", "Ward"],
+            PHYREXIAN_FLESHGORGER,
+        )
+        .with_mana_cost(ManaCost::generic(7))
+        .id();
+    scenario.with_mana_pool(P0, pool_of(ManaType::Black, black));
+    let runner = scenario.build();
+    assert!(
+        runner.state().objects[&fleshgorger]
+            .keywords
+            .iter()
+            .any(|k| matches!(
+                k,
+                Keyword::Prototype {
+                    power: Some(3),
+                    toughness: Some(3),
+                    ..
+                }
+            )),
+        "reach: Phyrexian Fleshgorger carries its prototype"
+    );
+    assert!(
+        runner.state().objects[&fleshgorger].color.is_empty(),
+        "reach: the printed Fleshgorger is colourless"
+    );
+    (runner, fleshgorger)
+}
+
+/// CR 702.160a + CR 718.3b: the prototyped spell has only the prototype mana
+/// cost and its colour (black), so Defiler of Flesh reduces {1}{B}{B} to {1}{B}:
+/// payable with {B}{B}. The printed {7} is not.
+#[test]
+fn prototype_is_priced_as_the_black_prototyped_spell() {
+    let (mut runner, fleshgorger) = fleshgorger_with_defiler(2);
+    assert!(
+        offered(&runner, fleshgorger),
+        "the prototyped cast is a legal action"
+    );
+    let life_before = runner.state().players[0].life;
+
+    let result = cast_with_defiler(&mut runner, fleshgorger, &Answers::default());
+
+    assert_eq!(result, Ok(vec!["DefilerPayment"]));
+    assert!(
+        runner.state().objects[&fleshgorger]
+            .color
+            .contains(&ManaColor::Black),
+        "the spell on the stack is the prototyped, black spell"
+    );
+    assert_eq!(runner.state().players[0].life, life_before - 2);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+}
+
+/// Control: with {B}{B}{B} the prototype cost is payable without the Defiler,
+/// which is still offered; accepting it leaves one black mana.
+#[test]
+fn prototype_offers_the_defiler_when_payable_without_it() {
+    let (mut runner, fleshgorger) = fleshgorger_with_defiler(3);
+
+    let result = cast_with_defiler(&mut runner, fleshgorger, &Answers::default());
+
+    assert_eq!(result, Ok(vec!["DefilerPayment"]));
+    assert_eq!(runner.state().players[0].mana_pool.total(), 1);
+}
+
+/// CR 118.9 + CR 118.9b: "the next red or green creature spell you cast this
+/// turn can be cast without paying its mana cost" (World War Hulk, chapter I)
+/// is an alternative cost to the printed cost, and spectacle is another. Only
+/// one applies (CR 118.9a), so with spectacle {2}{R} affordable the player
+/// still chooses, and the free printed cast completes with no mana spent.
+#[test]
+fn a_pending_free_cast_keeps_the_spectacle_choice() {
+    let parsed = parse_oracle_text(
+        WORLD_WAR_HULK,
+        "World War Hulk",
+        &[],
+        &["Enchantment".into()],
+        &["Saga".into()],
+    );
+    let spell_filter = parsed
+        .triggers
+        .iter()
+        .find_map(|trigger| {
+            trigger
+                .execute
+                .as_ref()
+                .and_then(|ability| match &*ability.effect {
+                    engine::types::ability::Effect::GrantNextSpellAbility {
+                        modifier:
+                            engine::types::game_state::NextSpellModifier::WithoutPayingManaCost,
+                        spell_filter,
+                        ..
+                    } => Some(spell_filter.clone()),
+                    _ => None,
+                })
+        })
+        .expect("reach: World War Hulk's chapter I grants a free next spell");
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let acrobat = scenario
+        .add_creature_to_hand(P0, "Spikewheel Acrobat", 5, 2)
+        .from_oracle_text_with_keywords(&["Spectacle"], SPIKEWHEEL_ACROBAT)
+        .with_mana_cost(cost(3, &[ManaCostShard::Red]))
+        .with_color(vec![ManaColor::Red])
+        .id();
+    scenario.with_mana_pool(P0, {
+        let mut pool = pool_of(ManaType::Colorless, 2);
+        pool.extend(pool_of(ManaType::Red, 1));
+        pool
+    });
+    let mut runner = scenario.build();
+    runner.state_mut().players[1].life_lost_this_turn = 1;
+    runner.state_mut().pending_next_spell_modifiers.push(
+        engine::types::game_state::PendingNextSpellModifier {
+            player: P0,
+            modifier: engine::types::game_state::NextSpellModifier::WithoutPayingManaCost,
+            spell_filter,
+            source_id: None,
+        },
+    );
+
+    let result = cast_with_defiler(
+        &mut runner,
+        acrobat,
+        &Answers {
+            alternative: Some(AlternativeCastDecision::Normal),
+            ..Answers::default()
+        },
+    );
+
+    assert_eq!(result, Ok(vec!["AlternativeCastChoice"]));
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        3,
+        "the free printed cast spends no mana"
+    );
+}
+
+/// Optimus Prime, Hero // Optimus Prime, Autobot Leader from a raw-MTGJSON
+/// fixture, so both faces are the printed ones.
+fn optimus_db() -> &'static engine::database::card_db::CardDatabase {
+    static DB: std::sync::OnceLock<engine::database::card_db::CardDatabase> =
+        std::sync::OnceLock::new();
+    DB.get_or_init(|| {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/optimus_prime_hero_mtmte_atomic.json");
+        engine::database::card_db::CardDatabase::from_mtgjson(&path)
+            .expect("parse both printed Optimus Prime faces")
+    })
+}
+
+/// Optimus Prime, Hero in hand with Heartless Summoning and Defiler of Dreams.
+fn optimus_board(pool: Vec<ManaUnit>) -> (GameRunner, ObjectId) {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    add_defiler_of_dreams(&mut scenario);
+    scenario.add_enchantment_from_oracle(P0, "Heartless Summoning", HEARTLESS_SUMMONING);
+    let optimus = scenario.add_real_card(P0, "Optimus Prime, Hero", Zone::Hand, optimus_db());
+    scenario.with_mana_pool(P0, pool);
+    let runner = scenario.build();
+    assert!(
+        runner.state().objects[&optimus]
+            .keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::MoreThanMeetsTheEye(_))),
+        "reach: Optimus Prime, Hero carries More Than Meets the Eye"
+    );
+    (runner, optimus)
+}
+
+/// CR 702.162a: the spell cast converted has the characteristics of Optimus
+/// Prime, Autobot Leader, a Legendary Artifact — Vehicle, so Heartless
+/// Summoning's "Creature spells you cast cost {2} less" doesn't reduce it; the
+/// Defiler does (it's blue). The printed {3}{U}{R}{W} creature spell is {1}{R}{W}
+/// with both reductions, so both casts are payable with {2}{R}{W}: the choice
+/// shows the converted cost {2}{U}{R}{W}, and the converted cast takes all four.
+#[test]
+fn converted_spell_is_priced_as_the_converted_face() {
+    let (mut runner, optimus) = optimus_board({
+        let mut pool = pool_of(ManaType::Colorless, 2);
+        pool.extend(pool_of(ManaType::Red, 1));
+        pool.extend(pool_of(ManaType::White, 1));
+        pool
+    });
+    let life_before = runner.state().players[0].life;
+    let card_id = runner.state().objects[&optimus].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: optimus,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the cast starts");
+    let WaitingFor::AlternativeCastChoice {
+        alternative_cost, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "both casts are payable, so the player chooses, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        alternative_cost.as_ref(),
+        Some(&cost(
+            2,
+            &[
+                ManaCostShard::Blue,
+                ManaCostShard::Red,
+                ManaCostShard::White
+            ]
+        )),
+        "Heartless Summoning doesn't reduce the converted Vehicle spell"
+    );
+    runner
+        .act(GameAction::ChooseAlternativeCast {
+            choice: AlternativeCastDecision::Alternative,
+        })
+        .expect("choose the converted cast");
+    assert_eq!(runner.waiting_for_kind(), "DefilerPayment");
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("accept the Defiler");
+
+    assert_eq!(runner.state().objects[&optimus].zone, Zone::Stack);
+    assert_eq!(
+        runner.state().objects[&optimus].name,
+        "Optimus Prime, Autobot Leader"
+    );
+    assert_eq!(runner.state().players[0].life, life_before - 2);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+}
+
+/// With only {R}{W} neither the printed {1}{R}{W} nor the converted {2}{R}{W}
+/// (both with the Defiler) can be paid.
+#[test]
+fn converted_spell_is_not_offered_when_neither_cost_is_payable() {
+    let (mut runner, optimus) = optimus_board({
+        let mut pool = pool_of(ManaType::Red, 1);
+        pool.extend(pool_of(ManaType::White, 1));
+        pool
+    });
+    assert_refused(&mut runner, optimus);
 }
