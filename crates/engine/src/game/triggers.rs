@@ -3286,9 +3286,10 @@ fn collect_matching_triggers_inner(
     // on the battlefield that left it in the event, the moving source
     // included. Its after-read takes the destination-zone abilities from the
     // object that is there now, so a copy's ability does not follow its card
-    // (CR 400.7) and an ability it regained on arrival is found. Only a token
-    // that has already ceased to exist has no such object, and its ability
-    // triggers from the record (CR 111.7).
+    // (CR 400.7) and an ability it regained on arrival is found. A token that
+    // has already ceased to exist has no such object, and its ability triggers
+    // from the record (CR 111.7); an ability such a token had suppressed on
+    // the battlefield (Humility) is not in the record, so it is not supported.
     let after_read_of_moving_source = use_latched_trigger_entries
         && matches!(visit, TriggerSourceVisit::EventSubject)
         && matches!(
