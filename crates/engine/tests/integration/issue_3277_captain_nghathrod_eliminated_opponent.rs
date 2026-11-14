@@ -117,7 +117,12 @@ fn captain_nghathrod_end_step_skips_eliminated_opponent_graveyard() {
         });
 
     let mut events = Vec::new();
-    eliminate_player(runner.state_mut(), P1, &mut events);
+    eliminate_player(
+        runner.state_mut(),
+        P1,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
 
     assert!(
         runner.state().players[1].is_eliminated,

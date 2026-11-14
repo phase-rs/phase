@@ -261,7 +261,7 @@ pub(crate) fn handle_priority_pass_with_limit(
 /// holder's seat is the controller, so the live `priority_player` must be
 /// compared against that mapped submitter, never against the seat itself.
 ///
-/// CR 732.2a-c: a shortened pre-cast shortcut proposal (CR 732.2a-b) obliges the
+/// CR 732.2a-c: a shortened shortcut proposal (CR 732.2a-b), on either route, obliges the
 /// player who now has priority to "make a different game choice than what was
 /// originally proposed" (CR 732.2c). The runtime models that obligation as a
 /// divergence latch, and a bare pass can never discharge it.
@@ -275,7 +275,7 @@ pub fn pass_priority_legality(state: &GameState, player: PlayerId) -> Result<(),
     }
     if precast_copy_shortcut::blocks_pass(state, player) {
         return Err(EngineError::ActionNotAllowed(
-            "A shortened pre-cast shortcut requires a different meaningful action before passing"
+            "A shortened shortcut requires a different meaningful action before passing"
                 .to_string(),
         ));
     }
@@ -1150,7 +1150,7 @@ mod tests {
             Err(EngineError::NotYourPriority)
         ));
 
-        // (c) CR 732.2c: a shortened pre-cast shortcut obliges its owner to make
+        // (c) CR 732.2c: a shortened shortcut obliges its owner to make
         // a different game choice; a bare pass can never discharge it.
         let mut latched = setup();
         latched.precast_shortcut_runtime.must_diverge = Some(PlayerId(0));
@@ -1160,7 +1160,7 @@ mod tests {
             panic!("a latched divergence obligation must reject a bare pass");
         };
         assert!(
-            message.contains("shortened pre-cast shortcut"),
+            message.contains("shortened shortcut"),
             "the reducer's exact message must be preserved by the extraction, got {message:?}"
         );
     }

@@ -218,6 +218,7 @@ fn point_named_by(
         K::MayChoice => Some(ChoicePoint::MayGate),
         K::UnlessBreak => Some(ChoicePoint::UnlessBreak),
         K::ManaColor { .. } => Some(ChoicePoint::ManaColor),
+        K::Order { .. } => Some(ChoicePoint::ReplacementOrder),
     }
 }
 
@@ -236,6 +237,16 @@ fn kind_governed_disagreement(
         )),
         None => Some(format!("{at}: governing {kind:?} names no choice point")),
     }
+}
+
+/// CR 601.2c + CR 119.3: a charged slot (`victim_slot`, `seat_takes`) is an announced target.
+fn charged_slot_disagreement(at: &str, carrier: &str, slot: &DecisionSlot) -> Option<String> {
+    (slot.point != ChoicePoint::AnnouncedTarget).then(|| {
+        format!(
+            "{at}: a {carrier} entry carries {:?}, not the AnnouncedTarget its field's contract names",
+            slot.point
+        )
+    })
 }
 
 /// CR 603.3b: a `PinnedDecision::Order`'s slot is minted at `TriggerOrder`, instance `0`,
@@ -345,7 +356,14 @@ fn every_migrated_slot_in_a_committed_gz_carries_the_point_its_neighbour_names()
                 .then(|| path.get(path.len().wrapping_sub(2)).copied())
                 .flatten()
                 .filter(|tag| tag.parse::<usize>().is_err());
-            let is_victim_slot = path.len() >= 3 && path[path.len() - 3] == "victim_slot";
+            let charged_carrier = (path.len() >= 3)
+                .then(|| (path[path.len() - 3], path[path.len() - 1]))
+                .and_then(|(carrier, field)| match (carrier, field) {
+                    ("victim_slot", "0") | ("seat_takes", "1") | ("forced_aims", "0") => {
+                        Some(carrier)
+                    }
+                    _ => None,
+                });
             let is_leading_aim = path.len() >= 3
                 && path[path.len() - 3] == "leading_aims"
                 && path.last() == Some(&"0");
@@ -395,24 +413,21 @@ fn every_migrated_slot_in_a_committed_gz_carries_the_point_its_neighbour_names()
                         other.len()
                     )),
                 }
-            } else if is_victim_slot {
+            } else if let Some(carrier) = charged_carrier {
                 // CR 601.2c. `PeriodicDelta.victim_slot`'s own contract says these are
                 // ANNOUNCED rather than published, and that an entry here with no matching
                 // schema point is CORRECT — so slot equality is the wrong instrument at this
                 // carrier and the field's documented contract is the right one.
-                if slot.point != ChoicePoint::AnnouncedTarget {
-                    failures.push(format!(
-                        "{at_named}: a victim_slot entry carries {:?}, not the AnnouncedTarget its field's contract names",
-                        slot.point
-                    ));
-                }
-                governing_kinds.push("victim_slot".to_owned());
+                // `PeriodicDelta.seat_takes` and `forced_aims` key on those same charged slots.
+                failures.extend(charged_slot_disagreement(&at_named, carrier, &slot));
+                governing_kinds.push(carrier.to_owned());
             } else if is_leading_aim {
                 match leading_aim_governing_kind(&at_named, &value, &slot) {
-                    Ok(kind) => {
+                    Ok(Some(kind)) => {
                         governing_kinds.push(format!("{:?}", std::mem::discriminant(&kind)));
                         failures.extend(kind_governed_disagreement(&at_named, &slot, &kind));
                     }
+                    Ok(None) => governing_kinds.push("leading_aims".to_owned()),
                     Err(failure) => failures.push(failure),
                 }
             } else {
@@ -484,6 +499,15 @@ fn every_migrated_slot_in_a_committed_gz_carries_the_point_its_neighbour_names()
         "hostile/refused: an Order slot at a published point's choice must be reported"
     );
 
+    assert!(
+        charged_slot_disagreement(
+            "hostile",
+            "seat_takes",
+            &DecisionSlot::first(source.clone(), ChoicePoint::MayGate),
+        )
+        .is_some(),
+        "hostile/refused: a seat_takes slot at a may gate must be reported"
+    );
     let aimed = DecisionSlot::first(source, ChoicePoint::AnnouncedTarget);
     let point = serde_json::to_value(DecisionPoint {
         slot: aimed.clone(),
@@ -493,12 +517,25 @@ fn every_migrated_slot_in_a_committed_gz_carries_the_point_its_neighbour_names()
     let mut moved = aimed.clone();
     moved.index = 1;
     assert!(
-        leading_aim_governing_kind("hostile", &serde_json::json!([point]), &aimed).is_ok(),
-        "hostile/admitted: a leading aim at its one published slot is governed"
+        matches!(
+            leading_aim_governing_kind("hostile", &serde_json::json!([point]), &aimed),
+            Ok(Some(DecisionPointKind::MayChoice))
+        ),
+        "hostile/admitted: a leading aim at its one published slot is governed by that point"
     );
     assert!(
-        leading_aim_governing_kind("hostile", &serde_json::json!([point]), &moved).is_err(),
-        "hostile/refused: a leading aim at no published slot must be reported"
+        matches!(
+            leading_aim_governing_kind("hostile", &serde_json::json!([point]), &moved),
+            Ok(None)
+        ),
+        "hostile/admitted: a leading aim at an unpublished announced target is a charged slot"
+    );
+    let mut gated = moved.clone();
+    gated.point = ChoicePoint::MayGate;
+    assert!(
+        leading_aim_governing_kind("hostile", &serde_json::json!([point]), &gated).is_err(),
+        "hostile/refused: a leading aim at no published slot and no announced target must be \
+         reported"
     );
     assert!(
         leading_aim_governing_kind("hostile", &serde_json::json!([point, point]), &aimed).is_err(),
@@ -506,17 +543,20 @@ fn every_migrated_slot_in_a_committed_gz_carries_the_point_its_neighbour_names()
     );
 }
 
-/// CR 603.3d + CR 601.2c: a `leading_aims` entry names a PUBLISHED target slot, so the one
-/// schema point at that slot is its governing neighbour.
+/// CR 603.3d + CR 601.2c: a `leading_aims` entry names a charged target slot, so the one schema
+/// point at that slot governs it, or, unpublished (a forced aim), the charged-slot contract does.
 fn leading_aim_governing_kind(
     at: &str,
     document: &serde_json::Value,
     slot: &DecisionSlot,
-) -> Result<engine::analysis::decision_template::DecisionPointKind, String> {
+) -> Result<Option<engine::analysis::decision_template::DecisionPointKind>, String> {
     let mut answered = Vec::new();
     collect_published_points(document, slot, &mut answered);
     match <[_; 1]>::try_from(answered) {
-        Ok([kind]) => Ok(kind),
+        Ok([kind]) => Ok(Some(kind)),
+        Err(none) if none.is_empty() => {
+            charged_slot_disagreement(at, "leading_aims", slot).map_or(Ok(None), Err)
+        }
         Err(other) => Err(format!(
             "{at}: a leading_aims entry names {} published points at its slot, so no point governs it",
             other.len()
@@ -548,6 +588,7 @@ fn kind_tag(kind: &engine::analysis::decision_template::DecisionPointKind) -> &'
         K::MayChoice => "MayChoice",
         K::UnlessBreak => "UnlessBreak",
         K::ManaColor { .. } => "ManaColor",
+        K::Order { .. } => "Order",
     }
 }
 

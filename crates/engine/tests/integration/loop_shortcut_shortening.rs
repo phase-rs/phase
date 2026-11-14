@@ -7,10 +7,10 @@
 //! zero-count proposal included: the handler floors nothing at zero, so a declaration naming it
 //! mints a proposal and opens the poll on a range that holds no place at all.
 
-use engine::ai_support::legal_actions;
+use engine::ai_support::{legal_actions, AI_SHORTEN_PLACE};
 use engine::analysis::decision_template::{IterationCount, ShortcutDecisionSchema};
 use engine::analysis::loop_check::ShortcutResponse;
-use engine::game::engine::{apply, EngineError};
+use engine::game::engine::{apply, EngineError, ShortenRefusal};
 use engine::game::interaction::{
     bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
 };
@@ -29,7 +29,9 @@ use engine::types::interaction::{
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-use crate::loop_shortcut::{gunzip_dump, reach_2p_optional_drain_offer, restore_dump};
+use crate::loop_shortcut::{
+    arm_responders, gunzip_dump, reach_2p_blight_priest_drain_offer, restore_dump,
+};
 use crate::loop_shortcut_drain_boards::weird_drain_board;
 
 /// The seat now being polled, and the seats still queued behind it.
@@ -70,10 +72,18 @@ fn shorten(state: &mut GameState, at_iteration: u32) -> Result<(), EngineError> 
     respond(state, ShortcutResponse::Shorten { at_iteration })
 }
 
-/// The restored four-seat drain dump, declared at `count` and parked at its first responder.
-/// Its offer is directly declarable, so no drive stands between the restore and the window.
+/// The restored four-seat drain dump, its responders armed, declared at `count` and parked at its
+/// first responder.
 fn weird_window(count: IterationCount) -> GameState {
+    weird_window_with(count, arm_responders)
+}
+
+/// The restored four-seat drain dump, `prepare`d at its offer, declared at `count` and parked at
+/// its first responder. Its offer is directly declarable, so no drive stands between the restore
+/// and the window.
+fn weird_window_with(count: IterationCount, prepare: fn(&mut GameState)) -> GameState {
     let mut state = weird_drain_board();
+    prepare(&mut state);
     let WaitingFor::LoopShortcut { proposer, .. } = state.waiting_for.clone() else {
         panic!(
             "the weird-drain fixture restores at its offer, got {:?}",
@@ -115,11 +125,25 @@ fn weird_offer_bound() -> u32 {
     schema.deliverable_capacity
 }
 
-/// The driven two-player optional-drain rig, declared at `count` and parked at its responder.
-/// This is the only reachable board whose schema admits `UntilLethal`: both committed dumps
-/// refuse that declaration against their bounded offers.
-fn rig_window(count: IterationCount) -> GameState {
-    let (mut runner, _life, _cleric) = reach_2p_optional_drain_offer();
+/// Marauding Blight-Priest's two-player drain, its responder armed, declared at `count` and parked
+/// at its responder.
+fn priest_window(count: IterationCount) -> GameState {
+    priest_window_with(count, arm_responders)
+}
+
+/// Marauding Blight-Priest's two-player drain, offered at P1's 19, `prepare`d at its offer,
+/// declared at `count` and parked at its responder.
+fn priest_window_with(count: IterationCount, prepare: fn(&mut GameState)) -> GameState {
+    let (runner, _life, _priest) = reach_2p_blight_priest_drain_offer();
+    declared_window(runner, count, prepare)
+}
+
+fn declared_window(
+    mut runner: engine::game::scenario::GameRunner,
+    count: IterationCount,
+    prepare: fn(&mut GameState),
+) -> GameState {
+    prepare(runner.state_mut());
     runner
         .act(GameAction::DeclareShortcut {
             count: count.clone(),
@@ -147,7 +171,19 @@ fn rig_window(count: IterationCount) -> GameState {
 /// the poll completes.
 #[test]
 fn a_place_at_the_proposed_count_is_refused_and_the_place_below_it_is_answered() {
-    let count = weird_offer_bound();
+    // Professor Dellian Fel's emblem ("Whenever you gain life, target opponent loses that much
+    // life.") under Bloodthirsty Conqueror ("Whenever an opponent loses life, you gain that much
+    // life.") takes one life from one opponent per repetition, so no seat leaves within the
+    // smallest opponent life total and the shortener survives to hold the ending point.
+    let board = weird_drain_board();
+    let count = board
+        .players
+        .iter()
+        .filter(|p| p.id != P0 && !p.is_eliminated)
+        .map(|p| p.life)
+        .min()
+        .and_then(|life| u32::try_from(life).ok())
+        .expect("the drain board seats a living opponent");
     let mut state = weird_window(IterationCount::Fixed(count));
     let (responder, queued) = window(&state);
 
@@ -181,53 +217,6 @@ fn a_place_at_the_proposed_count_is_refused_and_the_place_below_it_is_answered()
         state.waiting_for,
         WaitingFor::Priority { player: responder },
         "CR 732.2b/c: the shortcut is taken to the place the shortener named, and they hold it"
-    );
-}
-
-/// CR 704.5a: an `UntilLethal` proposal is ended by the loss state-based action rather than by
-/// a count, so it names no place past its end and CR 732.2b's range is not reopened. The largest
-/// place it admits would rewrite the count above the budget this engine drives, so `apply()`
-/// refuses it — before the event take and before any state write, which is why the poll is still
-/// the responder's afterwards and the next place they name is taken on the same board.
-///
-/// The window clause is what a bare `Err` cannot be: the refusal is scoped to the answer, not to
-/// the seat, so the same responder answers again and the shortcut is then TAKEN. Reds under
-/// restoring the responder's seam to its old `Ok` path — the place is answered for, the shortcut
-/// is dropped, and the window the second leg runs from is gone.
-#[test]
-fn the_largest_place_an_until_lethal_proposal_admits_is_refused_at_the_responders_seam() {
-    let mut state = rig_window(IterationCount::UntilLethal);
-    let poll = window(&state);
-    assert!(
-        poll.1.is_empty(),
-        "reach-guard: this shortener is the last responder, so nothing below is attributable to \
-         a queued seat"
-    );
-    let before: Vec<i32> = state.players.iter().map(|p| p.life).collect();
-
-    let refused = shorten(&mut state, u32::MAX);
-    assert!(
-        matches!(refused, Err(EngineError::InvalidAction(_))),
-        "the largest place an unbounded proposal admits is one this engine will not drive: \
-         {refused:?}"
-    );
-    assert_eq!(
-        window(&state),
-        poll,
-        "the refusal precedes the event take and every state write, so the poll is untouched"
-    );
-    assert_eq!(
-        state.players.iter().map(|p| p.life).collect::<Vec<_>>(),
-        before,
-        "NOT ONE cycle commits"
-    );
-
-    shorten(&mut state, 0).expect("the window the refusal left behind still takes a place");
-    assert_eq!(
-        state.waiting_for,
-        WaitingFor::Priority { player: poll.0 },
-        "CR 732.2b/c: the second answer is taken and its namer holds the ending point — so the \
-         refusal above was scoped to the place, not to the seat"
     );
 }
 
@@ -336,37 +325,39 @@ fn tenacity_board_with_seeded_interrupt(
     (state, responder, torment, blood)
 }
 
-/// CR 732.2b/c end to end, on a real four-seat board: the sole responder names a place above the
-/// budget this engine drives and is REFUSED with their window intact; from the state that
-/// refusal left behind they name a place the drive reaches, receive the ending point (CR 732.2c),
-/// and cast the instant in their hand at it — cutting the loop rather than losing to it.
+/// CR 732.2b/c end to end, on a real four-seat board: the sole responder names a place, receives
+/// the ending point (CR 732.2c), and casts the instant in their hand at it — cutting the loop
+/// rather than losing to it.
 ///
 /// The queue is asserted empty first, so the answer reaches consumption in one step and nothing
 /// below is attributable to a queued seat. The ending-point leg's discriminator is that the seat
 /// holding it is NOT the seat a handback would route to, which a bare `Priority` wait cannot be.
 /// The cast is driven through the pipeline rather than asserted around, and the life delta is
 /// deliberately not asserted: the loop's pending stack entries resolve alongside the spell.
-///
-/// Reds under restoring the responder's seam to its old `Ok` path: the first leg's `Err` fails
-/// at once, and the window the other two legs run from no longer exists.
 #[test]
-fn a_place_the_engine_cannot_drive_is_refused_and_the_next_answer_ends_the_loop() {
+fn the_responder_holds_the_ending_point_its_place_names_and_cuts_the_loop() {
     let Some(db) = crate::support::shared_card_db() else {
         return;
     };
     let (mut state, responder, torment, blood) = tenacity_board_with_seeded_interrupt(db);
-    let WaitingFor::LoopShortcut { proposer, .. } = state.waiting_for else {
+    let WaitingFor::LoopShortcut {
+        proposer,
+        ref schema,
+        ..
+    } = state.waiting_for
+    else {
         panic!("the seeded board is still at its offer")
     };
+    let count = schema.iteration_count.clone();
     apply(
         &mut state,
         proposer,
         GameAction::DeclareShortcut {
-            count: IterationCount::UntilLethal,
+            count,
             template: None,
         },
     )
-    .expect("this offer publishes no narrowed bound, so an unbounded declaration is legal");
+    .expect("the offer's own count is declarable");
 
     let poll = window(&state);
     assert_eq!(
@@ -375,31 +366,8 @@ fn a_place_the_engine_cannot_drive_is_refused_and_the_next_answer_ends_the_loop(
         "reach-guard: two of the three non-proposing seats are out of the game, so this answer \
          reaches consumption in one step with no queue to drain"
     );
-    let before: Vec<i32> = state.players.iter().map(|p| p.life).collect();
 
-    let over_budget = ShortcutDecisionSchema::default().deliverable_capacity + 1;
-    assert!(
-        admitted_places(&state).contains(&over_budget),
-        "reach-guard: CR 732.2b admits this place, so the refusal below is the DRIVE's and not \
-         the range's"
-    );
-    let refused = shorten(&mut state, over_budget);
-    assert!(
-        matches!(refused, Err(EngineError::InvalidAction(_))),
-        "the place one above the budget is refused at `apply()`: {refused:?}"
-    );
-    assert_eq!(
-        window(&state),
-        poll,
-        "the refusal precedes the event take and every state write, so the window survives it"
-    );
-    assert_eq!(
-        state.players.iter().map(|p| p.life).collect::<Vec<_>>(),
-        before,
-        "a refused answer commits nothing"
-    );
-
-    shorten(&mut state, 0).expect("the same responder names a place this engine drives");
+    shorten(&mut state, 0).expect("the responder names a place this engine drives");
     assert_eq!(
         state.waiting_for,
         WaitingFor::Priority { player: responder },
@@ -444,8 +412,8 @@ fn a_place_the_engine_cannot_drive_is_refused_and_the_next_answer_ends_the_loop(
 /// CREATURE, so the obvious removal destroys it and its own dies-trigger returns it to the
 /// battlefield as an enchantment, still carrying the trigger the loop turns on.
 ///
-/// Without this leg the arc row's "nothing re-offers it" is satisfied by the deliberate-action
-/// ring clear alone, which any cast would produce. Here the same cast on the same board DOES
+/// Without this leg the arc row's "nothing re-offers it" could be satisfied by the cast alone.
+/// Here the same cast on the same board DOES
 /// re-offer, so the arc row's halt is attributable to the edge that was cut.
 #[test]
 fn the_loop_edge_that_looks_like_the_answer_leaves_the_loop_standing() {
@@ -473,18 +441,24 @@ fn the_loop_edge_that_looks_like_the_answer_leaves_the_loop_standing() {
          target for creature removal"
     );
 
-    let WaitingFor::LoopShortcut { proposer, .. } = state.waiting_for else {
+    let WaitingFor::LoopShortcut {
+        proposer,
+        ref schema,
+        ..
+    } = state.waiting_for
+    else {
         panic!("the seeded board is still at its offer")
     };
+    let count = schema.iteration_count.clone();
     apply(
         &mut state,
         proposer,
         GameAction::DeclareShortcut {
-            count: IterationCount::UntilLethal,
+            count,
             template: None,
         },
     )
-    .expect("this offer publishes no narrowed bound");
+    .expect("the offer's own count is declarable");
     shorten(&mut state, 0).expect("the responder names a place this engine drives");
 
     let mut runner = GameRunner::from_state(state);
@@ -519,6 +493,33 @@ fn the_loop_edge_that_looks_like_the_answer_leaves_the_loop_standing() {
     );
 }
 
+/// The drain dump's responder window with its count tampered to the budget plus 2 and restored
+/// through the production decode. The tamper is `cap + 2`, not `cap + 1`: at `cap + 1` the
+/// published range ends at `cap`, so the boundary member `cap + 1` would be outside it.
+fn restored_over_cap_window() -> GameState {
+    let cap = ShortcutDecisionSchema::default().deliverable_capacity;
+    let mut state = weird_window(IterationCount::Fixed(weird_offer_bound()));
+    let WaitingFor::RespondToShortcut { proposal, .. } = &mut state.waiting_for else {
+        panic!("declaring on the drain dump opens a responder window")
+    };
+    proposal.count = IterationCount::Fixed(cap + 2);
+    let payload = serde_json::to_value(&state).expect("the tampered board serializes");
+    let state: GameState =
+        serde_json::from_value::<engine::types::game_state::PersistedGameState>(payload)
+            .expect("it decodes through the production restore")
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
+    let WaitingFor::RespondToShortcut { proposal, .. } = &state.waiting_for else {
+        panic!("the restore keeps the responder window")
+    };
+    assert_eq!(
+        proposal.count,
+        IterationCount::Fixed(cap + 2),
+        "the tampered count survives the decode, so no scrubber can be doing the refusing"
+    );
+    state
+}
+
 /// The class boundary on a RESTORED proposal carrying an over-cap `Fixed` count — the ingress the
 /// declare firewall never saw. CR 732.2b publishes every place below that count, and the seam
 /// refuses exactly the ones the drive cannot take: the boundary member one above the global
@@ -532,30 +533,7 @@ fn the_loop_edge_that_looks_like_the_answer_leaves_the_loop_standing() {
 #[test]
 fn a_restored_over_cap_proposal_refuses_what_it_cannot_drive_and_admits_the_repairing_place() {
     let cap = ShortcutDecisionSchema::default().deliverable_capacity;
-    // The tamper is `cap + 2`, not `cap + 1`: at `cap + 1` the published range ends at `cap` and
-    // the boundary member below would be outside it, so the range refusal would do the refusing.
-    let tampered = || {
-        let mut state = weird_window(IterationCount::Fixed(weird_offer_bound()));
-        let WaitingFor::RespondToShortcut { proposal, .. } = &mut state.waiting_for else {
-            panic!("declaring on the drain dump opens a responder window")
-        };
-        proposal.count = IterationCount::Fixed(cap + 2);
-        let payload = serde_json::to_value(&state).expect("the tampered board serializes");
-        let state: GameState =
-            serde_json::from_value::<engine::types::game_state::PersistedGameState>(payload)
-                .expect("it decodes through the production restore")
-                .into_game_state()
-                .expect("persisted test snapshot satisfies the checked restore contract");
-        let WaitingFor::RespondToShortcut { proposal, .. } = &state.waiting_for else {
-            panic!("the restore keeps the responder window")
-        };
-        assert_eq!(
-            proposal.count,
-            IterationCount::Fixed(cap + 2),
-            "the tampered count survives the decode, so no scrubber can be doing the refusing"
-        );
-        state
-    };
+    let tampered = restored_over_cap_window;
 
     let places = admitted_places(&tampered());
     assert_eq!(
@@ -799,15 +777,14 @@ fn a_zero_count_proposal_admits_no_place_while_accept_still_answers() {
     );
 }
 
-/// The engine-driven seat at a window whose range is empty. Its answer has to be one the reducer
-/// takes: `ai_support::candidates` builds a single candidate here and validates it against the
-/// reducer, so a verdict naming a place the proposal admits nowhere is dropped rather than
-/// refused on submit, leaving the polled seat nothing to play. The guard is the same rig at a
-/// count whose range does hold a place, where the seat still names one — so a seat that Accepted
-/// everywhere could not satisfy the row.
+/// The engine-driven seat at a window whose range is empty. The reducer filter drops the issued
+/// `Shorten`, which names a place the proposal admits nowhere, and leaves the `Accept` the reducer
+/// takes. The guard is the same rig at a count whose range does hold a place, where the issued
+/// `Shorten` survives beside the `Accept` — so a builder that issued only `Accept` could not
+/// satisfy the row.
 #[test]
 fn the_engine_driven_seat_can_answer_a_window_whose_range_is_empty() {
-    let mut state = rig_window(IterationCount::Fixed(0));
+    let mut state = priest_window(IterationCount::Fixed(0));
     assert!(
         admitted_places(&state).is_empty(),
         "reach-guard: this window's proposal admits no place"
@@ -815,34 +792,44 @@ fn the_engine_driven_seat_can_answer_a_window_whose_range_is_empty() {
     let (responder, _) = window(&state);
     let candidates = legal_actions(&state);
     assert_eq!(
-        candidates.len(),
-        1,
-        "the polled seat holds one candidate against an empty range, got {candidates:?}"
+        candidates,
+        vec![GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept
+        }],
+        "the polled seat holds only the Accept against an empty range"
     );
     apply(&mut state, responder, candidates[0].clone())
         .expect("the generated candidate must be one the reducer accepts");
 
-    let mut guard = rig_window(IterationCount::Fixed(1));
+    let mut guard = priest_window(IterationCount::Fixed(2));
     assert_eq!(
         admitted_places(&guard),
-        0..=0,
-        "reach-guard: a one-repetition proposal admits exactly place 0"
+        0..=1,
+        "reach-guard: a two-repetition proposal admits places 0 and 1"
     );
     let (guard_responder, _) = window(&guard);
     let guard_candidates = legal_actions(&guard);
     assert_eq!(
         guard_candidates,
-        vec![GameAction::RespondToShortcut {
-            response: ShortcutResponse::Shorten { at_iteration: 0 }
-        }],
-        "reach-guard: on a range that holds a place this seat still names one"
+        vec![
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept
+            },
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Shorten {
+                    at_iteration: AI_SHORTEN_PLACE
+                }
+            },
+        ],
+        "reach-guard: on a range that holds a place this seat, seated there with Relic of \
+         Progenitus to activate, keeps the issued Shorten"
     );
-    apply(&mut guard, guard_responder, guard_candidates[0].clone())
+    apply(&mut guard, guard_responder, guard_candidates[1].clone())
         .expect("the named place is legal on the proposal that admits it");
 }
 
-/// Place 0 is in range on every proposal whose range holds a place at all — `Fixed(n >= 1)` and
-/// `UntilLethal` — which is the place every emitter that names a constant one emits. `Fixed(1)`
+/// Place 0 is in range on every proposal whose range holds a place at all — `Fixed(n >= 1)` —
+/// which is the place every emitter that names a constant one emits. `Fixed(1)`
 /// carries the boundary: there 0 is simultaneously the only legal place and the last one. The
 /// zero count is the complementary class, and the row above owns it.
 #[test]
@@ -850,8 +837,8 @@ fn place_zero_is_answered_on_every_proposal_whose_range_holds_a_place() {
     let bounded = IterationCount::Fixed(weird_offer_bound());
     for mut state in [
         weird_window(bounded),
-        rig_window(IterationCount::Fixed(1)),
-        rig_window(IterationCount::UntilLethal),
+        priest_window(IterationCount::Fixed(1)),
+        priest_window(IterationCount::Fixed(19)),
     ] {
         let (responder, _) = window(&state);
         let places = admitted_places(&state);
@@ -933,9 +920,13 @@ fn interaction_admits(state: &GameState, at_iteration: u32) -> bool {
 /// board. CR 732.2b's published range keeps both its ends; the budget is the engine's and is not
 /// published as one.
 ///
+/// At or below the budget the reducer also refuses a published place where the responder has no
+/// game choice but passing (CR 732.2b), with that typed reason; each board is probed with its
+/// responders armed and bare, so both the agreement and that refusal are reached.
+///
 /// The at-or-below partition keeps its own counting reach-guard — a dead projection and a
-/// blanket refusal both fail it — and the above-budget partition is asserted non-empty, so
-/// routing the submission gate through the same predicate would empty it and fire.
+/// blanket refusal both fail it — and above the budget a restored over-cap proposal's place
+/// `cap + 1` must be published, so routing the submission gate through the same predicate fires.
 ///
 /// A proposal with no counted take publishes and honors the current place alone.
 #[test]
@@ -944,14 +935,17 @@ fn the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it(
     let cap = ShortcutDecisionSchema::default().deliverable_capacity;
     let mut admitted = 0usize;
     let mut refused = 0usize;
-    let mut above_budget = 0usize;
+    let mut no_choice = 0usize;
+    let bare: fn(&mut GameState) = |_| {};
 
-    for mut state in [
-        weird_window(IterationCount::Fixed(0)),
-        weird_window(IterationCount::Fixed(bound)),
-        rig_window(IterationCount::Fixed(1)),
-        rig_window(IterationCount::UntilLethal),
-    ] {
+    for mut state in [arm_responders, bare].into_iter().flat_map(|prepare| {
+        [
+            weird_window_with(IterationCount::Fixed(0), prepare),
+            weird_window_with(IterationCount::Fixed(bound), prepare),
+            priest_window_with(IterationCount::Fixed(1), prepare),
+            priest_window_with(IterationCount::Fixed(19), prepare),
+        ]
+    }) {
         bind_interaction_authority(&mut state, InteractionSessionId("shortening".to_string()))
             .expect("the responder window binds interaction authority");
         let places = admitted_places(&state);
@@ -970,17 +964,22 @@ fn the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it(
         ];
         for place in probes {
             let mut board = state.clone();
-            let honored = shorten(&mut board, place).is_ok();
+            let reply = shorten(&mut board, place);
+            let honored = reply.is_ok();
             let published = interaction_admits(&state, place);
             if place <= cap {
-                assert_eq!(
-                    published, honored,
-                    "the two layers disagree on place {place} against {places:?}"
-                );
-                if honored {
-                    admitted += 1;
-                } else {
-                    refused += 1;
+                match (published, reply) {
+                    (true, Ok(())) => admitted += 1,
+                    (false, Err(_)) => refused += 1,
+                    (true, Err(EngineError::InvalidAction(reason)))
+                        if reason.ends_with(ShortenRefusal::NoDifferentChoice.reason()) =>
+                    {
+                        no_choice += 1
+                    }
+                    (published, reply) => panic!(
+                        "the two layers disagree on place {place} against {places:?}: published \
+                         {published}, reducer {reply:?}"
+                    ),
                 }
             } else {
                 assert!(
@@ -993,10 +992,19 @@ fn the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it(
                     "place {place} is above the budget this engine drives, so the reducer alone \
                      refuses it — which is how the responder is told"
                 );
-                above_budget += 1;
             }
         }
     }
+
+    // No live proposal's range reaches past the budget; a restored over-cap one does.
+    let mut over = restored_over_cap_window();
+    bind_interaction_authority(&mut over, InteractionSessionId("shortening".to_string()))
+        .expect("the responder window binds interaction authority");
+    assert!(
+        interaction_admits(&over, cap + 1) && shorten(&mut over.clone(), cap + 1).is_err(),
+        "place {} is published above the budget and refused by the reducer alone",
+        cap + 1
+    );
 
     assert!(
         admitted > 0 && refused > 0,
@@ -1005,9 +1013,9 @@ fn the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it(
          the agreement"
     );
     assert!(
-        above_budget > 0,
-        "reach-guard on the parting partition: no probed place landed above the budget, so the \
-         disagreement above was asserted over nothing"
+        no_choice > 0,
+        "reach-guard on the no-choice refusal: no published place was refused for a responder \
+         with nothing but a pass"
     );
 
     let Some(mut state) = crate::mandatory_loop_draws::two_targets_without_end_window() else {
@@ -1297,7 +1305,7 @@ fn colorless(state: &GameState, player: PlayerId) -> usize {
         .unwrap_or(0)
 }
 
-/// The mana engine at its offer, plus the seat that proposed it.
+/// The mana engine, its responder armed at the offer, declared at `count`.
 fn mana_engine_window(db: &engine::database::card_db::CardDatabase, count: u32) -> GameState {
     use crate::loop_shortcut_mana_engine as rig;
     let mut engine_rig = rig::setup(true, LoopDetectionMode::Interactive, db);
@@ -1314,6 +1322,7 @@ fn mana_engine_window(db: &engine::database::card_db::CardDatabase, count: u32) 
         "reach-guard: the mana engine must OFFER before a response can be tested, got {:?}",
         engine_rig.runner.state().waiting_for
     );
+    arm_responders(engine_rig.runner.state_mut());
     engine_rig
         .runner
         .act(GameAction::DeclareShortcut {
@@ -1406,23 +1415,12 @@ fn a_shortened_mana_engine_is_performed_while_an_accepted_one_is_marked_unbounde
     }
 }
 
-/// CR 732.2c + CR 704.5a: an in-cap place on an unbounded proposal drives that many cycles and
-/// crowns nobody it was not promised. Below the crossing the cycles commit, no game ends and the
-/// ending point lands on the shortener; at or past it the game ends with the seat the OFFER
-/// named, and the unbounded axes stay unmarked — a finite drive is not the unbounded one.
-///
-/// The admitted member rides the same board: a restored proposal whose `predicted_winner` the
-/// drive contradicts is NOT crowned, however far past the crossing it is shortened to. It reds
-/// under its own restoration — clear the name at the rewrite and the drive's winner is crowned
-/// through an arm left with nothing to gate on.
-///
-/// Both legs red at base, where the response reaches no materializer at all. The crown leg's
-/// reach-guard is the crown itself, without which the no-crown leg passes on a drive that never
-/// reached lethal.
+/// CR 732.2c: an in-cap place drives that many cycles: below the crossing the cycles commit, no
+/// game ends and the ending point lands on the shortener.
 #[test]
-fn an_in_cap_place_drives_its_cycles_and_crowns_only_the_named_seat() {
+fn an_in_cap_place_drives_its_cycles() {
     let below = 5u32;
-    let mut short = rig_window(IterationCount::UntilLethal);
+    let mut short = priest_window(IterationCount::Fixed(19));
     let (shortener, _) = window(&short);
     let victim_before = short
         .players
@@ -1431,7 +1429,7 @@ fn an_in_cap_place_drives_its_cycles_and_crowns_only_the_named_seat() {
         .collect::<Vec<_>>();
 
     let per_cycle = {
-        let mut one = rig_window(IterationCount::UntilLethal);
+        let mut one = priest_window(IterationCount::Fixed(19));
         shorten(&mut one, 1).expect("one cycle is in range");
         one.players
             .iter()
@@ -1462,59 +1460,6 @@ fn an_in_cap_place_drives_its_cycles_and_crowns_only_the_named_seat() {
         short.waiting_for,
         WaitingFor::Priority { player: shortener },
         "below the crossing no game ends and the shortener holds the ending point"
-    );
-
-    let crossing = victim_before
-        .iter()
-        .map(|(_, life)| *life)
-        .max()
-        .expect("the rig has players") as u32
-        + 1;
-    let mut crowned = rig_window(IterationCount::UntilLethal);
-    let WaitingFor::RespondToShortcut { proposal, .. } = &crowned.waiting_for else {
-        panic!("the rig parks on a responder window")
-    };
-    let named = proposal
-        .predicted_winner
-        .expect("this offer's mint is the one that names a winner");
-    shorten(&mut crowned, crossing).expect("a place past the crossing is still in range");
-    assert_eq!(
-        crowned.waiting_for,
-        WaitingFor::GameOver {
-            winner: Some(named)
-        },
-        "CR 704.5a: past the crossing the game ends with the seat the offer named"
-    );
-    assert!(
-        crowned.unbounded_resources.is_empty(),
-        "a finite drive is not the unbounded one, so no axis is marked"
-    );
-
-    // The admitted member: the same shortening on a proposal whose name the drive contradicts.
-    let mut contradicted = rig_window(IterationCount::UntilLethal);
-    let WaitingFor::RespondToShortcut { proposal, .. } = &mut contradicted.waiting_for else {
-        panic!("the rig parks on a responder window")
-    };
-    proposal.predicted_winner = Some(
-        contradicted
-            .players
-            .iter()
-            .map(|p| p.id)
-            .find(|id| *id != named)
-            .expect("the rig seats an opponent"),
-    );
-    let payload = serde_json::to_value(&contradicted).expect("the tampered board serializes");
-    let mut restored: GameState =
-        serde_json::from_value::<engine::types::game_state::PersistedGameState>(payload)
-            .expect("it decodes through the production restore")
-            .into_game_state()
-            .expect("persisted test snapshot satisfies the checked restore contract");
-    shorten(&mut restored, crossing).expect("the same place is still in range");
-    assert!(
-        !matches!(restored.waiting_for, WaitingFor::GameOver { .. }),
-        "a drive whose CR 704.5a verdict the proposal's own name contradicts crowns nobody, got \
-         {:?}",
-        restored.waiting_for
     );
 }
 

@@ -105,6 +105,8 @@ pub trait CandidateFilter {
 /// - CR 601.2: casting/activation announcement steps (mode count, phyrexian
 ///   shard choices, modal bounds, target-set bounds).
 /// - CR 508/509: combat declarations (attackers/blockers must be valid).
+/// - CR 732.2b: a loop-shortcut responder's `Shorten` at a place `shorten_refusal`
+///   refuses.
 ///
 /// This is the current workhorse. A future follow-up should decompose it into
 /// the four named sub-filters originally planned: `ManaAvailabilityFilter`,
@@ -198,7 +200,7 @@ impl SimulationFilter {
         let mut sim = state.clone();
         // PR-3 Defect-2: mark the entire nested clone-and-apply as a legality probe so
         // the top-level-only loop-shortcut detection (`reconcile_terminal_result` §3)
-        // and ring accumulation (`pass_priority_once_with_pipeline` §2) are suppressed
+        // and play-trace recording are suppressed
         // inside it. The guard restores the previous flag on drop (panic-safe, nesting-
         // correct), terminating the §3→§9→legal_actions→SimulationFilter recursion.
         let _probe = SimulationProbeGuard::enter();
@@ -374,10 +376,11 @@ fn pending_spell_root(state: &GameState) -> Option<(SpellRootProvenance, Pending
 /// `phase-ai` projection fast path calls, so neither can drift.
 ///
 /// Skipping the clone-and-apply here is load-bearing: `PassPriority` is enumerated
-/// at every priority window (`candidates::priority_actions_with_probe`) and is never
-/// memoized (`legality_equivalence_key`'s catch-all), so before this hatch it paid a
-/// full `GameState` clone *per priority window* — plus the nested `boundary_snapshot`
-/// clone inside `apply_action_boundary_core` — to re-derive an O(1) answer.
+/// at every priority window whose pass `pass_priority_legality` admits
+/// (`candidates::priority_actions_with_probe`) and is never memoized
+/// (`legality_equivalence_key`'s catch-all), so before this hatch it paid a full `GameState`
+/// clone *per priority window* — plus the nested `boundary_snapshot` clone inside
+/// `apply_action_boundary_core` — to re-derive an O(1) answer.
 ///
 /// Conservative by design, mirroring `structurally_valid_search_selection`: this
 /// returns `false` — costing one simulation, never a wrong verdict — for every
@@ -1602,7 +1605,7 @@ mod tests {
     use crate::ai_support::{candidate_actions, structurally_valid_named_choice_answer as hatch};
     use crate::analysis::decision_template::IterationCount;
     use crate::analysis::loop_check::{
-        CountedTake, OfferRoad, ShortcutProposal, ShortcutResponse, UnperformableCause,
+        CountedTake, ShortcutProposal, ShortcutResponse, UnperformableCause,
     };
     use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::layers::evaluate_layers;
@@ -1785,8 +1788,8 @@ mod tests {
     /// `SimulationProbeGuard` window, minus the perf counter.
     ///
     /// The guard is load-bearing, not ceremony. It suppresses top-level loop
-    /// reconciliation (`reconcile_terminal_result` §3) and ring accumulation
-    /// (`pass_priority_once_with_pipeline` §2) for the duration of the probe, so
+    /// reconciliation (`reconcile_terminal_result`) and play-trace recording
+    /// for the duration of the probe, so
     /// an oracle that omits it can return a verdict production legality
     /// filtering never produces. Every soundness assertion below is a comparison
     /// against this function; if it stops being `fallback_simulation`, those
@@ -1959,14 +1962,8 @@ mod tests {
         assert!(pass_oracle_accepts(&unblocked, &unblocked_candidate));
     }
 
-    /// T6b. The over-accept direction, at the public `legal_actions` boundary.
-    ///
-    /// This passes on the unfixed tree — today the expensive clone is what
-    /// removes the pass — so it is a no-drift guard, and the most important one
-    /// in the set: it is what goes red if the hatch is written without gate
-    /// (d)'s `blocks_pass` component. That omission is invisible to every
-    /// latch-free fixture, and it would be a live over-accept: `legal_actions`
-    /// would start offering an action the reducer rejects.
+    /// T6b. The over-accept direction, at the public `legal_actions` boundary:
+    /// a pass the CR 732.2c latch blocks is never offered.
     ///
     /// `must_diverge` is `pub(crate)`, so this cannot live in
     /// `tests/integration/` and stays here beside T6.
@@ -3564,7 +3561,6 @@ mod tests {
                     shortened_by: None,
                     published_declaration: None,
                     leading_aims: Vec::new(),
-                    road: OfferRoad::Ring,
                     counted_take: Default::default(),
                     period: Default::default(),
                 },
@@ -3614,10 +3610,13 @@ mod tests {
         }
     }
 
-    /// The refused half of the same authority: a row per `Shorten` shape the reducer rejects,
-    /// paired with the probe. `cheap ⊆ sim` is pinned here in the direction that would otherwise
-    /// OFFER a place the reducer refuses — the failure the hatch would produce by admitting a
-    /// place after skipping the clone that used to reject it.
+    /// The refused half of the same authority: a row per `Shorten` shape the reducer rejects on
+    /// a synthetic board from measured evidence (`NoDifferentChoice` is decided only by the take,
+    /// so the hatch admits it and the committed answer refuses it;
+    /// `loop_shortcut::a_shorten_by_a_seat_with_no_other_choice_at_its_place_is_refused` pins
+    /// both), paired with the probe. `cheap ⊆ sim` is pinned here in the direction that would
+    /// otherwise OFFER a place the reducer refuses — the failure the hatch would produce by
+    /// admitting a place after skipping the clone that used to reject it.
     #[test]
     fn shortcut_response_authority_refuses_every_reducer_refusal() {
         let state_with = |count: IterationCount, counted_take: CountedTake| {
@@ -3638,7 +3637,6 @@ mod tests {
                     shortened_by: None,
                     published_declaration: None,
                     leading_aims: Vec::new(),
-                    road: OfferRoad::Ring,
                     counted_take,
                     period: Default::default(),
                 },

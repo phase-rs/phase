@@ -81,7 +81,7 @@ export type InteractionRelationSourceConstraint = "atMostOne" | "engineValidated
 
 export type InteractionDamageAssignmentMode = "normal" | "asThoughUnblocked";
 
-export type InteractionShortcutCountSpec = { "type": "fixed", "data": { min: number, max: number, suggested: number, } } | { "type": "untilLethal" } | { "type": "withoutEnd" };
+export type InteractionShortcutCountSpec = { "type": "fixed", "data": { min: number, max: number, suggested: number, } } | { "type": "withoutEnd" };
 
 export type InteractionShortcutPreviewFamily = "mana" | "life" | "damage" | "mill" | "counters" | "tokens" | "cards" | "casts" | "combats" | "turns" | "triggers";
 
@@ -127,7 +127,7 @@ export type InteractionShortcutPreview = { count: number, entries: Array<Interac
  */
 allocation?: Array<AmountAssignment>, };
 
-export type InteractionShortcutPointKind = "targets" | "convokeTaps" | "mode" | "mayChoice" | "unlessBreak" | "manaColor";
+export type InteractionShortcutPointKind = "targets" | "convokeTaps" | "mode" | "mayChoice" | "unlessBreak" | "manaColor" | "order";
 
 export type InteractionShortcutPoint = { group: number, kind: InteractionShortcutPointKind, min: number, max: number, unique: boolean, ordered: boolean, readOnly: boolean, candidateIds: Array<InteractionChoiceId>, };
 
@@ -150,10 +150,7 @@ export type InteractionShortcutPin = { group: number, choiceIds: Array<Interacti
  * outnumber the point's published `max` — and both limbs bind the same partition,
  * which only an `IterationCount::Fixed` can fill. Under a fixed count that
  * partition is `amounts`: one part per announced subject, in the sequence's own
- * order, every part at least 1, summing to the DECLARED count. An until-lethal
- * count has nothing to partition and refuses BOTH limbs — an empty `amounts` does
- * not rescue a longer `choice_ids` list — so no announcement order past the head
- * is declarable through this ingress.
+ * order, every part at least 1, summing to the DECLARED count.
  *
  * A sequenced pin is admissible only on a `Targets` point whose published `max`
  * is 1: a multi-position slot needs a per-position carrier a flat list cannot

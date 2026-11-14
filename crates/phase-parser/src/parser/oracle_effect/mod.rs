@@ -187,8 +187,8 @@ use self::search::{
 };
 use self::sequence::{
     apply_clause_continuation, clause_is_dig_lookback_transparent, continuation_absorbs_current,
-    parse_followup_continuation_ast, parse_intrinsic_continuation_ast,
-    parse_revealed_this_way_card_filter, split_clause_sequence,
+    dig_patch_represents_from_among, parse_followup_continuation_ast,
+    parse_intrinsic_continuation_ast, parse_revealed_this_way_card_filter, split_clause_sequence,
     try_parse_repeat_process_for_keywords, try_parse_same_is_true_continuation,
 };
 use self::subject::{
@@ -991,6 +991,21 @@ fn if_you_do_object_anchor(
             } => Some(TargetFilter::CostPaidObject),
             _ => None,
         })
+}
+
+/// CR 118.12: the optional look a "you may look … If you do, …" gate names,
+/// when that look is a `Dig` the body's instructions can continue.
+fn if_you_do_look_anchor(clauses: &[ClauseIr], condition: &AbilityCondition) -> Option<Effect> {
+    if !condition.is_optional_effect_performed() {
+        return None;
+    }
+    clauses
+        .iter()
+        .rev()
+        // allow-noncombinator: typed ClauseIr adjacency lookup, not Oracle-text dispatch.
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .filter(|clause| clause.is_optional && matches!(clause.parsed.effect, Effect::Dig { .. }))
+        .map(|clause| clause.parsed.effect.clone())
 }
 
 /// CR 608.2c + CR 708.7 + CR 118.1: Reinterpret a generic "if you can't" rider
@@ -29961,6 +29976,26 @@ fn chain_source_becomes_attachment(clauses: &[ClauseIr]) -> bool {
     })
 }
 
+/// CR 400.7j: the most recent emitted clause put a card onto the battlefield.
+fn prior_clause_moves_to_battlefield(clauses: &[ClauseIr]) -> bool {
+    clauses
+        .iter()
+        .rev()
+        .find(|c| !matches!(c.disposition, ClauseDisposition::Continue { .. }))
+        .is_some_and(|c| {
+            matches!(
+                &c.parsed.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    ..
+                } | Effect::Dig {
+                    destination: Some(Zone::Battlefield),
+                    ..
+                }
+            )
+        })
+}
+
 /// The player-declaring clauses of one chain being parsed, by clause index, with
 /// the group each node is tagged with. The chain's local `groups` counter mints
 /// the ids (`ChosenGroupId::declared_player`).
@@ -44106,6 +44141,15 @@ fn attach_die_result_branches_to_roll_before_finalization(
                 effect: Box::new(lower_ability_ir(effect)),
             })
             .collect();
+        // CR 706.3b + CR 608.2c: the roll and its table are one ability, so "those tokens" in a
+        // row names the tokens the row above creates, read in order.
+        for row in 1..results.len() {
+            let (above, rest) = results.split_at_mut(row);
+            lower::rewrite_those_tokens_from_antecedent(
+                &mut rest[0].effect.effect,
+                &above[row - 1].effect.effect,
+            );
+        }
     }
 }
 
@@ -46442,24 +46486,7 @@ fn parse_effect_chain_ir_body(
         // folds this into the put's `sub_ability`; `rewire_result_anchored_subchain`
         // then re-affirms `forward_result` (moved card -> Attach source; original
         // source -> injected target).
-        let prev_moves_to_battlefield = builder
-            .clauses()
-            .iter()
-            .rev()
-            .find(|c| !matches!(c.disposition, ClauseDisposition::Continue { .. }))
-            .is_some_and(|c| {
-                matches!(
-                    &c.parsed.effect,
-                    Effect::ChangeZone {
-                        destination: Zone::Battlefield,
-                        ..
-                    } | Effect::Dig {
-                        destination: Some(Zone::Battlefield),
-                        ..
-                    }
-                )
-            });
-        if prev_moves_to_battlefield {
+        if prior_clause_moves_to_battlefield(builder.clauses()) {
             if let Some((condition, attach, is_optional)) =
                 try_parse_moved_card_subtype_attach_followup(normalized_text)
             {
@@ -48138,6 +48165,55 @@ fn parse_effect_chain_ir_body(
         if let Some(ref outer_condition) = condition {
             let body_chunks = split_clause_sequence(&text);
             if body_chunks.len() > 1 {
+                // CR 118.12 + CR 608.2c: a body that is exactly one selection from
+                // among the looked-at cards and one rest instruction continues the
+                // optional look, whose optional Dig is the "If you do" gate.
+                if let Some(look) = if_you_do_look_anchor(builder.clauses(), outer_condition) {
+                    let mut candidate_ctx = ctx.clone();
+                    let continuations = body_chunks
+                        .iter()
+                        .map(|body| {
+                            parse_followup_continuation_ast(&body.text, &look, &mut candidate_ctx)
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .filter(|continuations| {
+                            matches!(
+                                continuations.as_slice(),
+                                [
+                                    ContinuationAst::DigFromAmong {
+                                        enters_under,
+                                        face_down_profile,
+                                        ..
+                                    },
+                                    ContinuationAst::PutRest { .. }
+                                ] if dig_patch_represents_from_among(enters_under, face_down_profile)
+                            )
+                        });
+                    if let Some(continuations) = continuations {
+                        *ctx = candidate_ctx;
+                        let last = body_chunks.len() - 1;
+                        for (index, (body, continuation)) in
+                            body_chunks.iter().zip(continuations).enumerate()
+                        {
+                            let boundary = if index == last {
+                                body.boundary_after.or(chunk.boundary_after)
+                            } else {
+                                body.boundary_after
+                            };
+                            builder
+                                .clause(
+                                    &body.text,
+                                    placeholder_parsed_clause("if_you_do_look_continuation"),
+                                    boundary,
+                                    ClauseDisposition::Continue {
+                                        continuation: Some(continuation),
+                                    },
+                                )
+                                .push();
+                        }
+                        continue;
+                    }
+                }
                 if has_player_anaphoric_reference(&text.to_lowercase()) {
                     ctx.enclosing_declared_player = declared_player_reference(
                         builder.clauses(),
@@ -49042,6 +49118,7 @@ fn parse_effect_chain_ir_body(
             // into an Aura/Equipment (the Licid class). Nothing else in the
             // chain is attachable, so the pronoun cannot name the chosen target.
             source_becomes_attachment_in_chain: chain_source_becomes_attachment(builder.clauses()),
+            prior_clause_moves_to_battlefield: prior_clause_moves_to_battlefield(builder.clauses()),
             effect_chain_full_lower: ctx.effect_chain_full_lower.clone(),
             parent_target_is_chosen,
             // CR 608.2c + CR 601.2a: carry the chosen-target filter (with its
@@ -49182,6 +49259,20 @@ fn parse_effect_chain_ir_body(
                 leading_subject_application.as_ref().map(|s| &s.affected),
                 Some(TargetFilter::Controller)
             ) || (is_optional && opponent_may_scope.is_none() && player_scope.is_none());
+        // CR 608.2c: in a printed "you may A, then <subject> B" the "may" scopes A
+        // alone, because B states its own subject or "may"; B is the next instruction.
+        let printed_then_before = chunk_idx
+            .checked_sub(1)
+            .and_then(|prev_idx| chunks.get(prev_idx))
+            .is_some_and(|prev_chunk| prev_chunk.boundary_after == Some(ClauseBoundary::Then));
+        if printed_then_before && (leading_subject_application.is_some() || is_optional) {
+            if let Some(prev) = builder
+                .last_mut()
+                .filter(|prev| prev.is_optional && prev.boundary == Some(ClauseBoundary::Then))
+            {
+                prev.boundary = Some(ClauseBoundary::Sentence);
+            }
+        }
         // CR 608.2c: a subjectless conjugated verb ("draws", not the imperative
         // "draw") continues the previous chunk's subject.
         let continues_elided_subject = leading_subject_application.is_none()
@@ -58694,6 +58785,112 @@ mod iteration_destination_rebinding_tests {
         assert_eq!(
             destination_of(&folded(TokenAttackDestination::ControllerChooses, &qty)),
             &TokenAttackDestination::ControllerChooses
+        );
+    }
+}
+
+#[cfg(test)]
+mod die_result_anaphor_tests {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{
+        AbilityDefinition, DieResultBranch, Effect, PtValue, QuantityExpr,
+    };
+
+    fn roll_rows(mut def: &AbilityDefinition) -> &[DieResultBranch] {
+        loop {
+            if let Effect::RollDie { results, .. } = &*def.effect {
+                return results;
+            }
+            def = def.sub_ability.as_deref().expect("the chain rolls a die");
+        }
+    }
+
+    fn with_count(effect: &Effect, value: i32) -> Effect {
+        let mut effect = effect.clone();
+        match &mut effect {
+            Effect::Token { count, .. } | Effect::CopyTokenOf { count, .. } => {
+                *count = QuantityExpr::Fixed { value };
+            }
+            other => panic!("not a token creation: {other:?}"),
+        }
+        effect
+    }
+
+    /// CR 706.3b + CR 608.2c: a results row's "create N of those tokens" creates N of the tokens
+    /// the row above creates; a row's other instructions stay as parsed.
+    #[test]
+    fn a_results_row_creates_n_of_the_tokens_the_row_above_creates() {
+        let goblins = parse_oracle_text(
+            "When this creature enters, roll a d20.\n1—9 | Create a 1/1 red Goblin creature token.\n10—19 | Create two of those tokens.\n20 | Create three of those tokens.",
+            "Swarming Goblins",
+            &[],
+            &["Creature".to_string()],
+            &["Goblin".to_string()],
+        );
+        let rows = roll_rows(goblins.triggers[0].execute.as_deref().expect("an effect"));
+        assert_eq!(rows.len(), 3);
+        let Effect::Token {
+            name,
+            count,
+            power,
+            toughness,
+            ..
+        } = &*rows[0].effect.effect
+        else {
+            panic!("row 1 creates a token: {:?}", rows[0].effect.effect);
+        };
+        assert_eq!(
+            (name.as_str(), count, power, toughness),
+            (
+                "Goblin",
+                &QuantityExpr::Fixed { value: 1 },
+                &PtValue::Fixed(1),
+                &PtValue::Fixed(1)
+            )
+        );
+        assert_eq!(
+            *rows[1].effect.effect,
+            with_count(&rows[0].effect.effect, 2)
+        );
+        assert_eq!(
+            *rows[2].effect.effect,
+            with_count(&rows[0].effect.effect, 3)
+        );
+
+        let delina = parse_oracle_text(
+            "Whenever Delina attacks, choose target creature you control, then roll a d20.\n1—14 | Create a tapped and attacking token that's a copy of that creature, except it's not legendary and it has \"At end of combat, exile this token.\"\n15—20 | Create one of those tokens. You may roll again.",
+            "Delina, Wild Mage",
+            &[],
+            &["Creature".to_string()],
+            &["Elf".to_string(), "Shaman".to_string()],
+        );
+        let rows = roll_rows(delina.triggers[0].execute.as_deref().expect("an effect"));
+        assert_eq!(rows.len(), 2);
+        let Effect::CopyTokenOf {
+            tapped,
+            enters_attacking,
+            additional_modifications,
+            count,
+            ..
+        } = &*rows[0].effect.effect
+        else {
+            panic!("row 1 creates a copy token: {:?}", rows[0].effect.effect);
+        };
+        assert!(*tapped && *enters_attacking && !additional_modifications.is_empty());
+        assert_eq!(count, &QuantityExpr::Fixed { value: 1 });
+        assert_eq!(
+            *rows[1].effect.effect,
+            with_count(&rows[0].effect.effect, 1)
+        );
+        let again = rows[1]
+            .effect
+            .sub_ability
+            .as_deref()
+            .expect("\"You may roll again.\" stays a sub-ability");
+        assert!(
+            matches!(&*again.effect, Effect::Unimplemented { .. }),
+            "{:?}",
+            again.effect
         );
     }
 }

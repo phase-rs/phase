@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::game::functioning_abilities::static_kind_present;
 use crate::game::layers;
@@ -10,7 +10,7 @@ use crate::game::zone_pipeline::{
 use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypedFilter};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, LossReason};
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -20,7 +20,6 @@ use crate::types::zones::Zone;
 
 use super::elimination::DepartureTriggers;
 use super::filter::{matches_target_filter, FilterContext};
-use super::players::PoisonLossMeasure;
 use super::speed::{controls_start_your_engines_in, set_speed};
 use super::zones;
 
@@ -185,21 +184,10 @@ fn run_state_based_actions(
         }
         // CR 704.5a-c + CR 704.6c: collect every player-loss SBA from this
         // check before applying any of them.
-        let mut losers: Vec<PlayerId> = collect_life_losers(state);
-        losers.extend(collect_draw_from_empty_losers(state));
-        losers.extend(collect_poison_losers(state));
-        losers.extend(collect_commander_damage_losers(state));
-
-        // A player can meet several loss conditions at once — dedup so each is
-        // eliminated (and emits PlayerLost) exactly once.
-        losers.sort_unstable();
-        losers.dedup();
-        if !losers.is_empty() {
+        let losses = player_losses(state);
+        if !losses.is_empty() {
             any_performed = true;
-            for &loser in &losers {
-                events.push(GameEvent::PlayerLost { player_id: loser });
-            }
-            super::elimination::eliminate_players(state, &losers, departures, events);
+            super::elimination::eliminate_players(state, &losses, departures, events);
 
             // If the game ended (a sole winner or a CR 104.4a draw), stop now.
             if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
@@ -663,60 +651,13 @@ fn cant_lose_active_for(state: &GameState, player_id: PlayerId) -> bool {
 }
 
 /// CR 704.5a/704.5b/704.5c/704.6c: Whether a player-loss SBA would currently
-/// eliminate at least one non-eliminated player. This is intentionally narrower
-/// than running the full SBA loop: callers that are only trying to avoid waiting
-/// on a dead player during a non-priority continuation should not trigger
-/// unrelated SBA choice prompts such as commander-zone or legend-rule choices.
+/// eliminate at least one non-eliminated player, read from the same collectors
+/// the SBA check runs. This is intentionally narrower than running the full SBA
+/// loop: callers that are only trying to avoid waiting on a dead player during a
+/// non-priority continuation should not trigger unrelated SBA choice prompts such
+/// as commander-zone or legend-rule choices.
 pub(crate) fn has_pending_player_loss_sba(state: &GameState) -> bool {
-    let life_loss = state.players.iter().any(|player| {
-        // CR 704.5a + CR 810.8c: A player (or team) with 0 or less life loses.
-        !player.is_eliminated
-            && !player.is_phased_out()
-            && super::players::team_life_total(state, player.id) <= 0
-            && !player_has_cant_lose(state, player.id)
-    });
-    if life_loss {
-        return true;
-    }
-
-    let drew_from_empty = state.players.iter().any(|player| {
-        // CR 704.5b: A player who attempted to draw from an empty library loses
-        // the game the next time state-based actions are checked.
-        !player.is_eliminated
-            && player.drew_from_empty_library
-            && !player_has_cant_lose(state, player.id)
-    });
-    if drew_from_empty {
-        return true;
-    }
-
-    let poison_loss = state.players.iter().any(|player| {
-        // CR 704.5c + CR 704.6b / CR 810.8d: the format's individual threshold
-        // (ten by default), or fifteen shared by the team. Archenemy Commander
-        // takes the individual branch for every seat — CR 904.13c keeps poison
-        // unshared even though life is shared. `players::poison_loss_measure`
-        // is the shared authority (twin of `collect_poison_losers`).
-        !player.is_eliminated
-            && super::players::poison_loss_measure(state, player)
-                .is_some_and(PoisonLossMeasure::is_lethal)
-            && !player_has_cant_lose(state, player.id)
-    });
-    if poison_loss {
-        return true;
-    }
-
-    let threshold = match state.format_config.commander_damage_threshold {
-        Some(threshold) => threshold as u32,
-        None => return false,
-    };
-
-    state.commander_damage.iter().any(|entry| {
-        // CR 704.6c: In Commander, a player dealt 21+ combat damage by the same
-        // commander over the course of the game loses.
-        entry.damage >= threshold
-            && !state.eliminated_players.contains(&entry.player)
-            && !player_has_cant_lose(state, entry.player)
-    })
+    !player_losses(state).is_empty()
 }
 
 /// Check if a static ability from `source_controller` with the given `affected` filter
@@ -770,6 +711,29 @@ fn static_affects_player(
     }
 }
 
+/// CR 704.3 + CR 704.5a-c + CR 704.6c: every player a player-loss SBA of this
+/// check removes, with every condition it meets.
+fn player_losses(state: &GameState) -> BTreeMap<PlayerId, BTreeSet<LossReason>> {
+    let mut losses: BTreeMap<PlayerId, BTreeSet<LossReason>> = BTreeMap::new();
+    for (losers, reason) in [
+        (collect_life_losers(state), LossReason::LifeTotal),
+        (
+            collect_draw_from_empty_losers(state),
+            LossReason::DrewFromEmptyLibrary,
+        ),
+        (collect_poison_losers(state), LossReason::Poison),
+        (
+            collect_commander_damage_losers(state),
+            LossReason::CommanderDamage,
+        ),
+    ] {
+        for loser in losers {
+            losses.entry(loser).or_default().insert(reason);
+        }
+    }
+    losses
+}
+
 /// CR 704.5a + CR 810.8c: A player (or, in a team-based format, a team) with 0
 /// or less life loses the game. Pure collector — the SBA driver batches all
 /// loss conditions into a single simultaneous event (CR 704.3) so simultaneous
@@ -794,8 +758,7 @@ fn collect_life_losers(state: &GameState) -> Vec<PlayerId> {
         // is never a CR 704.5a "0 or less life" loser. Belt-and-suspenders with
         // the life-loss→mill redirect (its life never drops), but this makes
         // "no life total" a hard guarantee independent of the redirect.
-        .filter(|p| !super::horde::player_has_no_life_total(state, p.id))
-        .filter(|p| super::players::team_life_total(state, p.id) <= 0)
+        .filter(|p| super::players::LossPool::life(state, p.id).is_some_and(|pool| pool.reached()))
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
         .collect()
@@ -825,10 +788,7 @@ fn collect_poison_losers(state: &GameState) -> Vec<PlayerId> {
         .iter()
         .filter(|p| !p.is_eliminated)
         .filter(|p| {
-            // Twin of the `has_pending_player_loss_sba` poison branch above,
-            // through the same authority, `players::poison_loss_measure`:
-            // Archenemy Commander takes the individual branch (CR 904.13c).
-            super::players::poison_loss_measure(state, p).is_some_and(PoisonLossMeasure::is_lethal)
+            super::players::LossPool::poison(state, p.id).is_some_and(|pool| pool.reached())
         })
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
@@ -2703,6 +2663,16 @@ mod tests {
         GameState::new_two_player(42)
     }
 
+    fn player_losses_in(events: &[GameEvent]) -> Vec<(PlayerId, BTreeSet<LossReason>)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PlayerLost { player_id, reasons } => Some((*player_id, reasons.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Convert a fresh battlefield object into a zero-defense battle for the
     /// CR 704.5v/w waiting-batch tests below. `siege` selects whether it gets
     /// the Siege battle type.
@@ -3036,12 +3006,30 @@ mod tests {
                 winner: Some(PlayerId(1))
             }
         ));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            GameEvent::PlayerLost {
-                player_id: PlayerId(0)
-            }
-        )));
+        assert_eq!(
+            player_losses_in(&events),
+            [(PlayerId(0), BTreeSet::from([LossReason::LifeTotal]))]
+        );
+    }
+
+    /// CR 704.3: one check finding a player at 0 life with ten poison counters
+    /// records both reasons on one `PlayerLost`.
+    #[test]
+    fn sba_zero_life_and_ten_poison_records_both_reasons() {
+        let mut state = setup();
+        state.players[0].life = 0;
+        state.players[0].poison_counters = 10;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert_eq!(
+            player_losses_in(&events),
+            [(
+                PlayerId(0),
+                BTreeSet::from([LossReason::LifeTotal, LossReason::Poison])
+            )]
+        );
     }
 
     #[test]
@@ -3855,12 +3843,10 @@ mod tests {
                 winner: Some(PlayerId(1))
             }
         ));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            GameEvent::PlayerLost {
-                player_id: PlayerId(0)
-            }
-        )));
+        assert_eq!(
+            player_losses_in(&events),
+            [(PlayerId(0), BTreeSet::from([LossReason::Poison]))]
+        );
     }
 
     #[test]
@@ -4953,17 +4939,16 @@ mod tests {
         state.players[1].is_eliminated = true;
         state.eliminated_players.push(PlayerId(1));
         state.players[1].life = 0;
+        state.players[2].life = 0;
         let mut events = Vec::new();
 
         check_state_based_actions(&mut state, &mut events);
 
-        // No new events for already-eliminated player
-        assert!(!events.iter().any(|e| matches!(
-            e,
-            GameEvent::PlayerLost {
-                player_id: PlayerId(1)
-            }
-        )));
+        // No new events for already-eliminated player; P2's loss is the reach guard.
+        assert_eq!(
+            player_losses_in(&events),
+            [(PlayerId(2), BTreeSet::from([LossReason::LifeTotal]))]
+        );
     }
 
     #[test]
@@ -5044,6 +5029,13 @@ mod tests {
         // Both team A members eliminated
         assert!(state.players[0].is_eliminated);
         assert!(state.players[1].is_eliminated);
+        assert_eq!(
+            player_losses_in(&events),
+            [
+                (PlayerId(0), BTreeSet::from([LossReason::LifeTotal])),
+                (PlayerId(1), BTreeSet::from([LossReason::LifeTotal])),
+            ]
+        );
         // Team B wins
         assert!(matches!(
             state.waiting_for,
@@ -5085,10 +5077,49 @@ mod tests {
 
         assert!(state.players[0].is_eliminated);
         assert!(state.players[1].is_eliminated);
+        assert_eq!(
+            player_losses_in(&events),
+            [
+                (PlayerId(0), BTreeSet::from([LossReason::Poison])),
+                (PlayerId(1), BTreeSet::from([LossReason::Poison])),
+            ]
+        );
         assert!(matches!(
             state.waiting_for,
             WaitingFor::GameOver { winner: Some(_) }
         ));
+    }
+
+    /// CR 704.5a: the pending-loss check reads the collectors, so the Horde seat, which has no
+    /// life total, is no pending loser at 0 life.
+    #[test]
+    fn pending_player_loss_reads_the_collectors() {
+        let mut state = GameState::new(
+            FormatConfig::horde(
+                crate::types::format::ChallengeDeck::CybermanHorde.default_ruleset(),
+            ),
+            3,
+            42,
+        );
+        assert!(crate::game::horde::player_has_no_life_total(
+            &state,
+            PlayerId(0)
+        ));
+        state.players[0].life = 0;
+        assert!(player_losses(&state).is_empty());
+        assert!(!has_pending_player_loss_sba(&state));
+
+        state.players[0].life = 20;
+        state.players[1].life = 0;
+        state.players[2].life = 0;
+        assert_eq!(
+            player_losses(&state),
+            BTreeMap::from([
+                (PlayerId(1), BTreeSet::from([LossReason::LifeTotal])),
+                (PlayerId(2), BTreeSet::from([LossReason::LifeTotal])),
+            ])
+        );
+        assert!(has_pending_player_loss_sba(&state));
     }
 
     #[test]
@@ -5124,6 +5155,14 @@ mod tests {
         assert!(state.players[0].is_eliminated);
         assert!(state.players[1].is_eliminated);
         assert!(!state.players[2].is_eliminated);
+        // CR 704.6c for P1; CR 810.8a folds its teammate P0 in.
+        assert_eq!(
+            player_losses_in(&events),
+            [
+                (PlayerId(1), BTreeSet::from([LossReason::CommanderDamage])),
+                (PlayerId(0), BTreeSet::from([LossReason::CommanderDamage])),
+            ]
+        );
         assert!(matches!(
             state.waiting_for,
             WaitingFor::GameOver { winner: Some(_) }
@@ -5597,12 +5636,13 @@ mod tests {
                 winner: Some(PlayerId(1))
             }
         ));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            GameEvent::PlayerLost {
-                player_id: PlayerId(0)
-            }
-        )));
+        assert_eq!(
+            player_losses_in(&events),
+            [(
+                PlayerId(0),
+                BTreeSet::from([LossReason::DrewFromEmptyLibrary])
+            )]
+        );
     }
 
     #[test]

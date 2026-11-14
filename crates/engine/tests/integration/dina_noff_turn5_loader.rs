@@ -174,3 +174,39 @@ fn c0_an_unrehydrated_stream_on_the_same_board_still_panics() {
     state.rng.set_word_pos(0);
     state.capture_rng_word_pos();
 }
+
+/// **T3.5 — the new `GameObject::parse_warnings` field changes no committed byte.**
+///
+/// `skip_serializing_if = "Vec::is_empty"` is the whole mechanism, and this is
+/// the assertion that it is actually wired: re-serialize every object of a
+/// committed fixture through the production decoder and compare against the
+/// bytes the fixture shipped with.
+///
+/// REVERT-PROBE (executed): drop `skip_serializing_if` from the field ⇒ every
+/// object gains `"parse_warnings":[]` and this row fails.
+#[test]
+fn t3_5_the_new_parse_warnings_field_keeps_dumps_byte_identical() {
+    let json = gunzip(include_bytes!("../fixtures/dina_noff_turn5_4p.json.gz"));
+    let envelope: serde_json::Value =
+        serde_json::from_str(&json).expect("dump envelope parses as JSON");
+    let before = envelope["gameState"]["objects"].clone();
+    assert!(
+        before.as_object().is_some_and(|m| !m.is_empty()),
+        "PREMISE: the fixture must carry objects, or byte-equality below is vacuous"
+    );
+    assert!(
+        !before.to_string().contains("parse_warnings"),
+        "PREMISE: the committed OBJECTS predate the field, so any occurrence below is new. \
+         (Scoped to `objects` on purpose: the envelope's card-database subtree carries the \
+         face-level `parse_warnings` this field is copied FROM, and has since before this change.)"
+    );
+
+    let state = load_dina_noff();
+    let after =
+        serde_json::to_value(state.objects.values().collect::<Vec<_>>()).expect("objects reencode");
+    assert!(
+        !after.to_string().contains("parse_warnings"),
+        "an EMPTY diagnostics list must not serialize. Without `skip_serializing_if` every object \
+         in every committed dump gains a `\"parse_warnings\":[]` key and every stored game grows"
+    );
+}

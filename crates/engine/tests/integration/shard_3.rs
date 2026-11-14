@@ -38,6 +38,7 @@ mod delayed_trigger_continuation;
 mod delayed_trigger_occurrence_fanout;
 mod demilich_helbrute_graveyard_exile_cost;
 mod demon_of_fates_design;
+mod departed_active_player_priority;
 mod departed_recipient_control_exchange;
 mod descendants_path_shared_creature_type_gate;
 mod desperate_futurescribe_instead;
@@ -108,6 +109,7 @@ mod emptiness_mana_spent_evoke_5943;
 mod emrakul_control_turn_crash;
 mod end_blaze_epiphany_choose_exiled_this_way;
 mod end_combat_phase;
+mod energy_keyed_per_seat;
 #[cfg(feature = "proptest")]
 mod engine_invariants;
 mod enlightened_tutor_regression;

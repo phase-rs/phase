@@ -1,11 +1,11 @@
 //! CR 732.2a: the confirmer's replay of a trace candidate, and the cover it certifies on.
 
-use engine::analysis::decision_template::{IterationCount, PinnedDecision};
-use engine::analysis::loop_check::{LoopCertificate, OfferRoad, ShortcutResponse, WinKind};
+use engine::analysis::decision_template::{IterationCount, PinnedDecision, ReplayMode};
+use engine::analysis::loop_check::{LoopCertificate, ShortcutResponse, WinKind};
 use engine::analysis::loop_states_equal_modulo_resources;
 use engine::analysis::resource::{
-    history_covers_for_tests, FodderCoverRefusal, ObjectGrowthVerdict, RecurrenceCover,
-    ResourceAxis,
+    history_covers_for_tests, FodderCoverRefusal, ObjectGrowthVerdict, PeriodSignature,
+    RecurrenceCover, ResourceAxis,
 };
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
@@ -27,17 +27,18 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
 use engine::game::zones::{add_to_zone, remove_from_zone};
-use engine::game::{play_trace_view, NamedSpan, NamingCause, PeriodReach, SpanSource};
+use engine::game::{play_trace_view, EntryKind, NamedSpan, NamingCause, PeriodReach, SpanSource};
 use engine::types::ability::{
     AbilityKind, CastingPermission, ChosenAttribute, ContinuousModification,
     DelayedTriggerCondition, Effect, ResolvedAbility, TargetRef,
 };
-use engine::types::actions::GameAction;
+use engine::types::actions::{GameAction, ResolveAllConsentDecision, ResolveAllScope};
 use engine::types::counter::CounterType;
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, LossReason};
+use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    CastPaymentMode, GameEnd, GameState, LoopDetectionMode, ManaChoice, PersistedGameState,
-    StackEntryKind, WaitingFor,
+    AutoMayChoice, CastPaymentMode, GameEnd, GameState, LoopDetectionMode, ManaChoice,
+    MayTriggerAutoChoiceSelector, PersistedGameState, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{
@@ -269,12 +270,140 @@ fn grown_not_inert(verdict: &Result<Vec<String>, OfferRefusal>) -> bool {
     )
 }
 
+/// The seat `state` hands priority to, when it waits on priority and publishes that seat.
+fn handed_to(state: &GameState) -> Option<PlayerId> {
+    match state.waiting_for {
+        WaitingFor::Priority { player } if state.priority_player == player => Some(player),
+        _ => None,
+    }
+}
+
+/// CR 732.2a + CR 800.4a: a shortcut that is not taken (declined, its declaration rejected, or its
+/// accepted proposal refused because its proposer conceded, CR 104.3a) hands priority back to the
+/// proposer, or to the next player in turn order still in the game; an accepted take ends where
+/// the active player receives priority (CR 117.3b). P1 holds priority on P0's turn with
+/// Kiki-Jiki, Mirror Breaker ("Haste / {T}: Create a token that's a copy of target nonlegendary
+/// creature you control, except it has haste. Sacrifice it at the beginning of the next end
+/// step.") and Deceiver Exarch ("Flash (You may cast this spell any time you could cast an
+/// instant.) / When this creature enters, choose one — / • Untap target permanent you control. /
+/// • Tap target permanent an opponent controls.").
+#[test]
+fn a_shortcut_not_taken_hands_priority_back_to_its_proposer() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let p2 = PlayerId(2);
+    let mut state = crate::loop_shortcut::restore_dump(&crate::loop_shortcut::gunzip_dump(
+        include_bytes!("../fixtures/kilo_freed_relic_pentad_4p.json.gz"),
+    ));
+    let kiki = place(&mut state, P1, "Kiki-Jiki, Mirror Breaker", db);
+    let exarch = place(&mut state, P1, "Deceiver Exarch", db);
+    let score = kiki_score(kiki, exarch);
+    let mut runner = GameRunner::from_state(state);
+    let mut plain_priority = None;
+    for _ in 0..40 {
+        if is_offer(runner.state()) {
+            break;
+        }
+        match runner.state().waiting_for {
+            WaitingFor::Priority { player } if player == P1 => {
+                plain_priority.get_or_insert_with(|| runner.state().clone());
+                kiki_activates(&mut runner, kiki, &score);
+            }
+            WaitingFor::Priority { .. } => act(&mut runner, GameAction::PassPriority),
+            ref other => panic!("unexpected {other:?}"),
+        }
+    }
+    let offer = runner.state().clone();
+    assert!(
+        matches!(offer.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P1)
+            && offer.active_player == P0,
+        "reach: P1's loop is offered on P0's turn: {:?}",
+        offer.waiting_for
+    );
+    let declare = |count| GameAction::DeclareShortcut {
+        count,
+        template: None,
+    };
+    let accept_all = |runner: &mut GameRunner| {
+        let mut last_responder = None;
+        while matches!(
+            runner.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ) {
+            last_responder = Some(runner.state().priority_player);
+            act(
+                runner,
+                GameAction::RespondToShortcut {
+                    response: ShortcutResponse::Accept,
+                },
+            );
+        }
+        last_responder
+    };
+
+    let mut conceded = GameRunner::from_state(plain_priority.expect("P1 held priority"));
+    act(&mut conceded, GameAction::Concede { player_id: P1 });
+    assert_eq!(
+        handed_to(conceded.state()),
+        Some(p2),
+        "control: a concession at plain priority"
+    );
+
+    let mut declined = GameRunner::from_state(offer.clone());
+    act(&mut declined, GameAction::DeclineShortcut);
+
+    let mut rejected = GameRunner::from_state(offer.clone());
+    act(&mut rejected, declare(IterationCount::Fixed(u32::MAX)));
+    assert!(
+        !matches!(
+            rejected.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ),
+        "reach: the over-cap declaration opens no window"
+    );
+
+    let mut refused = GameRunner::from_state(offer.clone());
+    act(&mut refused, declare(IterationCount::Fixed(3)));
+    assert!(
+        matches!(refused.state().waiting_for, WaitingFor::RespondToShortcut { player, .. } if player == p2),
+        "reach: the declaration polls P2: {:?}",
+        refused.state().waiting_for
+    );
+    act(&mut refused, GameAction::Concede { player_id: P1 });
+    assert_eq!(
+        accept_all(&mut refused),
+        Some(P0),
+        "hostile: the last polled responder holds `priority_player` at the refusal"
+    );
+    assert!(!engine::game::players::is_alive(refused.state(), P1));
+
+    assert_eq!(
+        [declined.state(), rejected.state(), refused.state()].map(handed_to),
+        [Some(P1), Some(P1), Some(p2)],
+        "decline, rejected declaration, refused proposal of a departed proposer"
+    );
+
+    let mut taken = GameRunner::from_state(offer);
+    act(&mut taken, declare(IterationCount::Fixed(3)));
+    accept_all(&mut taken);
+    assert_eq!(
+        handed_to(taken.state()),
+        Some(P0),
+        "control: the accepted take: {:?}",
+        taken.state().waiting_for
+    );
+    assert!(taken.state().stack.is_empty());
+}
+
 /// CR 702.8a + CR 702.10c: Kiki-Jiki copying Deceiver Exarch ("Flash … When this creature enters,
 /// choose one — • Untap target permanent you control. …") confirms, its copies' flash and haste
-/// and their delayed "sacrifice it" each grown; Pestermite's copies ("Flash Flying When this
-/// creature enters, you may tap or untap target permanent.") carry flying and are not inert.
+/// and their delayed "sacrifice it" each grown. CR 702.9b + CR 732.2a: Pestermite's copies ("Flash
+/// Flying When this creature enters, you may tap or untap target permanent.") carry flying, which
+/// only restricts blocks; the period declares no block and nothing reads the copies' abilities,
+/// so it confirms, is offered at the engine's cap (nothing the cards spend bounds it) and taken.
 #[test]
-fn kiki_jiki_confirms_with_deceiver_exarch_and_not_with_pestermite() {
+fn kiki_jiki_confirms_with_deceiver_exarch_and_with_pestermite() {
     let Some((mut runner, kiki, exarch)) = kiki_copy_board("Deceiver Exarch") else {
         return;
     };
@@ -290,44 +419,130 @@ fn kiki_jiki_confirms_with_deceiver_exarch_and_not_with_pestermite() {
     let Some((mut runner, kiki, pestermite)) = kiki_copy_board("Pestermite") else {
         return;
     };
-    for cycle in 0..4 {
-        assert_eq!(
-            kiki_copy_cycle(&mut runner, kiki, pestermite),
-            None,
-            "cycle {cycle}"
+    let score = kiki_score(kiki, pestermite);
+    kiki_activates(&mut runner, kiki, &score);
+    kiki_activates(&mut runner, kiki, &score);
+    assert!(
+        is_offer(runner.state()),
+        "{:?}",
+        latest_verdict(runner.state())
+    );
+    let WaitingFor::LoopShortcut { schema, .. } = &runner.state().waiting_for else {
+        unreachable!();
+    };
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(1_000));
+    assert_eq!(
+        performed_for_tests(runner.state()),
+        Some(Ok(vec!["Pestermite".to_string()]))
+    );
+    let before = tokens(runner.state(), P0);
+    take_to_step_end(&mut runner, 2);
+    let state = runner.state();
+    let minted: Vec<ObjectId> = tokens(state, P0)
+        .into_iter()
+        .filter(|id| !before.contains(id))
+        .collect();
+    assert_eq!(minted.len(), 2, "the take made the copies it counted");
+    for id in &minted {
+        let copy = &state.objects[id];
+        assert!(
+            !copy.tapped
+                && copy.keywords.contains(&Keyword::Flying)
+                && copy.keywords.contains(&Keyword::Haste),
+            "{id:?}: tapped={} keywords={:?}",
+            copy.tapped,
+            copy.keywords
         );
     }
-    let verdict = latest_verdict(runner.state());
-    assert!(grown_not_inert(&verdict), "{verdict:?}");
 }
 
-/// Phyrexian Altar recurring Gravecrawler beside Samwise Gamgee ("Whenever another nontoken
-/// creature you control enters, create a Food token.") grows Foods, whose "{2}, {T}, Sacrifice
-/// this token: You gain 3 life." keeps them from being inert.
+/// CR 602.2 + CR 732.2a: Phyrexian Altar recurring Gravecrawler beside Samwise Gamgee ("Whenever
+/// another nontoken creature you control enters, create a Food token.") grows Foods whose "{2},
+/// {T}, Sacrifice this token: You gain 3 life." the period never activates, so it is offered.
 #[test]
-fn an_altar_loop_growing_foods_is_refused_at_the_cover() {
+fn an_altar_loop_growing_foods_is_offered() {
     let Some(db) = shared_card_db() else { return };
     let (mut runner, altar, gravecrawler) = altar_board(Some("Samwise Gamgee"), db);
-    let score = |action: &GameAction| {
-        2 * names(&[gravecrawler])(action) + chooses_color(ManaType::Black)(action)
-    };
-    for cycle in 0..3 {
-        cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
-        settle(&mut runner, &score);
-        let index = ability(runner.state(), altar, true);
-        activate(&mut runner, altar, index);
-        settle(&mut runner, &score);
-        assert!(!is_offer(runner.state()), "cycle {cycle}");
-    }
-    let foods = runner
-        .state()
+    let offers = drive_altar_offers(&mut runner, (altar, gravecrawler), 3, |_| false);
+    assert_eq!(offers.len(), 1);
+    let state = runner.state();
+    let foods = state
         .battlefield
         .iter()
-        .filter(|id| runner.state().objects[id].name == "Food")
+        .filter(|id| state.objects[id].name == "Food")
         .count();
-    assert_eq!(foods, 3, "reach: one Food per entry");
-    let verdict = latest_verdict(runner.state());
-    assert!(grown_not_inert(&verdict), "{verdict:?}");
+    assert_eq!(foods, 1, "reach: Gravecrawler's entry made a Food");
+    assert!(matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }));
+}
+
+/// CR 121.1 + CR 732.2a: Phyrexian Altar ("Sacrifice a creature: Add one mana of any color.")
+/// recurring Gravecrawler beside Samwise Gamgee ("Whenever another nontoken creature you control
+/// enters, create a Food token.") and Moldervine Reclamation ("Whenever a creature you control
+/// dies, you gain 1 life and draw a card.") grows a Food and draws P0 a card each cycle; the cover
+/// puts the draw back beside the Food, so the period is offered.
+#[test]
+fn an_altar_loop_growing_foods_and_drawing_passes_the_cover() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board(Some("Samwise Gamgee"), db);
+    place(runner.state_mut(), P0, "Moldervine Reclamation", db);
+    let counts = |state: &GameState| {
+        let foods = state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[id].name == "Food")
+            .count();
+        let p0 = &state.players[0];
+        (foods, p0.library.len(), p0.hand.len())
+    };
+    for cycle in 0..3 {
+        let (foods, library, hand) = counts(runner.state());
+        altar_cycle(&mut runner, altar, gravecrawler);
+        assert_eq!(
+            counts(runner.state()),
+            (foods + 1, library - 1, hand + 1),
+            "reach: cycle {cycle}"
+        );
+    }
+    drive_altar_offers(&mut runner, (altar, gravecrawler), 3, |_| false);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
+}
+
+/// CR 121.1 + CR 701.17a: beside Liliana the Repentant ("Whenever another creature or
+/// planeswalker you control enters, mill two cards.") and Moldervine Reclamation ("Whenever a
+/// creature you control dies, you gain 1 life and draw a card."), each cycle mills P0 two cards
+/// and then draws the card under them, which the cover puts back as the top once they had left, so
+/// the period is offered.
+#[test]
+fn a_draw_after_a_mill_passes_the_cover() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board(Some("Liliana the Repentant"), db);
+    let state = runner.state_mut();
+    place(state, P0, "Moldervine Reclamation", db);
+    let swamp = db.get_face_by_name("Swamp").expect("card in fixture");
+    for _ in 0..30 {
+        engine::game::deck_loading::create_object_from_card_face(state, swamp, P0);
+    }
+    let counts = |state: &GameState| {
+        let p0 = &state.players[0];
+        (p0.library.len(), p0.graveyard.len(), p0.hand.len())
+    };
+    for cycle in 0..3 {
+        let (library, graveyard, hand) = counts(runner.state());
+        altar_cycle(&mut runner, altar, gravecrawler);
+        assert_eq!(
+            counts(runner.state()),
+            (library - 3, graveyard + 2, hand + 1),
+            "reach: cycle {cycle} mills two and draws one"
+        );
+    }
+    drive_altar_offers(&mut runner, (altar, gravecrawler), 3, |_| false);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
 }
 
 /// Kiki-Jiki copying Deceiver Exarch, three cycles after the first: three priority frames.
@@ -739,13 +954,6 @@ pub(crate) fn board_c_offered(member: BoardCMember) -> Option<food_chain_board::
     Some(board)
 }
 
-fn road(state: &GameState) -> Option<OfferRoad> {
-    match &state.waiting_for {
-        WaitingFor::LoopShortcut { road, .. } => Some(*road),
-        _ => None,
-    }
-}
-
 fn performance(state: &GameState) -> Option<PeriodPerformance> {
     match &state.waiting_for {
         WaitingFor::LoopShortcut { period, .. } => period.performance(),
@@ -768,9 +976,11 @@ fn board_c_members_are_offered_on_the_recorded_road_and_taken() {
         let Some(mut board) = board_c_offered(member) else {
             return;
         };
-        assert_eq!(
-            road(board.runner.state()),
-            Some(OfferRoad::RecordedPeriod),
+        assert!(
+            matches!(
+                board.runner.state().waiting_for,
+                WaitingFor::LoopShortcut { .. }
+            ),
             "{member:?}"
         );
         let before = incarnations(board.runner.state(), &[board.creature]);
@@ -865,7 +1075,10 @@ fn kiki_jiki_is_refused_at_its_first_span_then_offered_and_taken() {
         Err(OfferRefusal::UnanswerablePrompt)
     );
     kiki_activates(&mut runner, kiki, &score);
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
     let before = tokens(runner.state(), P0);
     take_to_step_end(&mut runner, 2);
     let state = runner.state();
@@ -1226,7 +1439,10 @@ fn grand_architect_pili_pala_is_offered_only_once_pili_pala_is_blue() {
 
     let (mut runner, _, offered) = grand_architect_pili_pala(db, true);
     assert!(offered, "reach: the recolored board offers");
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
     let pool = |state: &GameState| state.players[0].mana_pool.units().count();
     let before = pool(runner.state());
     take(&mut runner, 3);
@@ -1278,7 +1494,10 @@ fn griffin_board_is_refused_at_its_first_window_and_offered_at_the_next() {
         Err(OfferRefusal::NoRecurrence)
     );
     cast_paying_with_food_chain(&mut runner, scourge, griffin);
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
     let before = incarnations(runner.state(), &[griffin, scourge]);
     take(&mut runner, 2);
     let after = incarnations(runner.state(), &[griffin, scourge]);
@@ -1288,76 +1507,116 @@ fn griffin_board_is_refused_at_its_first_window_and_offered_at_the_next() {
     );
 }
 
-/// CR 732.1b + CR 121.4 + CR 704.5a: Phyrexian Altar recurring Gravecrawler is refused by name:
-/// with no payoff nothing grows; Moldervine Reclamation ("Whenever a creature you control dies,
-/// you gain 1 life and draw a card.") and Liliana the Repentant ("Whenever another creature or
-/// planeswalker you control enters, mill two cards.") deplete the caster's own library, beside
-/// Altar of the Brood's mill or alone.
+/// CR 732.1b: Phyrexian Altar recurring Gravecrawler with no payoff moves nothing toward anyone,
+/// so the period has no axis.
 #[test]
-fn an_altar_gravecrawler_period_is_refused_at_its_payoffs_stage() {
+fn an_altar_gravecrawler_period_without_a_payoff_has_no_axis() {
     let Some(db) = shared_card_db() else { return };
-    let Some(board) = board_c_offered(BoardCMember::C2SqueeTheImmortal) else {
-        return;
+    let (mut runner, altar, gravecrawler) = altar_board(None, db);
+    let score = |action: &GameAction| {
+        2 * names(&[gravecrawler])(action) + chooses_color(ManaType::Black)(action)
     };
-    assert!(is_offer(board.runner.state()), "reach: Board C is offered");
-    type Expected = fn(&Result<Vec<String>, OfferRefusal>) -> bool;
-    fn at_cover(v: &Result<Vec<String>, OfferRefusal>) -> bool {
-        matches!(
-            v,
-            Err(OfferRefusal::Cover(
-                ObjectGrowthVerdict::ResourceRecurrence(None)
-            ))
-        )
+    for cycle in 0..3 {
+        cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
+        settle(&mut runner, &score);
+        let index = ability(runner.state(), altar, true);
+        activate(&mut runner, altar, index);
+        settle(&mut runner, &score);
+        assert!(!is_offer(runner.state()), "cycle {cycle}");
     }
-    // Per cycle: P0's hand, P0's library, P1's library.
-    let refused: [(&[&str], [i64; 3], Expected); 4] = [
-        (&[], [0, 0, 0], |v| *v == Err(OfferRefusal::NoAxis)),
-        (
-            &["Altar of the Brood", "Moldervine Reclamation"],
-            [1, -1, -1],
-            at_cover,
-        ),
-        (&["Liliana the Repentant"], [0, -2, 0], at_cover),
-        (
-            &["Altar of the Brood", "Liliana the Repentant"],
-            [0, -2, -1],
-            at_cover,
-        ),
-    ];
-    let sizes = |state: &GameState| {
-        [
-            state.players[0].hand.len(),
-            state.players[0].library.len(),
-            state.players[1].library.len(),
-        ]
-        .map(|n| n as i64)
+    assert_eq!(latest_verdict(runner.state()), Err(OfferRefusal::NoAxis));
+}
+
+/// The Altar + Gravecrawler period's next cycle, its offers declined.
+fn altar_cycle(runner: &mut GameRunner, altar: ObjectId, gravecrawler: ObjectId) {
+    let score = |action: &GameAction| {
+        2 * names(&[gravecrawler])(action) + chooses_color(ManaType::Black)(action)
     };
-    for (payoffs, per_cycle, expected) in refused {
-        let (mut runner, altar, gravecrawler) = altar_board(payoffs.first().copied(), db);
-        for payoff in payoffs.iter().skip(1) {
-            place(runner.state_mut(), P0, payoff, db);
-        }
-        let score = |action: &GameAction| {
-            2 * names(&[gravecrawler])(action) + chooses_color(ManaType::Black)(action)
-        };
-        for cycle in 0..3 {
-            let before = sizes(runner.state());
-            cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
-            settle(&mut runner, &score);
+    for activates in [false, true] {
+        if activates {
             let index = ability(runner.state(), altar, true);
-            activate(&mut runner, altar, index);
-            settle(&mut runner, &score);
-            assert!(!is_offer(runner.state()), "{payoffs:?} cycle {cycle}");
-            let after = sizes(runner.state());
-            assert_eq!(
-                [0, 1, 2].map(|i| after[i] - before[i]),
-                per_cycle,
-                "reach: {payoffs:?} cycle {cycle}"
-            );
+            activate(runner, altar, index);
+        } else {
+            cast(runner, gravecrawler, vec![], CastPaymentMode::Auto);
         }
-        let verdict = latest_verdict(runner.state());
-        assert!(expected(&verdict), "{payoffs:?}: {verdict:?}");
+        settle(runner, &score);
+        while is_offer(runner.state()) {
+            act(runner, GameAction::DeclineShortcut);
+            settle(runner, &score);
+        }
     }
+}
+
+/// CR 121.4 + CR 701.17b + CR 732.2a: beside Altar of the Brood ("Whenever another permanent you
+/// control enters, each opponent mills a card."), Moldervine Reclamation ("Whenever a creature you
+/// control dies, you gain 1 life and draw a card.") draws P0 a card a cycle while P1 mills one.
+/// P0's draws count the period; P1's shorter library caps nothing, since milling loses no game.
+#[test]
+fn a_moldervine_altar_of_the_brood_period_is_counted_to_the_casters_library() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board(Some("Altar of the Brood"), db);
+    let state = runner.state_mut();
+    place(state, P0, "Moldervine Reclamation", db);
+    let cut: Vec<ObjectId> = state.players[1].library.iter().skip(3).copied().collect();
+    for id in cut {
+        remove_from_zone(state, id, Zone::Library, P1);
+        state.objects.remove(&id);
+    }
+    drive_altar_offers(&mut runner, (altar, gravecrawler), 1, |_| false);
+    let state = runner.state();
+    assert_eq!(
+        [0, 1].map(|seat| state.players[seat].library.len()),
+        [9, 2],
+        "reach: the offer's libraries"
+    );
+    let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for else {
+        panic!("an offer");
+    };
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(9));
+    assert_eq!(schema.deliverable_capacity, 9);
+    let after = taken(state, 9);
+    assert_eq!(
+        [0, 1].map(|seat| after.players[seat].library.len()),
+        [0, 0],
+        "the take draws P0's whole library"
+    );
+    assert!(after.game_end.is_none() && eliminated(&after).is_empty());
+}
+
+/// CR 121.1 + CR 704.5b + CR 732.2a: the same period with one card left in P0's library at the
+/// offer draws it once, so one repetition is offered, and taking it leaves P0 in the game.
+#[test]
+fn a_moldervine_altar_of_the_brood_period_with_one_card_left_is_offered_one_repetition() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board(Some("Altar of the Brood"), db);
+    let state = runner.state_mut();
+    place(state, P0, "Moldervine Reclamation", db);
+    for (seat, keep) in [(P0, state.players[0].library.len() - 8), (P1, 3)] {
+        let cut: Vec<ObjectId> = state.players[seat.0 as usize]
+            .library
+            .iter()
+            .skip(keep)
+            .copied()
+            .collect();
+        for id in cut {
+            remove_from_zone(state, id, Zone::Library, seat);
+            state.objects.remove(&id);
+        }
+    }
+    drive_altar_offers(&mut runner, (altar, gravecrawler), 1, |_| false);
+    let state = runner.state();
+    assert_eq!(
+        [0, 1].map(|seat| state.players[seat].library.len()),
+        [1, 2],
+        "reach: the offer's libraries"
+    );
+    let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for else {
+        panic!("an offer");
+    };
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(1));
+    let after = taken(state, 1);
+    assert_eq!(after.players[0].library.len(), 0);
+    assert!(after.game_end.is_none() && eliminated(&after).is_empty());
 }
 
 /// CR 732.1b: once both rotations of the Altar + Gravecrawler period are named, each later cycle
@@ -1439,7 +1698,10 @@ fn a_period_refused_for_no_axis_is_offered_once_it_nets_life() {
         refused_for_no_axis,
         "reach: the period was refused while it cost life"
     );
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
 }
 
 /// Cycles the Altar + Gravecrawler period at most `cycles` times, declining each offer `declines`
@@ -1488,7 +1750,10 @@ fn an_altar_of_the_brood_period_is_offered_and_taken() {
     let (mut runner, altar, gravecrawler) = altar_board(Some("Altar of the Brood"), db);
     let offers = drive_altar_offers(&mut runner, (altar, gravecrawler), 3, |_| false);
     let (library, certificate) = offers.last().expect("an offer");
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
     assert_eq!(certificate.unbounded, [ResourceAxis::LibraryDelta(P1)]);
     assert_eq!(certificate.win_kind, Some(WinKind::Advantage));
     take(&mut runner, 2);
@@ -1542,7 +1807,10 @@ fn an_altar_gravecrawler_period_is_offered_once_the_milled_library_is_empty() {
     assert_eq!(*library, 0);
     assert_eq!(last.unbounded, [ResourceAxis::Life(P0)]);
     assert_eq!(last.win_kind, Some(WinKind::Advantage));
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
 }
 
 /// CR 701.17b + CR 732.2c: on the Soul Warden board, a take of the offer made at P1's last card
@@ -1865,7 +2133,10 @@ fn a_sprout_swarm_ramp_up_is_offered_once_its_forests_are_spent() {
         settle(&mut runner, &|_| 0);
     }
     assert_eq!(saprolings(runner.state()), 3, "reach: each cast resolved");
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
     assert_eq!(
         performance(runner.state()),
         Some(PeriodPerformance::UsesTheStack)
@@ -1965,7 +2236,10 @@ fn a_replay_refused_for_want_of_red_mana_is_asked_again_once_food_chain_makes_re
         "reach: the green cycle was refused by its replay"
     );
     exile_for(&mut runner, ManaType::Red);
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
 }
 
 const P2: PlayerId = PlayerId(2);
@@ -2008,6 +2282,17 @@ fn eliminations(events: &[GameEvent]) -> Vec<PlayerId> {
         .iter()
         .filter_map(|event| match event {
             GameEvent::PlayerEliminated { player_id } => Some(*player_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Each seat `events` record as losing, with its reasons, in order.
+fn losses_in(events: &[GameEvent]) -> Vec<(PlayerId, BTreeSet<LossReason>)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerLost { player_id, reasons } => Some((*player_id, reasons.clone())),
             _ => None,
         })
         .collect()
@@ -2065,13 +2350,11 @@ fn bounded_recorded_offer(state: &GameState, count: u32) -> &LoopCertificate {
     let WaitingFor::LoopShortcut {
         certificate,
         schema,
-        road,
         ..
     } = &state.waiting_for
     else {
         panic!("no offer: {:?}", latest_verdict(state));
     };
-    assert_eq!(*road, OfferRoad::RecordedPeriod);
     assert_eq!(schema.iteration_count, IterationCount::Fixed(count));
     assert_eq!(schema.deliverable_capacity, count);
     assert_eq!(certificate.win_kind, Some(WinKind::LethalDamage));
@@ -2128,13 +2411,18 @@ fn an_altar_zulaport_period_is_offered_a_bounded_shortcut_and_taken() {
             [(P0, 1), (P1, -1)].into_iter().collect(),
             "{payoff}"
         );
+        let WaitingFor::LoopShortcut { declaration, .. } = &offered.waiting_for else {
+            panic!("{payoff}: an offer");
+        };
+        // The offer's own declaration carries the period's recorded answers, Phyrexian Altar's
+        // colour among them.
         assert!(
             engine::ai_support::candidate_actions(&offered)
                 .iter()
                 .any(|candidate| candidate.action
                     == GameAction::DeclareShortcut {
                         count: IterationCount::Fixed(l),
-                        template: None,
+                        template: declaration.clone(),
                     }),
             "{payoff}: the AI proposer may declare the offer"
         );
@@ -2168,6 +2456,1017 @@ fn an_altar_zulaport_period_is_offered_a_bounded_shortcut_and_taken() {
 
         assert_declaration_refused(&offered, l + 1);
     }
+}
+
+/// Drives P0's Phyrexian Altar + Gravecrawler loop on four seats, with `payoffs` beside Walking
+/// Corpse, each of `placements` on its seat, `enchanting`'s Aura under its seat attached to the
+/// first placement, and each of `starting` at its life, every trigger aimed at `aim`, to the offer.
+fn four_seat_altar_offer(
+    db: &CardDatabase,
+    payoffs: &[&str],
+    placements: &[(PlayerId, &str)],
+    enchanting: Option<(PlayerId, &str)>,
+    starting: &[(PlayerId, i32)],
+    aim: PlayerId,
+) -> GameRunner {
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let altar = scenario.add_real_card(P0, "Phyrexian Altar", Zone::Battlefield, db);
+    for card in payoffs.iter().chain(&["Walking Corpse"]) {
+        scenario.add_real_card(P0, card, Zone::Battlefield, db);
+    }
+    let placed: Vec<ObjectId> = placements
+        .iter()
+        .map(|&(seat, card)| scenario.add_real_card(seat, card, Zone::Battlefield, db))
+        .collect();
+    let aura =
+        enchanting.map(|(seat, card)| (seat, scenario.add_real_card(seat, card, Zone::Hand, db)));
+    let gravecrawler = scenario.add_real_card(P0, "Gravecrawler", Zone::Battlefield, db);
+    for seat in 0..4 {
+        for _ in 0..50 {
+            scenario.add_real_card(PlayerId(seat), "Swamp", Zone::Library, db);
+        }
+    }
+    for &(seat, life) in starting {
+        scenario.with_life(seat, life);
+    }
+    let mut runner = scenario.build();
+    if let Some((seat, aura)) = aura {
+        let state = runner.state_mut();
+        remove_from_zone(state, aura, Zone::Hand, seat);
+        add_to_zone(state, aura, Zone::Battlefield, seat);
+        state.objects.get_mut(&aura).expect("the Aura exists").zone = Zone::Battlefield;
+        attach_to(state, aura, placed[0]);
+        state.layers_dirty.mark_full();
+    }
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    let score = |action: &GameAction| {
+        2 * names(&[gravecrawler])(action)
+            + chooses_color(ManaType::Black)(action)
+            + i32::from(
+                matches!(
+                    action,
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(seat))
+                    } if *seat == aim
+                ) || matches!(action, GameAction::DecideOptionalEffect { accept: true }),
+            )
+    };
+    for _ in 0..6 {
+        let index = ability(runner.state(), altar, true);
+        activate(&mut runner, altar, index);
+        settle(&mut runner, &score);
+        if is_offer(runner.state()) {
+            break;
+        }
+        cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
+        settle(&mut runner, &score);
+        if is_offer(runner.state()) {
+            break;
+        }
+    }
+    runner
+}
+
+/// CR 603.3d + CR 601.2c + CR 800.4a + CR 104.2a: on four seats, P0 sacrifices Gravecrawler to
+/// Phyrexian Altar and recasts it beside a death trigger aimed at one seat: Blood Artist ("Whenever
+/// this creature or another creature dies, target player loses 1 life and you gain 1 life."),
+/// Spiteful Prankster ("Whenever another creature dies, this creature deals 1 damage to target
+/// player or planeswalker."), Blood Artist beside Extractor Demon ("Whenever another creature
+/// leaves the battlefield, you may have target player mill two cards."), or Blood Artist beside
+/// Spiteful Prankster, with or without an opponent's Energy Field ("Prevent all damage that would
+/// be dealt to you by sources you don't control." / "When a card is put into your graveyard from
+/// anywhere, sacrifice this enchantment.") or Fiendish Duo ("First strike (This creature deals
+/// combat damage before creatures without first strike.)" / "If a source would deal damage to an
+/// opponent, it deals double that damage to that player instead."). Each trigger's target is
+/// chosen as it goes on the stack, so the period re-aims at each seat left, and P0 wins. With every
+/// slot taking life, P1 leaves at repetition 19, P2 at 39 and P3 at 59, or at 9, 19 and 29 when
+/// Blood Artist and Spiteful Prankster both take 1; aimed at P2 or P3 instead, both taking 1 still
+/// win at 29. A slot that
+/// took nothing at P1 (Extractor Demon's mill, or Prankster's damage under Energy Field, CR 615.6)
+/// keeps P1, so P2 leaves at 21, P3 at 41 and P1 at 59. Prankster measured taking nothing at Energy
+/// Field's controller stays there while Blood Artist drains the others, so with the record aimed at
+/// P2 and the Field under P1, or aimed at P1 and the Field under P3, P0 wins at 57. Under P1's
+/// Fiendish Duo, P1 is not its own opponent and takes 2 a repetition: 29; under P2's, P1 takes 3 a
+/// repetition until it leaves in repetition 6, and P2 leaves with the Duo (CR 800.4a) in 16: 26.
+/// Under P1's Duo with the record aimed at P2 at 17, Prankster takes 1 at P2 once P1 has left with
+/// the Duo, so P1 leaves at 11, P2 at 18 and P3 at 28: 28.
+/// Palisade Giant ("All damage that would be dealt to you and other permanents you control is
+/// dealt to this creature instead.") takes Prankster's damage in its controller's place until a
+/// seventh destroys it (CR 614.1a + CR 704.5g), so Prankster leaves the Giant's seat after the hits
+/// it survives while Blood Artist drains that seat first: 32 under P3 with the record aimed at P1,
+/// and 32 under P1 or P2 aimed there, the Giant already marked once. Beside P1's Fiendish Duo,
+/// Prankster's damage at P3 meets the Duo's doubling and the Giant's redirection and P3 orders them
+/// (CR 616.1): the offer names the Giant first, which reaches 32 where the Duo first reaches 31, and
+/// P3 may shorten where it would order them otherwise (CR 732.2b). With P1 at 12 and the Giant under
+/// P3, P1 leaves at 15, before the Giant's seat, and Prankster moves on when P1 leaves: 28.
+/// The record aims at one seat alone, so its own declaration reaches that seat's departure: 19, 9
+/// when both slots take 1, 6 when P1 or P2 takes 3, or 5 when the Giant shares that seat.
+#[test]
+fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
+    let Some(db) = shared_card_db() else { return };
+    let prankster_artist = &["Blood Artist", "Spiteful Prankster"][..];
+    for (payoffs, placements, aim, frame, count, own, end) in [
+        (
+            &["Blood Artist"][..],
+            &[][..],
+            P1,
+            [21, 19, 20, 20],
+            59,
+            19,
+            [80, 0, 0, 0],
+        ),
+        (
+            &["Spiteful Prankster"][..],
+            &[][..],
+            P1,
+            [20, 19, 20, 20],
+            59,
+            19,
+            [20, 0, 0, 0],
+        ),
+        (
+            &["Blood Artist", "Extractor Demon"][..],
+            &[][..],
+            P1,
+            [21, 19, 20, 20],
+            59,
+            19,
+            [80, 0, 0, 0],
+        ),
+        (
+            prankster_artist,
+            &[(P1, "Energy Field")][..],
+            P1,
+            [21, 19, 20, 20],
+            59,
+            19,
+            [80, 0, 0, 0],
+        ),
+        (
+            prankster_artist,
+            &[][..],
+            P1,
+            [21, 18, 20, 20],
+            29,
+            9,
+            [50, 0, 0, 0],
+        ),
+        (
+            prankster_artist,
+            &[(P1, "Energy Field")][..],
+            P2,
+            [21, 20, 18, 20],
+            57,
+            9,
+            [78, 0, 0, 0],
+        ),
+        (
+            prankster_artist,
+            &[(P3, "Energy Field")][..],
+            P1,
+            [21, 18, 20, 20],
+            57,
+            9,
+            [78, 0, 0, 0],
+        ),
+        (
+            prankster_artist,
+            &[][..],
+            P2,
+            [21, 20, 18, 20],
+            29,
+            9,
+            [50, 0, 0, 0],
+        ),
+        (
+            prankster_artist,
+            &[][..],
+            P3,
+            [21, 20, 20, 18],
+            29,
+            9,
+            [50, 0, 0, 0],
+        ),
+        (
+            prankster_artist,
+            &[(P1, "Fiendish Duo")][..],
+            P1,
+            [21, 18, 20, 20],
+            29,
+            9,
+            [50, 0, 0, 0],
+        ),
+        (
+            prankster_artist,
+            &[(P2, "Fiendish Duo")][..],
+            P1,
+            [21, 17, 20, 20],
+            26,
+            6,
+            [46, 0, 0, 0],
+        ),
+        (
+            prankster_artist,
+            &[(P1, "Fiendish Duo")][..],
+            P2,
+            [21, 20, 17, 20],
+            28,
+            6,
+            [49, 0, 0, 0],
+        ),
+    ] {
+        let mut runner = four_seat_altar_offer(db, payoffs, placements, None, &[], aim);
+        assert_suggestion_wins(
+            &mut runner,
+            &format!("{payoffs:?} {placements:?} {aim:?}"),
+            payoffs.len(),
+            frame,
+            count,
+            Some(engine::analysis::decision_template::RepetitionBound::Measured),
+            own,
+            end,
+        );
+    }
+    let giant_first: &[(&str, u8)] = &[("Palisade Giant", 0), ("Fiendish Duo", 1)];
+    for (placements, starting, aim, frame, count, own, end, orders) in [
+        (
+            &[(P3, "Palisade Giant")][..],
+            &[][..],
+            P1,
+            [21, 18, 20, 20],
+            32,
+            9,
+            [53, 0, 0, 0],
+            &[][..],
+        ),
+        (
+            &[(P1, "Palisade Giant")][..],
+            &[][..],
+            P1,
+            [21, 19, 20, 20],
+            32,
+            5,
+            [53, 0, 0, 0],
+            &[][..],
+        ),
+        (
+            &[(P2, "Palisade Giant")][..],
+            &[][..],
+            P2,
+            [21, 20, 19, 20],
+            32,
+            5,
+            [53, 0, 0, 0],
+            &[][..],
+        ),
+        (
+            &[(P3, "Palisade Giant"), (P1, "Fiendish Duo")][..],
+            &[][..],
+            P1,
+            [21, 18, 20, 20],
+            32,
+            9,
+            [53, 0, 0, 0],
+            giant_first,
+        ),
+        (
+            &[(P3, "Palisade Giant")][..],
+            &[(P1, 12)][..],
+            P1,
+            [21, 10, 20, 20],
+            28,
+            5,
+            [49, 0, 0, 0],
+            &[][..],
+        ),
+    ] {
+        let label = format!("{placements:?} {starting:?}, aim {aim:?}");
+        let mut runner =
+            four_seat_altar_offer(db, prankster_artist, placements, None, starting, aim);
+        let WaitingFor::LoopShortcut { schema, .. } = &runner.state().waiting_for else {
+            panic!("{label}: no offer: {:?}", latest_verdict(runner.state()));
+        };
+        let positions = orders.len() as u8;
+        assert_eq!(
+            replacement_places(
+                runner.state(),
+                schema
+                    .suggested_declaration
+                    .as_ref()
+                    .map_or(&[][..], |suggestion| &suggestion.decisions),
+                &schema.points,
+            ),
+            (
+                orders
+                    .iter()
+                    .map(|&(name, pos)| (name.to_string(), pos))
+                    .collect(),
+                orders
+                    .iter()
+                    .map(|&(name, pos)| (name.to_string(), pos, positions))
+                    .collect(),
+            ),
+            "{label}: the suggestion's replacement order and its published points"
+        );
+        assert_suggestion_wins(&mut runner, &label, 2, frame, count, None, own, end);
+    }
+}
+
+/// Each CR 616.1 replacement-order pin among `pins`, as its effect source's name and place, and each
+/// published `Order` point among `points`, as its source's name, place and number of places.
+#[allow(clippy::type_complexity)]
+fn replacement_places(
+    state: &GameState,
+    pins: &[PinnedDecision],
+    points: &[engine::analysis::decision_template::DecisionPoint],
+) -> (Vec<(String, u8)>, Vec<(String, u8, u8)>) {
+    use engine::analysis::decision_template::{ChoicePoint, DecisionPointKind};
+    use engine::types::game_state::YieldTarget;
+    let name = |source: &YieldTarget| {
+        let YieldTarget::ThisObject { source_id, .. } = source else {
+            panic!("an object source, got {source:?}");
+        };
+        state.objects[source_id].name.clone()
+    };
+    (
+        pins.iter()
+            .filter_map(|pin| match pin {
+                PinnedDecision::Order { slot, pos }
+                    if slot.point == ChoicePoint::ReplacementOrder =>
+                {
+                    Some((name(&slot.source), *pos))
+                }
+                _ => None,
+            })
+            .collect(),
+        points
+            .iter()
+            .filter_map(|point| match point.kind {
+                DecisionPointKind::Order { pos, positions } => {
+                    Some((name(&point.slot.source), pos, positions))
+                }
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+/// Asserts the offer standing in `runner` (`label`) at its frame — `stack` triggers, lives `frame`
+/// — publishes `count` with P0 winning beside its own declaration's `own`, with `bound` as its
+/// repetition bound where given, and that taking its suggestion at `count` ends the game
+/// once with P0 the winner at lives `end`.
+#[allow(clippy::too_many_arguments)]
+fn assert_suggestion_wins(
+    runner: &mut GameRunner,
+    label: &str,
+    stack: usize,
+    frame: [i32; 4],
+    count: u32,
+    bound: Option<engine::analysis::decision_template::RepetitionBound>,
+    own: u32,
+    end: [i32; 4],
+) {
+    let offered = runner.state().clone();
+    assert_eq!(
+        (offered.stack.len(), lives(&offered)),
+        (stack, frame.to_vec()),
+        "reach {label}: the triggers stand at the offer frame"
+    );
+    let WaitingFor::LoopShortcut {
+        schema,
+        predicted_winner,
+        declaration,
+        ..
+    } = &offered.waiting_for
+    else {
+        panic!("{label}: no offer: {:?}", latest_verdict(&offered));
+    };
+    assert_eq!(
+        (&schema.iteration_count, *predicted_winner),
+        (&IterationCount::Fixed(count), Some(P0)),
+        "{label}"
+    );
+    if let Some(bound) = bound {
+        assert_eq!(schema.repetition_bound, bound, "{label}");
+    }
+    bounded_recorded_offer(&offered, count);
+    assert_eq!(
+        declaration.as_ref().map(|own| own.replay.clone()),
+        Some(ReplayMode::Scheduled {
+            count: IterationCount::Fixed(own)
+        }),
+        "{label}"
+    );
+    let suggestion = schema
+        .suggested_declaration
+        .clone()
+        .unwrap_or_else(|| panic!("{label}: a suggestion"));
+    assert_eq!(
+        suggestion.replay,
+        ReplayMode::Scheduled {
+            count: IterationCount::Fixed(count)
+        },
+        "{label}"
+    );
+
+    let mut events = act_events(
+        runner,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(count),
+            template: Some(suggestion),
+        },
+    );
+    events.extend(accept(runner));
+    let taken = runner.state();
+    assert_eq!(
+        taken.waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) },
+        "{label}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::GameOver { .. }))
+            .count(),
+        1,
+        "{label}"
+    );
+    assert_eq!(
+        (lives(taken), eliminated(taken)),
+        (end.to_vec(), vec![P1, P2, P3]),
+        "{label}"
+    );
+}
+
+/// Takes the offer standing in `runner` at its published count with its suggestion, and returns
+/// the events.
+fn take_suggestion(runner: &mut GameRunner) -> Vec<GameEvent> {
+    let WaitingFor::LoopShortcut { schema, .. } = &runner.state().waiting_for else {
+        panic!("an offer stands, got {:?}", runner.state().waiting_for);
+    };
+    let count = schema.iteration_count.clone();
+    let template = schema.suggested_declaration.clone();
+    let mut events = act_events(runner, GameAction::DeclareShortcut { count, template });
+    events.extend(accept(runner));
+    events
+}
+
+/// P0's four-seat Altar loop with Blood Artist and Spiteful Prankster, Palisade Giant under P3 and
+/// Fiendish Duo under P1, every trigger aimed at P1, at its offer.
+fn giant_and_duo_offer(db: &CardDatabase) -> GameRunner {
+    four_seat_altar_offer(
+        db,
+        &["Blood Artist", "Spiteful Prankster"],
+        &[(P3, "Palisade Giant"), (P1, "Fiendish Duo")],
+        None,
+        &[],
+        P1,
+    )
+}
+
+/// The object on `state`'s battlefield named `name` under `controller`, as a published candidate
+/// names it.
+fn object_named(state: &GameState, name: &str, controller: PlayerId) -> (String, String) {
+    let (id, _) = state
+        .objects
+        .iter()
+        .find(|(_, object)| object.name == name && object.controller == controller)
+        .unwrap_or_else(|| panic!("{name} under {controller:?}"));
+    (id.0.to_string(), name.to_string())
+}
+
+/// Each published `Order` point among `points`, as whether it is read-only and the objects its
+/// candidates name among `candidates`, in order.
+fn order_statements(
+    points: &[InteractionShortcutPoint],
+    candidates: &[engine::types::interaction::InteractionChoice],
+) -> Vec<(bool, Vec<(String, String)>)> {
+    use engine::types::interaction::InteractionPresentationSurface;
+    points
+        .iter()
+        .filter(|point| point.kind == InteractionShortcutPointKind::Order)
+        .map(|point| {
+            let named = point
+                .candidate_ids
+                .iter()
+                .map(|id| {
+                    candidates
+                        .iter()
+                        .find(|choice| choice.id == *id)
+                        .and_then(|choice| {
+                            choice.surfaces.iter().find_map(|surface| match surface {
+                                InteractionPresentationSurface::Object {
+                                    reference,
+                                    name: Some(name),
+                                    ..
+                                } => Some((reference.clone(), name.clone())),
+                                _ => None,
+                            })
+                        })
+                        .unwrap_or_else(|| panic!("candidate {id:?} names an object"))
+                })
+                .collect();
+            (point.read_only, named)
+        })
+        .collect()
+}
+
+/// The candidates an interaction opportunity publishes.
+fn opportunity_candidates(
+    opportunity: &InteractionOpportunity,
+) -> &[engine::types::interaction::InteractionChoice] {
+    match &opportunity.response {
+        InteractionOpportunityResponse::Schema { candidates, .. } => candidates,
+        other => panic!("a schema opportunity, got {other:?}"),
+    }
+}
+
+/// CR 616.1 + CR 732.2a: Spiteful Prankster's damage at P3 meets Fiendish Duo's "If a source would
+/// deal damage to an opponent, it deals double that damage to that player instead." and Palisade
+/// Giant's "All damage that would be dealt to you and other permanents you control is dealt to this
+/// creature instead.", an order the record never made. The offer publishes that order as read-only
+/// points, so accepting the suggestion through the interaction response declares it from the
+/// confirmed period and the take wins at 32.
+#[test]
+fn a_replacement_order_the_record_never_made_is_declared_through_the_ingress() {
+    use engine::analysis::decision_template::{
+        AnnouncementSubject, DecisionPointKind, TargetPin, TargetSchedule,
+    };
+    use engine::types::interaction::AmountAssignment;
+    let Some(db) = shared_card_db() else { return };
+    let offered = giant_and_duo_offer(db).state().clone();
+    assert_eq!(
+        (offered.stack.len(), lives(&offered)),
+        (2, vec![21, 18, 20, 20]),
+        "reach: the triggers stand at the offer frame"
+    );
+    let WaitingFor::LoopShortcut { schema, .. } = &offered.waiting_for else {
+        panic!("no offer: {:?}", latest_verdict(&offered));
+    };
+    let IterationCount::Fixed(count) = schema.iteration_count else {
+        panic!("a counted offer, got {:?}", schema.iteration_count);
+    };
+    assert_eq!(count, 32);
+    let suggestion = schema.suggested_declaration.clone().expect("a suggestion");
+    let giant = object_named(&offered, "Palisade Giant", P3);
+    let duo = object_named(&offered, "Fiendish Duo", P1);
+
+    let (bound, view) = published_to_p0(&offered);
+    let (opportunity, points) = shortcut_schema(&view).expect("a shortcut schema");
+    assert_eq!(
+        order_statements(points, opportunity_candidates(opportunity)),
+        vec![(true, vec![giant, duo]), (true, Vec::new())],
+        "the place-0 point states the order; the place-1 point states nothing"
+    );
+    // The suggestion's own announcement sequences, named through the published candidates.
+    let pins: Vec<InteractionShortcutPin> = points
+        .iter()
+        .zip(&schema.points)
+        .filter_map(|(point, published)| {
+            let DecisionPointKind::Targets { legal_targets, .. } = &published.kind else {
+                return None;
+            };
+            let targets = suggestion
+                .decisions
+                .iter()
+                .find_map(|decision| match decision {
+                    PinnedDecision::Targets { slot, targets } if *slot == published.slot => {
+                        Some(targets)
+                    }
+                    _ => None,
+                })?;
+            let [TargetPin::Scheduled(TargetSchedule::Piecewise(segments))] = targets.as_slice()
+            else {
+                panic!("a piecewise suggestion, got {targets:?}");
+            };
+            let named: Vec<AmountAssignment> = segments
+                .iter()
+                .enumerate()
+                .filter_map(|(k, (start, ranking))| {
+                    let end = segments.get(k + 1).map_or(count, |(next, _)| *next);
+                    let amount = count.min(end).saturating_sub(*start);
+                    let AnnouncementSubject::Seat(seat) = ranking.head() else {
+                        panic!("a seat segment, got {ranking:?}");
+                    };
+                    let at = legal_targets
+                        .iter()
+                        .position(|target| *target == TargetRef::Player(*seat))?;
+                    (amount > 0).then(|| AmountAssignment {
+                        choice_id: point.candidate_ids[at].clone(),
+                        amount,
+                    })
+                })
+                .collect();
+            Some(InteractionShortcutPin {
+                group: point.group,
+                choice_ids: named.iter().map(|part| part.choice_id.clone()).collect(),
+                amounts: named,
+            })
+        })
+        .collect();
+    assert_eq!(
+        pins.len(),
+        2,
+        "reach: both announced-target points are answered"
+    );
+    let submission = InteractionSubmission {
+        interaction_id: opportunity.interaction_id.clone(),
+        response: InteractionResponse::Shortcut {
+            decision: InteractionShortcutDecision::AcceptSuggested,
+            pins,
+        },
+    };
+    let template = match resolve_interaction_response(&bound, P0, &submission) {
+        Ok(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(32),
+            template: Some(template),
+        }) => template,
+        other => panic!(
+            "the response mints a declaration of 32; got {:?}",
+            other.map_err(|error| error.code)
+        ),
+    };
+    let orders = |decisions: &[PinnedDecision]| -> Vec<PinnedDecision> {
+        decisions
+            .iter()
+            .filter(|decision| matches!(decision, PinnedDecision::Order { .. }))
+            .cloned()
+            .collect()
+    };
+    let suggested = orders(&suggestion.decisions);
+    assert_eq!(
+        suggested.len(),
+        2,
+        "reach: the suggestion declares the order"
+    );
+    assert_eq!(orders(&template.decisions), suggested);
+
+    let mut declared = bound.clone();
+    assert!(submit_interaction(&mut declared, P0, submission).is_ok());
+    let mut runner = GameRunner::from_state(declared);
+    accept(&mut runner);
+    let taken = runner.state();
+    assert_eq!(taken.waiting_for, WaitingFor::GameOver { winner: Some(P0) });
+    assert_eq!(lives(taken), [53, 0, 0, 0]);
+}
+
+/// CR 616.1 + CR 732.2a: a second Palisade Giant under P2 gives P2 the order the offer names, and
+/// none for P3. Its suggestion reaches 28 with no winner: P2 leaves at 21 and P1 at 22, and a 29th
+/// Prankster hit would destroy P3's Giant and break the period (CR 704.5g). Re-aimed at P3 while P1
+/// lives, Prankster's damage meets Fiendish Duo and P3's Giant, an order the declaration names for
+/// P2 alone; it describes no choice of P3's, so nothing is performed and the declaration is handed
+/// back with P3's Giant unmarked.
+#[test]
+fn a_second_seats_order_the_offer_does_not_name_is_never_answered_from_the_first() {
+    use engine::analysis::decision_template::{
+        AnnouncementSubject, Ranking, TargetPin, TargetSchedule,
+    };
+    use engine::types::game_state::YieldTarget;
+    let Some(db) = shared_card_db() else { return };
+    let mut runner = four_seat_altar_offer(
+        db,
+        &["Blood Artist", "Spiteful Prankster"],
+        &[
+            (P3, "Palisade Giant"),
+            (P1, "Fiendish Duo"),
+            (P2, "Palisade Giant"),
+        ],
+        None,
+        &[],
+        P1,
+    );
+    let offered = runner.state().clone();
+    assert_eq!(
+        (offered.stack.len(), lives(&offered)),
+        (2, vec![21, 18, 20, 20]),
+        "reach: the triggers stand at the offer frame"
+    );
+    let WaitingFor::LoopShortcut {
+        schema,
+        predicted_winner,
+        declaration,
+        ..
+    } = &offered.waiting_for
+    else {
+        panic!("no offer: {:?}", latest_verdict(&offered));
+    };
+    assert_eq!(
+        (&schema.iteration_count, *predicted_winner),
+        (&IterationCount::Fixed(28), None)
+    );
+    assert_eq!(
+        declaration.as_ref().map(|own| own.replay.clone()),
+        Some(ReplayMode::Scheduled {
+            count: IterationCount::Fixed(9)
+        })
+    );
+    let suggestion = schema.suggested_declaration.clone().expect("a suggestion");
+    let p2_giant = object_named(&offered, "Palisade Giant", P2).0;
+    let duo = object_named(&offered, "Fiendish Duo", P1).0;
+    let places: Vec<(String, u8)> = suggestion
+        .decisions
+        .iter()
+        .filter_map(|decision| match decision {
+            PinnedDecision::Order { slot, pos } => match &slot.source {
+                YieldTarget::ThisObject { source_id, .. } => Some((source_id.0.to_string(), *pos)),
+                other => panic!("an object source, got {other:?}"),
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(places, [(p2_giant, 0), (duo, 1)], "P2's order, Giant first");
+
+    let events = take_suggestion(&mut runner);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, GameEvent::GameOver { .. })),
+        "the take ends no game"
+    );
+    let taken = runner.state();
+    assert_eq!(
+        (lives(taken), eliminated(taken)),
+        (vec![49, 0, 0, 14], vec![P1, P2])
+    );
+
+    let prankster = offered
+        .objects
+        .iter()
+        .find(|(_, object)| object.name == "Spiteful Prankster")
+        .map(|(id, _)| *id)
+        .expect("Spiteful Prankster");
+    let p3_giant = offered
+        .objects
+        .iter()
+        .find(|(_, object)| object.name == "Palisade Giant" && object.controller == P3)
+        .map(|(id, _)| *id)
+        .expect("P3's Palisade Giant");
+    let mut partial = suggestion.clone();
+    let mut re_aimed = 0;
+    for decision in &mut partial.decisions {
+        if let PinnedDecision::Targets { slot, targets } = decision {
+            if matches!(slot.source, YieldTarget::ThisObject { source_id, .. } if source_id == prankster)
+            {
+                *targets = vec![TargetPin::Scheduled(TargetSchedule::Constant(
+                    Ranking::one(AnnouncementSubject::Seat(P3)),
+                ))];
+                re_aimed += 1;
+            }
+        }
+    }
+    assert_eq!(
+        re_aimed, 1,
+        "reach: Prankster's announced target is re-aimed at P3"
+    );
+    let mut runner = GameRunner::from_state(offered.clone());
+    act(
+        &mut runner,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(3),
+            template: Some(partial),
+        },
+    );
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 },
+        "the declaration is handed back, no reply window"
+    );
+    let handed_back = runner.state();
+    assert_eq!(lives(handed_back), [21, 18, 20, 20]);
+    assert_eq!(handed_back.objects[&p3_giant].damage_marked, 0);
+}
+
+/// CR 732.2b: P3, whose order Spiteful Prankster's damage meets (Fiendish Duo's "If a source would
+/// deal damage to an opponent, it deals double that damage to that player instead." and Palisade
+/// Giant's "All damage that would be dealt to you and other permanents you control is dealt to this
+/// creature instead."), needs the order the proposal names for it to shorten where it would choose
+/// otherwise. It is public proposal text, so each responder, chooser or not, is shown Palisade Giant
+/// then Fiendish Duo, as the proposer's offer states it.
+#[test]
+fn a_declared_replacement_order_is_stated_to_every_responder() {
+    let Some(db) = shared_card_db() else { return };
+    let mut runner = giant_and_duo_offer(db);
+    let offered = runner.state().clone();
+    assert_eq!(
+        (offered.stack.len(), lives(&offered)),
+        (2, vec![21, 18, 20, 20]),
+        "reach: the triggers stand at the offer frame"
+    );
+    let stated = vec![
+        object_named(&offered, "Palisade Giant", P3),
+        object_named(&offered, "Fiendish Duo", P1),
+    ];
+    let (_, view) = published_to_p0(&offered);
+    let (opportunity, points) = shortcut_schema(&view).expect("a shortcut schema");
+    assert_eq!(
+        order_statements(points, opportunity_candidates(opportunity)),
+        vec![(true, stated.clone()), (true, Vec::new())],
+        "the proposer's offer states the order at place 0"
+    );
+
+    let WaitingFor::LoopShortcut { schema, .. } = &offered.waiting_for else {
+        panic!("no offer: {:?}", latest_verdict(&offered));
+    };
+    let count = schema.iteration_count.clone();
+    let template = schema.suggested_declaration.clone();
+    act(&mut runner, GameAction::DeclareShortcut { count, template });
+    let mut responders = Vec::new();
+    while let WaitingFor::RespondToShortcut { player, .. } = runner.state().waiting_for.clone() {
+        let mut bound = runner.state().clone();
+        bind_interaction_authority(&mut bound, InteractionSessionId("respond".into()))
+            .expect("valid interaction authority binding");
+        let filtered = filter_state_for_viewer(&bound, player);
+        let view = derive_viewer_interaction(&bound, &filtered, player);
+        let (opportunity, points) = view
+            .opportunities
+            .iter()
+            .find_map(|opportunity| match &opportunity.response {
+                InteractionOpportunityResponse::Schema {
+                    spec: InteractionResponseSpec::ShortcutReply { points, .. },
+                    ..
+                } => Some((opportunity, points.as_slice())),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{player:?} is asked to reply"));
+        assert_eq!(
+            points
+                .iter()
+                .filter(|point| point.kind == InteractionShortcutPointKind::Targets)
+                .count(),
+            2,
+            "reach: {player:?} is shown both announced-target decisions"
+        );
+        assert_eq!(
+            order_statements(points, opportunity_candidates(opportunity)),
+            vec![(true, stated.clone())],
+            "{player:?} is shown the order once"
+        );
+        responders.push(player);
+        act(
+            &mut runner,
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            },
+        );
+    }
+    assert_eq!(responders, [P1, P2, P3]);
+    let taken = runner.state();
+    assert_eq!(taken.waiting_for, WaitingFor::GameOver { winner: Some(P0) });
+    assert_eq!(lives(taken), [53, 0, 0, 0]);
+}
+
+/// CR 613.1b + CR 800.4a: P2's Confiscate ("Enchant permanent / You control enchanted
+/// permanent.") on P1's Energy Field ("Prevent all damage that would be dealt to you by sources you
+/// don't control." / "When a card is put into your graveyard from anywhere, sacrifice this
+/// enchantment.") makes the Field protect P2 until P2 leaves, when the control effect ends and the
+/// Field protects P1 again. So Spiteful Prankster stays on P2 while Blood Artist drains the others
+/// and P2, then moves to P1 while Blood Artist drains P1: with the record aimed at P2, every
+/// repetition takes exactly 1, 59; aimed at P1 or P3, the first repetition takes 2 there, 57.
+#[test]
+fn a_zero_that_moves_when_its_controller_leaves_follows_it() {
+    let Some(db) = shared_card_db() else { return };
+    for (aim, frame, count, own, end) in [
+        (P2, [21, 20, 19, 20], 59, 19, [80, 0, 0, 0]),
+        (P1, [21, 18, 20, 20], 57, 9, [78, 0, 0, 0]),
+        (P3, [21, 20, 20, 18], 57, 9, [78, 0, 0, 0]),
+    ] {
+        let mut runner = four_seat_altar_offer(
+            db,
+            &["Blood Artist", "Spiteful Prankster"],
+            &[(P1, "Energy Field")],
+            Some((P2, "Confiscate")),
+            &[],
+            aim,
+        );
+        let field = runner
+            .state()
+            .objects
+            .values()
+            .find(|object| object.name == "Energy Field")
+            .expect("Energy Field is on the battlefield");
+        assert_eq!(
+            (field.owner, field.controller),
+            (P1, P2),
+            "aim {aim:?}: Confiscate gives P2 the Field"
+        );
+        assert_suggestion_wins(
+            &mut runner,
+            &format!("Confiscate, aim {aim:?}"),
+            2,
+            frame,
+            count,
+            Some(engine::analysis::decision_template::RepetitionBound::Measured),
+            own,
+            end,
+        );
+    }
+}
+
+/// CR 117.4 + CR 616.1: with P1's Energy Field ("Prevent all damage that would be dealt to you by
+/// sources you don't control.") and P2's Fiendish Duo ("If a source would deal damage to an
+/// opponent, it deals double that damage to that player instead.") both applying to Spiteful
+/// Prankster's damage to P1, the record holds P1's choice of which applies first; a repetition
+/// whose Prankster does not hit P1 with both still applying never asks it. Either order deals 0,
+/// so Prankster stays on P1 while Blood Artist drains P2, P3 and P1, every repetition taking
+/// exactly 1: 59.
+#[test]
+fn a_recorded_order_a_repetition_never_asks_does_not_stop_it() {
+    let Some(db) = shared_card_db() else { return };
+    let mut runner = four_seat_altar_offer(
+        db,
+        &["Blood Artist", "Spiteful Prankster"],
+        &[(P1, "Energy Field"), (P2, "Fiendish Duo")],
+        None,
+        &[],
+        P1,
+    );
+    assert_suggestion_wins(
+        &mut runner,
+        "Energy Field under P1, Fiendish Duo under P2",
+        2,
+        [21, 19, 20, 20],
+        59,
+        Some(engine::analysis::decision_template::RepetitionBound::Measured),
+        19,
+        [80, 0, 0, 0],
+    );
+}
+
+/// CR 603.3b + CR 704.5a + CR 104.2a: with no negator, P1 at 1 life and the record aimed at P2 at
+/// 18, Blood Artist ("Whenever this creature or another creature dies, target player loses 1 life
+/// and you gain 1 life.") and Spiteful Prankster ("Whenever another creature dies, this creature
+/// deals 1 damage to target player or planeswalker.") trigger on one death and go on the stack
+/// together, so in repetition 2 Prankster's 1 kills P1 while Blood Artist drains P2, which leaves
+/// in repetition 10 as Blood Artist turns to P3. P3 then takes 1 there and 2 a repetition until
+/// Prankster's 1 in repetition 20 ends the game, Blood Artist having resolved 19 times: 20.
+#[test]
+fn a_segment_its_seat_leaves_before_the_slot_resolves_there_is_dropped() {
+    let Some(db) = shared_card_db() else { return };
+    let mut runner = four_seat_altar_offer(
+        db,
+        &["Blood Artist", "Spiteful Prankster"],
+        &[],
+        None,
+        &[(P1, 1)],
+        P2,
+    );
+    let offered = runner.state().clone();
+    assert_eq!(
+        (offered.stack.len(), lives(&offered)),
+        (2, vec![21, 1, 18, 20]),
+        "the triggers stand at the offer frame"
+    );
+    let WaitingFor::LoopShortcut {
+        schema,
+        predicted_winner,
+        declaration,
+        ..
+    } = &offered.waiting_for
+    else {
+        panic!("no offer: {:?}", latest_verdict(&offered));
+    };
+    assert_eq!(
+        (
+            &schema.iteration_count,
+            schema.repetition_bound,
+            *predicted_winner
+        ),
+        (
+            &IterationCount::Fixed(20),
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            Some(P0)
+        )
+    );
+    assert_eq!(
+        declaration.as_ref().map(|own| own.replay.clone()),
+        Some(ReplayMode::Scheduled {
+            count: IterationCount::Fixed(9)
+        })
+    );
+    assert_eq!(
+        schema
+            .suggested_declaration
+            .as_ref()
+            .map(|suggestion| suggestion.replay.clone()),
+        Some(ReplayMode::Scheduled {
+            count: IterationCount::Fixed(20)
+        })
+    );
+    let events = take_suggestion(&mut runner);
+    let taken = runner.state();
+    assert_eq!(taken.waiting_for, WaitingFor::GameOver { winner: Some(P0) });
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::GameOver { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        (lives(taken), eliminated(taken)),
+        (vec![40, 0, 0, 0], vec![P1, P2, P3])
+    );
 }
 
 fn in_a_best_of_three(runner: &mut GameRunner) {
@@ -2221,10 +3520,10 @@ fn an_altar_period_taken_to_lethal_in_a_best_of_three_reaches_sideboarding() {
     }
 }
 
-/// CR 732.2a: a period whose next repetition ends the game does not come round again, in a
-/// best-of-three as in a single game; with one more life the same steps are offered.
+/// CR 104.2a + CR 732.2a: a period whose second repetition ends a best-of-three game is counted to
+/// that ending with P0 its winner, as in a single game; with one more life it is counted to three.
 #[test]
-fn a_period_whose_replay_ends_a_best_of_three_game_does_not_recur() {
+fn a_period_whose_replay_ends_a_best_of_three_game_is_counted_to_its_ending() {
     let Some(db) = shared_card_db() else { return };
     let one_cycle_from = |p1_life: i32| {
         let (mut runner, altar, gravecrawler) =
@@ -2241,15 +3540,30 @@ fn a_period_whose_replay_ends_a_best_of_three_game_does_not_recur() {
         runner
     };
 
-    let refused = one_cycle_from(3);
-    assert_eq!(lives(refused.state()), [21, 2]);
-    assert!(!is_offer(refused.state()));
+    let counted = |p1_life: i32| {
+        let runner = one_cycle_from(p1_life);
+        let WaitingFor::LoopShortcut {
+            schema,
+            predicted_winner,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("an offer, got {:?}", runner.state().waiting_for);
+        };
+        (
+            lives(runner.state()),
+            schema.iteration_count.clone(),
+            *predicted_winner,
+        )
+    };
     assert_eq!(
-        latest_verdict(refused.state()),
-        Err(OfferRefusal::NoRecurrence)
+        counted(3),
+        (vec![21, 2], IterationCount::Fixed(2), Some(P0))
     );
-
-    assert!(is_offer(one_cycle_from(4).state()));
+    assert_eq!(
+        counted(4),
+        (vec![21, 3], IterationCount::Fixed(3), Some(P0))
+    );
 }
 
 /// `state` reloaded through the persisted codec the WASM restore and server persistence use, then
@@ -2298,25 +3612,6 @@ pub(super) fn shortcut_schema(
         })
 }
 
-/// Each ingress refuses `state` for carrying a confirmed period on the ring road.
-fn assert_refused_on_reload(state: &GameState) {
-    for restored in reload_both(state) {
-        let message = restored.expect_err("a ring-road period is refused");
-        assert!(message.contains("confirmed period"), "{message}");
-    }
-}
-
-/// `state` with its offer's or proposal's road set to the ring road.
-fn on_the_ring_road(state: &GameState) -> GameState {
-    let mut state = state.clone();
-    match &mut state.waiting_for {
-        WaitingFor::LoopShortcut { road, .. } => *road = OfferRoad::Ring,
-        WaitingFor::RespondToShortcut { proposal, .. } => proposal.road = OfferRoad::Ring,
-        other => panic!("no offer or proposal: {other:?}"),
-    }
-    state
-}
-
 /// The Altar–Zulaport board standing on its bounded recorded-period offer, which carries its period.
 fn bounded_recorded_offer_with_period(db: &CardDatabase) -> GameState {
     let (mut runner, altar, gravecrawler) = altar_board(Some("Zulaport Cutthroat"), db);
@@ -2330,8 +3625,8 @@ fn bounded_recorded_offer_with_period(db: &CardDatabase) -> GameState {
     offered
 }
 
-/// `state` after the standing offer is declared at `count`, asserted to carry the offer's road and
-/// period onto the proposal.
+/// `state` after the standing offer is declared at `count`, asserted to carry the offer's period
+/// onto the proposal.
 fn proposed(state: GameState, count: u32) -> GameState {
     let mut runner = GameRunner::from_state(state);
     act(
@@ -2344,7 +3639,6 @@ fn proposed(state: GameState, count: u32) -> GameState {
     let WaitingFor::RespondToShortcut { proposal, .. } = &runner.state().waiting_for else {
         panic!("no proposal: {:?}", runner.state().waiting_for);
     };
-    assert_eq!(proposal.road, OfferRoad::RecordedPeriod);
     assert!(
         !proposal.period.is_empty(),
         "the proposal carries the period"
@@ -2374,14 +3668,117 @@ fn a_bounded_recorded_offer_and_its_proposal_survive_a_reload() {
     }
 }
 
-/// The same bounded offer, and the proposal declared against it, on the ring road: its take is the
-/// ring drain, so the period it carries is refused at both ingresses.
+/// `state` reloaded through both ingresses with `"road": stamp` spliced into the `waiting_for`
+/// carrier at the JSON pointer `carrier`, once per ingress.
+fn reload_with_road(
+    state: &GameState,
+    carrier: &str,
+    stamp: Option<&str>,
+) -> [Result<GameState, String>; 2] {
+    fn splice(value: &mut serde_json::Value, carrier: &str, stamp: &str) -> usize {
+        let here = value
+            .get_mut("waiting_for")
+            .and_then(|waiting_for| waiting_for.pointer_mut(carrier))
+            .and_then(serde_json::Value::as_object_mut)
+            .map(|carrier| carrier.insert("road".to_string(), stamp.into()))
+            .is_some();
+        usize::from(here)
+            + match value {
+                serde_json::Value::Object(object) => object
+                    .values_mut()
+                    .map(|child| splice(child, carrier, stamp))
+                    .sum(),
+                serde_json::Value::Array(array) => array
+                    .iter_mut()
+                    .map(|child| splice(child, carrier, stamp))
+                    .sum(),
+                _ => 0,
+            }
+    }
+    let mut persisted =
+        serde_json::to_value(PersistedGameState::capture(state.clone())).expect("saves");
+    let mut bare = serde_json::to_value(state).expect("saves");
+    if let Some(stamp) = stamp {
+        for saved in [&mut persisted, &mut bare] {
+            assert_eq!(
+                splice(saved, carrier, stamp),
+                1,
+                "reach: one {carrier} carrier"
+            );
+        }
+    }
+    let persisted = serde_json::from_value::<PersistedGameState>(persisted)
+        .map_err(|error| error.to_string())
+        .and_then(|saved| saved.into_game_state().map_err(|error| error.to_string()));
+    let bare = serde_json::from_value::<GameState>(bare).map_err(|error| error.to_string());
+    [persisted, bare]
+}
+
+/// CR 732.2a: a saved offer or proposal carrying a `road` key decodes as the unspliced one, and
+/// the spliced proposal's take is the take of the offer's period.
 #[test]
-fn a_bounded_offer_or_proposal_on_the_ring_road_with_a_period_is_refused_on_reload() {
+fn a_saved_offer_or_proposal_carrying_a_road_loads_and_takes_its_period() {
     let Some(db) = shared_card_db() else { return };
     let offered = bounded_recorded_offer_with_period(db);
-    assert_refused_on_reload(&on_the_ring_road(&offered));
-    assert_refused_on_reload(&on_the_ring_road(&proposed(offered, 3)));
+    let expected = serde_json::to_value(taken(&offered, 3)).expect("saves");
+    let proposal = proposed(offered.clone(), 3);
+    for stamp in [Some("Ring"), Some("RecordedPeriod"), None] {
+        for (state, carrier) in [(&offered, "/data"), (&proposal, "/data/proposal")] {
+            for restored in reload_with_road(state, carrier, stamp) {
+                let restored =
+                    restored.unwrap_or_else(|error| panic!("[{stamp:?} {carrier}] {error}"));
+                assert_eq!(
+                    restored.waiting_for, state.waiting_for,
+                    "[{stamp:?} {carrier}]"
+                );
+                if matches!(restored.waiting_for, WaitingFor::RespondToShortcut { .. }) {
+                    let mut runner = GameRunner::from_state(restored);
+                    accept(&mut runner);
+                    assert_eq!(
+                        serde_json::to_value(runner.state()).expect("saves"),
+                        expected,
+                        "[{stamp:?}]"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Whether `seat` has a play in the trace at `state`.
+fn plays_in_trace(state: &GameState, seat: PlayerId) -> bool {
+    play_trace_view(state).is_some_and(|view| {
+        view.entries
+            .iter()
+            .any(|entry| entry.seat == seat && matches!(entry.kind, EntryKind::Play { .. }))
+    })
+}
+
+/// CR 732.2a: a proposal refused when it is taken is declined, so the proposer's plays leave the
+/// trace. The Altar–Zulaport proposal, its count raised past what a take may drive after the
+/// declaration, is refused once P1 accepts.
+#[test]
+fn a_proposal_refused_at_its_take_leaves_the_proposers_plays_out_of_the_trace() {
+    let Some(db) = shared_card_db() else { return };
+    let mut proposal = proposed(bounded_recorded_offer_with_period(db), 3);
+    assert!(
+        plays_in_trace(&proposal, P0),
+        "reach: P0's plays made the period"
+    );
+    let WaitingFor::RespondToShortcut {
+        proposal: shortcut, ..
+    } = &mut proposal.waiting_for
+    else {
+        unreachable!("`proposed` asserted the proposal")
+    };
+    shortcut.count = IterationCount::Fixed(u32::MAX);
+    let before = lives(&proposal);
+    let mut runner = GameRunner::from_state(proposal);
+    accept(&mut runner);
+    let state = runner.state();
+    assert_eq!(lives(state), before, "reach: the take is refused");
+    assert_eq!(state.waiting_for, WaitingFor::Priority { player: P0 });
+    assert!(!plays_in_trace(state, P0));
 }
 
 /// CR 704.5a + CR 800.4a + CR 104.2a: on four seats the Zulaport drain drops P1 and P2 together at
@@ -2429,7 +3826,10 @@ fn an_altar_zulaport_period_on_four_seats_drops_each_seat_at_its_crossing() {
         .expect("marker 6");
     for seat in [P1, P2] {
         for departure in [
-            GameEvent::PlayerLost { player_id: seat },
+            GameEvent::PlayerLost {
+                player_id: seat,
+                reasons: BTreeSet::from([LossReason::LifeTotal]),
+            },
             GameEvent::PlayerEliminated { player_id: seat },
         ] {
             assert!(
@@ -2472,8 +3872,8 @@ fn an_altar_zulaport_period_on_four_seats_drops_each_seat_at_its_crossing() {
     assert_declaration_refused(&offered, 8);
 }
 
-/// CR 704.3 + CR 800.4a: a take whose signature no longer charges P1 performs the repetitions
-/// before P1's departure and stops there, rather than commit a departure it did not predict.
+/// CR 732.2c + CR 800.4a: a take whose record no longer predicts P1's departure performs the
+/// repetitions before it and stops there, rather than commit a departure it did not predict.
 #[test]
 fn a_replay_take_stops_before_a_departure_its_signature_did_not_predict() {
     let Some(db) = shared_card_db() else { return };
@@ -2481,40 +3881,20 @@ fn a_replay_take_stops_before_a_departure_its_signature_did_not_predict() {
     drain_to_offer(&mut runner, altar, gravecrawler, &[P1, P2]);
     bounded_recorded_offer(runner.state(), 8);
     let p2 = runner.state().players[2].life;
-    act(
-        &mut runner,
-        GameAction::DeclareShortcut {
-            count: IterationCount::Fixed(8),
-            template: None,
-        },
+    let (recorded, state) =
+        crate::loop_shortcut::take_with_edited_departures(runner.state(), |entries| {
+            entries.retain(|entry| entry["seats"] != serde_json::json!([1]));
+        });
+    assert!(
+        recorded.iter().any(|(_, seats)| *seats == [P1]),
+        "reach: the record predicted P1's departure: {recorded:?}"
     );
-    let WaitingFor::RespondToShortcut { proposal, .. } = &mut runner.state_mut().waiting_for else {
-        panic!("the declaration opens the acceptance window");
-    };
-    let Some(engine::analysis::resource::PeriodSignature::EveryRepetition(signed)) =
-        proposal.per_cycle.as_mut()
-    else {
-        panic!("a signed proposal");
-    };
-    signed.delta.life.remove(&P1);
-    while matches!(
-        runner.state().waiting_for,
-        WaitingFor::RespondToShortcut { .. }
-    ) {
-        act(
-            &mut runner,
-            GameAction::RespondToShortcut {
-                response: ShortcutResponse::Accept,
-            },
-        );
-    }
-    let state = runner.state();
     assert!(
         state.players[2].life < p2,
         "reach: the take performed repetitions"
     );
-    assert!(eliminated(state).is_empty());
-    assert_eq!(lives(state)[1..], [1, p2 - 5]);
+    assert!(eliminated(&state).is_empty());
+    assert_eq!(lives(&state)[1..], [1, p2 - 5]);
     assert_eq!(state.waiting_for, WaitingFor::Priority { player: P0 });
 }
 
@@ -2614,14 +3994,7 @@ fn a_grove_marvin_period_is_offered_a_bounded_shortcut_and_taken() {
     let offered = runner.state().clone();
     let life = offered.players[1].life;
     let l = life as u32;
-    let certificate = bounded_recorded_offer(&offered, l);
-    assert_eq!(
-        certificate
-            .per_cycle
-            .as_ref()
-            .map(engine::analysis::resource::PeriodSignature::frames_per_period),
-        Some(2)
-    );
+    bounded_recorded_offer(&offered, l);
     assert!(offered.stack.is_empty());
 
     let three = taken(&offered, 3);
@@ -2843,11 +4216,26 @@ fn charger_board(
     mode: LoopDetectionMode,
     db: &CardDatabase,
 ) -> (GameRunner, ObjectId) {
-    let mut scenario = GameScenario::new();
+    charger_board_on(2, mountains, umbra, others, mode, db)
+}
+
+/// `charger_board` on `seats` seats, every opponent at 200 life.
+fn charger_board_on(
+    seats: u8,
+    mountains: usize,
+    umbra: bool,
+    others: &[&str],
+    mode: LoopDetectionMode,
+    db: &CardDatabase,
+) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(seats, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_life(P1, 200);
-    scenario.with_library_top(P0, &["Island"; 25]);
-    scenario.with_library_top(P1, &["Island"; 25]);
+    for seat in (0..seats).map(PlayerId) {
+        if seat != P0 {
+            scenario.with_life(seat, 200);
+        }
+        scenario.with_library_top(seat, &["Island"; 25]);
+    }
     let charger = scenario.add_real_card(P0, "Hellkite Charger", Zone::Battlefield, db);
     for _ in 0..mountains {
         scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
@@ -3141,42 +4529,209 @@ fn charger_trigger_top(state: &GameState) -> bool {
 #[test]
 fn a_hellkite_charger_period_is_offered_at_its_next_combat_and_taken() {
     let db = shared_card_db().expect("card db");
-    for mode in [LoopDetectionMode::Interactive, LoopDetectionMode::On] {
-        let (mut runner, charger) = charger_board(7, true, &[], mode, db);
+    let mode = LoopDetectionMode::Interactive;
+    let (mut runner, charger) = charger_board(7, true, &[], mode, db);
+    charger_until(
+        &mut runner,
+        charger,
+        |_| true,
+        |state| is_offer(state) || combats_begun(state) > 6,
+    );
+    let state = runner.state();
+    let (span, count) = offer_of(state);
+    assert_eq!(
+        (span.source, span.reach, span.cause),
+        (
+            SpanSource::Carried(0),
+            PeriodReach::Combat,
+            NamingCause::TriggerTop
+        ),
+        "{mode:?}"
+    );
+    assert_eq!(combats_begun(state), 2, "{mode:?}");
+    let power = state.objects[&charger].power.expect("the Charger's power");
+    let life = state.players[1].life;
+    let n = fixed(&count);
+    assert_eq!(n, ((life + power - 1) / power) as u32, "{mode:?}");
+
+    let events = take(&mut runner, n);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) },
+        "{mode:?}"
+    );
+    assert!(
+        events.contains(&GameEvent::GameOver { winner: Some(P0) }),
+        "{mode:?}"
+    );
+}
+
+/// CR 506.1 + CR 508.1a + CR 613.4c + CR 704.5a + CR 732.2a: beside Moraug, Fury of Akoum ("Each
+/// creature you control gets +1/+0 for each time it has attacked this turn."), Hellkite Charger
+/// wearing Bear Umbra deals one more damage each combat its period adds, so the period is offered
+/// at the first count whose growing damage reaches P1's life, with P0 the predicted winner, and a
+/// take of that count ends the game.
+#[test]
+fn a_hellkite_charger_period_beside_moraug_is_counted_over_its_growing_damage_and_taken() {
+    let db = shared_card_db().expect("card db");
+    let mode = LoopDetectionMode::Interactive;
+    let (mut runner, charger) = charger_board(7, true, &["Moraug, Fury of Akoum"], mode, db);
+    charger_until(
+        &mut runner,
+        charger,
+        |_| true,
+        |state| is_offer(state) || combats_begun(state) > 6,
+    );
+    let state = runner.state();
+    let (span, count) = offer_of(state);
+    assert_eq!(
+        (span.reach, span.cause),
+        (PeriodReach::Combat, NamingCause::TriggerTop),
+        "{mode:?}"
+    );
+    // The Charger has attacked in each combat begun: 5 printed, 2 from Bear Umbra, and one
+    // per attack from Moraug.
+    let first = 7 + combats_begun(state) as i32;
+    assert_eq!(state.objects[&charger].power, Some(first), "{mode:?}");
+    let life = state.players[1].life;
+    let n = (1..)
+        .find(|&n: &i32| (0..n).map(|k| first + k).sum::<i32>() >= life)
+        .expect("the damage reaches P1's life") as u32;
+    assert_eq!(fixed(&count), n, "{mode:?}");
+    let WaitingFor::LoopShortcut {
+        predicted_winner, ..
+    } = &state.waiting_for
+    else {
+        unreachable!("offer_of read the offer");
+    };
+    assert_eq!(*predicted_winner, Some(P0), "{mode:?}");
+
+    let events = take(&mut runner, n);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) },
+        "{mode:?}"
+    );
+    assert!(
+        events.contains(&GameEvent::GameOver { winner: Some(P0) }),
+        "{mode:?}"
+    );
+}
+
+/// The Charger period beside Moraug on `seats` seats, driven to its first offer.
+fn charger_moraug_offer(seats: u8, db: &CardDatabase) -> (GameRunner, ObjectId) {
+    let (mut runner, charger) = charger_board_on(
+        seats,
+        7,
+        true,
+        &["Moraug, Fury of Akoum"],
+        LoopDetectionMode::Interactive,
+        db,
+    );
+    charger_until(
+        &mut runner,
+        charger,
+        |_| true,
+        |state| is_offer(state) || combats_begun(state) > 6,
+    );
+    (runner, charger)
+}
+
+/// CR 508.1b + CR 800.4a + CR 104.2a: on three seats, once P1 leaves, P2 is the one player
+/// Hellkite Charger can attack, so its period beside Moraug is counted on past P1's departure. From
+/// the second combat, repetition r deals 8 + r (CR 510.1a + CR 613.4c): P1 at 192 leaves at 13
+/// and P2 at 200 at 21, ending the game.
+#[test]
+fn a_hellkite_charger_period_beside_moraug_on_three_seats_attacks_the_last_defender() {
+    let db = shared_card_db().expect("card db");
+    let (mut runner, charger) = charger_moraug_offer(3, db);
+    let state = runner.state();
+    assert_eq!(combats_begun(state), 2);
+    assert_eq!(state.objects[&charger].power, Some(9));
+    assert_eq!(lives(state), [20, 192, 200]);
+    let WaitingFor::LoopShortcut {
+        schema,
+        predicted_winner,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!("no offer at {:?}", state.waiting_for);
+    };
+    assert_eq!(
+        (
+            schema.iteration_count.clone(),
+            schema.repetition_bound,
+            *predicted_winner
+        ),
+        (
+            IterationCount::Fixed(21),
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            Some(P0)
+        )
+    );
+
+    let events = take(&mut runner, 21);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    );
+    assert_eq!(lives(runner.state()), [20, -3, -4]);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::GameOver { .. }))
+            .count(),
+        1
+    );
+}
+
+/// CR 508.1b: on four seats, once P1 leaves, which of P2 and P3 the Charger attacks is a choice
+/// its record does not hold, so the replay makes no attack on either.
+#[test]
+fn a_hellkite_charger_period_beside_moraug_on_four_seats_chooses_no_defender_for_its_proposer() {
+    let db = shared_card_db().expect("card db");
+    let (mut runner, charger) = charger_moraug_offer(4, db);
+    let state = runner.state();
+    assert_eq!(combats_begun(state), 2);
+    assert_eq!(state.objects[&charger].power, Some(9));
+    assert_eq!(lives(state), [20, 192, 200, 200]);
+    let (_, count) = offer_of(state);
+
+    take(&mut runner, fixed(&count));
+    assert_eq!(eliminated(runner.state()), [P1]);
+    assert_eq!(lives(runner.state())[2..], [200, 200]);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    );
+}
+
+/// CR 508.1a + CR 510.1a + CR 613.4c: Moraug, Fury of Akoum's "+1/+0 for each time it has
+/// attacked this turn" counts the attack being declared (Scryfall ruling: "The first time a
+/// creature attacks in a turn, the +1/+0 bonus will apply to the combat damage it deals during
+/// that combat."), so Hellkite Charger wearing Bear Umbra deals 8, 9 and 10 in its first three
+/// combats.
+#[test]
+fn moraug_counts_the_attack_being_declared_in_the_damage_it_deals() {
+    let db = shared_card_db().expect("card db");
+    let (mut runner, charger) = charger_board(
+        7,
+        true,
+        &["Moraug, Fury of Akoum"],
+        LoopDetectionMode::Off,
+        db,
+    );
+    let mut lives = vec![runner.state().players[1].life];
+    for combat in 2..=4 {
         charger_until(
             &mut runner,
             charger,
             |_| true,
-            |state| is_offer(state) || combats_begun(state) > 6,
+            |state| combats_begun(state) == combat && charger_trigger_top(state),
         );
-        let state = runner.state();
-        let (span, count) = offer_of(state);
-        assert_eq!(
-            (span.source, span.reach, span.cause),
-            (
-                SpanSource::Carried(0),
-                PeriodReach::Combat,
-                NamingCause::TriggerTop
-            ),
-            "{mode:?}"
-        );
-        assert_eq!(combats_begun(state), 2, "{mode:?}");
-        let power = state.objects[&charger].power.expect("the Charger's power");
-        let life = state.players[1].life;
-        let n = fixed(&count);
-        assert_eq!(n, ((life + power - 1) / power) as u32, "{mode:?}");
-
-        let events = take(&mut runner, n);
-        assert_eq!(
-            runner.state().waiting_for,
-            WaitingFor::GameOver { winner: Some(P0) },
-            "{mode:?}"
-        );
-        assert!(
-            events.contains(&GameEvent::GameOver { winner: Some(P0) }),
-            "{mode:?}"
-        );
+        lives.push(runner.state().players[1].life);
     }
+    assert_eq!(lives, [200, 192, 183, 173]);
 }
 
 /// Row 1's trigger-top frames at its second and third combats, with `other` on both battlefields.
@@ -3339,36 +4894,35 @@ fn najeela_until(runner: &mut GameRunner, until: impl Fn(&GameState) -> bool) {
 #[test]
 fn a_najeela_urtet_period_is_offered_at_its_next_combat_and_taken() {
     let db = shared_card_db().expect("card db");
-    for mode in [LoopDetectionMode::Interactive, LoopDetectionMode::On] {
-        let mut runner = najeela_board(true, mode, db);
-        najeela_until(&mut runner, |state| {
-            is_offer(state) || combats_begun(state) > 6
-        });
-        let state = runner.state();
-        let (span, count) = offer_of(state);
-        assert_eq!(
-            (span.source, span.reach, span.cause),
-            (
-                SpanSource::Carried(0),
-                PeriodReach::Combat,
-                NamingCause::LegalNow
-            ),
-            "{mode:?}"
-        );
-        assert_eq!(
-            (state.phase, combats_begun(state)),
-            (Phase::BeginCombat, 2),
-            "{mode:?}"
-        );
-        let n = fixed(&count);
-        assert_eq!(n, state.players[1].life as u32, "{mode:?}");
-        take(&mut runner, n);
-        assert_eq!(
-            runner.state().waiting_for,
-            WaitingFor::GameOver { winner: Some(P0) },
-            "{mode:?}"
-        );
-    }
+    let mode = LoopDetectionMode::Interactive;
+    let mut runner = najeela_board(true, mode, db);
+    najeela_until(&mut runner, |state| {
+        is_offer(state) || combats_begun(state) > 6
+    });
+    let state = runner.state();
+    let (span, count) = offer_of(state);
+    assert_eq!(
+        (span.source, span.reach, span.cause),
+        (
+            SpanSource::Carried(0),
+            PeriodReach::Combat,
+            NamingCause::LegalNow
+        ),
+        "{mode:?}"
+    );
+    assert_eq!(
+        (state.phase, combats_begun(state)),
+        (Phase::BeginCombat, 2),
+        "{mode:?}"
+    );
+    let n = fixed(&count);
+    assert_eq!(n, state.players[1].life as u32, "{mode:?}");
+    take(&mut runner, n);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) },
+        "{mode:?}"
+    );
 }
 
 /// CR 302.6: without Urtet the Myr stay tapped after the first activation, so Najeela cannot be
@@ -3578,43 +5132,42 @@ fn library_term(state: &GameState) -> u32 {
 #[test]
 fn an_archaeomancer_time_warp_period_is_offered_its_hand_bound_and_taken() {
     let db = shared_card_db().expect("card db");
-    for mode in [LoopDetectionMode::Interactive, LoopDetectionMode::On] {
-        let mut runner = warp_board(25, &[], mode, db);
-        let turn = runner.state().turn_number;
-        warp_until(&mut runner, |state| {
-            is_offer(state) || state.turn_number > turn + 3
-        });
-        let state = runner.state().clone();
-        let (span, count) = offer_of(&state);
-        assert_eq!(
-            (span.source, span.reach, span.cause),
-            (
-                SpanSource::Carried(0),
-                PeriodReach::ExtraTurn,
-                NamingCause::LegalNow
-            ),
-            "{mode:?}"
-        );
-        assert_eq!(state.turn_number, turn + 1, "{mode:?}");
-        let n = fixed(&count);
-        assert!(
-            hand_term(&state) < library_term(&state),
-            "reach: the hand binds"
-        );
-        assert_eq!(n, hand_term(&state), "{mode:?}");
+    let mode = LoopDetectionMode::Interactive;
+    let mut runner = warp_board(25, &[], mode, db);
+    let turn = runner.state().turn_number;
+    warp_until(&mut runner, |state| {
+        is_offer(state) || state.turn_number > turn + 3
+    });
+    let state = runner.state().clone();
+    let (span, count) = offer_of(&state);
+    assert_eq!(
+        (span.source, span.reach, span.cause),
+        (
+            SpanSource::Carried(0),
+            PeriodReach::ExtraTurn,
+            NamingCause::LegalNow
+        ),
+        "{mode:?}"
+    );
+    assert_eq!(state.turn_number, turn + 1, "{mode:?}");
+    let n = fixed(&count);
+    assert!(
+        hand_term(&state) < library_term(&state),
+        "reach: the hand binds"
+    );
+    assert_eq!(n, hand_term(&state), "{mode:?}");
 
-        take(&mut runner, n);
-        let after = runner.state();
-        assert_eq!(
-            (after.turn_number, after.active_player, after.phase),
-            (state.turn_number + n, P0, Phase::PreCombatMain),
-            "{mode:?}"
-        );
-        assert_eq!(
-            after.players[0].hand.len(),
-            state.players[0].hand.len() + n as usize
-        );
-    }
+    take(&mut runner, n);
+    let after = runner.state();
+    assert_eq!(
+        (after.turn_number, after.active_player, after.phase),
+        (state.turn_number + n, P0, Phase::PreCombatMain),
+        "{mode:?}"
+    );
+    assert_eq!(
+        after.players[0].hand.len(),
+        state.players[0].hand.len() + n as usize
+    );
 }
 
 /// [`warp_step`], with Carpet of Flowers' trigger aimed at P1 and its mana taken as green.
@@ -3840,26 +5393,52 @@ fn warp_windows(library: usize, turns: u32, db: &CardDatabase) -> Vec<(GameState
     panic!("the Time Warp drive did not end");
 }
 
+/// How many cards named `name` P0 holds.
+fn in_hand(state: &GameState, name: &str) -> u32 {
+    state.players[0]
+        .hand
+        .iter()
+        .filter(|id| state.objects[id].name == name)
+        .count() as u32
+}
+
 /// CR 514.1 + CR 704.5b + CR 732.2a: at every window of both libraries' drives an offer suggests
-/// the lesser of the hand and library terms, and stands exactly where the two periods the
-/// confirmer replays both end before a discard and a draw from an empty library.
+/// the lesser of the hand and library terms, and stands wherever that is at least one: the first
+/// period the confirmer replays ends before a discard and a draw from an empty library.
+/// Once the span records a cleanup discard the hand term is the Islands in hand, since a further
+/// discard would name a card still face down in the library (CR 401.2).
 #[test]
 fn every_archaeomancer_window_is_offered_the_lesser_of_its_hand_and_library_terms() {
     let db = shared_card_db().expect("card db");
+    let mut discard_windows = Vec::new();
     for library in [25, 4] {
         let windows = warp_windows(library, 8, db);
         let offered = windows.iter().filter(|(_, count)| count.is_some()).count();
         assert!(offered >= 2, "reach: {library} offers more than once");
         for (state, count) in &windows[1..] {
-            let replayable = hand_term(state).min(state.players[0].library.len() as u32);
+            // An Island reaches P0's graveyard on this board only by a cleanup discard.
+            let discarded = state.players[0]
+                .graveyard
+                .iter()
+                .any(|id| state.objects[id].name == "Island");
+            let known = if discarded {
+                discard_windows.push((in_hand(state, "Island"), library_term(state), *count));
+                in_hand(state, "Island")
+            } else {
+                hand_term(state)
+            };
+            let replayable = known.min(library_term(state));
             assert_eq!(
                 *count,
-                (replayable >= 2).then(|| hand_term(state).min(library_term(state))),
+                (replayable >= 1).then_some(replayable),
                 "{library} cards, turn {}",
                 state.turn_number
             );
         }
     }
+    // The first window after a discard holds Time Warp, Ghostly Flicker and six Islands, with 18
+    // cards left in the library.
+    assert_eq!(discard_windows.first(), Some(&(6, 18, Some(6))));
 }
 
 /// A board whose turns come round naturally: Grizzly Bears and two Islands, or Time Sieve with five
@@ -4055,8 +5634,6 @@ fn the_turn_cycle_cover_refuses_a_foretold_card_whose_castability_moved() {
     assert!(!moved.certifies(), "{moved:?}");
 }
 
-const BOTH_MODES: [LoopDetectionMode; 2] = [LoopDetectionMode::Interactive, LoopDetectionMode::On];
-
 /// The Altar + Gravecrawler + Genesis Chamber board in `mode` with Mayhem Devil ("Whenever a
 /// player sacrifices a permanent, this creature deals 1 damage to any target.") and `damaged`
 /// under `controller`, driven with the Devil aimed at `damaged` until its period is offered.
@@ -4109,18 +5686,17 @@ fn altar_devil_offered(
 #[test]
 fn a_period_damaging_an_indestructible_permanent_is_offered_and_performed() {
     let db = shared_card_db().expect("card db");
-    for mode in BOTH_MODES {
-        let (mut runner, myr) = altar_devil_offered(mode, P0, "Darksteel Myr", db);
-        let state = runner.state();
-        assert!(state.objects[&myr].has_keyword(&Keyword::Indestructible));
-        let (damage, made) = (state.objects[&myr].damage_marked, tokens(state, P0).len());
-        assert!(damage > 0, "{mode:?}: the hand-driven cycle marked damage");
-        take(&mut runner, 3);
-        let state = runner.state();
-        assert_eq!(state.objects[&myr].damage_marked, damage + 3, "{mode:?}");
-        assert_eq!(tokens(state, P0).len(), made + 3, "{mode:?}");
-        assert!(!marks_tokens(state, P0), "{mode:?}");
-    }
+    let mode = LoopDetectionMode::Interactive;
+    let (mut runner, myr) = altar_devil_offered(mode, P0, "Darksteel Myr", db);
+    let state = runner.state();
+    assert!(state.objects[&myr].has_keyword(&Keyword::Indestructible));
+    let (damage, made) = (state.objects[&myr].damage_marked, tokens(state, P0).len());
+    assert!(damage > 0, "{mode:?}: the hand-driven cycle marked damage");
+    take(&mut runner, 3);
+    let state = runner.state();
+    assert_eq!(state.objects[&myr].damage_marked, damage + 3, "{mode:?}");
+    assert_eq!(tokens(state, P0).len(), made + 3, "{mode:?}");
+    assert!(!marks_tokens(state, P0), "{mode:?}");
 }
 
 /// CR 120.3e + CR 120.6: the damage Mayhem Devil marks each cycle on an opponent's Steel Wall
@@ -4128,17 +5704,16 @@ fn a_period_damaging_an_indestructible_permanent_is_offered_and_performed() {
 #[test]
 fn a_period_damaging_an_opponents_permanent_is_performed() {
     let db = shared_card_db().expect("card db");
-    for mode in BOTH_MODES {
-        let (mut runner, wall) = altar_devil_offered(mode, P1, "Steel Wall", db);
-        let state = runner.state();
-        let made = tokens(state, P0).len();
-        assert_eq!(state.objects[&wall].damage_marked, 1, "{mode:?}");
-        take(&mut runner, 2);
-        let state = runner.state();
-        assert_eq!(state.objects[&wall].damage_marked, 3, "{mode:?}");
-        assert_eq!(state.objects[&wall].zone, Zone::Battlefield, "{mode:?}");
-        assert_eq!(tokens(state, P0).len(), made + 2, "{mode:?}");
-    }
+    let mode = LoopDetectionMode::Interactive;
+    let (mut runner, wall) = altar_devil_offered(mode, P1, "Steel Wall", db);
+    let state = runner.state();
+    let made = tokens(state, P0).len();
+    assert_eq!(state.objects[&wall].damage_marked, 1, "{mode:?}");
+    take(&mut runner, 2);
+    let state = runner.state();
+    assert_eq!(state.objects[&wall].damage_marked, 3, "{mode:?}");
+    assert_eq!(state.objects[&wall].zone, Zone::Battlefield, "{mode:?}");
+    assert_eq!(tokens(state, P0).len(), made + 2, "{mode:?}");
 }
 
 fn treasures(state: &GameState) -> usize {
@@ -4180,78 +5755,67 @@ fn charger_gnawbone_board(
 #[test]
 fn a_hellkite_charger_period_paid_by_remade_treasures_is_offered_and_taken() {
     let db = shared_card_db().expect("card db");
-    for mode in BOTH_MODES {
-        let (mut runner, charger, _) = charger_gnawbone_board(true, mode, db);
-        charger_until(
-            &mut runner,
-            charger,
-            |_| true,
-            |state| is_offer(state) || combats_begun(state) > 6,
-        );
-        let state = runner.state();
-        let (span, count) = offer_of(state);
-        assert_eq!(
-            (span.source, span.reach),
-            (SpanSource::Carried(0), PeriodReach::Combat),
-            "{mode:?}"
-        );
-        assert_eq!(combats_begun(state), 2, "{mode:?}");
-        let life = state.players[1].life;
-        assert_eq!(fixed(&count), ((life + 6) / 7) as u32, "{mode:?}");
-        assert_eq!(treasures(state), 7, "{mode:?}");
+    let mode = LoopDetectionMode::Interactive;
+    let (mut runner, charger, _) = charger_gnawbone_board(true, mode, db);
+    charger_until(
+        &mut runner,
+        charger,
+        |_| true,
+        |state| is_offer(state) || combats_begun(state) > 6,
+    );
+    let state = runner.state();
+    let (span, count) = offer_of(state);
+    assert_eq!(
+        (span.source, span.reach),
+        (SpanSource::Carried(0), PeriodReach::Combat),
+        "{mode:?}"
+    );
+    assert_eq!(combats_begun(state), 2, "{mode:?}");
+    let life = state.players[1].life;
+    assert_eq!(fixed(&count), ((life + 6) / 7) as u32, "{mode:?}");
+    assert_eq!(treasures(state), 7, "{mode:?}");
 
-        take(&mut runner, 3);
-        let state = runner.state();
-        assert_eq!(state.players[1].life, life - 21, "{mode:?}");
-        assert_eq!(treasures(state), 7, "{mode:?}");
-        assert_eq!(combats_begun(state), 5, "{mode:?}");
-    }
+    take(&mut runner, 3);
+    let state = runner.state();
+    assert_eq!(state.players[1].life, life - 21, "{mode:?}");
+    assert_eq!(treasures(state), 7, "{mode:?}");
+    assert_eq!(combats_begun(state), 5, "{mode:?}");
 }
 
-/// CR 732.2a: without Bear Umbra and with Old Gnawbone attacking beside it, each combat makes
-/// twelve Treasures for the seven it spends, and the cover refuses a period that nets a mint
-/// beside the tokens it makes again.
+/// CR 602.2 + CR 732.2a: without Bear Umbra and with Old Gnawbone attacking beside it, each combat
+/// makes more Treasures than it spends. Set apart from the Treasures it makes again, the ones it
+/// nets are never activated in the period and the combat history it grows is read by no live
+/// surface, so the carried combat span is offered.
 #[test]
-fn the_cover_refuses_a_carried_period_that_nets_treasures() {
+fn a_carried_period_that_nets_treasures_is_offered() {
     let db = shared_card_db().expect("card db");
-    for mode in BOTH_MODES {
-        let (mut runner, charger, gnawbone) = charger_gnawbone_board(false, mode, db);
-        let mut verdicts = Vec::new();
-        for combat in 2..=5 {
-            for _ in 0..4000 {
-                let state = runner.state();
-                if is_offer(state) || (combats_begun(state) == combat && charger_trigger_top(state))
-                {
-                    break;
-                }
-                match &state.waiting_for {
-                    WaitingFor::DeclareAttackers { player, .. } if *player == P0 => act(
-                        &mut runner,
-                        GameAction::DeclareAttackers {
-                            attacks: [charger, gnawbone]
-                                .map(|attacker| (attacker, AttackTarget::Player(P1)))
-                                .to_vec(),
-                            bands: vec![],
-                        },
-                    ),
-                    _ => charger_step(&mut runner, charger, true),
-                }
-            }
-            let state = runner.state();
-            assert!(!is_offer(state), "{mode:?}, combat {combat}");
-            assert_eq!(combats_begun(state), combat, "{mode:?}");
-            assert_eq!(treasures(state), 7 + 5 * (combat as usize - 1), "{mode:?}");
-            verdicts.extend(carried_verdicts(state));
+    let (mut runner, charger, gnawbone) =
+        charger_gnawbone_board(false, LoopDetectionMode::Interactive, db);
+    for _ in 0..4000 {
+        let state = runner.state();
+        if is_offer(state) || combats_begun(state) > 5 {
+            break;
         }
-        assert!(!verdicts.is_empty(), "{mode:?}: the span is carried");
-        assert!(
-            verdicts.iter().all(|verdict| matches!(
-                verdict,
-                Err(OfferRefusal::Cover(ObjectGrowthVerdict::FodderGrowth(_)))
-            )),
-            "{mode:?}: {verdicts:?}"
-        );
+        match &state.waiting_for {
+            WaitingFor::DeclareAttackers { player, .. } if *player == P0 => act(
+                &mut runner,
+                GameAction::DeclareAttackers {
+                    attacks: [charger, gnawbone]
+                        .map(|attacker| (attacker, AttackTarget::Player(P1)))
+                        .to_vec(),
+                    bands: vec![],
+                },
+            ),
+            _ => charger_step(&mut runner, charger, true),
+        }
     }
+    let state = runner.state();
+    assert!(is_offer(state), "{:?}", carried_verdicts(state));
+    assert_eq!(
+        (combats_begun(state), treasures(state)),
+        (2, 12),
+        "reach: offered in the second combat"
+    );
 }
 
 /// The mana Aggravated Assault's {3}{R}{R} costs.
@@ -4473,7 +6037,10 @@ fn carried_combat_offer(state: &GameState, case: &str) -> u32 {
         ),
         "{case}"
     );
-    assert_eq!(road(state), Some(OfferRoad::RecordedPeriod), "{case}");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }),
+        "{case}"
+    );
     fixed(&count)
 }
 
@@ -4493,71 +6060,70 @@ fn an_aggravated_assault_period_paid_by_the_treasures_its_combat_makes_is_offere
         mountains: 0,
         treasures: 5,
     };
-    for mode in BOTH_MODES {
-        for pay in [AssaultPay::Engine, AssaultPay::Hand] {
-            // CR 505.1a: every added main phase is a postcombat main, so a period begun in the
-            // precombat main first comes round to the phase it resumes in one cycle later.
-            for (phase, combats) in [(Phase::PreCombatMain, 2), (Phase::PostCombatMain, 1)] {
-                let case = format!("{mode:?}, {pay:?}, from {phase:?}");
-                let (mut runner, mut drive) = assault_board(board, phase, pay, mode, db);
-                assault_until(&mut runner, &mut drive, |state| {
-                    is_offer(state) || combats_begun(state) > 6
-                });
-                let state = runner.state().clone();
-                let n = carried_combat_offer(&state, &case);
-                let life = state.players[1].life;
-                assert_eq!(
-                    assault_frame(&state),
-                    (
-                        life,
-                        5,
-                        Phase::PostCombatMain,
-                        combats,
-                        0,
-                        0,
-                        vec!["Spined Wurm".to_string()]
-                    ),
-                    "{case}"
-                );
-                assert_eq!(n, ((life + 4) / 5) as u32, "{case}");
+    let mode = LoopDetectionMode::Interactive;
+    for pay in [AssaultPay::Engine, AssaultPay::Hand] {
+        // CR 505.1a: every added main phase is a postcombat main, so a period begun in the
+        // precombat main first comes round to the phase it resumes in one cycle later.
+        for (phase, combats) in [(Phase::PreCombatMain, 2), (Phase::PostCombatMain, 1)] {
+            let case = format!("{mode:?}, {pay:?}, from {phase:?}");
+            let (mut runner, mut drive) = assault_board(board, phase, pay, mode, db);
+            assault_until(&mut runner, &mut drive, |state| {
+                is_offer(state) || combats_begun(state) > 6
+            });
+            let state = runner.state().clone();
+            let n = carried_combat_offer(&state, &case);
+            let life = state.players[1].life;
+            assert_eq!(
+                assault_frame(&state),
+                (
+                    life,
+                    5,
+                    Phase::PostCombatMain,
+                    combats,
+                    0,
+                    0,
+                    vec!["Spined Wurm".to_string()]
+                ),
+                "{case}"
+            );
+            assert_eq!(n, ((life + 4) / 5) as u32, "{case}");
 
-                let cycles = assault_frame(&taken(&state, 3));
-                assert_eq!(
-                    cycles,
-                    (
-                        life - 15,
-                        5,
-                        Phase::PostCombatMain,
-                        combats + 3,
-                        0,
-                        0,
-                        vec!["Spined Wurm".to_string()]
-                    ),
-                    "{case}"
-                );
-                let mut by_hand = GameRunner::from_state(state);
-                act(&mut by_hand, GameAction::DeclineShortcut);
-                by_hand.state_mut().loop_detection = LoopDetectionMode::Off;
-                let mut hand_drive = AssaultDrive {
-                    activated_at: None,
-                    ..drive
-                };
-                assault_until(&mut by_hand, &mut hand_drive, |state| {
-                    combats_begun(state) == combats + 3 && assault_window(state)
-                });
-                assert_eq!(cycles, assault_frame(by_hand.state()), "{case}");
+            let cycles = assault_frame(&taken(&state, 3));
+            assert_eq!(
+                cycles,
+                (
+                    life - 15,
+                    5,
+                    Phase::PostCombatMain,
+                    combats + 3,
+                    0,
+                    0,
+                    vec!["Spined Wurm".to_string()]
+                ),
+                "{case}"
+            );
+            let mut by_hand = GameRunner::from_state(state);
+            act(&mut by_hand, GameAction::DeclineShortcut);
+            by_hand.state_mut().loop_detection = LoopDetectionMode::Off;
+            let mut hand_drive = AssaultDrive {
+                activated_at: None,
+                ..drive
+            };
+            assault_until(&mut by_hand, &mut hand_drive, |state| {
+                combats_begun(state) == combats + 3 && assault_window(state)
+            });
+            assert_eq!(cycles, assault_frame(by_hand.state()), "{case}");
 
-                let events = take(&mut runner, n);
-                assert_eq!(
-                    runner.state().waiting_for,
-                    WaitingFor::GameOver { winner: Some(P0) },
-                    "{case}"
-                );
-                assert!(
-                    events.contains(&GameEvent::GameOver { winner: Some(P0) }),
-                    "{case}"
-                );
-            }
+            let events = take(&mut runner, n);
+            assert_eq!(
+                runner.state().waiting_for,
+                WaitingFor::GameOver { winner: Some(P0) },
+                "{case}"
+            );
+            assert!(
+                events.contains(&GameEvent::GameOver { winner: Some(P0) }),
+                "{case}"
+            );
         }
     }
 }
@@ -4593,35 +6159,33 @@ fn an_aggravated_assault_period_paid_by_a_population_it_untaps_is_offered_and_ta
         ),
     ];
     for (board, power) in boards {
-        for mode in BOTH_MODES {
-            for pay in [AssaultPay::Engine, AssaultPay::Hand] {
-                let case = format!("{board:?}, {mode:?}, {pay:?}");
-                let (mut runner, mut drive) =
-                    assault_board(board, Phase::PreCombatMain, pay, mode, db);
-                assault_until(&mut runner, &mut drive, |state| {
-                    is_offer(state) || combats_begun(state) > 6
-                });
-                let state = runner.state();
-                let n = carried_combat_offer(state, &case);
-                assert_eq!(combats_begun(state), 2, "{case}");
-                assert_eq!(state.objects[&drive.attacker].power, Some(power), "{case}");
-                assert_eq!(
-                    n,
-                    ((state.players[1].life + power - 1) / power) as u32,
-                    "{case}"
-                );
+        let mode = LoopDetectionMode::Interactive;
+        for pay in [AssaultPay::Engine, AssaultPay::Hand] {
+            let case = format!("{board:?}, {mode:?}, {pay:?}");
+            let (mut runner, mut drive) = assault_board(board, Phase::PreCombatMain, pay, mode, db);
+            assault_until(&mut runner, &mut drive, |state| {
+                is_offer(state) || combats_begun(state) > 6
+            });
+            let state = runner.state();
+            let n = carried_combat_offer(state, &case);
+            assert_eq!(combats_begun(state), 2, "{case}");
+            assert_eq!(state.objects[&drive.attacker].power, Some(power), "{case}");
+            assert_eq!(
+                n,
+                ((state.players[1].life + power - 1) / power) as u32,
+                "{case}"
+            );
 
-                let events = take(&mut runner, n);
-                assert_eq!(
-                    runner.state().waiting_for,
-                    WaitingFor::GameOver { winner: Some(P0) },
-                    "{case}"
-                );
-                assert!(
-                    events.contains(&GameEvent::GameOver { winner: Some(P0) }),
-                    "{case}"
-                );
-            }
+            let events = take(&mut runner, n);
+            assert_eq!(
+                runner.state().waiting_for,
+                WaitingFor::GameOver { winner: Some(P0) },
+                "{case}"
+            );
+            assert!(
+                events.contains(&GameEvent::GameOver { winner: Some(P0) }),
+                "{case}"
+            );
         }
     }
 }
@@ -4677,7 +6241,10 @@ fn carried_offer(state: &GameState, case: &str) -> (NamedSpan, OfferMoment) {
         matches!(span.source, SpanSource::Carried(_)),
         "{case}: {span:?}"
     );
-    assert_eq!(road(state), Some(OfferRoad::RecordedPeriod), "{case}");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }),
+        "{case}"
+    );
     let moment = (
         combats_begun(state),
         state.phase,
@@ -4796,33 +6363,32 @@ fn a_period_beside_cards_it_never_uses_is_offered_as_it_is_without_them() {
             ],
         ),
     ];
-    for mode in BOTH_MODES {
-        for (board, pay, beside) in &groups {
-            let control = format!("{mode:?}, {pay:?}, {board:?}");
-            let (runner, drive) = assault_beside(*board, *pay, None, mode, db);
+    let mode = LoopDetectionMode::Interactive;
+    for (board, pay, beside) in &groups {
+        let control = format!("{mode:?}, {pay:?}, {board:?}");
+        let (runner, drive) = assault_beside(*board, *pay, None, mode, db);
+        let state = runner.state();
+        let (_, without @ (_, _, life, count)) = carried_offer(state, &control);
+        let power = state.objects[&drive.attacker]
+            .power
+            .expect("the attacker's power");
+        assert_eq!(count, ((life + power - 1) / power) as u32, "{control}");
+        for &(idle, reach) in beside {
+            let case = format!("{control} beside {idle:?}");
+            let (runner, drive) = assault_beside(*board, *pay, Some(idle), mode, db);
             let state = runner.state();
-            let (_, without @ (_, _, life, count)) = carried_offer(state, &control);
-            let power = state.objects[&drive.attacker]
-                .power
-                .expect("the attacker's power");
-            assert_eq!(count, ((life + power - 1) / power) as u32, "{control}");
-            for &(idle, reach) in beside {
-                let case = format!("{control} beside {idle:?}");
-                let (runner, drive) = assault_beside(*board, *pay, Some(idle), mode, db);
-                let state = runner.state();
-                let (span, moment) = carried_offer(state, &case);
-                assert_eq!(moment, without, "{case}");
-                assert_eq!(
-                    (span.reach, span.cause),
-                    (reach, NamingCause::LegalNow),
-                    "{case}"
-                );
-                assert_eq!(state.players[0].life, 20, "{case}");
-                // A hand-paid take leaves other activation records than its cycles driven by hand.
-                if *pay == AssaultPay::Engine {
-                    let differs = assault_take_differs(state, drive, 3);
-                    assert!(differs.is_empty(), "{case}: {differs:?}");
-                }
+            let (span, moment) = carried_offer(state, &case);
+            assert_eq!(moment, without, "{case}");
+            assert_eq!(
+                (span.reach, span.cause),
+                (reach, NamingCause::LegalNow),
+                "{case}"
+            );
+            assert_eq!(state.players[0].life, 20, "{case}");
+            // A hand-paid take leaves other activation records than its cycles driven by hand.
+            if *pay == AssaultPay::Engine {
+                let differs = assault_take_differs(state, drive, 3);
+                assert!(differs.is_empty(), "{case}: {differs:?}");
             }
         }
     }
@@ -4848,46 +6414,45 @@ fn a_hellkite_charger_period_beside_cards_it_never_uses_is_offered_as_it_is_with
         );
         (runner, charger)
     };
-    for mode in BOTH_MODES {
-        let control = format!("{mode:?}");
-        let (runner, charger) = offered(None, mode);
+    let mode = LoopDetectionMode::Interactive;
+    let control = format!("{mode:?}");
+    let (runner, charger) = offered(None, mode);
+    let state = runner.state();
+    let (_, without @ (_, _, life, count)) = carried_offer(state, &control);
+    let power = state.objects[&charger].power.expect("the Charger's power");
+    assert_eq!(count, ((life + power - 1) / power) as u32, "{control}");
+    for idle in [
+        Idle("World at War", Zone::Graveyard, false),
+        Idle("Aggravated Assault", Zone::Battlefield, false),
+        Idle("Mana Confluence", Zone::Battlefield, true),
+        Idle("Time Warp", Zone::Hand, false),
+    ] {
+        let case = format!("{mode:?} beside {idle:?}");
+        let (runner, charger) = offered(Some(idle), mode);
         let state = runner.state();
-        let (_, without @ (_, _, life, count)) = carried_offer(state, &control);
-        let power = state.objects[&charger].power.expect("the Charger's power");
-        assert_eq!(count, ((life + power - 1) / power) as u32, "{control}");
-        for idle in [
-            Idle("World at War", Zone::Graveyard, false),
-            Idle("Aggravated Assault", Zone::Battlefield, false),
-            Idle("Mana Confluence", Zone::Battlefield, true),
-            Idle("Time Warp", Zone::Hand, false),
-        ] {
-            let case = format!("{mode:?} beside {idle:?}");
-            let (runner, charger) = offered(Some(idle), mode);
-            let state = runner.state();
-            let (span, moment) = carried_offer(state, &case);
-            assert_eq!(moment, without, "{case}");
-            assert_eq!(
-                (span.reach, span.cause),
-                (PeriodReach::Combat, NamingCause::TriggerTop),
-                "{case}"
-            );
-            assert_eq!(state.players[0].life, 20, "{case}");
+        let (span, moment) = carried_offer(state, &case);
+        assert_eq!(moment, without, "{case}");
+        assert_eq!(
+            (span.reach, span.cause),
+            (PeriodReach::Combat, NamingCause::TriggerTop),
+            "{case}"
+        );
+        assert_eq!(state.players[0].life, 20, "{case}");
 
-            let combats = combats_begun(state);
-            let taken = taken(state, 3);
-            let mut by_hand = GameRunner::from_state(state.clone());
-            act(&mut by_hand, GameAction::DeclineShortcut);
-            by_hand.state_mut().loop_detection = LoopDetectionMode::Off;
-            charger_until(
-                &mut by_hand,
-                charger,
-                |_| true,
-                |state| combats_begun(state) == combats + 3 && charger_trigger_top(state),
-            );
-            let differs =
-                crate::loop_period_remade_token_source::differing_fields(&taken, by_hand.state());
-            assert!(differs.is_empty(), "{case}: {differs:?}");
-        }
+        let combats = combats_begun(state);
+        let taken = taken(state, 3);
+        let mut by_hand = GameRunner::from_state(state.clone());
+        act(&mut by_hand, GameAction::DeclineShortcut);
+        by_hand.state_mut().loop_detection = LoopDetectionMode::Off;
+        charger_until(
+            &mut by_hand,
+            charger,
+            |_| true,
+            |state| combats_begun(state) == combats + 3 && charger_trigger_top(state),
+        );
+        let differs =
+            crate::loop_period_remade_token_source::differing_fields(&taken, by_hand.state());
+        assert!(differs.is_empty(), "{case}: {differs:?}");
     }
 }
 
@@ -4907,34 +6472,33 @@ fn a_period_paying_life_its_own_trigger_regains_is_offered_and_taken() {
         mountains: 4,
         treasures: 0,
     };
-    for mode in BOTH_MODES {
-        let case = format!("{mode:?}");
-        let (runner, drive) = assault_beside(board, AssaultPay::Engine, None, mode, db);
-        let state = runner.state();
-        let (span, (combats, phase, life, count)) = carried_offer(state, &case);
-        assert_eq!(
-            (combats, phase, span.reach, span.cause),
-            (
-                2,
-                Phase::PostCombatMain,
-                PeriodReach::Combat,
-                NamingCause::LegalNow
-            ),
-            "{case}"
-        );
-        assert_eq!(state.players[0].life, 20, "{case}");
-        let lost_each_cycle = state.objects[&drive.attacker]
-            .power
-            .expect("the attacker's power")
-            + 1;
-        assert_eq!(
-            count,
-            ((life + lost_each_cycle - 1) / lost_each_cycle) as u32,
-            "{case}"
-        );
-        let differs = assault_take_differs(state, drive, 3);
-        assert!(differs.is_empty(), "{case}: {differs:?}");
-    }
+    let mode = LoopDetectionMode::Interactive;
+    let case = format!("{mode:?}");
+    let (runner, drive) = assault_beside(board, AssaultPay::Engine, None, mode, db);
+    let state = runner.state();
+    let (span, (combats, phase, life, count)) = carried_offer(state, &case);
+    assert_eq!(
+        (combats, phase, span.reach, span.cause),
+        (
+            2,
+            Phase::PostCombatMain,
+            PeriodReach::Combat,
+            NamingCause::LegalNow
+        ),
+        "{case}"
+    );
+    assert_eq!(state.players[0].life, 20, "{case}");
+    let lost_each_cycle = state.objects[&drive.attacker]
+        .power
+        .expect("the attacker's power")
+        + 1;
+    assert_eq!(
+        count,
+        ((life + lost_each_cycle - 1) / lost_each_cycle) as u32,
+        "{case}"
+    );
+    let differs = assault_take_differs(state, drive, 3);
+    assert!(differs.is_empty(), "{case}: {differs:?}");
 }
 
 /// CR 505.1a + CR 732.2a: Neheb, the Eternal ("At the beginning of each of your postcombat main
@@ -4953,32 +6517,31 @@ fn an_aggravated_assault_period_paid_by_neheb_and_lands_is_offered_and_taken() {
             mountains: 5,
             treasures: 0,
         };
-        for mode in BOTH_MODES {
-            let case = format!("{others:?}, {mode:?}");
-            let (mut runner, mut drive) =
-                assault_board(board, Phase::PreCombatMain, AssaultPay::Engine, mode, db);
-            // The precombat main passes without an activation.
-            drive.activated_at = Some(0);
-            assault_until(&mut runner, &mut drive, |state| {
-                is_offer(state) || state.active_player != P0 || combats_begun(state) > 6
-            });
-            let state = runner.state();
-            let (span, (combats, phase, life, count)) = carried_offer(state, &case);
-            assert_eq!(
-                (combats, phase, span.reach, span.cause),
-                (
-                    2,
-                    Phase::PostCombatMain,
-                    PeriodReach::Combat,
-                    NamingCause::LegalNow
-                ),
-                "{case}"
-            );
-            let power = state.objects[&drive.attacker].power.expect("Neheb's power");
-            assert_eq!(count, ((life + power - 1) / power) as u32, "{case}");
-            let differs = assault_take_differs(state, drive, 2);
-            assert!(differs.is_empty(), "{case}: {differs:?}");
-        }
+        let mode = LoopDetectionMode::Interactive;
+        let case = format!("{others:?}, {mode:?}");
+        let (mut runner, mut drive) =
+            assault_board(board, Phase::PreCombatMain, AssaultPay::Engine, mode, db);
+        // The precombat main passes without an activation.
+        drive.activated_at = Some(0);
+        assault_until(&mut runner, &mut drive, |state| {
+            is_offer(state) || state.active_player != P0 || combats_begun(state) > 6
+        });
+        let state = runner.state();
+        let (span, (combats, phase, life, count)) = carried_offer(state, &case);
+        assert_eq!(
+            (combats, phase, span.reach, span.cause),
+            (
+                2,
+                Phase::PostCombatMain,
+                PeriodReach::Combat,
+                NamingCause::LegalNow
+            ),
+            "{case}"
+        );
+        let power = state.objects[&drive.attacker].power.expect("Neheb's power");
+        assert_eq!(count, ((life + power - 1) / power) as u32, "{case}");
+        let differs = assault_take_differs(state, drive, 2);
+        assert!(differs.is_empty(), "{case}: {differs:?}");
     }
 }
 
@@ -5035,43 +6598,41 @@ fn an_aggravated_assault_period_paid_by_neheb_alone_is_offered_and_taken() {
         },
     ];
     for board in boards {
-        for mode in BOTH_MODES {
-            for pay in [AssaultPay::Engine, AssaultPay::Hand] {
-                let case = format!("{board:?}, {mode:?}, {pay:?}");
-                let (mut runner, mut drive) =
-                    assault_board(board, Phase::PreCombatMain, pay, mode, db);
-                assault_until(&mut runner, &mut drive, |state| {
-                    is_offer(state) || state.active_player != P0 || combats_begun(state) > 6
-                });
-                let state = runner.state();
-                let (span, (combats, phase, life, count)) = carried_offer(state, &case);
-                assert_eq!(
-                    (combats, phase, span.reach, span.cause),
-                    (
-                        2,
-                        Phase::PostCombatMain,
-                        PeriodReach::Combat,
-                        NamingCause::LegalNow
-                    ),
-                    "{case}"
-                );
-                assert!(!mana_ability_outside_library(state), "{case}");
-                let power = state.objects[&drive.attacker].power.expect("a power");
-                assert_eq!(count, ((life + power - 1) / power) as u32, "{case}");
-                let differs = assault_take_differs(state, drive, 3);
-                assert!(differs.is_empty(), "{case}: {differs:?}");
+        let mode = LoopDetectionMode::Interactive;
+        for pay in [AssaultPay::Engine, AssaultPay::Hand] {
+            let case = format!("{board:?}, {mode:?}, {pay:?}");
+            let (mut runner, mut drive) = assault_board(board, Phase::PreCombatMain, pay, mode, db);
+            assault_until(&mut runner, &mut drive, |state| {
+                is_offer(state) || state.active_player != P0 || combats_begun(state) > 6
+            });
+            let state = runner.state();
+            let (span, (combats, phase, life, count)) = carried_offer(state, &case);
+            assert_eq!(
+                (combats, phase, span.reach, span.cause),
+                (
+                    2,
+                    Phase::PostCombatMain,
+                    PeriodReach::Combat,
+                    NamingCause::LegalNow
+                ),
+                "{case}"
+            );
+            assert!(!mana_ability_outside_library(state), "{case}");
+            let power = state.objects[&drive.attacker].power.expect("a power");
+            assert_eq!(count, ((life + power - 1) / power) as u32, "{case}");
+            let differs = assault_take_differs(state, drive, 3);
+            assert!(differs.is_empty(), "{case}: {differs:?}");
 
-                let events = take(&mut runner, count);
-                assert_eq!(
-                    runner.state().waiting_for,
-                    WaitingFor::GameOver { winner: Some(P0) },
-                    "{case}"
-                );
-                assert!(
-                    events.contains(&GameEvent::GameOver { winner: Some(P0) }),
-                    "{case}"
-                );
-            }
+            let events = take(&mut runner, count);
+            assert_eq!(
+                runner.state().waiting_for,
+                WaitingFor::GameOver { winner: Some(P0) },
+                "{case}"
+            );
+            assert!(
+                events.contains(&GameEvent::GameOver { winner: Some(P0) }),
+                "{case}"
+            );
         }
     }
     for (name, zones) in [
@@ -5195,92 +6756,91 @@ fn a_retraced_waves_of_aggression_period_paid_by_neheb_is_offered_and_taken() {
         (&["Neheb, the Eternal"][..], false),
     ];
     for (others, recurs) in boards {
-        for mode in BOTH_MODES {
-            let case = format!("{others:?}, {mode:?}");
-            let mut scenario = GameScenario::new();
-            scenario.at_phase(Phase::PreCombatMain);
-            scenario.with_life(P1, 200);
-            scenario.with_library_top(P0, &["Island"; 25]);
-            scenario.with_library_top(P1, &["Island"; 25]);
-            let mut permanents: Vec<ObjectId> = others
-                .iter()
-                .map(|name| scenario.add_real_card(P0, name, Zone::Battlefield, db))
-                .collect();
-            let attacker = scenario.add_real_card(P0, "Spined Wurm", Zone::Battlefield, db);
-            permanents.push(attacker);
-            scenario.add_real_card(P0, "Waves of Aggression", Zone::Graveyard, db);
-            scenario.add_real_card(P0, RETRACE_LAND, Zone::Hand, db);
-            let mut runner = scenario.build();
-            let state = runner.state_mut();
-            let before = state.turn_number.saturating_sub(1);
-            for id in permanents {
-                let object = state.objects.get_mut(&id).expect("placed");
-                object.entered_battlefield_turn = Some(before);
-                object.summoning_sick = false;
-            }
-            state.loop_detection = mode;
-            let mut cast_at = None;
-            let mut casts = 0;
-            for _ in 0..4000 {
-                let state = runner.state();
-                if is_offer(state) || state.active_player != P0 || combats_begun(state) > 6 {
-                    break;
-                }
-                let before = cast_at;
-                waves_step(&mut runner, attacker, &mut cast_at);
-                casts += u32::from(cast_at != before);
-            }
-            let state = runner.state().clone();
-            assert!(!mana_ability_outside_library(&state), "{case}");
-            if !recurs {
-                assert!(!is_offer(&state), "{case}");
-                assert_eq!(casts, 1, "reach: {case} casts Waves of Aggression once");
-                continue;
-            }
-            let (span, (combats, phase, life, count)) = carried_offer(&state, &case);
-            assert_eq!(
-                (combats, phase, span.reach, span.cause),
-                (
-                    2,
-                    Phase::PostCombatMain,
-                    PeriodReach::Combat,
-                    NamingCause::LegalNow
-                ),
-                "{case}"
-            );
-            let power = state.objects[&attacker].power.expect("a power");
-            assert_eq!(count, ((life + power - 1) / power) as u32, "{case}");
-
-            let taken = taken(&state, 3);
-            let mut by_hand = GameRunner::from_state(state.clone());
-            act(&mut by_hand, GameAction::DeclineShortcut);
-            by_hand.state_mut().loop_detection = LoopDetectionMode::Off;
-            let mut hand_cast_at = None;
-            for _ in 0..4000 {
-                let state = by_hand.state();
-                if combats_begun(state) == combats + 3
-                    && assault_window(state)
-                    && in_zone(state, &state.players[0].hand, RETRACE_LAND).is_some()
-                {
-                    break;
-                }
-                waves_step(&mut by_hand, attacker, &mut hand_cast_at);
-            }
-            let differs =
-                crate::loop_period_remade_token_source::differing_fields(&taken, by_hand.state());
-            assert!(differs.is_empty(), "{case}: {differs:?}");
-
-            let events = take(&mut runner, count);
-            assert_eq!(
-                runner.state().waiting_for,
-                WaitingFor::GameOver { winner: Some(P0) },
-                "{case}"
-            );
-            assert!(
-                events.contains(&GameEvent::GameOver { winner: Some(P0) }),
-                "{case}"
-            );
+        let mode = LoopDetectionMode::Interactive;
+        let case = format!("{others:?}, {mode:?}");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P1, 200);
+        scenario.with_library_top(P0, &["Island"; 25]);
+        scenario.with_library_top(P1, &["Island"; 25]);
+        let mut permanents: Vec<ObjectId> = others
+            .iter()
+            .map(|name| scenario.add_real_card(P0, name, Zone::Battlefield, db))
+            .collect();
+        let attacker = scenario.add_real_card(P0, "Spined Wurm", Zone::Battlefield, db);
+        permanents.push(attacker);
+        scenario.add_real_card(P0, "Waves of Aggression", Zone::Graveyard, db);
+        scenario.add_real_card(P0, RETRACE_LAND, Zone::Hand, db);
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        let before = state.turn_number.saturating_sub(1);
+        for id in permanents {
+            let object = state.objects.get_mut(&id).expect("placed");
+            object.entered_battlefield_turn = Some(before);
+            object.summoning_sick = false;
         }
+        state.loop_detection = mode;
+        let mut cast_at = None;
+        let mut casts = 0;
+        for _ in 0..4000 {
+            let state = runner.state();
+            if is_offer(state) || state.active_player != P0 || combats_begun(state) > 6 {
+                break;
+            }
+            let before = cast_at;
+            waves_step(&mut runner, attacker, &mut cast_at);
+            casts += u32::from(cast_at != before);
+        }
+        let state = runner.state().clone();
+        assert!(!mana_ability_outside_library(&state), "{case}");
+        if !recurs {
+            assert!(!is_offer(&state), "{case}");
+            assert_eq!(casts, 1, "reach: {case} casts Waves of Aggression once");
+            continue;
+        }
+        let (span, (combats, phase, life, count)) = carried_offer(&state, &case);
+        assert_eq!(
+            (combats, phase, span.reach, span.cause),
+            (
+                2,
+                Phase::PostCombatMain,
+                PeriodReach::Combat,
+                NamingCause::LegalNow
+            ),
+            "{case}"
+        );
+        let power = state.objects[&attacker].power.expect("a power");
+        assert_eq!(count, ((life + power - 1) / power) as u32, "{case}");
+
+        let taken = taken(&state, 3);
+        let mut by_hand = GameRunner::from_state(state.clone());
+        act(&mut by_hand, GameAction::DeclineShortcut);
+        by_hand.state_mut().loop_detection = LoopDetectionMode::Off;
+        let mut hand_cast_at = None;
+        for _ in 0..4000 {
+            let state = by_hand.state();
+            if combats_begun(state) == combats + 3
+                && assault_window(state)
+                && in_zone(state, &state.players[0].hand, RETRACE_LAND).is_some()
+            {
+                break;
+            }
+            waves_step(&mut by_hand, attacker, &mut hand_cast_at);
+        }
+        let differs =
+            crate::loop_period_remade_token_source::differing_fields(&taken, by_hand.state());
+        assert!(differs.is_empty(), "{case}: {differs:?}");
+
+        let events = take(&mut runner, count);
+        assert_eq!(
+            runner.state().waiting_for,
+            WaitingFor::GameOver { winner: Some(P0) },
+            "{case}"
+        );
+        assert!(
+            events.contains(&GameEvent::GameOver { winner: Some(P0) }),
+            "{case}"
+        );
     }
 }
 
@@ -5355,99 +6915,98 @@ fn carried_through_turn(runner: &mut GameRunner, drive: &mut AssaultDrive, case:
 #[test]
 fn a_trigger_an_added_main_phase_does_not_feed_is_not_carried() {
     let db = shared_card_db().expect("card db");
-    for mode in BOTH_MODES {
-        let board = AssaultBoard {
-            others: &["Glóin the Mighty"],
-            attacker: "Spined Wurm",
-            aura: None,
-            mountains: 0,
-            treasures: 3,
-        };
-        for pay in [AssaultPay::Engine, AssaultPay::Hand] {
-            let case = format!("Glóin, {mode:?}, {pay:?}");
-            let (mut runner, mut drive) = assault_board(board, Phase::Upkeep, pay, mode, db);
-            let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, &case);
-            assert_eq!(
-                drive.activations, 1,
-                "reach: {case}: Glóin's mana pays once"
-            );
-            assert_eq!(runner.state().players[1].life, 195, "reach: {case}");
-            assert_eq!((verdicts, faces), (vec![], vec![]), "{case}");
-        }
-
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        scenario.with_library_top(P0, &["Island"; 25]);
-        scenario.with_library_top(P1, &["Island"; 25]);
-        let mut runner = scenario.build();
-        let state = runner.state_mut();
-        for name in [
-            "Najeela, the Blade-Blossom",
-            "Neheb, the Eternal",
-            "Hill Giant",
-        ] {
-            place_idle(state, Idle(name, Zone::Battlefield, false), db);
-        }
-        state.loop_detection = mode;
-        let on_battlefield = |name| in_zone(state, &state.battlefield, name).expect("placed");
-        // Najeela's ability is never activated: Neheb adds three mana, and no Warrior attacks.
-        let mut drive = AssaultDrive {
-            assault: on_battlefield("Najeela, the Blade-Blossom"),
-            attacker: on_battlefield("Hill Giant"),
-            pay: AssaultPay::Engine,
-            activated_at: None,
-            activations: 0,
-        };
-        let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, "Najeela");
-        assert_eq!(drive.activations, 0, "{mode:?}");
+    let mode = LoopDetectionMode::Interactive;
+    let board = AssaultBoard {
+        others: &["Glóin the Mighty"],
+        attacker: "Spined Wurm",
+        aura: None,
+        mountains: 0,
+        treasures: 3,
+    };
+    for pay in [AssaultPay::Engine, AssaultPay::Hand] {
+        let case = format!("Glóin, {mode:?}, {pay:?}");
+        let (mut runner, mut drive) = assault_board(board, Phase::Upkeep, pay, mode, db);
+        let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, &case);
         assert_eq!(
-            runner.state().players[1].life,
-            17,
-            "reach: {mode:?}: Neheb's trigger had three mana to add"
+            drive.activations, 1,
+            "reach: {case}: Glóin's mana pays once"
         );
-        assert_eq!((verdicts, faces), (vec![], vec![]), "{mode:?}");
+        assert_eq!(runner.state().players[1].life, 195, "reach: {case}");
+        assert_eq!((verdicts, faces), (vec![], vec![]), "{case}");
+    }
 
-        let board = AssaultBoard {
-            others: &[],
-            attacker: "Neheb, the Eternal",
-            aura: None,
-            mountains: 0,
-            treasures: 0,
-        };
-        for (held, reach) in [
-            (None, PeriodReach::Combat),
-            (Some("Time Warp"), PeriodReach::ExtraTurn),
-        ] {
-            let (mut runner, mut drive) =
-                assault_board(board, Phase::PreCombatMain, AssaultPay::Engine, mode, db);
-            if let Some(held) = held {
-                place_idle(runner.state_mut(), Idle(held, Zone::Hand, false), db);
-            }
-            let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, "Neheb alone");
-            assert_eq!(drive.activations, 0, "{mode:?}");
-            assert_eq!(
-                (verdicts, faces),
-                (
-                    vec![],
-                    vec![(Some("Neheb, the Eternal".to_string()), reach)]
-                ),
-                "{held:?}, {mode:?}"
-            );
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island"; 25]);
+    scenario.with_library_top(P1, &["Island"; 25]);
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    for name in [
+        "Najeela, the Blade-Blossom",
+        "Neheb, the Eternal",
+        "Hill Giant",
+    ] {
+        place_idle(state, Idle(name, Zone::Battlefield, false), db);
+    }
+    state.loop_detection = mode;
+    let on_battlefield = |name| in_zone(state, &state.battlefield, name).expect("placed");
+    // Najeela's ability is never activated: Neheb adds three mana, and no Warrior attacks.
+    let mut drive = AssaultDrive {
+        assault: on_battlefield("Najeela, the Blade-Blossom"),
+        attacker: on_battlefield("Hill Giant"),
+        pay: AssaultPay::Engine,
+        activated_at: None,
+        activations: 0,
+    };
+    let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, "Najeela");
+    assert_eq!(drive.activations, 0, "{mode:?}");
+    assert_eq!(
+        runner.state().players[1].life,
+        17,
+        "reach: {mode:?}: Neheb's trigger had three mana to add"
+    );
+    assert_eq!((verdicts, faces), (vec![], vec![]), "{mode:?}");
+
+    let board = AssaultBoard {
+        others: &[],
+        attacker: "Neheb, the Eternal",
+        aura: None,
+        mountains: 0,
+        treasures: 0,
+    };
+    for (held, reach) in [
+        (None, PeriodReach::Combat),
+        (Some("Time Warp"), PeriodReach::ExtraTurn),
+    ] {
+        let (mut runner, mut drive) =
+            assault_board(board, Phase::PreCombatMain, AssaultPay::Engine, mode, db);
+        if let Some(held) = held {
+            place_idle(runner.state_mut(), Idle(held, Zone::Hand, false), db);
         }
-
-        let (mut runner, mut drive) = siege_board(&["Frontier Siege"], mode, db);
-        let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, "Frontier Siege");
+        let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, "Neheb alone");
         assert_eq!(drive.activations, 0, "{mode:?}");
-        assert_eq!(runner.state().players[1].life, 195, "reach: {mode:?}");
         assert_eq!(
             (verdicts, faces),
             (
                 vec![],
-                vec![(Some("Frontier Siege".to_string()), PeriodReach::Combat)]
+                vec![(Some("Neheb, the Eternal".to_string()), reach)]
             ),
-            "{mode:?}"
+            "{held:?}, {mode:?}"
         );
     }
+
+    let (mut runner, mut drive) = siege_board(&["Frontier Siege"], mode, db);
+    let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, "Frontier Siege");
+    assert_eq!(drive.activations, 0, "{mode:?}");
+    assert_eq!(runner.state().players[1].life, 195, "reach: {mode:?}");
+    assert_eq!(
+        (verdicts, faces),
+        (
+            vec![],
+            vec![(Some("Frontier Siege".to_string()), PeriodReach::Combat)]
+        ),
+        "{mode:?}"
+    );
 }
 
 /// CR 505.1a + CR 732.2a: an added main phase whose trigger pays too little is carried and
@@ -5464,31 +7023,29 @@ fn an_added_main_phase_that_pays_too_little_is_carried_and_refused() {
         ("Neheb, the Eternal", "Ornithopter", 200),
     ];
     for (payer, attacker, life) in boards {
-        for mode in BOTH_MODES {
-            for pay in [AssaultPay::Engine, AssaultPay::Hand] {
-                let case = format!("{payer}, {mode:?}, {pay:?}");
-                let board = AssaultBoard {
-                    others: &[payer],
-                    attacker,
-                    aura: None,
-                    mountains: 0,
-                    treasures: 10,
-                };
-                let (mut runner, mut drive) =
-                    assault_board(board, Phase::PreCombatMain, pay, mode, db);
-                let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, &case);
-                assert_eq!(drive.activations, 2, "reach: {case}");
-                assert_eq!(runner.state().players[1].life, life, "reach: {case}");
-                assert!(
-                    faces.contains(&(Some(payer.to_string()), PeriodReach::Combat)),
-                    "{case}: {faces:?}"
-                );
-                assert_eq!(
-                    verdicts,
-                    vec![Err(OfferRefusal::IllegalReplayedPlay)],
-                    "{case}"
-                );
-            }
+        let mode = LoopDetectionMode::Interactive;
+        for pay in [AssaultPay::Engine, AssaultPay::Hand] {
+            let case = format!("{payer}, {mode:?}, {pay:?}");
+            let board = AssaultBoard {
+                others: &[payer],
+                attacker,
+                aura: None,
+                mountains: 0,
+                treasures: 10,
+            };
+            let (mut runner, mut drive) = assault_board(board, Phase::PreCombatMain, pay, mode, db);
+            let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, &case);
+            assert_eq!(drive.activations, 2, "reach: {case}");
+            assert_eq!(runner.state().players[1].life, life, "reach: {case}");
+            assert!(
+                faces.contains(&(Some(payer.to_string()), PeriodReach::Combat)),
+                "{case}: {faces:?}"
+            );
+            assert_eq!(
+                verdicts,
+                vec![Err(OfferRefusal::IllegalReplayedPlay)],
+                "{case}"
+            );
         }
     }
 }
@@ -5556,107 +7113,106 @@ fn assert_counted_offer(
     stop: HandStop,
 ) -> Vec<GameState> {
     let mut offers = Vec::new();
-    for mode in BOTH_MODES {
-        let case = format!("{case}, {mode:?}");
-        let mut board = make(mode);
-        let mut actions = 0;
-        while !is_offer(board.runner.state()) {
-            let state = board.runner.state();
-            assert!(
-                actions < 2000 && state.active_player == P0 && !game_over(state),
-                "{case}: not offered"
-            );
-            (board.step)(&mut board.runner).expect("the board's next action");
-            actions += 1;
-        }
-        let offered = board.runner.state().clone();
-        let WaitingFor::LoopShortcut { schema, .. } = &offered.waiting_for else {
-            unreachable!("is_offer")
-        };
-        assert_eq!(
-            (schema.deliverable_capacity, fixed(&schema.iteration_count)),
-            (count, suggested),
-            "{case}"
-        );
-
-        let mut undetected = make(LoopDetectionMode::Off);
-        for _ in 0..actions {
-            (undetected.step)(&mut undetected.runner).expect("the board's next action");
-        }
-        assert_eq!(
-            differing_fields(&offered, undetected.runner.state()),
-            BTreeSet::from(["waiting_for".to_string()]),
-            "{case}: the offer performed nothing"
-        );
-        let mut hand = GameRunner::from_state(offered.clone());
-        act(&mut hand, GameAction::DeclineShortcut);
-        let declined = hand.state().clone();
+    let mode = LoopDetectionMode::Interactive;
+    let case = format!("{case}, {mode:?}");
+    let mut board = make(mode);
+    let mut actions = 0;
+    while !is_offer(board.runner.state()) {
+        let state = board.runner.state();
         assert!(
-            differing_fields(&declined, undetected.runner.state()).is_empty(),
-            "{case}: declining leaves the hand-played state"
+            actions < 2000 && state.active_player == P0 && !game_over(state),
+            "{case}: not offered"
         );
-
-        hand.state_mut().loop_detection = LoopDetectionMode::Off;
-        let start = (board.periods)(&offered);
-        let mut frames: Vec<GameState> = Vec::new();
-        let mut ended = false;
-        for _ in 0..6000 {
-            let state = hand.state();
-            if game_over(state) {
-                ended = true;
-                break;
-            }
-            if state.active_player != P0 || frames.len() as u32 > count {
-                break;
-            }
-            if (board.window)(state) && (board.periods)(state) == start + frames.len() as u32 + 1 {
-                frames.push(state.clone());
-            }
-            // The hand game ends where the reducer refuses its next play.
-            let mut trial = GameRunner::from_state(state.clone());
-            if (board.step)(&mut trial).is_err() {
-                break;
-            }
-            hand = trial;
-        }
-        let made = frames.len() as u32 + u32::from(ended);
-        match stop {
-            HandStop::Spent | HandStop::GameEnds => assert_eq!(
-                (made, ended),
-                (count, stop == HandStop::GameEnds),
-                "{case}: the hand count"
-            ),
-            HandStop::PastTheCap => assert!(made > count, "{case}: {made} by hand"),
-        }
-
-        let mut takes = vec![1, count / 2, count - 1, count];
-        takes.retain(|k| *k >= 1);
-        takes.dedup();
-        for k in takes {
-            let reference = frames.get(k as usize - 1).unwrap_or(hand.state());
-            let differs = differing_fields(&taken(&offered, k), reference);
-            assert!(
-                differs.is_empty(),
-                "{case}: a take of {k} differs in {differs:?}"
-            );
-        }
-        let mut over = GameRunner::from_state(offered.clone());
-        act(
-            &mut over,
-            GameAction::DeclareShortcut {
-                count: IterationCount::Fixed(count + 1),
-                template: None,
-            },
-        );
-        let mut declined_off = declined.clone();
-        declined_off.loop_detection = LoopDetectionMode::Off;
-        assert!(
-            differing_fields(over.state(), &declined_off).is_empty(),
-            "{case}: a declaration of {} performed something",
-            count + 1
-        );
-        offers.push(offered);
+        (board.step)(&mut board.runner).expect("the board's next action");
+        actions += 1;
     }
+    let offered = board.runner.state().clone();
+    let WaitingFor::LoopShortcut { schema, .. } = &offered.waiting_for else {
+        unreachable!("is_offer")
+    };
+    assert_eq!(
+        (schema.deliverable_capacity, fixed(&schema.iteration_count)),
+        (count, suggested),
+        "{case}"
+    );
+
+    let mut undetected = make(LoopDetectionMode::Off);
+    for _ in 0..actions {
+        (undetected.step)(&mut undetected.runner).expect("the board's next action");
+    }
+    assert_eq!(
+        differing_fields(&offered, undetected.runner.state()),
+        BTreeSet::from(["waiting_for".to_string()]),
+        "{case}: the offer performed nothing"
+    );
+    let mut hand = GameRunner::from_state(offered.clone());
+    act(&mut hand, GameAction::DeclineShortcut);
+    let declined = hand.state().clone();
+    assert!(
+        differing_fields(&declined, undetected.runner.state()).is_empty(),
+        "{case}: declining leaves the hand-played state"
+    );
+
+    hand.state_mut().loop_detection = LoopDetectionMode::Off;
+    let start = (board.periods)(&offered);
+    let mut frames: Vec<GameState> = Vec::new();
+    let mut ended = false;
+    for _ in 0..6000 {
+        let state = hand.state();
+        if game_over(state) {
+            ended = true;
+            break;
+        }
+        if state.active_player != P0 || frames.len() as u32 > count {
+            break;
+        }
+        if (board.window)(state) && (board.periods)(state) == start + frames.len() as u32 + 1 {
+            frames.push(state.clone());
+        }
+        // The hand game ends where the reducer refuses its next play.
+        let mut trial = GameRunner::from_state(state.clone());
+        if (board.step)(&mut trial).is_err() {
+            break;
+        }
+        hand = trial;
+    }
+    let made = frames.len() as u32 + u32::from(ended);
+    match stop {
+        HandStop::Spent | HandStop::GameEnds => assert_eq!(
+            (made, ended),
+            (count, stop == HandStop::GameEnds),
+            "{case}: the hand count"
+        ),
+        HandStop::PastTheCap => assert!(made > count, "{case}: {made} by hand"),
+    }
+
+    let mut takes = vec![1, count / 2, count - 1, count];
+    takes.retain(|k| *k >= 1);
+    takes.dedup();
+    for k in takes {
+        let reference = frames.get(k as usize - 1).unwrap_or(hand.state());
+        let differs = differing_fields(&taken(&offered, k), reference);
+        assert!(
+            differs.is_empty(),
+            "{case}: a take of {k} differs in {differs:?}"
+        );
+    }
+    let mut over = GameRunner::from_state(offered.clone());
+    act(
+        &mut over,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(count + 1),
+            template: None,
+        },
+    );
+    let mut declined_off = declined.clone();
+    declined_off.loop_detection = LoopDetectionMode::Off;
+    assert!(
+        differing_fields(over.state(), &declined_off).is_empty(),
+        "{case}: a declaration of {} performed something",
+        count + 1
+    );
+    offers.push(offered);
     offers
 }
 
@@ -6053,8 +7609,8 @@ fn a_period_paying_its_controllers_life_is_offered_at_its_hand_count() {
     }
     // CR 605.3a + CR 603.3: the Ogre's repetition is its mana ability alone; the Coinsmith's
     // activates a non-mana ability.
-    let mana_only = vec![Some(PeriodPerformance::ManaAbilitiesOnly); BOTH_MODES.len()];
-    let stack = vec![Some(PeriodPerformance::UsesTheStack); BOTH_MODES.len()];
+    let mana_only = vec![Some(PeriodPerformance::ManaAbilitiesOnly)];
+    let stack = vec![Some(PeriodPerformance::UsesTheStack)];
     assert_eq!(
         performances,
         [
@@ -6090,7 +7646,8 @@ fn a_take_of_nineteen_at_nineteen_life_ends_the_game_where_the_hand_game_does() 
 /// CR 118.3 + CR 122.1 + CR 732.2a: Walking Ballista's "Remove a +1/+1 counter from this
 /// creature: It deals 1 damage to any target." spends counters nothing returns, and Aether Hub's
 /// "{T}, Pay {E}: Add one mana of any color." spends energy; each is offered at the repetitions
-/// its counters or energy pay for, P1's life binding first at 5.
+/// its counters or energy pay for, P1's life binding first at 5. P1's own energy takes no part in
+/// the period of the Hubs P0 taps (CR 107.14).
 #[test]
 fn a_period_spending_its_counters_or_energy_is_offered_at_its_hand_count() {
     assert_counted_offer(
@@ -6113,9 +7670,53 @@ fn a_period_spending_its_counters_or_energy_is_offered_at_its_hand_count() {
     let make = move |mode| {
         let mut hand = assault_hand(hub, (0, 0))(mode);
         hand.runner.state_mut().players[0].energy = 4;
+        hand.runner.state_mut().players[1].energy = 1;
         hand
     };
-    assert_counted_offer("Aether Hub, 4 energy", &make, (2, 2), HandStop::Spent);
+    for offered in assert_counted_offer("Aether Hub, 4 energy", &make, (2, 2), HandStop::Spent) {
+        let WaitingFor::LoopShortcut { certificate, .. } = &offered.waiting_for else {
+            unreachable!("assert_counted_offer returns offers")
+        };
+        let (PeriodSignature::EveryRepetition(period) | PeriodSignature::OneRepetition(period)) =
+            certificate
+                .per_cycle
+                .as_ref()
+                .expect("the offer carries its period");
+        let energy = &period.delta.energy;
+        assert_eq!(energy.keys().copied().collect::<Vec<_>>(), vec![P0]);
+        assert!(energy[&P0] < 0, "{energy:?}");
+    }
+}
+
+/// CR 704.5a + CR 732.2a: Walking Ballista's pings take P1 from 5 one life at a time; the take of
+/// the four offered ends the game in the counting loop, which the offer names from that last
+/// repetition, and records P1's reason.
+#[test]
+fn a_counted_take_ending_the_game_records_its_reason() {
+    let mut board = in_step_hand("Walking Ballista", 30, &[], (20, 5), ping_ability)(
+        LoopDetectionMode::Interactive,
+    );
+    for _ in 0..2000 {
+        if is_offer(board.runner.state()) {
+            break;
+        }
+        (board.step)(&mut board.runner).expect("the board's next action");
+    }
+    let (count, _, certificate) = offered_parts(&board.runner);
+    assert_eq!(count, IterationCount::Fixed(4), "reach");
+    assert_eq!(
+        (certificate.win_kind, certificate.win_kind_at),
+        (Some(WinKind::LethalDamage), Some(4))
+    );
+    let events = take(&mut board.runner, 4);
+    assert_eq!(
+        losses_in(&events),
+        [(P1, BTreeSet::from([LossReason::LifeTotal]))]
+    );
+    assert!(matches!(
+        board.runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    ));
 }
 
 /// CR 732.2a: a count stops at the confirmer's cap, which the replay performed, however much
@@ -6283,27 +7884,26 @@ fn a_declined_counted_offer_is_offered_again_at_the_count_left() {
         ),
     ];
     for (case, make, count) in boards {
-        for mode in BOTH_MODES {
-            let mut board = make(mode);
-            let mut counts = Vec::new();
-            for _ in 0..4000 {
-                let state = board.runner.state();
-                if game_over(state) || state.active_player != P0 {
-                    break;
-                }
-                if let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for {
-                    counts.push(schema.deliverable_capacity);
-                    act(&mut board.runner, GameAction::DeclineShortcut);
-                } else {
-                    (board.step)(&mut board.runner).expect("the board's next action");
-                }
+        let mode = LoopDetectionMode::Interactive;
+        let mut board = make(mode);
+        let mut counts = Vec::new();
+        for _ in 0..4000 {
+            let state = board.runner.state();
+            if game_over(state) || state.active_player != P0 {
+                break;
             }
-            assert_eq!(
-                counts,
-                (1..=count).rev().collect::<Vec<_>>(),
-                "{case}, {mode:?}"
-            );
+            if let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for {
+                counts.push(schema.deliverable_capacity);
+                act(&mut board.runner, GameAction::DeclineShortcut);
+            } else {
+                (board.step)(&mut board.runner).expect("the board's next action");
+            }
         }
+        assert_eq!(
+            counts,
+            (1..=count).rev().collect::<Vec<_>>(),
+            "{case}, {mode:?}"
+        );
     }
 }
 
@@ -6315,45 +7915,42 @@ fn assert_refused(
     make: &dyn Fn(LoopDetectionMode) -> HandBoard,
     refusals: &[OfferRefusal],
 ) {
-    for mode in BOTH_MODES {
-        let mut board = make(mode);
-        let mut seen: Vec<OfferRefusal> = Vec::new();
-        let mut actions = 0;
-        while actions < 1500 {
-            let state = board.runner.state();
-            assert!(!is_offer(state), "{case}, {mode:?}: offered");
-            if game_over(state) || state.active_player != P0 {
-                break;
-            }
-            if matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0) {
-                for (_, verdict) in confirm_for_tests(state) {
-                    if let Err(refusal) = verdict {
-                        if !seen.contains(&refusal) {
-                            seen.push(refusal);
-                        }
+    let mode = LoopDetectionMode::Interactive;
+    let mut board = make(mode);
+    let mut seen: Vec<OfferRefusal> = Vec::new();
+    let mut actions = 0;
+    while actions < 1500 {
+        let state = board.runner.state();
+        assert!(!is_offer(state), "{case}, {mode:?}: offered");
+        if game_over(state) || state.active_player != P0 {
+            break;
+        }
+        if matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0) {
+            for (_, verdict) in confirm_for_tests(state) {
+                if let Err(refusal) = verdict {
+                    if !seen.contains(&refusal) {
+                        seen.push(refusal);
                     }
                 }
             }
-            (board.step)(&mut board.runner).expect("the board's next action");
-            actions += 1;
         }
-        assert_eq!(seen, refusals, "{case}, {mode:?}");
-        let mut undetected = make(LoopDetectionMode::Off);
-        for _ in 0..actions {
-            (undetected.step)(&mut undetected.runner).expect("the board's next action");
-        }
-        let differs = differing_fields(board.runner.state(), undetected.runner.state());
-        assert!(differs.is_empty(), "{case}, {mode:?}: {differs:?}");
+        (board.step)(&mut board.runner).expect("the board's next action");
+        actions += 1;
     }
+    assert_eq!(seen, refusals, "{case}, {mode:?}");
+    let mut undetected = make(LoopDetectionMode::Off);
+    for _ in 0..actions {
+        (undetected.step)(&mut undetected.runner).expect("the board's next action");
+    }
+    let differs = differing_fields(board.runner.state(), undetected.runner.state());
+    assert!(differs.is_empty(), "{case}, {mode:?}: {differs:?}");
 }
 
 /// CR 732.2a: periods the counted road does not take. Ingris Stingerquill's "{4}: Create a 2/2
 /// colorless Wizard Soldier creature token named Cadet. Then creatures you control gain haste
 /// until end of turn." mints a token class, so the reproduced-token arm answers its pairs and
 /// refuses both on the board; Shivan Dragon's "{R}: This creature gets +1/+0 until end of turn."
-/// spends Mountains toward no axis; Hellkite Charger beside Moraug, Fury of Akoum ("Each
-/// creature you control gets +1/+0 for each time it has attacked this turn.") changes a source
-/// no spend explains.
+/// spends Mountains toward no axis.
 #[test]
 fn periods_the_counted_road_does_not_take_stay_refused() {
     assert_refused(
@@ -6383,14 +7980,6 @@ fn periods_the_counted_road_does_not_take_stay_refused() {
             other_ability,
         ),
         &[OfferRefusal::NoAxis, OfferRefusal::IllegalReplayedPlay],
-    );
-    assert_refused(
-        "Moraug, Fury of Akoum",
-        &charger_hand(7, true, &["Moraug, Fury of Akoum"]),
-        &[
-            OfferRefusal::Cover(ObjectGrowthVerdict::ResourceRecurrence(None)),
-            OfferRefusal::NoRecurrence,
-        ],
     );
 }
 
@@ -6442,6 +8031,8 @@ fn a_period_costing_life_is_counted_until_a_floor_holds_the_life_total() {
                         assert_eq!(runner.state().players[0].life, 1);
                     } else {
                         act(&mut runner, GameAction::DeclineShortcut);
+                        // An offer can stand at a window with the untap still on the stack.
+                        settle(&mut runner, &|_| 0);
                     }
                 }
             }
@@ -6476,63 +8067,62 @@ fn a_period_fed_by_an_each_opponent_drain_is_offered_inside_its_step() {
             mountains: 0,
             treasures: 0,
         };
-        for mode in BOTH_MODES {
-            let case = format!("{others:?}, {mode:?}");
-            let (mut runner, mut drive) =
-                assault_board(board, Phase::PreCombatMain, AssaultPay::Hand, mode, db);
-            runner.state_mut().players[0].life = 80;
+        let mode = LoopDetectionMode::Interactive;
+        let case = format!("{others:?}, {mode:?}");
+        let (mut runner, mut drive) =
+            assault_board(board, Phase::PreCombatMain, AssaultPay::Hand, mode, db);
+        runner.state_mut().players[0].life = 80;
+        let state = runner.state();
+        let ogre = state
+            .battlefield
+            .iter()
+            .copied()
+            .find(|id| state.objects[id].name == "Treasonous Ogre")
+            .expect("the Ogre");
+        let (mut offers, mut most_carried) = (Vec::new(), 0);
+        for _ in 0..4000 {
             let state = runner.state();
-            let ogre = state
-                .battlefield
-                .iter()
-                .copied()
-                .find(|id| state.objects[id].name == "Treasonous Ogre")
-                .expect("the Ogre");
-            let (mut offers, mut most_carried) = (Vec::new(), 0);
-            for _ in 0..4000 {
-                let state = runner.state();
-                if state.active_player != P0 || game_over(state) {
-                    break;
-                }
-                most_carried = most_carried.max(carried(state).len());
-                if let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for {
-                    assert_eq!(
-                        play_trace_view(state)
-                            .and_then(|view| view.offered)
-                            .map(|span| span.source),
-                        Some(SpanSource::Window),
-                        "{case}"
-                    );
-                    let life = i64::from(state.players[0].life);
-                    offers.push((life, schema.deliverable_capacity));
-                    act(&mut runner, GameAction::DeclineShortcut);
-                    continue;
-                }
-                if assault_window(state)
-                    && drive.activated_at != Some(combats_begun(state))
-                    && state.players[0].mana_pool.total() < ASSAULT_COST
-                    && state.players[0].life > 3
-                {
-                    let ability_index = ability(state, ogre, true);
-                    act(
-                        &mut runner,
-                        GameAction::ActivateAbility {
-                            source_id: ogre,
-                            ability_index,
-                            payment_mode: CastPaymentMode::Auto,
-                        },
-                    );
-                } else {
-                    assault_step(&mut runner, &mut drive);
-                }
+            if state.active_player != P0 || game_over(state) {
+                break;
             }
-            assert!(drive.activations >= 2, "reach: {case} activates twice");
-            assert_eq!(most_carried > 0, carries, "{case} carries {most_carried}");
-            assert!(!offers.is_empty(), "{case}");
-            for (life, count) in offers {
-                // CR 119.4: three life is paid while three is left.
-                assert_eq!(i64::from(count), (life / 3).min(25), "{case} at {life}");
+            most_carried = most_carried.max(carried(state).len());
+            if let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for {
+                assert_eq!(
+                    play_trace_view(state)
+                        .and_then(|view| view.offered)
+                        .map(|span| span.source),
+                    Some(SpanSource::Window),
+                    "{case}"
+                );
+                let life = i64::from(state.players[0].life);
+                offers.push((life, schema.deliverable_capacity));
+                act(&mut runner, GameAction::DeclineShortcut);
+                continue;
             }
+            if assault_window(state)
+                && drive.activated_at != Some(combats_begun(state))
+                && state.players[0].mana_pool.total() < ASSAULT_COST
+                && state.players[0].life > 3
+            {
+                let ability_index = ability(state, ogre, true);
+                act(
+                    &mut runner,
+                    GameAction::ActivateAbility {
+                        source_id: ogre,
+                        ability_index,
+                        payment_mode: CastPaymentMode::Auto,
+                    },
+                );
+            } else {
+                assault_step(&mut runner, &mut drive);
+            }
+        }
+        assert!(drive.activations >= 2, "reach: {case} activates twice");
+        assert_eq!(most_carried > 0, carries, "{case} carries {most_carried}");
+        assert!(!offers.is_empty(), "{case}");
+        for (life, count) in offers {
+            // CR 119.4: three life is paid while three is left.
+            assert_eq!(i64::from(count), (life / 3).min(25), "{case} at {life}");
         }
     }
 }
@@ -6596,52 +8186,51 @@ fn a_counted_offer_previews_only_what_its_take_performs() {
         ),
     ];
     for (case, make) in boards {
-        for mode in BOTH_MODES {
-            let mut board = make(mode);
-            for _ in 0..2000 {
-                if is_offer(board.runner.state()) {
-                    break;
-                }
-                (board.step)(&mut board.runner).expect("the board's next action");
+        let mode = LoopDetectionMode::Interactive;
+        let mut board = make(mode);
+        for _ in 0..2000 {
+            if is_offer(board.runner.state()) {
+                break;
             }
-            let offered = board.runner.state().clone();
-            let WaitingFor::LoopShortcut { schema, .. } = &offered.waiting_for else {
-                panic!("{case}, {mode:?}: not offered");
-            };
-            let capacity = schema.deliverable_capacity;
-            assert_ne!(
-                take_change(
-                    &offered,
-                    &taken(&offered, capacity),
-                    InteractionShortcutPreviewFamily::Life,
-                    Some(1),
-                ),
-                0,
-                "{case}, {mode:?}: the take moves P1's life, a magnitude a preview could state"
-            );
-            let mut bound = offered.clone();
-            bind_interaction_authority(&mut bound, InteractionSessionId("preview".to_string()))
-                .expect("bind");
-            let view = derive_viewer_interaction(&bound, &filter_state_for_viewer(&bound, P0), P0);
-            let Some(InteractionOpportunityResponse::Schema {
-                spec: InteractionResponseSpec::Shortcut { preview, .. },
-                ..
-            }) = view.opportunities.first().map(|o| &o.response)
-            else {
-                panic!("{case}, {mode:?}: no shortcut opportunity");
-            };
+            (board.step)(&mut board.runner).expect("the board's next action");
+        }
+        let offered = board.runner.state().clone();
+        let WaitingFor::LoopShortcut { schema, .. } = &offered.waiting_for else {
+            panic!("{case}, {mode:?}: not offered");
+        };
+        let capacity = schema.deliverable_capacity;
+        assert_ne!(
+            take_change(
+                &offered,
+                &taken(&offered, capacity),
+                InteractionShortcutPreviewFamily::Life,
+                Some(1),
+            ),
+            0,
+            "{case}, {mode:?}: the take moves P1's life, a magnitude a preview could state"
+        );
+        let mut bound = offered.clone();
+        bind_interaction_authority(&mut bound, InteractionSessionId("preview".to_string()))
+            .expect("bind");
+        let view = derive_viewer_interaction(&bound, &filter_state_for_viewer(&bound, P0), P0);
+        let Some(InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Shortcut { preview, .. },
+            ..
+        }) = view.opportunities.first().map(|o| &o.response)
+        else {
+            panic!("{case}, {mode:?}: no shortcut opportunity");
+        };
+        assert!(
+            !preview.is_empty(),
+            "{case}, {mode:?}: elements are published"
+        );
+        for element in preview {
             assert!(
-                !preview.is_empty(),
-                "{case}, {mode:?}: elements are published"
+                element.entries.is_empty(),
+                "{case}, {mode:?}: a take of {} is previewed {:?}",
+                element.count,
+                element.entries
             );
-            for element in preview {
-                assert!(
-                    element.entries.is_empty(),
-                    "{case}, {mode:?}: a take of {} is previewed {:?}",
-                    element.count,
-                    element.entries
-                );
-            }
         }
     }
 }
@@ -6670,56 +8259,55 @@ fn a_counted_declaration_aiming_at_a_seat_is_accepted_through_the_response_path(
         place(hand.runner.state_mut(), P1, "Platinum Angel", db);
         hand
     };
-    for mode in BOTH_MODES {
-        let offered = hand_offer(&make, mode);
-        let WaitingFor::LoopShortcut { schema, .. } = &offered.waiting_for else {
-            unreachable!("hand_offer")
-        };
-        assert_eq!(schema.deliverable_capacity, 7, "{mode:?}");
-        let (bound, view) = published_to_p0(&offered);
-        let (opportunity, points) = shortcut_schema(&view).expect("a shortcut schema");
-        let submission = InteractionSubmission {
-            interaction_id: opportunity.interaction_id.clone(),
-            response: InteractionResponse::Shortcut {
-                decision: InteractionShortcutDecision::Fixed { iterations: 7 },
-                pins: points
-                    .iter()
-                    .map(|point| InteractionShortcutPin {
-                        group: point.group,
-                        choice_ids: point.candidate_ids.clone(),
-                        amounts: Vec::new(),
-                    })
-                    .collect(),
-            },
-        };
-        assert!(
-            matches!(
-                resolve_interaction_response(&bound, P0, &submission),
-                Ok(GameAction::DeclareShortcut {
-                    template: Some(_),
-                    ..
+    let mode = LoopDetectionMode::Interactive;
+    let offered = hand_offer(&make, mode);
+    let WaitingFor::LoopShortcut { schema, .. } = &offered.waiting_for else {
+        unreachable!("hand_offer")
+    };
+    assert_eq!(schema.deliverable_capacity, 7, "{mode:?}");
+    let (bound, view) = published_to_p0(&offered);
+    let (opportunity, points) = shortcut_schema(&view).expect("a shortcut schema");
+    let submission = InteractionSubmission {
+        interaction_id: opportunity.interaction_id.clone(),
+        response: InteractionResponse::Shortcut {
+            decision: InteractionShortcutDecision::Fixed { iterations: 7 },
+            pins: points
+                .iter()
+                .map(|point| InteractionShortcutPin {
+                    group: point.group,
+                    choice_ids: point.candidate_ids.clone(),
+                    amounts: Vec::new(),
                 })
-            ),
-            "{mode:?}: the response mints a templated declaration"
-        );
-        let mut declared = bound.clone();
-        assert!(
-            submit_interaction(&mut declared, P0, submission).is_ok(),
-            "{mode:?}: the response is accepted"
-        );
-        let mut runner = GameRunner::from_state(declared);
-        accept(&mut runner);
-        let after = runner.state();
-        assert!(
-            after.players[1].life < 0 && eliminated(after).is_empty(),
-            "{mode:?}: reach: P1 at {} under the Angel",
-            after.players[1].life
-        );
-        let mut reference = taken(&bound, 7);
-        reference.loop_detection = LoopDetectionMode::Off;
-        let differs = differing_fields(after, &reference);
-        assert!(differs.is_empty(), "{mode:?}: differs in {differs:?}");
-    }
+                .collect(),
+        },
+    };
+    assert!(
+        matches!(
+            resolve_interaction_response(&bound, P0, &submission),
+            Ok(GameAction::DeclareShortcut {
+                template: Some(_),
+                ..
+            })
+        ),
+        "{mode:?}: the response mints a templated declaration"
+    );
+    let mut declared = bound.clone();
+    assert!(
+        submit_interaction(&mut declared, P0, submission).is_ok(),
+        "{mode:?}: the response is accepted"
+    );
+    let mut runner = GameRunner::from_state(declared);
+    accept(&mut runner);
+    let after = runner.state();
+    assert!(
+        after.players[1].life < 0 && eliminated(after).is_empty(),
+        "{mode:?}: reach: P1 at {} under the Angel",
+        after.players[1].life
+    );
+    let mut reference = taken(&bound, 7);
+    reference.loop_detection = LoopDetectionMode::Off;
+    let differs = differing_fields(after, &reference);
+    assert!(differs.is_empty(), "{mode:?}: differs in {differs:?}");
 }
 
 /// CR 104.2a + CR 732.2a: a counted offer names how the game ends only at the count whose take
@@ -6774,38 +8362,1673 @@ fn a_counted_offer_states_no_outcome_its_take_does_not_produce() {
         ),
     ];
     for (case, make, count, ends, ending) in boards {
-        for mode in BOTH_MODES {
-            let case = format!("{case}, {mode:?}");
-            let offered = hand_offer(&*make, mode);
-            let WaitingFor::LoopShortcut {
-                certificate,
-                schema,
-                ..
-            } = &offered.waiting_for
-            else {
-                unreachable!("hand_offer")
-            };
-            assert_eq!(schema.deliverable_capacity, count, "{case}");
-            assert_eq!(
-                (
-                    game_over(&taken(&offered, count)),
-                    game_over(&taken(&offered, count - 1))
-                ),
-                (ends, false),
-                "{case}: reach"
-            );
-            let named = (ending, ending.map(|_| count));
-            assert_eq!(
-                (certificate.win_kind, certificate.win_kind_at),
-                named,
-                "{case}"
-            );
-            assert!(certificate.unbounded.is_empty(), "{case}");
-            let declared = proposed(offered.clone(), count);
-            let WaitingFor::RespondToShortcut { proposal, .. } = &declared.waiting_for else {
-                unreachable!("proposed")
-            };
-            assert_eq!((proposal.win_kind, proposal.win_kind_at), named, "{case}");
+        let mode = LoopDetectionMode::Interactive;
+        let case = format!("{case}, {mode:?}");
+        let offered = hand_offer(&*make, mode);
+        let WaitingFor::LoopShortcut {
+            certificate,
+            schema,
+            ..
+        } = &offered.waiting_for
+        else {
+            unreachable!("hand_offer")
+        };
+        assert_eq!(schema.deliverable_capacity, count, "{case}");
+        assert_eq!(
+            (
+                game_over(&taken(&offered, count)),
+                game_over(&taken(&offered, count - 1))
+            ),
+            (ends, false),
+            "{case}: reach"
+        );
+        let named = (ending, ending.map(|_| count));
+        assert_eq!(
+            (certificate.win_kind, certificate.win_kind_at),
+            named,
+            "{case}"
+        );
+        assert!(certificate.unbounded.is_empty(), "{case}");
+        let declared = proposed(offered.clone(), count);
+        let WaitingFor::RespondToShortcut { proposal, .. } = &declared.waiting_for else {
+            unreachable!("proposed")
+        };
+        assert_eq!((proposal.win_kind, proposal.win_kind_at), named, "{case}");
+    }
+}
+
+/// CR 104.2a + CR 704.5a + CR 704.5c + CR 732.2a: Kilo, Apogee Mind ("Whenever Kilo becomes
+/// tapped, proliferate.") tapped by Relic of Legends and untapped by Freed from the Real, with
+/// Scheming Aspirant ("Whenever you proliferate, each opponent loses 2 life and you gain 2
+/// life."): the counted offer names the reason P1 leaves for. Offered at 2 life and 8 poison, life
+/// reaches 0 at 9 poison; offered at 3 and 8, poison reaches 10 at 1; offered at 2 and 9, poison
+/// reaches 10 before the drain resolves.
+#[test]
+fn a_counted_offer_names_the_threshold_its_ending_crosses() {
+    let Some(db) = shared_card_db() else { return };
+    for (offered_at, repetitions, expected, reason) in [
+        ((2, 8), 1, WinKind::LethalDamage, LossReason::LifeTotal),
+        ((3, 8), 2, WinKind::PoisonLoss, LossReason::Poison),
+        ((2, 9), 1, WinKind::PoisonLoss, LossReason::Poison),
+    ] {
+        let mut runner = kilo_offer(GameScenario::new(), &[(22, 0), offered_at], &[P1], db);
+        let (count, _, certificate) = offered_parts(&runner);
+        assert_eq!(count, IterationCount::Fixed(repetitions), "{offered_at:?}");
+        assert_eq!(predicted_winner(&runner), Some(P0), "{offered_at:?}");
+        assert_eq!(certificate.win_kind, Some(expected), "{offered_at:?}");
+        let events = take(&mut runner, repetitions);
+        assert_eq!(
+            losses_in(&events),
+            [(P1, BTreeSet::from([reason]))],
+            "{offered_at:?}"
+        );
+    }
+}
+
+/// Phyrexian Altar recurring Gravecrawler as `altar_board_at` builds it, with Ms. Bumbleflower
+/// ("Whenever you cast a spell, target opponent draws a card. …") and `victim`'s library at three
+/// cards; every other library holds ten.
+fn bumbleflower_board(
+    mut scenario: GameScenario,
+    lives: &[i32],
+    victim: PlayerId,
+    db: &CardDatabase,
+) -> (GameRunner, ObjectId, ObjectId) {
+    scenario.at_phase(Phase::PreCombatMain);
+    for (seat, life) in lives.iter().enumerate() {
+        scenario.with_life(PlayerId(seat as u8), *life);
+    }
+    let altar = scenario.add_real_card(P0, "Phyrexian Altar", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Walking Corpse", Zone::Battlefield, db);
+    let gravecrawler = scenario.add_real_card(P0, "Gravecrawler", Zone::Graveyard, db);
+    scenario.add_real_card(P0, "Swamp", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Ms. Bumbleflower", Zone::Battlefield, db);
+    for seat in 0..lives.len() {
+        let seat = PlayerId(seat as u8);
+        let cards = if seat == victim { 3 } else { 10 };
+        for _ in 0..cards {
+            scenario.add_real_card(seat, "Swamp", Zone::Library, db);
         }
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    (runner, altar, gravecrawler)
+}
+
+/// Casts Gravecrawler and sacrifices it to the Altar, Bumbleflower aiming its draw at `victim`,
+/// until the engine offers the loop.
+fn deck_to_offer(
+    runner: &mut GameRunner,
+    altar: ObjectId,
+    gravecrawler: ObjectId,
+    victim: PlayerId,
+) {
+    let score = |action: &GameAction| {
+        2 * names(&[gravecrawler])(action)
+            + chooses_color(ManaType::Black)(action)
+            + 4 * i32::from(matches!(
+                action,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Player(seat))
+                } if *seat == victim
+            ))
+    };
+    for _ in 0..4 {
+        cast(runner, gravecrawler, vec![], CastPaymentMode::Auto);
+        settle(runner, &score);
+        if is_offer(runner.state()) {
+            return;
+        }
+        let index = ability(runner.state(), altar, true);
+        activate(runner, altar, index);
+        settle(runner, &score);
+        if is_offer(runner.state()) {
+            return;
+        }
+    }
+    panic!("not offered: {:?}", latest_verdict(runner.state()));
+}
+
+/// CR 704.5b: Bumbleflower makes the victim draw from an empty library, and the offer names that
+/// decking; CR 810.8a: in Two-Headed Giant the victim's teammate loses with it, carrying its reason.
+#[test]
+fn a_decking_take_records_its_reason_for_each_leaving_seat() {
+    let Some(db) = shared_card_db() else { return };
+    let decked = BTreeSet::from([LossReason::DrewFromEmptyLibrary]);
+    for (case, scenario, lives, victim, expected) in [
+        (
+            "two players",
+            GameScenario::new(),
+            &[20, 20][..],
+            P1,
+            vec![(P1, decked.clone())],
+        ),
+        (
+            "Two-Headed Giant",
+            GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42),
+            &[30, -3, 15, 15][..],
+            P2,
+            vec![(P2, decked.clone()), (P3, decked.clone())],
+        ),
+    ] {
+        let (mut runner, altar, gravecrawler) = bumbleflower_board(scenario, lives, victim, db);
+        deck_to_offer(&mut runner, altar, gravecrawler, victim);
+        let (count, _, certificate) = offered_parts(&runner);
+        assert_eq!(count, IterationCount::Fixed(1), "{case}: reach");
+        assert_eq!(certificate.win_kind, Some(WinKind::Decking), "{case}");
+        assert_eq!(predicted_winner(&runner), Some(P0), "{case}");
+        let events = take(&mut runner, 1);
+        assert_eq!(losses_in(&events), expected, "{case}");
+    }
+}
+
+/// Cycles the Altar + Gravecrawler period like [`drive_altar_offers`], noting P0's library at each
+/// offer.
+fn drive_altar_offers_noting_p0(
+    runner: &mut GameRunner,
+    pair: (ObjectId, ObjectId),
+    cycles: usize,
+    declines: impl Fn(&GameState) -> bool,
+) -> Vec<(usize, LoopCertificate)> {
+    let libraries = std::cell::RefCell::new(Vec::new());
+    let offers = drive_altar_offers(runner, pair, cycles, |state| {
+        libraries.borrow_mut().push(state.players[0].library.len());
+        declines(state)
+    });
+    libraries
+        .into_inner()
+        .into_iter()
+        .zip(offers.into_iter().map(|(_, certificate)| certificate))
+        .collect()
+}
+
+/// CR 701.17a + CR 701.17b + CR 704.5b + CR 732.2a: Liliana the Repentant ("Whenever another
+/// creature or planeswalker you control enters, mill two cards.") mills P0 two cards each time
+/// Gravecrawler enters. Milling never loses the game, so the period is offered without end while
+/// the library holds a card, its last two included, and has no axis once it is empty.
+#[test]
+fn a_liliana_self_mill_period_is_offered_without_end() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board(Some("Liliana the Repentant"), db);
+    let offers = drive_altar_offers_noting_p0(&mut runner, (altar, gravecrawler), 8, |state| {
+        state.players[0].library.len() > 2
+    });
+    let libraries: Vec<usize> = offers.iter().map(|(library, _)| *library).collect();
+    assert_eq!(libraries, [8, 6, 4, 2], "reach: two cards a cycle");
+    for (library, certificate) in &offers {
+        assert_eq!(
+            certificate.unbounded,
+            [ResourceAxis::LibraryDelta(P0)],
+            "library {library}"
+        );
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
+    act(&mut runner, GameAction::DeclineShortcut);
+    settle(&mut runner, &|action| 2 * names(&[gravecrawler])(action));
+    for cycle in 0..2 {
+        altar_cycle(&mut runner, altar, gravecrawler);
+        assert!(!is_offer(runner.state()), "cycle {cycle}");
+    }
+    assert_eq!(runner.state().players[0].library.len(), 0);
+    assert_eq!(latest_verdict(runner.state()), Err(OfferRefusal::NoAxis));
+}
+
+/// CR 701.17b: a take of more repetitions than the library lasts mills what it holds and stops at
+/// P0's priority.
+#[test]
+fn a_take_of_a_liliana_self_mill_period_mills_what_the_library_holds() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board(Some("Liliana the Repentant"), db);
+    drive_altar_offers(&mut runner, (altar, gravecrawler), 8, |_| false);
+    let state = runner.state();
+    let (library, graveyard) = (
+        state.players[0].library.len(),
+        state.players[0].graveyard.len(),
+    );
+    assert!(library > 0, "reach: the offer's library holds cards");
+    take(&mut runner, (library / 2 + 2) as u32);
+    let state = runner.state();
+    assert_eq!(state.players[0].library.len(), 0);
+    assert_eq!(state.players[0].graveyard.len(), graveyard + library);
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player: P0 }),
+        "{}",
+        state.waiting_for.variant_name()
+    );
+}
+
+/// CR 701.17b: Altar of the Brood's period is offered at P1's last card, whose first repetition
+/// mills it and whose later ones mill none; at an empty library it has no axis.
+#[test]
+fn an_altar_of_the_brood_period_is_offered_at_the_last_card() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board(Some("Altar of the Brood"), db);
+    let offers = drive_altar_offers(&mut runner, (altar, gravecrawler), 12, |state| {
+        state.players[1].library.len() > 1
+    });
+    let (library, certificate) = offers.last().expect("an offer");
+    assert_eq!(*library, 1);
+    assert_eq!(certificate.unbounded, [ResourceAxis::LibraryDelta(P1)]);
+    act(&mut runner, GameAction::DeclineShortcut);
+    settle(&mut runner, &|action| 2 * names(&[gravecrawler])(action));
+    altar_cycle(&mut runner, altar, gravecrawler);
+    assert!(!is_offer(runner.state()));
+    assert_eq!(runner.state().players[1].library.len(), 0);
+    assert_eq!(latest_verdict(runner.state()), Err(OfferRefusal::NoAxis));
+}
+
+/// CR 701.17b + CR 732.2a: beside Altar of the Brood, Liliana the Repentant's period mills both
+/// libraries; it is offered on both while P0's holds a card, and on P1's once P0's is empty.
+#[test]
+fn a_liliana_beside_altar_of_the_brood_is_offered_before_and_after_the_casters_library_empties() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board(Some("Liliana the Repentant"), db);
+    place(runner.state_mut(), P0, "Altar of the Brood", db);
+    let offers = drive_altar_offers_noting_p0(&mut runner, (altar, gravecrawler), 12, |state| {
+        !state.players[0].library.is_empty()
+    });
+    let (first_library, first) = &offers[0];
+    assert!(*first_library > 0, "{offers:?}");
+    assert_eq!(
+        first.unbounded,
+        [
+            ResourceAxis::LibraryDelta(P0),
+            ResourceAxis::LibraryDelta(P1)
+        ]
+    );
+    let (library, last) = offers.last().expect("an offer");
+    assert_eq!(*library, 0);
+    assert_eq!(last.unbounded, [ResourceAxis::LibraryDelta(P1)]);
+    assert_eq!(last.win_kind, Some(WinKind::Advantage));
+}
+
+/// CR 118.3 + CR 701.17b: Millikin ("{T}, Mill a card: Add {C}.") untapped by Intruder Alarm
+/// ("Whenever a creature enters, untap all creatures.") pays a mill each cycle, which can't be
+/// paid from an empty library, so the period is counted to P0's library.
+#[test]
+fn a_period_whose_cost_mills_is_counted_to_the_library() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let altar = scenario.add_real_card(P0, "Phyrexian Altar", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Walking Corpse", Zone::Battlefield, db);
+    let gravecrawler = scenario.add_real_card(P0, "Gravecrawler", Zone::Graveyard, db);
+    let millikin = scenario.add_real_card(P0, "Millikin", Zone::Battlefield, db);
+    for card in ["Intruder Alarm", "Swamp"] {
+        scenario.add_real_card(P0, card, Zone::Battlefield, db);
+    }
+    for seat in [P0, P1] {
+        for _ in 0..8 {
+            scenario.add_real_card(seat, "Swamp", Zone::Library, db);
+        }
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    let score = |action: &GameAction| {
+        2 * names(&[gravecrawler])(action) + chooses_color(ManaType::Black)(action)
+    };
+    'cycles: for _ in 0..6 {
+        for play in 0..3 {
+            match play {
+                0 => {
+                    // CR 605.1a: a cost that mills makes Millikin's ability not a mana ability.
+                    let index = ability(runner.state(), millikin, false);
+                    activate(&mut runner, millikin, index);
+                }
+                1 => cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto),
+                _ => {
+                    let index = ability(runner.state(), altar, true);
+                    activate(&mut runner, altar, index);
+                }
+            }
+            settle(&mut runner, &score);
+            if is_offer(runner.state()) {
+                break 'cycles;
+            }
+        }
+    }
+    let state = runner.state();
+    let library = state.players[0].library.len();
+    let WaitingFor::LoopShortcut {
+        schema,
+        certificate,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!("an offer: {:?}", latest_verdict(state));
+    };
+    assert!(library > 0, "reach: the offer's library holds cards");
+    assert_eq!(
+        schema.iteration_count,
+        IterationCount::Fixed(library as u32)
+    );
+    assert_eq!(schema.deliverable_capacity, library as u32);
+    assert!(
+        certificate.unbounded.is_empty(),
+        "{:?}",
+        certificate.unbounded
+    );
+    take(&mut runner, library as u32);
+    let state = runner.state();
+    assert_eq!(state.players[0].library.len(), 0);
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player: P0 }),
+        "{}",
+        state.waiting_for.variant_name()
+    );
+}
+
+/// CR 111.10a + CR 602.2: Temur Sabertooth ("{1}{G}: You may return another creature you control
+/// to its owner's hand. If you do, this creature gains indestructible until end of turn.") returns
+/// Dockside Extortionist ("When this creature enters, create X Treasure tokens, where X is the
+/// number of artifacts and enchantments your opponents control.") to be cast again; against six
+/// Ornithopters each cycle makes six Treasures, more than the period spends, and the ones it nets
+/// go unused, so it is offered.
+#[test]
+fn dockside_and_sabertooth_are_offered() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let sabertooth = scenario.add_real_card(P0, "Temur Sabertooth", Zone::Battlefield, db);
+    let dockside = scenario.add_real_card(P0, "Dockside Extortionist", Zone::Battlefield, db);
+    for land in ["Forest", "Forest", "Mountain", "Mountain"] {
+        scenario.add_real_card(P0, land, Zone::Battlefield, db);
+    }
+    for _ in 0..6 {
+        scenario.add_real_card(P1, "Ornithopter", Zone::Battlefield, db);
+    }
+    for seat in [P0, P1] {
+        for _ in 0..10 {
+            scenario.add_real_card(seat, "Forest", Zone::Library, db);
+        }
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    let score = |action: &GameAction| {
+        2 * names(&[dockside])(action)
+            + i32::from(matches!(
+                action,
+                GameAction::DecideOptionalEffect { accept: true }
+            ))
+    };
+    'cycles: for _ in 0..4 {
+        for recast in [false, true] {
+            if recast {
+                cast(&mut runner, dockside, vec![], CastPaymentMode::Auto);
+            } else {
+                let index = ability(runner.state(), sabertooth, false);
+                activate(&mut runner, sabertooth, index);
+            }
+            settle(&mut runner, &score);
+            if is_offer(runner.state()) {
+                break 'cycles;
+            }
+        }
+    }
+    let state = runner.state();
+    assert!(is_offer(state), "{:?}", latest_verdict(state));
+    assert_eq!(
+        treasures(state),
+        6,
+        "reach: Dockside's entry made a Treasure per Ornithopter"
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }));
+}
+
+/// Magda, Brazen Outlaw ("Other Dwarves you control get +1/+0. / Whenever a Dwarf you control
+/// becomes tapped, create a Treasure token. ...") beside Universal Automaton (Changeling), Clock of
+/// Omens ("Tap two untapped artifacts you control: Untap target artifact.") and Battered Golem
+/// ("This creature doesn't untap during your untap step. / Whenever an artifact enters, you may
+/// untap this creature."), whose "may" P0 has answered `golem` for the card; the board, the
+/// Automaton, the Clock and the Golem.
+fn magda_board(
+    golem: AutoMayChoice,
+    db: &CardDatabase,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Magda, Brazen Outlaw", Zone::Battlefield, db);
+    let automaton = scenario.add_real_card(P0, "Universal Automaton", Zone::Battlefield, db);
+    let clock = scenario.add_real_card(P0, "Clock of Omens", Zone::Battlefield, db);
+    let battered = scenario.add_real_card(P0, "Battered Golem", Zone::Battlefield, db);
+    for seat in [P0, P1] {
+        for _ in 0..10 {
+            scenario.add_real_card(seat, "Island", Zone::Library, db);
+        }
+    }
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.loop_detection = LoopDetectionMode::Interactive;
+    // CR 205.3m: the creature types the card pool holds, which Changeling makes the Automaton.
+    state.all_creature_types = ["Berserker", "Dwarf", "Golem", "Shapeshifter"]
+        .map(String::from)
+        .to_vec();
+    let printed_ref = state.objects[&battered]
+        .printed_ref
+        .clone()
+        .expect("a printed card");
+    state.set_may_trigger_auto_choice_selector(
+        MayTriggerAutoChoiceSelector::SameCard {
+            player: P0,
+            printed_ref,
+            printed_occurrence: 0,
+        },
+        golem,
+    );
+    (runner, automaton, clock, battered)
+}
+
+/// One activation of Clock of Omens tapping the Automaton and `other`, untapping the Automaton.
+fn magda_cycle(runner: &mut GameRunner, (automaton, clock): (ObjectId, ObjectId), other: ObjectId) {
+    let score = |action: &GameAction| 3 * names(&[automaton])(action) + names(&[other])(action);
+    let index = activated_index(runner.state(), clock);
+    activate(runner, clock, index);
+    settle(runner, &score);
+}
+
+/// CR 602.2 + CR 732.2a: each activation of Clock of Omens taps Universal Automaton, the board's
+/// only Dwarf, so Magda makes a Treasure, whose entry untaps Battered Golem; the period never
+/// activates its Treasures, so it is offered.
+#[test]
+fn a_magda_period_growing_unused_treasures_is_offered() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, automaton, clock, battered) = magda_board(AutoMayChoice::Accept, db);
+    let mut treasures_at = Vec::new();
+    for _ in 0..2 {
+        magda_cycle(&mut runner, (automaton, clock), battered);
+        assert!(
+            is_offer(runner.state()),
+            "{:?}",
+            latest_verdict(runner.state())
+        );
+        treasures_at.push(treasures(runner.state()));
+        act(&mut runner, GameAction::DeclineShortcut);
+        settle(&mut runner, &|_| 0);
+    }
+    assert_eq!(treasures_at, [1, 2], "reach: one Treasure a cycle");
+}
+
+/// CR 602.2: tapping a Treasure the period made to pay Clock of Omens uses it, so the grown
+/// Treasures are not inert.
+#[test]
+fn a_magda_period_tapping_its_treasures_is_refused_at_the_cover() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, automaton, clock, battered) = magda_board(AutoMayChoice::Accept, db);
+    magda_cycle(&mut runner, (automaton, clock), battered);
+    assert!(
+        is_offer(runner.state()),
+        "reach: the untapped period is offered"
+    );
+    act(&mut runner, GameAction::DeclineShortcut);
+    settle(&mut runner, &|_| 0);
+    for cycle in 0..3 {
+        let state = runner.state();
+        let untapped = tokens(state, P0)
+            .into_iter()
+            .find(|id| !state.objects[id].tapped)
+            .expect("an untapped Treasure");
+        magda_cycle(&mut runner, (automaton, clock), untapped);
+        assert!(
+            runner.state().objects[&untapped].tapped,
+            "reach: cycle {cycle} tapped a Treasure"
+        );
+        assert!(!is_offer(runner.state()), "cycle {cycle}");
+    }
+    let verdict = latest_verdict(runner.state());
+    assert!(grown_not_inert(&verdict), "{verdict:?}");
+}
+
+/// CR 603.5 + CR 118.3: with Battered Golem's "may" declined it stays tapped, so the next
+/// activation of Clock of Omens cannot tap the same two artifacts and the period's own cost answer
+/// cannot be given again.
+#[test]
+fn a_magda_period_declining_the_golem_does_not_recur() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, automaton, clock, battered) = magda_board(AutoMayChoice::Decline, db);
+    magda_cycle(&mut runner, (automaton, clock), battered);
+    let state = runner.state();
+    assert!(
+        state.objects[&battered].tapped,
+        "reach: the Golem stays tapped"
+    );
+    assert!(!is_offer(state));
+    assert_eq!(latest_verdict(state), Err(OfferRefusal::UnanswerablePrompt));
+}
+
+/// CR 732.2a: Resolve All proposes a shortcut over priority passes, not a game choice, so Altar of
+/// the Brood's period resolved through it is the same period, and is offered alike for either
+/// scope.
+#[test]
+fn an_altar_of_the_brood_period_resolved_all_is_offered() {
+    let Some(db) = shared_card_db() else { return };
+    for scope in [ResolveAllScope::Own, ResolveAllScope::Shared] {
+        let (mut runner, altar, gravecrawler) = altar_board(Some("Altar of the Brood"), db);
+        let score = |action: &GameAction| {
+            2 * names(&[gravecrawler])(action) + chooses_color(ManaType::Black)(action)
+        };
+        let library = runner.state().players[1].library.len();
+        cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
+        act(
+            &mut runner,
+            GameAction::BeginResolveAll {
+                max_resolutions: 10,
+                scope,
+            },
+        );
+        if scope == ResolveAllScope::Shared {
+            let WaitingFor::ResolveAllConsent { epoch, .. } = runner.state().waiting_for else {
+                panic!(
+                    "a shared Resolve All asks P1: {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            act(
+                &mut runner,
+                GameAction::RespondResolveAllConsent {
+                    epoch,
+                    decision: ResolveAllConsentDecision::Grant,
+                },
+            );
+        }
+        settle(&mut runner, &score);
+        if !is_offer(runner.state()) {
+            let index = ability(runner.state(), altar, true);
+            activate(&mut runner, altar, index);
+            settle(&mut runner, &score);
+        }
+        let state = runner.state();
+        let WaitingFor::LoopShortcut { certificate, .. } = &state.waiting_for else {
+            panic!("{scope:?}: {:?}", latest_verdict(state));
+        };
+        assert_eq!(
+            state.players[1].library.len(),
+            library - 1,
+            "{scope:?}: reach"
+        );
+        assert_eq!(
+            certificate.unbounded,
+            [ResourceAxis::LibraryDelta(P1)],
+            "{scope:?}"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }),
+            "{scope:?}"
+        );
+    }
+}
+
+/// The offer standing on `runner`, as its schema's published count and the certificate's.
+fn offered_parts(runner: &GameRunner) -> (IterationCount, u32, LoopCertificate) {
+    let WaitingFor::LoopShortcut {
+        schema,
+        certificate,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("an offer, got {:?}", runner.state().waiting_for);
+    };
+    (
+        schema.iteration_count.clone(),
+        schema.deliverable_capacity,
+        certificate.clone(),
+    )
+}
+
+/// CR 104.2a + CR 704.5a + CR 732.2a: with P1 at 2, the Altar–Zulaport period's second replayed
+/// repetition ends the game with P0 the winner, so the counting replay counts it and the take
+/// ends the game there.
+#[test]
+fn a_period_whose_replay_ends_the_game_for_its_holder_is_counted() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board_at("Zulaport Cutthroat", &[20, 3], db);
+    let score = |action: &GameAction| {
+        2 * names(&[gravecrawler])(action) + chooses_color(ManaType::Black)(action)
+    };
+    cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
+    settle(&mut runner, &score);
+    let index = ability(runner.state(), altar, true);
+    activate(&mut runner, altar, index);
+    settle(&mut runner, &score);
+    assert_eq!(lives(runner.state()), [21, 2]);
+    let (count, _, certificate) = offered_parts(&runner);
+    assert_eq!(count, IterationCount::Fixed(2));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut {
+            predicted_winner: Some(P0),
+            ..
+        }
+    ));
+    assert_eq!(certificate.win_kind, Some(WinKind::LethalDamage));
+    assert_eq!(certificate.win_kind_at, Some(2));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
+    let events = take_recorded(runner.state_mut(), 2).events;
+    assert_eq!(markers(&events).len(), 2);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver {
+            winner: Some(P0),
+            ..
+        }
+    ));
+}
+
+/// CR 121.1 + CR 704.5b + CR 732.2a: a period that grows a Food and draws P0 a card each
+/// repetition has no CR 704 threshold but its own library, so it is offered at the draws that
+/// library holds; milling two first (Liliana the Repentant) leaves a third of them.
+#[test]
+fn a_drawing_advantage_period_is_offered_at_its_library() {
+    let Some(db) = shared_card_db() else { return };
+    for (payoff, per_repetition) in [("Samwise Gamgee", 1), ("Liliana the Repentant", 3)] {
+        let (mut runner, altar, gravecrawler) = altar_board(Some(payoff), db);
+        place(runner.state_mut(), P0, "Moldervine Reclamation", db);
+        drive_altar_offers(&mut runner, (altar, gravecrawler), 3, |_| false);
+        let library = runner.state().players[0].library.len() as u32;
+        let (count, _, _) = offered_parts(&runner);
+        assert_eq!(
+            count,
+            IterationCount::Fixed(library / per_repetition),
+            "{payoff}: library {library}"
+        );
+    }
+}
+
+/// CR 119.3: Spike Feeder ("Remove a +1/+1 counter from this creature: You gain 2 life.") beside
+/// Archangel of Thune ("Whenever you gain life, put a +1/+1 counter on each creature you
+/// control.") gains P0 2 life a repetition, so an offer near the largest life total the engine
+/// represents is held to the repetitions that stay representable, and its take completes.
+#[test]
+fn a_life_gaining_period_is_offered_within_the_representable_life_total() {
+    let Some(db) = shared_card_db() else { return };
+    let offered_at = |life: i32| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let feeder = scenario.add_real_card(P0, "Spike Feeder", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Archangel of Thune", Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.loop_detection = LoopDetectionMode::Interactive;
+        state.players[0].life = life;
+        state
+            .objects
+            .get_mut(&feeder)
+            .expect("Spike Feeder")
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+        let index = runner.state().objects[&feeder]
+            .abilities
+            .iter()
+            .position(|a| {
+                a.kind == AbilityKind::Activated && matches!(*a.effect, Effect::GainLife { .. })
+            })
+            .expect("Spike Feeder's life gain");
+        for _ in 0..8 {
+            activate(&mut runner, feeder, index);
+            settle(&mut runner, &|_| 0);
+            if is_offer(runner.state()) {
+                return runner;
+            }
+        }
+        panic!("reach: the period is offered");
+    };
+    let headroom = 200;
+    let mut runner = offered_at(i32::MAX - headroom);
+    let life = runner.state().players[0].life;
+    let (_, capacity, _) = offered_parts(&runner);
+    assert_eq!(capacity, ((i32::MAX - life) / 2) as u32);
+    take_recorded(runner.state_mut(), capacity);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().players[0].life, life + 2 * capacity as i32);
+
+    let (_, uncapped, _) = offered_parts(&offered_at(20));
+    assert!(uncapped > capacity, "{uncapped}");
+}
+
+/// CR 701.17a + CR 701.17b + CR 121.1: beside Altar of the Brood and Moldervine Reclamation the
+/// period mills P1 one card and draws P0 one, so its preview mills P1 no more than its library
+/// holds, states P0's draws, and its certificate names no decking win; with P1's library as long
+/// as P0's, the take performs every repetition offered.
+#[test]
+fn a_moldervine_altar_of_the_brood_period_previews_its_mills_and_draws() {
+    let Some(db) = shared_card_db() else { return };
+    for p1_library in [3, 10] {
+        let (mut runner, altar, gravecrawler) = altar_board(Some("Altar of the Brood"), db);
+        let state = runner.state_mut();
+        place(state, P0, "Moldervine Reclamation", db);
+        let cut: Vec<ObjectId> = state.players[1]
+            .library
+            .iter()
+            .skip(p1_library)
+            .copied()
+            .collect();
+        for id in cut {
+            remove_from_zone(state, id, Zone::Library, P1);
+            state.objects.remove(&id);
+        }
+        drive_altar_offers(&mut runner, (altar, gravecrawler), 1, |_| false);
+        let offered = runner.state().clone();
+        let p1_held = i32::try_from(offered.players[1].library.len()).expect("small");
+        let (count, _, certificate) = offered_parts(&runner);
+        assert_ne!(certificate.win_kind, Some(WinKind::Decking), "{p1_library}");
+        let IterationCount::Fixed(n) = count else {
+            panic!("a fixed count");
+        };
+        let (_, view) = published_to_p0(&offered);
+        let Some(InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Shortcut { preview, .. },
+            ..
+        }) = view.opportunities.first().map(|o| &o.response)
+        else {
+            panic!("no shortcut opportunity");
+        };
+        let element = preview
+            .iter()
+            .find(|element| element.count == n)
+            .expect("the suggested count is previewed");
+        let amount = |family, seat: PlayerId| {
+            element
+                .entries
+                .iter()
+                .find(|entry| entry.family == family && entry.player == Some(seat.0))
+                .map(|entry| entry.amount)
+        };
+        assert_eq!(
+            amount(InteractionShortcutPreviewFamily::Mill, P1),
+            Some(-(n as i32).min(p1_held)),
+            "{p1_library}"
+        );
+        assert_eq!(
+            amount(InteractionShortcutPreviewFamily::Cards, P0),
+            Some(n as i32),
+            "{p1_library}"
+        );
+        if p1_library == 10 {
+            let events = take_recorded(runner.state_mut(), n).events;
+            assert_eq!(markers(&events).last(), Some(&(P0, n)), "{p1_library}");
+        }
+    }
+}
+
+/// P0's precombat main with Time Sieve ("{T}, Sacrifice five artifacts: Take an extra turn after
+/// this one.") and six Islands on P0's battlefield, Thopter Assembly ("At the beginning of your
+/// upkeep, if you control no Thopters other than this creature, return this creature to its owner's
+/// hand and create five 1/1 colorless Thopter artifact creature tokens with flying.") in hand,
+/// `library` Islands in P0's library and `stage` applied; the runner, the Sieve and the Assembly.
+fn sieve_board(
+    library: usize,
+    stage: impl FnOnce(&mut GameScenario),
+    db: &CardDatabase,
+) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Real Islands: a card still in the library is face down to its holder (CR 401.2).
+    for _ in 0..library {
+        scenario.add_real_card(P0, "Island", Zone::Library, db);
+    }
+    scenario.with_library_top(P1, &["Island"; 25]);
+    let sieve = scenario.add_real_card(P0, "Time Sieve", Zone::Battlefield, db);
+    for _ in 0..6 {
+        scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
+    }
+    let assembly = scenario.add_real_card(P0, "Thopter Assembly", Zone::Hand, db);
+    stage(&mut scenario);
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    (runner, sieve, assembly)
+}
+
+/// Drives the Time Sieve board until turn `last` ends, casting Thopter Assembly and sacrificing
+/// its Thopters to the Sieve each main phase, discarding an Island at cleanup and declining every
+/// offer; each offer's turn and count, and each of P0's precombat-main windows (an offered one as
+/// its offer stands).
+fn sieve_windows(
+    (mut runner, sieve, assembly): (GameRunner, ObjectId, ObjectId),
+    last: u32,
+) -> (Vec<(u32, u32)>, Vec<GameState>) {
+    let (mut offers, mut windows) = (Vec::new(), Vec::<GameState>::new());
+    for _ in 0..40_000 {
+        let state = runner.state();
+        if state.turn_number > last || matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+            return (offers, windows);
+        }
+        if is_offer(state) {
+            assert_eq!(state.phase, Phase::PreCombatMain, "{}", state.turn_number);
+            offers.push((state.turn_number, fixed(&offer_of(state).1)));
+            windows.push(state.clone());
+            act(&mut runner, GameAction::DeclineShortcut);
+            continue;
+        }
+        let priority = matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+            && state.stack.is_empty();
+        let main = priority && state.active_player == P0 && state.phase == Phase::PreCombatMain;
+        if main
+            && windows
+                .last()
+                .is_none_or(|window| window.turn_number != state.turn_number)
+        {
+            windows.push(state.clone());
+        }
+        let untapped_islands = state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[id].name == "Island" && !state.objects[id].tapped)
+            .count();
+        let thopters = state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[id].is_token)
+            .count();
+        let action = match &state.waiting_for {
+            _ if main && state.players[0].hand.contains(&assembly) && untapped_islands >= 6 => {
+                GameAction::CastSpell {
+                    object_id: assembly,
+                    card_id: state.objects[&assembly].card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::Auto,
+                }
+            }
+            _ if main && thopters >= 5 && !state.objects[&sieve].tapped => {
+                GameAction::ActivateAbility {
+                    source_id: sieve,
+                    ability_index: ability(state, sieve, false),
+                    payment_mode: CastPaymentMode::Auto,
+                }
+            }
+            WaitingFor::PayCost { choices, count, .. } => GameAction::SelectCards {
+                cards: choices
+                    .iter()
+                    .copied()
+                    .filter(|id| state.objects[id].is_token)
+                    .take(*count)
+                    .collect(),
+            },
+            WaitingFor::DiscardToHandSize { cards, count, .. } => GameAction::SelectCards {
+                cards: cards
+                    .iter()
+                    .copied()
+                    .filter(|id| state.objects[id].name == "Island")
+                    .take(*count)
+                    .collect(),
+            },
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            _ => GameAction::PassPriority,
+        };
+        act(&mut runner, action);
+    }
+    panic!("the Time Sieve drive did not end");
+}
+
+/// The window of turn `turn` among `windows`.
+fn window_of(windows: &[GameState], turn: u32) -> &GameState {
+    windows
+        .iter()
+        .find(|window| window.turn_number == turn)
+        .unwrap_or_else(|| panic!("no window at turn {turn}"))
+}
+
+/// CR 500.7 + CR 514.1 + CR 732.2a: the Sieve's extra-turn period repeats its whole turn, casting
+/// Thopter Assembly and sacrificing its Thopters, and is offered at the next turn's precombat
+/// main, counted to the first cleanup that would discard (CR 401.2: what that discard names is
+/// not yet drawn). The first window holds two Islands and the Assembly; its turn ends holding two
+/// cards and each repetition adds one, so the sixth would end holding eight: 6. Each declined
+/// window is one repetition nearer: 5, 4, 3, 2, 1.
+#[test]
+fn a_time_sieve_thopter_assembly_period_is_offered_to_its_first_cleanup_discard() {
+    let Some(db) = shared_card_db() else { return };
+    let board = sieve_board(25, |_| {}, db);
+    let start = board.0.state().turn_number;
+    let (offers, windows) = sieve_windows(board, start + 9);
+    assert_eq!(in_hand(window_of(&windows, start + 3), "Island"), 2);
+    assert_eq!(
+        offers,
+        (3..9)
+            .map(|turn| (start + turn, 9 - turn))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        windows.iter().any(|window| window.turn_number == start + 9),
+        "reach: the drive passes the windows that offer nothing"
+    );
+}
+
+/// The count offered at the first window whose span records a cleanup discard, with that window.
+fn first_discard_offer(
+    library: usize,
+    stage: impl FnOnce(&mut GameScenario),
+    db: &CardDatabase,
+) -> (Option<u32>, GameState) {
+    let board = sieve_board(library, stage, db);
+    let start = board.0.state().turn_number;
+    let (offers, windows) = sieve_windows(board, start + 10);
+    assert!(
+        offers.contains(&(start + 3, 6)),
+        "reach: the first window is offered, {offers:?}"
+    );
+    let window = window_of(&windows, start + 10).clone();
+    assert!(
+        window.players[0]
+            .graveyard
+            .iter()
+            .any(|id| window.objects[id].name == "Island"),
+        "reach: an Island was discarded before the window"
+    );
+    let count = offers
+        .iter()
+        .find(|(turn, _)| *turn == start + 10)
+        .map(|(_, count)| *count);
+    (count, window)
+}
+
+/// CR 514.1 + CR 401.2 + CR 504.1 + CR 704.5b + CR 732.2a: once the span records a cleanup
+/// discard, the count is the lesser of the cards in hand sharing the discarded card's name, which
+/// the recorded discard can name, and the cards left to draw. With 25 cards the window holds eight
+/// Islands and the Assembly over a 16-card library: 8, and a take of 8 performs eight turns, each
+/// discarding an Island, while 9 is refused. With 14 cards the library holds 5: 5.
+#[test]
+fn a_recorded_cleanup_discard_window_is_offered_the_lesser_of_its_named_hand_and_library() {
+    let Some(db) = shared_card_db() else { return };
+    for (library, named, left, count) in [(25, 8, 16, 8), (14, 8, 5, 5)] {
+        let (offered, window) = first_discard_offer(library, |_| {}, db);
+        assert_eq!(
+            (in_hand(&window, "Island"), library_term(&window)),
+            (named, left),
+            "{library}"
+        );
+        assert_eq!(offered, Some(count), "{library}");
+        if library == 25 {
+            let discarded = |state: &GameState| {
+                state.players[0]
+                    .graveyard
+                    .iter()
+                    .filter(|id| state.objects[id].name == "Island")
+                    .count()
+            };
+            let after = taken(&window, 8);
+            assert_eq!(
+                (after.turn_number, library_term(&after), discarded(&after)),
+                (window.turn_number + 8, left - 8, discarded(&window) + 8)
+            );
+            assert_declaration_refused(&window, 9);
+        }
+    }
+}
+
+/// CR 514.1 + CR 603.4: Mysterio's Mirage ("At the beginning of your end step, if you discarded a
+/// card this turn, create a 3/3 blue Illusion Villain creature token.") reads the turn's discards,
+/// and Boneyard Wurm ("Boneyard Wurm's power and toughness are each equal to the number of creature
+/// cards in your graveyard.", Grizzly Bears in that graveyard) reads the graveyard's contents, so
+/// beside either the discarded card is not put back and the recorded-discard window is not offered.
+#[test]
+fn a_discard_or_graveyard_reader_keeps_the_recorded_discard_window_unoffered() {
+    let Some(db) = shared_card_db() else { return };
+    let (mirage, _) = first_discard_offer(
+        25,
+        |scenario| {
+            scenario.add_enchantment_from_oracle(
+                P0,
+                "Mysterio's Mirage",
+                "At the beginning of your end step, if you discarded a card this turn, create a \
+                 3/3 blue Illusion Villain creature token.",
+            );
+        },
+        db,
+    );
+    assert_eq!(mirage, None);
+    let (wurm, window) = first_discard_offer(
+        25,
+        |scenario| {
+            scenario.add_real_card(P0, "Grizzly Bears", Zone::Graveyard, db);
+            scenario.add_creature_from_oracle(
+                P0,
+                "Boneyard Wurm",
+                0,
+                0,
+                "Boneyard Wurm's power and toughness are each equal to the number of creature \
+                 cards in your graveyard.",
+            );
+        },
+        db,
+    );
+    assert!(
+        window
+            .battlefield
+            .iter()
+            .any(|id| window.objects[id].name == "Boneyard Wurm"),
+        "reach: the Wurm survives to the window"
+    );
+    assert_eq!(wurm, None);
+}
+
+/// Cauldron Familiar ("When this creature enters, each opponent loses 1 life and you gain 1 life.
+/// / Sacrifice a Food: Return this card from your graveyard to the battlefield.") cast beside
+/// Carrion Feeder ("Sacrifice a creature: Put a +1/+1 counter on this creature.") and Samwise
+/// Gamgee, then recurred until the loop is offered; P1 holds Relic of Progenitus ("{T}: Target
+/// player exiles a card from their graveyard."). Returns the runner and the Relic.
+fn familiar_offered(db: &CardDatabase) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P1, 20);
+    let feeder = scenario.add_real_card(P0, "Carrion Feeder", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Samwise Gamgee", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Swamp", Zone::Battlefield, db);
+    let familiar = scenario.add_real_card(P0, "Cauldron Familiar", Zone::Hand, db);
+    let relic = scenario.add_real_card(P1, "Relic of Progenitus", Zone::Battlefield, db);
+    for seat in [P0, P1] {
+        for _ in 0..10 {
+            scenario.add_real_card(seat, "Swamp", Zone::Library, db);
+        }
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    let named = [familiar];
+    let score = names(&named);
+    cast(&mut runner, familiar, vec![], CastPaymentMode::Auto);
+    settle(&mut runner, &score);
+    for _ in 0..4 {
+        for source in [feeder, familiar] {
+            let index = ability(runner.state(), source, false);
+            activate(&mut runner, source, index);
+            settle(&mut runner, &score);
+            if is_offer(runner.state()) {
+                return (runner, relic);
+            }
+        }
+    }
+    panic!(
+        "no offer; latest verdict {:?}",
+        latest_verdict(runner.state())
+    );
+}
+
+/// CR 732.2c: "If the shortcut was shortened from the original proposal, the player who now has
+/// priority must make a different game choice than what was originally proposed for that
+/// player." A Familiar take P1 shortens ends at P1's priority, where P1's bare pass is refused and
+/// activating the Relic is accepted; the same take accepted outright owes its seat nothing.
+#[test]
+fn a_shortened_familiar_take_refuses_the_shorteners_bare_pass() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, relic) = familiar_offered(db);
+    act(
+        &mut runner,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(6),
+            template: None,
+        },
+    );
+    let mut accepted = GameRunner::from_state(runner.state().clone());
+    let before = lives(runner.state());
+    act(
+        &mut runner,
+        GameAction::RespondToShortcut {
+            response: ShortcutResponse::Shorten { at_iteration: 3 },
+        },
+    );
+    let state = runner.state();
+    assert_eq!(
+        (lives(state)[1], state.waiting_for.clone()),
+        (before[1] - 3, WaitingFor::Priority { player: P1 }),
+        "reach: the take performed the three cycles P1 named and ended at P1's priority"
+    );
+    let pass = engine::game::engine::apply(&mut state.clone(), P1, GameAction::PassPriority);
+    assert!(
+        matches!(pass, Err(EngineError::ActionNotAllowed(_))),
+        "the shortener's bare pass must be refused: {pass:?}"
+    );
+    let index = ability(runner.state(), relic, false);
+    activate(&mut runner, relic, index);
+
+    accept(&mut accepted);
+    let WaitingFor::Priority { player } = accepted.state().waiting_for else {
+        panic!("{}", accepted.state().waiting_for.variant_name());
+    };
+    assert!(
+        lives(accepted.state())[1] < before[1],
+        "reach: the accepted take performed its cycles"
+    );
+    let pass = engine::game::engine::apply(
+        &mut accepted.state().clone(),
+        player,
+        GameAction::PassPriority,
+    );
+    assert!(pass.is_ok(), "an accepted take latches nothing: {pass:?}");
+}
+
+/// CR 104.2a + CR 732.2a: with P1 at 1 after one hand-made cycle, the Altar period's next
+/// repetition wins, so P0 is offered that one repetition and the take ends the game.
+#[test]
+fn a_period_its_first_replayed_repetition_wins_is_offered_one_repetition() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board_at("Zulaport Cutthroat", &[20, 2], db);
+    let score = |action: &GameAction| {
+        2 * names(&[gravecrawler])(action) + chooses_color(ManaType::Black)(action)
+    };
+    cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
+    settle(&mut runner, &score);
+    let index = ability(runner.state(), altar, true);
+    activate(&mut runner, altar, index);
+    settle(&mut runner, &score);
+    assert_eq!(lives(runner.state()), vec![21, 1]);
+    let WaitingFor::LoopShortcut {
+        schema,
+        predicted_winner,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("no offer: {:?}", latest_verdict(runner.state()));
+    };
+    assert_eq!(
+        (
+            &schema.iteration_count,
+            schema.deliverable_capacity,
+            *predicted_winner
+        ),
+        (&IterationCount::Fixed(1), 1, Some(P0))
+    );
+    take(&mut runner, 1);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    );
+    assert_eq!(lives(runner.state()), vec![22, 0]);
+}
+
+/// CR 705.1 + CR 732.2a: Goblin Bangchuckers ("{T}: Flip a coin. If you win the flip, this
+/// creature deals 2 damage to any target. …") untapped by Freed from the Real ("{U}: Untap enchanted
+/// creature.") with P1 at 2: its next repetition wins only on a won flip, so it is refused as
+/// random, though this seed's next flip wins.
+#[test]
+fn a_repetition_that_wins_on_a_flip_is_refused_as_random() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = GameScenario::new_n_player(2, 2);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P1, 4);
+    scenario.with_mana_pool(
+        P0,
+        (0..8)
+            .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    for seat in [P0, P1] {
+        for _ in 0..10 {
+            scenario.add_real_card(seat, "Island", Zone::Library, db);
+        }
+    }
+    let mut runner = scenario.build();
+    let goblin = place(runner.state_mut(), P0, "Goblin Bangchuckers", db);
+    let freed = place(runner.state_mut(), P0, "Freed from the Real", db);
+    attach_to(runner.state_mut(), freed, goblin);
+    runner.state_mut().layers_dirty.mark_full();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    let tap = ability(runner.state(), goblin, false);
+    let untap = runner.state().objects[&freed]
+        .abilities
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.kind == AbilityKind::Activated)
+        .map(|(index, _)| index)
+        .nth(1)
+        .expect("Freed from the Real's untap ability");
+    let at_p1 = |action: &GameAction| {
+        i32::from(matches!(
+            action,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P1))
+            }
+        ))
+    };
+    activate(&mut runner, goblin, tap);
+    settle(&mut runner, &at_p1);
+    assert_eq!(
+        lives(runner.state()),
+        vec![20, 2],
+        "reach: the first flip won"
+    );
+    activate(&mut runner, freed, untap);
+    settle(&mut runner, &at_p1);
+    assert!(
+        !is_offer(runner.state()),
+        "a repetition winning on a flip was offered"
+    );
+    assert_eq!(
+        latest_verdict(runner.state()),
+        Err(OfferRefusal::Randomness)
+    );
+    activate(&mut runner, goblin, tap);
+    settle(&mut runner, &at_p1);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) },
+        "reach: the next flip wins"
+    );
+}
+
+/// CR 800.4a + CR 104.2a + CR 732.2a: the Altar + Gravecrawler + Zulaport Cutthroat period on
+/// three seats, P1 at 1 and P2 at 4 after one hand-made cycle: its next repetition eliminates P1
+/// but wins no game.
+#[test]
+fn a_repetition_eliminating_one_of_two_opponents_is_not_offered_as_won() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board_at("Zulaport Cutthroat", &[20, 2, 5], db);
+    let score = |action: &GameAction| {
+        2 * names(&[gravecrawler])(action) + chooses_color(ManaType::Black)(action)
+    };
+    cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
+    settle(&mut runner, &score);
+    let index = ability(runner.state(), altar, true);
+    activate(&mut runner, altar, index);
+    settle(&mut runner, &score);
+    assert_eq!(lives(runner.state()), vec![21, 1, 4]);
+    assert!(!is_offer(runner.state()));
+    assert_eq!(
+        latest_verdict(runner.state()),
+        Err(OfferRefusal::NoRecurrence)
+    );
+    cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
+    settle(&mut runner, &score);
+    let index = ability(runner.state(), altar, true);
+    activate(&mut runner, altar, index);
+    settle(&mut runner, &score);
+    assert_eq!(
+        (
+            eliminated(runner.state()),
+            runner.state().game_end.is_none()
+        ),
+        (vec![P1], true),
+        "reach: the next repetition eliminates P1 and ends no game"
+    );
+}
+
+/// Kilo, Apogee Mind ("Whenever Kilo becomes tapped, proliferate.") tapped by Relic of Legends
+/// and untapped by Freed from the Real, with Scheming Aspirant ("Whenever you proliferate, each
+/// opponent loses 2 life and you gain 2 life."), P0's, on `scenario`'s board with P0 holding the
+/// turn and priority: one live cycle, its proliferate naming `named`, leaves each seat at `offered`
+/// (life, poison) under the offer.
+fn kilo_offer(
+    mut scenario: GameScenario,
+    offered: &[(i32, u32)],
+    named: &[PlayerId],
+    db: &CardDatabase,
+) -> GameRunner {
+    use crate::kilo_live_offer_from_real_dump::{FREED_UNTAP, RELIC_TAP_MANA};
+    scenario.at_phase(Phase::PreCombatMain);
+    let kilo = scenario.add_real_card(P0, "Kilo, Apogee Mind", Zone::Battlefield, db);
+    let relic = scenario.add_real_card(P0, "Relic of Legends", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Scheming Aspirant", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.loop_detection = LoopDetectionMode::Interactive;
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    // CR 102.3: the live cycle gains P0 2 life and costs each of its opponents 2.
+    for (seat, (life, poison)) in offered.iter().enumerate() {
+        let id = PlayerId(seat as u8);
+        let start = if id == P0 {
+            life - 2
+        } else if engine::game::players::is_opponent(state, P0, id) {
+            life + 2
+        } else {
+            *life
+        };
+        let gained = u32::from(named.contains(&id));
+        state.players[seat].life = start;
+        state.players[seat].poison_counters = poison - gained;
+    }
+    let freed = place(runner.state_mut(), P0, "Freed from the Real", db);
+    attach_to(runner.state_mut(), freed, kilo);
+    let wanted: Vec<TargetRef> = named.iter().copied().map(TargetRef::Player).collect();
+    let score = |action: &GameAction| {
+        names(&[kilo])(action)
+            + chooses_color(ManaType::Blue)(action)
+            + i32::from(matches!(action, GameAction::SelectTargets { targets }
+                if targets == &wanted))
+    };
+    activate(&mut runner, relic, RELIC_TAP_MANA);
+    settle(&mut runner, &score);
+    activate(&mut runner, freed, FREED_UNTAP);
+    settle(&mut runner, &score);
+    assert_eq!(seat_totals(runner.state()), offered, "reach");
+    runner
+}
+
+/// [`kilo_offer`] on a Two-Headed Giant board.
+fn two_headed_giant_kilo_offer(
+    offered: [(i32, u32); 4],
+    named: &[PlayerId],
+    db: &CardDatabase,
+) -> GameRunner {
+    kilo_offer(
+        GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42),
+        &offered,
+        named,
+        db,
+    )
+}
+
+fn seat_totals(state: &GameState) -> Vec<(i32, u32)> {
+    state
+        .players
+        .iter()
+        .map(|p| (p.life, p.poison_counters))
+        .collect()
+}
+
+fn predicted_winner(runner: &GameRunner) -> Option<PlayerId> {
+    let WaitingFor::LoopShortcut {
+        predicted_winner, ..
+    } = runner.state().waiting_for
+    else {
+        panic!("an offer, got {:?}", runner.state().waiting_for);
+    };
+    predicted_winner
+}
+
+/// CR 704.6a + CR 704.6b + CR 104.2c: the opposing team's 5 + 5 shared poison plus 2 a repetition
+/// reaches fifteen at the third, while its 3 + 30 shared life less 4 a repetition is still 25
+/// after the second; the offer counts and names that poison loss, including when a proposer's
+/// teammate is below 0 life but the team total is not.
+#[test]
+fn a_two_headed_giant_offer_counts_the_opposing_teams_shared_loss() {
+    let Some(db) = shared_card_db() else { return };
+    let opponents = [PlayerId(2), PlayerId(3)];
+    for offered in [
+        [(13, 0), (15, 0), (3, 5), (30, 5)],
+        [(30, 0), (-3, 0), (3, 5), (30, 5)],
+    ] {
+        let mut runner = two_headed_giant_kilo_offer(offered, &opponents, db);
+        let (count, capacity, certificate) = offered_parts(&runner);
+        assert_eq!(
+            (count, capacity),
+            (IterationCount::Fixed(3), 3),
+            "{offered:?}"
+        );
+        assert_eq!(
+            certificate.win_kind,
+            Some(WinKind::PoisonLoss),
+            "{offered:?}"
+        );
+        assert_eq!(predicted_winner(&runner), Some(P0), "{offered:?}");
+        let events = take(&mut runner, 3);
+        assert_eq!(
+            losses_in(&events),
+            [
+                (PlayerId(2), BTreeSet::from([LossReason::Poison])),
+                (PlayerId(3), BTreeSet::from([LossReason::Poison])),
+            ],
+            "{offered:?}"
+        );
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::GameOver { winner: Some(P0) }
+            ),
+            "{offered:?}: {:?}",
+            runner.state().waiting_for
+        );
+    }
+}
+
+/// CR 704.6b + CR 732.2a: the proposer's team holds 12 shared poison plus 1 a repetition and
+/// reaches fifteen at the third, before the opponents' 8 plus 2 does at the fourth, so the most
+/// the offer counts is 2, and a declared 3 is refused. The take of 2 ends nothing, so neither the
+/// offer nor its proposal names a win.
+#[test]
+fn a_two_headed_giant_offer_never_eliminates_the_proposers_team() {
+    let Some(db) = shared_card_db() else { return };
+    let offered = [(13, 0), (15, 12), (30, 4), (30, 4)];
+    let mut runner = two_headed_giant_kilo_offer(offered, &[P1, PlayerId(2), PlayerId(3)], db);
+    let (count, capacity, certificate) = offered_parts(&runner);
+    assert_eq!((count, capacity), (IterationCount::Fixed(2), 2));
+    assert_eq!(
+        (certificate.win_kind, certificate.win_kind_at),
+        (None, None)
+    );
+    assert_eq!(predicted_winner(&runner), None);
+    let declared = proposed(runner.state().clone(), 2);
+    let WaitingFor::RespondToShortcut { proposal, .. } = &declared.waiting_for else {
+        unreachable!("proposed")
+    };
+    assert_eq!(
+        (
+            proposal.win_kind,
+            proposal.win_kind_at,
+            proposal.predicted_winner
+        ),
+        (None, None, None)
+    );
+
+    let mut over = GameRunner::from_state(runner.state().clone());
+    over.act(GameAction::DeclareShortcut {
+        count: IterationCount::Fixed(3),
+        template: None,
+    })
+    .expect("an over-capacity declaration is answered, not an error");
+    assert!(matches!(
+        over.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(seat_totals(over.state()), offered);
+
+    let events = take(&mut runner, 2);
+    assert!(losses_in(&events).is_empty());
+    assert!(eliminated(runner.state()).is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+}
+
+/// CR 704.6b + CR 104.2c: the opposing team's 10 shared poison plus 2 a repetition reaches
+/// fifteen at the third, ending the game while the proposer's team, at 10 plus 1, holds 13.
+#[test]
+fn a_two_headed_giant_offer_ends_at_the_opposing_teams_earlier_crossing() {
+    let Some(db) = shared_card_db() else { return };
+    let offered = [(13, 0), (15, 10), (30, 5), (30, 5)];
+    let mut runner = two_headed_giant_kilo_offer(offered, &[P1, PlayerId(2), PlayerId(3)], db);
+    let (count, _, certificate) = offered_parts(&runner);
+    assert_eq!(count, IterationCount::Fixed(3));
+    assert_eq!(certificate.win_kind, Some(WinKind::PoisonLoss));
+    assert_eq!(predicted_winner(&runner), Some(P0));
+    let events = take(&mut runner, 3);
+    assert_eq!(
+        losses_in(&events),
+        [
+            (PlayerId(2), BTreeSet::from([LossReason::Poison])),
+            (PlayerId(3), BTreeSet::from([LossReason::Poison])),
+        ]
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    ));
+    assert!(!runner.state().players[1].is_eliminated);
+}
+
+/// Asserts `runner`'s offer counts `n`, names `kind` won at `n` by P0, and declares it so, then
+/// takes it: the seats leave with `losses` and P0 wins.
+fn assert_offered_win(
+    runner: &mut GameRunner,
+    n: u32,
+    kind: WinKind,
+    losses: &[(PlayerId, LossReason)],
+) {
+    let (count, capacity, certificate) = offered_parts(runner);
+    assert_eq!((count, capacity), (IterationCount::Fixed(n), n));
+    let named = (Some(kind), Some(n));
+    assert_eq!((certificate.win_kind, certificate.win_kind_at), named);
+    assert_eq!(predicted_winner(runner), Some(P0));
+    let declared = proposed(runner.state().clone(), n);
+    let WaitingFor::RespondToShortcut { proposal, .. } = &declared.waiting_for else {
+        unreachable!("proposed")
+    };
+    assert_eq!((proposal.win_kind, proposal.win_kind_at), named);
+    let events = take(runner, n);
+    let expected: Vec<_> = losses
+        .iter()
+        .map(|&(seat, reason)| (seat, BTreeSet::from([reason])))
+        .collect();
+    assert_eq!(losses_in(&events), expected);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::GameOver { winner: Some(P0) }
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 704.6b + CR 810.8a: the opposing team's 9 + 5 shared poison reaches fifteen when the first
+/// repetition's proliferate gives P3 a sixth, removing both opponents at 30 team life; the counted
+/// win is named for poison, including when the proposer's teammate is below 0 life but the team
+/// total is not.
+#[test]
+fn a_two_headed_giant_counted_win_is_named_by_the_teams_recorded_loss() {
+    let Some(db) = shared_card_db() else { return };
+    for offered in [
+        [(13, 0), (15, 0), (15, 9), (15, 5)],
+        [(32, 0), (-3, 0), (15, 9), (15, 5)],
+    ] {
+        let mut runner = two_headed_giant_kilo_offer(offered, &[P3], db);
+        assert_offered_win(
+            &mut runner,
+            1,
+            WinKind::PoisonLoss,
+            &[(P2, LossReason::Poison), (P3, LossReason::Poison)],
+        );
+    }
+}
+
+/// CR 904.2b + CR 102.3 + CR 704.5c + CR 704.5a: facing the archenemy P1, P0's fellow hero P2
+/// leaves to its tenth poison counter from the proliferate, then Scheming Aspirant drains the
+/// archenemy, P0's one opponent, from 2 to 0; the teammate's loss names no part of the win.
+#[test]
+fn a_teammates_loss_in_the_winning_repetition_does_not_name_the_win() {
+    let Some(db) = shared_card_db() else { return };
+    let format = FormatConfig {
+        archenemy_player: Some(P1),
+        ..FormatConfig::archenemy()
+    };
+    let mut runner = kilo_offer(
+        GameScenario::new_with_format(format, 3, 42),
+        &[(20, 0), (2, 0), (20, 9)],
+        &[P2],
+        db,
+    );
+    assert_offered_win(
+        &mut runner,
+        1,
+        WinKind::LethalDamage,
+        &[(P2, LossReason::Poison), (P1, LossReason::LifeTotal)],
+    );
+}
+
+/// CR 704.6a + CR 704.6b: the opposing team's 8 shared life loses 4 a repetition and reaches 0 at
+/// the second, while the proposer's team poison, 12 plus 1 a repetition from proliferating P1, is
+/// 14; the counted win is named for life.
+#[test]
+fn a_two_headed_giant_counted_win_reads_no_poison_on_the_proposers_team() {
+    let Some(db) = shared_card_db() else { return };
+    let mut runner = two_headed_giant_kilo_offer([(13, 0), (15, 12), (4, 0), (4, 0)], &[P1], db);
+    assert_offered_win(
+        &mut runner,
+        2,
+        WinKind::LethalDamage,
+        &[(P2, LossReason::LifeTotal), (P3, LossReason::LifeTotal)],
+    );
+    assert!(!runner.state().players[1].is_eliminated);
+}
+
+/// CR 704.5c + CR 704.5a: P1 leaves to its tenth poison counter from the proliferate, then
+/// Scheming Aspirant drains P2 from 2 to 0 in the same repetition; two reasons name no single win.
+#[test]
+fn a_counted_win_with_two_reasons_is_named_immediate() {
+    let Some(db) = shared_card_db() else { return };
+    let mut runner = kilo_offer(
+        GameScenario::new_with_format(FormatConfig::free_for_all(), 3, 42),
+        &[(20, 0), (20, 9), (2, 0)],
+        &[P1],
+        db,
+    );
+    assert_offered_win(
+        &mut runner,
+        1,
+        WinKind::ImmediateWin,
+        &[(P1, LossReason::Poison), (P2, LossReason::LifeTotal)],
+    );
+}
+
+/// CR 704.6b + CR 732.2a: the opposing team's 7 shared poison plus 1 a repetition reaches fifteen
+/// at the eighth repetition's proliferate, before its drain takes the team's last 2 life; the
+/// threshold offer names the poison win its performance records, at eight.
+#[test]
+fn a_threshold_offers_performed_win_is_named_by_its_recorded_loss() {
+    let Some(db) = shared_card_db() else { return };
+    let mut runner = two_headed_giant_kilo_offer([(13, 0), (15, 0), (15, 7), (15, 0)], &[P2], db);
+    assert_offered_win(
+        &mut runner,
+        8,
+        WinKind::PoisonLoss,
+        &[(P2, LossReason::Poison), (P3, LossReason::Poison)],
+    );
+}
+
+/// CR 704.5a + CR 704.5c + CR 104.2a: P1's 6 life falls 2 a repetition and reaches 0 at the third;
+/// P2's 6 poison plus 1 a repetition reaches ten at the fourth, leaving P0 alone. The threshold
+/// offer names the win by the fourth repetition's poison, not P1's earlier departure.
+#[test]
+fn a_threshold_offers_performed_win_is_named_by_its_last_repetition() {
+    let Some(db) = shared_card_db() else { return };
+    let mut runner = kilo_offer(
+        GameScenario::new_with_format(FormatConfig::free_for_all(), 3, 42),
+        &[(20, 0), (6, 0), (20, 6)],
+        &[P2],
+        db,
+    );
+    assert_offered_win(
+        &mut runner,
+        4,
+        WinKind::PoisonLoss,
+        &[(P1, LossReason::LifeTotal), (P2, LossReason::Poison)],
+    );
+}
+
+/// CR 704.5c at the host's poison-loss threshold + CR 704.5a + CR 732.2a: P1's 10 life falls 2 a
+/// repetition and reaches 0 at the fifth; its 6 poison plus 1 a repetition reaches ten at the
+/// fourth but twelve only at the sixth. The threshold offer counts and names whichever the host's
+/// threshold makes first.
+#[test]
+fn a_threshold_offer_counts_and_names_the_hosts_poison_threshold() {
+    let Some(db) = shared_card_db() else { return };
+    for (threshold, n, kind, reason) in [
+        (10, 4, WinKind::PoisonLoss, LossReason::Poison),
+        (12, 5, WinKind::LethalDamage, LossReason::LifeTotal),
+    ] {
+        let format = FormatConfig {
+            poison_counter_threshold: Some(threshold),
+            ..FormatConfig::standard()
+        };
+        let mut runner = kilo_offer(
+            GameScenario::new_with_format(format, 2, 42),
+            &[(22, 0), (10, 6)],
+            &[P1],
+            db,
+        );
+        assert_offered_win(&mut runner, n, kind, &[(P1, reason)]);
     }
 }

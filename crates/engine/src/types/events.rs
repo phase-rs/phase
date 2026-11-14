@@ -980,6 +980,25 @@ pub enum ExertOrigin {
     AbilityCost,
 }
 
+/// CR 104.3: why a player lost the game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum LossReason {
+    /// CR 704.5a / CR 704.6a / CR 904.13b: their life total (where life is shared, their team's) is 0 or less.
+    LifeTotal,
+    /// CR 704.5b: they attempted to draw from an empty library.
+    DrewFromEmptyLibrary,
+    /// CR 704.5c / CR 704.6b: poison counters at the threshold `players::poison_loss_measure` applies.
+    Poison,
+    /// CR 704.6c: 21 or more combat damage from one commander.
+    CommanderDamage,
+    /// CR 104.3a / CR 810.8b / CR 904.13b: they (or, where life is shared, their teammate) conceded.
+    Conceded,
+    /// CR 104.3e: an effect stated that they lose.
+    EffectStatedLoss,
+    /// CR 104.2b: an effect stated that an opponent of theirs wins.
+    OpponentWon,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum GameEvent {
@@ -1296,8 +1315,10 @@ pub enum GameEvent {
     BecameForetold {
         object_id: ObjectId,
     },
+    /// CR 104.3 + CR 704.3: a player left the game by losing, and every reason found for it; never empty.
     PlayerLost {
         player_id: PlayerId,
+        reasons: std::collections::BTreeSet<LossReason>,
     },
     MulliganStarted,
     CardsDrawn {

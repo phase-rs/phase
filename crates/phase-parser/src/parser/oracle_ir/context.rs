@@ -846,6 +846,8 @@ pub struct ParseContext {
     /// `parse_target` binding (Embercleave's Equipment-ETB `ParentTarget`; Aura
     /// Graft's chained-referent `ParentTarget`).
     pub source_becomes_attachment_in_chain: bool,
+    /// CR 400.7j + CR 608.2c: the chain's most recent emitted instruction put a card onto the battlefield, so a following "it" can name that moved card.
+    pub prior_clause_moves_to_battlefield: bool,
     /// CR 608.2c: Full lowercased effect-chain text for cross-clause features
     /// like cultivate/Final-Parting split-destination detection on a search
     /// clause that does not include the put-destination phrase in its chunk.

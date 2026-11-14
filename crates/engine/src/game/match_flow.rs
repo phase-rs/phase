@@ -1199,8 +1199,8 @@ mod tests {
     }
 
     /// CR 732.2a opt-in persistence across the ENGINE between-games rebuild. A Bo3 match
-    /// created with the detector On (projected onto `loop_detection` by `set_match_config`)
-    /// must KEEP it On after `restart_between_games_with_starting_player` builds a fresh
+    /// created with the detector Interactive (projected onto `loop_detection` by
+    /// `set_match_config`) must KEEP it Interactive after `restart_between_games_with_starting_player` builds a fresh
     /// `GameState::new` for game 2. This guards the engine `match_flow` rebuild — distinct
     /// from the server-core `rebuild_pregame_state` path — which a raw `match_config = …`
     /// assignment silently drops, because a fresh `GameState::new` defaults the runtime
@@ -1208,7 +1208,7 @@ mod tests {
     ///
     /// REVERT-FAIL: change the rebuild back to `next_state.match_config = state.match_config;`
     /// ⇒ `next_state.loop_detection` stays at the `GameState::new` default Off and the
-    /// post-restart `On` assertion fails (the opt-in vanishes for game 2/3 of the match).
+    /// post-restart `Interactive` assertion fails (the opt-in vanishes for game 2/3 of the match).
     #[test]
     fn bo3_restart_preserves_loop_detection_opt_in() {
         use crate::types::game_state::LoopDetectionMode;
@@ -1217,10 +1217,10 @@ mod tests {
         let mut state = GameState::new_two_player(17);
         state.set_match_config(MatchConfig {
             match_type: MatchType::Bo3,
-            loop_detection: LoopDetectionMode::On,
+            loop_detection: LoopDetectionMode::Interactive,
         });
         // Creation-time projection holds for game 1.
-        assert_eq!(state.loop_detection, LoopDetectionMode::On);
+        assert_eq!(state.loop_detection, LoopDetectionMode::Interactive);
 
         let payload = DeckPayload {
             player: PlayerDeckPayload {
@@ -1294,10 +1294,13 @@ mod tests {
         // ...and the detector opt-in survived the fresh-state rebuild.
         assert_eq!(
             state.loop_detection,
-            LoopDetectionMode::On,
+            LoopDetectionMode::Interactive,
             "detector opt-in must persist across the engine between-games rebuild"
         );
-        assert_eq!(state.match_config.loop_detection, LoopDetectionMode::On);
+        assert_eq!(
+            state.match_config.loop_detection,
+            LoopDetectionMode::Interactive
+        );
     }
 
     /// Debug capability must survive the ENGINE between-games rebuild, exactly

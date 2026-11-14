@@ -600,7 +600,12 @@ fn phased_protector_board(phase_out: &[PlayerId]) -> (GameRunner, ObjectId) {
             "phase_out_player must actually transition {seat:?}"
         );
     }
-    engine::game::elimination::eliminate_player(runner.state_mut(), PlayerId(2), &mut events);
+    engine::game::elimination::eliminate_player(
+        runner.state_mut(),
+        PlayerId(2),
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
     assert!(
         runner.state().players[2].is_eliminated,
         "P2 must read as eliminated"

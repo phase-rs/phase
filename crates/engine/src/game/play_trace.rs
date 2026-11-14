@@ -169,7 +169,8 @@ pub enum SpanSource {
     Carried(usize),
 }
 
-/// A period begun in an earlier window: the entries from its key's last occurrence there on.
+/// A period begun in an earlier window: the entries from its key's last occurrence there on, or
+/// from the window's first entry for an extra-turn period.
 #[derive(Clone, Debug)]
 struct CarriedSpan {
     key: NodeKey,
@@ -267,6 +268,10 @@ pub struct CostMove {
     pub destination: Zone,
     /// `None` for an object that no longer exists.
     pub arrivals: Vec<Option<Zone>>,
+    /// CR 400.7: the name of each object the answer chose, in its order, read before it moved,
+    /// since a moved object is a new one and a token that left the battlefield is gone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen: Vec<String>,
 }
 
 /// Where an object-moving cost sends the objects it chooses; `None` for a cost that moves none.
@@ -299,12 +304,22 @@ fn cost_destination(kind: &PayCostKind) -> Option<Zone> {
 pub(crate) struct CostChoices {
     destination: Zone,
     choices: Vec<(ObjectId, Zone)>,
+    chosen: Vec<String>,
 }
 
 impl CostChoices {
-    pub(crate) fn at(state: &GameState) -> Option<Self> {
+    /// The prompt `state` waits on, answered by `answer`.
+    pub(crate) fn at(state: &GameState, answer: &GameAction) -> Option<Self> {
         let WaitingFor::PayCost { kind, choices, .. } = &state.waiting_for else {
             return None;
+        };
+        let chosen = match answer {
+            GameAction::SelectCards { cards } => cards
+                .iter()
+                .map(|id| state.objects.get(id).map(|o| o.name.clone()))
+                .collect::<Option<Vec<_>>>()
+                .unwrap_or_default(),
+            _ => Vec::new(),
         };
         Some(Self {
             destination: cost_destination(kind)?,
@@ -312,6 +327,7 @@ impl CostChoices {
                 .iter()
                 .filter_map(|id| state.objects.get(id).map(|o| (*id, o.zone)))
                 .collect(),
+            chosen,
         })
     }
 
@@ -329,6 +345,7 @@ impl CostChoices {
         CostMove {
             destination: self.destination,
             arrivals,
+            chosen: self.chosen.clone(),
         }
     }
 }
@@ -351,6 +368,12 @@ pub enum EntryKind {
         cost_move: Option<CostMove>,
         /// The decision point the answered prompt is, which the every-option proof enumerates.
         point: Option<crate::analysis::decision_template::ChoicePoint>,
+    },
+    /// CR 603.5: an optional answer a stored preference gave, which a replay answers again from
+    /// the same store.
+    Remembered {
+        /// The triggered ability whose resolution asked it.
+        asked_by: Option<usize>,
     },
 }
 
@@ -378,7 +401,7 @@ pub enum NamingCause {
     /// No play was consumed and this one is legal now.
     LegalNow,
     /// CR 104.4b + CR 732.4: a triggered node is about to resolve again with no optional answer
-    /// or play since its previous instance resolved. Read on demand, never named.
+    /// or play since its previous instance resolved.
     MandatoryRecurrence,
 }
 
@@ -466,8 +489,8 @@ pub(crate) struct PlayTrace {
     named: im::Vector<NamedSpan>,
     /// The first named span no window has read.
     unread: usize,
-    /// The span the latest offer was made for.
-    offered: Option<NamedSpan>,
+    /// The span the latest offer was made for, with the window's entry count when it was made.
+    offered: Option<(NamedSpan, usize)>,
     undo: im::Vector<UndoPoint>,
     /// CR 733.1: the mana abilities the engine reversed inside the action in progress.
     reversed: Vec<(ObjectId, usize)>,
@@ -485,8 +508,12 @@ pub(crate) struct PlayTrace {
     /// The mandatory-recurrence verdict kept for the span starting at this entry, one slot per out
     /// verdict.
     witnessed: [Option<(usize, Witnessed)>; 2],
-    /// The every-option proof kept for the mandatory span starting at this entry.
-    ordered: Option<(usize, crate::game::period_confirm::OptionProof)>,
+    /// The every-option proof kept for the mandatory span starting at this entry, one slot per
+    /// outcome admission.
+    ordered: [Option<(usize, crate::game::period_confirm::OptionProof)>; 2],
+    /// While a priority pass resolves the stack: the remembered answers made so far, each with the
+    /// stack entry resolving when it was made, held until that entry's resolution is recorded.
+    held: Option<Vec<(Option<ObjectId>, TraceEntry)>>,
 }
 
 impl PlayTrace {
@@ -513,8 +540,9 @@ impl PlayTrace {
             carried: im::Vector::new(),
             carried_named: im::Vector::new(),
             carrying: im::HashMap::new(),
-            witnessed: [None; 2],
-            ordered: None,
+            witnessed: [None, None],
+            ordered: [None, None],
+            held: None,
         }
     }
 
@@ -601,7 +629,7 @@ impl PlayTrace {
             EntryKind::Play { node, .. } | EntryKind::Resolution { node } => {
                 *node = reintern(self, *node);
             }
-            EntryKind::Answer { asked_by, .. } => {
+            EntryKind::Answer { asked_by, .. } | EntryKind::Remembered { asked_by } => {
                 *asked_by = asked_by.map(|node| reintern(self, node));
             }
         }
@@ -639,17 +667,22 @@ impl PlayTrace {
                 self.push_node_entry(*node, entry);
             }
             EntryKind::Answer {
-                optional, asked_by, ..
-            } => {
-                if *optional == AnswerOptionality::Optional {
-                    self.last_optional = Some(self.entries.len());
-                    // CR 603.5: a trigger whose resolution asked an optional answer.
-                    if let Some(node) = asked_by {
-                        self.optional_triggers.insert(*node);
-                    }
+                optional: AnswerOptionality::Optional,
+                asked_by,
+                ..
+            }
+            | EntryKind::Remembered { asked_by } => {
+                self.last_optional = Some(self.entries.len());
+                // CR 603.5: a trigger whose resolution asked an optional answer.
+                if let Some(node) = asked_by {
+                    self.optional_triggers.insert(*node);
                 }
                 self.entries.push_back(entry);
             }
+            EntryKind::Answer {
+                optional: AnswerOptionality::Mandatory,
+                ..
+            } => self.entries.push_back(entry),
         }
         if let Some(undo) = undo {
             self.undo.push_back(undo);
@@ -687,7 +720,7 @@ fn trace_mut(state: &mut GameState) -> &mut PlayTrace {
 
 /// CR 500.2: the first touch of a new window ends the old one's trace. Each node of the old
 /// window whose key its seat's carrying index carries begins a carried span from its last
-/// occurrence there, and a carried span runs on while its reach admits the new window and its key
+/// occurrence there (an extra-turn span from the window's start), and a carried span runs on while its reach admits the new window and its key
 /// is still carried.
 fn roll(state: &mut GameState) {
     let window = WindowKey::of(state);
@@ -732,6 +765,13 @@ fn roll(state: &mut GameState) {
         let key = &old.nodes[node];
         let Some(reach) = next.carrying.get(&seat).and_then(|index| index.reach(key)) else {
             continue;
+        };
+        // CR 500.7: an extra turn repeats every play of its turn, so its span starts at the
+        // window's first entry.
+        let at = if reach == PeriodReach::ExtraTurn {
+            0
+        } else {
+            at
         };
         let mut trace = PlayTrace::new(old.window);
         for (from, entry) in old.entries.iter().enumerate().skip(at) {
@@ -843,14 +883,13 @@ enum Choice {
     Play(Play),
     Answer(Answer),
     Reverse(Reversal),
-    /// A preference or permission, not a game choice.
+    /// A preference, a permission, or a shortcut or Resolve All negotiation (CR 732.2a): not a game choice.
     Setting,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Answer {
-    /// Passing priority, the shortcut and Resolve All negotiations (CR 732.2a), or a concession:
-    /// never a choice that stops a loop of mandatory actions (CR 104.4b).
+    /// Passing priority or a concession: never a choice that stops a loop of mandatory actions (CR 104.4b).
     Pass,
     /// Any other answer.
     Take,
@@ -929,7 +968,14 @@ fn classify(action: &GameAction, prompt: &WaitingFor) -> Choice {
         | GameAction::GrantDebugPermission { .. }
         | GameAction::RevokeDebugPermission { .. }
         // CR 402.3: arranging one's hand has no game significance.
-        | GameAction::ReorderHand { .. } => Choice::Setting,
+        | GameAction::ReorderHand { .. }
+        | GameAction::DeclareShortcut { .. }
+        | GameAction::RespondToShortcut { .. }
+        | GameAction::DeclineShortcut
+        | GameAction::PrecastCopyShortcut { .. }
+        | GameAction::BeginResolveAll { .. }
+        | GameAction::RespondResolveAllConsent { .. }
+        | GameAction::RevokeResolveAllConsent { .. } => Choice::Setting,
         GameAction::Equip { .. }
         | GameAction::CrewVehicle { .. }
         | GameAction::ActivateStation { .. }
@@ -1035,15 +1081,7 @@ fn classify(action: &GameAction, prompt: &WaitingFor) -> Choice {
         | GameAction::ChooseSpecializeColor { .. }
         | GameAction::PassParadigmOffer
         | GameAction::EndContinuousEffect { .. } => Choice::Answer(Answer::Take),
-        GameAction::PassPriority
-        | GameAction::Concede { .. }
-        | GameAction::DeclareShortcut { .. }
-        | GameAction::RespondToShortcut { .. }
-        | GameAction::DeclineShortcut
-        | GameAction::PrecastCopyShortcut { .. }
-        | GameAction::BeginResolveAll { .. }
-        | GameAction::RespondResolveAllConsent { .. }
-        | GameAction::RevokeResolveAllConsent { .. } => Choice::Answer(Answer::Pass),
+        GameAction::PassPriority | GameAction::Concede { .. } => Choice::Answer(Answer::Pass),
     }
 }
 
@@ -1328,6 +1366,14 @@ fn trigger_node(state: &GameState, entry: &StackEntry, at: usize) -> Option<Node
     ))
 }
 
+/// The triggered ability whose resolution is asking a choice (CR 603.5 + CR 608.2d).
+fn asking_node(state: &GameState, at: usize) -> Option<NodeKey> {
+    state
+        .resolving_stack_entry
+        .as_ref()
+        .and_then(|entry| trigger_node(state, entry, at))
+}
+
 /// The pre-action trace, restored when the action does not apply, and the reversal the action
 /// makes when it does.
 pub(crate) struct TraceSnapshot {
@@ -1405,11 +1451,8 @@ pub(crate) fn begin_action(
             Choice::Answer(answer) => {
                 let optional = answer_optionality(&state.waiting_for, answer);
                 let point = state.waiting_for.option_point();
-                let asking = state
-                    .resolving_stack_entry
-                    .as_ref()
-                    .and_then(|entry| trigger_node(state, entry, at));
-                cost = CostChoices::at(state).map(|choices| (at, choices));
+                let asking = asking_node(state, at);
+                cost = CostChoices::at(state, action).map(|choices| (at, choices));
                 let trace = trace_mut(state);
                 let asked_by = asking.map(|key| trace.intern(key));
                 let entry = TraceEntry {
@@ -1597,8 +1640,9 @@ pub(crate) struct BeforeResolution {
     next_object_id: u64,
 }
 
-/// The stack as it stood before a priority pass resolves its top, when the trace records it.
-pub(crate) fn stack_before_resolution(state: &GameState) -> Option<BeforeResolution> {
+/// The stack as it stood before a priority pass resolves its top, when the trace records it; from
+/// here until the pass's resolutions are recorded, remembered answers are held.
+pub(crate) fn stack_before_resolution(state: &mut GameState) -> Option<BeforeResolution> {
     if in_simulation_probe()
         && state.loop_detection.samples()
         && state
@@ -1608,38 +1652,91 @@ pub(crate) fn stack_before_resolution(state: &GameState) -> Option<BeforeResolut
     {
         meter!(resolution_hooks_in_probe += 1);
     }
-    recording(state).then(|| BeforeResolution {
+    if !recording(state) {
+        return None;
+    }
+    trace_mut(state).held = Some(Vec::new());
+    Some(BeforeResolution {
         stack: state.stack.clone(),
         next_object_id: state.next_object_id,
     })
 }
 
+/// CR 603.5: records an optional answer `seat`'s stored preference gave. During a priority pass
+/// it is held, since the resolution that asked it is recorded only after the pass.
+pub(crate) fn note_remembered(state: &mut GameState, seat: PlayerId) {
+    if !recording(state) {
+        return;
+    }
+    let at = trace_mut(state).entries.len();
+    let asking = asking_node(state, at);
+    let during = state.resolving_stack_entry.as_ref().map(|entry| entry.id);
+    let depth = state.stack.len();
+    let next_object_id = state.next_object_id;
+    let trace = trace_mut(state);
+    let asked_by = asking.map(|key| trace.intern(key));
+    let entry = TraceEntry {
+        seat,
+        kind: EntryKind::Remembered { asked_by },
+        depth,
+        prompt: PromptClass::Other,
+        next_object_id,
+    };
+    if let Some(held) = trace.held.as_mut() {
+        held.push((during, entry));
+        return;
+    }
+    let prior = trace.clone();
+    trace.record(&prior, entry, None);
+}
+
+/// Records, in order, the held remembered answers made while `during` resolved, or every one
+/// left when `during` is `None`.
+fn record_held(
+    state: &mut GameState,
+    held: &mut Vec<(Option<ObjectId>, TraceEntry)>,
+    during: Option<ObjectId>,
+) {
+    let (now, later): (Vec<_>, Vec<_>) = std::mem::take(held)
+        .into_iter()
+        .partition(|(made, _)| during.is_none() || *made == during);
+    *held = later;
+    for (_, entry) in now {
+        let trace = trace_mut(state);
+        let prior = trace.clone();
+        trace.record(&prior, entry, None);
+    }
+}
+
 /// CR 603.3: records each triggered ability among the `consumed` entries that resolved from
-/// the top of `before`. Triggered mana abilities never use the stack (CR 605.4a).
+/// the top of `before`, each followed by the remembered answers its resolution made. Triggered
+/// mana abilities never use the stack (CR 605.4a).
 pub(crate) fn record_resolutions(state: &mut GameState, before: &BeforeResolution, consumed: u32) {
     metered(|| {
+        let mut held = trace_mut(state).held.take().unwrap_or_default();
         let consumed = usize::try_from(consumed).unwrap_or(usize::MAX);
         for (resolved, entry) in before.stack.iter().rev().take(consumed).enumerate() {
             let at = trace_mut(state).entries.len();
-            let Some(key) = trigger_node(state, entry, at) else {
-                continue;
-            };
-            meter!(resolutions_recorded += 1);
-            let trace = trace_mut(state);
-            let prior = trace.clone();
-            let node = trace.intern(key);
-            trace.record(
-                &prior,
-                TraceEntry {
-                    seat: entry.controller,
-                    kind: EntryKind::Resolution { node },
-                    depth: before.stack.len() - resolved,
-                    prompt: PromptClass::Priority,
-                    next_object_id: before.next_object_id,
-                },
-                None,
-            );
+            if let Some(key) = trigger_node(state, entry, at) {
+                meter!(resolutions_recorded += 1);
+                let trace = trace_mut(state);
+                let prior = trace.clone();
+                let node = trace.intern(key);
+                trace.record(
+                    &prior,
+                    TraceEntry {
+                        seat: entry.controller,
+                        kind: EntryKind::Resolution { node },
+                        depth: before.stack.len() - resolved,
+                        prompt: PromptClass::Priority,
+                        next_object_id: before.next_object_id,
+                    },
+                    None,
+                );
+            }
+            record_held(state, &mut held, Some(entry.id));
         }
+        record_held(state, &mut held, None);
     });
 }
 
@@ -1749,36 +1846,47 @@ fn read_legality(state: &GameState, holder: PlayerId, locus: &PlayLocus) -> Opti
     Some(legal)
 }
 
-/// CR 104.4b + CR 732.4: the span back to the last instance of the triggered node on top of the
-/// stack, when nothing optional was asked or played since; `None` outside a recording boundary.
-pub(crate) fn mandatory_recurrence(state: &GameState) -> Option<NamedSpan> {
-    if !recording(state) {
-        return None;
+/// CR 104.4b + CR 732.4: how the span back to the last instance of the recurring triggered `node`
+/// is named — `TriggerTop` when its resolution asked an optional answer, or an optional answer
+/// and another node's repeat were made since with no play; `MandatoryRecurrence` when neither a
+/// play nor an optional answer was made since; otherwise not at all.
+fn trigger_top_cause(trace: &PlayTrace, node: usize) -> Option<(usize, NamingCause)> {
+    let &start = trace.last.get(&node)?;
+    let played = trace.last_play.is_some_and(|play| play >= start);
+    let recurs_inside = || {
+        trace
+            .repeated
+            .iter()
+            .any(|repeated| trace.last.get(repeated).is_some_and(|&at| at > start))
+    };
+    if trace.optional_triggers.contains(&node)
+        || (trace.last_optional.is_some_and(|optional| optional > start)
+            && !played
+            && recurs_inside())
+    {
+        return Some((start, NamingCause::TriggerTop));
     }
-    mandatory_recurrence_span(state)
-}
-
-/// [`mandatory_recurrence`] without its recording gate.
-pub(crate) fn mandatory_recurrence_span(state: &GameState) -> Option<NamedSpan> {
-    let trace = current(state)?;
-    let end = trace.entries.len();
-    let node = trigger_node(state, state.stack.back()?, end).and_then(|key| trace.find(&key))?;
-    let start = *trace.last.get(&node)?;
-    let mandatory = !trace.optional_triggers.contains(&node)
-        && !trace
-            .last_optional
-            .is_some_and(|optional| optional >= start)
-        && !trace.last_play.is_some_and(|play| play >= start);
-    mandatory.then(|| NamedSpan::in_window(start, end, NamingCause::MandatoryRecurrence))
+    let answered = trace
+        .last_optional
+        .is_some_and(|optional| optional >= start);
+    (!played && !answered).then_some((start, NamingCause::MandatoryRecurrence))
 }
 
 /// CR 104.4b + CR 732.2a: what a mandatory-recurrence span was read as.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Witnessed {
     Declared,
-    /// Offered, with the counted take the replay that read it minted.
-    Offered(crate::analysis::loop_check::CountedTake),
+    /// Offered, with the counted take, the board residual the replay that read it minted, and
+    /// the period its take performs; the residual is empty when that replay kept a random outcome.
+    Offered {
+        counted_take: crate::analysis::loop_check::CountedTake,
+        residual: crate::analysis::resource::BoardDelta,
+        period: Box<crate::game::period_confirm::ConfirmedPeriod>,
+    },
     Refused,
+    /// CR 704.5a + CR 732.2a: a loss period the mandatory pass cannot crown, which its holder may
+    /// shortcut.
+    Breakable,
 }
 
 fn out_slot(out: PriorityOut) -> usize {
@@ -1792,8 +1900,9 @@ fn out_slot(out: PriorityOut) -> usize {
 /// computed under `out`.
 pub(crate) fn witnessed(state: &GameState, start: usize, out: PriorityOut) -> Option<Witnessed> {
     current(state)?.witnessed[out_slot(out)]
-        .filter(|&(at, _)| at == start)
-        .map(|(_, verdict)| verdict)
+        .as_ref()
+        .filter(|(at, _)| *at == start)
+        .map(|(_, verdict)| verdict.clone())
 }
 
 /// Keeps `verdict` for the mandatory-recurrence span of the current window starting at `start`,
@@ -1814,21 +1923,32 @@ pub(crate) fn note_witnessed(
     }
 }
 
-/// The every-option proof kept for the mandatory span of the current window starting at `start`.
+fn outcomes_slot(outcomes: crate::game::period_confirm::Outcomes) -> usize {
+    use crate::game::period_confirm::Outcomes;
+    match outcomes {
+        Outcomes::Refused => 0,
+        Outcomes::Admitted => 1,
+    }
+}
+
+/// The every-option proof kept for the mandatory span of the current window starting at `start`,
+/// computed under `outcomes`.
 pub(crate) fn order_proof(
     state: &GameState,
     start: usize,
+    outcomes: crate::game::period_confirm::Outcomes,
 ) -> Option<crate::game::period_confirm::OptionProof> {
-    current(state)?
-        .ordered
+    current(state)?.ordered[outcomes_slot(outcomes)]
         .filter(|&(at, _)| at == start)
         .map(|(_, proof)| proof)
 }
 
-/// Keeps `proof` for the mandatory span of the current window starting at `start`.
+/// Keeps `proof` for the mandatory span of the current window starting at `start`, computed
+/// under `outcomes`.
 pub(crate) fn note_order_proof(
     state: &mut GameState,
     start: usize,
+    outcomes: crate::game::period_confirm::Outcomes,
     proof: crate::game::period_confirm::OptionProof,
 ) {
     let window = WindowKey::of(state);
@@ -1837,7 +1957,7 @@ pub(crate) fn note_order_proof(
         .as_deref_mut()
         .filter(|trace| trace.window == window)
     {
-        trace.ordered = Some((start, proof));
+        trace.ordered[outcomes_slot(outcomes)] = Some((start, proof));
     }
 }
 
@@ -1889,30 +2009,14 @@ pub(crate) fn name_window(state: &mut GameState) -> Vec<NamedSpan> {
         let end = trace.entries.len();
         if let Some(top) = state.stack.back() {
             // A play is named only with the stack empty; a trigger is named as its next instance
-            // comes to the top when its own resolution asked an optional answer, or when an
-            // optional answer and another node's repeat were both made since its previous
-            // instance resolved, so the span closes a recurrence the trace has already seen.
+            // comes to the top, so the span closes a recurrence the trace has already seen.
             let node = trigger_node(state, top, end).and_then(|key| trace.find(&key));
             if let Some(node) = node {
                 meter!(node_map_reads += 1);
-                if let Some(&start) = trace.last.get(&node) {
-                    let recurs_inside = || {
-                        trace
-                            .repeated
-                            .iter()
-                            .any(|repeated| trace.last.get(repeated).is_some_and(|&at| at > start))
-                    };
-                    if trace.optional_triggers.contains(&node)
-                        || (trace.last_optional.is_some_and(|optional| optional > start)
-                            && !trace.last_play.is_some_and(|play| play >= start)
-                            && recurs_inside())
-                    {
-                        trace.named.push_back(NamedSpan::in_window(
-                            start,
-                            end,
-                            NamingCause::TriggerTop,
-                        ));
-                    }
+                if let Some((start, cause)) = trigger_top_cause(&trace, node) {
+                    trace
+                        .named
+                        .push_back(NamedSpan::in_window(start, end, cause));
                 }
             }
         } else {
@@ -2011,6 +2115,12 @@ fn carried_cause(state: &GameState, holder: PlayerId, span: &CarriedSpan) -> Opt
             && span.trace.optional_triggers.contains(&node))
         .then_some(NamingCause::TriggerTop),
         None => {
+            // CR 500.7 + CR 732.2a: an extra-turn period comes round in the step it began in.
+            if span.reach == PeriodReach::ExtraTurn
+                && WindowKey::of(state).phase() != span.trace.window.phase()
+            {
+                return None;
+            }
             let &at = span.trace.last.get(&node)?;
             let EntryKind::Play { locus, .. } = span.trace.entries.get(at)?.kind else {
                 return None;
@@ -2049,8 +2159,20 @@ pub(crate) fn note_offered(state: &mut GameState, span: NamedSpan) {
         .as_deref_mut()
         .filter(|trace| trace.window == window)
     {
-        trace.offered = Some(span);
+        trace.offered = Some((span, trace.entries.len()));
     }
+}
+
+/// CR 732.2a: whether `span` names a period this window already offered: a window span ending
+/// within the trace as it stood at the offer, or the offered carried span itself. A refused
+/// declaration leaves the plays standing, so this is what keeps the window from offering it again.
+pub(crate) fn offer_latched(state: &GameState, span: NamedSpan) -> bool {
+    current(state)
+        .and_then(|trace| trace.offered)
+        .is_some_and(|(offered, prefix)| match span.source {
+            SpanSource::Window => span.end <= prefix,
+            SpanSource::Carried(_) => span == offered,
+        })
 }
 
 /// The printed identity of the node a triggered stack entry resolves, as a replayed cycle reports
@@ -2090,6 +2212,7 @@ pub(crate) fn discard_seat(state: &mut GameState, holder: PlayerId) {
     let mut kept = PlayTrace::new(trace.window);
     kept.carrying = trace.carrying.clone();
     let mut owner = None;
+    let mut kept_at = Vec::new();
     for (at, entry) in trace.entries.iter().enumerate() {
         if matches!(
             entry.kind,
@@ -2099,8 +2222,16 @@ pub(crate) fn discard_seat(state: &mut GameState, holder: PlayerId) {
         }
         if owner.unwrap_or(entry.seat) != holder {
             kept.rerecord(trace, at, entry.clone(), false);
+            kept_at.push(at);
         }
     }
+    // CR 732.2a: a declined window period stays offered until it recurs past the kept entries it
+    // was offered over. An offered carried span is not carried: the discard drops every named
+    // carried span, so nothing left in the window is the span it named.
+    kept.offered = trace
+        .offered
+        .filter(|(span, _)| span.source == SpanSource::Window)
+        .map(|(span, prefix)| (span, kept_at.iter().filter(|&&at| at < prefix).count()));
     kept.carried = trace
         .carried
         .iter()
@@ -2223,7 +2354,7 @@ pub fn play_trace_view(state: &GameState) -> Option<PlayTraceView> {
         entries: trace.entries.iter().cloned().collect(),
         named: trace.named.iter().copied().collect(),
         node_count: trace.nodes.len(),
-        offered: trace.offered,
+        offered: trace.offered.map(|(span, _)| span),
         carried: trace
             .carried
             .iter()
@@ -2279,13 +2410,33 @@ mod tests {
         note_witnessed(&mut state, 3, Absent, Witnessed::Refused);
         assert_eq!(witnessed(&state, 3, Absent), Some(Witnessed::Refused));
         assert_eq!(witnessed(&state, 3, Held), None);
-        let offered = Witnessed::Offered(crate::analysis::loop_check::CountedTake::Unperformable(
-            crate::analysis::loop_check::UnperformableCause::UndelimitedCover,
-        ));
-        note_witnessed(&mut state, 3, Held, offered);
+        let offered = Witnessed::Offered {
+            counted_take: crate::analysis::loop_check::CountedTake::Unperformable(
+                crate::analysis::loop_check::UnperformableCause::UncontainedChoice,
+            ),
+            residual: Default::default(),
+            period: Default::default(),
+        };
+        note_witnessed(&mut state, 3, Held, offered.clone());
         assert_eq!(witnessed(&state, 3, Held), Some(offered));
         assert_eq!(witnessed(&state, 3, Absent), Some(Witnessed::Refused));
         assert_eq!(witnessed(&state, 4, Absent), None);
+    }
+
+    #[test]
+    fn a_kept_order_proof_is_read_only_under_the_outcome_admission_it_was_computed_under() {
+        use crate::game::period_confirm::OptionProof::{Continues, Undecided};
+        use crate::game::period_confirm::Outcomes::{Admitted, Refused};
+        let mut state = GameState::new_two_player(1);
+        state.play_trace = Some(Box::new(PlayTrace::new(WindowKey::of(&state))));
+        note_order_proof(&mut state, 3, Admitted, Continues);
+        assert_eq!(order_proof(&state, 3, Admitted), Some(Continues));
+        assert_eq!(order_proof(&state, 3, Refused), None);
+        note_order_proof(&mut state, 3, Refused, Undecided);
+        assert_eq!(order_proof(&state, 3, Refused), Some(Undecided));
+        assert_eq!(order_proof(&state, 3, Admitted), Some(Continues));
+        assert_eq!(order_proof(&state, 4, Admitted), None);
+        assert_eq!(order_proof(&state, 4, Refused), None);
     }
 
     #[test]
@@ -2484,5 +2635,104 @@ mod tests {
             .map(|(label, ..)| *label)
             .collect();
         assert_eq!(misread, Vec::<&str>::new());
+    }
+
+    /// CR 603.5 + CR 104.4b: an optional remembered answer is an entry of its seat; a mandatory
+    /// one and every answer under Off are tally marks only.
+    #[test]
+    fn the_remembered_answer_authority_records_only_optional_answers_while_recording() {
+        use crate::types::game_state::LoopDetectionMode;
+        let entries = |state: &GameState| {
+            state
+                .play_trace
+                .as_deref()
+                .map_or_else(Vec::new, |trace| trace.entries.iter().cloned().collect())
+        };
+        let _boundary = BoundaryDepth::enter();
+        let mut state = GameState::new_two_player(1);
+        state.loop_detection = LoopDetectionMode::Interactive;
+        let tally = state.loop_decision_tally;
+        state.record_remembered_answer(PlayerId(1), AnswerOptionality::Optional);
+        let recorded = entries(&state);
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].seat, PlayerId(1));
+        assert_eq!(recorded[0].kind, EntryKind::Remembered { asked_by: None });
+        assert_eq!(state.loop_decision_tally.optional, tally.optional + 1);
+
+        state.record_remembered_answer(PlayerId(1), AnswerOptionality::Mandatory);
+        assert_eq!(entries(&state).len(), 1);
+        assert_eq!(state.loop_decision_tally.decision, tally.decision + 1);
+
+        // Held through a priority pass, then recorded once the pass's resolutions are.
+        let before = stack_before_resolution(&mut state).expect("recording");
+        state.record_remembered_answer(PlayerId(0), AnswerOptionality::Optional);
+        assert_eq!(entries(&state).len(), 1);
+        record_resolutions(&mut state, &before, 0);
+        let recorded = entries(&state);
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded[1].seat, PlayerId(0));
+
+        let mut off = GameState::new_two_player(1);
+        off.loop_detection = LoopDetectionMode::Off;
+        off.record_remembered_answer(PlayerId(1), AnswerOptionality::Optional);
+        assert!(off.play_trace.is_none());
+        assert_eq!(off.loop_decision_tally.optional, tally.optional + 1);
+    }
+
+    /// CR 732.2a: proposing, answering or declining a shortcut or a Resolve All is not a game
+    /// choice, so the trace records none of them; a pass and a concession stay passes.
+    #[test]
+    fn negotiation_actions_are_settings() {
+        use crate::analysis::decision_template::IterationCount;
+        use crate::analysis::loop_check::ShortcutResponse;
+        use crate::types::actions::{
+            PrecastCopyShortcutResponse, ResolveAllConsentDecision, ResolveAllScope,
+        };
+        let prompt = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let negotiations = [
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(1),
+                template: None,
+            },
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            },
+            GameAction::DeclineShortcut,
+            GameAction::PrecastCopyShortcut {
+                epoch: 0,
+                response: PrecastCopyShortcutResponse::Decline,
+            },
+            GameAction::BeginResolveAll {
+                max_resolutions: 1,
+                scope: ResolveAllScope::Shared,
+            },
+            GameAction::RespondResolveAllConsent {
+                epoch: 0,
+                decision: ResolveAllConsentDecision::Grant,
+            },
+            GameAction::RevokeResolveAllConsent {
+                epoch: 0,
+                representative: PlayerId(1),
+            },
+        ];
+        for action in &negotiations {
+            assert!(
+                matches!(classify(action, &prompt), Choice::Setting),
+                "{action:?}"
+            );
+        }
+        for action in [
+            GameAction::PassPriority,
+            GameAction::Concede {
+                player_id: PlayerId(0),
+            },
+        ] {
+            assert!(
+                matches!(classify(&action, &prompt), Choice::Answer(Answer::Pass)),
+                "{action:?}"
+            );
+        }
     }
 }

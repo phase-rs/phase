@@ -830,11 +830,10 @@ export const loopShortcutWaitingForFactory = LoopShortcutWaitingForFactory.defin
       residual_board_delta: { added: [], removed: [] },
     },
     schema: {
-      iteration_count: "UntilLethal",
+      iteration_count: "WithoutEnd",
       points: [],
       convoke_tappable_count: 0,
     },
-    road: "Ring",
   },
 }));
 
@@ -874,10 +873,9 @@ export const respondToShortcutWaitingForFactory =
       proposal: {
         proposer: 1,
         predicted_winner: 1,
-        count: "UntilLethal",
+        count: "WithoutEnd",
         unbounded: [{ DamageDealt: 1 }],
         win_kind: "LethalDamage",
-        road: "Ring",
       },
     },
   }));

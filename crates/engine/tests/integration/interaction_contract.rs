@@ -3434,7 +3434,6 @@ fn loop_shortcut_zero_deliverable_capacity_is_rejected_not_clamped() {
                 ..Default::default()
             },
             declaration: None,
-            road: engine::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -3498,12 +3497,11 @@ fn loop_shortcut_narrowed_capacity_bounds_the_picker() {
             // A NARROWED offer, i.e. what a producer that measured a threshold on a real board
             // publishes: the measured threshold and the capacity derived from it.
             iteration_count: engine::analysis::decision_template::IterationCount::Fixed(9),
-            measured_repetition_bound: Some(3),
+            repetition_bound: engine::analysis::decision_template::RepetitionBound::Measured,
             deliverable_capacity: 3,
             ..Default::default()
         },
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -3557,7 +3555,6 @@ fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
             ..Default::default()
         },
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -3643,19 +3640,27 @@ fn preview_offer_with_points(
             per_cycle: per_cycle.map(|delta| {
                 engine::analysis::resource::PeriodSignature::EveryRepetition(
                     engine::analysis::resource::PeriodicDelta {
-                        frames_per_period: 1,
                         delta,
                         declarable_victims: Vec::new(),
+                        forced_aims: Vec::new(),
                         victim_slot,
                         seat_life_charge: Vec::new(),
                         cleanup: None,
+                        instructed_mills: None,
+                        growth: Default::default(),
+                        seat_life_charge_growth: Vec::new(),
+                        seat_takes: Vec::new(),
+                        zero_lifetimes: Vec::new(),
                     },
                 )
             }),
         },
         schema: ShortcutDecisionSchema {
             iteration_count,
-            measured_repetition_bound: measured,
+            repetition_bound: measured.map_or(
+                engine::analysis::decision_template::RepetitionBound::Unmeasured,
+                |_| engine::analysis::decision_template::RepetitionBound::Measured,
+            ),
             deliverable_capacity: measured.map_or(
                 ShortcutDecisionSchema::default().deliverable_capacity,
                 |m| m.min(ShortcutDecisionSchema::default().deliverable_capacity),
@@ -3664,7 +3669,6 @@ fn preview_offer_with_points(
             ..Default::default()
         },
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -3672,8 +3676,7 @@ fn preview_offer_with_points(
     state
 }
 
-/// The slots the synthetic preview offers speak through — one source, the shape
-/// `certified_bounded_cycle_offer` publishes.
+/// The slots the synthetic preview offers speak through — one source.
 ///
 /// It takes BOTH axes because its callers use both: most pair it with successive CR 601.2c
 /// announcements on that one source (the INSTANCE axis), while others pair it with that
@@ -3881,17 +3884,17 @@ fn loop_shortcut_preview_is_absent_without_both_a_period_and_a_finite_count() {
         "an offer that states no per-period signature has nothing to multiply"
     );
 
-    // ── CR 704.5a: `UntilLethal` is the determinate-drain mode. It names no number, so
-    //    there is no declared count to state a finished magnitude for — even though the
-    //    period here IS measured, which is what keeps this arm distinct from the one above.
+    // ── A proposal without end names no number, so there is no declared count to state a
+    //    finished magnitude for — even though the period here IS measured, which is what keeps
+    //    this arm distinct from the one above.
     assert_eq!(
         shortcut_preview_of(&preview_offer(
-            IterationCount::UntilLethal,
+            IterationCount::WithoutEnd,
             Some(4),
             Some(preview_period_delta()),
         )),
         Vec::new(),
-        "`UntilLethal` states no finite count to multiply the period by"
+        "`WithoutEnd` states no finite count to multiply the period by"
     );
 
     // ── A period whose every family nets to zero (one W gained and one W spent) states
@@ -4147,7 +4150,7 @@ fn loop_shortcut_preview_never_routes_through_the_clone_apply_previewer() {
     );
     let response_attach = extract(
         answerer_scope,
-        "\n        Ok(_) => InteractionPreview {",
+        "\n        Ok(outcome) => InteractionPreview {",
         "\n        Err(_) =>",
     );
     assert!(
@@ -4156,9 +4159,9 @@ fn loop_shortcut_preview_never_routes_through_the_clone_apply_previewer() {
          else the ban is being applied to the wrong arm"
     );
     assert!(
-        response_attach.contains("state,"),
-        "constructibility, second half: the arm must actually USE that `&GameState` binding, so \
-         a clone is writable at the exact point the payload is minted"
+        response_attach.contains("filtered."),
+        "constructibility, second half: the arm must actually USE a `GameState` binding, so a \
+         clone is writable at the exact point the payload is minted"
     );
 
     // ── SPAN 4: the basis STRUCT and the domain STRUCT it folds in. A parameter list cannot
@@ -4375,7 +4378,6 @@ fn respond_window_on(
             shortened_by: None,
             published_declaration: None,
             leading_aims: Vec::new(),
-            road: engine::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         },
@@ -4463,12 +4465,17 @@ fn respond_period(
         delta.life.insert(*seat, *amount);
     }
     engine::analysis::resource::PeriodicDelta {
-        frames_per_period: 1,
         delta,
         declarable_victims: Vec::new(),
+        forced_aims: Vec::new(),
         victim_slot,
         seat_life_charge: Vec::new(),
         cleanup: None,
+        instructed_mills: None,
+        growth: Default::default(),
+        seat_life_charge_growth: Vec::new(),
+        seat_takes: Vec::new(),
+        zero_lifetimes: Vec::new(),
     }
 }
 
@@ -5266,7 +5273,7 @@ fn a_scheduled_step_carrying_a_next_episode_tail_still_states_this_drive() {
 /// `evaluate_schedule` resolves `Ranking::head` for a schedule of every kind and never advances
 /// past it, so no iteration announces a ranking's tail. The responder is shown one subject per
 /// step — what the drive performs — and that subject
-/// takes the whole of its step. CR 732.1b: an until-lethal proposal names no count to partition,
+/// takes the whole of its step. CR 732.1b: a proposal without end names no count to partition,
 /// so it states an ORDER and no magnitude.
 ///
 /// # Discrimination
@@ -5308,11 +5315,11 @@ fn a_multi_subject_schedule_states_the_head_its_drive_announces() {
         ))
     };
 
-    for count in [IterationCount::UntilLethal, IterationCount::Fixed(COUNT)] {
+    for count in [IterationCount::WithoutEnd, IterationCount::Fixed(COUNT)] {
         // A one-step schedule partitions the whole declared count, and nothing at all when the
         // proposal names no count.
         let partition = match &count {
-            IterationCount::UntilLethal | IterationCount::WithoutEnd => None,
+            IterationCount::WithoutEnd => None,
             IterationCount::Fixed(n) => Some(vec![*n]),
         };
         for ((shape, tailed), (_, single)) in shapes(&TAILED).into_iter().zip(shapes(&HEAD)) {
@@ -5413,7 +5420,7 @@ fn a_step_the_declared_count_never_reaches_is_not_stated() {
 /// **CR 732.1b — an order-only declaration publishes the ORDER its drive announces in, and no
 /// magnitude.**
 ///
-/// An until-lethal proposal names no count, so there is nothing for a partition to divide and a
+/// A proposal without end names no count, so there is nothing for a partition to divide and a
 /// magnitude stated there could only be invented. What it does state is the sequence of
 /// announcements the proposer described (CR 732.2a) — one subject per scheduled step, in their
 /// order — which is the object CR 732.2b gives the responder the right to shorten.
@@ -5427,7 +5434,7 @@ fn a_step_the_declared_count_never_reaches_is_not_stated() {
 ///
 /// # Discrimination
 ///
-/// Resolve `declared_count` to anything but `None` for an until-lethal proposal ⇒ the order-only
+/// Resolve `declared_count` to anything but `None` for a proposal without end ⇒ the order-only
 /// board states a partition and the `is_none` leg fails. Publish the steps in any other order, or
 /// only the first ⇒ the seat equality fails on both boards.
 #[test]
@@ -5469,7 +5476,7 @@ fn an_order_only_declaration_publishes_its_announcement_order_and_no_magnitude()
         segments_from(&STARTS, COUNT),
     );
 
-    let order_only = window(IterationCount::UntilLethal);
+    let order_only = window(IterationCount::WithoutEnd);
     let seats = announced_seats(&order_only);
     assert_eq!(
         seats,
@@ -5486,7 +5493,7 @@ fn an_order_only_declaration_publishes_its_announcement_order_and_no_magnitude()
     );
     assert!(
         order_only.declared.is_none(),
-        "CR 732.1b: an until-lethal proposal names no count, so there is no partition to state \
+        "CR 732.1b: a proposal without end names no count, so there is no partition to state \
          and any magnitude here would be invented. got {:?}",
         order_only.declared
     );
@@ -6223,7 +6230,7 @@ fn the_published_preview_always_states_the_count_window_endpoints() {
 /// REVERT-PROBES: drop the `counts.len() < MAX_SHORTCUT_PREVIEW_ELEMENTS` guard ⇒ the cap leg
 /// fails, the separating window then publishing 18; collapse the stride to 1 ⇒ the spread leg
 /// fails and NO other leg moves, because a stride of 1 fills the cap just as well; yield a
-/// non-empty sample for `UntilLethal` ⇒ the finite-count leg fails.
+/// non-empty sample for `WithoutEnd` ⇒ the finite-count leg fails.
 #[test]
 fn the_published_preview_thins_its_interior_and_stops_at_the_element_cap() {
     let offer = shortcut_offer_of(&separating_window());
@@ -6289,16 +6296,16 @@ fn the_published_preview_thins_its_interior_and_stops_at_the_element_cap() {
         );
     }
 
-    // ── HOSTILE: `UntilLethal` names no number, so the exhaustive match yields no sample and
+    // ── HOSTILE: `WithoutEnd` names no number, so the exhaustive match yields no sample and
     //    the producer publishes nothing — the offer's single finite-count gate.
     assert!(
         shortcut_preview_of(&preview_offer(
-            IterationCount::UntilLethal,
+            IterationCount::WithoutEnd,
             Some(999),
             Some(preview_period_delta()),
         ))
         .is_empty(),
-        "`UntilLethal` states no finite count, so no element is published"
+        "`WithoutEnd` states no finite count, so no element is published"
     );
 }
 
@@ -6947,9 +6954,10 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
         card_id: CardId(9001),
         trigger_description: None,
     };
-    // Six distinct choice points on ONE source. The parameter names WHICH CHOICE, which is
-    // this row's subject stated directly: before the typed point the six were told apart only
-    // by six ordinals, and the number carried the kind half.
+    // Five distinct choice points on ONE source. The parameter names WHICH CHOICE, which is
+    // this row's subject stated directly: before the typed point they were told apart only
+    // by ordinals, and the number carried the kind half. A `MayChoice` point states the
+    // confirmed period's answer, which a synthetic offer cannot carry.
     let slot = |point| DecisionSlot::first(source.clone(), point);
     runner.state_mut().waiting_for = WaitingFor::LoopShortcut {
         proposer: P0,
@@ -6969,7 +6977,7 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
             iteration_count: IterationCount::Fixed(2),
             // This producer measured no CR 704 threshold — `Default` carries the absence and
             // a capacity at the global cap.
-            measured_repetition_bound: None,
+            repetition_bound: engine::analysis::decision_template::RepetitionBound::Unmeasured,
             deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
             points: vec![
                 DecisionPoint {
@@ -6997,10 +7005,6 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
                     },
                 },
                 DecisionPoint {
-                    slot: slot(ChoicePoint::MayGate),
-                    kind: DecisionPointKind::MayChoice,
-                },
-                DecisionPoint {
                     slot: slot(ChoicePoint::UnlessBreak),
                     kind: DecisionPointKind::UnlessBreak,
                 },
@@ -7014,13 +7018,12 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
             convoke_tappable_count: 1,
         },
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
     bind(runner.state_mut(), "loop-point-kinds");
 
-    // ── R9 leg 6: six choice points on ONE source stay six, and the POINT is what says so.
+    // ── R9 leg 6: five choice points on ONE source stay five, and the POINT is what says so.
     //    Re-grounded from the ordinal: the slots must be pairwise distinct, each slot's
     //    `point` must be the one its own `kind` names, and every one of them is instance `0`
     //    — its original subject stated directly instead of through a number.
@@ -7030,14 +7033,14 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
     let published: Vec<&DecisionSlot> = schema.points.iter().map(|point| &point.slot).collect();
     assert_eq!(
         published.len(),
-        6,
-        "reach-guard: six points publish, so 'pairwise distinct' is a claim about six slots"
+        5,
+        "reach-guard: five points publish, so 'pairwise distinct' is a claim about five slots"
     );
     let distinct: std::collections::BTreeSet<&DecisionSlot> = published.iter().copied().collect();
     assert_eq!(
         distinct.len(),
         published.len(),
-        "six choice points on one source are six distinct slots: {published:?}"
+        "five choice points on one source are five distinct slots: {published:?}"
     );
     for point in &schema.points {
         assert_eq!(
@@ -7068,7 +7071,6 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
             InteractionShortcutPointKind::Targets,
             InteractionShortcutPointKind::ConvokeTaps,
             InteractionShortcutPointKind::Mode,
-            InteractionShortcutPointKind::MayChoice,
             InteractionShortcutPointKind::UnlessBreak,
             InteractionShortcutPointKind::ManaColor,
         ]
@@ -7078,10 +7080,10 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
         (1, 2, true)
     );
     assert!(points[1].read_only);
-    assert!(points[5].read_only);
-    assert_eq!(candidates.len(), 10);
+    assert!(points[4].read_only);
+    assert_eq!(candidates.len(), 8);
 
-    let selected_pins = [0usize, 2, 3, 4]
+    let selected_pins = [0usize, 2, 3]
         .into_iter()
         .map(|group| InteractionShortcutPin {
             group: group as u32,
@@ -7130,7 +7132,7 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
 /// CR 601.2c: one shape per point kind, whoever submitted it. `materialize_loop_shortcut_response`
 /// decodes a submitted player candidate on a `Targets` point into
 /// `Scheduled(Constant(Ranking::one(AnnouncementSubject::Seat(..))))` — the same value
-/// `game::engine::record_trigger_target_answer` journals for an announced seat — and an OBJECT
+/// `game::engine::announced_target_pins` emits for an announced seat — and an OBJECT
 /// candidate on the SAME point into `TargetPin::ByIdentity`, unchanged.
 ///
 /// # Discrimination
@@ -7206,7 +7208,7 @@ fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_s
             suggested_declaration: None,
             leading_aims: Vec::new(),
             iteration_count: IterationCount::Fixed(2),
-            measured_repetition_bound: None,
+            repetition_bound: engine::analysis::decision_template::RepetitionBound::Unmeasured,
             deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
             points: vec![DecisionPoint {
                 slot: slot.clone(),
@@ -7221,7 +7223,6 @@ fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_s
             convoke_tappable_count: 0,
         },
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -8469,7 +8470,7 @@ fn activate_mana_source_labels_fixed_and_flexible_sacrificial_sources() {
 
 // ═════════════════════════════════════════════════════════════════════════════════════════
 // PHASE 4 — the SEQUENCED-pin ingress: the A3 coherence relation, the hostile allocations,
-// the until-lethal withdrawal, the wire charge, serde additivity, and the progress window.
+// the count-free withdrawal, the wire charge, serde additivity, and the progress window.
 // ═════════════════════════════════════════════════════════════════════════════════════════
 
 /// CR 732.2a: which [`ChoicePoint`] a PUBLISHED point's own kind names. Written here rather
@@ -8483,6 +8484,7 @@ fn point_of_published_kind(kind: &DecisionPointKind) -> ChoicePoint {
         DecisionPointKind::Mode { .. } => ChoicePoint::Mode,
         DecisionPointKind::UnlessBreak => ChoicePoint::UnlessBreak,
         DecisionPointKind::ManaColor { .. } => ChoicePoint::ManaColor,
+        DecisionPointKind::Order { .. } => ChoicePoint::ReplacementOrder,
     }
 }
 
@@ -8541,9 +8543,11 @@ fn stage_sequenced_offer(
             suggested_declaration: None,
             leading_aims: Vec::new(),
             iteration_count,
-            // The pair a producer publishes: `None` is an offer that measured nothing, which is
-            // what keeps `handle_declare_shortcut`'s `UntilLethal` arm reachable below.
-            measured_repetition_bound: measured,
+            // The pair a producer publishes: `None` is an offer that measured nothing.
+            repetition_bound: measured.map_or(
+                engine::analysis::decision_template::RepetitionBound::Unmeasured,
+                |_| engine::analysis::decision_template::RepetitionBound::Measured,
+            ),
             deliverable_capacity: measured.map_or(
                 ShortcutDecisionSchema::default().deliverable_capacity,
                 |m| m.min(ShortcutDecisionSchema::default().deliverable_capacity),
@@ -8557,7 +8561,6 @@ fn stage_sequenced_offer(
             convoke_tappable_count: 0,
         },
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -8649,22 +8652,30 @@ fn p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape()
         AnnouncementSubject, PinnedDecision, Ranking, TargetPin, TargetSchedule,
     };
 
-    // ── A `Fixed` offer publishing a single-position Targets point AND a MayChoice point ──
+    // ── A `Fixed` offer publishing a single-position Targets point AND an UnlessBreak point ──
     let (runner, slots) = stage_sequenced_offer(
         "p4-coherence-fixed",
         IterationCount::Fixed(6),
         Some(6),
-        vec![victims_point(1, 1), DecisionPointKind::MayChoice],
+        vec![victims_point(1, 1), DecisionPointKind::UnlessBreak],
     );
     let view = priority_view(runner.state());
     let points = shortcut_points(&view);
     assert_eq!(
-        (points.len(), points[0].max, points[0].candidate_ids.len()),
-        (2, 1, 3),
+        (
+            points.len(),
+            points[0].max,
+            points[0].candidate_ids.len(),
+            points[1].kind,
+            points[1].candidate_ids.len(),
+            points[1].read_only
+        ),
+        (2, 1, 3, InteractionShortcutPointKind::UnlessBreak, 2, false),
         "reach-guard: a single-position Targets point over three candidates, beside a \
-         non-Targets point — the two shapes every leg below distinguishes"
+         non-Targets point publishing its two candidates — the two shapes every leg below \
+         distinguishes"
     );
-    let may_pin = InteractionShortcutPin {
+    let unless_pin = InteractionShortcutPin {
         group: points[1].group,
         choice_ids: vec![points[1].candidate_ids[0].clone()],
         amounts: Vec::new(),
@@ -8682,7 +8693,7 @@ fn p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape()
                 choice_ids: vec![points[0].candidate_ids[0].clone()],
                 amounts: Vec::new(),
             },
-            may_pin.clone(),
+            unless_pin.clone(),
         ],
     )
     .expect("a flat in-window pin with empty amounts still decodes");
@@ -8712,7 +8723,7 @@ fn p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape()
             runner.state(),
             &view,
             fixed,
-            vec![conforming.clone(), may_pin.clone()]
+            vec![conforming.clone(), unless_pin.clone()]
         )
         .is_ok(),
         "paired positive: the conforming allocation is ACCEPTED, so every refusal below is \
@@ -8720,8 +8731,8 @@ fn p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape()
     );
 
     // 1 — `amounts` non-empty on a point whose kind is not `Targets` ⇒ the sequenced gate.
-    let mut amounts_on_may = may_pin.clone();
-    amounts_on_may.amounts = vec![AmountAssignment {
+    let mut amounts_on_unless = unless_pin.clone();
+    amounts_on_unless.amounts = vec![AmountAssignment {
         choice_id: points[1].candidate_ids[0].clone(),
         amount: 6,
     }];
@@ -8736,7 +8747,7 @@ fn p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape()
                     choice_ids: vec![points[0].candidate_ids[0].clone()],
                     amounts: Vec::new(),
                 },
-                amounts_on_may
+                amounts_on_unless
             ]
         )
         .is_err(),
@@ -8752,7 +8763,7 @@ fn p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape()
             runner.state(),
             &view,
             fixed,
-            vec![short_amounts, may_pin.clone()]
+            vec![short_amounts, unless_pin.clone()]
         )
         .is_err(),
         "one amount per announced subject, positionally"
@@ -8767,7 +8778,7 @@ fn p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape()
             runner.state(),
             &view,
             fixed,
-            vec![transposed, may_pin.clone()]
+            vec![transposed, unless_pin.clone()]
         )
         .is_err(),
         "the positional compare: an allocation whose amounts are attached to the wrong \
@@ -8785,7 +8796,7 @@ fn p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape()
             runner.state(),
             &view,
             fixed,
-            vec![amount_free, may_pin.clone()]
+            vec![amount_free, unless_pin.clone()]
         )
         .is_err(),
         "an amount-free sequence cannot partition a declared count"
@@ -8933,17 +8944,17 @@ fn p4_row_4_hostile_allocations_are_refused_each_at_its_own_guard() {
     );
 }
 
-/// **Row (5) — the human ingress no longer mints a sequenced until-lethal pin, and the FIXED
-/// one still does.**
+/// **Row (5) — the human ingress mints no sequenced pin without end, and the FIXED one still
+/// does.**
 ///
-/// CR 732.2c: an accepted proposal's choices are all taken, so an until-lethal declaration may
+/// CR 732.2c: an accepted proposal's choices are all taken, so a declaration without end may
 /// announce only the ONE subject its drive resolves at every repetition. Under a FIXED count the
 /// extra ids are a partition across ITERATIONS and every one of them becomes its own segment's
 /// head, so that mode is untouched.
 ///
 /// # Discrimination
 ///
-/// Restore the until-lethal sequenced route ⇒ the first leg accepts. Refuse EVERY until-lethal
+/// Admit a sequenced pin without end ⇒ the first leg accepts. Refuse EVERY count-free
 /// `Targets` submission rather than only the sequenced one — the shape a guard written on the
 /// count alone would have — ⇒ the second leg fails. Refuse every sequenced pin ⇒ the FIXED legs
 /// fail. The guard's other two conjuncts (the point's KIND, and its published `max`) keep their
@@ -8951,14 +8962,14 @@ fn p4_row_4_hostile_allocations_are_refused_each_at_its_own_guard() {
 /// `p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape`, so a rewrite
 /// dropping either while adding the count one passes every leg here and fails that row.
 #[test]
-fn p4_row_5_an_until_lethal_declaration_announces_the_one_subject_its_drive_resolves() {
+fn p4_row_5_a_declaration_without_end_announces_the_one_subject_its_drive_resolves() {
     use engine::analysis::decision_template::{
         AnnouncementSubject, PinnedDecision, Ranking, TargetPin, TargetSchedule,
     };
 
     let (runner, slots) = stage_sequenced_offer(
         "p4-announce-one",
-        IterationCount::UntilLethal,
+        IterationCount::WithoutEnd,
         Some(6),
         vec![victims_point(1, 1)],
     );
@@ -8971,7 +8982,7 @@ fn p4_row_5_an_until_lethal_declaration_announces_the_one_subject_its_drive_reso
          the published max and a one-id submission can name a candidate other than the head"
     );
 
-    // ── REFUSE: more ids than the point's published `max`, on an until-lethal offer. ──
+    // ── REFUSE: more ids than the point's published `max`, on an offer without end. ──
     let over_max = submit_pins(
         runner.state(),
         &view,
@@ -9001,7 +9012,7 @@ fn p4_row_5_an_until_lethal_declaration_announces_the_one_subject_its_drive_reso
             amounts: Vec::new(),
         }],
     )
-    .expect("a one-subject until-lethal declaration is accepted to the end of the human ingress");
+    .expect("a one-subject declaration without end is accepted to the end of the human ingress");
     let GameAction::DeclareShortcut {
         template: Some(template),
         count,
@@ -9009,7 +9020,7 @@ fn p4_row_5_an_until_lethal_declaration_announces_the_one_subject_its_drive_reso
     else {
         panic!("a shortcut acceptance carrying pins materializes a template");
     };
-    assert_eq!(count, IterationCount::UntilLethal);
+    assert_eq!(count, IterationCount::WithoutEnd);
     assert_eq!(
         template.decisions,
         vec![PinnedDecision::Targets {
@@ -9471,27 +9482,27 @@ fn untargeted_offer_board() -> (GameState, PlayerId) {
 ///
 /// # The two legs, in ONE invocation
 ///
-/// The ALLOCATED class publishes a charged victim slot, so a witness declaration can re-aim it
-/// after the first crossing and exhibit a longer cascade than the offer's own declaration drives —
-/// the pair DIFFERS. The UNTARGETED class publishes no charged slot, so there is no aim to move and
+/// On the F4 board with one card left at the offer (CR 121.1 + CR 704.5b), the second repetition
+/// draws from an empty library: declaring it is legal, but its proposer leaves in it, so the
+/// ceiling is 2 and the suggestion — the most repetitions the proposer survives — is 1, and the
+/// pair DIFFERS. The UNTARGETED class's proposer survives every repetition its ceiling admits, so
 /// the two COINCIDE. Both are asserted, so neither leg is satisfied by a difference that exists
 /// everywhere or by an equality that does.
 ///
 /// # Reach guards, asserted before the claim
 ///
-/// Both legs assert the spec is the `Fixed` variant and that `max` is strictly positive, so an
-/// `UntilLethal` projection or a zeroed authority fails rather than passing by absence; and
+/// Both legs assert the spec is the `Fixed` variant and that `max` is strictly positive, so a
+/// `WithoutEnd` projection or a zeroed authority fails rather than passing by absence; and
 /// `suggested` is asserted inside `[min, max]`, which is the window the picker renders.
 ///
 /// # Discrimination
 ///
 /// Have the producer set both fields from one integer — which is what it did before this phase —
-/// and the allocated leg's strict inequality FAILS while the untargeted leg stays green. Publish
-/// the witness count as the suggestion too and the untargeted leg still passes while the allocated
-/// leg's `suggested < max` becomes an equality and fails.
+/// and the one-card leg's strict inequality FAILS while the untargeted leg stays green.
 #[test]
 fn the_count_pickers_ceiling_and_suggestion_are_two_numbers() {
-    let (allocated, allocated_proposer) = f4_offer_board();
+    let mut one_card = crate::fantastic_four_bounded_loop::f4_library_at_offer(1);
+    bind(&mut one_card, "interaction-contract-one-card-count-pair");
     let (untargeted, untargeted_proposer) = untargeted_offer_board();
 
     let pair = |state: &GameState, proposer: PlayerId, label: &str| -> (u32, u32, u32) {
@@ -9519,15 +9530,15 @@ fn the_count_pickers_ceiling_and_suggestion_are_two_numbers() {
         (min, suggested, max)
     };
 
-    // ── THE DIFFER LEG — the allocated class, whose charged slot a witness can re-aim.
-    let (_, allocated_suggested, allocated_max) =
-        pair(&allocated, allocated_proposer, "allocated class");
-    assert!(
-        allocated_suggested < allocated_max,
+    // ── THE DIFFER LEG — the proposer leaves in the last repetition the ceiling admits.
+    let (_, one_card_suggested, one_card_max) =
+        pair(&one_card, PlayerId(0), "one card at the offer");
+    assert_eq!(
+        (one_card_suggested, one_card_max),
+        (1, 2),
         "CR 732.2a: the ceiling is what SOME legal declaration may specify and the suggestion is \
-         what the offer's OWN declaration drives, so on a board where re-aiming the charged slot \
-         reaches a later crossing the two are different numbers; got suggested \
-         {allocated_suggested} vs max {allocated_max}"
+         the most repetitions the proposer survives, so with one card left they are different \
+         numbers"
     );
 
     // ── THE EQUAL LEG, in this same invocation — the untargeted class has no aim to move.
@@ -9696,6 +9707,58 @@ fn every_published_shortcut_element_round_trips_byte_equal() {
              producer, so they cannot disagree at any published count"
         );
     }
+}
+
+/// An authored split the offer never performed is previewed from the offer's measured
+/// evidence alone, so the preview performs no repetition; submitting the same declaration performs
+/// it.
+#[test]
+fn previewing_an_unperformed_split_performs_no_repetition() {
+    use engine::game::perf_counters::play_trace_counters;
+
+    let (state, proposer) = f4_offer_board();
+    let view = viewer_interaction(&state, proposer);
+    let interaction_id = view.opportunities[0].interaction_id.clone();
+    let points = shortcut_points(&view);
+    let own = crate::fantastic_four_bounded_loop::published_declaration_count(&state);
+    let request = f4_request(
+        &interaction_id,
+        own,
+        f4_pins(&points, &[(0, own - 2), (1, 2)]),
+    );
+
+    let before = play_trace_counters();
+    let preview = preview_interaction(&state, proposer, &request);
+    let previewed = play_trace_counters().since(before);
+    assert_eq!(preview.status, InteractionPreviewStatus::Confirmable);
+    assert_eq!(
+        previewed.probe_entries, 0,
+        "the preview performs no repetition of a declaration the offer never recorded"
+    );
+    let before = play_trace_counters();
+    let rejecting = preview_interaction_with_rejection(&state, proposer, &request);
+    let previewed = play_trace_counters().since(before);
+    assert_eq!(
+        rejecting.map(|preview| preview.status),
+        Ok(InteractionPreviewStatus::Confirmable)
+    );
+    assert_eq!(previewed.probe_entries, 0, "the rejecting preview too");
+
+    let before = play_trace_counters();
+    let submitted = resolve_interaction_response(
+        &state,
+        proposer,
+        &InteractionSubmission {
+            interaction_id,
+            response: request.response,
+        },
+    );
+    let performed = play_trace_counters().since(before);
+    assert!(submitted.is_ok(), "{submitted:?}");
+    assert!(
+        performed.probe_entries > 0,
+        "reach: the submission performs the same declaration"
+    );
 }
 
 /// **Row 2** — an AUTHORED, non-canonical distribution is previewed per DECLARED seat, and the
@@ -10072,14 +10135,12 @@ fn f4_announced_slot(state: &GameState) -> (DecisionSlot, Vec<PlayerId>) {
 ///   this leg is `Err` while leg 1 passes, which is the divergence itself;
 /// * leg 3 — mint anything but `canonical_allocation` over the domain's ids and the equality
 ///   against the offer's own published element fails;
-/// * leg 4 — drop the `min == 1` conjunct and an element appears where an empty announcement is
-///   already the declaration;
+/// * leg 4 — drop the `min == 1` conjunct and the empty announcement is completed, so the preview
+///   states the canonical split's element;
 /// * leg 5 — drop the sole-point conjunct and the answered-second member turns `Confirmable` and
 ///   submits, while the both-empty member stays refused either way.
 #[test]
 fn a_nothing_naming_pin_is_completed_with_the_offers_canonical_split() {
-    use engine::analysis::decision_template::PinnedDecision;
-
     let (state, proposer) = f4_offer_board();
     let view = viewer_interaction(&state, proposer);
     let interaction_id = view.opportunities[0].interaction_id.clone();
@@ -10273,50 +10334,36 @@ fn a_nothing_naming_pin_is_completed_with_the_offers_canonical_split() {
         unsampled,
         optional_pins.clone(),
     );
+    // The offer never performed this declaration, so the preview, reading measured evidence
+    // only, cannot refuse it.
     assert_eq!(
         optional_preview.status,
-        InteractionPreviewStatus::Confirmable,
-        "an OPTIONAL announced point's empty pin is a legal answer, exactly as it is today"
+        InteractionPreviewStatus::Confirmable
     );
     assert!(
         optional_preview.shortcut_preview.is_none(),
         "CR 601.2c: at `min == 0` the empty pin already MEANS 'announce no target here', so \
          completing it would replace one stated declaration with a different one"
     );
+    // CR 601.2c + CR 603.3d: the commit performs the empty announcement against Human Torch's
+    // printed "target opponent", which admits none while an opponent is a legal target.
     let mut optional_submitted = optional_state.clone();
-    let optional_applied = submit_interaction(
-        &mut optional_submitted,
-        optional_proposer,
-        InteractionSubmission {
-            interaction_id: optional_id,
-            response: InteractionResponse::Shortcut {
-                decision: InteractionShortcutDecision::Fixed {
-                    iterations: unsampled,
-                },
-                pins: optional_pins,
-            },
-        },
-    )
-    .expect("the optional announcement submits, as it does today");
-    let GameAction::DeclareShortcut {
-        template: Some(optional_template),
-        ..
-    } = &optional_applied.action
-    else {
-        panic!(
-            "a declared shortcut submits a template, got {:?}",
-            optional_applied.action
-        );
-    };
     assert!(
-        optional_template
-            .decisions
-            .contains(&PinnedDecision::Targets {
-                slot: f4_announced_slot(&optional_state).0,
-                targets: Vec::new(),
-            }),
-        "the EMPTY announcement is what submits; got {:?}",
-        optional_template.decisions
+        submit_interaction(
+            &mut optional_submitted,
+            optional_proposer,
+            InteractionSubmission {
+                interaction_id: optional_id,
+                response: InteractionResponse::Shortcut {
+                    decision: InteractionShortcutDecision::Fixed {
+                        iterations: unsampled,
+                    },
+                    pins: optional_pins,
+                },
+            },
+        )
+        .is_err(),
+        "an OPTIONAL announced point's empty pin is judged as the empty announcement it states"
     );
 
     // ── LEG 5: a SECOND announced-target point leaves the offer's one published split an
@@ -10403,7 +10450,7 @@ fn a_nothing_naming_pin_is_completed_with_the_offers_canonical_split() {
         );
     }
 
-    // ── HOSTILE SIBLINGS, all three at the SAME unsampled count leg 1 completes.
+    // ── HOSTILE SIBLINGS.
     // A pin naming ONE choice id with empty amounts states WHO without partitioning anything —
     // still confirmable, and still carrying no element, because the completion fires only on a
     // pin naming nothing.
@@ -10427,27 +10474,6 @@ fn a_nothing_naming_pin_is_completed_with_the_offers_canonical_split() {
         unpartitioned.shortcut_preview.is_none(),
         "CR 732.2a: a pin NAMING a subject states no split, so the completion leaves it alone"
     );
-    // Dropping another point's pin entirely: the completion substitutes the announced group and
-    // nothing else, so a declaration another point leaves unanswered stays refused.
-    let missing_other = nothing_named
-        .iter()
-        .filter(|pin| pin.group == point.group)
-        .cloned()
-        .collect::<Vec<_>>();
-    assert!(
-        missing_other.len() < nothing_named.len(),
-        "reach-guard: the offer must publish a second answerable point for this sibling to drop"
-    );
-    let incomplete = f4_preview(&state, proposer, &interaction_id, unsampled, missing_other);
-    assert_eq!(
-        incomplete.status,
-        InteractionPreviewStatus::Rejected {
-            reason: InteractionReasonCode::ConstraintUnsatisfied
-        },
-        "the completion is group-local: it cannot carry a declaration another point leaves \
-         unanswered"
-    );
-    assert!(incomplete.shortcut_preview.is_none());
     // The window is `materialize_loop_shortcut_response`'s single authority, and the completion
     // does not restate it: an out-of-window count is refused after the substitution as before it.
     let out_of_window = f4_preview(&state, proposer, &interaction_id, max + 1, nothing_named);
@@ -10900,11 +10926,6 @@ fn targets_template(
 ///
 /// Each call stages its OWN offer: a declaration consumes it, so one runner cannot serve a
 /// second leg.
-///
-/// ⚠ the measured threshold is a parameter and not a constant because
-/// `handle_declare_shortcut` refuses `UntilLethal` outright on an offer whose producer MEASURED
-/// one, before any pin is read. An until-lethal leg staged that way lands on `Priority` for a
-/// reason with nothing to do with the pin, and every leg then agrees.
 fn declare_targets_verdict(
     label: &str,
     count: IterationCount,
@@ -10955,12 +10976,11 @@ fn accepted(verdict: &WaitingFor) -> bool {
 /// subject.
 #[test]
 fn p10_row_1_a_declaration_naming_an_unread_announcement_is_refused_at_the_declare_ingress() {
-    // An offer whose producer measured nothing: the shape the `UntilLethal` legs below need.
     let unbounded: Option<u32> = None;
 
     let hostile = declare_targets_verdict(
         "p10-row1-hostile",
-        IterationCount::UntilLethal,
+        IterationCount::WithoutEnd,
         unbounded,
         (1, 1),
         vec![constant_of(&[P1, P0])],
@@ -10972,7 +10992,7 @@ fn p10_row_1_a_declaration_naming_an_unread_announcement_is_refused_at_the_decla
 
     let head_only = declare_targets_verdict(
         "p10-row1-positive",
-        IterationCount::UntilLethal,
+        IterationCount::WithoutEnd,
         unbounded,
         (1, 1),
         vec![constant_of(&[P1])],
@@ -10986,7 +11006,7 @@ fn p10_row_1_a_declaration_naming_an_unread_announcement_is_refused_at_the_decla
 
     let unpublished_head = declare_targets_verdict(
         "p10-row1-control",
-        IterationCount::UntilLethal,
+        IterationCount::WithoutEnd,
         unbounded,
         (1, 1),
         vec![constant_of(&[P0])],
@@ -11209,7 +11229,6 @@ fn p10_row_7_a_restored_multi_entry_ranking_still_loads_and_still_drives_head_on
             shortened_by: None,
             published_declaration: None,
             leading_aims: Vec::new(),
-            road: engine::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         },

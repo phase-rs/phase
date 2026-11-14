@@ -3719,16 +3719,39 @@ pub fn trigger_definition_functions_in_zone(def: &TriggerDefinition, zone: Zone)
     }
 }
 
+/// CR 701.17a + CR 119.3: the life a per-card mill observer gains its controller each time it
+/// fires, when that fixed gain is the only thing its resolution can do.
+pub(crate) fn milled_observer_life_gain(def: &TriggerDefinition) -> Option<i64> {
+    let execute = def.execute.as_deref()?;
+    let Effect::GainLife {
+        amount: QuantityExpr::Fixed { value },
+        player: TargetFilter::Controller,
+    } = *execute.effect
+    else {
+        return None;
+    };
+    let mut bare = AbilityDefinition::new(execute.kind, (*execute.effect).clone());
+    bare.description = execute.description.clone();
+    (def.mode == TriggerMode::Milled
+        && !def.batched
+        && !def.optional
+        && def.unless_pay.is_none()
+        && value > 0
+        && bare == *execute)
+        .then_some(i64::from(value))
+}
+
 /// CR 701.17a: a mill puts a card from the top of a library into a graveyard; CR 614.6
 /// lets a replacement send it elsewhere instead, so the shapes a certified id can have
 /// taken are its own landing zone and the graveyard — and only a matcher that excludes
-/// ALL of them provably cannot fire on one. Returns `true` iff so.
+/// ALL of them provably cannot fire on one. Returns `true` iff so, or for a relieved mill
+/// observer ([`milled_observer_life_gain`]).
 ///
 /// Fail-closed: every axis this predicate cannot classify keeps the caller's conservative veto.
 ///
 /// It takes neither a `&GameState` nor a class member, because its proof is
 /// zone/event-key disjointness against sets its caller supplies. Its one consult sits inside
-/// `certify_instructed_opponent_library_departure`, which runs on both projected and
+/// `certify_instructed_library_departure`, which runs on both projected and
 /// unprojected frames, so binding this proof to a frame would make its verdict depend on which
 /// caller asked.
 ///
@@ -3757,13 +3780,15 @@ pub(crate) fn departure_observer_provably_excludes(
     class_event_keys: &[crate::types::triggers::TriggerEventKey],
 ) -> bool {
     match def.mode {
-        // CR 701.17a: these fire on the mill by definition. This arm is UNCONDITIONAL and
-        // runs FIRST, which is why the caller carries no separate
+        // CR 701.17a: these fire on the mill by definition. This arm runs FIRST, which is
+        // why the caller carries no separate
         // `TriggerEventKey::Milled` conjunct: `trigger_index::keys_from_trigger_def`
         // sources that key from exactly these three modes, so no definition carrying it
         // reaches the delegation arm at all — and the verdict here is invariant under
-        // which EVENT ends up carrying the mill key.
-        TriggerMode::Milled | TriggerMode::MilledOnce | TriggerMode::MilledAll => false,
+        // which EVENT ends up carrying the mill key. A relieved observer passes here, and the
+        // caller checks that nothing reads the life it writes.
+        TriggerMode::Milled => milled_observer_life_gain(def).is_some(),
+        TriggerMode::MilledOnce | TriggerMode::MilledAll => false,
         TriggerMode::ChangesZone | TriggerMode::ChangesZoneAll => {
             // Fail closed on the fields that make an `origin`/`destination`-based proof
             // invalid: a disjunctive clause list, a non-empty `origin_zones` (when it is
@@ -6346,7 +6371,7 @@ fn collect_pending_triggers_with_collection(
         // on this path, and when it is non-empty it names unrelated permanents
         // that died in the same pass. Only the recorded attachment identifies
         // the observer as having been attached to THIS losing player.
-        if let GameEvent::PlayerLost { player_id } = event {
+        if let GameEvent::PlayerLost { player_id, .. } = event {
             for observer_event in events {
                 let GameEvent::ZoneChanged {
                     object_id: observer_id,
@@ -8287,8 +8312,11 @@ fn group_is_order_independent(state: &GameState, group: &[PendingTriggerContext]
 
     // C2 (fail-closed AST walker): two distinct soundness axes (event context,
     // sibling-mutable) — consumed ONLY by the gated-C2 distinct-event term.
-    let c2_order_independent = !crate::game::ability_scan::ability_uses_event_context(&reference)
-        && !crate::game::ability_scan::ability_reads_sibling_mutable(&reference);
+    let c2_order_independent =
+        !crate::game::ability_scan::ability_uses_event_context(
+            &reference,
+            crate::game::ability_scan::ScanMode::Conservative,
+        ) && !crate::game::ability_scan::ability_reads_sibling_mutable(&reference);
     rest.iter().all(|ctx| {
         let t = &ctx.pending;
         ctx.firing().is_delayed() == first.firing().is_delayed()
@@ -8641,11 +8669,12 @@ thread_local! {
 }
 
 /// Whether an every-order replay is running, so no saved order applies or is saved.
-fn saved_orders_bypassed() -> bool {
+pub(crate) fn saved_orders_bypassed() -> bool {
     SAVED_ORDERS_BYPASSED.with(std::cell::Cell::get)
 }
 
-/// CR 603.3b: while held, every ordering point is asked rather than answered by a saved order.
+/// CR 603.3b + CR 616.1: while held, every trigger or replacement ordering point is asked rather
+/// than answered by a saved order.
 #[must_use]
 pub(crate) struct SavedOrdersBypass(bool);
 
@@ -16821,7 +16850,7 @@ fn check_trigger_constraint_with_ref(
         // test would over-fire. Same authority as
         // `ParsedCondition::IsOpponentsTurn`.
         TriggerConstraint::OnlyDuringOpponentsTurn => {
-            super::players::is_opponent(state, controller, state.active_player)
+            super::players::is_opponents_turn(state, controller)
         }
         TriggerConstraint::OncePerOpponentPerTurn => {
             // CR 603.2: The trigger event only matches the first life-loss event
@@ -18018,7 +18047,7 @@ fn evaluate_trigger_condition_with_source(
             // shared team turns, a teammate holding `active_player` remains on
             // the controller's active team and is not an opponent.
             PlayerFilter::Opponent => {
-                super::players::is_opponent(state, controller, state.active_player)
+                super::players::is_opponents_turn(state, controller)
             }
             // CR 603.4 + CR 102.1: "that player's turn" — the player named by
             // the trigger event (drawer / tapper / damaged player / etc.) is
@@ -30047,7 +30076,12 @@ pub mod tests {
             None,
             "a group the payload declares itself is not the carried player"
         );
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(1),
+            crate::types::events::LossReason::Conceded,
+            &mut Vec::new(),
+        );
         assert_eq!(
             delayed_intervening_if(&state, &payload(Some(PlayerId(1)), false)),
             unbound,
@@ -46469,7 +46503,7 @@ pub mod tests {
             amount: 1,
             new_total: crate::types::events::LifeTotalReading::default(),
         });
-        for mode in [LoopDetectionMode::Off, LoopDetectionMode::On] {
+        for mode in [LoopDetectionMode::Off, LoopDetectionMode::Interactive] {
             for ability in [pr625_sound_ability(), pr625_sibling_mutable_ability()] {
                 let mut state = setup();
                 state.loop_detection = mode;
@@ -46552,7 +46586,7 @@ pub mod tests {
 
         // ON arm — must auto-resolve.
         let mut on = setup();
-        on.loop_detection = LoopDetectionMode::On;
+        on.loop_detection = LoopDetectionMode::Interactive;
         let on_group = vec![
             pr625_no_input_trigger(
                 &mut on,
@@ -46740,7 +46774,7 @@ pub mod tests {
             new_total: crate::types::events::LifeTotalReading::default(),
         });
         let mut on = setup();
-        on.loop_detection = LoopDetectionMode::On;
+        on.loop_detection = LoopDetectionMode::Interactive;
         let group = vec![
             pr625_no_input_trigger(
                 &mut on,
@@ -48385,7 +48419,7 @@ pub mod tests {
         assert!(
             result.events.iter().any(|event| matches!(
                 event,
-                GameEvent::PlayerLost { player_id } if *player_id == OWNER
+                GameEvent::PlayerLost { player_id, .. } if *player_id == OWNER
             )),
             "reach-guard: OWNER loses to the state-based action"
         );
@@ -56879,5 +56913,116 @@ mod object_sweep_sharing_tests {
             clear_post_collection_transients,
             reference_clear_post_collection_transients,
         );
+    }
+}
+
+#[cfg(test)]
+mod milled_observer_life_gain_tests {
+    use super::*;
+    use crate::types::ability::UnlessPayModifier;
+
+    /// The `Milled` trigger of a printed creature card, from its verbatim Oracle text.
+    fn milled_trigger(name: &str, oracle: &str) -> TriggerDefinition {
+        crate::parser::parse_oracle_text(oracle, name, &[], &["Creature".to_string()], &[])
+            .triggers
+            .into_iter()
+            .find(|def| def.mode == TriggerMode::Milled)
+            .expect("the card has a mill trigger")
+    }
+
+    fn glowing_one() -> TriggerDefinition {
+        milled_trigger(
+            "Glowing One",
+            "Deathtouch\nWhenever this creature deals combat damage to a player, they get four \
+             rad counters.\nWhenever a player mills a nonland card, you gain 1 life.",
+        )
+    }
+
+    fn zellix_execute() -> AbilityDefinition {
+        *milled_trigger(
+            "Zellix, Sanity Flayer",
+            "Hive Mind — Whenever a player mills one or more creature cards, you create a 1/1 \
+             black Horror creature token.\n{1}, {T}: Target player mills three cards.\nChoose a \
+             Background (You can have a Background as a second commander.)",
+        )
+        .execute
+        .expect("Zellix's mill trigger creates a token")
+    }
+
+    /// Glowing One with one field changed by `edit`.
+    fn edited(edit: impl FnOnce(&mut TriggerDefinition)) -> Option<i64> {
+        let mut def = glowing_one();
+        edit(&mut def);
+        milled_observer_life_gain(&def)
+    }
+
+    fn edited_gain(amount: QuantityExpr, player: TargetFilter) -> Option<i64> {
+        edited(|def| {
+            *def.execute.as_mut().expect("Glowing One gains life").effect =
+                Effect::GainLife { amount, player };
+        })
+    }
+
+    /// CR 701.17a + CR 119.3: Glowing One's mill trigger gains its controller a fixed 1 life and
+    /// does nothing else; each single field that lets the resolution do more, or less, refuses.
+    #[test]
+    fn only_a_bare_fixed_controller_life_gain_per_card_is_relieved() {
+        assert_eq!(milled_observer_life_gain(&glowing_one()), Some(1));
+        let refused = [
+            ("batched", edited(|def| def.batched = true)),
+            ("optional", edited(|def| def.optional = true)),
+            (
+                "unless_pay",
+                edited(|def| {
+                    def.unless_pay = Some(UnlessPayModifier {
+                        cost: AbilityCost::Tap,
+                        payer: TargetFilter::Controller,
+                    })
+                }),
+            ),
+            (
+                "MilledOnce",
+                edited(|def| def.mode = TriggerMode::MilledOnce),
+            ),
+            (
+                "execute.optional",
+                edited(|def| def.execute.as_mut().expect("execute").optional = true),
+            ),
+            (
+                "execute.sub_ability",
+                edited(|def| {
+                    def.execute.as_mut().expect("execute").sub_ability =
+                        Some(Box::new(zellix_execute()))
+                }),
+            ),
+            (
+                "execute.effect",
+                edited(|def| {
+                    def.execute.as_mut().expect("execute").effect = zellix_execute().effect
+                }),
+            ),
+            (
+                "player",
+                edited_gain(QuantityExpr::Fixed { value: 1 }, TargetFilter::Opponent),
+            ),
+            (
+                "amount",
+                edited_gain(
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                    TargetFilter::Controller,
+                ),
+            ),
+            (
+                "zero",
+                edited_gain(QuantityExpr::Fixed { value: 0 }, TargetFilter::Controller),
+            ),
+        ];
+        for (field, verdict) in refused {
+            assert_eq!(verdict, None, "{field}");
+        }
     }
 }

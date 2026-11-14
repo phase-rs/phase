@@ -106,14 +106,35 @@ mod tests {
         // An opted-in config round-trips and DOES emit the key.
         let on = MatchConfig {
             match_type: MatchType::Bo1,
-            loop_detection: LoopDetectionMode::On,
+            loop_detection: LoopDetectionMode::Interactive,
         };
-        let on_json = serde_json::to_value(on).expect("serialize On");
+        let on_json = serde_json::to_value(on).expect("serialize Interactive");
         assert!(
             on_json.get("loop_detection").is_some(),
             "an opted-in config must serialize the loop_detection key: {on_json}"
         );
-        let round: MatchConfig = serde_json::from_value(on_json).expect("deserialize On");
-        assert_eq!(round.loop_detection, LoopDetectionMode::On);
+        let round: MatchConfig = serde_json::from_value(on_json).expect("deserialize Interactive");
+        assert_eq!(round.loop_detection, LoopDetectionMode::Interactive);
+    }
+
+    /// CR 732.2a: a legacy `On` loads as `Interactive` and re-serializes as `Interactive`.
+    #[test]
+    fn a_legacy_on_loop_detection_loads_as_interactive() {
+        let decode = |mode: &str| {
+            serde_json::from_str::<MatchConfig>(&format!(
+                r#"{{"match_type":"Bo1","loop_detection":{{"type":"{mode}"}}}}"#
+            ))
+        };
+        assert_eq!(
+            decode("Interactive").unwrap().loop_detection,
+            LoopDetectionMode::Interactive
+        );
+        assert!(decode("Bogus").is_err());
+        let legacy = decode("On").expect("a legacy On must still load");
+        assert_eq!(legacy.loop_detection, LoopDetectionMode::Interactive);
+        assert_eq!(
+            serde_json::to_value(legacy).unwrap()["loop_detection"]["type"],
+            "Interactive"
+        );
     }
 }

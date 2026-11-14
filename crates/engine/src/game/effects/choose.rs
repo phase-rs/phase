@@ -1848,7 +1848,12 @@ mod tests {
             "P1 must read as phased out after the production call"
         );
 
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert!(
             state.players[2].is_eliminated,
             "P2 must read as eliminated after the production call"

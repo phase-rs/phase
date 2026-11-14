@@ -4,16 +4,11 @@
 //! over the living opponents of ceil(life / 3), the trigger already on the stack (CR 603.3d)
 //! being one of its seat's hits.
 //!
-//! S (`exquisite_blood_tenacity_three_opponents_4p.json.gz`) is a saved game whose offer
-//! predates these readings. The `committed_dump_walk` S row is the one row that reads S's saved
-//! offer; R0 and every other row here only decline it.
+//! S (`exquisite_blood_tenacity_three_opponents_4p.json.gz`) is a saved game standing at the
+//! recorded offer reached by answering P1 then P2; the answer-pattern rows decline it and drive on.
 //!
-//! F-C (`exquisite_blood_tenacity_alternating_offer_4p.json.gz`) is minted by this engine through
-//! `apply()`: S, its offer declined, answering P1 then P2 up to the first offer. Regenerate it
-//! (gzipped by the writer) with
-//! `PHASE_REGENERATE_FIXTURES=1 cargo nextest run -p phase-engine --features test-support --test integration --run-ignored only -E 'test(/regenerate_alternating_offer_fixture/)'`.
-
-use std::io::Write;
+//! F-C (`exquisite_blood_tenacity_alternating_offer_4p.json.gz`) is a committed save standing one
+//! repetition before R0's offer; nothing regenerates it.
 
 use engine::analysis::decision_template::{
     AnnouncementSubject, DecisionPointKind, DecisionSlot, DecisionTemplate, IterationCount,
@@ -30,7 +25,7 @@ use engine::game::scenario::GameScenario;
 use engine::game::visibility::filter_state_for_viewer;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{GameState, LoopDetectionMode, PersistedGameState, WaitingFor};
+use engine::types::game_state::{GameState, LoopDetectionMode, WaitingFor};
 use engine::types::interaction::{
     AmountAssignment, InteractionChoiceId, InteractionId, InteractionOpportunityResponse,
     InteractionReasonCode, InteractionResponse, InteractionResponseSpec, InteractionSessionId,
@@ -63,7 +58,6 @@ fn fc_path() -> std::path::PathBuf {
         .join(FC_FILE)
 }
 
-// Read at run time: the regenerator lives in this binary, so it must build without F-C.
 pub(crate) fn load_fc() -> GameState {
     let gz = std::fs::read(fc_path()).expect("F-C is committed beside S");
     restore_dump(&gunzip_dump(&gz))
@@ -454,15 +448,15 @@ const ROWS: &[Row] = &[
         answers: &[P1, P2, P1],
         min_answers: 0,
         board: [10, 9, 1],
-        lead: Some(P2),
-        own: Some(5),
+        lead: Some(P1),
+        own: Some(4),
     },
     Row {
         label: "T-ALT2",
         answers: &[P2, P1, P2],
         min_answers: 0,
-        board: [13, 6, 1],
-        lead: Some(P1),
+        board: [10, 9, 1],
+        lead: Some(P2),
         own: Some(3),
     },
     Row {
@@ -470,16 +464,8 @@ const ROWS: &[Row] = &[
         answers: &[P1, P3, P1],
         min_answers: 0,
         board: [10, 9, 1],
-        lead: Some(P3),
+        lead: Some(P1),
         own: None,
-    },
-    Row {
-        label: "T-LEADKILL",
-        answers: &[P2, P1, P2],
-        min_answers: 3,
-        board: [10, 3, 1],
-        lead: Some(P2),
-        own: Some(1),
     },
     Row {
         label: "T-UNI",
@@ -494,8 +480,16 @@ const ROWS: &[Row] = &[
         answers: &[P1],
         min_answers: 3,
         board: [4, 9, 1],
-        lead: None,
-        own: None,
+        lead: Some(P1),
+        own: Some(2),
+    },
+    Row {
+        label: "T-LEADKILL",
+        answers: &[P2, P1, P2],
+        min_answers: 3,
+        board: [7, 6, 1],
+        lead: Some(P2),
+        own: Some(2),
     },
 ];
 
@@ -591,39 +585,57 @@ fn every_answer_pattern_offers_the_card_count_and_each_take_eliminates_every_opp
 }
 
 /// R0's offer, with the alternating history, publishes the observed answer at its own count and
-/// the eliminating Piecewise suggestion at the card count; F-C snapshots exactly this offer.
+/// the eliminating Piecewise suggestion at the card count.
 #[test]
 fn the_alternating_offer_publishes_its_observation_and_an_eliminating_suggestion() {
     let r0 = drive_to_offer(load_s(), &[P1, P2, P1], 0);
+    assert_eq!(opponents_life(&r0), [10, 9, 1]);
+    assert_eq!(in_flight(&r0), Some(P1));
     let (schema, declaration) = offer(&r0);
-    assert_eq!(schema.deliverable_capacity, 8);
+    assert_eq!(schema.deliverable_capacity, 8, "4 + 3 + 1 hits of 3");
     assert_eq!(
         schedule(declaration.expect("published")),
-        (TargetSchedule::Constant(rank(P1)), IterationCount::Fixed(5)),
-        "P2's in-flight hit, then P1's four, P1 crossing at the fifth"
+        (TargetSchedule::Constant(rank(P1)), IterationCount::Fixed(4)),
+        "P1's in-flight hit, then three more, P1 crossing at the fourth"
     );
     assert_eq!(
         schedule(schema.suggested_declaration.as_ref().expect("suggested")),
         (
-            TargetSchedule::Piecewise(vec![(0, rank(P1)), (4, rank(P2)), (6, rank(P3))]),
+            TargetSchedule::Piecewise(vec![(0, rank(P1)), (3, rank(P2)), (6, rank(P3))]),
             IterationCount::Fixed(8)
-        )
+        ),
+        "P1 three past its in-flight hit, P2 three, P3 one and the final unresolved announcement"
     );
-    match &r0.waiting_for {
-        WaitingFor::LoopShortcut { certificate, .. } => {
-            let per_cycle = certificate
-                .per_cycle
-                .as_ref()
-                .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
-                .expect("a bounded period");
-            assert_eq!(
-                per_cycle.frames_per_period, 2,
-                "CR 732.2a: one repetition, the target answers aside"
-            );
-        }
-        _ => unreachable!(),
-    }
-    assert_eq!(load_fc().waiting_for, r0.waiting_for, "F-C is this offer");
+    let mut fc = load_fc();
+    assert_eq!(opponents_life(&fc), [13, 9, 1]);
+    // F-C stands one repetition earlier, so only its board-dependent schema, declaration, period
+    // and the count its win is named at differ from this offer.
+    let (
+        WaitingFor::LoopShortcut {
+            schema,
+            declaration,
+            period,
+            certificate,
+            ..
+        },
+        WaitingFor::LoopShortcut {
+            schema: r0_schema,
+            declaration: r0_declaration,
+            period: r0_period,
+            certificate: r0_certificate,
+            ..
+        },
+    ) = (&mut fc.waiting_for, &r0.waiting_for)
+    else {
+        panic!("both stand at an offer");
+    };
+    (*schema, *declaration, *period) =
+        (r0_schema.clone(), r0_declaration.clone(), r0_period.clone());
+    certificate.win_kind_at = r0_certificate.win_kind_at;
+    assert_eq!(
+        fc.waiting_for, r0.waiting_for,
+        "F-C carries the rest of this offer"
+    );
 }
 
 /// The published declaration declared at its own count is taken and stops where P1 leaves.
@@ -640,7 +652,7 @@ fn the_published_declaration_is_taken_at_its_own_count() {
     };
     assert!(take(&mut state, action, accept) > 0);
     assert!(state.players[1].is_eliminated, "CR 800.4a: P1 left");
-    assert_eq!([state.players[2].life, state.players[3].life], [6, 1]);
+    assert_eq!([state.players[2].life, state.players[3].life], [9, 1]);
     assert_eq!(state.waiting_for, WaitingFor::Priority { player: P0 });
 }
 
@@ -649,29 +661,29 @@ fn accepting_the_suggestion_eliminates_every_opponent() {
     assert_game_over(&accept_suggested(&load_fc()), "AcceptSuggested");
 }
 
-/// CR 732.2a + CR 608.2b: an authored order is admitted at the card count wherever each aim lands
-/// on a seat still in the game, refused one repetition past it and wherever an aim outlives its
-/// seat.
+/// CR 732.2a + CR 603.3d + CR 601.2c: an authored order is admitted at the card count wherever each
+/// aim is announced at a seat still in the game, refused one repetition past it and wherever an aim
+/// outlives its seat.
 #[test]
 fn authored_orders_are_admitted_exactly_where_every_aim_lands() {
     let state = load_fc();
     for (label, allocation) in [
-        ("candidate order", [(P1, 4), (P2, 2), (P3, 2)]),
-        ("opens away from the lead", [(P3, 1), (P1, 4), (P2, 3)]),
-        ("opens on the lead", [(P2, 2), (P3, 1), (P1, 5)]),
+        ("candidate order", [(P1, 4), (P2, 3), (P3, 2)]),
+        ("opens away from the lead", [(P3, 1), (P1, 4), (P2, 4)]),
+        ("opens on the lead", [(P1, 4), (P3, 1), (P2, 4)]),
     ] {
         let taken = declare_fixed(&state, &allocation).expect(label);
         assert_game_over(&taken, label);
     }
     assert_eq!(
-        declare_fixed(&state, &[(P1, 5), (P2, 2), (P3, 2)]).err(),
+        declare_fixed(&state, &[(P1, 5), (P2, 3), (P3, 2)]).err(),
         Some(InteractionReasonCode::ConstraintUnsatisfied),
-        "nine repetitions"
+        "ten repetitions"
     );
     assert_eq!(
-        declare_fixed(&state, &[(P2, 3), (P1, 4), (P3, 1)]).err(),
+        declare_fixed(&state, &[(P2, 4), (P1, 4), (P3, 1)]).err(),
         Some(InteractionReasonCode::ConstraintUnsatisfied),
-        "the third P2 aim resolves after P2 has left"
+        "the fourth P2 aim is announced after P2 has left"
     );
 }
 
@@ -698,22 +710,23 @@ fn drained(preview: &InteractionShortcutPreview) -> Vec<(u8, i32)> {
 fn each_preview_element_states_the_suggestions_prefix_and_its_victims() {
     let mut state = load_fc();
     let dialog = dialog(&mut state);
-    let expected: [ExpectedElement; 8] = [
-        (1, &[(P1, 1)], &[(2, -3)]),
-        (2, &[(P1, 2)], &[(1, -3), (2, -3)]),
-        (3, &[(P1, 3)], &[(1, -6), (2, -3)]),
-        (4, &[(P1, 4)], &[(1, -9), (2, -3)]),
-        (5, &[(P1, 4), (P2, 1)], &[(1, -12), (2, -3)]),
-        (6, &[(P1, 4), (P2, 2)], &[(1, -12), (2, -6)]),
-        (7, &[(P1, 4), (P2, 2), (P3, 1)], &[(1, -12), (2, -9)]),
+    let expected: [ExpectedElement; 9] = [
+        (1, &[(P1, 1)], &[(1, -3)]),
+        (2, &[(P1, 2)], &[(1, -6)]),
+        (3, &[(P1, 3)], &[(1, -9)]),
+        (4, &[(P1, 4)], &[(1, -12)]),
+        (5, &[(P1, 4), (P2, 1)], &[(1, -15)]),
+        (6, &[(P1, 4), (P2, 2)], &[(1, -15), (2, -3)]),
+        (7, &[(P1, 4), (P2, 3)], &[(1, -15), (2, -6)]),
+        (8, &[(P1, 4), (P2, 3), (P3, 1)], &[(1, -15), (2, -9)]),
         (
-            8,
-            &[(P1, 4), (P2, 2), (P3, 2)],
-            &[(1, -12), (2, -9), (3, -3)],
+            9,
+            &[(P1, 4), (P2, 3), (P3, 2)],
+            &[(1, -15), (2, -9), (3, -3)],
         ),
     ];
     let counts: Vec<u32> = dialog.preview.iter().map(|p| p.count).collect();
-    assert_eq!(counts, (1..=8).collect::<Vec<_>>(), "one element per count");
+    assert_eq!(counts, (1..=9).collect::<Vec<_>>(), "one element per count");
     for (preview, (count, allocation, victims)) in dialog.preview.iter().zip(expected) {
         assert_eq!(preview.count, count);
         let stated: Vec<(PlayerId, u32)> = preview
@@ -744,7 +757,7 @@ fn the_ai_declares_the_suggestion_and_ends_the_game() {
     assert_eq!(
         ai,
         vec![GameAction::DeclareShortcut {
-            count: IterationCount::Fixed(8),
+            count: IterationCount::Fixed(9),
             template: suggestion,
         }]
     );
@@ -760,8 +773,8 @@ fn a_responder_shortening_the_eliminating_order_stops_at_its_iteration() {
     let action = submit(
         &state,
         &dialog,
-        InteractionShortcutDecision::Fixed { iterations: 8 },
-        &[(P1, 4), (P2, 2), (P3, 2)],
+        InteractionShortcutDecision::Fixed { iterations: 9 },
+        &[(P1, 4), (P2, 3), (P3, 2)],
     )
     .expect("admitted");
     let shortened = std::cell::Cell::new(false);
@@ -775,7 +788,7 @@ fn a_responder_shortening_the_eliminating_order_stops_at_its_iteration() {
     });
     assert!(shortened.get(), "P1 answered the window");
     assert!(state.players[1].is_eliminated);
-    assert_eq!([state.players[2].life, state.players[3].life], [6, 1]);
+    assert_eq!([state.players[2].life, state.players[3].life], [9, 1]);
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
 
@@ -911,21 +924,4 @@ fn latched_triggers_buried_under_the_chain_do_not_lead() {
     assert_eq!(at(1), vec![(1, -2)], "the in-drive announcement hits P1");
     assert_eq!(at(7), vec![(1, -4), (2, -6), (3, -4)]);
     assert_every_opponent_eliminated(&accept_suggested(&state), "buried");
-}
-
-#[test]
-#[ignore = "writes F-C; run with PHASE_REGENERATE_FIXTURES=1"]
-fn regenerate_alternating_offer_fixture() {
-    let state = drive_to_offer(load_s(), &[P1, P2], 0);
-    if std::env::var("PHASE_REGENERATE_FIXTURES").as_deref() != Ok("1") {
-        return;
-    }
-    let envelope = serde_json::json!({
-        "gameState": serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
-            .expect("serializable"),
-    });
-    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
-    gz.write_all(&serde_json::to_vec(&envelope).expect("json"))
-        .expect("gzip");
-    std::fs::write(fc_path(), gz.finish().expect("gzip")).expect("write F-C");
 }

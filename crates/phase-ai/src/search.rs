@@ -462,6 +462,18 @@ fn choose_action_with_session_inner(
         }
     }
 
+    if let WaitingFor::RespondToShortcut { player, .. }
+    | WaitingFor::RespondToPrecastCopyShortcut { player, .. } = &state.waiting_for
+    {
+        if *player == ai_player {
+            if let Some(action) = shortcut_answer(state, ai_player, config, rng, &issued_domain())
+                .and_then(&bind_specialist)
+            {
+                return direct(Some(action));
+            }
+        }
+    }
+
     // CR 118.5 + CR 118.12a: acknowledge a free Counter payment to protect
     // the spell. Other unless effects can make declining strategically useful.
     if zero_counter_payment_owed_by(state, ai_player) {
@@ -793,6 +805,51 @@ impl<'a> RootPriorityDomain<'a> {
     }
 }
 
+/// CR 732.2b: the accepting answer at either shortcut responder window.
+pub(crate) fn is_shortcut_accept(action: &GameAction) -> bool {
+    matches!(
+        action,
+        GameAction::RespondToShortcut {
+            response: engine::analysis::loop_check::ShortcutResponse::Accept,
+        } | GameAction::PrecastCopyShortcut {
+            response: engine::types::actions::PrecastCopyShortcutResponse::Accept,
+            ..
+        }
+    )
+}
+
+/// CR 732.2b + CR 732.2c: the responder's answer from the issued `domain`: the issued shorten when
+/// `ai_player`'s own priority choice at the shortened place is not a pass, otherwise the accept.
+fn shortcut_answer(
+    state: &GameState,
+    ai_player: PlayerId,
+    config: &AiConfig,
+    rng: &mut impl Rng,
+    domain: &[GameAction],
+) -> Option<GameAction> {
+    let acts_at_place = |shorten: &&GameAction| {
+        engine::ai_support::shortened_priority_state(state, ai_player, shorten)
+            .and_then(|place| choose_action(&place, ai_player, config, rng))
+            .is_some_and(|choice| choice != GameAction::PassPriority)
+    };
+    domain
+        .iter()
+        .find(|action| {
+            matches!(
+                action,
+                GameAction::RespondToShortcut {
+                    response: engine::analysis::loop_check::ShortcutResponse::Shorten { .. },
+                } | GameAction::PrecastCopyShortcut {
+                    response: engine::types::actions::PrecastCopyShortcutResponse::Shorten { .. },
+                    ..
+                }
+            )
+        })
+        .filter(acts_at_place)
+        .or_else(|| domain.iter().find(|action| is_shortcut_accept(action)))
+        .cloned()
+}
+
 fn fast_priority_action(
     domain: &RootPriorityDomain<'_>,
     config: &AiConfig,
@@ -807,8 +864,9 @@ fn fast_priority_action(
         return None;
     }
 
+    let pass_authority = engine::game::priority::pass_priority_structurally_legal(state, ai_player);
     if large_board_main_phase_has_no_development_sources(state, ai_player) {
-        return (!has_certified_fetch_then_cast_route(state, ai_player))
+        return (pass_authority && !has_certified_fetch_then_cast_route(state, ai_player))
             .then_some(GameAction::PassPriority);
     }
 
@@ -823,7 +881,6 @@ fn fast_priority_action(
     // enumerating them a second time. Without that authority (a CR 723.5
     // submitter mismatch, a CR 732.2c divergence obligation, or a parked cost
     // resume) validation may drop the pass, so the validated list decides.
-    let pass_authority = engine::game::priority::pass_priority_structurally_legal(state, ai_player);
     let issued_pass = issued.filter(|_| pass_authority).and_then(|contract| {
         let issued_actions: Vec<GameAction> = contract
             .candidates
@@ -1766,41 +1823,9 @@ pub fn fallback_action(
                 }
             )
         }),
-        // PR-7 Phase 4c (LOW-2): self-preservation via the single-authority
-        // `smart_shortcut_response` — Shorten when the polled player has a meaningful
-        // way to break the loop, else Accept.
-        WaitingFor::RespondToShortcut { player, .. } => Some(GameAction::RespondToShortcut {
-            response: engine::ai_support::smart_shortcut_response(state, *player),
-        }),
-        // CR 732.2b/c: use the same meaningful-priority probe as the legacy
-        // responder. A finite route can only shorten at its engine-issued
-        // breakpoint, so translate a legacy-style Shorten to that concrete
-        // capability; if none is issued, accepting is the only legal fallback.
-        WaitingFor::RespondToPrecastCopyShortcut {
-            player,
-            epoch,
-            breakpoint_ids,
-            ..
-        } => {
-            let response = match engine::ai_support::smart_shortcut_response(state, *player) {
-                engine::analysis::loop_check::ShortcutResponse::Shorten { .. } => {
-                    breakpoint_ids.first().map_or(
-                        engine::types::actions::PrecastCopyShortcutResponse::Accept,
-                        |breakpoint_id| {
-                            engine::types::actions::PrecastCopyShortcutResponse::Shorten {
-                                breakpoint_id: *breakpoint_id,
-                            }
-                        },
-                    )
-                }
-                engine::analysis::loop_check::ShortcutResponse::Accept => {
-                    engine::types::actions::PrecastCopyShortcutResponse::Accept
-                }
-            };
-            Some(GameAction::PrecastCopyShortcut {
-                epoch: *epoch,
-                response,
-            })
+        // CR 732.2b: accepting is the conservative answer to a shortcut proposal.
+        WaitingFor::RespondToShortcut { .. } | WaitingFor::RespondToPrecastCopyShortcut { .. } => {
+            issued(is_shortcut_accept)
         }
 
         // Combat declarations: an empty declaration is NOT always legal —
@@ -8273,7 +8298,6 @@ mod tests {
             },
             schema: engine::analysis::decision_template::ShortcutDecisionSchema::default(),
             declaration: None,
-            road: engine::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -20120,14 +20144,13 @@ one on the bottom of your library.";
         );
     }
 
-    /// P1 at priority under a CR 732.2c divergence obligation: P0 casts Chain of
-    /// Smog with Witherbloom Apprentice in play, proposes the pre-cast copy
-    /// shortcut, and P1 shortens it at P1's breakpoint.
-    fn divergence_latched_priority_state() -> GameState {
+    /// P1 polled at the pre-cast copy window: P0 casts Chain of Smog at itself
+    /// with Witherbloom Apprentice in play and proposes the pre-cast copy shortcut.
+    fn precast_responder_window(mut scenario: GameScenario) -> GameRunner {
         use std::path::Path;
 
         use engine::database::card_db::CardDatabase;
-        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::game::scenario::{P0, P1};
         use engine::game::scenario_db::GameScenarioDbExt;
         use engine::types::actions::PrecastCopyShortcutResponse;
         use engine::types::game_state::CastPaymentMode;
@@ -20140,7 +20163,6 @@ one on the bottom of your library.";
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/mtgjson/test_fixture.json"),
         )
         .expect("test fixture must contain Witherbloom Apprentice");
-        let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         scenario.add_real_card(P0, "Witherbloom Apprentice", Zone::Battlefield, &db);
         let chain = scenario
@@ -20173,14 +20195,33 @@ one on the bottom of your library.";
                 response: PrecastCopyShortcutResponse::Propose { route_id: epoch },
             })
             .expect("P0 proposes the route");
-        let breakpoint_id = match &runner.state().waiting_for {
-            WaitingFor::RespondToPrecastCopyShortcut {
-                player,
-                breakpoint_ids,
-                ..
-            } if *player == P1 => *breakpoint_ids.first().expect("P1 is issued a breakpoint"),
-            other => panic!("expected P1's shortcut response, got {other:?}"),
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::RespondToPrecastCopyShortcut { player, .. } if player == P1
+            ),
+            "expected P1's shortcut response, got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+    }
+
+    /// P1 at priority under a CR 732.2c divergence obligation: P1 shortens the
+    /// pre-cast copy shortcut at P1's breakpoint.
+    fn divergence_latched_priority_state() -> GameState {
+        use engine::game::scenario::P1;
+        use engine::types::actions::PrecastCopyShortcutResponse;
+
+        let mut runner = precast_responder_window(GameScenario::new());
+        let WaitingFor::RespondToPrecastCopyShortcut {
+            epoch,
+            ref breakpoint_ids,
+            ..
+        } = runner.state().waiting_for
+        else {
+            unreachable!("precast_responder_window stops at the response window");
         };
+        let breakpoint_id = *breakpoint_ids.first().expect("P1 is issued a breakpoint");
         runner
             .act(GameAction::PrecastCopyShortcut {
                 epoch,
@@ -20196,10 +20237,8 @@ one on the bottom of your library.";
     }
 
     /// CR 732.2c: the player who shortened a pre-cast copy shortcut must diverge,
-    /// so the reducer rejects their pass and the validated list omits it, while
-    /// the issued contract still carries `PassPriority`. Answering the low-value
-    /// pass from the contract would propose an illegal action. Fails on revert of
-    /// the pass-authority guard.
+    /// so the reducer rejects their pass, and neither the issued contract nor the
+    /// validated list carries it; the priority shortcut never answers with it.
     #[test]
     fn priority_shortcut_never_passes_through_a_divergence_obligation() {
         let state = divergence_latched_priority_state();
@@ -20214,11 +20253,11 @@ one on the bottom of your library.";
         );
         let contract = AiDecisionContract::issue(&state, p1);
         assert!(
-            contract
+            !contract
                 .candidates
                 .iter()
                 .any(|candidate| matches!(candidate.action, GameAction::PassPriority)),
-            "reach-guard: the issued contract still carries the pass"
+            "the builder issues no pass the latch refuses"
         );
         let config = create_config(AiDifficulty::Medium, Platform::Native);
         let session = AiSession::arc_from_game(&state);
@@ -24600,6 +24639,387 @@ one on the bottom of your library.";
             assert!(
                 (got - gap).abs() < 1e-9,
                 "the hint does not time {name}: {gap} over the instant's 0.3, got {got}"
+            );
+        }
+    }
+
+    /// The AI's answer at a CR 732.2b responder window, decided by its own priority choice at the
+    /// place it would shorten at, on the Cauldron Familiar board: P0 loops Cauldron Familiar ("When
+    /// this creature enters, each opponent loses 1 life and you gain 1 life. / Sacrifice a Food:
+    /// Return this card from your graveyard to the battlefield.") through Carrion Feeder and Samwise
+    /// Gamgee against P1 at 12 holding Relic of Progenitus.
+    mod shortcut_responder {
+        use super::*;
+        use engine::analysis::decision_template::IterationCount;
+        use engine::analysis::loop_check::ShortcutResponse;
+        use engine::game::engine::apply;
+        use engine::types::actions::PrecastCopyShortcutResponse;
+
+        /// The player's dump, restored at P0's offer. Regenerating it requires re-gzipping it.
+        fn familiar_offer_state() -> GameState {
+            use std::io::Read;
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../engine/tests/fixtures/familiar_relic_turn5_2p.json.gz");
+            let mut json = String::new();
+            flate2::read::GzDecoder::new(File::open(path).expect("the Familiar dump opens"))
+                .read_to_string(&mut json)
+                .expect("the Familiar dump inflates");
+            let json = engine::types::game_state::record_captured_onsets_json(&json);
+            let document: serde_json::Value =
+                serde_json::from_str(&json).expect("the Familiar dump is JSON");
+            serde_json::from_value::<engine::types::game_state::PersistedGameState>(
+                document["gameState"].clone(),
+            )
+            .expect("the Familiar dump decodes")
+            .into_game_state()
+            .expect("the Familiar dump restores")
+        }
+
+        /// P0 declares `count` on the Familiar offer after `board` adjusts it; P1 is polled.
+        fn familiar_window(count: u32, board: impl FnOnce(&mut GameState)) -> GameState {
+            let mut state = familiar_offer_state();
+            board(&mut state);
+            apply(
+                &mut state,
+                P0,
+                GameAction::DeclareShortcut {
+                    count: IterationCount::Fixed(count),
+                    template: None,
+                },
+            )
+            .expect("P0 declares the shortcut");
+            assert!(
+                matches!(state.waiting_for, WaitingFor::RespondToShortcut { player, .. } if player == P1),
+                "P1 answers the proposal, got {:?}",
+                state.waiting_for
+            );
+            state
+        }
+
+        /// Lightning Bolt ("Lightning Bolt deals 3 damage to any target.") in P1's hand and an
+        /// untapped Mountain under P1's control.
+        fn arm_bolt(state: &mut GameState) {
+            let db = shared_integration_card_db();
+            for (name, zone) in [
+                ("Lightning Bolt", Zone::Hand),
+                ("Mountain", Zone::Battlefield),
+            ] {
+                let face = db
+                    .get_face_by_name(name)
+                    .unwrap_or_else(|| panic!("{name} is in the integration fixture"));
+                let id = engine::game::deck_loading::create_object_from_card_face(state, face, P1);
+                engine::game::zones::move_to_zone(state, id, zone, &mut Vec::new());
+            }
+            state.layers_dirty = engine::types::game_state::LayersDirty::full();
+        }
+
+        fn tap_relic(state: &mut GameState) {
+            let relic = state
+                .battlefield
+                .iter()
+                .copied()
+                .find(|id| state.objects[id].name == "Relic of Progenitus")
+                .expect("P1's Relic of Progenitus is on the battlefield");
+            state.objects.get_mut(&relic).expect("present").tapped = true;
+        }
+
+        fn accept() -> GameAction {
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            }
+        }
+
+        fn shorten_at(at_iteration: u32) -> GameAction {
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Shorten { at_iteration },
+            }
+        }
+
+        fn contract_actions(state: &GameState, seat: PlayerId) -> Vec<GameAction> {
+            AiDecisionContract::issue(state, seat)
+                .candidates
+                .into_iter()
+                .map(|candidate| candidate.action)
+                .collect()
+        }
+
+        fn answer(state: &GameState, difficulty: AiDifficulty, seed: u64) -> Option<GameAction> {
+            let config = create_config(difficulty, Platform::Native).into_measurement(seed);
+            choose_action(state, P1, &config, &mut SmallRng::seed_from_u64(seed))
+        }
+
+        fn life(state: &GameState, seat: PlayerId) -> i32 {
+            state.players[seat.0 as usize].life
+        }
+
+        /// R1. P1's own choice at place 1 passes — Relic of Progenitus's {T} has the targeted
+        /// player choose the card (CR 608.2d) and its {1} ability is unaffordable — so P1 accepts,
+        /// and the twelve repetitions drain P1 from 12 to 0 (CR 119.3 + CR 704.5a) while P0 goes
+        /// 22 → 34 and wins the game (CR 104.2a).
+        #[test]
+        fn a_seat_whose_place_choice_passes_accepts_and_the_loop_lands() {
+            let mut state = familiar_window(12, |_| {});
+            assert_eq!(
+                contract_actions(&state, P1),
+                vec![accept(), shorten_at(1)],
+                "reach-guard: the Shorten is issued, so the Accept is chosen, not forced"
+            );
+            assert!(
+                engine::ai_support::shortened_priority_state(&state, P1, &shorten_at(1)).is_some(),
+                "reach-guard: the shortened place is reached"
+            );
+            for difficulty in [AiDifficulty::Easy, AiDifficulty::Medium, AiDifficulty::Hard] {
+                for seed in 0..3 {
+                    assert_eq!(
+                        answer(&state, difficulty, seed),
+                        Some(accept()),
+                        "{difficulty:?} seed {seed}"
+                    );
+                }
+            }
+
+            apply(&mut state, P1, accept()).expect("the Accept takes the shortcut");
+            assert_eq!(life(&state, P1), 0);
+            assert!(state.players[1].is_eliminated);
+            assert_eq!(life(&state, P0), 34);
+            assert!(
+                matches!(
+                    state.waiting_for,
+                    WaitingFor::BetweenGamesSideboard { game_number: 2, ref score, .. }
+                        if score.p0_wins == 1 && score.p1_wins == 0
+                ),
+                "P0 wins game 1, got {:?}",
+                state.waiting_for
+            );
+        }
+
+        /// R2. With Lightning Bolt castable, P1's answer follows its own choice at place 1: Medium
+        /// seed 3 passes there and accepts; the other seeds cast and shorten, and the take leaves P1
+        /// at 11 with priority after one repetition (CR 732.2c).
+        #[test]
+        fn a_seat_shortens_exactly_when_its_place_choice_acts() {
+            let state = familiar_window(12, arm_bolt);
+            assert_eq!(contract_actions(&state, P1), vec![accept(), shorten_at(1)]);
+            assert_eq!(answer(&state, AiDifficulty::Medium, 3), Some(accept()));
+            for seed in [0, 1, 2, 4, 5] {
+                assert_eq!(
+                    answer(&state, AiDifficulty::Medium, seed),
+                    Some(shorten_at(1)),
+                    "seed {seed}"
+                );
+            }
+
+            let mut shortened = state;
+            apply(&mut shortened, P1, shorten_at(1)).expect("the Shorten is admitted");
+            assert_eq!(life(&shortened, P1), 11);
+            assert_eq!(shortened.waiting_for, WaitingFor::Priority { player: P1 });
+        }
+
+        /// R3. With Relic of Progenitus tapped P1 has no different choice at place 1. Legality
+        /// reads the proposal alone, so the Shorten is issued; the committed Shorten is refused
+        /// (CR 732.2b) with P1's window kept, and the chooser accepts.
+        #[test]
+        fn a_seat_with_no_different_choice_is_refused_the_shorten_and_accepts() {
+            let mut state = familiar_window(12, tap_relic);
+            assert_eq!(contract_actions(&state, P1), vec![accept(), shorten_at(1)]);
+            assert_eq!(answer(&state, AiDifficulty::Medium, 0), Some(accept()));
+            let mut refused = state.clone();
+            assert!(apply(&mut refused, P1, shorten_at(1)).is_err());
+            assert_eq!(refused.waiting_for, state.waiting_for);
+            assert_eq!(contract_actions(&refused, P1), vec![accept()]);
+            apply(&mut state, P1, accept()).expect("the Accept takes the shortcut");
+            assert!(state.players[1].is_eliminated);
+        }
+
+        /// P0's declaration on its own offer passes the planner's legality gate from the offer's
+        /// measured evidence, without a state copy.
+        #[test]
+        fn the_planner_gate_admits_the_proposers_declaration_without_a_state_copy() {
+            use crate::planner::{
+                prepare_payment_candidates, PlannerServices, PromptAnswerValidation,
+            };
+            let state = familiar_offer_state();
+            let config = create_config(AiDifficulty::Medium, Platform::Native);
+            let policies = PolicyRegistry::default();
+            let mut services = PlannerServices::new_default(P0, &config, &policies);
+            services.prompt_answers = PromptAnswerValidation::AtSubmission;
+            let ctx = services.build_decision_context(&state);
+            let declarations: Vec<_> = prepare_payment_candidates(&state, ctx.candidates.clone())
+                .into_iter()
+                .filter(|entry| {
+                    matches!(entry.candidate.action, GameAction::DeclareShortcut { .. })
+                })
+                .collect();
+            assert_eq!(
+                declarations.len(),
+                1,
+                "reach-guard: the offer issues its declaration"
+            );
+            engine::game::perf_counters::reset();
+            let validated = services.validate_prepared_candidates(&state, declarations);
+            assert_eq!(validated.len(), 1, "the gate keeps the declaration");
+            assert_eq!(
+                engine::game::perf_counters::snapshot().state_clone_for_legality,
+                0
+            );
+        }
+
+        /// R4. A one-repetition proposal admits only place 0 (CR 732.2b), where the AI never
+        /// shortens: the issued domain is the Accept alone even with Lightning Bolt castable.
+        #[test]
+        fn a_one_repetition_proposal_is_accepted() {
+            let state = familiar_window(1, arm_bolt);
+            let WaitingFor::RespondToShortcut { ref proposal, .. } = state.waiting_for else {
+                unreachable!("familiar_window stops at P1's window");
+            };
+            assert_eq!(
+                proposal.shortening_places(),
+                0..=0,
+                "reach-guard: the range is {{0}}"
+            );
+            assert_eq!(contract_actions(&state, P1), vec![accept()]);
+            assert_eq!(answer(&state, AiDifficulty::Medium, 0), Some(accept()));
+        }
+
+        /// R5. The same rule at the pre-cast window with three seats: P1 is polled with P2
+        /// queued, and shortens at its breakpoint exactly when it holds Lightning Bolt to cast.
+        #[test]
+        fn the_precast_responder_shortens_exactly_when_its_place_choice_acts() {
+            for bolt in [false, true] {
+                let mut scenario = GameScenario::new_n_player(3, 42);
+                if bolt {
+                    let db = shared_integration_card_db();
+                    scenario.add_real_card(P1, "Lightning Bolt", Zone::Hand, db);
+                    scenario.add_real_card(P1, "Mountain", Zone::Battlefield, db);
+                }
+                let runner = precast_responder_window(scenario);
+                let state = runner.state();
+                let WaitingFor::RespondToPrecastCopyShortcut {
+                    epoch,
+                    ref breakpoint_ids,
+                    ref remaining_players,
+                    ..
+                } = state.waiting_for
+                else {
+                    unreachable!("precast_responder_window stops at the response window");
+                };
+                assert_eq!(
+                    remaining_players,
+                    &vec![PlayerId(2)],
+                    "reach-guard: P2 is queued"
+                );
+                let [breakpoint_id] = breakpoint_ids[..] else {
+                    panic!("P1 is issued one breakpoint, got {breakpoint_ids:?}");
+                };
+                let accept = GameAction::PrecastCopyShortcut {
+                    epoch,
+                    response: PrecastCopyShortcutResponse::Accept,
+                };
+                let shorten = GameAction::PrecastCopyShortcut {
+                    epoch,
+                    response: PrecastCopyShortcutResponse::Shorten { breakpoint_id },
+                };
+                assert_eq!(
+                    contract_actions(state, P1),
+                    vec![accept.clone(), shorten.clone()]
+                );
+                let expected = if bolt { shorten } else { accept };
+                for seed in 0..3 {
+                    assert_eq!(
+                        answer(state, AiDifficulty::Medium, seed),
+                        Some(expected.clone()),
+                        "bolt={bolt} seed {seed}"
+                    );
+                }
+            }
+        }
+
+        /// R6. The conservative paths take the Accept although the Shorten is issued.
+        #[test]
+        fn the_conservative_paths_accept() {
+            let state = familiar_window(12, |_| {});
+            let contract = AiDecisionContract::issue(&state, P1);
+            assert!(
+                contract.contains_action(&state, &shorten_at(1)),
+                "reach-guard: the Shorten is issued"
+            );
+            let config = create_config(AiDifficulty::Medium, Platform::Native);
+            assert_eq!(fallback_action(&state, &config, &contract), Some(accept()));
+
+            let runner = precast_responder_window(GameScenario::new());
+            let precast = runner.state();
+            let contract = AiDecisionContract::issue(precast, P1);
+            assert_eq!(
+                contract.candidates.len(),
+                2,
+                "reach-guard: Accept and Shorten are issued"
+            );
+            assert!(matches!(
+                fallback_action(precast, &config, &contract),
+                Some(GameAction::PrecastCopyShortcut {
+                    response: PrecastCopyShortcutResponse::Accept,
+                    ..
+                })
+            ));
+        }
+
+        /// R7. After P1 shortens at place 1, one repetition is taken (P1 11) and P1 holds
+        /// priority under CR 732.2c's obligation, so passing is not issued and the AI activates
+        /// Relic of Progenitus, the only legal action, which the reducer takes.
+        #[test]
+        fn a_latched_seat_is_never_issued_a_pass() {
+            let mut state = familiar_window(12, |_| {});
+            apply(&mut state, P1, shorten_at(1)).expect("the Relic seat may shorten at 1");
+            assert_eq!(state.waiting_for, WaitingFor::Priority { player: P1 });
+            assert_eq!(life(&state, P1), 11);
+            let legal = engine::ai_support::legal_actions(&state);
+            assert!(
+                !legal.is_empty() && !legal.contains(&GameAction::PassPriority),
+                "reach-guard: the latch refuses the pass and leaves an action, got {legal:?}"
+            );
+            assert!(!contract_actions(&state, P1).contains(&GameAction::PassPriority));
+            for difficulty in [AiDifficulty::Easy, AiDifficulty::Medium, AiDifficulty::Hard] {
+                for seed in 0..2 {
+                    let choice = answer(&state, difficulty, seed).expect("an answer");
+                    assert!(
+                        matches!(choice, GameAction::ActivateAbility { source_id, .. }
+                            if state.objects[&source_id].name == "Relic of Progenitus"),
+                        "{difficulty:?} seed {seed}: {choice:?}"
+                    );
+                    assert!(legal.contains(&choice));
+                    apply(&mut state.clone(), P1, choice).expect("the reducer takes it");
+                }
+            }
+        }
+
+        /// CR 723.5: at a large inert board the priority shortcut passes only where the reducer's
+        /// pass guard holds; a priority window whose live submitter is another seat gets no pass.
+        #[test]
+        fn the_large_board_pass_needs_the_pass_authority() {
+            let mut state = large_board_state(FormatConfig::standard(), P0);
+            state.priority_player = P1;
+            assert!(
+                large_board_main_phase_has_no_development_sources(&state, P0),
+                "reach-guard: the board takes the large-board early return"
+            );
+            assert!(!engine::game::priority::pass_priority_structurally_legal(
+                &state, P0
+            ));
+            let fast = |state: &GameState| {
+                fast_priority_action(
+                    &RootPriorityDomain::new(state, P0),
+                    &AiConfig::default(),
+                    &AiSession::arc_from_game(state),
+                    None,
+                )
+            };
+            assert_eq!(fast(&state), None);
+
+            state.priority_player = P0;
+            assert_eq!(
+                fast(&state),
+                Some(GameAction::PassPriority),
+                "control: with the submitter restored the early return passes"
             );
         }
     }

@@ -529,7 +529,12 @@ fn announcer_offer_excludes_a_phased_out_opponent_at_both_mints() {
         runner.state().players[1].is_phased_out(),
         "P1 must read as phased out"
     );
-    engine::game::elimination::eliminate_player(runner.state_mut(), PlayerId(2), &mut setup_events);
+    engine::game::elimination::eliminate_player(
+        runner.state_mut(),
+        PlayerId(2),
+        engine::types::events::LossReason::Conceded,
+        &mut setup_events,
+    );
     assert!(
         runner.state().players[2].is_eliminated,
         "P2 must read as eliminated"

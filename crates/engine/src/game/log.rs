@@ -1877,7 +1877,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![player_seg(state, *player_id), text(" commits a crime")]
         }
 
-        GameEvent::PlayerLost { player_id } => {
+        GameEvent::PlayerLost { player_id, .. } => {
             vec![player_seg(state, *player_id), text(" loses the game")]
         }
 
@@ -3291,6 +3291,9 @@ mod tests {
             GameEvent::GameOver { winner: None },
             GameEvent::PlayerLost {
                 player_id: PlayerId(0),
+                reasons: std::collections::BTreeSet::from([
+                    crate::types::events::LossReason::LifeTotal,
+                ]),
             },
             GameEvent::PlayerEliminated {
                 player_id: PlayerId(0),

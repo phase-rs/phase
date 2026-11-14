@@ -516,6 +516,7 @@ mod play_with_fire_damage_scry;
 mod player_action_recording_after_choice;
 mod player_hexproof_shroud_grants;
 mod player_leaves_game_ltb_triggers;
+mod player_lost_reasons;
 mod player_scope_created_token_union;
 mod player_scope_linked_exile_batch;
 mod player_scope_sacrifice_carrier;

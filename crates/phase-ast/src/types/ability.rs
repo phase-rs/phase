@@ -8634,10 +8634,10 @@ pub enum TargetFilter {
     /// enchant ability (defined per CR 303.4a), and CR 608.2c requires reading
     /// the whole sentence to bind each anaphor to its true referent at resolution.
     ///
-    /// Never persisted as a `ResolvedAbility` field: it is concretized eagerly,
-    /// in place, to `SpecificObject { id }` in the `forward_result` block of
-    /// `effects/mod.rs`, at the one point where the pre-rebind `source_id` and
-    /// the about-to-be-mutated sub-ability clone coexist.
+    /// A `GenericEffect` static's `affected` is concretized to `SpecificObject { id }`
+    /// in the `forward_result` block of `effects/mod.rs`; an `Attach` attachment
+    /// stays `OriginalSource` and resolves live against the trigger source's
+    /// incarnation (CR 400.7).
     ///
     /// Unlike the current ability's primary `SelfRef` or a moved-object
     /// `ParentTarget`, this pins the pre-rebind producer for legacy grants.

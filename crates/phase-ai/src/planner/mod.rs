@@ -1310,7 +1310,8 @@ impl<'a> PlannerServices<'a> {
         candidate: &CandidateAction,
         prompt_answers: PromptAnswerValidation,
     ) -> bool {
-        // PassPriority is always legal during Priority (skip simulation for perf),
+        // During Priority the candidate builder offers PassPriority only where
+        // `pass_priority_legality` admits it (skip simulation for perf),
         // but during ManaPayment it means "finalize payment" which can fail if the
         // player can't actually pay the cost (e.g., Thalia tax makes it unaffordable).
         let pass_always_valid = matches!(
@@ -1335,11 +1336,12 @@ impl<'a> PlannerServices<'a> {
             // Mulligan as the complete legal set; neither can fail apply_as_current.
             // Skipping the clone+simulate eliminates ~2 state clones per mulligan step.
             engine::types::actions::GameAction::MulliganDecision { .. } => true,
-            // CR 608.2d + CR 614.12a + CR 701.23a + CR 732.2b: a named-choice answer from the
-            // prompt's enumerated domain, a library search selection, or a loop-shortcut
-            // responder's answer is admitted by its submission guard without mutating the game;
-            // the engine decides that through the same authority `SimulationFilter` consults
-            // before its probe. Under `PromptAnswerValidation::AtSubmission` no state copy is
+            // CR 608.2d + CR 614.12a + CR 701.23a + CR 732.2a + CR 732.2b: a named-choice
+            // answer from the prompt's enumerated domain, a library search selection, or a
+            // loop-shortcut declaration or responder's answer is admitted by its submission guard
+            // without mutating the game; the engine decides that through the same authority
+            // `SimulationFilter` consults before its probe. Under
+            // `PromptAnswerValidation::AtSubmission` no state copy is
             // made here: the root search simulates the answers in its beam until one fails, and
             // the caller the one answer it submits. A shape
             // the authority declines (a scoped search, a card name, a free-entry
@@ -1353,6 +1355,7 @@ impl<'a> PlannerServices<'a> {
             // time — two takes where the unadmitted shape paid one.
             engine::types::actions::GameAction::ChooseOption { .. }
             | engine::types::actions::GameAction::SelectCards { .. }
+            | engine::types::actions::GameAction::DeclareShortcut { .. }
             | engine::types::actions::GameAction::RespondToShortcut { .. }
                 if prompt_answers.admits_without_simulation(state, &candidate.action) =>
             {
@@ -2107,7 +2110,7 @@ pub(crate) enum PromptAnswerValidation {
     /// Simulate each answer on a state copy, as the gate's catch-all does. The
     /// gate's verdict is final.
     EachCandidate,
-    /// Admit the answer without a state copy. The root search simulates such
+    /// Admit the answer without simulating it on a state copy. The root search simulates such
     /// answers in its beam on its first rung, in beam order, and returns the
     /// first that fails (`search::FailedAdmittedAnswer`) instead of scores,
     /// simulating no answer after it, and the root scorer scores the decision
@@ -4056,7 +4059,6 @@ pub(crate) mod tests {
                 shortened_by: None,
                 published_declaration: None,
                 leading_aims: Vec::new(),
-                road: engine::analysis::loop_check::OfferRoad::Ring,
                 counted_take: Default::default(),
                 period: Default::default(),
             },

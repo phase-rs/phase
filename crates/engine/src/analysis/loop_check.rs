@@ -20,16 +20,8 @@
 //! (and the volatile stack id, see `resource::project_out_resources`), or covers that board
 //! by growth, while every living player but one loses life or gains poison each cycle, it
 //! shortcuts to the forced loss instead
-//! of halting on the resource ceiling. PR-3 (Option C) scans a persisted bounded ring
-//! of post-resolution snapshots (`GameState::loop_detect_ring`), maintained at the
-//! post-pipeline frame of `game::engine::pass_priority_once_with_pipeline` (after
-//! `run_post_action_pipeline` places refilling triggers, CR 603.3) and scanned at the
-//! single SBA-reconciliation seam — so the win path
-//! fires LIVE under the default per-beat `apply(PassPriority)` drive (the production
-//! frontend default), which runs `reconcile_terminal_result` after every beat. Note
-//! `run_auto_pass_loop` does NOT call `reconcile_terminal_result` inside its internal
-//! iterations, so its net-progress grind still runs to the natural CR 704.5a death;
-//! the per-beat drive is the accelerated path.
+//! of halting on the resource ceiling. The confirmer (`game::period_confirm`) calls it on
+//! the frames of a replayed period.
 //!
 //! # The detection rule (CR 732.2a — the shortcut, not the draw)
 //!
@@ -55,6 +47,7 @@ use crate::analysis::resource::{
     loop_states_cover_modulo_growth, loop_states_equal_modulo_resources, BoardDelta, ResourceAxis,
     ResourceVector,
 };
+use crate::types::events::LossReason;
 use crate::types::game_state::GameState;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -78,11 +71,11 @@ use serde::{Deserialize, Serialize};
 /// name string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WinKind {
-    /// CR 704.5a: an opponent's life is driven to 0 or less — unbounded damage to
-    /// or unbounded life loss from an opponent (burn pings, drains, lifeloss).
+    /// CR 704.5a: an opponent's life is driven to 0 or less — unbounded life loss
+    /// from an opponent (damage without infect, CR 120.3a, or a drain).
     LethalDamage,
-    /// CR 704.5c: an opponent accrues 10+ poison counters — an unbounded poison
-    /// (infect/proliferate-poison) loop.
+    /// CR 704.5c / CR 704.6b: an opponent reaches its configured poison-loss threshold — an
+    /// unbounded poison (infect/proliferate-poison) loop.
     PoisonLoss,
     /// CR 104.3c / CR 121.4: an opponent's library is emptied (mill) such that the
     /// next draw — or the mill itself reaching 0 — loses them the game. Surfaces as
@@ -90,8 +83,8 @@ pub enum WinKind {
     Decking,
     /// CR 104.2: an explicit "you win the game" / "that player loses the game"
     /// effect fires each cycle (e.g. an Aetherflux-style life-payment, a
-    /// Thassa's-Oracle-style deckout win). Reserved for loops whose win is a
-    /// printed win/loss condition rather than a resource threshold.
+    /// Thassa's-Oracle-style deckout win). Also names a loop whose life and poison
+    /// thresholds fall in the same repetition, which neither axis alone decides.
     ImmediateWin,
     /// CR 500.7: unbounded extra turns — a turns loop that wins by simply never
     /// passing the game back.
@@ -102,6 +95,24 @@ pub enum WinKind {
     /// condition for an opponent. The canonical CR 732.2a beneficial loop; the
     /// payoff that converts the advantage to a win is a separate card.
     Advantage,
+}
+
+impl WinKind {
+    /// The win an opponent's loss for `reason` names.
+    pub(crate) fn of_loss(reason: LossReason) -> WinKind {
+        match reason {
+            // CR 704.5a / CR 704.6a: a player or team with 0 or less life loses.
+            LossReason::LifeTotal => WinKind::LethalDamage,
+            // CR 704.5c / CR 704.6b: a player or team at its poison-loss threshold loses.
+            LossReason::Poison => WinKind::PoisonLoss,
+            // CR 704.5b: a player who drew from an empty library loses.
+            LossReason::DrewFromEmptyLibrary => WinKind::Decking,
+            LossReason::CommanderDamage
+            | LossReason::Conceded
+            | LossReason::EffectStatedLoss
+            | LossReason::OpponentWon => WinKind::ImmediateWin,
+        }
+    }
 }
 
 /// A confirmed loop cycle — its unbounded axes, win kind and breakability — as
@@ -117,9 +128,10 @@ pub struct LoopCertificate {
     /// The subset of `unbounded` the loop drives up, from the same `ResourceVector` derivation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rising: Vec<ResourceAxis>,
-    /// The classified win condition, derived from `unbounded`, or for a counted offer from what
-    /// its counting replay performed; `None` when that take does not end the game with its
-    /// proposer the winner.
+    /// The classified win condition, derived from `unbounded`, or read from the reasons recorded
+    /// in the winning repetition the confirmer performed (a counted offer, or a threshold offer
+    /// whose performance wins); for an offer whose take the confirmer performed, `None` when that
+    /// take does not end the game with its proposer the winner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub win_kind: Option<WinKind>,
     /// CR 732.2a: the count whose take `win_kind` is the outcome of, for an outcome a smaller
@@ -128,9 +140,7 @@ pub struct LoopCertificate {
     pub win_kind_at: Option<u32>,
     /// CR 732.5 / CR 732.2b: whether NO living player has a meaningful priority action
     /// that could break the loop — the producer's own measurement, not a property of the
-    /// cycle's contents. (`game::engine::interactive_loop_bridge` assigns it from
-    /// `no_living_player_has_meaningful_priority_action`, which probes EVERY living player
-    /// as the priority holder.) CR 732.5 is why that is the right question: no player can
+    /// cycle's contents. CR 732.5 is why that is the right question: no player can
     /// be forced to take an action that would end a loop, so a loop is unbreakable exactly
     /// when nobody HAS such an action to take voluntarily; CR 732.2b is the shortcut-side
     /// counterpart — the window in which another player would name a different choice.
@@ -161,14 +171,6 @@ impl LoopCertificate {
     }
 }
 
-/// Which producer minted a loop-shortcut offer: the ring sampler, or the priority holder's
-/// recorded period.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OfferRoad {
-    Ring,
-    RecordedPeriod,
-}
-
 /// CR 732.2a: whether a counted take of an offer performs, or why none does.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CountedTake {
@@ -184,8 +186,6 @@ pub enum CountedTake {
 pub enum UnperformableCause {
     /// CR 732.2c: each repetition makes a game choice no declaration of the offer contains.
     UncontainedChoice,
-    /// The period recurs only where the ring drain's cycle delimiter does not fire.
-    UndelimitedCover,
 }
 
 impl CountedTake {
@@ -227,7 +227,6 @@ impl UnperformableCause {
             Self::UncontainedChoice => {
                 "CR 732.2a: the proposal contains no choice its repetitions make"
             }
-            Self::UndelimitedCover => "this engine will not take a counted repetition of this loop",
         }
     }
 }
@@ -268,8 +267,7 @@ pub struct ShortcutProposal {
     pub win_kind_at: Option<u32>,
     /// PR-7 Phase 4b: an optional CR 732.2a decision template pinning the loop's
     /// free choices for `IterationCount::Fixed(N)` finite materialization. `None`
-    /// for a choice-free drain or an `UntilLethal`
-    /// proposal, which never reads this field.
+    /// for a choice-free drain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<DecisionTemplate>,
     /// CR 732.2a: copied verbatim off the confirmed certificate so the drive reads ONE
@@ -293,8 +291,6 @@ pub struct ShortcutProposal {
     /// A seat identity is public board state, so this carries no redaction seam of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shortened_by: Option<PlayerId>,
-    /// The producer that minted the offer this proposal was declared against, copied off it.
-    pub road: OfferRoad,
     /// The counted take of the offer this proposal was declared against, copied off it.
     #[serde(default, skip_serializing_if = "CountedTake::is_performs")]
     pub counted_take: CountedTake,
@@ -335,9 +331,6 @@ impl ShortcutProposal {
             IterationCount::Fixed(iterations) => iterations
                 .checked_sub(1)
                 .map_or(std::ops::RangeInclusive::new(1, 0), |last| 0..=last),
-            // CR 704.5a: the drain runs until a player loses, so the proposal names no count
-            // and no place is past its end.
-            IterationCount::UntilLethal => 0..=u32::MAX,
             // CR 732.2b: a proposal with no ending point has no place past its end.
             IterationCount::WithoutEnd => 0..=u32::MAX,
         };
@@ -452,9 +445,9 @@ pub fn detect_loop(
     })
 }
 
-/// CR 732.2a + CR 704.5a: the reducer's winner test over a ring frame and the live board.
+/// CR 732.2a + CR 704.5a: the reducer's winner test over a replayed frame and the live board.
 ///
-/// Given a ring frame whose board `cycle_end` repeats (modulo monotone resources AND the
+/// Given a frame whose board `cycle_end` repeats (modulo monotone resources AND the
 /// volatile stack id, see [`crate::analysis::resource::project_out_resources`]) or covers by
 /// growth, decide whether every living player but one loses life or gains poison each cycle
 /// toward a determinate loss and, if so, name the one who does not.
@@ -487,13 +480,13 @@ pub(crate) fn live_mandatory_loop_winner(
         return None;
     }
 
-    // CR 704.5a (life ≤ 0) OR CR 704.5c (poison → 10): partition living into strict
-    // fallers vs. non-fallers. A player whose life is draining OR whose poison is
-    // accumulating each cycle extrapolates to a loss. Delta-based (not the absolute SBA
-    // threshold): the loop works on per-cycle deltas + extrapolation. Exactly one
-    // non-faller is the sole survivor candidate; since fallers/non-fallers partition
-    // `living`, that single non-faller condition IS "every other living player falls"
-    // (CR 104.2a).
+    // CR 704.5a (life ≤ 0) OR CR 704.5c / CR 704.6b (poison → its configured threshold):
+    // partition living into strict fallers vs. non-fallers. A player whose life is draining
+    // OR whose poison is accumulating each cycle extrapolates to a loss. Delta-based (not
+    // the absolute SBA threshold): the loop works on per-cycle deltas + extrapolation.
+    // Exactly one non-faller is the sole survivor candidate; since fallers/non-fallers
+    // partition `living`, that single non-faller condition IS "every other living player
+    // falls" (CR 104.2a).
     let fallers: Vec<PlayerId> = living
         .iter()
         .copied()
@@ -572,15 +565,14 @@ pub(crate) fn live_mandatory_loop_winner(
     if !delta.net_progress_for(winner) {
         return None;
     }
-    // Scope the live shortcut to a determinate loss axis — CR 704.5a life drain
-    // (`LethalDamage`) or CR 704.5c poison (`PoisonLoss`) — never a pure advantage
-    // engine or mill. classify's branch order (damage → opp-life<0 → poison>0 → …)
-    // reaches the poison branch before the Advantage fallthrough, so the winner's own
-    // lifegain does not mask a rising-poison loss.
-    if !matches!(
-        classify_win_kind(winner, delta, Some(cycle_end)),
-        WinKind::LethalDamage | WinKind::PoisonLoss
-    ) {
+    // CR 704.5a + CR 704.5c: the live shortcut needs an opponent's life or poison loss axis,
+    // never a pure advantage engine or mill.
+    // CR 102.3: a teammate is no opponent.
+    let opponents = crate::game::players::opponents(cycle_end, winner);
+    let is_opponent = |pid: PlayerId| opponents.contains(&pid);
+    if !(opponent_loses_along(&is_opponent, &delta.life, -1)
+        || opponent_loses_along(&is_opponent, &delta.poison, 1))
+    {
         return None;
     }
 
@@ -599,15 +591,16 @@ pub(crate) fn live_mandatory_loop_winner(
         {
             return None;
         }
-        // CR 704.3 poison simultaneity: all poison-fallers must cross 10 in the SAME SBA
-        // batch. Require BOTH equal per-cycle poison delta AND equal ABSOLUTE poison at
-        // cycle_end — equal-absolute alone is a fail-open (differing deltas with equal
-        // current totals cross at different future cycles); equal-delta alone is a
-        // fail-open (equal +1/cycle from staggered starts). Staggered on either axis ⇒
-        // fail-safe None. This also rejects mixed life+poison pods (a life-faller has
-        // poison 0, a poison-faller has poison>0 → unequal → None). Unlike the life
-        // arm, poison is monotone (proliferate only adds), so no intra-cycle dip check
-        // is needed (contrast `winner_life_never_dips`, which stays life-only).
+        // CR 704.3 poison simultaneity: all poison-fallers must cross their configured
+        // poison-loss threshold in the SAME SBA batch. Require BOTH equal per-cycle poison
+        // delta AND equal ABSOLUTE poison at cycle_end — equal-absolute alone is a
+        // fail-open (differing deltas with equal current totals cross at different future
+        // cycles); equal-delta alone is a fail-open (equal +1/cycle from staggered starts).
+        // Staggered on either axis ⇒ fail-safe None. This also rejects mixed life+poison
+        // pods (a life-faller has poison 0, a poison-faller has poison>0 → unequal → None).
+        // Unlike the life arm, poison is monotone (proliferate only adds), so no
+        // intra-cycle dip check is needed (contrast `winner_life_never_dips`, which stays
+        // life-only).
         let first_pd = delta.poison.get(&fallers[0]).copied().unwrap_or(0);
         if fallers
             .iter()
@@ -631,56 +624,14 @@ pub(crate) fn live_mandatory_loop_winner(
 }
 
 /// CR 704.5a + CR 104.4a: the loop's winner (the sole strict non-faller) must never
-/// dip below its prior life at ANY per-resolution ring frame. Named for the winner,
+/// dip below its prior life at ANY frame it is handed. Named for the winner,
 /// NOT the loop's controller: a mandatory-loop trigger can be controlled by a faller,
 /// so the controller is not necessarily the player this guard protects — the winner
 /// (the one non-faller) is. A transient intra-cycle dip that recovers to a
 /// non-negative NET delta would still kill the winner via the CR 704.5a SBA at low
 /// absolute life before the extrapolated win — a net-delta check cannot see it.
-/// Per-resolution granularity IS SBA granularity here, but NOT because ring frames are
-/// consecutive resolutions — they are not, and never were. The shipped CR 603.3b
-/// `OrderTriggers` exemption already retains the ring across a non-sampling beat, and
-/// `WaitingFor::is_forced_cascade_window` extends that to every forced pre-priority window
-/// (CR 603.3d / CR 603.5 + CR 608.2 / CR 903.9a / CR 704.5j / CR 310.11 / CR 703.1 +
-/// CR 117.3a). The invariant this guard actually needs is weaker:
-/// **every point at which CR 704.5a could fire is either sampled or clears the ring.**
-/// CR 704.3 fixes those points: SBAs are checked whenever a player would get priority,
-/// and every such point arrives as `WaitingFor::Priority`, which is deliberately not a
-/// forced-cascade window and therefore samples or clears. The retained windows are
-/// exempt for three DIFFERENT reasons, and the weaker invariant is what covers all
-/// three:
-/// the between-resolutions members (CR 603.3b / CR 603.3d / CR 903.9a / CR 704.5j /
-/// CR 310.11) sit inside the CR 704.3 fixpoint itself, where no life total moves; the
-/// MID-resolution member (`OptionalEffectChoice`, CR 603.5 + CR 608.2) is a pause in the
-/// middle of a resolution, where life absolutely can move — but CR 608.2 performs no SBA
-/// check mid-resolution, so a life change there is not a CR 704.5a point being skipped,
-/// it is a life change that the very next CR 704.3 check (a `Priority` window) observes;
-/// the TURN-BASED members (CR 703.1 + CR 117.3a — untap CR 502.3, declare attackers
-/// CR 508.1/508.1g, declare blockers CR 509.1, cleanup discard CR 514.1) precede the
-/// step's own grant of priority (CR 508.2 is the explicit case), and the DECLARATION
-/// itself moves no life: untapping, declaring, exerting/enlisting and discarding change
-/// no life, and anything that WOULD (an attack trigger) uses the stack and therefore
-/// resolves at an observed `Priority` beat.
-/// That is a claim about the declaration only, and the two life-moving neighbours it
-/// deliberately excludes are why the class is drawn where it is:
-/// * CR 508.1h / CR 509.1d put the declaration's COSTS in a separate sub-step
-///   ("Costs may include paying mana, tapping permanents, sacrificing permanents,
-///   discarding cards, and so on"), and a Phyrexian symbol in an attack or block tax is
-///   paid with 2 life (CR 107.4f) — measured in-code: `engine_combat::handle_pay_combat_tax`
-///   pays through `casting::pay_unless_cost`, which settles `life_payments` via
-///   `life_costs::pay_life_as_cost`. So declaring CAN move life, at
-///   `WaitingFor::CombatTaxPayment` — which is deliberately NOT a member and therefore
-///   clears the ring.
-/// * `AssignCombatDamage` / `AssignBlockerDamage` are likewise NOT members despite being
-///   turn-based (CR 510.1c / CR 510.1d): CR 510.2 deals the assigned damage with no
-///   intervening priority. That window-keyed exclusion is necessary but NOT sufficient,
-///   because the window opens only for a damage DIVISION choice — an unblocked attacker
-///   deals CR 510.2 damage with no window at all. The sufficient guard is event-keyed:
-///   `GameState::invalidate_loop_ring_on_unobserved_life_move`, called from
-///   `game::combat_damage::apply_combat_damage`.
-///
 /// So the guard requires `life[winner]` non-decreasing across the matched window (prior
-/// frame → every subsequent ring frame → the live state). A winner never draws from an
+/// frame → every subsequent frame → the live state). A winner never draws from an
 /// empty library here: `live_mandatory_loop_winner` refuses a cycle in which any living
 /// player's library shrinks.
 pub(crate) fn winner_life_never_dips(frames: &[&GameState], winner: PlayerId) -> bool {
@@ -704,7 +655,7 @@ pub(crate) fn winner_life_never_dips(frames: &[&GameState], winner: PlayerId) ->
 
 /// CR 704.3 (one SBA batch) + CR 800.4a + CR 104.2a: the R5-B2 simultaneity floor,
 /// seam half. With ≥2 fallers, every faller's `player.life` must be pairwise-equal at
-/// EVERY ring frame (incl. the live state); combined with the predicate's equal
+/// EVERY frame (incl. the live state); combined with the predicate's equal
 /// per-cycle deltas, all fallers stay pairwise-equal at every extrapolated frame and
 /// therefore cross lethal in the SAME resolution's CR 704.3 SBA batch. The single
 /// CR 104.2a elimination is then terminal ("happens immediately and overrides all
@@ -721,18 +672,32 @@ pub(crate) fn fallers_lives_pairwise_equal(frames: &[&GameState], fallers: &[Pla
     })
 }
 
+/// CR 704.5a / CR 704.5c: whether `axis` moves a player `is_opponent` names toward a loss,
+/// `sign` being the losing direction (-1 for life, +1 for poison).
+fn opponent_loses_along(
+    is_opponent: &dyn Fn(PlayerId) -> bool,
+    axis: &std::collections::BTreeMap<PlayerId, i64>,
+    sign: i64,
+) -> bool {
+    axis.iter()
+        .any(|(pid, &n)| sign * n > 0 && is_opponent(*pid))
+}
+
 /// Derive the [`WinKind`] from the measured per-cycle delta.
 ///
 /// Classification is by the **most decisive** unbounded axis, in CR loss-priority
-/// order: an opponent-lethal axis (damage/life-loss → CR 704.5a, poison → CR
+/// order: an opponent-lethal axis (life loss → CR 704.5a, poison → CR
 /// 704.5c, decking → CR 104.3c/121.4, extra turns → CR 500.7) outranks a pure
 /// advantage engine (mana/tokens/draw/…). A loop that pumps several axes is named
 /// by the first loss condition it satisfies; if none, it is [`WinKind::Advantage`].
+/// With a `state`, a loop that moves an opponent's life and poison together is named by
+/// the axis whose threshold it crosses in fewer repetitions, or [`WinKind::ImmediateWin`] when
+/// both fall in the same repetition.
 ///
-/// `controller` distinguishes "an opponent" from the loop's controller: damage to
-/// / life loss from / mill on a player who is *not* the loop's controller is an
-/// opponent loss condition; the corpus rows are two-player, so any non-controller
-/// player is the opponent.
+/// `controller` distinguishes "an opponent" from the loop's controller: life loss from
+/// / poison on / mill on a player who is *not* the loop's controller is an
+/// opponent loss condition. With a `state`, the controller's teammates are no opponents
+/// (CR 102.3), and each opponent's life and poison headroom is its loss pool's.
 ///
 /// `state` supplies the library storage authority (`GameState::zone_storage_seat`).
 /// With no state, each seat is its own storage.
@@ -741,30 +706,46 @@ pub(crate) fn classify_win_kind(
     delta: &ResourceVector,
     state: Option<&GameState>,
 ) -> WinKind {
-    // CR 704.5a: a player at 0 life loses — so unbounded damage is a WIN only when
-    // the damaged player is an OPPONENT (a non-controller). Damage to the loop's
-    // own controller (self-ping offset by lifegain) is an advantage engine, not a
-    // win; mirror the life/decking branches' opponent-victim discrimination.
-    if delta
-        .damage_dealt
-        .iter()
-        .any(|(pid, &n)| n > 0 && *pid != controller)
-    {
-        return WinKind::LethalDamage;
-    }
+    // CR 102.3: a teammate is no opponent.
+    let is_opponent = |pid: PlayerId| match state {
+        Some(state) => crate::game::players::opponents(state, controller).contains(&pid),
+        None => pid != controller,
+    };
     // CR 704.5a: unbounded life *loss* from an opponent (drain loops report a
     // negative life delta on the victim) is lethal. A life *gain* on the
-    // controller is advantage, not a win, so require a strictly-negative life
-    // axis on a non-controller player.
-    if delta
-        .life
-        .iter()
-        .any(|(pid, &n)| n < 0 && *pid != controller)
-    {
-        return WinKind::LethalDamage;
+    // controller is advantage, not a win.
+    if opponent_loses_along(&is_opponent, &delta.life, -1) {
+        // CR 704.3 + CR 704.5a + CR 704.5c: whole repetitions order the thresholds; two in the
+        // same final repetition are ordered only inside it, so neither axis names the win.
+        // CR 704.6a + CR 704.6b: a team's thresholds are its pool's, moved by every member.
+        let order = state.and_then(|state| {
+            use crate::game::players::LossPool;
+            let fewest = |axis: &std::collections::BTreeMap<PlayerId, i64>,
+                          pool: fn(&GameState, PlayerId) -> Option<LossPool>,
+                          sign: i64| {
+                axis.keys()
+                    .filter(|pid| is_opponent(**pid))
+                    .filter_map(|pid| {
+                        let pool = pool(state, *pid)?;
+                        ResourceVector::narrowed_repetitions([(
+                            pool.to_threshold - 1,
+                            sign * pool.moved_by(axis),
+                        )])
+                    })
+                    .min()
+            };
+            let life = fewest(&delta.life, LossPool::life, -1)?;
+            let poison = fewest(&delta.poison, LossPool::poison, 1)?;
+            Some(poison.cmp(&life))
+        });
+        return match order {
+            Some(std::cmp::Ordering::Less) => WinKind::PoisonLoss,
+            Some(std::cmp::Ordering::Equal) => WinKind::ImmediateWin,
+            Some(std::cmp::Ordering::Greater) | None => WinKind::LethalDamage,
+        };
     }
-    // CR 704.5c: unbounded poison counters on any player.
-    if delta.poison.values().any(|&n| n > 0) {
+    // CR 704.5c: unbounded poison counters on an opponent.
+    if opponent_loses_along(&is_opponent, &delta.poison, 1) {
         return WinKind::PoisonLoss;
     }
     // CR 104.3c / CR 121.4: an unbounded *downward* library delta on a player
@@ -887,13 +868,6 @@ mod tests {
         assert!(named > 0, "reach: some member set names a choice");
     }
 
-    // The CR 704.3 partition `winner_life_never_dips` rests on — `Priority` DISJOINT from
-    // the retained class, over both priority seats — is asserted by
-    // `types::game_state::forced_cascade_window_tests::forced_cascade_window_class`, which
-    // covers it strictly more completely (thirteen members and eight non-members, including both
-    // `Priority` seats). A second weaker row here would only be a place for the two to
-    // drift apart.
-
     fn battlefield_creature(state: &mut GameState, id: u64, controller: u8) -> ObjectId {
         let oid = ObjectId(id);
         let mut object = GameObject::new(
@@ -923,6 +897,7 @@ mod tests {
 
         let mut delta = ResourceVector::default();
         delta.damage_dealt.insert(pid(1), 1); // 1 damage to opponent
+        delta.life.insert(pid(1), -1); // CR 120.3a: the damage is life loss
         delta.life.insert(pid(0), 1); // 1 life gained (lifelink)
 
         let cert =
@@ -1337,20 +1312,63 @@ mod tests {
         );
     }
 
+    fn two_headed_giant(seats: &[(usize, i32, u32)]) -> GameState {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        for &(seat, life, poison) in seats {
+            state.players[seat].life = life;
+            state.players[seat].poison_counters = poison;
+        }
+        state
+    }
+
+    /// CR 704.6a + CR 704.6b: the opposing team's 1 + 12 life less 4 a repetition outlasts its
+    /// 5 + 5 poison plus 2 a repetition, so the loop is a poison win; with no state the life
+    /// axis names it.
+    #[test]
+    fn classify_win_kind_reads_a_teams_shared_thresholds() {
+        use std::collections::BTreeMap;
+        let state = two_headed_giant(&[(2, 1, 5), (3, 12, 5)]);
+        let delta = ResourceVector {
+            life: BTreeMap::from([(pid(2), -2), (pid(3), -2)]),
+            poison: BTreeMap::from([(pid(2), 1), (pid(3), 1)]),
+            ..ResourceVector::default()
+        };
+        assert_eq!(
+            classify_win_kind(pid(0), &delta, Some(&state)),
+            WinKind::PoisonLoss
+        );
+        assert_eq!(
+            classify_win_kind(pid(0), &delta, None),
+            WinKind::LethalDamage
+        );
+    }
+
+    /// CR 102.3: the controller's teammate losing life is no opponent's loss.
+    #[test]
+    fn classify_win_kind_ignores_a_teammates_life() {
+        use std::collections::BTreeMap;
+        let state = two_headed_giant(&[(0, 5, 0), (1, 5, 0), (2, 15, 0), (3, 15, 0)]);
+        let delta = ResourceVector {
+            life: BTreeMap::from([(pid(1), -2)]),
+            poison: BTreeMap::from([(pid(2), 1), (pid(3), 1)]),
+            ..ResourceVector::default()
+        };
+        assert_eq!(
+            classify_win_kind(pid(0), &delta, Some(&state)),
+            WinKind::PoisonLoss
+        );
+    }
+
     /// FINDING (CR 704.5a): damage dealt to the loop's OWN controller is NOT a
     /// win — a player loses only when *they* reach 0 life, so lethal damage is a
     /// win only against an OPPONENT. A self-ping loop whose controller's life is
     /// offset (lifegain) pumps `damage_dealt[controller]` unbounded but kills no
     /// opponent; it is an advantage engine, mirroring self-mill (`Advantage`, not
     /// `Decking`) and self-life-loss (`Advantage`, not `LethalDamage`).
-    ///
-    /// DISCRIMINATING: the pre-fix damage branch was
-    /// `delta.damage_dealt.values().any(|&n| n > 0)` — controller-blind — so it
-    /// classified controller-only damage as `LethalDamage`. The first assertion
-    /// (`controller == victim => Advantage`) therefore FAILS against pre-fix code
-    /// and PASSES against the fixed `*pid != controller` predicate. The second
-    /// assertion (`opponent victim => LethalDamage`) is unchanged by the fix,
-    /// proving the change is surgical: it flips only the controller-victim case.
     ///
     /// WELL-FORMEDNESS: `unbounded_components` still surfaces
     /// `DamageDealt(controller)`, so `detect_loop` returns a `Some` certificate
@@ -1371,6 +1389,7 @@ mod tests {
         // Parallel opponent case (P0 controls, P1 is damaged) => still LethalDamage.
         let mut opp_dmg = ResourceVector::default();
         opp_dmg.damage_dealt.insert(pid(1), 1);
+        opp_dmg.life.insert(pid(1), -1); // CR 120.3a: the damage is life loss
         assert_eq!(
             classify_win_kind(pid(0), &opp_dmg, None),
             WinKind::LethalDamage,
@@ -1437,6 +1456,31 @@ mod tests {
             live_mandatory_loop_winner(&start, &end, &delta),
             Some(pid(0)),
             "a single-opponent forced life-drain shortcuts to the winner"
+        );
+    }
+
+    /// CR 704.3 + CR 704.5a + CR 704.5c: a drain that crosses life and poison in the same
+    /// repetition is labelled `ImmediateWin` and still names its winner. Card-free because no
+    /// printed board forms a mandatory loop crossing both axes in one repetition: proliferate is a
+    /// choice (CR 701.34a); the nearest are Sanguine Bond + Exquisite Blood (mandatory, life only)
+    /// and Kilo, Apogee Mind + Scheming Aspirant (both axes, optional).
+    #[test]
+    fn live_winner_life_and_poison_tie_keeps_its_winner() {
+        let mut end = GameState::new_two_player(7);
+        end.players[1].life = 18;
+        end.players[1].poison_counters = 1;
+        let start = end.clone();
+        let mut delta = ResourceVector::default();
+        delta.life.insert(pid(1), -2);
+        delta.life.insert(pid(0), 2);
+        delta.poison.insert(pid(1), 1);
+        assert_eq!(
+            classify_win_kind(pid(0), &delta, Some(&end)),
+            WinKind::ImmediateWin
+        );
+        assert_eq!(
+            live_mandatory_loop_winner(&start, &end, &delta),
+            Some(pid(0))
         );
     }
 

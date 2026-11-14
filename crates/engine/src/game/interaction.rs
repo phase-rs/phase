@@ -2904,9 +2904,10 @@ fn preview_key(
 /// delta — "the predictable results of the sequence of choices", stated per display family
 /// and per affected seat.
 ///
-/// **This is arithmetic over the certificate's `per_cycle.delta`, and nothing else.** It
-/// applies no game action, resolves nothing, and touches no `GameState`: the multiplication
-/// `n × δ` is the whole computation. In particular it is NOT
+/// **This is arithmetic over the certificate's `per_cycle` signature, and nothing else.** It
+/// applies no game action, resolves nothing, and touches no `GameState`: the sum of the first
+/// `n` repetitions' charges (`PeriodicDelta::total_over`) is the whole computation. In
+/// particular it is NOT
 /// `interaction::preview_interaction`, which answers a different question (is this response
 /// submittable) by cloning the state and applying to the clone. A clone-apply cannot answer
 /// this one anyway — the count may be up to `MAX_SHORTCUT_CYCLES`, and the point of a CR
@@ -2922,36 +2923,62 @@ fn preview_key(
 /// short. No such delta exists — one period's delta is a difference of two game-state
 /// readings — and `i32` is exact in the JS number the binding generates, which `i64` is not.
 fn shortcut_preview_entries(
-    delta: &crate::analysis::resource::ResourceVector,
+    periodic: &crate::analysis::resource::PeriodicDelta,
     count: u32,
     victim: Option<&VictimSplit>,
 ) -> Vec<InteractionShortcutPreviewEntry> {
-    let charged_axis =
-        victim.map(|split| crate::analysis::resource::ResourceAxis::Life(split.charged_seat));
-    let mut per_cycle_totals: BTreeMap<(InteractionShortcutPreviewFamily, Option<u8>), i64> =
-        BTreeMap::new();
-    for (axis, magnitude) in delta.axis_components() {
+    use crate::analysis::resource::ResourceAxis;
+    let charged_axis = victim.map(|split| ResourceAxis::Life(split.charged_seat));
+    let mill_of = |axis: ResourceAxis| match axis {
+        ResourceAxis::LibraryDelta(seat) => periodic
+            .instructed_mills
+            .as_ref()
+            .and_then(|mills| mills.get(&seat))
+            .map(|mill| (seat, *mill)),
+        _ => None,
+    };
+    let mut totals: BTreeMap<(InteractionShortcutPreviewFamily, Option<u8>), i64> = BTreeMap::new();
+    let mut library_losses = Vec::new();
+    // CR 732.2a: each repetition moves what the signature states for it.
+    for (axis, magnitude) in periodic.total_over(count).axis_components() {
         // The charged seat's life is re-added below, spread across the seats the declaration
         // allocates the count to. Folding it here as well would state it twice.
         if Some(axis) == charged_axis {
             continue;
         }
-        let total = per_cycle_totals.entry(preview_key(axis)).or_insert(0);
+        if let Some((seat, mill)) = mill_of(axis) {
+            library_losses.push((seat, mill, -magnitude));
+            continue;
+        }
+        let total = totals.entry(preview_key(axis)).or_insert(0);
         *total = total.saturating_add(magnitude);
     }
-    let mut totals: BTreeMap<(InteractionShortcutPreviewFamily, Option<u8>), i64> =
-        per_cycle_totals
-            .into_iter()
-            .map(|(key, per_cycle)| (key, per_cycle.saturating_mul(i64::from(count))))
-            .collect();
+    // CR 701.17b: a seat mills no more than its library holds; CR 121.1: the rest of its library
+    // loss is drawn.
+    for (seat, mill, loss) in library_losses {
+        let milled = mill
+            .per_repetition
+            .saturating_mul(i64::from(count))
+            .min(mill.library.max(0));
+        let mill_key = (InteractionShortcutPreviewFamily::Mill, Some(seat.0));
+        *totals.entry(mill_key).or_insert(0) -= milled;
+        let drawn = (loss - mill.per_repetition.saturating_mul(i64::from(count))).max(0);
+        let cards_key = (InteractionShortcutPreviewFamily::Cards, Some(seat.0));
+        *totals.entry(cards_key).or_insert(0) += drawn;
+    }
     // CR 119.3: the announced slot charges a LIFE magnitude, so the re-attribution moves the
     // `Life` family and nothing else. `DamageDealt`, `LibraryDelta` and `Poison` are seat-keyed
     // by `payload_seat` too, and keep the seat it gave them.
     if let Some(split) = victim {
+        let mut through = 0u32;
         for (seat, cycles) in &split.cycles {
             let key = preview_key(crate::analysis::resource::ResourceAxis::Life(*seat));
             let total = totals.entry(key).or_insert(0);
-            *total = total.saturating_sub(split.rate.saturating_mul(i64::from(*cycles)));
+            let landed = split
+                .charged_through(through.saturating_add(*cycles))
+                .saturating_sub(split.charged_through(through));
+            through = through.saturating_add(*cycles);
+            *total = total.saturating_sub(landed);
         }
     }
     totals
@@ -2978,14 +3005,9 @@ fn shortcut_preview_entries(
 ///
 /// `step` starts at 1 rather than 0 deliberately: at 0 the loop regenerates `min` itself, and the
 /// explicit `min` seed would then be unfalsifiable.
-///
-/// The exhaustive match is also the offer's single finite-count gate — `UntilLethal` names no
-/// number to multiply a period by, so it yields no sample and the caller publishes nothing.
 fn shortcut_preview_counts(count: &InteractionShortcutCountSpec) -> Vec<u32> {
     match count {
-        InteractionShortcutCountSpec::UntilLethal | InteractionShortcutCountSpec::WithoutEnd => {
-            Vec::new()
-        }
+        InteractionShortcutCountSpec::WithoutEnd => Vec::new(),
         InteractionShortcutCountSpec::Fixed {
             min,
             max,
@@ -3101,11 +3123,12 @@ fn canonical_allocation(ids: &[InteractionChoiceId], count: u32) -> Vec<AmountAs
         .collect()
 }
 
-/// CR 119.3: the life magnitude one repetition charges through an announced slot, and the
-/// single seat that magnitude currently lands on.
+/// CR 119.3: the life magnitude the first repetition charges through an announced slot, what
+/// each later repetition adds to it, and the single seat that magnitude currently lands on.
 #[derive(Debug, Clone, Copy)]
 struct VictimCharge {
     rate: i64,
+    growth: i64,
     seat: PlayerId,
 }
 
@@ -3120,9 +3143,6 @@ struct VictimCharge {
 /// to. Outside it the answer is `None` and the fold keeps `payload_seat`'s own keys — an
 /// unsplit magnitude on the right seat beats a split one on the wrong seats.
 ///
-/// Deliberately NOT `analysis::resource::slot_charged_life`, which answers a different
-/// question — what TOTAL is liftable, largest loss first, refusing a tie.
-///
 /// Four refusals, all fail-closed: no entry for the slot, a period whose life map names zero or
 /// several losing seats, a losing seat the declaration does not announce, and a per-period loss
 /// no negation can state.
@@ -3135,8 +3155,8 @@ struct VictimCharge {
 /// saying this point's slot is one the period charges, and is otherwise discarded. That is what
 /// makes the FOLD's precondition hold by construction rather than by coincidence: CR 732.2a
 /// states a count's magnitudes as the period times the count, and `shortcut_preview_entries`
-/// re-states the charged seat's life by dropping that axis and re-adding `rate` once per
-/// allocated cycle, so the substitution preserves the period's life total exactly. The reader is
+/// re-states the charged seat's life by dropping that axis and re-adding each allocated
+/// repetition's own charge, so the substitution preserves the period's life total exactly. The reader is
 /// thereby INDIFFERENT to which derivation minted the aggregate.
 fn victim_charge(
     periodic: &crate::analysis::resource::PeriodicDelta,
@@ -3156,6 +3176,13 @@ fn victim_charge(
     (losing.next().is_none() && seats.contains(seat)).then_some(())?;
     Some(VictimCharge {
         rate: loss.checked_neg()?,
+        growth: periodic
+            .growth
+            .life
+            .get(seat)
+            .copied()
+            .unwrap_or(0)
+            .checked_neg()?,
         seat: *seat,
     })
 }
@@ -3164,10 +3191,12 @@ fn victim_charge(
 /// declaration allocates it to.
 ///
 /// `cycles` is never empty — the one constructor filters that case away — so "a split with no
-/// parts" is unrepresentable rather than a case the fold has to remember.
+/// parts" is unrepresentable rather than a case the fold has to remember. Its runs are in
+/// repetition order, because a growing charge lands differently on each.
 #[derive(Debug, Clone)]
 struct VictimSplit {
     rate: i64,
+    growth: i64,
     charged_seat: PlayerId,
     cycles: Vec<(PlayerId, u32)>,
 }
@@ -3200,17 +3229,24 @@ impl VictimSplit {
             if let Some((_, tail)) = cycles.last_mut() {
                 *tail = tail.saturating_sub(1);
             }
-            match cycles.iter_mut().find(|(seat, _)| *seat == lead) {
-                Some((_, landed)) => *landed += 1,
-                None => cycles.push((lead, 1)),
-            }
+            cycles.insert(0, (lead, 1));
         }
         Some(Self {
             rate: charge.rate,
+            growth: charge.growth,
             charged_seat: charge.seat,
             cycles,
         })
         .filter(|split| !split.cycles.is_empty())
+    }
+
+    /// CR 732.2a: what the first `n` repetitions charge together, in `PeriodicDelta::total_over`'s
+    /// closed form.
+    fn charged_through(&self, n: u32) -> i64 {
+        let n = i64::from(n);
+        self.rate
+            .saturating_mul(n)
+            .saturating_add(self.growth.saturating_mul(n.saturating_mul(n - 1) / 2))
     }
 }
 
@@ -3314,8 +3350,8 @@ struct ShortcutPreviewBasis<'a> {
 /// is minted over, resolved once per offer rather than once per count.
 ///
 /// Refuses an offer carrying no measured per-period signature, and one whose period states
-/// nothing on any family: a magnitude is the period times the count, so neither has anything
-/// to multiply.
+/// nothing on any family: a magnitude is the sum of the count's repetitions, so neither has
+/// anything to sum.
 fn shortcut_preview_basis<'a>(
     interaction_id: &InteractionId,
     projection: &'a LoopShortcutProjection,
@@ -3323,7 +3359,7 @@ fn shortcut_preview_basis<'a>(
     let signature = projection.per_cycle.as_ref()?;
     let (crate::analysis::resource::PeriodSignature::EveryRepetition(periodic)
     | crate::analysis::resource::PeriodSignature::OneRepetition(periodic)) = signature;
-    if shortcut_preview_entries(&periodic.delta, 1, None).is_empty() {
+    if shortcut_preview_entries(periodic, 1, None).is_empty() {
         return None;
     }
     let (group, ids, seats, charge, lead) =
@@ -3378,7 +3414,7 @@ fn shortcut_preview_element(
                         VictimSplit::new(charge, &basis.ids, seats, &allocation, basis.lead)
                     },
                 );
-                shortcut_preview_entries(&periodic.delta, count, split.as_ref())
+                shortcut_preview_entries(periodic, count, split.as_ref())
             }
             // The count's consequence is the take's replay, which nothing here performs.
             crate::analysis::resource::PeriodSignature::OneRepetition(_) => Vec::new(),
@@ -3396,7 +3432,7 @@ fn shortcut_preview_element(
 /// Three things have to hold before there is anything to state, and all three are the offer's
 /// own: a measured per-period signature, a finite count window, and a period that states
 /// something at all (a period netting to nothing on every family publishes no element at any
-/// count, because `amount` is the period times the count).
+/// count, because `amount` is the sum of the count's repetitions).
 fn loop_shortcut_preview(
     interaction_id: &InteractionId,
     projection: &LoopShortcutProjection,
@@ -3451,9 +3487,8 @@ fn loop_shortcut_preview(
 ///
 /// The count resolution is the exhaustive `(decision, count_spec)` match
 /// `declared_shortcut_preview` performs, `AcceptSuggested` included — that decision reaches this
-/// completion exactly as a `Fixed` one does. `UntilLethal` names no number to partition and
-/// returns on every arm, so this is structurally unreachable there; a new
-/// `InteractionShortcutCountSpec` variant build-breaks the match rather than falling through.
+/// completion exactly as a `Fixed` one does. A new `InteractionShortcutCountSpec` variant
+/// build-breaks the match rather than falling through.
 ///
 /// Consulted BEFORE legality, at the one chokepoint both the preview and the submit paths share,
 /// so a request that previews `Confirmable` submits the same sequenced announcement.
@@ -3478,7 +3513,7 @@ fn completed_shortcut_declaration(
         | (
             InteractionShortcutDecision::AcceptSuggested
             | InteractionShortcutDecision::Fixed { .. },
-            InteractionShortcutCountSpec::UntilLethal | InteractionShortcutCountSpec::WithoutEnd,
+            InteractionShortcutCountSpec::WithoutEnd,
         ) => {
             return None;
         }
@@ -3566,7 +3601,7 @@ fn declared_shortcut_preview(
         | (
             InteractionShortcutDecision::AcceptSuggested
             | InteractionShortcutDecision::Fixed { .. },
-            InteractionShortcutCountSpec::UntilLethal | InteractionShortcutCountSpec::WithoutEnd,
+            InteractionShortcutCountSpec::WithoutEnd,
         ) => return None,
     };
     let basis = shortcut_preview_basis(interaction_id, &projection)?;
@@ -3651,8 +3686,7 @@ fn scheduled_announcements(
 /// iterations a decision's announcements start at — successive differences, the last running to
 /// the count.
 ///
-/// The one place that rule is expressed, for every pin kind. An until-lethal proposal names no
-/// count to partition, so it declares an ORDER and no segment. The projection cuts every step
+/// The one place that rule is expressed, for every pin kind. The projection cuts every step
 /// the count does not reach before asking (`DecisionTemplate::cut_schedules_at`), so each segment
 /// is positive; `None` is a start past the count, which is a partition nobody could have declared.
 fn declared_segments(starts: &[u32], declared_count: Option<u32>) -> Option<Vec<u32>> {
@@ -3705,6 +3739,19 @@ fn declared_targets_statement(
     Some((values, declared_segments(&starts, declared_count)?))
 }
 
+/// CR 616.1: the replacement effects one order names, in the order the affected player applies
+/// them; `None` when a source names no live object.
+fn replacement_order_statement<'a>(
+    places: impl Iterator<Item = (&'a crate::analysis::decision_template::DecisionSource, u8)>,
+) -> Option<Vec<LoopShortcutCandidateValue>> {
+    let mut places: Vec<_> = places.collect();
+    places.sort_by_key(|(_, pos)| *pos);
+    places
+        .into_iter()
+        .map(|(source, _)| declared_object_candidate(source))
+        .collect()
+}
+
 /// CR 732.2b: the declaration a responder is being asked to accept or shorten, decoded into the
 /// OFFER side's own projection vocabulary so every surface below it is minted by the offer's
 /// producers rather than by a second copy of them.
@@ -3712,8 +3759,8 @@ fn declared_targets_statement(
 /// # The publication posture, stated once for all seven pin kinds
 ///
 /// A decision this projection can state nothing about publishes NO POINT, and the rest of the
-/// declaration publishes anyway — `Mode`, `UnlessBreak`, `ManaColor`, `ConvokeTaps`, `Order`, an
-/// unmintable `MayChoice` and an unstatable `Targets` decision alike, each for its own reason.
+/// declaration publishes anyway — `Mode`, `UnlessBreak`, `ManaColor`, `ConvokeTaps`, a trigger
+/// `Order`, an unmintable `MayChoice` and an unstatable `Targets` decision alike, each for its own reason.
 ///
 /// The ONE thing a skip may not do is move the ALLOCATION'S DOMAIN. `allocation_point` names the
 /// FIRST published `Targets` point, so what a skipped announced-target decision owes is not
@@ -3730,7 +3777,7 @@ fn declared_targets_statement(
 /// statement helpers above, are wildcard-free, so a future variant carrying an identity or an
 /// answer gets a compile-time visit rather than a silent omission.
 fn declared_shortcut_projection(waiting_for: &WaitingFor) -> Option<DeclaredSequence> {
-    use crate::analysis::decision_template::{IterationCount, PinnedDecision};
+    use crate::analysis::decision_template::{ChoicePoint, IterationCount, PinnedDecision};
 
     let WaitingFor::RespondToShortcut { proposal, .. } = waiting_for else {
         return None;
@@ -3752,14 +3799,13 @@ fn declared_shortcut_projection(waiting_for: &WaitingFor) -> Option<DeclaredSequ
             max: iterations,
             suggested: iterations,
         },
-        IterationCount::UntilLethal => InteractionShortcutCountSpec::UntilLethal,
         IterationCount::WithoutEnd => InteractionShortcutCountSpec::WithoutEnd,
     };
     let declared_count = match proposal.count {
         IterationCount::Fixed(iterations) => Some(iterations),
-        // CR 732.1b: an until-lethal or endless proposal names no count to partition, so every
+        // CR 732.1b: an endless proposal names no count to partition, so every
         // arm below declares an ORDER and no segment.
-        IterationCount::UntilLethal | IterationCount::WithoutEnd => None,
+        IterationCount::WithoutEnd => None,
     };
 
     let mut candidates: Vec<LoopShortcutCandidateValue> = Vec::new();
@@ -3805,7 +3851,7 @@ fn declared_shortcut_projection(waiting_for: &WaitingFor) -> Option<DeclaredSequ
                 //
                 // A slot source naming a CARD identity mints no subject, so this decision states
                 // nothing and publishes NO POINT — the same answer `Mode`, `UnlessBreak`,
-                // `ManaColor`, `ConvokeTaps` and `Order` give below, and the declaration's other
+                // `ManaColor`, `ConvokeTaps` and a trigger `Order` give below, and the declaration's other
                 // decisions are unaffected. `AllCopies` is not hidden information
                 // (`game::visibility`'s redaction arm answers `false` for it: a card identity,
                 // not a live object), so nothing here is a redaction and the all-or-nothing rule
@@ -3845,8 +3891,37 @@ fn declared_shortcut_projection(waiting_for: &WaitingFor) -> Option<DeclaredSequ
             // Its own doc records that the concrete creatures are re-bound LIVE each iteration
             // and no per-iteration creature is latched, so the pin states no answer to publish.
             PinnedDecision::ConvokeTaps { .. } => {}
-            // CR 603.3b trigger ordering under the static replay mode, not a loop-shortcut
-            // per-iteration decision, so this projection publishes nothing for it.
+            // CR 616.1 + CR 732.2b: the order a declaration names for a replacement prompt is
+            // stated to every responder, chooser or not, once, at place 0.
+            PinnedDecision::Order { slot, pos: 0 }
+                if slot.point == ChoicePoint::ReplacementOrder =>
+            {
+                let places = template
+                    .decisions
+                    .iter()
+                    .filter_map(PinnedDecision::replacement_place);
+                let Some(order) = replacement_order_statement(places) else {
+                    continue;
+                };
+                let start = candidates.len();
+                candidates.extend(order);
+                published.push((
+                    LoopShortcutPointProjection {
+                        slot: slot.clone(),
+                        kind: InteractionShortcutPointKind::Order,
+                        min: 0,
+                        max: 0,
+                        unique: true,
+                        ordered: true,
+                        read_only: true,
+                        candidate_indices: (start..candidates.len()).collect(),
+                    },
+                    Vec::new(),
+                ));
+            }
+            // CR 603.3b trigger ordering under the static replay mode is not a loop-shortcut
+            // per-iteration decision, and a replacement order's later place is stated at place 0,
+            // so this projection publishes nothing for either.
             PinnedDecision::Order { .. } => {}
         }
     }
@@ -3981,7 +4056,6 @@ fn loop_shortcut_projection(
     let WaitingFor::LoopShortcut {
         schema,
         certificate,
-        road,
         ..
     } = waiting_for
     else {
@@ -4043,21 +4117,18 @@ fn loop_shortcut_projection(
                 suggested: suggested.clamp(1, max),
             }
         }
-        crate::analysis::decision_template::IterationCount::UntilLethal => {
-            InteractionShortcutCountSpec::UntilLethal
-        }
         crate::analysis::decision_template::IterationCount::WithoutEnd => {
             InteractionShortcutCountSpec::WithoutEnd
         }
     };
     // CR 732.2a: carry the measured per-period signature forward so the picker's numbers can
     // state their consequence instead of standing alone. It is published by
-    // `bounded_offer_tail`, for a ring period and a recorded loss period alike, and by
+    // `bounded_offer_tail`, for a recorded loss period, and by
     // `counted_offer`, whose signature states one repetition and so no count's magnitude; every
     // other mint carries `None`, as does every save written before the field existed. The other
     // authority the magnitudes need — a FINITE count — is `count` above, and the two coincide by
     // construction rather than by luck: each producer mints a `Fixed` VARIANT, which is what
-    // selects the finite arm, and no clamp can turn a `Fixed` into an `UntilLethal`.
+    // selects the finite arm.
     let per_cycle = certificate.per_cycle.clone();
     let mut candidates = Vec::new();
     let mut points = Vec::with_capacity(schema.points.len());
@@ -4151,25 +4222,13 @@ fn loop_shortcut_projection(
             DecisionPointKind::MayChoice => {
                 // CR 732.2a: a recorded take performs the confirmed period's own answer, so its
                 // "may" is stated as fixed and neither answer is offered.
-                let fixed = *road == crate::analysis::loop_check::OfferRoad::RecordedPeriod;
-                if !fixed {
-                    candidates.extend([
-                        LoopShortcutCandidateValue::May(
-                            crate::analysis::decision_template::MayChoiceOption::Take,
-                        ),
-                        LoopShortcutCandidateValue::May(
-                            crate::analysis::decision_template::MayChoiceOption::Decline,
-                        ),
-                    ]);
-                }
-                let answers = u32::from(!fixed);
                 (
                     InteractionShortcutPointKind::MayChoice,
-                    answers,
-                    answers,
+                    0,
+                    0,
                     true,
                     false,
-                    fixed,
+                    true,
                 )
             }
             DecisionPointKind::UnlessBreak => {
@@ -4200,6 +4259,21 @@ fn loop_shortcut_projection(
                     false,
                     true,
                 )
+            }
+            // CR 616.1: the declared place of a replacement effect is a statement, not an option.
+            DecisionPointKind::Order { pos, .. } => {
+                if *pos == 0 {
+                    candidates.extend(
+                        replacement_order_statement(schema.points.iter().filter_map(|point| {
+                            let DecisionPointKind::Order { pos, .. } = point.kind else {
+                                return None;
+                            };
+                            Some((&point.slot.source, pos))
+                        }))
+                        .unwrap_or_default(),
+                    );
+                }
+                (InteractionShortcutPointKind::Order, 0, 0, true, true, true)
             }
         };
         if candidates.len() > MAX_INTERACTION_LIST_LEN {
@@ -8216,6 +8290,7 @@ fn schema_witness_availability(
         filtered_state,
         interaction_id,
         &response,
+        crate::game::engine::ShortcutEvidence::Measured,
     ) else {
         return InteractionAvailability::InputRequired;
     };
@@ -10955,6 +11030,7 @@ fn materialize_number_response(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn materialize_loop_shortcut_response(
     interaction_id: &InteractionId,
     projection: &LoopShortcutProjection,
@@ -10962,11 +11038,12 @@ fn materialize_loop_shortcut_response(
     // carried as ONE value because the seat the minted template is OWNED by and the seat the aim
     // walk measures against must be the same one.
     aim: crate::analysis::decision_template::AimContext<'_>,
-    // CR 732.2a: the answers the offer's confirmed period recorded; `None` off a recorded offer.
-    recorded: Option<&[PinnedDecision]>,
+    // CR 732.2a: the offer's confirmed period, empty off a recorded offer.
+    period: &crate::game::period_confirm::ConfirmedPeriod,
     authoritative_schema: &crate::analysis::decision_template::ShortcutDecisionSchema,
     authoritative_state: &GameState,
     response: &InteractionResponse,
+    evidence: crate::game::engine::ShortcutEvidence,
 ) -> Result<(GameAction, InteractionProgress), InteractionReasonCode> {
     let InteractionResponse::Shortcut { decision, pins } = response else {
         return Err(InteractionReasonCode::MalformedResponse);
@@ -10987,10 +11064,6 @@ fn materialize_loop_shortcut_response(
         ));
     }
     let count = match (*decision, projection.count) {
-        (
-            InteractionShortcutDecision::AcceptSuggested,
-            InteractionShortcutCountSpec::UntilLethal,
-        ) => IterationCount::UntilLethal,
         (
             InteractionShortcutDecision::AcceptSuggested,
             InteractionShortcutCountSpec::WithoutEnd,
@@ -11044,10 +11117,22 @@ fn materialize_loop_shortcut_response(
                     });
                 }
                 // CR 732.2a: the confirmed period's own answer is the one its take performs.
-                InteractionShortcutPointKind::MayChoice => {
-                    let answer = recorded
+                InteractionShortcutPointKind::MayChoice | InteractionShortcutPointKind::Order => {
+                    let answer = period
+                        .recorded_answers()
                         .and_then(|recorded| recorded_answer(recorded, &point.slot))
-                        .filter(|pin| matches!(pin, PinnedDecision::MayChoice { .. }))
+                        .filter(|pin| {
+                            matches!(
+                                (pin, point.kind),
+                                (
+                                    PinnedDecision::MayChoice { .. },
+                                    InteractionShortcutPointKind::MayChoice
+                                ) | (
+                                    PinnedDecision::Order { .. },
+                                    InteractionShortcutPointKind::Order
+                                )
+                            )
+                        })
                         .ok_or(InteractionReasonCode::InvalidAuthorityState)?;
                     decisions.push(answer.clone());
                 }
@@ -11069,10 +11154,8 @@ fn materialize_loop_shortcut_response(
         let sequenced = !pin.amounts.is_empty() || pin.choice_ids.len() > point.max as usize;
         // CR 732.2a: a SEQUENCED pin is ONE target position's partition of a DECLARED count, and
         // nothing else. A multi-position slot needs a per-position carrier a flat list cannot
-        // express; an until-lethal proposal has no count to partition, so a sequence there names
-        // announcements past the head that no drive ever reads (CR 732.2c). Both are refused
-        // rather than mis-read. Binding the count here carries "this can only be a `Fixed`
-        // partition" in the type instead of in a comment.
+        // express, so it is refused rather than mis-read. Binding the count here carries "this
+        // can only be a `Fixed` partition" in the type instead of in a comment.
         let sequenced_partition: Option<u32> = if sequenced {
             match (&count, &point.kind) {
                 (IterationCount::Fixed(declared), InteractionShortcutPointKind::Targets)
@@ -11169,20 +11252,6 @@ fn materialize_loop_shortcut_response(
                     indices,
                 });
             }
-            InteractionShortcutPointKind::MayChoice => {
-                let [candidate_index] = candidate_indices.as_slice() else {
-                    return Err(InteractionReasonCode::ConstraintUnsatisfied);
-                };
-                let LoopShortcutCandidateValue::May(take) =
-                    &projection.candidates[*candidate_index]
-                else {
-                    return Err(InteractionReasonCode::InvalidAuthorityState);
-                };
-                decisions.push(PinnedDecision::MayChoice {
-                    slot: point.slot.clone(),
-                    take: *take,
-                });
-            }
             InteractionShortcutPointKind::UnlessBreak => {
                 let [candidate_index] = candidate_indices.as_slice() else {
                     return Err(InteractionReasonCode::ConstraintUnsatisfied);
@@ -11197,7 +11266,10 @@ fn materialize_loop_shortcut_response(
                     pay: *pay,
                 });
             }
-            InteractionShortcutPointKind::ConvokeTaps | InteractionShortcutPointKind::ManaColor => {
+            InteractionShortcutPointKind::ConvokeTaps
+            | InteractionShortcutPointKind::ManaColor
+            | InteractionShortcutPointKind::MayChoice
+            | InteractionShortcutPointKind::Order => {
                 return Err(InteractionReasonCode::InvalidAuthorityState);
             }
         }
@@ -11231,22 +11303,40 @@ fn materialize_loop_shortcut_response(
         // The `required` slot list is still not derived here: `declaration_conforms` derives it
         // from the SAME `authoritative_schema` this site already passed.
         //
-        // CR 732.2a: the preview and the submit paths share this chokepoint, so both answer the
-        // aim question the same way, and a failure here is this entry's `ConstraintUnsatisfied`
-        // rather than the declare handler's priority handback. Of
+        // CR 732.2a: the preview and the submit paths share this chokepoint, and it asks the
+        // declare handler's own question with the caller's evidence, so a declaration the handler
+        // would refuse on that evidence fails here as this entry's `ConstraintUnsatisfied` rather
+        // than the handler's priority handback. Of
         // `InteractionShortcutDecision`'s three variants, `AcceptSuggested` and `Fixed` both fall
         // through the pin loop above into this call — so the suggestion-count route is validated
         // here too — while `Decline` returns before any pin is read and reaches no conjunct.
-        if !declaration_conforms(
-            authoritative_schema,
-            template,
-            crate::game::engine::shortcut_validated_range(&count, Some(template)),
-            aim.clone(),
-            recorded,
-            authoritative_state,
-        ) {
+        if period.performed.is_empty()
+            && !declaration_conforms(
+                authoritative_schema,
+                template,
+                crate::game::engine::shortcut_validated_range(&count, Some(template)),
+                aim.clone(),
+                period.recorded_answers(),
+                authoritative_state,
+            )
+        {
             return Err(InteractionReasonCode::ConstraintUnsatisfied);
         }
+    }
+    // CR 732.2a + CR 608.2b: on an offer whose period carries performances, a declaration
+    // conforms iff its pins conform and, performed from the offer frame, it reaches the count.
+    if !period.performed.is_empty()
+        && !crate::game::engine::performance_conforms(
+            authoritative_state,
+            authoritative_schema,
+            aim,
+            period,
+            template.as_ref(),
+            &count,
+            evidence,
+        )
+    {
+        return Err(InteractionReasonCode::ConstraintUnsatisfied);
     }
     let pin_minimum = projection
         .points
@@ -11324,9 +11414,7 @@ fn shortcut_announcement_subject(
 /// the running prefix sums, so the pin is a `TargetSchedule::Piecewise`. Positive parts summing
 /// to `declared` put every segment start inside `0..declared`, which is the range
 /// `game::engine::shortcut_validated_range` validates, so this producer can never mint a
-/// `ScheduleExhausted`. An until-lethal proposal names no count to partition and is not
-/// sequenced at all — its caller refuses the shape before reaching here, and its submission
-/// decodes through the ordinary flat `Targets` arm.
+/// `ScheduleExhausted`.
 ///
 /// `Ranking::new` validates the sequence, and it is the only thing that can:
 /// `loop_shortcut_projection` hard-codes `unique: false` into every `Targets` point it mints,
@@ -11571,6 +11659,7 @@ fn materialize_response(
     filtered_state: &GameState,
     interaction_id: &InteractionId,
     response: &InteractionResponse,
+    evidence: crate::game::engine::ShortcutEvidence,
 ) -> Result<(GameAction, InteractionProgress), InteractionReasonCode> {
     let semantic_owner = authoritative_state
         .active_interaction_slots
@@ -11693,10 +11782,11 @@ fn materialize_response(
                     per_cycle: certificate.per_cycle.as_ref(),
                     published: declaration.as_ref(),
                 },
-                period.recorded_answers(),
+                period,
                 schema,
                 authoritative_state,
                 completed.as_ref().unwrap_or(response),
+                evidence,
             );
         }
         HumanResponseModel::AmountAssignments => {
@@ -11774,6 +11864,33 @@ fn preview_outcome(
     }
 }
 
+/// What committing `action` would do, read off a throwaway authoritative clone. A loop-shortcut
+/// answer is read from the offer's measured evidence instead, so a preview never
+/// performs a repetition or takes the shortcut; it reports a take as advancing past the window,
+/// since only performing the take tells a game it ends from one it returns to priority.
+fn preview_action_outcome(
+    state: &GameState,
+    actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: GameAction,
+    interaction_id: &InteractionId,
+) -> Result<InteractionOutcomeCode, EngineError> {
+    use crate::game::engine::{shortcut_step, ShortcutEvidence, ShortcutStep};
+    if let Some(step) = shortcut_step(state, &action, ShortcutEvidence::Measured) {
+        return step.map(|step| match (step, &state.waiting_for) {
+            (ShortcutStep::Polls { .. }, WaitingFor::RespondToShortcut { .. }) => {
+                InteractionOutcomeCode::Replaced
+            }
+            (ShortcutStep::HandsBack | ShortcutStep::Polls { .. } | ShortcutStep::Takes, _) => {
+                InteractionOutcomeCode::Advanced
+            }
+        });
+    }
+    let mut projected = state.clone();
+    apply_interaction_for_simulation(&mut projected, actor, semantic_owner, action)?;
+    Ok(preview_outcome(state, &projected, interaction_id))
+}
+
 /// Preview a response by materializing the exact engine action and applying it
 /// to a throwaway authoritative clone. No global-concede action is ever minted
 /// by the interaction candidate set, so it can never serve as a progress witness.
@@ -11807,14 +11924,24 @@ pub fn preview_interaction(
         Err(reason) => return rejected(reason, InteractionProgress::default()),
     };
     let filtered = visibility::filter_state_for_viewer(state, actor);
-    let (action, progress) =
-        match materialize_response(state, &filtered, &request.interaction_id, &request.response) {
-            Ok(materialized) => materialized,
-            Err(reason) => return rejected(reason, InteractionProgress::default()),
-        };
-    let mut projected = state.clone();
-    match apply_interaction_for_simulation(&mut projected, actor, semantic_owner, action) {
-        Ok(_) => InteractionPreview {
+    let (action, progress) = match materialize_response(
+        state,
+        &filtered,
+        &request.interaction_id,
+        &request.response,
+        crate::game::engine::ShortcutEvidence::Measured,
+    ) {
+        Ok(materialized) => materialized,
+        Err(reason) => return rejected(reason, InteractionProgress::default()),
+    };
+    match preview_action_outcome(
+        state,
+        actor,
+        semantic_owner,
+        action,
+        &request.interaction_id,
+    ) {
+        Ok(outcome) => InteractionPreview {
             request_id: request.request_id.clone(),
             interaction_id: request.interaction_id.clone(),
             status: InteractionPreviewStatus::Confirmable,
@@ -11822,7 +11949,7 @@ pub fn preview_interaction(
                 confirmable: true,
                 ..progress
             },
-            outcome: preview_outcome(state, &projected, &request.interaction_id),
+            outcome,
             summaries: vec![
                 InteractionSummaryCode::ConfirmAvailable,
                 InteractionSummaryCode::Progress,
@@ -11854,19 +11981,29 @@ pub fn preview_interaction_with_rejection(
         .map_err(action_rejection_for_interaction_reason)?
         .semantic_owner;
     let filtered = visibility::filter_state_for_viewer(state, actor);
-    let (action, progress) =
-        materialize_response(state, &filtered, &request.interaction_id, &request.response)
-            .map_err(action_rejection_for_interaction_reason)?;
+    let (action, progress) = materialize_response(
+        state,
+        &filtered,
+        &request.interaction_id,
+        &request.response,
+        crate::game::engine::ShortcutEvidence::Measured,
+    )
+    .map_err(action_rejection_for_interaction_reason)?;
     let related_object_ids = action.related_object_ids();
-    let mut projected = state.clone();
-    apply_interaction_for_simulation(&mut projected, actor, PlayerId(semantic_owner), action)
-        .map_err(|error| {
-            visibility::filter_action_rejection_for_viewer(
-                state,
-                actor,
-                &action_rejection_for_engine_error(&error, related_object_ids),
-            )
-        })?;
+    let outcome = preview_action_outcome(
+        state,
+        actor,
+        PlayerId(semantic_owner),
+        action,
+        &request.interaction_id,
+    )
+    .map_err(|error| {
+        visibility::filter_action_rejection_for_viewer(
+            state,
+            actor,
+            &action_rejection_for_engine_error(&error, related_object_ids),
+        )
+    })?;
     Ok(InteractionPreview {
         request_id: request.request_id.clone(),
         interaction_id: request.interaction_id.clone(),
@@ -11875,7 +12012,7 @@ pub fn preview_interaction_with_rejection(
             confirmable: true,
             ..progress
         },
-        outcome: preview_outcome(state, &projected, &request.interaction_id),
+        outcome,
         summaries: vec![
             InteractionSummaryCode::ConfirmAvailable,
             InteractionSummaryCode::Progress,
@@ -11910,6 +12047,20 @@ pub fn resolve_interaction_response(
     actor: PlayerId,
     submission: &InteractionSubmission,
 ) -> Result<GameAction, InteractionSubmitError> {
+    resolve_with_evidence(
+        state,
+        actor,
+        submission,
+        crate::game::engine::ShortcutEvidence::Performed,
+    )
+}
+
+fn resolve_with_evidence(
+    state: &GameState,
+    actor: PlayerId,
+    submission: &InteractionSubmission,
+    evidence: crate::game::engine::ShortcutEvidence,
+) -> Result<GameAction, InteractionSubmitError> {
     bound_interaction_submission(submission)?;
     slot_for_submission(state, actor, &submission.interaction_id)?;
     let filtered = visibility::filter_state_for_viewer(state, actor);
@@ -11918,8 +12069,29 @@ pub fn resolve_interaction_response(
         &filtered,
         &submission.interaction_id,
         &submission.response,
+        evidence,
     )?;
     Ok(action)
+}
+
+/// CR 732.2a: a submitted shortcut declaration is performed once, before the ingress decides it,
+/// and the receipt that performance leaves is what the ingress and the reducer read.
+fn record_submitted_answer(
+    state: &mut GameState,
+    actor: PlayerId,
+    submission: &InteractionSubmission,
+) {
+    if !matches!(submission.response, InteractionResponse::Shortcut { .. }) {
+        return;
+    }
+    if let Ok(action) = resolve_with_evidence(
+        state,
+        actor,
+        submission,
+        crate::game::engine::ShortcutEvidence::Measured,
+    ) {
+        crate::game::engine::record_answer_receipt(state, &action);
+    }
 }
 
 /// Hidden engine-only submission entry point. The opaque interaction and choice
@@ -11931,6 +12103,7 @@ pub fn submit_interaction(
     actor: PlayerId,
     submission: InteractionSubmission,
 ) -> Result<AppliedInteraction, InteractionSubmitError> {
+    record_submitted_answer(state, actor, &submission);
     let action = resolve_interaction_response(state, actor, &submission)?;
     // Re-read the slot rather than threading it out of `resolve_*`: keeping that
     // function's return to the action alone is what makes it usable as a public
@@ -11953,6 +12126,7 @@ pub fn submit_interaction_with_rejection(
     actor: PlayerId,
     submission: InteractionSubmission,
 ) -> Result<AppliedInteraction, ActionRejection> {
+    record_submitted_answer(state, actor, &submission);
     let action = resolve_interaction_response(state, actor, &submission)
         .map_err(|error| action_rejection_for_interaction_reason(error.code))?;
     let semantic_owner = PlayerId(
@@ -12030,6 +12204,96 @@ mod tests {
                 .map(|(action, _)| action),
             Err(InteractionReasonCode::ConstraintUnsatisfied),
             "every announced target must receive a share"
+        );
+    }
+
+    /// CR 732.2a: a growing period's preview states the sum of its repetitions — P1 losing 9, then
+    /// 10, 11 and 12 previews −42 over four, not four times the first repetition's −9.
+    #[test]
+    fn a_growing_period_previews_the_sum_of_its_repetitions() {
+        use crate::analysis::resource::{PeriodicDelta, ResourceVector};
+        let life = |loss: i64| ResourceVector {
+            life: BTreeMap::from([(PlayerId(1), -loss)]),
+            ..ResourceVector::default()
+        };
+        let periodic = PeriodicDelta {
+            delta: life(9),
+            growth: life(1),
+            ..PeriodicDelta::default()
+        };
+        assert_eq!(
+            shortcut_preview_entries(&periodic, 4, None),
+            vec![InteractionShortcutPreviewEntry {
+                family: InteractionShortcutPreviewFamily::Life,
+                player: Some(1),
+                amount: -42,
+            }]
+        );
+    }
+
+    /// CR 119.3 + CR 732.2a: a growing charge lands on each seat as the repetitions the
+    /// declaration allocates it, in order — P1 losing 9 a repetition, growing by 1, puts 9 on the
+    /// seat of the first repetition and 10, 11 and 12 on the seat of the next three; with the
+    /// trigger on the stack latched on P2, P2 takes the first and the last two.
+    #[test]
+    fn a_growing_charged_slot_spreads_each_repetitions_own_charge() {
+        use crate::analysis::decision_template::{ChoicePoint, DecisionSlot};
+        use crate::analysis::resource::{PeriodicDelta, ResourceVector};
+        let life = |loss: i64| ResourceVector {
+            life: BTreeMap::from([(PlayerId(1), -loss)]),
+            ..ResourceVector::default()
+        };
+        let slot = DecisionSlot::first(
+            crate::types::game_state::YieldTarget::ThisObject {
+                source_id: ObjectId(1),
+                incarnation: None,
+                trigger_description: None,
+            },
+            ChoicePoint::AnnouncedTarget,
+        );
+        let periodic = PeriodicDelta {
+            delta: life(9),
+            growth: life(1),
+            victim_slot: vec![(slot.clone(), 9)],
+            ..PeriodicDelta::default()
+        };
+        let point = LoopShortcutPointProjection {
+            slot,
+            kind: InteractionShortcutPointKind::Targets,
+            min: 1,
+            max: 1,
+            unique: false,
+            ordered: false,
+            read_only: false,
+            candidate_indices: vec![0, 1],
+        };
+        let seats = [PlayerId(1), PlayerId(2)];
+        let ids = [
+            InteractionChoiceId("p1".into()),
+            InteractionChoiceId("p2".into()),
+        ];
+        let allocation = [
+            AmountAssignment {
+                choice_id: ids[0].clone(),
+                amount: 1,
+            },
+            AmountAssignment {
+                choice_id: ids[1].clone(),
+                amount: 3,
+            },
+        ];
+        let charge = victim_charge(&periodic, &point, &seats).expect("the slot charges P1");
+        let preview = |lead: Option<PlayerId>| {
+            let split = VictimSplit::new(&charge, &ids, &seats, &allocation, lead);
+            shortcut_preview_entries(&periodic, 4, split.as_ref())
+                .into_iter()
+                .map(|entry| (entry.player, entry.amount))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(preview(None), vec![(Some(1), -9), (Some(2), -33)]);
+        assert_eq!(
+            preview(Some(PlayerId(2))),
+            vec![(Some(1), -10), (Some(2), -32)]
         );
     }
 
@@ -12427,28 +12691,25 @@ mod tests {
     /// specify: the declare handler refuses any `Fixed(n)` above it, so a picker publishing the
     /// measurement would offer a count that handler then hands back.
     ///
-    /// THREE ARMS, because only one of them can discriminate WHICH field is read:
+    /// THREE ARMS:
     ///
-    /// * ⓐ THE DISCRIMINATING ARM — the two published answers differ BELOW the budget, so
-    ///   `.min(MAX_SHORTCUT_CYCLES)` cannot mask a swap. No producer mints this pair
-    ///   (`build_shortcut_schema` derives the capacity as `measured.min(budget)`, which is the
-    ///   measurement itself whenever it fits); it is the loaded/persisted authority the
-    ///   zero-capacity guard above exists for, and it is the only board on which reading the
-    ///   measured field is observable at all.
+    /// * ⓐ the two published answers differ BELOW the budget, so `.min(MAX_SHORTCUT_CYCLES)`
+    ///   cannot mask a swap. No producer mints this pair (`build_shortcut_schema` derives the
+    ///   capacity as `measured.min(budget)`, which is the measurement itself whenever it fits);
+    ///   it is the loaded/persisted authority the zero-capacity guard above exists for.
     /// * ⓑ the production-reachable boundary — a threshold ABOVE the budget, whose capacity is
     ///   therefore the budget. The pair a real above-budget board carries.
-    /// * ⓒ the hostile sibling — `UntilLethal` publishes NO finite ceiling, stated on the
+    /// * ⓒ the hostile sibling — `WithoutEnd` publishes NO finite ceiling, stated on the
     ///   SUGGESTION's variant rather than on `is_bounded()`: an un-narrowed object-growth offer
     ///   measures no threshold and still publishes a finite ceiling, so the two are not the same
     ///   question.
     ///
-    /// REVERT-PROBE: read `measured_repetition_bound` in place of `deliverable_capacity` ⇒ ⓐ's
-    /// `max` is the measurement and FAILS, while ⓑ stays green under the `.min(..)`. Key ⓒ's arm
-    /// on `is_bounded()` instead of on the variant ⇒ ⓒ publishes a finite ceiling and FAILS.
+    /// REVERT-PROBE: key ⓒ's arm on `is_bounded()` instead of on the variant ⇒ ⓒ publishes a
+    /// finite ceiling and FAILS.
     #[test]
     fn the_picker_publishes_the_deliverable_capacity_and_never_the_measured_threshold() {
-        use crate::analysis::decision_template::ShortcutDecisionSchema;
-        use crate::analysis::loop_check::{LoopCertificate, OfferRoad, WinKind};
+        use crate::analysis::decision_template::{RepetitionBound, ShortcutDecisionSchema};
+        use crate::analysis::loop_check::{LoopCertificate, WinKind};
         use crate::analysis::resource::BoardDelta;
 
         let viewer = PlayerId(0);
@@ -12468,12 +12729,12 @@ mod tests {
                 },
                 schema: ShortcutDecisionSchema {
                     iteration_count,
-                    measured_repetition_bound: measured,
+                    repetition_bound: measured
+                        .map_or(RepetitionBound::Unmeasured, |_| RepetitionBound::Measured),
                     deliverable_capacity: capacity,
                     ..Default::default()
                 },
                 declaration: None,
-                road: OfferRoad::Ring,
                 counted_take: Default::default(),
                 period: Default::default(),
             };
@@ -12534,12 +12795,12 @@ mod tests {
              publishes it"
         );
 
-        // ⓒ the hostile sibling: a measured threshold beside an `UntilLethal` suggestion still
+        // ⓒ the hostile sibling: a measured threshold beside a `WithoutEnd` suggestion still
         //   publishes no finite ceiling, because the finite arm is chosen on the VARIANT.
         assert_eq!(
-            offer_at(IterationCount::UntilLethal, Some(12), 12),
-            InteractionShortcutCountSpec::UntilLethal,
-            "CR 732.2a: `UntilLethal` names no count, so there is no ceiling to publish"
+            offer_at(IterationCount::WithoutEnd, Some(12), 12),
+            InteractionShortcutCountSpec::WithoutEnd,
+            "CR 732.2a: `WithoutEnd` names no count, so there is no ceiling to publish"
         );
     }
 

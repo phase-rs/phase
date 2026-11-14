@@ -141,7 +141,7 @@ function shortcutReplyCandidates(
 
 /** Which control the offer's announced-target point opens, CARRYING the point it opens on, so
  *  routing, rendering and the dispatch cannot disagree about which point is answered. */
-type TargetsControl = { kind: "allocation" | "subject"; point: InteractionShortcutPoint };
+type TargetsControl = { kind: "allocation"; point: InteractionShortcutPoint };
 
 /** CR 732.2a + CR 601.2c: the control an announced-target point opens under the offer's published count. */
 function targetsControlFor(
@@ -150,8 +150,6 @@ function targetsControlFor(
   previewed: boolean,
 ): TargetsControl | null {
   switch (count.type) {
-    case "untilLethal":
-      return { kind: "subject", point };
     case "fixed":
     case "withoutEnd":
       return previewed ? { kind: "allocation", point } : null;
@@ -232,8 +230,6 @@ function CountLine({ count }: { count: IterationCount }) {
 function countText(t: TFunction<"game">, count: IterationCount): string {
   if (typeof count === "object") return t("comboShortcut.fixedCount", { count: count.Fixed });
   switch (count) {
-    case "UntilLethal":
-      return t("comboShortcut.untilLethal");
     case "WithoutEnd":
       return t("comboShortcut.withoutEnd");
     default:
@@ -399,7 +395,7 @@ function DeclareShortcutOffer({
   const mayPoints = pinRoute ? points.filter((p) => !p.readOnly && p.kind === "mayChoice") : [];
 
   // CR 732.2a: the count window is ENGINE-OWNED. `null` when this offer publishes no finite
-  // window (UntilLethal) or when the transport published no interaction projection at all — in
+  // window (WithoutEnd) or when the transport published no interaction projection at all — in
   // both cases no picker renders and the offer's own count is declared verbatim, as before.
   const countSpec = spec?.count.type === "fixed" ? spec.count.data : null;
   // No client-side default: until the player types, the box shows the ENGINE's suggested count.
@@ -422,10 +418,6 @@ function DeclareShortcutOffer({
   const [authored, setAuthored] = useState<{ count: number; raw: Record<string, string> } | null>(
     null,
   );
-  // CR 732.2c: an UntilLethal declaration announces ONE subject — the drive resolves it at every
-  // repetition and never advances past it, so a longer list would certify choices nobody takes.
-  // No default: `null` until the player selects, which is what disables Confirm.
-  const [subject, setSubject] = useState<InteractionChoiceId | null>(null);
   // CR 603.5: the optional "may", whose choice is made on resolution; pinning it declares the same
   // answer for every iteration. No client-side default — an unanswered point disables Confirm.
   const [mayPicks, setMayPicks] = useState<Record<number, InteractionChoiceId>>({});
@@ -496,8 +488,7 @@ function DeclareShortcutOffer({
   // game consequence. The engine remains the sole legality authority.
   const declarationComplete =
     mayPoints.every((p) => mayPicks[p.group] !== undefined) &&
-    (targetsControl?.kind !== "allocation" || (effective.length > 0 && allocated === chosen)) &&
-    (targetsControl?.kind !== "subject" || subject !== null);
+    (targetsControl?.kind !== "allocation" || (effective.length > 0 && allocated === chosen));
 
   const confirmDisabled =
     (countSpec !== null && chosen === null) || (pinRoute && !declarationComplete);
@@ -520,9 +511,7 @@ function DeclareShortcutOffer({
 
     // Only `targetsControl.point` can reach the `targets` arms — the group conjunct in
     // `renderable` is what guarantees it — so there is no second `targets` point for `effective`
-    // to leak onto. `amounts` is always written explicitly. CR 732.2c: `null` on an unselected
-    // subject is the same type-level refusal arm the count uses above, so the dispatched id is
-    // the SELECTED value rather than an assertion, a default, a clamp or a fallback.
+    // to leak onto. `amounts` is always written explicitly.
     const pinFor = (p: InteractionShortcutPoint): InteractionShortcutPin | null => {
       if (p.kind === "mayChoice") {
         // An unanswered group takes that same refusal arm, so an unset pick is unrepresentable
@@ -532,9 +521,7 @@ function DeclareShortcutOffer({
       }
       return targetsControl?.kind === "allocation"
         ? { group: p.group, choiceIds: effective.map((a) => a.choiceId), amounts: effective }
-        : subject === null
-          ? null
-          : { group: p.group, choiceIds: [subject], amounts: [] };
+        : null;
     };
 
     const pins = points.filter((p) => !p.readOnly).map(pinFor);
@@ -585,9 +572,9 @@ function DeclareShortcutOffer({
   // CR 732.2a: the count the picker offers may be one the offer's bounded sample published no
   // element for, and then the engine is the only source of the canonical split. `declaredResponse`
   // already builds the pin that asks for it — naming nothing, because nothing is authored here.
-  // Shares `custom`'s leading conjuncts, so an UntilLethal offer never asks: its control takes the
-  // `subject` arm. A second announced-target point drops `pinRoute` (`renderable` requires the
-  // point's own group), which is the shape the engine refuses to complete.
+  // Shares `custom`'s leading conjuncts. A second announced-target point drops `pinRoute`
+  // (`renderable` requires the point's own group), which is the shape the engine refuses to
+  // complete.
   const unsampled =
     pinRoute &&
     targetsControl?.kind === "allocation" &&
@@ -735,35 +722,6 @@ function DeclareShortcutOffer({
             </button>
           </div>
         )}
-        {pinRoute && targetsControl?.kind === "subject" && (
-          <div className="flex flex-col gap-2 rounded-lg bg-white/5 px-3 py-2">
-            <p className="text-xs font-semibold tracking-wide text-slate-400 uppercase">
-              {t("comboShortcut.announceTitle")}
-            </p>
-            {/* The domain is the point's published `candidateIds` and the bound is its published
-                `max`; the modal derives neither. */}
-            {targetsControl.point.candidateIds.map((id) => {
-              const label = candidateLabel(t, candidates, id);
-              const picked = subject === id;
-              return (
-                <SubjectControl key={id} subject={label}>
-                  <button
-                    onClick={() => setSubject(id)}
-                    aria-pressed={picked}
-                    aria-label={t("comboShortcut.announceAria", { subject: label })}
-                    className={`min-h-9 rounded-[12px] border px-3 py-1 text-sm font-semibold transition ${
-                      picked
-                        ? "border-cyan-400/60 bg-cyan-500/20 text-cyan-100"
-                        : "border-white/8 bg-white/5 text-slate-200 hover:bg-white/8"
-                    }`}
-                  >
-                    {t("comboShortcut.announce")}
-                  </button>
-                </SubjectControl>
-              );
-            })}
-          </div>
-        )}
         {mayPoints.map((p, index) => {
           // The ordinal IS the subject: nothing else this panel renders distinguishes one may
           // point from another. It counts the RENDERED panels, not the published points, so it
@@ -904,7 +862,9 @@ function RespondToShortcut({
   // position. No group is named exactly when no allocation is stated, and then every decision
   // states its order — reading only the first would show the responder half the proposal.
   const allocationGroup = spec?.allocationGroup ?? null;
-  const orderPoints = points.filter((p) => p.kind === "targets" && p.group !== allocationGroup);
+  const orderPoints = points.filter(
+    (p) => (p.kind === "targets" && p.group !== allocationGroup) || p.kind === "order",
+  );
   const allocation = declared?.allocation ?? [];
   // One authority for whether a may row exists, so the panel's predicate and its render cannot
   // drift: a point this modal has no wording for contributes neither a row nor a title.
@@ -994,10 +954,15 @@ function RespondToShortcut({
                   key={`${point.group}:${id}`}
                   className="text-sm text-slate-200 tabular-nums"
                 >
-                  {t("comboShortcut.respondOrderEntry", {
-                    position: index + 1,
-                    subject: candidateLabel(t, candidates, id),
-                  })}
+                  {t(
+                    point.kind === "order"
+                      ? "comboShortcut.respondReplacementOrderEntry"
+                      : "comboShortcut.respondOrderEntry",
+                    {
+                      position: index + 1,
+                      subject: candidateLabel(t, candidates, id),
+                    },
+                  )}
                 </p>
               )),
             )}

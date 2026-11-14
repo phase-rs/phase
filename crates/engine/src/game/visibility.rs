@@ -2272,7 +2272,6 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         ref certificate,
         ref schema,
         ref declaration,
-        road,
         counted_take,
         period: _,
     } = state.waiting_for
@@ -2329,6 +2328,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                         DecisionPointKind::ManaColor { color } => {
                             DecisionPointKind::ManaColor { color: *color }
                         }
+                        DecisionPointKind::Order { pos, positions } => DecisionPointKind::Order {
+                            pos: *pos,
+                            positions: *positions,
+                        },
                     };
                     DecisionPoint {
                         slot: point.slot.clone(),
@@ -2373,7 +2376,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                     // (life, poison, library sizes over the living players) and the engine's own
                     // budget, so the pair carries through the per-viewer projection unredacted —
                     // only hidden-info legal targets are rewritten above.
-                    measured_repetition_bound: schema.measured_repetition_bound,
+                    repetition_bound: schema.repetition_bound,
                     deliverable_capacity: schema.deliverable_capacity,
                     points,
                     convoke_tappable_count,
@@ -2387,7 +2390,6 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             predicted_winner,
             certificate: certificate.clone(),
             declaration,
-            road,
             counted_take,
             period: Default::default(),
             schema,
@@ -4056,19 +4058,6 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     obj.casting_permissions.clear();
     obj.unimplemented_mechanics.clear();
 
-    obj.base_power = None;
-    obj.base_toughness = None;
-    obj.base_loyalty = None;
-    obj.base_printed_loyalty = None;
-    obj.base_defense = None;
-    obj.base_card_types = Default::default();
-    obj.base_mana_cost = Default::default();
-    obj.base_keywords.clear();
-    Arc::make_mut(&mut obj.base_abilities).clear();
-    Arc::make_mut(&mut obj.base_trigger_definitions).clear();
-    Arc::make_mut(&mut obj.base_replacement_definitions).clear();
-    Arc::make_mut(&mut obj.base_static_definitions).clear();
-    obj.base_color.clear();
     obj.base_printed_ref = None;
     // CR 400.2 + CR 708.5: the printing identifies the physical card exactly as its name does,
     // so it leaves with the name, live and base value alike.
@@ -4943,6 +4932,21 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.face_down = true;
         obj.name = HIDDEN_CARD_NAME.to_string();
         redact_printed_identity(obj);
+        // CR 708.2a + CR 708.4: base characteristics clear here, not in `redact_printed_identity`,
+        // because a face-down permanent's or spell's base values are its public characteristics.
+        obj.base_power = None;
+        obj.base_toughness = None;
+        obj.base_loyalty = None;
+        obj.base_printed_loyalty = None;
+        obj.base_defense = None;
+        obj.base_card_types = Default::default();
+        obj.base_mana_cost = Default::default();
+        obj.base_keywords.clear();
+        Arc::make_mut(&mut obj.base_abilities).clear();
+        Arc::make_mut(&mut obj.base_trigger_definitions).clear();
+        Arc::make_mut(&mut obj.base_replacement_definitions).clear();
+        Arc::make_mut(&mut obj.base_static_definitions).clear();
+        obj.base_color.clear();
         Arc::make_mut(&mut obj.abilities).clear();
         obj.keywords.clear();
         obj.power = None;
@@ -5294,6 +5298,7 @@ mod tests {
         SpellCastRecord, StackEntry, TargetEffectDetail, TriggerOrderGroup,
     };
     use crate::types::identifiers::{CardId, ObjectIncarnationRef, ReplacementContinuationId};
+    use crate::types::keywords::{Keyword, WardCost};
     use crate::types::mana::ManaCost;
     use crate::types::proposed_event::{ProposedEvent, SearchFoundDisposition};
     use crate::types::replacements::ReplacementEvent;
@@ -12886,7 +12891,6 @@ mod tests {
                 }],
                 damage_to_players: Vec::new(),
                 prevention_tally: Vec::new(),
-                lives_before: vec![20, 20],
                 sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
                 phase_c_remnant: None,
             }));
@@ -13939,7 +13943,7 @@ mod tests {
                 suggested_declaration: None,
                 leading_aims: Vec::new(),
                 iteration_count: IterationCount::Fixed(3),
-                measured_repetition_bound: Some(3),
+                repetition_bound: crate::analysis::decision_template::RepetitionBound::Measured,
                 deliverable_capacity: 3,
                 points: vec![DecisionPoint {
                     slot: slot.clone(),
@@ -13960,7 +13964,6 @@ mod tests {
                 },
                 key: DecisionGroupKey::from_sources(&[slot.source], DecisionKind::LoopChoice),
             }),
-            road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -14019,7 +14022,7 @@ mod tests {
     ///
     /// # This path is UNREACHABLE through today's publisher, and the row says so
     ///
-    /// `record_trigger_target_answer` mints `ByIdentity` only for `TargetRef::Object`, and the
+    /// `announced_target_pins` mints `ByIdentity` only for `TargetRef::Object`, and the
     /// bounded publisher's own conjuncts (`TargetAnnouncement::Chosen`, and player-valued legal
     /// sets on every tracked board — measured `any ByIdentity pin? false` on all five drives)
     /// keep object pins out of a published slot today. The row exists so a publisher relaxation
@@ -14369,7 +14372,6 @@ mod tests {
                 shortened_by: None,
                 published_declaration: Some(declaration),
                 leading_aims: Vec::new(),
-                road: crate::analysis::loop_check::OfferRoad::Ring,
                 counted_take: Default::default(),
                 period: Default::default(),
             },
@@ -16072,5 +16074,256 @@ mod tests {
             opponent.replacement_continuations, state.replacement_continuations,
             "an unreferenced rider naming only public objects is projected unchanged"
         );
+    }
+
+    const SOUL_SUMMONS: &str = "Manifest the top card of your library. (Put it onto the battlefield face down as a 2/2 creature. Turn it face up any time for its mana cost if it's a creature card.)";
+    const CRYPTIC_COAT: &str = "When this Equipment enters, cloak the top card of your library, then attach this Equipment to it. (To cloak a card, put it onto the battlefield face down as a 2/2 creature with ward {2}. Turn it face up any time for its mana cost if it's a creature card.)\nEquipped creature gets +1/+0 and can't be blocked.\n{1}{U}: Return this Equipment to its owner's hand.";
+    const HIDDEN_DRAGONSLAYER: &str = "Lifelink\nMegamorph {2}{W} (You may cast this card face down as a 2/2 creature for {3}. Turn it face up any time for its megamorph cost and put a +1/+1 counter on it.)\nWhen this creature is turned face up, destroy target creature with power 4 or greater an opponent controls.";
+
+    fn after_layer_pass(mut view: GameState) -> GameState {
+        crate::game::layers::mark_layers_full(&mut view);
+        crate::game::layers::flush_layers(&mut view);
+        view
+    }
+
+    /// Serra Angel ({3}{W}{W} Creature — Angel 4/4, Flying, Vigilance) on top of P0's library.
+    fn serra_angel_on_library_top(scenario: &mut GameScenario) -> ObjectId {
+        let angel = scenario.add_card_to_library_top(P0, "Serra Angel");
+        let obj = scenario.state.objects.get_mut(&angel).unwrap();
+        obj.card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Angel".to_string()],
+        };
+        obj.base_card_types = obj.card_types.clone();
+        (obj.power, obj.toughness) = (Some(4), Some(4));
+        (obj.base_power, obj.base_toughness) = (Some(4), Some(4));
+        obj.keywords = vec![Keyword::Flying, Keyword::Vigilance];
+        obj.base_keywords = obj.keywords.clone();
+        angel
+    }
+
+    fn soul_summons_manifests_serra_angel() -> (GameState, ObjectId) {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let angel = serra_angel_on_library_top(&mut scenario);
+        let summons = scenario
+            .add_spell_to_hand_from_oracle(P0, "Soul Summons", false, SOUL_SUMMONS)
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(summons).resolve();
+        let state = runner.state().clone();
+        assert!(
+            state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "reach guard: Soul Summons resolved completely"
+        );
+        let obj = &state.objects[&angel];
+        assert!(
+            obj.zone == Zone::Battlefield && obj.face_down && obj.back_face.is_some(),
+            "reach guard: Serra Angel was manifested face down"
+        );
+        (state, angel)
+    }
+
+    fn assert_redacted_for_p1(state: &GameState, id: ObjectId) {
+        assert_eq!(
+            identity_projection_for_viewer(state, P1).get(&id).copied(),
+            Some(IdentityProjection::FaceDownRedacted),
+            "reach guard: the opponent may not look under the face-down object"
+        );
+    }
+
+    fn object_json(state: &GameState, id: ObjectId) -> String {
+        serde_json::to_string(&state.objects[&id]).expect("object serializes")
+    }
+
+    /// CR 708.2a + CR 701.40a: an observer's view of a manifested card keeps its public 2/2
+    /// Creature values, live and base, through a layer pass.
+    #[test]
+    fn manifest_observer_view_keeps_face_down_base_characteristics_through_layer_pass() {
+        let (state, angel) = soul_summons_manifests_serra_angel();
+        assert_redacted_for_p1(&state, angel);
+
+        let view = after_layer_pass(proposer_hidden_view(&state, P1));
+        let obj = &view.objects[&angel];
+        assert_eq!((obj.power, obj.toughness), (Some(2), Some(2)));
+        assert_eq!((obj.base_power, obj.base_toughness), (Some(2), Some(2)));
+        assert_eq!(obj.card_types.core_types, vec![CoreType::Creature]);
+        assert_eq!(obj.base_card_types.core_types, vec![CoreType::Creature]);
+    }
+
+    /// CR 708.5: the card under a manifest stays hidden from an observer in both consumers;
+    /// its base values are the face-down 2/2, never the hidden card's 4/4.
+    #[test]
+    fn manifest_observer_views_never_carry_the_hidden_card() {
+        let (state, angel) = soul_summons_manifests_serra_angel();
+        assert_redacted_for_p1(&state, angel);
+        let needles = ["Serra Angel", "Angel", "Vigilance", "Flying"];
+
+        let controller = object_json(&filter_state_for_viewer(&state, P0), angel);
+        for needle in ["Serra Angel", "Vigilance", "Flying"] {
+            assert!(
+                controller.contains(needle),
+                "control: the controller's view names {needle}"
+            );
+        }
+
+        let hidden = proposer_hidden_view(&state, P1);
+        let views = [
+            ("hidden view", hidden.clone()),
+            ("hidden view after a layer pass", after_layer_pass(hidden)),
+            ("wire snapshot", filter_state_for_viewer(&state, P1)),
+        ];
+        for (label, view) in &views {
+            let obj = &view.objects[&angel];
+            assert_eq!(obj.name, HIDDEN_CARD_NAME, "{label}");
+            assert!(obj.back_face.is_none(), "{label}");
+            let json = object_json(view, angel);
+            for needle in needles {
+                assert!(!json.contains(needle), "{label} leaks {needle}");
+            }
+        }
+        for (label, view) in &views {
+            let obj = &view.objects[&angel];
+            assert_eq!(
+                (obj.base_power, obj.base_toughness),
+                (Some(2), Some(2)),
+                "{label}"
+            );
+        }
+    }
+
+    /// CR 701.58a: an observer's view of a cloaked card keeps its public 2/2 Creature base
+    /// values and its ward {2}.
+    #[test]
+    fn cloak_observer_view_keeps_face_down_base_characteristics_and_ward() {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let angel = serra_angel_on_library_top(&mut scenario);
+        let coat = scenario
+            .add_artifact_to_hand_from_oracle(P0, "Cryptic Coat", CRYPTIC_COAT)
+            .with_subtypes(vec!["Equipment"])
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(coat).resolve();
+        runner.resolve_top();
+        let state = runner.state().clone();
+        let ward = vec![Keyword::Ward(WardCost::Mana(ManaCost::generic(2)))];
+        let cloaked = &state.objects[&angel];
+        assert!(
+            cloaked.zone == Zone::Battlefield
+                && cloaked.face_down
+                && cloaked.back_face.is_some()
+                && cloaked.keywords == ward
+                && cloaked.base_keywords == ward,
+            "reach guard: the ETB trigger cloaked Serra Angel with ward {{2}}"
+        );
+        assert_redacted_for_p1(&state, angel);
+        assert_eq!(
+            state.objects[&coat]
+                .attached_to
+                .as_ref()
+                .and_then(|attached| attached.as_object()),
+            Some(angel),
+            "reach guard: the Coat equips the cloaked card"
+        );
+
+        let view = after_layer_pass(proposer_hidden_view(&state, P1));
+        let obj = &view.objects[&angel];
+        assert_eq!((obj.base_power, obj.base_toughness), (Some(2), Some(2)));
+        assert_eq!((obj.power, obj.toughness), (Some(3), Some(2)));
+        assert_eq!(obj.base_card_types.core_types, vec![CoreType::Creature]);
+        assert_eq!(obj.keywords, ward);
+        assert_eq!(obj.base_keywords, ward);
+    }
+
+    /// CR 708.4 + CR 708.2a: a spell cast face down keeps its public 2/2 Creature base values
+    /// in an observer's view while on the stack, and its card stays hidden.
+    #[test]
+    fn face_down_stack_spell_observer_view_keeps_face_down_base_characteristics() {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let slayer = scenario
+            .add_creature_to_hand(P0, "Hidden Dragonslayer", 2, 1)
+            .with_subtypes(vec!["Human", "Warrior"])
+            .from_oracle_text_with_keywords(&["Lifelink", "Megamorph"], HIDDEN_DRAGONSLAYER)
+            .id();
+        let colorless = || {
+            crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )
+        };
+        scenario.with_mana_pool(P0, vec![colorless(), colorless(), colorless()]);
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&slayer].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: slayer,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::AlternativeCastChoice {
+                    keyword: crate::types::game_state::AlternativeCastKeyword::FaceDown,
+                    ..
+                }
+            ),
+            "reach guard: megamorph offers the face-down cast"
+        );
+        runner
+            .act(GameAction::ChooseAlternativeCast {
+                choice: crate::types::actions::AlternativeCastDecision::Alternative,
+            })
+            .unwrap();
+        let state = runner.state().clone();
+        assert!(
+            state.stack.iter().any(|entry| entry.id == slayer)
+                && state.objects[&slayer].face_down
+                && state.objects[&slayer].back_face.is_some(),
+            "reach guard: Hidden Dragonslayer is a face-down spell on the stack"
+        );
+        assert_redacted_for_p1(&state, slayer);
+        let needles = ["Dragonslayer", "Human", "Warrior", "Lifelink", "Megamorph"];
+        let controller = object_json(&filter_state_for_viewer(&state, P0), slayer);
+        for needle in needles {
+            assert!(
+                controller.contains(needle),
+                "control: the controller's view names {needle}"
+            );
+        }
+
+        let views = [
+            (
+                "hidden view after a layer pass",
+                after_layer_pass(proposer_hidden_view(&state, P1)),
+            ),
+            ("wire snapshot", filter_state_for_viewer(&state, P1)),
+        ];
+        for (label, view) in &views {
+            let json = object_json(view, slayer);
+            for needle in needles {
+                assert!(!json.contains(needle), "{label} leaks {needle}");
+            }
+        }
+        for (label, view) in &views {
+            let obj = &view.objects[&slayer];
+            assert_eq!(
+                (obj.base_power, obj.base_toughness),
+                (Some(2), Some(2)),
+                "{label}"
+            );
+            assert_eq!(
+                obj.base_card_types.core_types,
+                vec![CoreType::Creature],
+                "{label}"
+            );
+        }
     }
 }

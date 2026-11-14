@@ -1720,7 +1720,7 @@ fn a_repeated_draw_cost_on_an_empty_library_is_paid_then_loses() {
     );
     let lost = event_index(
         &result.events,
-        |event| matches!(event, GameEvent::PlayerLost { player_id } if *player_id == P0),
+        |event| matches!(event, GameEvent::PlayerLost { player_id, reasons: _ } if *player_id == P0),
     )
     .expect("CR 121.4: the player who drew from an empty library loses");
     assert!(paid < lost, "the payment completes before the loss");
@@ -1812,7 +1812,7 @@ fn declining_every_skip_offers_each_prompt_pays_then_loses() {
     .expect("the paid epilogue resolved the upkeep ability");
     let lost = event_index(
         &result.events,
-        |event| matches!(event, GameEvent::PlayerLost { player_id } if *player_id == P0),
+        |event| matches!(event, GameEvent::PlayerLost { player_id, reasons: _ } if *player_id == P0),
     )
     .expect("CR 121.4: P0 drew from an empty library and loses");
     assert!(paid < lost, "the payment completes before the loss");

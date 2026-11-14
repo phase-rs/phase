@@ -633,17 +633,6 @@ fn parse_direct_manifest_clause<'a>(
     input: &'a str,
     ctx: &ParseContext,
 ) -> OracleResult<'a, (TargetFilter, QuantityExpr, Option<ControllerRef>)> {
-    let attach_to_it_continuation = value(
-        (),
-        preceded(
-            space1::<_, OracleError<'_>>,
-            (
-                tag::<_, _, OracleError<'_>>("and attach "),
-                take_until::<_, _, OracleError<'_>>(" to it"),
-                tag(" to it"),
-            ),
-        ),
-    );
     all_consuming((
         tag::<_, _, OracleError<'_>>("manifest the top "),
         parse_manifest_count_card_words,
@@ -659,11 +648,10 @@ fn parse_direct_manifest_clause<'a>(
             space1::<_, OracleError<'_>>,
             tag("under your control"),
         )),
-        opt(attach_to_it_continuation),
         opt(tag(".")),
     ))
     .parse(input)
-    .map(|(rest, (_, count, _, target, _, _, _))| (rest, (target, count, Some(ControllerRef::You))))
+    .map(|(rest, (_, count, _, target, _, _))| (rest, (target, count, Some(ControllerRef::You))))
 }
 
 fn parse_put_sticker_target_tail(
@@ -7766,7 +7754,7 @@ pub(super) fn parse_utility_imperative_ast(
             {
                 (TargetFilter::ParentTarget, "")
             } else {
-                parse_attach_recipient(recipient_text, ctx, None)
+                parse_attach_recipient(recipient_text, ctx)
             }
         };
         #[cfg(debug_assertions)]
@@ -7857,8 +7845,16 @@ pub(super) fn parse_utility_imperative_ast(
                 AttachSelection::AtResolution { count: cardinality }
             };
             let (attachment, _attachment_rem) = parse_attachment_anaphor(&attachment_text, ctx);
-            let (target, _target_rem) =
-                parse_attach_recipient(&target_text, ctx, Some(&attachment));
+            let (target, _target_rem) = parse_attach_recipient(&target_text, ctx);
+            // CR 400.7j + CR 701.3a: after a battlefield move, "attach ~ to it" makes the moved card the host; `OriginalSource` keeps the source as the attachment through the forward_result rebind.
+            let attachment = match (attachment, &target) {
+                (TargetFilter::SelfRef, TargetFilter::ParentTarget)
+                    if ctx.prior_clause_moves_to_battlefield =>
+                {
+                    TargetFilter::OriginalSource
+                }
+                (attachment, _) => attachment,
+            };
             // CR 115.6 + CR 601.2c: the HOST operand's zero-target authority is
             // its own printed quantifier, independent of whether the ATTACHMENT
             // operand claimed an announced slot. "attach target Equipment you
@@ -8072,16 +8068,20 @@ fn parse_attach_target_quantifier(
     }
 }
 
-fn parse_attach_recipient<'a>(
-    text: &'a str,
-    ctx: &mut ParseContext,
-    attachment: Option<&TargetFilter>,
-) -> (TargetFilter, &'a str) {
+fn parse_attach_recipient<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFilter, &'a str) {
     // CR 608.2k: thread `ctx` so "attach this Equipment to it" in trigger
     // bodies binds "it" to the triggering subject (Ancestral Katana —
     // "Whenever a Samurai or Warrior you control attacks alone … attach this
     // Equipment to it"). Pre-existing "her" / "him" → SelfRef carve-out is
     // preserved for legacy attach-to-self phrasings (e.g. "attach to her").
+    // CR 400.7j: after a battlefield move, a bare "it" host is the card that move
+    // put there (the forwarded `ParentTarget`), not the trigger subject.
+    if ctx.prior_clause_moves_to_battlefield {
+        let trimmed = text.trim_start();
+        if parse_neuter_attach_self_recipient(trimmed.to_ascii_lowercase().trim()).is_ok() {
+            return (TargetFilter::ParentTarget, &trimmed[trimmed.len()..]);
+        }
+    }
     let (target, rest) = parse_target_with_ctx(text, ctx);
     if matches!(target, TargetFilter::ParentTarget) {
         let trimmed = text.trim_start();
@@ -8089,17 +8089,9 @@ fn parse_attach_recipient<'a>(
         if parse_gendered_attach_self_recipient(lower.trim()).is_ok() {
             return (TargetFilter::SelfRef, &trimmed[lower.len()..]);
         }
-        // CR 608.2c: a selected attachment and a newly created permanent are
-        // distinct referents in "attach that Equipment to it." Bind the bare
-        // recipient only after parsing the attachment role, so source-owned
-        // Equipment and face-down card attachment semantics remain unchanged.
-        if parse_neuter_attach_self_recipient(lower.trim()).is_ok()
-            && ctx.token_created_in_chain
-            && matches!(
-                attachment,
-                Some(TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. })
-            )
-        {
+        // CR 608.2c: a bare "it" host names what the chain's most recent
+        // producer made, whatever the attachment operand is.
+        if parse_neuter_attach_self_recipient(lower.trim()).is_ok() && ctx.token_created_in_chain {
             return (TargetFilter::LastCreated, &trimmed[lower.len()..]);
         }
         if parse_neuter_attach_self_recipient(lower.trim()).is_ok()
@@ -8115,8 +8107,8 @@ fn parse_attach_recipient<'a>(
         // two consumers cannot disagree about what "that creature" means.
         //
         // The DEMONSTRATIVE-only entry point is deliberate: bare "it" is already
-        // resolved by the branch above through
-        // `attach_neuter_recipient_resolves_via_subject`, a wider gate, and
+        // resolved by the two branches above (the chain-created referent, then
+        // `attach_neuter_recipient_resolves_via_subject`, a wider gate), and
         // letting it fall through to here would change bare-pronoun attachment
         // for chains that have nothing to do with a chain-created referent.
         if let Some(bound) = super::counter::chain_created_demonstrative_binding(lower.trim(), ctx)
@@ -21595,6 +21587,91 @@ mod tests {
     }
 
     #[test]
+    fn parse_attach_source_to_bare_it_binds_created_referent_only_after_a_producer() {
+        let input = "attach ~ to it";
+        let lower = input.to_lowercase();
+        for (created, expected_target) in [
+            (true, TargetFilter::LastCreated),
+            (false, TargetFilter::SelfRef),
+        ] {
+            let mut ctx = ParseContext {
+                subject: Some(TargetFilter::SelfRef),
+                token_created_in_chain: created,
+                ..Default::default()
+            };
+            let result = parse_utility_imperative_ast(input, &lower, &mut ctx);
+            let Some(UtilityImperativeAst::Attach {
+                attachment, target, ..
+            }) = result
+            else {
+                panic!("{input}: expected Attach, got {result:?}");
+            };
+            assert_eq!(attachment, TargetFilter::SelfRef);
+            assert_eq!(target, expected_target, "token_created_in_chain: {created}");
+        }
+    }
+
+    #[test]
+    fn cryptic_coat_attaches_itself_to_the_cloaked_card() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "When this Equipment enters, cloak the top card of your library, then attach this Equipment to it. (To cloak a card, put it onto the battlefield face down as a 2/2 creature with ward {2}. Turn it face up any time for its mana cost if it's a creature card.)\nEquipped creature gets +1/+0 and can't be blocked.\n{1}{U}: Return this Equipment to its owner's hand.",
+            "Cryptic Coat",
+            &[],
+            &["Artifact".to_string()],
+            &["Equipment".to_string()],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("Cryptic Coat ETB execute");
+        assert!(
+            matches!(&*execute.effect, Effect::Cloak { .. }),
+            "got {:?}",
+            execute.effect
+        );
+        let attach = execute.sub_ability.as_deref().expect("attach continuation");
+        assert_eq!(
+            *attach.effect,
+            Effect::Attach {
+                attachment: TargetFilter::SelfRef,
+                target: TargetFilter::LastCreated,
+                selection: AttachSelection::AtResolution {
+                    count: AttachCardinality::One
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn armory_automaton_bare_it_host_stays_self_without_a_producer() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Whenever this creature enters or attacks, you may attach any number of target Equipment to it. (Control of the Equipment doesn't change.)",
+            "Armory Automaton",
+            &[],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Construct".to_string()],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("Armory Automaton execute");
+        let Effect::Attach {
+            attachment, target, ..
+        } = &*execute.effect
+        else {
+            panic!("expected Attach, got {:?}", execute.effect);
+        };
+        let TargetFilter::Typed(typed) = attachment else {
+            panic!("expected typed Equipment attachment, got {attachment:?}");
+        };
+        assert!(typed.type_filters.iter().any(
+            |filter| matches!(filter, TypeFilter::Subtype(subtype) if subtype == "Equipment")
+        ));
+        assert!(execute.sub_ability.is_none());
+        assert_eq!(*target, TargetFilter::SelfRef);
+    }
+
+    #[test]
     fn parse_attach_recipient_it_preserves_chosen_parent_target_for_self_subject() {
         let input = "attach up to one target Equipment you control to it";
         let lower = input.to_lowercase();
@@ -32099,6 +32176,90 @@ mod tests {
             );
             node = def.sub_ability.as_deref();
         }
+    }
+
+    /// The first trigger's Attach operands, with whether its parent carries `forward_result`.
+    fn first_trigger_attach(
+        oracle: &str,
+        name: &str,
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> (bool, TargetFilter, TargetFilter) {
+        let strings = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            oracle,
+            name,
+            &[],
+            &strings(types),
+            &strings(subtypes),
+        );
+        let mut parent_forwards = false;
+        let mut node = parsed.triggers.iter().find_map(|t| t.execute.as_deref());
+        while let Some(def) = node {
+            assert!(
+                !matches!(*def.effect, Effect::Unimplemented { .. }),
+                "{name}: {:?}",
+                def.effect
+            );
+            if let Effect::Attach {
+                attachment, target, ..
+            } = &*def.effect
+            {
+                return (parent_forwards, attachment.clone(), target.clone());
+            }
+            parent_forwards = def.forward_result;
+            node = def.sub_ability.as_deref();
+        }
+        panic!("{name}: no Attach under its trigger");
+    }
+
+    /// CR 400.7j + CR 701.3a: "attach ~ to it" after a battlefield move keeps the source as
+    /// the attachment (`OriginalSource`) and the moved card as the host.
+    #[test]
+    fn attach_source_to_moved_card_is_original_source_attachment() {
+        for (name, types, subtypes, oracle) in [
+            (
+                "Deathrender",
+                &["Artifact"][..],
+                &["Equipment"][..],
+                "Equipped creature gets +2/+2.\nWhenever equipped creature dies, you may put a creature card from your hand onto the battlefield and attach this Equipment to it.\nEquip {2}",
+            ),
+            (
+                "Last Voyage of the _____",
+                &["Enchantment"][..],
+                &[][..],
+                "When this enchantment enters, you may put a name sticker on it, then it becomes an Aura with enchant creature. Return a creature card from your graveyard to the battlefield and attach this Aura to it.\nEnchanted creature gets +2/+0 for each name sticker on this Aura with seven or fewer letters.\nWhen this Aura leaves the battlefield, sacrifice enchanted creature.",
+            ),
+            (
+                "Scythe of the Wretched",
+                &["Artifact"][..],
+                &["Equipment"][..],
+                "Equipped creature gets +2/+2.\nWhenever a creature dealt damage by equipped creature this turn dies, return that card to the battlefield under your control. Attach this Equipment to that creature.\nEquip {4}",
+            ),
+            (
+                "Nim Deathmantle",
+                &["Artifact"][..],
+                &["Equipment"][..],
+                "Equipped creature gets +2/+2, has intimidate, and is a black Zombie. (A creature with intimidate can't be blocked except by artifact creatures and/or creatures that share a color with it.)\nWhenever a nontoken creature is put into your graveyard from the battlefield, you may pay {4}. If you do, return that card to the battlefield and attach this Equipment to it.\nEquip {4}",
+            ),
+        ] {
+            let (parent_forwards, attachment, target) = first_trigger_attach(oracle, name, types, subtypes);
+            assert!(parent_forwards, "{name}: the move forwards its result");
+            assert_eq!(attachment, TargetFilter::OriginalSource, "{name}");
+            assert_eq!(target, TargetFilter::ParentTarget, "{name}");
+        }
+
+        let (_, attachment, _) = first_trigger_attach(
+            "Enchant creature\nEnchanted creature can't attack or block, and its activated abilities can't be activated.\nWhenever a creature an opponent controls enters, you may attach this Aura to that creature.",
+            "Prison Term",
+            &["Enchantment"],
+            &["Aura"],
+        );
+        assert_eq!(
+            attachment,
+            TargetFilter::SelfRef,
+            "no prior move: the Aura stays SelfRef"
+        );
     }
 }
 

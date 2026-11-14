@@ -7,7 +7,10 @@ use engine::game::casting::can_cast_object_now;
 use engine::game::deck_loading::create_object_from_card_face;
 use engine::game::effects::attach::attach_to;
 use engine::game::mana_abilities::is_mana_ability;
-use engine::game::perf_counters::{play_trace_counters, PlayTraceCounters};
+use engine::game::perf_counters::{
+    play_trace_counters, snapshot as perf_snapshot, PlayTraceCounters,
+};
+use engine::game::period_confirm::{confirm_for_tests, OfferRefusal};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::{add_to_zone, remove_from_zone};
@@ -16,10 +19,13 @@ use engine::game::{
     PlayTraceView, TraceEntry,
 };
 use engine::types::ability::{AbilityCost, AbilityKind, TargetRef};
-use engine::types::actions::{CastChoice, GameAction};
+use engine::types::actions::{
+    CastChoice, GameAction, ReplacementAutoChoice, ResolveAllConsentDecision, ResolveAllScope,
+};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{
-    CastPaymentMode, GameState, LoopDetectionMode, ManaChoice, StackEntryKind, WaitingFor,
+    AutoMayChoice, CastPaymentMode, GameState, LoopDetectionMode, ManaChoice,
+    MayTriggerAutoChoiceScope, MayTriggerAutoChoiceSelector, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::ManaType;
@@ -40,6 +46,7 @@ enum Step {
     Play(usize),
     Resolve(usize),
     Answer(PlayerId, &'static str),
+    Remembered(PlayerId),
 }
 
 fn trace_of(state: &GameState) -> PlayTraceView {
@@ -57,6 +64,7 @@ fn entry_steps(view: &PlayTraceView, range: std::ops::Range<usize>) -> Vec<Step>
             EntryKind::Play { node, .. } => Step::Play(*node),
             EntryKind::Resolution { node } => Step::Resolve(*node),
             EntryKind::Answer { action, .. } => Step::Answer(entry.seat, action.into()),
+            EntryKind::Remembered { .. } => Step::Remembered(entry.seat),
         })
         .collect()
 }
@@ -912,14 +920,13 @@ fn play_trace_names_each_members_period_food_chain_griffin_scourge() {
 // Row 1 hostiles
 // ---------------------------------------------------------------------------------------------
 
-#[test]
-fn play_trace_names_nothing_for_worldgorger_animate_dead() {
-    let Some(db) = shared_card_db() else { return };
+/// Worldgorger Dragon ("When this creature enters, exile all other permanents you control. / When
+/// this creature leaves the battlefield, return the exiled cards to the battlefield under their
+/// owners' control.") in P0's graveyard with Animate Dead in hand, two Swamps, and ten library
+/// Swamps per seat.
+fn worldgorger_board(db: &CardDatabase) -> (GameScenario, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    // Worldgorger Dragon: "When this creature enters, exile all other permanents you control.
-    // When this creature leaves the battlefield, return the exiled cards to the battlefield
-    // under their owners' control." Animate Dead returns it; nothing is activated.
     let dragon = scenario.add_real_card(P0, "Worldgorger Dragon", Zone::Graveyard, db);
     let animate = scenario.add_real_card(P0, "Animate Dead", Zone::Hand, db);
     for _ in 0..2 {
@@ -930,6 +937,22 @@ fn play_trace_names_nothing_for_worldgorger_animate_dead() {
             scenario.add_real_card(seat, "Swamp", Zone::Library, db);
         }
     }
+    (scenario, dragon, animate)
+}
+
+fn mandatory_entry(entry: &TraceEntry) -> bool {
+    match &entry.kind {
+        EntryKind::Play { .. } | EntryKind::Remembered { .. } => false,
+        EntryKind::Answer { optional, .. } => *optional == AnswerOptionality::Mandatory,
+        EntryKind::Resolution { .. } => true,
+    }
+}
+
+#[test]
+fn play_trace_names_the_mandatory_recurrence_for_worldgorger_animate_dead() {
+    let Some(db) = shared_card_db() else { return };
+    // Animate Dead returns the Dragon; nothing is activated and no "may" is asked.
+    let (scenario, dragon, animate) = worldgorger_board(db);
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
     cast(&mut runner, animate, vec![dragon], CastPaymentMode::Auto);
@@ -966,14 +989,417 @@ fn play_trace_names_nothing_for_worldgorger_animate_dead() {
         "reach: a resolved trigger node stood on top at a priority window"
     );
     assert!(
-        occurrences.iter().filter(|&&n| n >= 3).count() >= 2,
-        "reach: the enters triggers recur over three cycles: {occurrences:?}"
+        occurrences.iter().filter(|&&n| n >= 2).count() >= 2,
+        "reach: the enters triggers recur: {occurrences:?}"
+    );
+    // CR 104.4b: once named, the recurrence is drawn with no third live cycle.
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: None }
+    );
+    assert!(
+        !view.named.is_empty(),
+        "CR 732.4: a loop of mandatory nodes names its recurrence"
+    );
+    for span in &view.named {
+        assert_eq!(span.cause, NamingCause::MandatoryRecurrence, "{span:?}");
+        assert!(
+            view.entries[span.start..span.end]
+                .iter()
+                .all(mandatory_entry),
+            "the mandatory span holds no play or optional answer: {:?}",
+            entry_steps(&view, span.start..span.end)
+        );
+    }
+    assert_eq!(view.offered, None);
+}
+
+/// Niv-Mizzet, the Firemind ("Whenever you draw a card, Niv-Mizzet deals 1 damage to any target.
+/// / {T}: Draw a card.") enchanted by Curiosity ("Whenever enchanted creature deals damage to an
+/// opponent, you may draw a card."), beside Niv-Mizzet, Parun ("Whenever you draw a card,
+/// Niv-Mizzet deals 1 damage to any target."), with P0's answer to Curiosity's "may" stored as
+/// `choice` before the window.
+fn niv_curiosity_board(choice: AutoMayChoice, db: &CardDatabase) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let firemind = scenario.add_real_card(P0, "Niv-Mizzet, the Firemind", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Niv-Mizzet, Parun", Zone::Battlefield, db);
+    for seat in [P0, P1] {
+        for _ in 0..20 {
+            scenario.add_real_card(seat, "Island", Zone::Library, db);
+        }
+    }
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.loop_detection = LoopDetectionMode::Interactive;
+    let curiosity = place(state, P0, "Curiosity", db);
+    attach_to(state, curiosity, firemind);
+    let printed_ref = state.objects[&curiosity]
+        .printed_ref
+        .clone()
+        .expect("a printed card");
+    state.set_may_trigger_auto_choice_selector(
+        MayTriggerAutoChoiceSelector::SameCard {
+            player: P0,
+            printed_ref,
+            printed_occurrence: 0,
+        },
+        choice,
+    );
+    (runner, firemind)
+}
+
+fn pings_p1(action: &GameAction) -> i32 {
+    i32::from(matches!(
+        action,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P1))
+        }
+    ))
+}
+
+fn remembered_by(entry: &TraceEntry, seat: PlayerId) -> bool {
+    entry.seat == seat && matches!(entry.kind, EntryKind::Remembered { .. })
+}
+
+fn optional_answer(entry: &TraceEntry) -> bool {
+    matches!(
+        entry.kind,
+        EntryKind::Answer {
+            optional: AnswerOptionality::Optional,
+            ..
+        }
+    )
+}
+
+/// What the Niv drive saw at its priority windows.
+#[derive(Default)]
+struct NivWindows {
+    remembered: usize,
+    /// The most remembered answers a window held that name the trigger that asked them.
+    asked: usize,
+    named: usize,
+    mandatory: usize,
+    /// A P0 window named a trigger-top span over P0's remembered answer and no optional answer.
+    remembered_top: bool,
+    /// The verdicts of the first such span at a P1 window and at a P0 window.
+    foreign: Option<Result<Vec<String>, OfferRefusal>>,
+    own: Option<Result<Vec<String>, OfferRefusal>>,
+    /// Whether every remembered entry was preceded by the resolution that asked it.
+    ordered: bool,
+}
+
+fn drive_niv(choice: AutoMayChoice, db: &CardDatabase) -> NivWindows {
+    let (runner, firemind) = niv_curiosity_board(choice, db);
+    drive_niv_board(runner, firemind)
+}
+
+/// [`drive_niv`] on a board already built.
+fn drive_niv_board(mut runner: GameRunner, firemind: ObjectId) -> NivWindows {
+    let index = ability(runner.state(), firemind, false);
+    activate(&mut runner, firemind, index);
+    let mut seen = NivWindows {
+        ordered: true,
+        ..NivWindows::default()
+    };
+    for _ in 0..BEAT_CAP {
+        let state = runner.state();
+        match state.waiting_for {
+            WaitingFor::GameOver { .. } => break,
+            // CR 732.2a: the offer replaced the proposer's priority window, so each seat's verdict
+            // is read on that window's frame.
+            WaitingFor::LoopShortcut { .. } => {
+                for seat in [P0, P1] {
+                    let mut frame = state.clone();
+                    frame.waiting_for = WaitingFor::Priority { player: seat };
+                    observe_niv_window(&mut seen, &frame, seat);
+                }
+                break;
+            }
+            WaitingFor::Priority { player } => {
+                observe_niv_window(&mut seen, state, player);
+                if state.stack.is_empty() {
+                    break;
+                }
+                act(&mut runner, GameAction::PassPriority);
+            }
+            _ => answer(&mut runner, &pings_p1),
+        }
+    }
+    seen
+}
+
+/// Records what `player`'s priority window over `state` names and confirms.
+fn observe_niv_window(seen: &mut NivWindows, state: &GameState, player: PlayerId) {
+    let view = trace_of(state);
+    seen.remembered = seen.remembered.max(
+        view.entries
+            .iter()
+            .filter(|entry| remembered_by(entry, P0))
+            .count(),
+    );
+    seen.asked = seen.asked.max(
+        view.entries
+            .iter()
+            .filter(|entry| matches!(entry.kind, EntryKind::Remembered { asked_by: Some(_) }))
+            .count(),
+    );
+    seen.named = seen.named.max(view.named.len());
+    seen.mandatory += view
+        .named
+        .iter()
+        .filter(|span| span.cause == NamingCause::MandatoryRecurrence)
+        .count();
+    seen.ordered &= view.entries.iter().enumerate().all(|(at, entry)| {
+        let EntryKind::Remembered {
+            asked_by: Some(node),
+        } = entry.kind
+        else {
+            return true;
+        };
+        at > 0 && view.entries[at - 1].kind == EntryKind::Resolution { node }
+    });
+    let top = view.named.iter().copied().find(|span| {
+        let body = &view.entries[span.start..span.end];
+        span.cause == NamingCause::TriggerTop
+            && body.iter().any(|entry| remembered_by(entry, P0))
+            && !body.iter().any(optional_answer)
+    });
+    if let Some(span) = top {
+        let verdict = || {
+            confirm_for_tests(state)
+                .into_iter()
+                .find_map(|(named, verdict)| (named == span).then_some(verdict))
+        };
+        seen.remembered_top |= player == P0;
+        if player == P1 && seen.foreign.is_none() {
+            seen.foreign = verdict();
+        }
+        if player == P0 && seen.own.is_none() {
+            seen.own = verdict();
+        }
+    }
+}
+
+/// CR 603.5 + CR 104.4b: Curiosity's draw is optional each time, whether a person or a stored
+/// preference answers it, so the period it closes is named as a trigger-top period and never as a
+/// mandatory recurrence.
+#[test]
+fn play_trace_names_a_stored_accept_period_trigger_top_not_mandatory() {
+    let Some(db) = shared_card_db() else { return };
+    let seen = drive_niv(AutoMayChoice::Accept, db);
+    assert!(
+        seen.remembered_top,
+        "a P0 window names a trigger-top span over the remembered answer"
+    );
+    assert_eq!(seen.mandatory, 0, "no window names a mandatory recurrence");
+    assert!(
+        seen.ordered,
+        "each remembered answer follows the resolution that asked it"
+    );
+    assert!(
+        seen.asked > 0,
+        "reach: a remembered answer names the trigger that asked it"
+    );
+    // CR 732.2a: the remembered answer is P0's choice, so the period is P0's alone.
+    assert_eq!(
+        seen.foreign,
+        Some(Err(OfferRefusal::ForeignSeat { seat: P0 }))
+    );
+    let own = seen.own.expect("a P0 window's verdict");
+    // CR 121.1 + CR 113.6g: the draws are put back, and "This spell can't be countered" functions
+    // only on the stack.
+    assert!(own.is_ok(), "{own:?}");
+    assert!(seen.remembered > 0, "reach: the stored accept answered");
+}
+
+/// CR 121.1 + CR 401.2: P0 can't look at its library, so a draw is put back by where it lay, the
+/// top: the period confirms with an Island moved from the top of P0's library to its bottom.
+#[test]
+fn play_trace_confirms_a_draw_period_whatever_order_the_library_holds() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, firemind) = niv_curiosity_board(AutoMayChoice::Accept, db);
+    let library = &mut runner.state_mut().players[0].library;
+    let top = library.pop_front().expect("a library card");
+    library.push_back(top);
+    let seen = drive_niv_board(runner, firemind);
+    assert!(seen.remembered_top, "reach: a P0 window names the period");
+    let own = seen.own.expect("a P0 window's verdict");
+    assert!(own.is_ok(), "{own:?}");
+}
+
+/// CR 603.5: a stored decline is recorded and the loop stops, so nothing recurs to be named.
+#[test]
+fn play_trace_records_a_stored_decline_and_names_nothing() {
+    let Some(db) = shared_card_db() else { return };
+    let seen = drive_niv(AutoMayChoice::Decline, db);
+    assert!(seen.remembered > 0, "reach: the stored decline answered");
+    assert_eq!(seen.named, 0);
+}
+
+/// CR 603.5 + CR 608.2: two Soul's Attendants ("Whenever another creature enters, you may gain 1
+/// life.") see Raise the Alarm ("Create two 1/1 white Soldier creature tokens.") make two Soldiers.
+/// P0 declines the first trigger and remembers it for the card, so a granted Resolve All resolves
+/// the three declined triggers left in one pass, and each remembered decline follows the
+/// resolution that asked it.
+#[test]
+fn play_trace_places_each_remembered_answer_after_its_resolution_in_a_batch() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for _ in 0..2 {
+        scenario.add_real_card(P0, "Plains", Zone::Battlefield, db);
+    }
+    let alarm = scenario.add_real_card(P0, "Raise the Alarm", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.loop_detection = LoopDetectionMode::Interactive;
+    let attendants = [
+        place(state, P0, "Soul's Attendant", db),
+        place(state, P0, "Soul's Attendant", db),
+    ];
+    let waiting = |state: &GameState| {
+        state
+            .stack
+            .iter()
+            .filter(|entry| attendants.contains(&entry.source_id))
+            .count()
+    };
+    cast(&mut runner, alarm, vec![], CastPaymentMode::Auto);
+    for _ in 0..BEAT_CAP {
+        match runner.state().waiting_for {
+            WaitingFor::OptionalEffectChoice { .. } => break,
+            WaitingFor::Priority { .. } => act(&mut runner, GameAction::PassPriority),
+            _ => answer(&mut runner, &|_| 0),
+        }
+    }
+    assert_eq!(waiting(runner.state()), 3, "reach: the first trigger asks");
+    act(
+        &mut runner,
+        GameAction::DecideOptionalEffectAndRemember {
+            choice: AutoMayChoice::Decline,
+            scope: MayTriggerAutoChoiceScope::SameCard,
+        },
     );
     assert_eq!(
-        view.named,
-        [],
-        "a loop of mandatory nodes names nothing (CR 732.4)"
+        waiting(runner.state()),
+        3,
+        "reach: three declined triggers wait"
     );
+    act(
+        &mut runner,
+        GameAction::BeginResolveAll {
+            max_resolutions: 3,
+            scope: ResolveAllScope::Shared,
+        },
+    );
+    let WaitingFor::ResolveAllConsent { epoch, .. } = runner.state().waiting_for else {
+        panic!("P1 consents: {:?}", runner.state().waiting_for);
+    };
+    let before = perf_snapshot().stack_inert_noop_entries;
+    let start = trace_of(runner.state()).entries.len();
+    act(
+        &mut runner,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        },
+    );
+    assert_eq!(
+        perf_snapshot().stack_inert_noop_entries - before,
+        3,
+        "reach: one pass resolved the three declined triggers"
+    );
+    let view = trace_of(runner.state());
+    let resolved = entry_steps(&view, start..view.entries.len());
+    let Some(&Step::Resolve(node)) = resolved.first() else {
+        panic!("a resolution follows the consent: {resolved:?}");
+    };
+    assert_eq!(
+        resolved,
+        vec![
+            Step::Resolve(node),
+            Step::Remembered(P0),
+            Step::Resolve(node),
+            Step::Remembered(P0),
+            Step::Resolve(node),
+            Step::Remembered(P0),
+        ]
+    );
+}
+
+/// Battletide Alchemist's prevention ("If a source would deal damage to a player, you
+/// may prevent X of that damage, where X is the number of Clerics you control.") is P1's optional
+/// choice inside P0's Worldgorger loop, whose Gibbering Fiend ("When this creature enters, it
+/// deals 1 damage to each opponent.") re-enters each cycle; P1 answers it once and remembers it.
+#[test]
+fn play_trace_attributes_a_remembered_prevention_to_its_seat() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut scenario, dragon, animate) = worldgorger_board(db);
+    scenario.add_real_card(P0, "Gibbering Fiend", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Battletide Alchemist", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    cast(&mut runner, animate, vec![dragon], CastPaymentMode::Auto);
+    let (mut prompts, mut remembered, mut mandatory) = (0, 0, 0);
+    let mut verdicts = Vec::new();
+    for _ in 0..80 {
+        let state = runner.state();
+        match state.waiting_for {
+            WaitingFor::GameOver { .. } => break,
+            WaitingFor::Priority { .. } if state.stack.is_empty() => break,
+            WaitingFor::Priority { player } => {
+                let view = trace_of(state);
+                remembered = view
+                    .entries
+                    .iter()
+                    .filter(|entry| remembered_by(entry, P1))
+                    .count();
+                mandatory += view
+                    .named
+                    .iter()
+                    .filter(|span| span.cause == NamingCause::MandatoryRecurrence)
+                    .count();
+                if player == P0 {
+                    verdicts.extend(
+                        confirm_for_tests(state)
+                            .into_iter()
+                            .map(|(span, verdict)| (span.cause, verdict.err())),
+                    );
+                }
+                act(&mut runner, GameAction::PassPriority);
+            }
+            WaitingFor::LoopShortcut { .. } => act(&mut runner, GameAction::DeclineShortcut),
+            // CR 603.3b + CR 405.5: the Fiend's trigger is put on the stack last, so it resolves first.
+            WaitingFor::OrderTriggers { ref triggers, .. } => {
+                let fiend = |at: &usize| triggers[*at].source_name == "Gibbering Fiend";
+                let (last, mut order): (Vec<usize>, Vec<usize>) =
+                    (0..triggers.len()).partition(fiend);
+                order.extend(last);
+                act(&mut runner, GameAction::OrderTriggers { order });
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                prompts += 1;
+                act(
+                    &mut runner,
+                    GameAction::ChooseReplacementAndRemember {
+                        choice: ReplacementAutoChoice::Optional { index: 0 },
+                    },
+                );
+            }
+            _ => answer(&mut runner, &names(&[dragon])),
+        }
+    }
+    assert_eq!(prompts, 1, "reach: P1 answered the prevention once");
+    assert_eq!(mandatory, 0, "no window names a mandatory recurrence");
+    assert!(!verdicts.is_empty(), "reach: P0 windows named spans");
+    assert!(
+        verdicts
+            .iter()
+            .all(|(_, refusal)| *refusal == Some(OfferRefusal::ForeignSeat { seat: P1 })),
+        "every P0 period holds P1's choices: {verdicts:?}"
+    );
+    assert!(remembered > 0, "the store answered P1's later preventions");
 }
 
 #[test]
@@ -988,6 +1414,10 @@ fn play_trace_keys_a_delayed_trigger_by_its_creator_across_cycles() {
     for _ in 0..2 {
         scenario.add_real_card(P0, "Swamp", Zone::Battlefield, db);
     }
+    // CR 603.5 + CR 104.4b: Soul's Attendant ("Whenever another creature enters, you may gain 1
+    // life.") returns with the Dragon each cycle, and its "may" is an optional action, so the loop
+    // is no draw and runs on past one cycle.
+    scenario.add_real_card(P0, "Soul's Attendant", Zone::Battlefield, db);
     for seat in [P0, P1] {
         for _ in 0..10 {
             scenario.add_real_card(seat, "Swamp", Zone::Library, db);
@@ -996,6 +1426,8 @@ fn play_trace_keys_a_delayed_trigger_by_its_creator_across_cycles() {
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
     cast(&mut runner, animate, vec![dragon], CastPaymentMode::Auto);
+    // Nodes are keyed per trace, and declining the offer discards the decliner's trace.
+    let mut trace = 0;
     let (mut delayed, mut animate_printed) = (Vec::new(), Vec::new());
     for _ in 0..60 {
         let state = runner.state();
@@ -1011,36 +1443,139 @@ fn play_trace_keys_a_delayed_trigger_by_its_creator_across_cycles() {
                     }
                     _ => None,
                 };
-                let before = trace_of(state).entries.len();
+                let before = play_trace_view(state).map_or(0, |view| view.entries.len());
                 act(&mut runner, GameAction::PassPriority);
-                let resolved = trace_of(runner.state()).entries[before..]
-                    .iter()
-                    .find_map(|e| match e.kind {
-                        EntryKind::Resolution { node } => Some(node),
-                        _ => None,
-                    });
+                let resolved = play_trace_view(runner.state()).and_then(|view| {
+                    view.entries
+                        .get(before..)?
+                        .iter()
+                        .find_map(|e| match e.kind {
+                            EntryKind::Resolution { node } => Some(node),
+                            _ => None,
+                        })
+                });
                 match (top, resolved) {
-                    (Some(true), Some(node)) => delayed.push(node),
-                    (Some(false), Some(node)) => animate_printed.push(node),
+                    (Some(true), Some(node)) => delayed.push((trace, node)),
+                    (Some(false), Some(node)) => animate_printed.push((trace, node)),
                     _ => {}
                 }
             }
-            WaitingFor::LoopShortcut { .. } => act(&mut runner, GameAction::DeclineShortcut),
+            WaitingFor::LoopShortcut { .. } => {
+                trace += 1;
+                act(&mut runner, GameAction::DeclineShortcut);
+            }
             _ => answer(&mut runner, &names(&[dragon])),
         }
     }
+    let in_trace = |nodes: &[(usize, usize)], at: usize| -> Vec<usize> {
+        nodes
+            .iter()
+            .filter(|(of, _)| *of == at)
+            .map(|(_, node)| *node)
+            .collect()
+    };
     assert!(
-        delayed.len() >= 2 && !animate_printed.is_empty(),
-        "reach: two cycles of Animate Dead's delayed and enters triggers resolved: \
+        (0..=trace).any(|at| in_trace(&delayed, at).len() >= 2) && !animate_printed.is_empty(),
+        "reach: one trace saw two cycles of Animate Dead's delayed trigger resolve: \
          {delayed:?} {animate_printed:?}"
     );
-    assert!(
-        delayed.iter().all(|&node| node == delayed[0]),
-        "CR 603.7a: one creator's delayed ability is one node across cycles: {delayed:?}"
+    for at in 0..=trace {
+        let nodes = in_trace(&delayed, at);
+        assert!(
+            nodes.iter().all(|&node| node == nodes[0]),
+            "CR 603.7a: one creator's delayed ability is one node across cycles: {delayed:?}"
+        );
+        assert!(
+            nodes
+                .first()
+                .is_none_or(|node| !in_trace(&animate_printed, at).contains(node)),
+            "the delayed ability is not its creator's printed trigger: {delayed:?} \
+             {animate_printed:?}"
+        );
+    }
+}
+
+/// CR 603.5 + CR 707.10: P0's stored accept of Soul's Attendant's "may" answers its trigger and
+/// the copy Strionic Resonator ("{2}, {T}: Copy target triggered ability you control. ...") makes
+/// of it, so each gains 1 life.
+#[test]
+fn a_remembered_accept_answers_the_may_trigger_and_its_copy() {
+    let Some(db) = shared_card_db() else { return };
+    let choice = AutoMayChoice::Accept;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for _ in 0..6 {
+        scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    }
+    let bears = [
+        scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db),
+        scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db),
+    ];
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.loop_detection = LoopDetectionMode::Interactive;
+    let attendant = place(state, P0, "Soul's Attendant", db);
+    let resonator = place(state, P0, "Strionic Resonator", db);
+    cast(&mut runner, bears[0], vec![], CastPaymentMode::Auto);
+    for _ in 0..BEAT_CAP {
+        match runner.state().waiting_for {
+            WaitingFor::OptionalEffectChoice { .. } => break,
+            WaitingFor::Priority { .. } => act(&mut runner, GameAction::PassPriority),
+            _ => answer(&mut runner, &|_| 0),
+        }
+    }
+    act(
+        &mut runner,
+        GameAction::DecideOptionalEffectAndRemember {
+            choice,
+            scope: MayTriggerAutoChoiceScope::SameCard,
+        },
     );
+    settle(&mut runner, &|_| 0);
+    let life = runner.state().players[0].life;
+    cast(&mut runner, bears[1], vec![], CastPaymentMode::Auto);
+    let on_stack = |state: &GameState, source: ObjectId| {
+        state.stack.iter().filter(|e| e.source_id == source).count()
+    };
+    for _ in 0..BEAT_CAP {
+        match runner.state().waiting_for {
+            WaitingFor::Priority { .. } if on_stack(runner.state(), bears[1]) > 0 => {
+                act(&mut runner, GameAction::PassPriority)
+            }
+            WaitingFor::Priority { .. } => break,
+            _ => answer(&mut runner, &|_| 0),
+        }
+    }
+    assert_eq!(on_stack(runner.state(), attendant), 1, "{choice:?}");
+    let start = trace_of(runner.state()).entries.len();
+    let index = ability(runner.state(), resonator, false);
+    activate(&mut runner, resonator, index);
+    for _ in 0..BEAT_CAP {
+        match runner.state().waiting_for {
+            WaitingFor::Priority { .. } if on_stack(runner.state(), resonator) > 0 => {
+                act(&mut runner, GameAction::PassPriority)
+            }
+            WaitingFor::Priority { .. } => break,
+            _ => answer(&mut runner, &names(&[attendant])),
+        }
+    }
+    assert_eq!(
+        on_stack(runner.state(), attendant),
+        2,
+        "{choice:?}: the copy"
+    );
+    settle(&mut runner, &|_| 0);
+    assert_eq!(runner.state().players[0].life - life, 2, "{choice:?}");
+    let view = trace_of(runner.state());
+    let steps = entry_steps(&view, start..view.entries.len());
+    let answered: Vec<&Step> = steps
+        .windows(2)
+        .filter(|pair| pair[1] == Step::Remembered(P0))
+        .map(|pair| &pair[0])
+        .collect();
     assert!(
-        !animate_printed.contains(&delayed[0]),
-        "the delayed ability is not its creator's printed trigger: {delayed:?} {animate_printed:?}"
+        matches!(answered.as_slice(), [Step::Resolve(a), Step::Resolve(b)] if a == b),
+        "{choice:?}: each stored answer follows a resolution of the Attendant's node: {steps:?}"
     );
 }
 
@@ -1168,8 +1703,10 @@ fn play_trace_records_only_the_outermost_apply() {
         run.nested_applies > 0,
         "reach: the finish re-enters the action boundary: {run:?}"
     );
+    // CR 732.2a: the drive's one shortcut decline is a negotiation, which the trace never records.
     assert_eq!(
-        run.actions_recorded, run.boundary_entries,
+        run.actions_recorded + 1,
+        run.boundary_entries,
         "only outermost applies record: {run:?}"
     );
     assert!(
@@ -1481,7 +2018,7 @@ fn play_trace_names_the_base_window_population_sprout_swarm_lumaret() {
     let mut state = restore_dump(include_bytes!(
         "../fixtures/witherbloom_sprout_lumaret_4p.json.gz"
     ));
-    state.loop_detection = LoopDetectionMode::On;
+    state.loop_detection = LoopDetectionMode::Interactive;
     let mut runner = GameRunner::from_state(state);
     let mut named_before = play_trace_view(runner.state()).map_or(0, |view| view.named.len());
     let mut commit = runner
@@ -2086,6 +2623,7 @@ fn play_trace_drops_a_cancelled_spend_after_an_untapped_lands_mana_ability() {
 enum Made {
     Play(PlayLocus),
     Answer(&'static str),
+    Remembered,
     Resolution,
 }
 
@@ -2108,6 +2646,7 @@ fn standing(state: &GameState) -> (&'static str, Option<ObjectId>, Vec<Made>) {
         .map(|entry| match &entry.kind {
             EntryKind::Play { locus, .. } => Made::Play(*locus),
             EntryKind::Answer { action, .. } => Made::Answer(action.into()),
+            EntryKind::Remembered { .. } => Made::Remembered,
             EntryKind::Resolution { .. } => Made::Resolution,
         })
         .collect();
@@ -2563,4 +3102,920 @@ fn play_trace_names_a_trigger_repeated_across_land_drops() {
             Step::Answer(P1, "PassPriority"),
         ]
     );
+}
+
+/// CR 732.2a + CR 603.3d + CR 601.2c: the recorded Niv-Mizzet loop at a multiplayer table. Each
+/// repetition the Firemind's draw triggers both Niv-Mizzets' "deals 1 damage to any target" and
+/// Curiosity's "may draw" on the Firemind's ping at an opponent.
+mod recorded_niv_table {
+    use super::*;
+    use engine::analysis::decision_template::{
+        AnnouncementSubject, DecisionPointKind, DecisionSlot, DecisionTemplate, IterationCount,
+        PinnedDecision, Ranking, ReplayMode, TargetPin, TargetSchedule,
+    };
+    use engine::analysis::loop_check::ShortcutResponse;
+    use engine::types::events::GameEvent;
+
+    const P2: PlayerId = PlayerId(2);
+    const P3: PlayerId = PlayerId(3);
+    const TABLE: [i32; 4] = [20, 32, 25, 25];
+
+    /// The table at `lives`, P0's Firemind enchanted by Curiosity (stored "may" accepted) beside
+    /// Parun and `extras`, `islands_in_hand` Islands in P0's hand, and P3 controlling Leyline of
+    /// Sanctity when `leyline`.
+    fn table(
+        lives: &[i32],
+        extras: &[&str],
+        islands_in_hand: usize,
+        leyline: bool,
+        db: &CardDatabase,
+    ) -> (GameRunner, ObjectId) {
+        let mut scenario = GameScenario::new_n_player(lives.len() as u8, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let firemind =
+            scenario.add_real_card(P0, "Niv-Mizzet, the Firemind", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Niv-Mizzet, Parun", Zone::Battlefield, db);
+        for name in extras {
+            scenario.add_real_card(P0, name, Zone::Battlefield, db);
+        }
+        for _ in 0..islands_in_hand {
+            scenario.add_real_card(P0, "Island", Zone::Hand, db);
+        }
+        for seat in 0..lives.len() {
+            for _ in 0..60 {
+                scenario.add_real_card(PlayerId(seat as u8), "Island", Zone::Library, db);
+            }
+        }
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.loop_detection = LoopDetectionMode::Interactive;
+        for (seat, life) in lives.iter().enumerate() {
+            state.players[seat].life = *life;
+        }
+        if leyline {
+            place(state, P3, "Leyline of Sanctity", db);
+        }
+        let curiosity = place(state, P0, "Curiosity", db);
+        attach_to(state, curiosity, firemind);
+        let printed_ref = state.objects[&curiosity]
+            .printed_ref
+            .clone()
+            .expect("a printed card");
+        state.set_may_trigger_auto_choice_selector(
+            MayTriggerAutoChoiceSelector::SameCard {
+                player: P0,
+                printed_ref,
+                printed_occurrence: 0,
+            },
+            AutoMayChoice::Accept,
+        );
+        (runner, firemind)
+    }
+
+    /// Activates the Firemind and plays each ping at P1 until the loop is offered.
+    fn offered(lives: &[i32], extras: &[&str], hand: usize, leyline: bool) -> Option<GameRunner> {
+        let db = shared_card_db()?;
+        let (mut runner, firemind) = table(lives, extras, hand, leyline, db);
+        let index = ability(runner.state(), firemind, false);
+        activate(&mut runner, firemind, index);
+        for _ in 0..BEAT_CAP {
+            match &runner.state().waiting_for {
+                WaitingFor::LoopShortcut { .. } => return Some(runner),
+                WaitingFor::Priority { .. } => act(&mut runner, GameAction::PassPriority),
+                _ => answer(&mut runner, &pings_p1),
+            }
+        }
+        panic!("reach: the loop is offered within the beat budget");
+    }
+
+    fn lives(state: &GameState) -> Vec<i32> {
+        state.players.iter().map(|p| p.life).collect()
+    }
+
+    fn offer_count(state: &GameState) -> IterationCount {
+        let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for else {
+            panic!("an offer, got {:?}", state.waiting_for);
+        };
+        schema.iteration_count.clone()
+    }
+
+    fn suggestion(state: &GameState) -> DecisionTemplate {
+        let WaitingFor::LoopShortcut {
+            schema,
+            declaration,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("an offer");
+        };
+        schema
+            .suggestion(declaration.as_ref())
+            .cloned()
+            .expect("the offer publishes a declaration")
+    }
+
+    /// `declaration` with every announced target pinned at `seat` for `count` repetitions.
+    fn every_ping_at(
+        declaration: &DecisionTemplate,
+        seat: PlayerId,
+        count: u32,
+    ) -> DecisionTemplate {
+        let mut declared = declaration.clone();
+        for decision in &mut declared.decisions {
+            if let PinnedDecision::Targets { targets, .. } = decision {
+                *targets = vec![TargetPin::Scheduled(TargetSchedule::Constant(
+                    Ranking::one(AnnouncementSubject::Seat(seat)),
+                ))];
+            }
+        }
+        declared.replay = ReplayMode::Scheduled {
+            count: IterationCount::Fixed(count),
+        };
+        declared
+    }
+
+    /// Declares `template` at `count`, every opponent accepts, and returns the repetitions the
+    /// take committed.
+    fn take(runner: &mut GameRunner, count: u32, template: DecisionTemplate) -> usize {
+        act(
+            runner,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(count),
+                template: Some(template),
+            },
+        );
+        let mut events = Vec::new();
+        while matches!(
+            runner.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ) {
+            let applied = runner
+                .act(GameAction::RespondToShortcut {
+                    response: ShortcutResponse::Accept,
+                })
+                .expect("accept");
+            events.extend(applied.events);
+        }
+        last_repetition(&events)
+    }
+
+    /// The last committed repetition: the record keeps only the first and last markers.
+    fn last_repetition(events: &[GameEvent]) -> usize {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ShortcutRepetition { repetition, .. } => Some(*repetition as usize),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The seats `declared` names at `slot` over `count` repetitions: one flat seat for a fixed
+    /// pin, else each `Piecewise` segment's seat with the repetitions it covers.
+    fn stated_seats(
+        declared: &DecisionTemplate,
+        slot: &DecisionSlot,
+        count: u32,
+    ) -> Vec<(PlayerId, Option<u32>)> {
+        let seat_of = |ranking: &Ranking| match ranking.head() {
+            AnnouncementSubject::Seat(seat) => *seat,
+            AnnouncementSubject::Object(_) => panic!("a seat"),
+        };
+        let pins = declared
+            .decisions
+            .iter()
+            .find_map(|decision| match decision {
+                PinnedDecision::Targets { slot: at, targets } if at == slot => Some(targets),
+                _ => None,
+            })
+            .expect("the declaration pins every published point");
+        match pins.as_slice() {
+            [TargetPin::Player(seat)] => vec![(*seat, None)],
+            [TargetPin::Scheduled(TargetSchedule::Constant(ranking))] => {
+                vec![(seat_of(ranking), None)]
+            }
+            [TargetPin::Scheduled(TargetSchedule::Piecewise(segments))] => segments
+                .iter()
+                .enumerate()
+                .filter_map(|(k, (start, ranking))| {
+                    let end = segments.get(k + 1).map_or(count, |(next, _)| *next);
+                    let amount = count.min(end).saturating_sub(*start);
+                    (amount > 0).then(|| (seat_of(ranking), Some(amount)))
+                })
+                .collect(),
+            other => panic!("an unstated pin {other:?}"),
+        }
+    }
+
+    fn won_by_p0(state: &GameState) -> bool {
+        matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(P0),
+                ..
+            }
+        )
+    }
+
+    /// CR 732.2a + CR 120.3a + CR 104.2a: the suggestion is performed before it is published, so
+    /// the offer states the count it reaches — every opponent's life over two pings a repetition —
+    /// and its take ends the game; the own declaration, performed alike, reaches 15, the repetition
+    /// its seat leaves in (CR 800.4a).
+    #[test]
+    fn a_recorded_niv_table_offers_and_takes_what_its_suggestion_reaches() {
+        let Some(mut runner) = offered(&TABLE, &[], 0, false) else {
+            return;
+        };
+        let state = runner.state();
+        assert_eq!(lives(state), [20, 29, 25, 25]);
+        assert_eq!(offer_count(state), IterationCount::Fixed(40));
+        let WaitingFor::LoopShortcut {
+            predicted_winner,
+            declaration,
+            certificate,
+            schema,
+            ..
+        } = &state.waiting_for
+        else {
+            unreachable!()
+        };
+        assert_eq!(*predicted_winner, Some(P0));
+        assert_eq!(
+            declaration.as_ref().map(|own| own.replay.clone()),
+            Some(ReplayMode::Scheduled {
+                count: IterationCount::Fixed(15)
+            })
+        );
+        // CR 115.4: the published point is the "any target" announcement's own legal set, and
+        // the proposer is never a charged victim.
+        let targets: Vec<&Vec<TargetRef>> = schema
+            .points
+            .iter()
+            .filter_map(|point| match &point.kind {
+                DecisionPointKind::Targets { legal_targets, .. } => Some(legal_targets),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(targets.len(), 2);
+        for legal in targets {
+            for seat in [P0, P1, P2, P3] {
+                assert!(legal.contains(&TargetRef::Player(seat)), "{seat:?}");
+            }
+            assert!(legal.iter().any(|t| matches!(t, TargetRef::Object(_))));
+        }
+        let periodic = certificate
+            .per_cycle
+            .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+            .expect("an every-repetition signature");
+        assert_eq!(periodic.declarable_victims, [P1, P2, P3]);
+        let declared = suggestion(state);
+        assert_eq!(take(&mut runner, 40, declared), 40);
+        assert!(
+            won_by_p0(runner.state()),
+            "{:?}",
+            runner.state().waiting_for
+        );
+    }
+
+    /// CR 732.2a + CR 120.3a + CR 104.2a: at two seats the suggestion reaches the lone
+    /// opponent's 29 life over two pings a repetition, 15, and its take ends the game.
+    #[test]
+    fn a_two_seat_recorded_niv_table_offers_and_takes_fifteen() {
+        let Some(mut runner) = offered(&[20, 32], &[], 0, false) else {
+            return;
+        };
+        let state = runner.state();
+        assert_eq!(lives(state), [20, 29]);
+        assert_eq!(offer_count(state), IterationCount::Fixed(15));
+        let declared = suggestion(state);
+        assert_eq!(take(&mut runner, 15, declared), 15);
+        assert!(
+            won_by_p0(runner.state()),
+            "{:?}",
+            runner.state().waiting_for
+        );
+    }
+
+    /// CR 702.11c + CR 104.2a: a hexproof seat is in no legal set, so the suggestion reaches the
+    /// two targetable opponents' 29 + 25 life at two pings a repetition and its take ends with
+    /// the hexproof seat still in the game.
+    #[test]
+    fn a_hexproof_seat_bounds_the_recorded_table_to_its_targetable_opponents() {
+        let Some(mut runner) = offered(&TABLE, &[], 0, true) else {
+            return;
+        };
+        let state = runner.state();
+        assert_eq!(lives(state), [20, 29, 25, 25]);
+        assert_eq!(offer_count(state), IterationCount::Fixed(27));
+        let declared = suggestion(state);
+        assert_eq!(take(&mut runner, 27, declared), 27);
+        let state = runner.state();
+        assert!(state.players[1].is_eliminated && state.players[2].is_eliminated);
+        assert_eq!(
+            (state.players[3].is_eliminated, state.players[3].life),
+            (false, 25)
+        );
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// CR 603.3d + CR 601.2c + CR 608.2b: a declaration aiming every ping at P2 reaches 13 when
+    /// performed — the ping latched at P1 before the offer still resolves at P1 — so 13 is taken
+    /// and 14 is refused at the declaration with nothing driven.
+    #[test]
+    fn a_re_aimed_declaration_is_admitted_to_the_reach_its_performance_shows() {
+        let Some(mut runner) = offered(&TABLE, &[], 0, false) else {
+            return;
+        };
+        let at_offer = lives(runner.state());
+        let declared = every_ping_at(&suggestion(runner.state()), P2, 14);
+        act(
+            &mut runner,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(14),
+                template: Some(declared),
+            },
+        );
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(lives(runner.state()), at_offer);
+
+        let Some(mut runner) = offered(&TABLE, &[], 0, false) else {
+            return;
+        };
+        let declared = every_ping_at(&suggestion(runner.state()), P2, 13);
+        assert_eq!(take(&mut runner, 13, declared), 13);
+        let state = runner.state();
+        assert!(state.players[2].is_eliminated);
+        assert_eq!(state.players[1].life, at_offer[1] - 1);
+        assert_eq!(state.players[3].life, at_offer[3]);
+    }
+
+    /// The offer's shortcut interaction: its id and, per published `Targets` point, a pin naming
+    /// the seats `seats_at` gives for that point's slot — flat for one seat with no amount, else
+    /// sequenced by the amounts.
+    fn shortcut_interaction(
+        state: &mut GameState,
+        seats_at: impl Fn(&DecisionSlot) -> Vec<(PlayerId, Option<u32>)>,
+    ) -> (
+        engine::types::interaction::InteractionId,
+        Vec<engine::types::interaction::InteractionShortcutPin>,
+    ) {
+        use engine::game::interaction::{bind_interaction_authority, derive_viewer_interaction};
+        use engine::game::visibility::filter_state_for_viewer;
+        use engine::types::interaction::{
+            AmountAssignment, InteractionOpportunityResponse, InteractionResponseSpec,
+            InteractionSessionId, InteractionShortcutPin,
+        };
+        bind_interaction_authority(state, InteractionSessionId("niv-table".to_string()))
+            .expect("an interaction authority");
+        let filtered = filter_state_for_viewer(state, P0);
+        let view = derive_viewer_interaction(state, &filtered, P0);
+        let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for else {
+            panic!("an offer");
+        };
+        view.opportunities
+            .iter()
+            .find_map(|opportunity| match &opportunity.response {
+                InteractionOpportunityResponse::Schema {
+                    spec: InteractionResponseSpec::Shortcut { points, .. },
+                    ..
+                } => Some((
+                    opportunity.interaction_id.clone(),
+                    points
+                        .iter()
+                        .zip(&schema.points)
+                        .filter_map(|(point, published)| match &published.kind {
+                            DecisionPointKind::Targets { legal_targets, .. } => {
+                                let named = seats_at(&published.slot)
+                                    .into_iter()
+                                    .map(|(seat, amount)| {
+                                        let at = legal_targets
+                                            .iter()
+                                            .position(|t| *t == TargetRef::Player(seat))?;
+                                        Some((point.candidate_ids[at].clone(), amount))
+                                    })
+                                    .collect::<Option<Vec<_>>>()?;
+                                Some(InteractionShortcutPin {
+                                    group: point.group,
+                                    choice_ids: named.iter().map(|(id, _)| id.clone()).collect(),
+                                    amounts: named
+                                        .iter()
+                                        .filter_map(|(id, amount)| {
+                                            Some(AmountAssignment {
+                                                choice_id: id.clone(),
+                                                amount: (*amount)?,
+                                            })
+                                        })
+                                        .collect(),
+                                })
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                )),
+                _ => None,
+            })
+            .expect("reach: the offer is published as a shortcut schema")
+    }
+
+    /// CR 732.2a + CR 608.2b: the human ingress answers the declare seam's question, so a
+    /// declaration whose performance does not reach its count is this entry's
+    /// `ConstraintUnsatisfied`, and one that does is dispatched.
+    #[test]
+    fn the_ingress_admits_a_re_aimed_declaration_to_its_performed_reach() {
+        use engine::game::interaction::submit_interaction;
+        use engine::types::interaction::{
+            InteractionReasonCode, InteractionResponse, InteractionShortcutDecision,
+            InteractionSubmission,
+        };
+        let Some(mut runner) = offered(&TABLE, &[], 0, false) else {
+            return;
+        };
+        let submit = |runner: &mut GameRunner, iterations: u32| {
+            let state = runner.state_mut();
+            let (interaction_id, pins) = shortcut_interaction(state, |_| vec![(P2, None)]);
+            submit_interaction(
+                state,
+                P0,
+                InteractionSubmission {
+                    interaction_id,
+                    response: InteractionResponse::Shortcut {
+                        decision: InteractionShortcutDecision::Fixed { iterations },
+                        pins,
+                    },
+                },
+            )
+            .map(drop)
+            .map_err(|error| error.code)
+        };
+        assert_eq!(
+            submit(&mut runner, 14),
+            Err(InteractionReasonCode::ConstraintUnsatisfied)
+        );
+        assert_eq!(submit(&mut runner, 13), Ok(()));
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ));
+    }
+
+    /// The preview reads only what the offer measured, so a re-aimed declaration it never
+    /// recorded is confirmable there without a repetition performed. CR 732.2a + CR 608.2b: its
+    /// submission through the ingress performs it, falls short of 14, and is refused before any
+    /// state write, so the window stays open and the proposer answers again with 13.
+    #[test]
+    fn a_re_aimed_declaration_is_previewed_unperformed_and_refused_when_submitted() {
+        use engine::game::interaction::{preview_interaction, submit_interaction};
+        use engine::types::interaction::{
+            InteractionPreviewRequest, InteractionPreviewStatus, InteractionReasonCode,
+            InteractionResponse, InteractionShortcutDecision, InteractionSubmission,
+            PreviewRequestId,
+        };
+        let Some(mut runner) = offered(&TABLE, &[], 0, false) else {
+            return;
+        };
+        let state = runner.state_mut();
+        let (interaction_id, pins) = shortcut_interaction(state, |_| vec![(P2, None)]);
+        let fixed = |iterations| InteractionResponse::Shortcut {
+            decision: InteractionShortcutDecision::Fixed { iterations },
+            pins: pins.clone(),
+        };
+
+        let before = play_trace_counters();
+        let preview = preview_interaction(
+            state,
+            P0,
+            &InteractionPreviewRequest {
+                request_id: PreviewRequestId("niv-table".to_string()),
+                interaction_id: interaction_id.clone(),
+                response: fixed(14),
+            },
+        );
+        assert_eq!(play_trace_counters().since(before).probe_entries, 0);
+        assert_eq!(preview.status, InteractionPreviewStatus::Confirmable);
+
+        let entry = serde_json::to_value(&*state).expect("the state serializes");
+        let entry_position = state.clone();
+        let before = play_trace_counters();
+        let submitted = submit_interaction(
+            state,
+            P0,
+            InteractionSubmission {
+                interaction_id: interaction_id.clone(),
+                response: fixed(14),
+            },
+        )
+        .map(drop)
+        .map_err(|error| error.code);
+        assert!(
+            play_trace_counters().since(before).probe_entries > 0,
+            "reach: the submission performs the declaration"
+        );
+        assert_eq!(submitted, Err(InteractionReasonCode::ConstraintUnsatisfied));
+        assert_eq!(
+            serde_json::to_value(&*state).expect("the state serializes"),
+            entry,
+            "the refused commit writes nothing"
+        );
+        assert!(
+            *state == entry_position,
+            "a receipt is not part of the position"
+        );
+        assert!(matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }));
+        assert!(
+            state
+                .active_interaction_slots
+                .iter()
+                .any(|slot| slot.interaction_id == interaction_id),
+            "the proposer's interaction slot is still open"
+        );
+
+        let before = play_trace_counters();
+        let resubmitted = submit_interaction(
+            state,
+            P0,
+            InteractionSubmission {
+                interaction_id: interaction_id.clone(),
+                response: fixed(14),
+            },
+        )
+        .map(drop)
+        .map_err(|error| error.code);
+        assert_eq!(
+            resubmitted,
+            Err(InteractionReasonCode::ConstraintUnsatisfied)
+        );
+        assert_eq!(play_trace_counters().since(before).probe_entries, 0);
+
+        let before = play_trace_counters();
+        submit_interaction(
+            state,
+            P0,
+            InteractionSubmission {
+                interaction_id,
+                response: fixed(13),
+            },
+        )
+        .expect("the proposer answers again with the count its performance reaches");
+        assert_eq!(
+            play_trace_counters().since(before).probe_entries,
+            0,
+            "the performance of 14 already reached 13"
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ));
+    }
+
+    /// CR 732.2a: the suggestion of a period whose drain resolves before its pings is
+    /// confirmable at the ingress and taken through it to the count the offer published.
+    #[test]
+    fn the_ingress_previews_and_takes_the_published_suggestion() {
+        use engine::game::interaction::{preview_interaction, submit_interaction};
+        use engine::types::interaction::{
+            InteractionPreviewRequest, InteractionPreviewStatus, InteractionResponse,
+            InteractionShortcutDecision, InteractionSubmission, PreviewRequestId,
+        };
+        let extras = ["Sheoldred, the Apocalypse", "Marauding Blight-Priest"];
+        let Some(mut runner) = offered(&TABLE, &extras, 0, false) else {
+            return;
+        };
+        let IterationCount::Fixed(count) = offer_count(runner.state()) else {
+            panic!("a fixed count");
+        };
+        let suggested = suggestion(runner.state());
+        let (interaction_id, pins) = shortcut_interaction(runner.state_mut(), |slot| {
+            stated_seats(&suggested, slot, count)
+        });
+        let response = InteractionResponse::Shortcut {
+            decision: InteractionShortcutDecision::AcceptSuggested,
+            pins,
+        };
+        let preview = preview_interaction(
+            runner.state(),
+            P0,
+            &InteractionPreviewRequest {
+                request_id: PreviewRequestId("niv-table".to_string()),
+                interaction_id: interaction_id.clone(),
+                response: response.clone(),
+            },
+        );
+        assert_eq!(preview.status, InteractionPreviewStatus::Confirmable);
+        submit_interaction(
+            runner.state_mut(),
+            P0,
+            InteractionSubmission {
+                interaction_id,
+                response,
+            },
+        )
+        .expect("the suggestion is dispatched");
+        let mut events = Vec::new();
+        while matches!(
+            runner.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ) {
+            events.extend(
+                runner
+                    .act(GameAction::RespondToShortcut {
+                        response: ShortcutResponse::Accept,
+                    })
+                    .expect("accept")
+                    .events,
+            );
+        }
+        assert_eq!(last_repetition(&events), 17);
+        assert!(
+            won_by_p0(runner.state()),
+            "{:?}",
+            runner.state().waiting_for
+        );
+    }
+
+    /// CR 119.3 + CR 603.3d: with Sheoldred, the Apocalypse ("Whenever you draw a card, you gain
+    /// 2 life.") both pings sit latched at P1 when the loop is offered, and the take reads that
+    /// lead to the count the offer published.
+    #[test]
+    fn two_latched_pings_lead_the_offer_and_its_take() {
+        let Some(mut runner) = offered(&TABLE, &["Sheoldred, the Apocalypse"], 0, false) else {
+            return;
+        };
+        let state = runner.state();
+        assert_eq!(lives(state), [24, 30, 25, 25]);
+        assert_eq!(offer_count(state), IterationCount::Fixed(40));
+        let declared = suggestion(state);
+        assert_eq!(take(&mut runner, 40, declared), 40);
+        assert!(
+            won_by_p0(runner.state()),
+            "{:?}",
+            runner.state().waiting_for
+        );
+    }
+
+    /// CR 119.3 + CR 704.5a: Marauding Blight-Priest's "each opponent loses 1 life" resolves
+    /// before the pings each repetition, so an opponent it takes leaves before the ping aimed at
+    /// it; the published schedule aims every ping at a living opponent through repetition 17.
+    #[test]
+    fn a_drain_resolving_before_the_pings_is_counted_in_the_published_schedule() {
+        let extras = ["Sheoldred, the Apocalypse", "Marauding Blight-Priest"];
+        let Some(mut runner) = offered(&TABLE, &extras, 0, false) else {
+            return;
+        };
+        let state = runner.state();
+        assert_eq!(lives(state), [24, 29, 24, 24]);
+        assert_eq!(offer_count(state), IterationCount::Fixed(17));
+        let declared = suggestion(state);
+        assert_eq!(take(&mut runner, 17, declared), 17);
+        assert!(
+            won_by_p0(runner.state()),
+            "{:?}",
+            runner.state().waiting_for
+        );
+    }
+
+    /// CR 119.3 + CR 704.5a: Psychosis Crawler's "Whenever you draw a card, each opponent loses
+    /// 1 life." resolves after both pings each repetition.
+    #[test]
+    fn a_drain_resolving_after_the_pings_is_counted_in_the_published_schedule() {
+        let Some(mut runner) = offered(&TABLE, &["Psychosis Crawler"], 3, false) else {
+            return;
+        };
+        let state = runner.state();
+        assert_eq!(lives(state), [20, 28, 23, 23]);
+        assert_eq!(offer_count(state), IterationCount::Fixed(17));
+        let declared = suggestion(state);
+        assert_eq!(take(&mut runner, 17, declared), 17);
+        assert!(
+            won_by_p0(runner.state()),
+            "{:?}",
+            runner.state().waiting_for
+        );
+    }
+
+    /// Submits the declaration aiming every ping at P2 for `iterations` through the ingress and
+    /// returns its answer with the probe entries it cost.
+    fn submit_at_p2(
+        state: &mut GameState,
+        iterations: u32,
+    ) -> (
+        Result<(), engine::types::interaction::InteractionReasonCode>,
+        u64,
+    ) {
+        use engine::game::interaction::submit_interaction;
+        use engine::types::interaction::{
+            InteractionResponse, InteractionShortcutDecision, InteractionSubmission,
+        };
+        let (interaction_id, pins) = shortcut_interaction(state, |_| vec![(P2, None)]);
+        let before = play_trace_counters();
+        let submitted = submit_interaction(
+            state,
+            P0,
+            InteractionSubmission {
+                interaction_id,
+                response: InteractionResponse::Shortcut {
+                    decision: InteractionShortcutDecision::Fixed { iterations },
+                    pins,
+                },
+            },
+        )
+        .map(drop)
+        .map_err(|error| error.code);
+        (submitted, play_trace_counters().since(before).probe_entries)
+    }
+
+    fn offer_open(state: &GameState) -> bool {
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { .. })
+    }
+
+    /// CR 732.2a + CR 402.3: P0's reversed hand or P2's emptied stop list changes nothing the
+    /// performance reads, so the refused 14 stands at no cost; a real stop changes what the drive
+    /// auto-submits, so 14 is performed again.
+    #[test]
+    fn a_declared_receipt_survives_a_preference_that_changes_nothing() {
+        use engine::types::interaction::InteractionReasonCode::ConstraintUnsatisfied;
+        let refused_once = || {
+            let mut state = offered(&TABLE, &[], 0, false)?.state().clone();
+            let (refused, cost) = submit_at_p2(&mut state, 14);
+            assert_eq!(refused, Err(ConstraintUnsatisfied));
+            assert!(cost > 0, "reach: the submission performs the declaration");
+            Some(state)
+        };
+        for reorder in [true, false] {
+            let Some(mut state) = refused_once() else {
+                return;
+            };
+            if reorder {
+                let hand: Vec<ObjectId> = state.players[0].hand.iter().copied().collect();
+                assert!(hand.len() >= 2, "reach: a hand whose order can change");
+                let reversed: Vec<ObjectId> = hand.iter().rev().copied().collect();
+                engine::game::engine::apply(
+                    &mut state,
+                    P0,
+                    GameAction::ReorderHand { order: reversed },
+                )
+                .expect("P0 reorders its hand");
+                assert_ne!(
+                    state.players[0].hand.iter().copied().collect::<Vec<_>>(),
+                    hand
+                );
+            } else {
+                engine::game::engine::apply(
+                    &mut state,
+                    P2,
+                    GameAction::SetPhaseStops { stops: vec![] },
+                )
+                .expect("P2 empties its stops");
+            }
+            assert_eq!(
+                submit_at_p2(&mut state, 14),
+                (Err(ConstraintUnsatisfied), 0),
+                "reorder={reorder}"
+            );
+            assert!(offer_open(&state));
+        }
+
+        let Some(mut state) = refused_once() else {
+            return;
+        };
+        engine::game::engine::apply(
+            &mut state,
+            P2,
+            GameAction::SetPhaseStops {
+                stops: vec![engine::types::phase::PhaseStop {
+                    phase: Phase::End,
+                    scope: engine::types::phase::PhaseStopScope::AllTurns,
+                }],
+            },
+        )
+        .expect("P2 sets a stop");
+        let (_, cost) = submit_at_p2(&mut state, 14);
+        assert!(cost > 0, "a real stop performs the declaration again");
+    }
+
+    /// CR 732.2a: a declaration the offer never performed is performed once when submitted, as
+    /// often through either ingress entry as when applied directly.
+    #[test]
+    fn an_unrecorded_declaration_is_performed_once_when_submitted() {
+        use engine::game::interaction::submit_interaction_with_rejection;
+        use engine::types::interaction::{
+            InteractionResponse, InteractionShortcutDecision, InteractionSubmission,
+        };
+        let Some(mut direct) = offered(&TABLE, &[], 0, false) else {
+            return;
+        };
+        let base = direct.state().clone();
+
+        let before = play_trace_counters();
+        act(
+            &mut direct,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(13),
+                template: Some(every_ping_at(&suggestion(&base), P2, 13)),
+            },
+        );
+        let direct_cost = play_trace_counters().since(before).probe_entries;
+        assert!(direct_cost > 0);
+        assert!(matches!(
+            direct.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ));
+
+        let mut wire = base.clone();
+        assert_eq!(submit_at_p2(&mut wire, 13), (Ok(()), direct_cost));
+        assert!(matches!(
+            wire.waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ));
+
+        let mut wire = base;
+        let (interaction_id, pins) = shortcut_interaction(&mut wire, |_| vec![(P2, None)]);
+        let before = play_trace_counters();
+        submit_interaction_with_rejection(
+            &mut wire,
+            P0,
+            InteractionSubmission {
+                interaction_id,
+                response: InteractionResponse::Shortcut {
+                    decision: InteractionShortcutDecision::Fixed { iterations: 13 },
+                    pins,
+                },
+            },
+        )
+        .expect("the declaration is dispatched");
+        assert_eq!(
+            play_trace_counters().since(before).probe_entries,
+            direct_cost
+        );
+        assert!(matches!(
+            wire.waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ));
+    }
+
+    /// CR 104.3a + CR 800.4a: P3's concession takes its life and objects out of the game while the
+    /// offer stays open, so the performance of 14 taken before it says nothing and 14 is performed
+    /// again, once.
+    #[test]
+    fn a_declared_receipt_dies_with_a_concession() {
+        use engine::types::interaction::InteractionReasonCode::ConstraintUnsatisfied;
+        let Some(runner) = offered(&TABLE, &[], 0, false) else {
+            return;
+        };
+        let mut state = runner.state().clone();
+        let (refused, cost) = submit_at_p2(&mut state, 14);
+        assert_eq!(refused, Err(ConstraintUnsatisfied));
+        assert!(cost > 0, "reach: the submission performs the declaration");
+        engine::game::engine::apply(&mut state, P3, GameAction::Concede { player_id: P3 })
+            .expect("P3 concedes");
+        assert!(offer_open(&state), "the offer survives P3");
+        let (refused, cost) = submit_at_p2(&mut state, 14);
+        assert_eq!(refused, Err(ConstraintUnsatisfied));
+        assert!(cost > 0, "the new board is performed again");
+        assert_eq!(
+            submit_at_p2(&mut state, 14),
+            (Err(ConstraintUnsatisfied), 0)
+        );
+    }
+
+    /// CR 732.2a: a count past the offer's capacity or the count cap is handed back before the
+    /// declaration is performed, so it performs nothing.
+    #[test]
+    fn a_declaration_the_commit_refuses_first_performs_nothing() {
+        let Some(runner) = offered(&TABLE, &[], 0, false) else {
+            return;
+        };
+        let base = runner.state().clone();
+        let WaitingFor::LoopShortcut { schema, .. } = &base.waiting_for else {
+            panic!("an offer");
+        };
+        let declared = suggestion(&base);
+        let declare = |n: u32| {
+            let mut state = base.clone();
+            let before = play_trace_counters();
+            let applied = engine::game::engine::apply(
+                &mut state,
+                P0,
+                GameAction::DeclareShortcut {
+                    count: IterationCount::Fixed(n),
+                    template: Some(every_ping_at(&declared, P2, n)),
+                },
+            );
+            assert!(applied.is_ok(), "n={n}: {applied:?}");
+            assert!(
+                matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+                "n={n}: handed back, got {:?}",
+                state.waiting_for
+            );
+            play_trace_counters().since(before).probe_entries
+        };
+        assert!(declare(14) > 0, "reach: 14 is performed and falls short");
+        for n in [schema.deliverable_capacity + 1, u32::MAX] {
+            assert_eq!(declare(n), 0, "n={n}");
+        }
+    }
 }

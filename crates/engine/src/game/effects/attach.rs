@@ -225,6 +225,11 @@ fn resolve_attachment_ids<'a>(
             .or_else(|| resolve_object_filter(state, ability, attachment_filter, target_slots))
             .into_iter()
             .collect()
+    } else if matches!(attachment_filter, TargetFilter::TriggeringSource)
+        && attachment_referent_departed(state, ability, attachment_filter)
+    {
+        // CR 400.7: the event's object is the attachment only as the incarnation the event named.
+        Vec::new()
     } else {
         resolve_object_filter(state, ability, attachment_filter, &mut std::iter::empty())
             .into_iter()
@@ -322,6 +327,16 @@ fn resolve_bound_attachment_operation(
     let attachment_ids =
         resolve_attachment_ids(state, ability, attachment_filter, &mut target_slots);
     if attachment_ids.is_empty() {
+        // CR 400.7 + CR 608.2b: a referent that became a new object or an
+        // illegal target is not attached, and the instruction still resolved.
+        if attachment_referent_departed(state, ability, attachment_filter) {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id,
+                subject: None,
+            });
+            return Ok(AttachResolutionOutcome::Completed);
+        }
         return Err(EffectError::MissingParam(
             "No attachment for Attach".to_string(),
         ));
@@ -906,6 +921,10 @@ fn prompt_described_host_choice(
     let mut no_slots = std::iter::empty();
     let attachment_ids = resolve_attachment_ids(state, ability, attachment_filter, &mut no_slots);
     if attachment_ids.is_empty() {
+        // CR 400.7: the executor resolves a departed referent as a no-op.
+        if attachment_referent_departed(state, ability, attachment_filter) {
+            return Ok(AttachPromptOutcome::Execute);
+        }
         return Ok(AttachPromptOutcome::Completed);
     }
     // CR 115.1d + CR 608.2d: the host candidates are the BATTLEFIELD objects
@@ -1707,6 +1726,49 @@ fn resolve_parent_target_attachment_from_trigger(state: &GameState) -> Option<Ob
             None
         }
     })
+}
+
+/// CR 400.7 + CR 608.2b: whether an attachment operand that resolved to nothing names a
+/// specific object that has since become a new object or an illegal target. An operand
+/// naming no specific object (a scan, or a granter never stamped) has not departed.
+fn attachment_referent_departed(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> bool {
+    let trigger_source = ability
+        .trigger_source
+        .as_ref()
+        .map(|s| s.identity.reference);
+    let referent = match filter {
+        TargetFilter::SelfRef => trigger_source.or_else(|| ability.source_ref(state)),
+        TargetFilter::OriginalSource => trigger_source,
+        TargetFilter::GrantingObject { bound } => bound.or(ability.context.granting_object),
+        // CR 400.7: the incarnation the firing event recorded for its object.
+        TargetFilter::TriggeringSource => {
+            match crate::game::targeting::resolve_event_context_target(
+                state,
+                filter,
+                ability.source_id,
+            ) {
+                Some(TargetRef::Object(id)) => {
+                    state.current_trigger_event.as_ref().and_then(|event| {
+                        crate::game::targeting::event_context_incarnation(filter, event, id)
+                    })
+                }
+                _ => None,
+            }
+        }
+        // The live slot read already dropped it: a declared object departed or became illegal.
+        TargetFilter::ParentTargetSlot { index } => {
+            return matches!(
+                crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index),
+                Some(TargetRef::Object(_))
+            );
+        }
+        _ => None,
+    };
+    referent.is_some_and(|referent| !referent.is_current(state))
 }
 
 fn resolve_object_filter<'a>(

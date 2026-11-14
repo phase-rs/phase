@@ -283,15 +283,26 @@ fn decode_persisted_seat_state(json: &str) -> Result<SeatState, String> {
     serde_json::from_value(value).map_err(|error| error.to_string())
 }
 
-fn parse_initialize_format_config(
-    decoded: Result<FormatConfig, String>,
-) -> Result<FormatConfig, serde_json::Value> {
+fn parse_initialize_config<T>(
+    decoded: Result<T, String>,
+    what: &str,
+) -> Result<T, serde_json::Value> {
     decoded.map_err(|error| {
         serde_json::json!({
             "error": true,
-            "reasons": [format!("Format config deserialization failed: {error}")],
+            "reasons": [format!("{what} deserialization failed: {error}")],
         })
     })
+}
+
+/// An absent match config is the default; one that fails to decode is refused.
+fn initialize_match_config(
+    decoded: Option<Result<MatchConfig, String>>,
+) -> Result<MatchConfig, serde_json::Value> {
+    decoded.map_or_else(
+        || Ok(MatchConfig::default()),
+        |decoded| parse_initialize_config(decoded, "Match config"),
+    )
 }
 
 #[cfg(test)]
@@ -590,7 +601,7 @@ mod external_format_config_tests {
         let decoded = serde_json::from_value::<FormatConfig>(malformed_js_config)
             .map_err(|error| error.to_string());
 
-        let error = parse_initialize_format_config(decoded)
+        let error = parse_initialize_config(decoded, "Format config")
             .expect_err("malformed JS config must not fall back to Standard");
 
         assert_eq!(error["error"], true);
@@ -598,6 +609,50 @@ mod external_format_config_tests {
             .as_str()
             .expect("error reason is a string")
             .contains("Format config deserialization failed"));
+    }
+
+    #[test]
+    fn undecodable_initialize_match_config_is_refused_not_defaulted() {
+        let decode = |json: serde_json::Value| {
+            serde_json::from_value::<MatchConfig>(json).map_err(|error| error.to_string())
+        };
+
+        let error = initialize_match_config(Some(decode(serde_json::json!({
+            "match_type": "Bo3",
+            "loop_detection": { "type": "Bogus" },
+        }))))
+        .expect_err("an undecodable match config must not fall back to the default");
+        assert_eq!(error["error"], true);
+        assert!(error["reasons"][0]
+            .as_str()
+            .expect("error reason is a string")
+            .contains("Match config deserialization failed"));
+
+        let decoded = initialize_match_config(Some(decode(serde_json::json!({
+            "match_type": "Bo3",
+            "loop_detection": { "type": "Interactive" },
+        }))))
+        .expect("a decodable match config passes through");
+        assert_eq!(decoded.match_type, MatchType::Bo3);
+        assert_eq!(
+            decoded.loop_detection,
+            engine::types::game_state::LoopDetectionMode::Interactive
+        );
+
+        assert_eq!(
+            initialize_match_config(None).expect("an absent match config is the default"),
+            MatchConfig::default()
+        );
+
+        let legacy = initialize_match_config(Some(decode(serde_json::json!({
+            "match_type": "Bo1",
+            "loop_detection": { "type": "On" },
+        }))))
+        .expect("a stored legacy `On` match config still loads");
+        assert_eq!(
+            legacy.loop_detection,
+            engine::types::game_state::LoopDetectionMode::Interactive
+        );
     }
 
     #[test]
@@ -2011,7 +2066,8 @@ fn occupied_refusal(reason: &str) -> JsValue {
 /// Initialize a new game for local (single-player / AI) play.
 /// Accepts deck_data as a DeckList (name-only) or null/undefined for empty libraries.
 /// format_config_js: optional FormatConfig JSON — defaults to Standard if null/undefined.
-/// match_config_js: optional MatchConfig JSON — defaults to BO1 if null/undefined.
+/// match_config_js: optional MatchConfig JSON — defaults to BO1 if null/undefined; an
+/// undecodable one is refused with `{error, reasons}`.
 /// player_count: number of players — defaults to 2 if not provided.
 /// first_player: 0 = human plays first (CR 103.1), 1 = opponent plays first, None = random.
 /// Names are resolved against the card database loaded via load_card_database().
@@ -2184,11 +2240,14 @@ fn initialize_game_impl(
             serde_wasm_bindgen::from_value::<serde_json::Value>(format_config_js)
                 .map_err(|error| error.to_string())
         });
-    let match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
-        serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
-            .unwrap_or_else(|_| MatchConfig::default())
-    } else {
-        MatchConfig::default()
+    let match_config = match initialize_match_config(
+        (!match_config_js.is_null() && !match_config_js.is_undefined()).then(|| {
+            serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
+                .map_err(|error| error.to_string())
+        }),
+    ) {
+        Ok(config) => config,
+        Err(error) => return to_js(&error),
     };
     match initialize_game_inner(
         deck_data,
@@ -2219,8 +2278,9 @@ fn initialize_game_inner(
     // default must be chosen FOR this seat count (see
     // `resolve_and_validate_initialize_format_config`).
     let decoded_format_config = match format_config {
-        Some(config) => Some(parse_initialize_format_config(
+        Some(config) => Some(parse_initialize_config(
             config.and_then(decode_initialize_format_config),
+            "Format config",
         )?),
         None => None,
     };

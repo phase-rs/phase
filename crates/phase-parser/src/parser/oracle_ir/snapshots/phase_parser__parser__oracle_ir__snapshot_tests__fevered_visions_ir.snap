@@ -38,7 +38,9 @@ expression: "&ir"
               "optional": false,
               "damage_kind": "Any",
               "secondary": false,
-              "valid_target": null,
+              "valid_target": {
+                "type": "Player"
+              },
               "valid_source": null,
               "description": null,
               "constraint": null,

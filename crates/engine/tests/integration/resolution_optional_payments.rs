@@ -11,7 +11,7 @@ use engine::types::ability::{
 use engine::types::actions::{GameAction, ResolutionOptionalPaymentChoice};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    AutoMayChoice, LoopDetectSample, MayTriggerAutoChoiceKey, MayTriggerOrigin, WaitingFor,
+    AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -860,29 +860,15 @@ fn resolution_optional_oneof_uses_paycost_player_reference() {
 }
 
 #[test]
-fn resolution_optional_oneof_decline_clears_loop_ring_and_cannot_replay() {
+fn resolution_optional_oneof_decline_cannot_replay() {
     let (mut runner, source, cards) = runner_with_hand(1);
     let life = runner.state().players[P0.0 as usize].life;
     let ability = optional_payment(source, vec![discard()]);
     resolve_ability_chain(runner.state_mut(), &ability, &mut Vec::new(), 0).unwrap();
-    let sampled = runner.state().clone();
-    runner
-        .state_mut()
-        .loop_detect_ring
-        .push_back(std::sync::Arc::new(LoopDetectSample {
-            normalized: sampled.clone(),
-            live: sampled,
-            tally: Default::default(),
-            trace_at: None,
-        }));
     let decline = GameAction::ChooseResolutionOptionalPaymentBranch {
         choice: ResolutionOptionalPaymentChoice::Decline,
     };
     apply(runner.state_mut(), P0, decline.clone()).expect("decline is legal");
-    assert!(
-        runner.state().loop_detect_ring.is_empty(),
-        "the optional-payment window can precede a life payment, so its answer must clear the ring"
-    );
     assert_eq!(runner.state().players[P0.0 as usize].life, life);
     assert!(runner.state().players[P0.0 as usize]
         .hand
@@ -893,7 +879,7 @@ fn resolution_optional_oneof_decline_clears_loop_ring_and_cannot_replay() {
 }
 
 #[test]
-fn resolution_optional_phyrexian_payment_clears_ring_before_observable_life_move() {
+fn resolution_optional_phyrexian_payment_moves_life_during_the_answer() {
     let (mut runner, source, _) = runner_with_hand(0);
     let life = runner.state().players[P0.0 as usize].life;
     let ability = optional_payment(
@@ -906,16 +892,6 @@ fn resolution_optional_phyrexian_payment_clears_ring_before_observable_life_move
         }],
     );
     resolve_ability_chain(runner.state_mut(), &ability, &mut Vec::new(), 0).unwrap();
-    let sampled = runner.state().clone();
-    runner
-        .state_mut()
-        .loop_detect_ring
-        .push_back(std::sync::Arc::new(LoopDetectSample {
-            normalized: sampled.clone(),
-            live: sampled,
-            tally: Default::default(),
-            trace_at: None,
-        }));
 
     apply(
         runner.state_mut(),
@@ -925,10 +901,6 @@ fn resolution_optional_phyrexian_payment_clears_ring_before_observable_life_move
         },
     )
     .expect("choose the Phyrexian payment branch");
-    assert!(
-        runner.state().loop_detect_ring.is_empty(),
-        "the ring must be cleared before the selected branch can move life"
-    );
     assert_eq!(
         runner.state().players[P0.0 as usize].life,
         life + 1,
@@ -1624,7 +1596,12 @@ fn eliminated_resolution_sacrifice_payer_game_over_drops_staged_resolution() {
     )
     .unwrap();
 
-    eliminate_player(runner.state_mut(), P1, &mut Vec::new());
+    eliminate_player(
+        runner.state_mut(),
+        P1,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
 
     assert!(matches!(
         runner.state().waiting_for,
@@ -1668,7 +1645,12 @@ fn eliminated_resolution_sacrifice_controller_terminates_real_stack_selection_as
         WaitingFor::PayCost { player: P1, .. }
     ));
 
-    eliminate_player(runner.state_mut(), P0, &mut Vec::new());
+    eliminate_player(
+        runner.state_mut(),
+        P0,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
 
     assert!(runner.state().active_optional_effect_frame().is_none());
     assert!(runner.state().active_ability_continuation().is_none());
@@ -1766,7 +1748,12 @@ fn eliminated_resolution_sacrifice_controller_terminates_real_stack_replacement_
     assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
 
     let mut events = Vec::new();
-    eliminate_player(runner.state_mut(), P0, &mut events);
+    eliminate_player(
+        runner.state_mut(),
+        P0,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
     runner.advance_until_stack_empty();
 
     assert!(runner.state().active_optional_effect_frame().is_none());
@@ -1899,7 +1886,12 @@ fn unrelated_elimination_preserves_resolution_sacrifice_root() {
         },
     )
     .unwrap();
-    eliminate_player(runner.state_mut(), p2, &mut Vec::new());
+    eliminate_player(
+        runner.state_mut(),
+        p2,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::PayCost {
@@ -2024,7 +2016,12 @@ fn the_resolution_net_finishes_an_owed_spell_above_the_spell_below_before_it_res
         },
     )
     .unwrap();
-    eliminate_player(runner.state_mut(), P1, &mut Vec::new());
+    eliminate_player(
+        runner.state_mut(),
+        P1,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
 
     // Reach: the instructions are done but the final part is still owed, with
     // the spell below still on the stack.
@@ -2138,7 +2135,12 @@ fn the_resolution_nets_final_part_batch_collects_a_delayed_death_trigger() {
         },
     )
     .unwrap();
-    eliminate_player(runner.state_mut(), P1, &mut Vec::new());
+    eliminate_player(
+        runner.state_mut(),
+        P1,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
     assert_eq!(
         runner
             .state()

@@ -1,5 +1,5 @@
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, LossReason};
 use crate::types::game_state::GameState;
 
 use super::resolve_player_for_context_ref;
@@ -80,7 +80,7 @@ pub fn resolve_lose(
             continue;
         }
         // CR 104.3e: A player who loses the game leaves the game.
-        eliminate_player(state, pid, events);
+        eliminate_player(state, pid, LossReason::EffectStatedLoss, events);
     }
 
     events.push(GameEvent::EffectResolved {
@@ -91,7 +91,7 @@ pub fn resolve_lose(
     Ok(())
 }
 
-/// CR 104.2b + CR 104.3e: Resolve "win the game" — the winner's opponents lose.
+/// CR 104.2b + CR 104.1: Resolve "win the game" — the winner's opponents lose.
 ///
 /// Winner resolution (in priority order):
 /// 1. If `Effect::WinTheGame.target` names a context-ref subject, that
@@ -103,7 +103,7 @@ pub fn resolve_lose(
 ///    game" reading).
 ///
 /// After resolving the winner, all opponents of the winner are eliminated
-/// (CR 104.3e), unless the winner is under `CantWinTheGame` (CR 104.2b).
+/// (CR 104.1), unless the winner is under `CantWinTheGame` (CR 104.2b).
 pub fn resolve_win(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -141,14 +141,14 @@ pub fn resolve_win(
         return Ok(());
     }
 
-    // CR 104.2b + CR 104.3e: A player wins the game — all opponents lose.
+    // CR 104.2b + CR 104.1: A player wins the game — all opponents lose.
     let opponents: Vec<_> = players::opponents(state, winner)
         .into_iter()
         .filter(|&pid| players::is_alive(state, pid))
         .collect();
 
     for pid in opponents {
-        eliminate_player(state, pid, events);
+        eliminate_player(state, pid, LossReason::OpponentWon, events);
     }
 
     events.push(GameEvent::EffectResolved {

@@ -3846,7 +3846,12 @@ fn elimination_restores_session_baseline_before_departing_preferences_are_cleane
     });
 
     let mut events = Vec::new();
-    crate::game::elimination::eliminate_player(&mut state, PlayerId(0), &mut events);
+    crate::game::elimination::eliminate_player(
+        &mut state,
+        PlayerId(0),
+        crate::types::events::LossReason::Conceded,
+        &mut events,
+    );
 
     assert!(state.stack_resolution_session.is_none());
     assert!(
@@ -13284,6 +13289,7 @@ fn elide_middle_repetitions_keeps_the_ends_and_each_departure_between() {
     };
     let lost = |seat| GameEvent::PlayerLost {
         player_id: PlayerId(seat),
+        reasons: std::collections::BTreeSet::from([crate::types::events::LossReason::LifeTotal]),
     };
     let left = |seat| GameEvent::PlayerEliminated {
         player_id: PlayerId(seat),

@@ -621,7 +621,12 @@ fn replay_prefix(
         ));
     }
     for step in offer.transcript.iter().take(breakpoint.prefix_length) {
-        let result = super::engine::apply_for_simulation(state, step.actor, step.action.clone())?;
+        let result = super::engine::apply_for_seat_with_mode(
+            state,
+            step.actor,
+            step.action.clone(),
+            super::engine::PublicFinalizeMode::DeferredDisplay,
+        )?;
         events.extend(result.events);
     }
     if !matches!(state.waiting_for, WaitingFor::Priority { player } if player == breakpoint.expected_priority_holder)
