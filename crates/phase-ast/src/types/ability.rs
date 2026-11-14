@@ -7040,9 +7040,13 @@ pub enum FilterProp {
         controller: Option<ControllerRef>,
     },
     /// Excludes a reference object for predicates such as "another creature."
-    /// Live object matching uses `FilterContext::recipient_id` when bound
-    /// (for example, an attachment's host), and otherwise uses the ability source.
-    /// Zone-change record and spell-cost matching compare against their source IDs.
+    /// Live object matching excludes `FilterContext::recipient_id` when it is
+    /// bound (for example, an attachment's host). Otherwise it excludes the
+    /// ability source's exact incarnation (a triggered ability's source is matched
+    /// by zone-change identity, not by bare object id).
+    /// Zone-change record matching excludes records whose `object_id` is the
+    /// source. Spell-cost matching excludes the spell that is the source; with no
+    /// spell bound it fails closed and never matches.
     Another,
     /// CR 702.95b: Matches objects that are not paired with another creature.
     Unpaired,
