@@ -333,7 +333,7 @@ fn drive_answering_zone_choices(runner: &mut GameRunner) -> ZoneChoicePrompts {
     );
 }
 
-/// CR 701.8a + CR 101.4c + CR 616.1 (this PR's staged population): a mass exile
+/// CR 101.4c + CR 616.1 (this PR's staged population): a mass exile
 /// is one simultaneous event, so every land is consulted before any prompt and
 /// P1, who owns both lands, first chooses which land's optional replacement to
 /// make. Pin that order prompt (P1, exactly the two lands) and make the first
@@ -1353,7 +1353,7 @@ fn aethersnatch_mudhole_replacement_pause() -> (GameRunner, [ObjectId; 2], Objec
             .act(GameAction::PassPriority)
             .expect("resolve the stolen Mudhole");
     }
-    // CR 701.8a + CR 616.1 (this PR): P1's order prompt for the staged mass
+    // CR 101.4c + CR 616.1 (this PR): P1's order prompt for the staged mass
     // exile comes first; the family is then read from the staged owner.
     make_first_land_decision_first(&mut runner, lands);
     let roles = subject_exile_roles(&runner);
@@ -1393,7 +1393,7 @@ fn mudhole_replacement_pause_resume_records_the_subject() {
     let (mut runner, [land_a, land_b], relic, mudhole) = mudhole_replacement_fixture(false);
 
     let outcome = runner.cast(mudhole).target_player(P1).resolve();
-    // CR 701.8a + CR 616.1 (this PR): the staged mass exile asks P1's order
+    // CR 101.4c + CR 616.1 (this PR): the staged mass exile asks P1's order
     // prompt before the first replacement prompt.
     assert!(matches!(
         outcome.final_waiting_for(),
@@ -1465,7 +1465,7 @@ fn mudhole_replacement_pause_resume_records_the_subject() {
 fn mudhole_typed_continuation_completes_after_replacement_pauses() {
     let (mut runner, lands, relic, mudhole) = mudhole_replacement_fixture(true);
     runner.cast(mudhole).target_player(P1).resolve();
-    // CR 701.8a + CR 616.1 (this PR): the order prompt of the staged mass exile.
+    // CR 101.4c + CR 616.1 (this PR): the order prompt of the staged mass exile.
     make_first_land_decision_first(&mut runner, lands);
     for _ in lands {
         assert!(matches!(
@@ -1500,7 +1500,7 @@ fn mudhole_typed_continuation_completes_after_replacement_pauses() {
 fn paused_subject_exile_restore_preserves_actor_before_public_resume() {
     let (mut runner, lands, _, mudhole) = mudhole_replacement_fixture(true);
     runner.cast(mudhole).target_player(P1).resolve();
-    // CR 701.8a + CR 616.1 (this PR): the order prompt of the staged mass exile.
+    // CR 101.4c + CR 616.1 (this PR): the order prompt of the staged mass exile.
     make_first_land_decision_first(&mut runner, lands);
     assert!(matches!(
         runner.state().waiting_for,
@@ -1552,7 +1552,7 @@ fn wire_state_mut(wire: &mut serde_json::Value) -> &mut serde_json::Value {
 /// Remove the recorded `performed_by` of the parked mass-exile family. A
 /// legacy `ChangeZone` frame records it once on its family carrier (the object
 /// holding the controller, performer, logical group and unprocessed members);
-/// CR 701.8a (this PR's staged population) records it on each member's request.
+/// The staged population records it on each member's request.
 fn remove_recorded_actor_of_parked_family(value: &mut serde_json::Value) -> bool {
     match value {
         serde_json::Value::Object(map) => {
@@ -1606,7 +1606,7 @@ struct SubjectExileRoles {
     exile_controller: Option<PlayerId>,
 }
 
-/// The parked mass-exile family's recorded roles. CR 701.8a + CR 616.1 (this
+/// The parked mass-exile family's recorded roles. CR 101.4c + CR 616.1 (this
 /// PR): the population is a staged batch whose owner records them, not an
 /// active `ChangeZone` frame's `pending`; a family parked in such a frame
 /// (a saved legacy shape) is still read from it.
@@ -1654,7 +1654,7 @@ fn subject_exile_roles(runner: &GameRunner) -> SubjectExileRoles {
     }
 }
 
-/// CR 701.8a + CR 616.1 (this PR's staged population): how many lands still
+/// CR 101.4c + CR 616.1 (this PR's staged population): how many lands still
 /// await a replacement decision (the asked one and the held ones); an answered
 /// land waits for the population's simultaneous delivery.
 fn lands_awaiting_a_decision(runner: &GameRunner) -> usize {
@@ -1686,14 +1686,14 @@ fn assert_restored_subject_exile_roles(runner: &GameRunner, controller: PlayerId
             ..
         }
     ));
-    // CR 701.8a + CR 616.1 (this PR): the family is read from the staged owner.
+    // CR 101.4c + CR 616.1 (this PR): the family is read from the staged owner.
     let roles = subject_exile_roles(runner);
     assert_eq!(roles.performed_by, P1, "preserve the recorded actor");
     assert_eq!(
         roles.controller, controller,
         "preserve the actual resolving family's controller"
     );
-    // CR 701.8a + CR 616.1 (this PR): the paused member's anchor is recorded
+    // CR 101.4c + CR 616.1 (this PR): the paused member's anchor is recorded
     // on its staged request, which `subject_exile_roles` reads.
     assert_eq!(
         roles.exile_controller,
@@ -1926,7 +1926,7 @@ fn deployed_v11_subject_exile_restore_refuses_contradictory_recorded_continuatio
 fn subject_exile_restore_keeps_explicit_actor_and_current_missing_actor_is_strict() {
     let (mut runner, lands, _, mudhole) = mudhole_replacement_fixture(true);
     runner.cast(mudhole).target_player(P1).resolve();
-    // CR 701.8a + CR 616.1 (this PR): the order prompt of the staged mass exile.
+    // CR 101.4c + CR 616.1 (this PR): the order prompt of the staged mass exile.
     make_first_land_decision_first(&mut runner, lands);
     let (transferred, _, _, _) = aethersnatch_mudhole_replacement_pause();
     for (runner, controller) in [(runner, P0), (transferred, P2)] {
@@ -1940,7 +1940,7 @@ fn subject_exile_restore_keeps_explicit_actor_and_current_missing_actor_is_stric
             assert_restored_subject_exile_roles(&restored, controller);
             if version == 12 {
                 let state = wire_state_mut(&mut wire);
-                // CR 701.8a + CR 616.1 (this PR): the parked family's performer is
+                // CR 101.4c + CR 616.1 (this PR): the parked family's performer is
                 // recorded on the staged members' requests, not on a `ChangeZone`
                 // frame's carrier.
                 assert!(remove_recorded_actor_of_parked_family(

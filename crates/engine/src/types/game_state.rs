@@ -7358,9 +7358,10 @@ impl PendingBatchDeliveries {
     /// (`append_delivery_events` records `Moved` from the actual `ZoneChanged`
     /// before a pause can save), so a record claiming a move the group never saw
     /// would later be settled as a member the group still has pending. A
-    /// prevented or remained member has no occurrence: its slot is still
-    /// `Pending` until settlement records it, or already carries the same
-    /// outcome, and a slot another member's outcome already filled disagrees.
+    /// prevented or remained member has no occurrence of its own: its slot is
+    /// still `Pending` until settlement records it, already carries the same
+    /// outcome, or carries a later `Moved` another replacement in the same
+    /// action caused; a slot holding the other outcome disagrees.
     fn validate_staged_terminals_match_group(
         &self,
         staged: &StagedBatchDelivery,
@@ -7385,15 +7386,23 @@ impl PendingBatchDeliveries {
                 ZoneMoveCompletion::Moved => {
                     matches!(outcome, LogicalZoneChangeTerminalOutcome::Moved { .. })
                 }
+                // A prevented or remained member's own operation produced no
+                // occurrence, but another replacement in the same logical action
+                // can still move that permanent later (Umbra armor destroying
+                // an Aura whose own destruction a regeneration shield had
+                // prevented): the group then retains that departure as `Moved`
+                // (CR 701.19a, CR 702.89a).
                 ZoneMoveCompletion::Prevented => matches!(
                     outcome,
                     LogicalZoneChangeTerminalOutcome::Pending
                         | LogicalZoneChangeTerminalOutcome::Prevented
+                        | LogicalZoneChangeTerminalOutcome::Moved { .. }
                 ),
                 ZoneMoveCompletion::Remained => matches!(
                     outcome,
                     LogicalZoneChangeTerminalOutcome::Pending
                         | LogicalZoneChangeTerminalOutcome::Remained
+                        | LogicalZoneChangeTerminalOutcome::Moved { .. }
                 ),
             };
             if !agrees {

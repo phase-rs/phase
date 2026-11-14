@@ -2928,7 +2928,7 @@ fn a_destroy_population_member_without_a_performer_still_restores() {
 
 const PRAETORS_COUNSEL: &str = "Return all cards from your graveyard to your hand. Exile Praetor's Counsel. You have no maximum hand size for the rest of the game.";
 
-/// CR 400.3 + CR 108.3 + CR 701.8a: in Dandân (`EntryOwnership::ActorOwns`) the
+/// CR 400.3 + CR 108.3: in Dandân (`EntryOwnership::ActorOwns`) the
 /// graveyard is shared, so Praetor's Counsel ("Return all cards from your
 /// graveyard to your hand") takes P1's two cards into P0's hand and they become
 /// P0's. The mass return is a staged population (two members), whose requests
@@ -2976,4 +2976,65 @@ fn a_dandan_staged_mass_return_gives_the_caster_the_cards_it_takes() {
             "the Dandân caster owns the card they took into hand"
         );
     }
+}
+
+const REKNIT: &str = "Regenerate target permanent.";
+
+/// CR 701.19a + CR 702.89a + CR 616.1: P0's two Grizzly Bears each wear Hyena
+/// Umbra and Spider Umbra. Reknit ("Regenerate target permanent.") shields the
+/// first Hyena Umbra; Akroma's Vengeance ("Destroy all artifacts, creatures, and
+/// enchantments.") then consults that Aura, whose destruction the shield
+/// prevents (a staged `Prevented` terminal). P0 chooses to make the first
+/// Bear's choice first and picks Hyena Umbra's armor, which destroys that same
+/// Aura as part of its replacing action; the logical action now retains the
+/// Aura's departure as `Moved` while the second Bear's choice parks the run.
+/// That pause is a legitimate state: it saves, restores through the checked
+/// path and completes.
+#[test]
+fn a_prevented_aura_that_armor_later_destroys_still_saves_restores_and_completes() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear_a = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let hyena_a = umbra(&mut scenario, P0, "Hyena Umbra", HYENA_UMBRA);
+    let spider_a = umbra(&mut scenario, P0, "Spider Umbra", SPIDER_UMBRA);
+    let bear_b = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+    let hyena_b = umbra(&mut scenario, P0, "Hyena Umbra", HYENA_UMBRA);
+    let spider_b = umbra(&mut scenario, P0, "Spider Umbra", SPIDER_UMBRA);
+    let reknit = scenario
+        .add_spell_to_hand_from_oracle(P0, "Reknit", true, REKNIT)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let vengeance = zero_cost_spell(&mut scenario, "Akroma's Vengeance", AKROMAS_VENGEANCE);
+    let mut runner = scenario.build();
+    attach(&mut runner, hyena_a, bear_a);
+    attach(&mut runner, spider_a, bear_a);
+    attach(&mut runner, hyena_b, bear_b);
+    attach(&mut runner, spider_b, bear_b);
+    engine::game::layers::flush_layers(runner.state_mut());
+
+    runner.cast(reknit).target_object(hyena_a).resolve();
+    cast_until_decision(&mut runner, vengeance);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementDecisionOrder {
+            player: P0,
+            objects: vec![bear_a, bear_b],
+        },
+        "reach guard: P0 holds both Bears' armor choices"
+    );
+    select_decision(&mut runner, bear_a);
+    assert_eq!(asked_choice(&runner), (P0, bear_a));
+    choose_source(&mut runner, hyena_a);
+    assert_eq!(
+        asked_choice(&runner),
+        (P0, bear_b),
+        "reach guard: the second Bear's choice parks the run after the first Aura moved"
+    );
+    round_trip(&mut runner);
+    choose_source(&mut runner, hyena_b);
+    finish(&mut runner);
+    assert_eq!(zone(&runner, bear_a), Zone::Battlefield);
+    assert_eq!(zone(&runner, bear_b), Zone::Battlefield);
+    assert_eq!(zone(&runner, hyena_a), Zone::Graveyard);
+    assert_eq!(zone(&runner, hyena_b), Zone::Graveyard);
 }
