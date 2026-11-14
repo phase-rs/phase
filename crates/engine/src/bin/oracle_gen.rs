@@ -2444,12 +2444,12 @@ mod tests {
 
         let mut robot = make_entry("o-robot", &["TST"], None);
         robot.face = face_with(
-            "{T}: Choose a card name that hasn't been chosen among Who, What, When, Where, and              Why. Create a copy of the card with the chosen name. You may cast the copy.",
+            "{T}: Choose a card name that hasn't been chosen among Who, What, When, Where, and Why. Create a copy of the card with the chosen name. You may cast the copy.",
             "Interrogation Robot",
         );
         let mut garth = make_entry("o-garth", &["TST"], None);
         garth.face = face_with(
-            "{T}: Choose a card name that hasn't been chosen from among Disenchant, Terror, and              Regrowth. Create a copy of the card with the chosen name. You may cast the copy.",
+            "{T}: Choose a card name that hasn't been chosen from among Disenchant, Terror, and Regrowth. Create a copy of the card with the chosen name. You may cast the copy.",
             "Garth One-Eye",
         );
         let mut face_index = BTreeMap::from([
