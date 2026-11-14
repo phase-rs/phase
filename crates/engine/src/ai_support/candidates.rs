@@ -6561,6 +6561,8 @@ fn push_object_combo(
     combo: impl IntoIterator<Item = crate::types::identifiers::ObjectId>,
 ) {
     let combo: Vec<_> = combo.into_iter().collect();
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_selection_combinations(1);
     let key: Vec<u64> = combo.iter().map(|id| id.0).collect();
     if seen.insert(key) {
         output.push(combo);
@@ -6658,13 +6660,19 @@ fn bounded_ignore_combinations(ignorable: &[usize], ignore_count: usize) -> Vec<
 }
 
 fn combinations_usize(items: &[usize], k: usize) -> Vec<Vec<usize>> {
+    // Each output combination grows from exactly one base-case vector, so the
+    // base cases record each combination once despite the recursion.
     if k == 0 {
+        #[cfg(feature = "test-support")]
+        crate::game::perf_counters::record_selection_combinations(1);
         return vec![Vec::new()];
     }
     if items.len() < k {
         return Vec::new();
     }
     if items.len() == k {
+        #[cfg(feature = "test-support")]
+        crate::game::perf_counters::record_selection_combinations(1);
         return vec![items.to_vec()];
     }
 
@@ -6743,6 +6751,8 @@ fn combinations_generic<T: Clone>(items: &[T], k: usize) -> Vec<Vec<T>> {
     let mut result = Vec::new();
     let mut current = Vec::with_capacity(k);
     recurse(items, k, 0, &mut current, &mut result);
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_selection_combinations(result.len());
     result
 }
 
