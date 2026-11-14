@@ -2350,6 +2350,16 @@ mod grant_trigger_polarity_tests {
             selection: engine::types::ability::BounceSelection::AtResolution,
         });
         assert_eq!(extract_target_filter(&wind), None);
+        // Reach-guard: a Bounce that does say "target" keeps its slot.
+        let targeted_bounce = wrap(Effect::Bounce {
+            target: TargetFilter::Any,
+            destination: None,
+            selection: engine::types::ability::BounceSelection::Targeted,
+        });
+        assert_eq!(
+            extract_target_filter(&targeted_bounce),
+            Some(&TargetFilter::Any)
+        );
     }
 
     #[test]

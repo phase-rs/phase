@@ -9381,21 +9381,27 @@ pub(crate) fn parse_oneshot_draw_replacement(norm_lower: &str) -> Option<Effect>
     })
 }
 
-/// CR 115.1c: whether every target a draw-replacement substitute names can be
-/// announced through the single slot its head surfaces — no multi-target head,
-/// and no targeted sub/else clause.
+/// CR 115.1c + CR 602.2b: whether every target a draw-replacement substitute
+/// names can be announced through the single slot its head surfaces — no
+/// multi-target head, and no target in any other instruction the substitute
+/// follows during its own resolution (a later `sub_ability`/`else_ability`
+/// clause, a mode, or a selectable `ChooseOneOf` branch, which exposes no slot
+/// of its own). The walk stops at the CR 603.3 boundary
+/// (`ResolutionScope::OwnResolutionOnly`): a payload merely registered to
+/// resolve later is announced when that ability is created, not here.
 fn draw_replacement_payload_targets_fit_head_slot(payload: &AbilityDefinition) -> bool {
-    fn chain_has_target(def: &AbilityDefinition) -> bool {
-        crate::types::ability::extract_target_filter_from_effect(&def.effect).is_some()
-            || def.sub_ability.as_deref().is_some_and(chain_has_target)
-            || def.else_ability.as_deref().is_some_and(chain_has_target)
-    }
-    payload.multi_target.is_none()
-        && !payload.sub_ability.as_deref().is_some_and(chain_has_target)
-        && !payload
-            .else_ability
-            .as_deref()
-            .is_some_and(chain_has_target)
+    use crate::types::ability::extract_target_filter_from_effect;
+    use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
+
+    let mut targeted_instructions = 0usize;
+    let _ = visit_ability_def_scoped(payload, ResolutionScope::OwnResolutionOnly, &mut |effect| {
+        if extract_target_filter_from_effect(effect).is_some() {
+            targeted_instructions += 1;
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    let head_slots = usize::from(extract_target_filter_from_effect(&payload.effect).is_some());
+    payload.multi_target.is_none() && targeted_instructions == head_slots
 }
 
 fn parse_entering_copy_subject(input: &str) -> OracleResult<'_, TargetFilter> {
@@ -34408,6 +34414,55 @@ mod snapshot_tests {
             "the next time you would draw a card this turn, you gain 2 life and ~ deals 2 damage to any target instead",
         )
         .is_none());
+    }
+
+    #[test]
+    fn draw_replacement_head_slot_guard_traverses_choose_one_of_branches() {
+        // Synthetic shape: no printed card is a modal draw replacement. A
+        // `ChooseOneOf` head surfaces no target slot, so a target-bearing branch
+        // could not be announced (CR 115.1c + CR 602.2b).
+        let damage = |kind| {
+            AbilityDefinition::new(
+                kind,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+            )
+        };
+        let gain = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        );
+        let choose = |branches| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches,
+                    kind: ChooseOneOfKind::Ordinary,
+                },
+            )
+        };
+        assert!(
+            !draw_replacement_payload_targets_fit_head_slot(&choose(vec![
+                gain.clone(),
+                damage(AbilityKind::Spell),
+            ])),
+            "a target-bearing ChooseOneOf branch has no announced slot"
+        );
+        // Reach-guard: untargeted branches, and a plain targeted head, still fit.
+        assert!(draw_replacement_payload_targets_fit_head_slot(&choose(
+            vec![gain.clone(), gain]
+        )));
+        assert!(draw_replacement_payload_targets_fit_head_slot(&damage(
+            AbilityKind::Spell
+        )));
     }
 
     #[test]

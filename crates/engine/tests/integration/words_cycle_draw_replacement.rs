@@ -794,6 +794,167 @@ fn words_of_wind_survivors_still_choose_after_the_chooser_concedes() {
     assert!(on_battlefield(&runner, p3_a), "unchosen permanents stay");
 }
 
+/// Four players with two permanents each (Words of Wind and its drawer for P0),
+/// Wind activated and its replaced draw taken: P0 is prompted for the return.
+struct WindTable {
+    runner: GameRunner,
+    drawer: ObjectId,
+    /// Each of P1..P3's two creatures, in seat order.
+    seats: [[ObjectId; 2]; 3],
+}
+
+fn wind_table_at_p0_choice() -> WindTable {
+    let mut scenario = GameScenario::new_n_player(4, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_card_to_library_top(P0, "P0 Library Top");
+    let words = scenario
+        .add_enchantment_from_oracle(P0, "Words of Wind", WORDS_OF_WIND)
+        .id();
+    let drawer = scenario
+        .add_artifact_from_oracle(P0, "Test Drawing Artifact", DRAW_A_CARD)
+        .id();
+    let mut seats = [[ObjectId(0); 2]; 3];
+    for (slot, seat) in seats.iter_mut().enumerate() {
+        let player = engine::types::player::PlayerId(slot as u8 + 1);
+        for (index, id) in seat.iter_mut().enumerate() {
+            *id = scenario
+                .add_creature(player, &format!("Seat {} Creature {index}", slot + 1), 1, 1)
+                .id();
+        }
+    }
+    scenario.with_mana_pool(P0, colorless_mana(1));
+    let mut runner = scenario.build();
+
+    let index = first_ability_index(&runner, words);
+    runner.activate(words, index).resolve();
+    resolve_stack(&mut runner);
+    draw_one(&mut runner, drawer);
+    let (chooser, _) = pending_return_choice(&runner);
+    assert_eq!(chooser, P0, "reach-guard: the active player announces first");
+    WindTable {
+        runner,
+        drawer,
+        seats,
+    }
+}
+
+/// CR 800.4a + CR 608.2m + CR 101.4: P0 and P1 have already chosen when P2, the
+/// current chooser, concedes. The earlier picks stay collected, P3 still
+/// chooses, and all surviving picks return together; the carrier is cleared and
+/// the resolution finishes at priority.
+///
+/// REVERT-FAILING: with no departure reconciliation the carrier (and P0/P1's
+/// picks and P3's turn) is stranded behind ordinary priority.
+#[test]
+fn words_of_wind_later_chooser_concedes_after_earlier_picks() {
+    let WindTable {
+        mut runner,
+        drawer,
+        seats: [p1, p2, p3],
+    } = wind_table_at_p0_choice();
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![drawer],
+        })
+        .expect("P0's choice is accepted");
+    runner
+        .act(GameAction::SelectCards { cards: vec![p1[0]] })
+        .expect("P1's choice is accepted");
+    let (chooser, _) = pending_return_choice(&runner);
+    assert_eq!(chooser, engine::types::player::PlayerId(2));
+
+    runner
+        .act(GameAction::Concede {
+            player_id: engine::types::player::PlayerId(2),
+        })
+        .expect("P2 concedes during their return choice");
+
+    let (chooser, _) = pending_return_choice(&runner);
+    assert_eq!(
+        chooser,
+        engine::types::player::PlayerId(3),
+        "the walk continues with the next living player"
+    );
+    assert!(
+        on_battlefield(&runner, drawer) && on_battlefield(&runner, p1[0]),
+        "earlier picks stay on the battlefield until the batch is delivered"
+    );
+    runner
+        .act(GameAction::SelectCards { cards: vec![p3[1]] })
+        .expect("P3's choice is accepted");
+    resolve_stack(&mut runner);
+
+    assert!(in_hand(&runner, drawer), "P0's earlier pick returns");
+    assert!(in_hand(&runner, p1[0]), "P1's earlier pick returns");
+    assert!(in_hand(&runner, p3[1]), "the later chooser still returns");
+    assert!(on_battlefield(&runner, p1[1]) && on_battlefield(&runner, p3[0]));
+    for id in p2 {
+        assert!(!on_battlefield(&runner, id), "the departed seat's objects left");
+        assert!(!in_hand(&runner, id), "the departed seat returns nothing");
+    }
+    assert!(
+        runner.state().pending_player_scope_bounce_choice.is_none(),
+        "the carrier is cleared once the instruction completes"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 800.4a + CR 101.4: a player who has not yet been asked (P3) concedes while
+/// P0 is choosing. Nothing is stranded: P0 still holds the open prompt, P1 and
+/// P2 still choose, P3 is never prompted, and the batch returns the survivors'
+/// picks together.
+///
+/// REVERT-FAILING: the departed seat's name stays in the carrier's remaining
+/// players and is prompted (or its stale pick delivered) after it has left.
+#[test]
+fn words_of_wind_noncurrent_remaining_chooser_concedes() {
+    let WindTable {
+        mut runner,
+        drawer,
+        seats: [p1, p2, p3],
+    } = wind_table_at_p0_choice();
+
+    runner
+        .act(GameAction::Concede {
+            player_id: engine::types::player::PlayerId(3),
+        })
+        .expect("P3 concedes while P0 is choosing");
+    let (chooser, cards) = pending_return_choice(&runner);
+    assert_eq!(chooser, P0, "P0's open prompt still stands");
+    assert!(cards.contains(&drawer));
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![drawer],
+        })
+        .expect("P0's choice is accepted");
+    runner
+        .act(GameAction::SelectCards { cards: vec![p1[1]] })
+        .expect("P1's choice is accepted");
+    runner
+        .act(GameAction::SelectCards { cards: vec![p2[0]] })
+        .expect("P2's choice is accepted");
+    resolve_stack(&mut runner);
+
+    assert!(in_hand(&runner, drawer) && in_hand(&runner, p1[1]) && in_hand(&runner, p2[0]));
+    assert!(on_battlefield(&runner, p1[0]) && on_battlefield(&runner, p2[1]));
+    for id in p3 {
+        assert!(!in_hand(&runner, id), "the departed seat returns nothing");
+    }
+    assert!(
+        runner.state().pending_player_scope_bounce_choice.is_none(),
+        "the carrier is cleared once the instruction completes"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
 /// CR 614.11a + CR 121.6b: Words of Wind replaces the first draw of "draw two
 /// cards"; the replacement, including every player's return choice, completes
 /// before the sequence resumes with the second draw.

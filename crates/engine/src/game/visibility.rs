@@ -5113,7 +5113,8 @@ mod tests {
         LinkedExileSnapshot, ManaAbilityCostCursor, ManaAbilityCostResolutionMode,
         ManaAbilityResume, ManaSpentSourceSnapshot, MayTriggerAutoChoiceKey, MayTriggerOrigin,
         PendingBeginGameAbility, PendingCast, PendingCostMoveCompletion, PendingCostMoveResume,
-        PendingManaAbility, PendingSacrificeCostCompletion, PendingScopedLibrarySearch,
+        PendingManaAbility, PendingPlayerScopeBounceChoice, PendingSacrificeCostCompletion,
+        PendingScopedLibrarySearch,
         PendingSearchFoundBatch, PendingTriggerOrder, PreparedScopedLibrarySearchChoice,
         SpellCastRecord, StackEntry, TargetEffectDetail, TriggerOrderGroup,
     };
@@ -6890,9 +6891,8 @@ mod tests {
     fn paused_ability_carriers_blank_only_hidden_mana_source_payment_snapshots() {
         use crate::types::game_state::{
             CollectEvidenceResume, EpicEffect, LibrarySearchDeliveryResume, ManaChoiceContext,
-            ManaChoicePrompt, PayableResource, PendingPlayerScopeBounceChoice,
-            PendingPlayerScopeSacrificeChoice, PendingPlayerScopeUnlessPayment,
-            ScopedLibrarySearchPhase,
+            ManaChoicePrompt, PayableResource, PendingPlayerScopeSacrificeChoice,
+            PendingPlayerScopeUnlessPayment, ScopedLibrarySearchPhase,
         };
         let fixture = payment_fixture();
         let (owner, opponent_id, paid) = (fixture.owner, fixture.opponent, fixture.paid);

@@ -446,8 +446,8 @@ pub fn resolve(
 ///
 /// Only the bare instruction is collected. A per-player rider the generic
 /// fan-out evaluates for each seat — an unless-cost ("… unless they pay 2
-/// life", CR 118.12), an optional or "may" grant, a repeat, a condition, or a
-/// published return result — keeps the generic per-seat route, which owns
+/// life", CR 118.12a), an optional or "may" grant (CR 608.2d), a repeat, a
+/// condition or its "otherwise" branch (CR 608.2c), or a published return result — keeps the generic per-seat route, which owns
 /// those prompts.
 pub(super) fn should_collect_player_scope_choices(ability: &ResolvedAbility) -> bool {
     matches!(
@@ -458,6 +458,7 @@ pub(super) fn should_collect_player_scope_choices(ability: &ResolvedAbility) -> 
             ..
         } if !filter_targets_zone(target, Zone::Graveyard)
     ) && ability.sub_ability.is_none()
+        && ability.else_ability.is_none()
         && ability.unless_pay.is_none()
         && !ability.optional
         && ability.optional_for.is_none()
@@ -561,7 +562,7 @@ fn set_scoped_bounce_waiting_for(
         owner_library: false,
         track_exiled_by_source: false,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
-        // CR 708.2a: bounce returns cards face up; no face-down entry.
+        // CR 400.7: a returned permanent is a new object; it enters no face-down profile.
         face_down_profile: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
@@ -1030,6 +1031,99 @@ mod tests {
     use crate::types::game_state::{CastingVariant, StackEntry};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+
+    fn scoped_return_template() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter {
+                    type_filters: vec![crate::types::ability::TypeFilter::Permanent],
+                    controller: Some(ControllerRef::ScopedPlayer),
+                    properties: vec![],
+                }),
+                destination: None,
+                selection: BounceSelection::AtResolution,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+    }
+
+    /// CR 101.4: the bare "each player returns a permanent they control" is the
+    /// collector's whole domain; any per-seat gate keeps the generic route that
+    /// owns it (CR 118.12a unless-cost, CR 608.2d optional, CR 608.2c condition
+    /// and "otherwise" branch). Positive control first, then one negative per
+    /// modifier so no admitted form can lose its gate.
+    #[test]
+    fn scoped_return_collector_admits_only_the_bare_mandatory_instruction() {
+        use crate::types::ability::{
+            AbilityCondition, AbilityCost, OpponentMayScope, QuantityExpr, RepeatContinuation,
+            ReturnResultId, UnlessPayModifier,
+        };
+
+        assert!(should_collect_player_scope_choices(&scoped_return_template()));
+
+        let gated: Vec<(&str, Box<dyn Fn(&mut ResolvedAbility)>)> = vec![
+            (
+                "unless_pay",
+                Box::new(|a| {
+                    a.unless_pay = Some(UnlessPayModifier {
+                        cost: AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 2 },
+                        },
+                        payer: TargetFilter::Controller,
+                    })
+                }),
+            ),
+            ("optional", Box::new(|a| a.optional = true)),
+            (
+                "optional_for",
+                Box::new(|a| a.optional_for = Some(OpponentMayScope::AnyOpponent)),
+            ),
+            (
+                "optional_player",
+                Box::new(|a| a.optional_player = Some(TargetFilter::Controller)),
+            ),
+            (
+                "condition",
+                Box::new(|a| {
+                    a.condition = Some(AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn)
+                }),
+            ),
+            (
+                "else_ability",
+                Box::new(|a| {
+                    a.else_ability = Some(Box::new(scoped_return_template()));
+                }),
+            ),
+            (
+                "sub_ability",
+                Box::new(|a| {
+                    a.sub_ability = Some(Box::new(scoped_return_template()));
+                }),
+            ),
+            (
+                "repeat_for",
+                Box::new(|a| a.repeat_for = Some(QuantityExpr::Fixed { value: 2 })),
+            ),
+            (
+                "repeat_until",
+                Box::new(|a| a.repeat_until = Some(RepeatContinuation::ControllerChoice)),
+            ),
+            (
+                "declares_return_result",
+                Box::new(|a| a.declares_return_result = Some(ReturnResultId(1))),
+            ),
+        ];
+        for (modifier, apply) in gated {
+            let mut ability = scoped_return_template();
+            apply(&mut ability);
+            assert!(
+                !should_collect_player_scope_choices(&ability),
+                "a `{modifier}` template must keep the generic per-seat route"
+            );
+        }
+    }
 
     #[test]
     fn test_bounce_moves_permanent_to_hand() {
