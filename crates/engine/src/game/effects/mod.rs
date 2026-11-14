@@ -5949,7 +5949,7 @@ fn frame_may_apply_with_entry(frame: &ResolutionFrame) -> bool {
 /// leg, or a "that player" bound at resolution) rather than by its phase trigger's turn player?
 /// A binding that is the phase's own is no seat leg; the equality guards a node a later binding
 /// rewrote without clearing the phase's.
-fn bound_to_a_player_by_an_instruction(node: &ResolvedAbility) -> bool {
+pub(crate) fn bound_to_a_player_by_an_instruction(node: &ResolvedAbility) -> bool {
     node.scoped_player.is_some() && node.scoped_player != node.context.phase_turn_player
 }
 

@@ -4377,6 +4377,121 @@ mod feldon_tokens {
         }
     }
 
+    const ZAGORKA: &str = "Vigilance, trample\nAt the beginning of your end step, each player may create a tapped land token named Sanctum with \"{T}: Add one mana of any color.\" Each opponent who does can't attack you during their next turn.";
+
+    /// Zagorka, Mother of Sanctum's end-step trigger in a three-player game after the active
+    /// player resolved Crafty Cutpurse this turn, so every seat's optional Sanctum is created
+    /// under the active player's control. Mister Fantastic watches the active player's tokens.
+    /// Every seat accepts. Returns the Sanctums created and the draws Mister Fantastic offered.
+    fn zagorka_sanctums(persist: bool) -> (usize, usize) {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PostCombatMain);
+        for player in (0..3).map(PlayerId) {
+            scenario.with_library_top(player, &["Plains", "Island", "Swamp", "Mountain"]);
+        }
+        let zagorka = scenario
+            .add_creature_from_oracle(P0, "Zagorka, Mother of Sanctum", 4, 4, ZAGORKA)
+            .as_legendary()
+            .with_subtypes(vec!["Human", "Peasant"])
+            .id();
+        let fantastic = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Mister Fantastic, Reed Richards",
+                2,
+                4,
+                "Reach\nWhenever one or more tokens you control enter, you may draw a card.",
+            )
+            .as_legendary()
+            .id();
+        let cutpurse = scenario
+            .add_creature_to_hand_from_oracle(P0, "Crafty Cutpurse", 2, 2, CRAFTY_CUTPURSE)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(cutpurse).resolve();
+        for _ in 0..12 {
+            match &runner.state().waiting_for {
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        assert_eq!(runner.state().objects[&cutpurse].zone, Zone::Battlefield);
+        assert_eq!(runner.state().phase, Phase::PostCombatMain);
+        // Every player passes in turn: the end step begins.
+        for _ in 0..3 {
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert_eq!(runner.state().phase, Phase::End);
+        assert_eq!(runner.state().stack.len(), 1, "Zagorka's trigger");
+        let mut seat_answers = 0;
+        let mut draws_offered = 0;
+        for _ in 0..60 {
+            if persist && !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                runner = restore(runner);
+            }
+            match &runner.state().waiting_for {
+                WaitingFor::OptionalEffectChoice { source_id, .. } if *source_id == zagorka => {
+                    seat_answers += 1;
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: true })
+                        .unwrap();
+                }
+                WaitingFor::OptionalEffectChoice { source_id, .. } if *source_id == fantastic => {
+                    draws_offered += 1;
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: false })
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. }
+                    if runner.state().stack.is_empty()
+                        && runner.state().deferred_triggers.is_empty() =>
+                {
+                    break
+                }
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        assert_eq!(seat_answers, 3, "every seat is asked (restore: {persist})");
+        let sanctums = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.is_token
+                    && object.zone == Zone::Battlefield
+                    && object.name == "Sanctum"
+                    && object.controller == P0
+            })
+            .count();
+        (sanctums, draws_offered)
+    }
+
+    /// CR 101.4 + CR 608.2f + CR 603.6a: "each player may create a tapped land token named
+    /// Sanctum", every seat accepting, creates its tokens as one simultaneous event, so Mister
+    /// Fantastic's "one or more tokens you control enter" trigger fires once for the three
+    /// Sanctums, whichever optional answer is given last, also across a restore.
+    #[test]
+    fn optional_seat_answers_keep_one_simultaneous_entry_event() {
+        for persist in [false, true] {
+            assert_eq!(
+                zagorka_sanctums(persist),
+                (3, 1),
+                "three Sanctums, one Mister Fantastic draw offer (restore: {persist})"
+            );
+        }
+    }
+
     const SECRETS_OF_THE_KEY: &str = "Investigate. If this spell was cast from a graveyard, investigate twice instead. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")\nFlashback {3}{U}";
 
     /// Mister Fantastic's "Whenever one or more tokens you control enter, you may draw a card."

@@ -9893,10 +9893,13 @@ fn action_has_settled(state: &GameState) -> bool {
 /// replacement that modifies an entry ([`parked_replacement_modifies_an_entry`]:
 /// an ordering choice, a copy offer, an entry-controller choice), an entrant
 /// held liminal for its copy choice, a token committed before its entry
-/// record, an entry parked for its own mid-entry choice, and an entering Aura's
+/// record, an entry parked for its own mid-entry choice, an entering Aura's
 /// host choice (CR 303.4f: it is made as the Aura enters, and its entry tail is
-/// stashed behind the prompt). A pause that holds none of them belongs to a later
-/// event, not to an entry.
+/// stashed behind the prompt), and a seat's optional answer in a player-scope clause
+/// (CR 101.4: "each player may create a token": the seats' actions are one
+/// simultaneous event, so a later seat's prompt is the same instruction's entry
+/// still being made). A pause that holds none of them belongs to a later event,
+/// not to an entry.
 pub(crate) fn battlefield_entry_in_progress(state: &GameState) -> bool {
     state
         .pending_replacement
@@ -9906,6 +9909,9 @@ pub(crate) fn battlefield_entry_in_progress(state: &GameState) -> bool {
         || !state.liminal_entries.is_empty()
         || state.pending_token_battlefield_entry.is_some()
         || !state.deferred_entry_events.is_empty()
+        || state.active_optional_effect_frame().is_some_and(|frame| {
+            super::effects::bound_to_a_player_by_an_instruction(&frame.ability)
+        })
 }
 
 /// CR 614.12a + CR 614.1c + CR 616.1: does a parked replacement modify a
