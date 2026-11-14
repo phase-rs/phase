@@ -933,6 +933,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             enter_tapped: _,
             enters_attacking: _,
             up_to: _,
+            library_shuffle: _,
         } => match mode {
             ScanMode::Conservative => Axes::CONSERVATIVE,
             ScanMode::LoopFirewall
@@ -2785,9 +2786,9 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             acc
         }
         QuantityRef::TrackedSetSize => Axes::NONE,
-        // CR 608.2c: with a cause, the set is what one zone change or keyword action produced
-        // "this way", so its size scales only through that producer, whose own arm carries any
-        // population read.
+        // CR 608.2c: with a cause, the set is what one zone change, keyword action or control
+        // change produced "this way", so its size scales only through that producer, whose own
+        // arm carries any population read.
         QuantityRef::FilteredTrackedSetSize { filter, caused_by } => {
             let ctx = match (mode, caused_by) {
                 (ScanMode::LoopFirewall, Some(_)) => FilterReadContext::SnapshotOrEvent,
@@ -11808,6 +11809,7 @@ mod tests {
 
     fn move_onto_battlefield_with(edit: impl FnOnce(&mut Effect)) -> (bool, bool, bool) {
         let mut effect = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
             target: TargetFilter::ParentTarget,

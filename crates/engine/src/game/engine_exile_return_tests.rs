@@ -112,6 +112,7 @@ fn exile_until_host_leaves_returns_card_through_full_pipeline() {
     // battlefield" — exile resolves and must register the return link.
     let mut exile = ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: TargetFilter::Any,

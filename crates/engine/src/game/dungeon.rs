@@ -1028,6 +1028,7 @@ pub fn room_effects(
         (DungeonId::BaldursGateWilderness, 5) => {
             let mut ability = simple(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Hand),
                     destination: Zone::Battlefield,
                     target: TargetFilter::Typed(TypedFilter::land()),
@@ -1561,6 +1562,7 @@ fn search_basic_land(source_id: ObjectId, controller: PlayerId) -> ResolvedAbili
     );
     let mut change_zone = simple(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Hand,
             target: TargetFilter::Any,

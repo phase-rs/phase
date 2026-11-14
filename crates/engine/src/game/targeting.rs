@@ -2951,6 +2951,30 @@ pub fn resolve_effect_player_ref(
         // `effects::resolve_player_for_context_ref`, which resolves `Controller`
         // straight to `ability.controller`.
         TargetFilter::Controller => Some(ability.controller),
+        // CR 108.3 + CR 608.2h: ownership is invariant across zone changes.
+        // Unlike source controller, this reference does not require a live
+        // matching incarnation, and an unknown owner names no player.
+        TargetFilter::Owner => ability
+            .trigger_source
+            .as_ref()
+            .map(|source| source.source_read(state).owner())
+            .or_else(|| {
+                state
+                    .objects
+                    .get(&ability.source_id)
+                    .map(|source| source.owner)
+            })
+            .or_else(|| {
+                ability.source_incarnation.and_then(|incarnation| {
+                    crate::game::filter::exit_lki_for_incarnation(
+                        state,
+                        ability.source_id,
+                        incarnation,
+                    )
+                    .map(|lki| lki.owner)
+                })
+            })
+            .or_else(|| state.lki_cache.get(&ability.source_id).map(|lki| lki.owner)),
         // CR 608.2h + CR 113.7a: "~'s controller" follows the source's exact
         // incarnation. A triggered ability owns the richer TriggerSourceContext
         // authority; an activated ability carries its source incarnation from
@@ -4033,39 +4057,19 @@ fn is_protected_from(
 }
 
 /// CR 702.11d: Check if a source matches a HexproofFilter.
+///
+/// The filter-vs-source match itself lives in
+/// `keywords::source_matches_hexproof_filter`, shared with the player path
+/// (`static_abilities::player_has_hexproof_from`); this wrapper resolves the
+/// source object from its id for the object targeting path.
 fn hexproof_filter_matches(
     filter: &HexproofFilter,
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    let source_obj = match state.objects.get(&source_id) {
-        Some(o) => o,
-        None => return false,
-    };
-    // CR 709.4b: A split source has its chosen-half colors on the stack (the
-    // usual hexproof-source case) and its combined colors off the stack; no-op
-    // for single-face and on-stack sources.
-    let source_colors = source_obj.effective_colors();
-    match filter {
-        HexproofFilter::Color(color) => source_colors.contains(color),
-        HexproofFilter::CardType(type_name) => {
-            crate::game::keywords::source_matches_card_type(source_obj, type_name)
-        }
-        HexproofFilter::Quality(quality) => {
-            crate::game::keywords::source_matches_quality(source_obj, quality)
-        }
-        // CR 702.11d + CR 702.16 + CR 609.6: `ChosenColor` is normally
-        // resolved to a concrete `Color(_)` at layer application time (see
-        // `layers::apply_continuous_effect`). The intrinsic variant arm
-        // remains for cards whose printed text resolves "the chosen color" on
-        // the same object that chose it — mirrors
-        // `source_matches_protection_target` for `ProtectionTarget::ChosenColor`.
-        HexproofFilter::ChosenColor => state
-            .objects
-            .get(&source_id)
-            .and_then(|src| src.chosen_color())
-            .is_some_and(|color| source_colors.contains(&color)),
-    }
+    state.objects.get(&source_id).is_some_and(|source_obj| {
+        crate::game::keywords::source_matches_hexproof_filter(filter, source_obj)
+    })
 }
 
 /// Full battlefield targeting check: shroud + hexproof + protection (CR 702.16b).
@@ -7914,6 +7918,59 @@ mod tests {
         )
     }
 
+    #[test]
+    fn source_owner_is_invariant_and_unknown_owner_names_no_player() {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "owned source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().controller = PlayerId(0);
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source).unwrap(),
+        );
+        let mut ability = make_resolved_with_targets(vec![TargetRef::Player(PlayerId(0))], source);
+        ability.source_incarnation = Some(state.objects[&source].incarnation);
+        let assert_owner = |state: &GameState, ability: &ResolvedAbility, expected| {
+            assert_eq!(
+                resolve_effect_player_ref(state, ability, &TargetFilter::Owner),
+                expected
+            );
+            assert_eq!(
+                crate::game::effects::resolve_player_for_context_ref(
+                    state,
+                    ability,
+                    &TargetFilter::Owner
+                ),
+                expected
+            );
+        };
+        assert_owner(&state, &ability, Some(PlayerId(1)));
+        let moved = state.objects.get_mut(&source).unwrap();
+        moved.zone = Zone::Library;
+        moved.incarnation += 1;
+        assert_owner(&state, &ability, Some(PlayerId(1)));
+        state.objects.remove(&source);
+        ability.trigger_source = Some(context.clone());
+        assert_owner(&state, &ability, Some(PlayerId(1)));
+        ability.trigger_source = None;
+        state
+            .lki_by_incarnation
+            .entry(source)
+            .or_default()
+            .insert(ability.source_incarnation.unwrap(), context.lki.clone());
+        assert_owner(&state, &ability, Some(PlayerId(1)));
+        state.lki_by_incarnation.remove(&source);
+        state.lki_cache.insert(source, context.lki);
+        assert_owner(&state, &ability, Some(PlayerId(1)));
+        state.lki_cache.remove(&source);
+        assert_owner(&state, &ability, None);
+    }
+
     /// CR 608.2h + CR 113.7a: A source-controller predicate on a triggered
     /// ability reads the observed incarnation while it remains in its observed
     /// zone, then uses that incarnation's LKI rather than a same-id return.
@@ -8530,6 +8587,7 @@ mod tests {
         let second = TargetRef::Object(ObjectId(2));
         let body = ResolvedAbility::new(
             crate::types::ability::Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTargetSlot { index: 1 },

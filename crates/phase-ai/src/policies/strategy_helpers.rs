@@ -717,10 +717,11 @@ pub(crate) fn available_mana_after_spell(ctx: &PolicyContext<'_>) -> u32 {
         // sources count only if they have a mana ability and — for creatures —
         // aren't summoning-sick (CR 302.6).
         let is_pure_land = obj.card_types.core_types.contains(&CoreType::Land) && !is_creature;
+        // CR 701.10f: a pool doubling is a mana ability but adds no mana by itself.
         let is_usable_dork = obj
             .abilities
             .iter()
-            .any(engine::game::mana_abilities::is_mana_ability)
+            .any(engine::game::mana_abilities::is_mana_source_ability)
             && !(is_creature && engine::game::combat::has_summoning_sickness(obj));
         if is_pure_land || is_usable_dork {
             sources += 1;
@@ -901,6 +902,21 @@ pub(crate) fn can_pay_ward_cost(
             .iter()
             .all(|cost| can_pay_ward_cost(ctx, cost, warded)),
     }
+}
+
+/// CR 702.21a + CR 102.3: The ward cost the AI's spell or ability faces when it
+/// targets `warded` — none unless an opponent controls it.
+pub(crate) fn ward_cost_against_ai<'a>(
+    ctx: &PolicyContext<'_>,
+    warded: &'a GameObject,
+) -> Option<&'a WardCost> {
+    if !players::is_opponent(ctx.state, warded.controller, ctx.ai_player) {
+        return None;
+    }
+    warded.keywords.iter().find_map(|keyword| match keyword {
+        Keyword::Ward(ward) => Some(ward),
+        _ => None,
+    })
 }
 
 fn keyword_pressure(object: &GameObject) -> f64 {

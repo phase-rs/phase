@@ -1484,13 +1484,7 @@ pub(super) fn match_changes_zone(
         // source-zone set that takes precedence over single-zone `origin` when
         // non-empty. CR 111.1: `from = None` (token creation) cannot satisfy a
         // trigger that names any specific origin zone.
-        let origin = if !trigger.origin_zones.is_empty() {
-            OriginConstraint::OneOf(trigger.origin_zones.clone())
-        } else if let Some(origin) = trigger.origin {
-            OriginConstraint::Equals(origin)
-        } else {
-            OriginConstraint::Any
-        };
+        let origin = zone_change_origin(trigger, None);
         zone_change_clause_matches(
             &origin,
             trigger.destination.as_ref(),
@@ -3516,12 +3510,13 @@ pub(super) fn match_mana_ability_produced(
 // Promoted Trigger Matchers
 // ---------------------------------------------------------------------------
 
-/// AttackerBlocked: fires when the source creature is among blocked attackers.
+/// CR 509.3c/509.3d: promoted attacker-blocked modes consume declaration or
+/// attacker-side effect events, preserving first-transition versus per-pair scope.
 pub(super) fn match_attacker_blocked(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
+    trigger: &TriggerDefinition,
     source_context: &TriggerSourceContext,
-    _state: &GameState,
+    state: &GameState,
 ) -> bool {
     let source_id = source_event_subject_id(source_context);
     if let GameEvent::BlockersDeclared { assignments } = event {
@@ -3530,7 +3525,16 @@ pub(super) fn match_attacker_blocked(
             .iter()
             .any(|(_, attacker)| *attacker == source_id)
     } else {
-        false
+        // CR 509.3c/509.3d: use the same first-transition and creature-qualified
+        // authority as ordinary becomes-blocked triggers. Keep the established
+        // declared-blocker verdict above unchanged.
+        match event {
+            GameEvent::AttackerBecameBlockedByEffect { .. }
+            | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. } => {
+                !matching_becomes_blocked_events(event, trigger, source_context, state).is_empty()
+            }
+            _ => false,
+        }
     }
 }
 
@@ -3577,6 +3581,26 @@ pub(super) fn match_milled(
     }
 }
 
+/// CR 603.10a + CR 603.6c: The trigger's source-zone constraint, folding the
+/// disjunctive `origin_zones` over the scalar `origin`. `default_origin` is the
+/// zone the trigger's verb implies when neither field is set (leaves-the-
+/// battlefield defaults to Battlefield; the exiled/changes-zone family to any).
+/// Single authority for every zone-change matcher so the fold cannot drift.
+fn zone_change_origin(
+    trigger: &TriggerDefinition,
+    default_origin: Option<Zone>,
+) -> OriginConstraint {
+    if !trigger.origin_zones.is_empty() {
+        OriginConstraint::OneOf(trigger.origin_zones.clone())
+    } else if let Some(origin) = trigger.origin {
+        OriginConstraint::Equals(origin)
+    } else if let Some(default_origin) = default_origin {
+        OriginConstraint::Equals(default_origin)
+    } else {
+        OriginConstraint::Any
+    }
+}
+
 /// Exiled: fires when a card moves to Exile zone.
 pub(super) fn match_exiled(
     event: &GameEvent,
@@ -3586,6 +3610,7 @@ pub(super) fn match_exiled(
 ) -> bool {
     if let GameEvent::ZoneChanged {
         object_id,
+        from,
         to,
         record,
         ..
@@ -3593,6 +3618,11 @@ pub(super) fn match_exiled(
     {
         // CR 800.4a: an object that left the game with its owner was not exiled.
         if *to != Zone::Exile || record.departure.left_game() {
+            return false;
+        }
+        // CR 603.6c: "is exiled from [zone]" restricts the source zone; the
+        // unconstrained form keeps `OriginConstraint::Any`.
+        if !zone_change_origin(trigger, None).matches_from(from) {
             return false;
         }
         if !valid_card_matches(trigger, state, *object_id, source_context) {
@@ -4501,13 +4531,7 @@ pub(super) fn match_leaves_battlefield(
     {
         // CR 603.10a: LeavesBattlefield is a battlefield-origin zone change.
         // Default `origin = None` to Battlefield, matching the legacy matcher.
-        let origin = if !trigger.origin_zones.is_empty() {
-            OriginConstraint::OneOf(trigger.origin_zones.clone())
-        } else if let Some(origin) = trigger.origin {
-            OriginConstraint::Equals(origin)
-        } else {
-            OriginConstraint::Equals(Zone::Battlefield)
-        };
+        let origin = zone_change_origin(trigger, Some(Zone::Battlefield));
         zone_change_clause_matches(
             &origin,
             trigger.destination.as_ref(),
@@ -4524,8 +4548,7 @@ pub(super) fn match_leaves_battlefield(
     }
 }
 
-/// BecomesBlocked: fires when the source creature is assigned at least one blocker.
-/// Reuses BlockersDeclared event — the attacker "becomes blocked" when blockers are declared.
+/// BecomesBlocked: fires on blocker declaration or an attacker-side effect event.
 pub(super) fn match_becomes_blocked(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -4542,15 +4565,20 @@ pub(super) fn matching_becomes_blocked_events(
     state: &GameState,
 ) -> Vec<GameEvent> {
     let source_id = source_event_subject_id(source_context);
+    let blocker_filter = combat_filter(trigger);
+    // CR 509.3d: the promoted ByCreature mode carries the per-creature
+    // qualifier in its mode even when no narrower valid_target filter exists.
+    let per_blocker =
+        blocker_filter.is_some() || matches!(trigger.mode, TriggerMode::AttackerBlockedByCreature);
     if let GameEvent::AttackerBecameBlockedByEffect { attacker } = event {
-        // CR 509.3d: an effect-driven block is NOT "blocked by a creature" — the
-        // "becomes blocked by a creature" form (which carries a genuine blocker
-        // filter) must NOT fire. Only the bare "becomes blocked" form (CR 509.3c)
-        // fires, and only for the matching attacker. `combat_filter` excludes a
-        // spurious `TargetFilter::Player` surfaced by effect-text lowering (e.g.
+        // CR 509.3c/509.3d: this event carries only the first blocked transition,
+        // not a blocker identity. Only the bare form fires here; a real entering
+        // blocker supplies its own per-creature event separately.
+        // `combat_filter` excludes a spurious `TargetFilter::Player` surfaced
+        // by the effect-text lowering (e.g.
         // Goblin Cadets' "target opponent gains control"), which is not a real
         // CR 509 blocker filter and must not suppress this bare-form firing.
-        if combat_filter(trigger).is_some() {
+        if per_blocker {
             return Vec::new();
         }
         let attacker_matches = if trigger.valid_card.is_some() {
@@ -4564,6 +4592,28 @@ pub(super) fn matching_becomes_blocked_events(
             Vec::new()
         };
     }
+    if let GameEvent::AttackerBecameBlockedByFilteredBlocker { attacker, blocker } = event {
+        // CR 509.3d + CR 509.4: an entering blocker triggers only the qualified
+        // attacker-side form. The bare form consumes the first-transition event,
+        // and the entering creature never fires a blocker-side "blocks" trigger.
+        if !per_blocker {
+            return Vec::new();
+        }
+        let attacker_matches = if trigger.valid_card.is_some() {
+            valid_card_matches(trigger, state, *attacker, source_context)
+        } else {
+            *attacker == source_id
+        };
+        let blocker_matches = match blocker_filter {
+            Some(filter) => target_filter_matches_object(state, *blocker, filter, source_context),
+            None => true,
+        };
+        return if attacker_matches && blocker_matches {
+            vec![event.clone()]
+        } else {
+            Vec::new()
+        };
+    }
     if let GameEvent::BlockersDeclared { assignments } = event {
         // CR 509.3d: the "becomes blocked by a creature [with quality]" form
         // (carries a `valid_target` blocker filter) triggers once for each
@@ -4571,7 +4621,6 @@ pub(super) fn matching_becomes_blocked_events(
         // blocker qualifier, `valid_target: None`) triggers only once each combat
         // for the attacker, regardless of how many creatures block it — so the
         // matching assignments are collapsed to a single event per attacker.
-        let per_blocker = combat_filter(trigger).is_some();
         let mut emitted_attackers: Vec<ObjectId> = Vec::new();
         assignments
             .iter()
@@ -4584,7 +4633,7 @@ pub(super) fn matching_becomes_blocked_events(
                 if !attacker_matches {
                     return None;
                 }
-                let blocker_matches = match combat_filter(trigger) {
+                let blocker_matches = match blocker_filter {
                     Some(filter) => {
                         target_filter_matches_object(state, *blocker, filter, source_context)
                     }

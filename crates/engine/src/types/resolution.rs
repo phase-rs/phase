@@ -3906,6 +3906,16 @@ impl ResolutionStack {
         self.frames.push(frame);
     }
 
+    /// CR 104.1: retire every suspended frame because the game this stack belongs to
+    /// has ended; no instruction of a resolution still under way is owed to a
+    /// finished game. Frames are dropped through the stack's own `pop` whatever
+    /// their kind, so a direct-choice owner and every parent beneath it go together.
+    /// The monotonic draw, discard and post-replacement allocators are left as they
+    /// are, as for any other abandoned frame.
+    pub(crate) fn abandon_all_frames(&mut self) {
+        while self.frames.pop().is_some() {}
+    }
+
     /// Install an outer continuation immediately below the active child.
     ///
     /// There is deliberately no fallback insertion position: callers that do
@@ -5685,15 +5695,20 @@ impl ResolutionStateWire {
                 Err("invalid resolution-state wire decode mode".to_string())
             }
         })();
-        decoded.map_err(|error: String| {
-            if version <= LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
-                && error.contains("INVALID_COIN_BRANCH_BINDINGS:")
-            {
-                LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string()
-            } else {
-                error
-            }
-        })
+        decoded
+            .and_then(|wire: Self| {
+                crate::types::game_state::validate_restored_event_context_pins(&wire.state)?;
+                Ok(wire)
+            })
+            .map_err(|error: String| {
+                if version <= LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
+                    && error.contains("INVALID_COIN_BRANCH_BINDINGS:")
+                {
+                    LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string()
+                } else {
+                    error
+                }
+            })
     }
 }
 
@@ -7311,6 +7326,7 @@ mod tests {
                 moved_count: None,
                 face_down_profile: None,
                 library_placement: None,
+                library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                 enter_attached_to: None,
                 effect_kind: EffectKind::ChangeZone,
             }),
@@ -10044,6 +10060,7 @@ mod tests {
                 index: 0,
             }],
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,

@@ -238,10 +238,12 @@ fn is_counterspell(face: &CardFace) -> bool {
 pub(crate) fn is_sweeper_parts(abilities: &[AbilityDefinition]) -> bool {
     abilities.iter().any(|ability| {
         collect_chain_effects(ability).iter().any(|e| {
+            // CR 608.2c: a selected-object library move (Chaos Warp) acts on its
+            // declared target, not on a population.
             matches!(
                 e,
                 Effect::DestroyAll { .. } | Effect::DamageAll { .. } | Effect::ChangeZoneAll { .. }
-            )
+            ) && !engine::game::effects::is_selected_object_library_move(e)
         })
     })
 }
@@ -381,6 +383,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -721,6 +724,25 @@ mod tests {
             "commitment should clamp to 1.0, got {}",
             feature.commitment
         );
+    }
+
+    /// CR 608.2c: Chaos Warp's printed text lowers to a `TargetOnly` declaration
+    /// and a `ChangeZoneAll` bound to that selection. It moves one declared
+    /// permanent, so it is not a sweeper.
+    #[test]
+    fn selected_object_library_move_is_not_a_sweeper() {
+        let definition = engine::parser::oracle_effect::parse_effect_chain(
+            "The owner of target permanent shuffles it into their library, then reveals the top card of their library. If it's a permanent card, they put it onto the battlefield.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            collect_chain_effects(&definition)
+                .iter()
+                .any(|effect| matches!(effect, Effect::ChangeZoneAll { .. })),
+            "reach guard: Chaos Warp's move is the bound ChangeZoneAll"
+        );
+        assert!(!is_sweeper_parts(std::slice::from_ref(&definition)));
+        assert!(is_sweeper_parts(&[destroy_all_ability()]));
     }
 
     #[test]

@@ -31,6 +31,8 @@ use engine::game::quantity::{
     static_definition_is_cast_stable_for_pre_cast, trigger_definition_is_cast_stable_for_pre_cast,
     try_resolve_quantity_in_source_context,
 };
+#[cfg(test)]
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::stack::stack_object_controller;
 use engine::game::targeting::find_legal_targets;
 use engine::game::triggers::{
@@ -74,7 +76,7 @@ use crate::policies::stack_awareness::{
     is_creature_permanent_controlled_by, node_damage, removal_steps_acting_on, removes_or_damages,
     will_target_die_from_stack, RemovalStep,
 };
-use crate::policies::strategy_helpers::can_pay_ward_cost;
+use crate::policies::strategy_helpers::{can_pay_ward_cost, ward_cost_against_ai};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GateDecision {
@@ -1211,15 +1213,12 @@ fn reject_futile_target(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<G
         return Some(GateDecision::Reject);
     }
 
-    // CR 702.21a: targeting a warded permanent triggers ward; if the AI can't
-    // pay the cost, the spell is simply countered — a strict card-down. Never
-    // choose such a target.
-    for keyword in &object.keywords {
-        if let Keyword::Ward(ward) = keyword {
-            if !can_pay_ward_cost(ctx, ward, object) {
-                return Some(GateDecision::Reject);
-            }
-            break;
+    // CR 702.21a: targeting a warded permanent an opponent controls triggers
+    // ward; if the AI can't pay the cost, the spell is simply countered — a
+    // strict card-down. Never choose such a target.
+    if let Some(ward) = ward_cost_against_ai(ctx, object) {
+        if !can_pay_ward_cost(ctx, ward, object) {
+            return Some(GateDecision::Reject);
         }
     }
 
@@ -5783,6 +5782,7 @@ mod tests {
         let mut redirect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -10287,6 +10287,149 @@ mod tests {
             search_depth: crate::policies::context::SearchDepth::Root,
         };
         assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// P0 casts a real Giant Growth with Gev, Scaled Scorch ("Ward—Pay 2 life.")
+    /// and Grizzly Bears on the battlefield, with `life` as both its seat's and
+    /// its team's life total. Returns whether the gate keeps each target and
+    /// whether the chooser picks Gev on seeds 0..4.
+    fn ward_pump_target_verdict(
+        format: Option<engine::types::format::FormatConfig>,
+        life: i32,
+        gev_controller: PlayerId,
+        bears_controller: PlayerId,
+    ) -> (bool, bool, Vec<bool>) {
+        let db = crate::test_support::shared_integration_card_db();
+        let mut scenario = match format {
+            Some(format) => GameScenario::new_with_format(format, 4, 7),
+            None => GameScenario::new(),
+        };
+        scenario.at_phase(Phase::PreCombatMain);
+        let gev =
+            scenario.add_real_card(gev_controller, "Gev, Scaled Scorch", Zone::Battlefield, db);
+        let bears =
+            scenario.add_real_card(bears_controller, "Grizzly Bears", Zone::Battlefield, db);
+        let growth = scenario.add_real_card(P0, "Giant Growth", Zone::Hand, db);
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Green, 1));
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            // Zero every teammate seat so the team's shared life equals P0's seat.
+            for mate in engine::game::players::teammates(state, P0) {
+                state.players[mate.0 as usize].life = 0;
+            }
+            state.players[0].life = life;
+            state.active_player = P0;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        let card_id = runner.state().objects[&growth].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: growth,
+                card_id,
+                targets: vec![],
+                payment_mode: Default::default(),
+            })
+            .unwrap();
+        let state = runner.state().clone();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+        assert_eq!(state.players[0].life, life);
+        assert_eq!(engine::game::players::team_life_total(&state, P0), life);
+        assert!(state.objects[&gev]
+            .keywords
+            .contains(&Keyword::Ward(WardCost::PayLife(2))));
+        let gev_action = GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(gev)),
+        };
+        let bears_action = GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bears)),
+        };
+        let issued = candidate_actions(&state);
+        assert!(issued.iter().any(|c| c.action == gev_action));
+        assert!(issued.iter().any(|c| c.action == bears_action));
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: issued.clone(),
+        };
+        let gated = gate_candidates(
+            &state,
+            &decision,
+            issued,
+            P0,
+            &config,
+            &AiContext::empty(&config.weights),
+        );
+        let retained = |action: &GameAction| gated.iter().any(|g| &g.candidate.action == action);
+        let choices = (0..4)
+            .map(|seed| {
+                let mut rng = ChaCha20Rng::seed_from_u64(seed);
+                crate::search::choose_action(&state, P0, &config, &mut rng)
+            })
+            .collect::<Vec<_>>();
+        let gev_choice = Some(gev_action.clone());
+        let bears_choice = Some(bears_action.clone());
+        assert!(choices
+            .iter()
+            .all(|c| *c == gev_choice || *c == bears_choice));
+        (
+            retained(&gev_action),
+            retained(&bears_action),
+            choices.iter().map(|c| *c == gev_choice).collect(),
+        )
+    }
+
+    /// CR 702.21a: ward triggers only for an opponent's spell, so the AI's own
+    /// warded creature is a free pump target even when it cannot pay the cost.
+    #[test]
+    fn keeps_own_warded_target_it_cannot_pay_for() {
+        let (gev_kept, bears_kept, gev_picks) = ward_pump_target_verdict(None, 2, P0, P1);
+        assert!(gev_kept);
+        assert!(bears_kept);
+        assert_eq!(gev_picks, [true; 4]);
+    }
+
+    /// CR 702.21a + CR 102.3: a 2HG teammate is not an opponent, so the
+    /// teammate's warded creature is a free pump target even though the team's
+    /// shared life (CR 119.4a) cannot pay 2.
+    #[test]
+    fn keeps_teammates_warded_target_it_cannot_pay_for() {
+        let format = engine::types::format::FormatConfig::two_headed_giant();
+        let table = GameState::new(format.clone(), 4, 7);
+        assert!(!engine::game::players::is_opponent(&table, PlayerId(1), P0));
+        let (gev_kept, bears_kept, gev_picks) =
+            ward_pump_target_verdict(Some(format), 1, PlayerId(1), PlayerId(2));
+        assert!(gev_kept);
+        assert!(bears_kept);
+        assert_eq!(gev_picks, [true; 4]);
+    }
+
+    /// CR 702.21a + CR 119.4a: an opposing 2HG team's ward still rejects the
+    /// target when the AI's team's shared life cannot pay 2.
+    #[test]
+    fn rejects_opposing_teams_warded_target_its_team_cannot_pay_for() {
+        let format = engine::types::format::FormatConfig::two_headed_giant();
+        let table = GameState::new(format.clone(), 4, 7);
+        assert!(engine::game::players::is_opponent(&table, PlayerId(2), P0));
+        let (gev_kept, bears_kept, gev_picks) =
+            ward_pump_target_verdict(Some(format), 1, PlayerId(2), PlayerId(3));
+        assert!(!gev_kept);
+        assert!(bears_kept);
+        assert_eq!(gev_picks, [false; 4]);
+    }
+
+    /// CR 702.21a: an opponent's unpayable ward still rejects the target.
+    #[test]
+    fn still_rejects_opponents_warded_target_it_cannot_pay_for() {
+        let (gev_kept, bears_kept, gev_picks) = ward_pump_target_verdict(None, 2, P1, P0);
+        assert!(!gev_kept);
+        assert!(bears_kept);
+        assert_eq!(gev_picks, [false; 4]);
     }
     /// Build an Improvise `ManaPayment` decision context: a `TapForConvoke`
     /// Colorless candidate for `object_id`, plus whatever sibling candidates

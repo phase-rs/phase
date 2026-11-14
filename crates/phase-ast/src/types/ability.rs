@@ -8133,14 +8133,16 @@ pub enum ThisWayCause {
     /// wider blast radius than adding one new leaf — out of scope for a
     /// single-card bug fix (issue #8159).
     PutIntoGraveyard,
+    /// CR 613.1b + CR 608.2c: the member's control changed to the recipient this way — only an actual controller change counts; a target the recipient already controlled is not "gained" (Coveted Falcon: "Draw a card for each one they gained control of this way.").
+    ControlGained,
 }
 
 impl ThisWayCause {
     /// The origin zone the producing transition must have departed, when the
     /// action determines one. `None` for destination-named actions (Exiled,
     /// Returned, Bounced, PutIntoGraveyard, OwnerLibraryShuffleSubject),
-    /// which arrive from anywhere, and for `Tapped`, which names no transition
-    /// at all (callers gate on [`Self::is_zone_transition`] first). The
+    /// which arrive from anywhere, and for `Tapped` and `ControlGained`, which
+    /// name no transition at all (callers gate on [`Self::is_zone_transition`] first). The
     /// origin-stamp site requires the
     /// member's latest zone-change record to agree; a mismatch means the
     /// record is not the producing transition and no origin is stamped.
@@ -8153,8 +8155,9 @@ impl ThisWayCause {
             // CR 701.9a: discard moves hand cards to the graveyard.
             ThisWayCause::Discarded => Some(Zone::Hand),
             // CR 701.26a: tapping is not a zone transition (see
-            // `is_zone_transition`), so it determines no departed zone.
-            ThisWayCause::Tapped => None,
+            // `is_zone_transition`), so it determines no departed zone; a
+            // control change, like a tap, is not a zone transition either.
+            ThisWayCause::Tapped | ThisWayCause::ControlGained => None,
             ThisWayCause::Exiled
             | ThisWayCause::Returned
             | ThisWayCause::Bounced
@@ -8164,13 +8167,13 @@ impl ThisWayCause {
     }
 
     /// CR 400.7 + CR 701.26a: does the producing action move the member between
-    /// zones? Every cause but `Tapped` names a zone-moving action; tapping
-    /// turns a permanent sideways where it is, so a tapped member's latest
-    /// zone-change record is an earlier, unrelated transition and must never be
+    /// zones? Every cause but `Tapped` and `ControlGained` names a zone-moving
+    /// action; tapping turns a permanent sideways where it is, so a tapped
+    /// member's latest zone-change record is an earlier, unrelated transition and must never be
     /// stamped as its producing origin.
     pub fn is_zone_transition(self) -> bool {
         match self {
-            ThisWayCause::Tapped => false,
+            ThisWayCause::Tapped | ThisWayCause::ControlGained => false,
             ThisWayCause::OwnerLibraryShuffleSubject
             | ThisWayCause::Discarded
             | ThisWayCause::Returned
@@ -8614,15 +8617,15 @@ pub enum TargetFilter {
     OriginalController,
     /// CR 613.1f + CR 608.2c: Resolves to the ability's *original*, pre-rebind
     /// source identity — the object that put this ability on the stack — even
-    /// inside a `ChangeZone { forward_result: true }` sub-ability chain where
-    /// the runtime has rebound `ResolvedAbility::source_id` to the just-moved
-    /// object.
+    /// inside a `ChangeZone { forward_result: true }` chain whose legacy
+    /// object-relative child has rebound `ResolvedAbility::source_id` to the
+    /// just-moved object.
     ///
     /// Motivation (reanimator-Aura class: Animate Dead / Dance of the Dead):
     /// the ETB effect returns the enchanted creature card to the battlefield
-    /// via `ChangeZone { forward_result: true }`, which rebinds `source_id` to
-    /// the reanimated creature so trailing `SelfRef`/`ParentTarget` anaphora
-    /// (the attach, the leaves-battlefield sacrifice) bind to that creature.
+    /// via `ChangeZone { forward_result: true }`. Its legacy immediate generic
+    /// grant reads the reanimated object, while returned-object anaphora use the
+    /// forwarded context. A primary `SelfRef` still names the creating source.
     /// But the same effect ALSO rewrites the Aura's OWN enchant restriction
     /// ("it loses \"enchant creature card in a graveyard\" and gains \"enchant
     /// creature put onto the battlefield with this Aura\""). That keyword swap
@@ -8636,8 +8639,9 @@ pub enum TargetFilter {
     /// `effects/mod.rs`, at the one point where the pre-rebind `source_id` and
     /// the about-to-be-mutated sub-ability clone coexist.
     ///
-    /// Distinct from `SelfRef` (rebound to the moved object under
-    /// `forward_result`) and from `OriginalController` (a player reference).
+    /// Unlike the current ability's primary `SelfRef` or a moved-object
+    /// `ParentTarget`, this pins the pre-rebind producer for legacy grants.
+    /// `OriginalController` is the separate player reference.
     OriginalSource,
     /// CR 615.5 + CR 609.7: Resolves to the controller of the *prevented event's*
     /// damage source. Used by prevention follow-up sentences such as "the source's
@@ -10723,6 +10727,73 @@ pub fn effect_owns_resolution_zone_choice(effect: &Effect, timing: TargetChoiceT
         && !effect_requires_parent_target_object(effect)
 }
 
+#[cfg(test)]
+mod r2_resolution_choice_authority_tests {
+    use super::*;
+
+    #[test]
+    fn zone_union_choice_ownership_requires_resolution_and_preserves_target_filter() {
+        let target = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Spacecraft".into())],
+            controller: Some(ControllerRef::You),
+            properties: vec![FilterProp::InAnyZone {
+                zones: vec![Zone::Hand, Zone::Graveyard],
+            }],
+        });
+        let mut effect: Effect =
+            serde_json::from_str(r#"{"type":"ChangeZone","destination":"Battlefield"}"#).unwrap();
+        let Effect::ChangeZone { target: slot, .. } = &mut effect else {
+            unreachable!()
+        };
+        *slot = target.clone();
+        assert!(effect_owns_resolution_zone_choice(
+            &effect,
+            TargetChoiceTiming::Resolution
+        ));
+        assert!(!effect_owns_resolution_zone_choice(
+            &effect,
+            TargetChoiceTiming::Stack
+        ));
+        assert_eq!(effect.target_filter(), Some(&target));
+        let Effect::ChangeZone { target: slot, .. } = &mut effect else {
+            unreachable!()
+        };
+        *slot = TargetFilter::ParentTarget;
+        assert!(!effect_owns_resolution_zone_choice(
+            &effect,
+            TargetChoiceTiming::Resolution
+        ));
+    }
+
+    #[test]
+    fn terminal_owner_movement_exposes_bound_parent_slots() {
+        for target in [
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 1 },
+        ] {
+            let mut effect: Effect =
+                serde_json::from_str(r#"{"type":"ChangeZoneAll","destination":"Library"}"#)
+                    .unwrap();
+            let Effect::ChangeZoneAll {
+                target: slot,
+                library_shuffle,
+                ..
+            } = &mut effect
+            else {
+                unreachable!()
+            };
+            *slot = target.clone();
+            *library_shuffle = LibraryShuffleMode::TerminalShuffle;
+            assert_eq!(effect_parent_ref_slots(&effect), vec![&target]);
+            assert!(effect_requires_parent_target_object(&effect));
+            assert!(!effect_owns_resolution_zone_choice(
+                &effect,
+                TargetChoiceTiming::Resolution
+            ));
+        }
+    }
+}
+
 /// CR 608.2c + CR 400.7 + CR 115.10a: what one instruction can single out,
 /// introduce or move — the objects a later instruction's definite anaphor
 /// ("that creature") could name. See [`instruction_object_reach`].
@@ -10847,6 +10918,7 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
             destination: _,
             target,
             owner_library: _,
+            library_shuffle: _,
             enter_transformed: _,
             enters_under: _,
             enter_tapped: _,
@@ -19731,8 +19803,9 @@ impl AbilityCost {
         match self {
             // The dry run has a real arm for exactly the shapes
             // `supports_effect_cost_payment` admits (PutCounter{SelfRef} /
-            // Mana{Fixed}); every other shape hits the payment-path fallback and
-            // is refused on every board. `supports_cumulative_upkeep_payment`
+            // Mana{Fixed} / Draw by a context-ref player); every other shape hits
+            // the payment-path fallback and is refused on every board.
+            // `supports_cumulative_upkeep_payment`
             // below delegates to the same predicate, but as a MATCH GUARD
             // (`EffectCost { .. } if self.supports_effect_cost_payment() => true`)
             // because that function has a `_ => false` fallthrough to absorb the
@@ -19868,22 +19941,56 @@ impl AbilityCost {
     /// a player choice. This is shared by cumulative-upkeep synthesis and the
     /// resolution-time payment gate so supported cards never install a trigger
     /// whose cost will later be rejected.
+    ///
+    /// CR 118.1 + CR 121.1: the deterministic effect-as-cost forms are source
+    /// counters, fixed mana, and a draw by the cost's context-ref player (the
+    /// controller, or the original controller for "has you draw a card").
+    ///
+    /// - An `UpTo` draw count is excluded: it is a CR 608.2d announcement the
+    ///   payment authority has no payment-time arm for.
+    /// - The draw target set is closed to the two context-ref players. An
+    ///   object reference never draws, and an announced player target is not a
+    ///   cost the payer can carry out without a choice.
+    /// - An effect-cost `Draw { count: N }` is ONE N-card draw instruction wherever it is paid (CR 121.2 +
+    ///   CR 121.2a: an instruction-level replacement such as Alms Collector sees N). Repetition, such as
+    ///   cumulative upkeep's "for each age counter" (CR 702.24a), is a `Composite` of that instruction, never a
+    ///   scaled count.
     pub fn supports_effect_cost_payment(&self) -> bool {
-        matches!(
-            self,
-            AbilityCost::EffectCost { effect }
-                if matches!(
-                    effect.as_ref(),
-                    Effect::PutCounter {
-                        target: TargetFilter::SelfRef,
-                        ..
-                    } | Effect::Mana {
-                        produced: ManaProduction::Fixed { .. },
-                        target: None,
-                        ..
-                    }
-                )
-        )
+        let AbilityCost::EffectCost { effect } = self else {
+            return false;
+        };
+        match effect.as_ref() {
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                ..
+            } => true,
+            Effect::Mana {
+                produced: ManaProduction::Fixed { .. },
+                target: None,
+                ..
+            } => true,
+            Effect::Draw {
+                count,
+                target: TargetFilter::Controller | TargetFilter::OriginalController,
+            } => !count.is_up_to(),
+            _ => false,
+        }
+    }
+
+    /// CR 118.1 + CR 702.24a: a cost every leg of which is a deterministic effect cost
+    /// (`supports_effect_cost_payment`) — the leaf itself, or the `Composite` that `expand_per_counter` builds from an
+    /// effect-cost base. The single resolution payment authority pays it with no prompt; a replacement choice on one
+    /// leg pauses the payment, and the unpaid later legs are paid when it resumes.
+    pub fn supports_deterministic_effect_cost_payment(&self) -> bool {
+        match self {
+            AbilityCost::Composite { costs } => {
+                !costs.is_empty()
+                    && costs
+                        .iter()
+                        .all(Self::supports_deterministic_effect_cost_payment)
+            }
+            leaf => leaf.supports_effect_cost_payment(),
+        }
     }
 
     /// CR 118: Classify this cost into one or more `CostCategory` buckets.
@@ -20626,21 +20733,28 @@ impl LibraryPosition {
     }
 }
 
-/// CR 701.24a + CR 701.24d: Whether a mass move into a library is the move
+/// CR 701.24a + CR 701.24d: Whether a move into a library is the move
 /// component of one parser-emitted “shuffle this set into that library” action.
-/// Ordinary mass moves retain the zone pipeline's per-object library behavior;
+/// Ordinary moves retain the zone pipeline's per-object library behavior;
 /// `TerminalShuffle` reserves the single shuffle for the chained `Shuffle`
 /// instruction after every member has moved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "type")]
-pub enum MassLibraryShuffleMode {
+pub enum LibraryShuffleMode {
     #[default]
     PerObject,
     TerminalShuffle,
 }
 
-fn is_default_mass_library_shuffle_mode(mode: &MassLibraryShuffleMode) -> bool {
-    matches!(mode, MassLibraryShuffleMode::PerObject)
+impl LibraryShuffleMode {
+    /// Serde skip-helper: `PerObject` is the default and is omitted from JSON.
+    pub fn is_per_object(&self) -> bool {
+        matches!(self, Self::PerObject)
+    }
+}
+
+fn is_default_library_shuffle_mode(mode: &LibraryShuffleMode) -> bool {
+    mode.is_per_object()
 }
 
 /// CR 701.20a + CR 608.2c: How the *set* of matching cards found by an
@@ -22502,6 +22616,11 @@ pub enum Effect {
         /// (not controller's). Used for "shuffle into its owner's library".
         #[serde(default)]
         owner_library: bool,
+        /// CR 701.24a + CR 701.24d: `TerminalShuffle` marks the move component
+        /// of a parser-emitted "shuffle [set] into [library]" operation. Its
+        /// chained `Shuffle` owns the one library randomization.
+        #[serde(default, skip_serializing_if = "is_default_library_shuffle_mode")]
+        library_shuffle: LibraryShuffleMode,
         /// CR 712.2: When true, the object enters the battlefield showing its back face.
         #[serde(default)]
         enter_transformed: bool,
@@ -22597,8 +22716,8 @@ pub enum Effect {
         /// CR 701.24a + CR 701.24d: `TerminalShuffle` marks the mass-move
         /// component of a parser-emitted "shuffle [set] into [library]"
         /// operation. Its chained `Shuffle` owns the one library randomization.
-        #[serde(default, skip_serializing_if = "is_default_mass_library_shuffle_mode")]
-        library_shuffle: MassLibraryShuffleMode,
+        #[serde(default, skip_serializing_if = "is_default_library_shuffle_mode")]
+        library_shuffle: LibraryShuffleMode,
         /// CR 401.4: When `true`, the objects are placed in a random order
         /// (e.g. Endurance). When `false`, the owner chooses the order per
         /// CR 401.4's default rule. Independent of `library_position`.
@@ -26126,6 +26245,16 @@ fn effect_introduces_per_player_chosen_card_referent(effect: &Effect) -> bool {
 pub fn effect_introduces_per_iteration_referent(effect: &Effect) -> bool {
     effect_introduces_per_player_object_referent(effect)
         || effect_introduces_per_player_chosen_card_referent(effect)
+        // CR 608.2c: a single exiled top card is also an iteration-local
+        // referent for the following land-deploy or optional-cast instruction.
+        || matches!(
+            effect,
+            Effect::ExileTop {
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+                ..
+            }
+        )
 }
 
 pub fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool {
@@ -26307,6 +26436,76 @@ fn phase_out_or_in_filter_is_mass(filter: &TargetFilter) -> bool {
                 && tf.properties.is_empty()
         }
         _ => false,
+    }
+}
+
+/// CR 115.10a: a PhaseOut union of supported already-bound object references
+/// declares no new target. Keep this narrower than `TargetFilter::is_context_ref`:
+/// other context references need their own object authority before joining a
+/// phasing batch. This does not prove any supported reference is live.
+pub fn phase_out_filter_is_context_union(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Or { filters } => filters.iter().all(phase_out_filter_is_context_union),
+        TargetFilter::SelfRef
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::TriggeringSource => true,
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::Typed(_)
+        | TargetFilter::Not { .. }
+        | TargetFilter::And { .. }
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
     }
 }
 
@@ -26504,6 +26703,13 @@ pub fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilte
             .is_some_and(phase_out_or_in_filter_is_mass)
     {
         return None;
+    }
+    // CR 115.10a: affecting the source and a previously selected target does
+    // not declare another target. PhaseOut collects these references as a union.
+    if let Effect::PhaseOut { target } = effect {
+        if phase_out_filter_is_context_union(target) {
+            return None;
+        }
     }
     effect.target_filter().filter(|t| !t.is_context_ref())
 }
@@ -29632,6 +29838,9 @@ impl TargetFilter {
                 // the source's live-or-LKI incarnation, never chosen while
                 // announcing the ability.
                 | TargetFilter::SourceController
+                // CR 108.3 + CR 115.10a: the source's owner is fixed by
+                // ownership, not selected when announcing this ability.
+                | TargetFilter::Owner
                 | TargetFilter::OriginalController
                 // CR 608.2c: the reanimator-Aura's pre-rebind source identity is
                 // resolved (concretized to SpecificObject) during resolution, never
@@ -30063,6 +30272,21 @@ enum CreatedReferentPublisher {
 }
 
 impl Effect {
+    /// CR 605.1a + CR 701.10f: whether resolving this effect adds mana to a mana
+    /// pool — `Effect::Mana`, or doubling a pool's mana (CR 701.10f: "that player
+    /// adds an amount of mana of that type equal to the amount they already have").
+    /// The single shape authority every "could add mana" classifier reads.
+    pub fn adds_mana_on_resolution(&self) -> bool {
+        matches!(
+            self,
+            Effect::Mana { .. }
+                | Effect::Double {
+                    target_kind: DoubleTarget::ManaPool { .. },
+                    ..
+                }
+        )
+    }
+
     /// CR 608.2c: true for the structural "repeat this process" directive
     /// node (`RuntimeHandled { RepeatProcess }`).
     pub fn is_repeat_directive(&self) -> bool {
@@ -35792,9 +36016,11 @@ pub struct AbilityDefinition {
     /// CR 601.2f: Self-referential cost reduction applied before activation.
     /// "This ability costs {N} less to activate for each [condition]"
     pub cost_reduction: Option<CostReduction>,
-    /// When true, after this ability's effect resolves, moved/created objects are forwarded
-    /// to the sub_ability: the moved object becomes sub's source_id, and the original source
-    /// becomes a target. Used for "put onto the battlefield attached to [source]" patterns.
+    /// Forward the settled moved/created objects to the sub-ability's result context.
+    /// Legacy object-relative children may also rebind their source to the moved
+    /// object; a primary `SelfRef`, delayed trigger, or repeat directive keeps its
+    /// creating source instead. Use the forwarded-object operands for the result,
+    /// independently of the printed source identity.
     pub forward_result: bool,
     /// Player scope for "each player/opponent [effect]" patterns.
     /// When set, the effect iterates over matching players (each becomes the acting player).
@@ -35921,7 +36147,9 @@ pub(crate) fn cost_moves_card_to_or_from_library(ability_def: &AbilityDefinition
 }
 
 /// CR 605.1a, criteria (1)-(3) ONLY — no target (CR 115.6), the root effect adds
-/// mana, and it's not a loyalty ability (CR 606.2). Deliberately EXCLUDES the
+/// mana (`Effect::Mana`, or a pool doubling per CR 701.10f — see
+/// [`Effect::adds_mana_on_resolution`]), and it's not a loyalty ability
+/// (CR 606.2). Deliberately EXCLUDES the
 /// fourth criterion ("its cost and effect don't move any card to or from a
 /// library"), which is why this is NOT the mana-ability test and must never be
 /// used for activation routing — use [`is_mana_ability`] for that.
@@ -35950,7 +36178,14 @@ pub fn produces_mana_on_activation(ability_def: &AbilityDefinition) -> bool {
     // makes this not-a-mana-ability under today's behavior, and this change
     // must not widen mana-ability status for any shipping card.
     let target_attached = match &*ability_def.effect {
-        Effect::Mana { target, .. } => target.as_ref().and_then(|r| r.declared_filters().next()),
+        Effect::Mana { target, .. } => target
+            .as_ref()
+            .and_then(|r| r.declared_filters().next())
+            .map(|(_, filter)| filter),
+        // CR 605.1a + CR 701.10f: doubling a pool's mana adds mana; it requires a
+        // target only when the shared target-slot authority surfaces one ("you" is a
+        // context reference — Doubling Cube).
+        effect if effect.adds_mana_on_resolution() => extract_target_filter_from_effect(effect),
         _ => return false,
     };
     // CR 605.1a: A targeted mana-producing ability is not a mana ability.
@@ -36038,7 +36273,8 @@ pub fn could_be_activated_mana_ability(def: &AbilityDefinition) -> bool {
 
 /// CR 605.1b: could this triggered ability body — if its trigger observed an
 /// activated mana ability — be a triggered mana ability? True when its OWN
-/// resolution could add mana (any reachable `Effect::Mana`, whatever else the
+/// resolution could add mana (any reachable effect for which
+/// [`Effect::adds_mana_on_resolution`] holds, whatever else the
 /// chain does or in whatever order) and it requires no target anywhere in that
 /// resolution (CR 115.6). Separately registered payloads (delayed, reflexive,
 /// replacement bodies) are not this ability's resolution and are not walked
@@ -36049,8 +36285,11 @@ pub fn could_be_triggered_mana_ability_body(def: &AbilityDefinition) -> bool {
     let mut adds_mana = false;
     let mut targets = false;
     let _ = visit_ability_def_scoped(def, ResolutionScope::OwnResolutionOnly, &mut |effect| {
-        if let Effect::Mana { target, .. } = effect {
+        // CR 605.1a + CR 701.10f: a pool doubling adds mana too.
+        if effect.adds_mana_on_resolution() {
             adds_mana = true;
+        }
+        if let Effect::Mana { target, .. } = effect {
             if target
                 .as_ref()
                 .is_some_and(|role| role.declared_filters().next().is_some())
@@ -43296,6 +43535,94 @@ mod tests {
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
 
+    #[test]
+    fn phase_out_context_union_extracts_no_new_target() {
+        let pair = TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
+        };
+        for target in [
+            pair.clone(),
+            TargetFilter::Or {
+                filters: vec![pair, TargetFilter::SelfRef],
+            },
+            TargetFilter::Or { filters: vec![] },
+            TargetFilter::Or {
+                filters: vec![TargetFilter::Or { filters: vec![] }],
+            },
+            TargetFilter::Any,
+            TargetFilter::SelfRef,
+            TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+        ] {
+            let effect = Effect::PhaseOut { target };
+            assert_eq!(extract_target_filter_from_effect(&effect), None);
+            assert!(!effect_has_stack_target_declaration(&effect));
+            let control = Effect::PhaseOut {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            };
+            assert!(std::ptr::eq(
+                extract_target_filter_from_effect(&control).unwrap(),
+                control.target_filter().unwrap()
+            ));
+            assert!(effect_has_stack_target_declaration(&control));
+        }
+    }
+
+    #[test]
+    fn phase_out_context_union_preserves_targeted_boundaries() {
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let mixed = TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, creature],
+        };
+        for target in [
+            mixed.clone(),
+            TargetFilter::Or {
+                filters: vec![TargetFilter::ParentTarget, mixed],
+            },
+            TargetFilter::Or {
+                filters: vec![TargetFilter::SelfRef, TargetFilter::Any],
+            },
+            TargetFilter::And {
+                filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
+            },
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::SelfRef),
+            },
+        ] {
+            let effect = Effect::PhaseOut { target };
+            assert!(std::ptr::eq(
+                extract_target_filter_from_effect(&effect).unwrap(),
+                effect.target_filter().unwrap()
+            ));
+            assert!(effect_has_stack_target_declaration(&effect));
+        }
+        let pair = TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
+        };
+        for effect in [
+            Effect::PhaseIn {
+                target: pair.clone(),
+            },
+            Effect::Destroy {
+                target: pair,
+                cant_regenerate: false,
+            },
+        ] {
+            assert_eq!(
+                extract_target_filter_from_effect(&effect),
+                effect.target_filter()
+            );
+            assert!(effect_has_stack_target_declaration(&effect));
+        }
+        for target in [
+            TargetFilter::SelfRef,
+            TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+        ] {
+            let effect = Effect::PhaseIn { target };
+            assert_eq!(extract_target_filter_from_effect(&effect), None);
+            assert!(!effect_has_stack_target_declaration(&effect));
+        }
+    }
+
     fn goblin_token(attack_destination: TokenAttackDestination) -> Effect {
         Effect::Token {
             name: "Goblin".to_string(),
@@ -46238,6 +46565,77 @@ mod tests {
             filter: None,
         }
         .supports_cumulative_upkeep_payment());
+
+        // CR 118.1 + CR 121.1: a draw by the cost's context-ref player is a
+        // deterministic effect cost (Psychic Vortex: you; Decoy Gambit: the
+        // spell's original controller).
+        let draw_cost = |count: QuantityExpr, target: TargetFilter| AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw { count, target }),
+        };
+        assert!(
+            draw_cost(QuantityExpr::Fixed { value: 1 }, TargetFilter::Controller)
+                .supports_cumulative_upkeep_payment()
+        );
+        assert!(draw_cost(
+            QuantityExpr::Fixed { value: 1 },
+            TargetFilter::OriginalController
+        )
+        .supports_cumulative_upkeep_payment());
+        // CR 608.2d: an "up to" count is an announcement with no payment arm.
+        assert!(!draw_cost(
+            QuantityExpr::UpTo {
+                max: Box::new(QuantityExpr::Fixed { value: 1 }),
+            },
+            TargetFilter::Controller,
+        )
+        .supports_cumulative_upkeep_payment());
+        // An announced player target, or an object reference, is not a
+        // context-ref drawer.
+        assert!(
+            !draw_cost(QuantityExpr::Fixed { value: 1 }, TargetFilter::Player)
+                .supports_cumulative_upkeep_payment()
+        );
+        assert!(
+            !draw_cost(QuantityExpr::Fixed { value: 1 }, TargetFilter::SelfRef)
+                .supports_cumulative_upkeep_payment()
+        );
+    }
+
+    /// CR 118.1 + CR 702.24a: the routing predicate admits a deterministic effect-cost leaf and any non-empty
+    /// `Composite` (nested or not) whose every leg is one; a single unsupported leg refuses the whole.
+    #[test]
+    fn deterministic_effect_cost_composites_are_supported() {
+        let draw = |target: TargetFilter| AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target,
+            }),
+        };
+        let draw_one = draw(TargetFilter::Controller);
+        let composite = |costs: Vec<AbilityCost>| AbilityCost::Composite { costs };
+
+        assert!(draw_one.supports_deterministic_effect_cost_payment());
+        assert!(composite(vec![draw_one.clone(), draw_one.clone()])
+            .supports_deterministic_effect_cost_payment());
+        assert!(
+            composite(vec![draw_one.clone(), composite(vec![draw_one.clone()])])
+                .supports_deterministic_effect_cost_payment()
+        );
+        assert!(!composite(vec![]).supports_deterministic_effect_cost_payment());
+        // A mana leaf is not an effect cost.
+        let mana_one = AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        };
+        assert!(!composite(vec![draw_one.clone(), mana_one])
+            .supports_deterministic_effect_cost_payment());
+        // One unsupported leg (an announced player target) refuses the whole.
+        assert!(
+            !composite(vec![draw_one.clone(), draw(TargetFilter::Player)])
+                .supports_deterministic_effect_cost_payment()
+        );
+        // CR 702.24a: the printed base is the leaf; the expanded Composite is judged by the routing predicate, not
+        // the synthesis predicate.
+        assert!(!composite(vec![draw_one.clone(), draw_one]).supports_cumulative_upkeep_payment());
     }
 
     #[test]
@@ -48252,6 +48650,7 @@ mod tests {
     #[test]
     fn change_zone_owner_library_serde_roundtrip() {
         let effect = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Battlefield),
             destination: Zone::Library,
             target: TargetFilter::Any,
@@ -48708,6 +49107,7 @@ mod tests {
     /// Helper: build a minimal `Effect::ChangeZone` with `enters_under` set.
     fn change_zone_with_enters_under(enters_under: Option<ControllerRef>) -> Effect {
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -50356,7 +50756,7 @@ mod static_condition_traversal_tests {
         else {
             panic!("expected ChangeZoneAll");
         };
-        assert_eq!(library_shuffle, MassLibraryShuffleMode::PerObject);
+        assert_eq!(library_shuffle, LibraryShuffleMode::PerObject);
         let legacy_json = serde_json::to_value(Effect::ChangeZoneAll {
             origin: None,
             destination: Zone::Library,
@@ -50367,7 +50767,7 @@ mod static_condition_traversal_tests {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
-            library_shuffle: MassLibraryShuffleMode::PerObject,
+            library_shuffle: LibraryShuffleMode::PerObject,
             random_order: false,
         })
         .expect("default mode serializes");
@@ -50386,7 +50786,7 @@ mod static_condition_traversal_tests {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
-            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             random_order: false,
         };
         let terminal_json = serde_json::to_value(&terminal).expect("terminal mode serializes");

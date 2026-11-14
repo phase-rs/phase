@@ -58,7 +58,7 @@ use crate::types::ability::{
     CopyRetargetPermission, CountBinding, CountScope, CounterAdjustment, CounterKindChooser,
     CounterKindDomain, DigSource, DoorLockOp, Duration, Effect, EffectScope, ExtraPhaseAnchor,
     ExtraPhaseRecipient, FaceDownProfile, FilterProp, ForceBlockAttackerRef, GrantedAbilityScope,
-    LibraryPosition, MassLibraryShuffleMode, MultiTargetSpec, ObjectSelectionCardinality,
+    LibraryPosition, LibraryShuffleMode, MultiTargetSpec, ObjectSelectionCardinality,
     ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerFilter,
     PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope, PtStat,
     PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, ReturnResultReadSpec,
@@ -2987,6 +2987,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 );
             }
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin,
                 destination: Zone::Battlefield,
                 target,
@@ -3020,6 +3021,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             up_to,
             multi_target: _,
         } => Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin,
             destination,
             target,
@@ -5159,8 +5161,19 @@ pub(super) fn parse_choose_ast(
             // unclassified fragments into new card-coverage diagnostics.
             // The former parse_target wrapper discarded those diagnostics.
             let diagnostic_count = ctx.diagnostics.len();
-            let (target, _) = parse_target_with_ctx(rest, ctx);
+            let (target, remainder) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
+            let tail = remainder.trim();
+            if (tail.split_whitespace().count() == 1
+                && !tail.chars().all(|c| c.is_ascii_punctuation())
+                && !super::sequence::starts_clause_text_or_conjugated(tail))
+                || matches!(&target, TargetFilter::Typed(filter)
+                    if filter.type_filters.is_empty()
+                        && filter.controller.is_none()
+                        && filter.properties.is_empty())
+            {
+                return None;
+            }
             return Some(ChooseImperativeAst::TargetOnly { target });
         }
     }
@@ -9819,6 +9832,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                 }
             } else {
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin,
                     destination,
                     target,
@@ -10304,7 +10318,96 @@ pub(super) fn shuffle_rest_clause(lower: &str) -> Option<ShuffleRestClause> {
     Some(form)
 }
 
-pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImperativeAst> {
+/// CR 608.2c + CR 400.7e + CR 115.10a: true when the bare pronoun "it" in a
+/// "shuffle it into its owner's library" clause names the ability's own source
+/// instead of an announced object.
+///
+/// Two nearer antecedents veto the reading, and both are proofs rather than
+/// guesses: an explicitly bound object pronoun (`object_pronoun_ref`, set by a
+/// trigger condition or a preceding clause), and any object slot an earlier
+/// clause of this chain announced (CR 601.2c — the registry is authoritative;
+/// an `Indeterminate` registry cannot prove the absence of one, so it declines).
+/// With neither, the departed object is the trigger's own source (CR 400.7e),
+/// and a subjectless construct ("Shuffle it into its owner's library") has no
+/// other referent at all. The source therefore binds `SelfRef`, the
+/// single-object movement authority; binding `ParentTarget` there would lower
+/// to the selected-population `ChangeZoneAll`, which requires announced targets
+/// to move anything (Alabaster Dragon, Dread, Serra Avatar).
+fn shuffle_it_names_the_source(object: &str, ctx: &ParseContext) -> bool {
+    if object.trim() != "it" {
+        return false;
+    }
+    if ctx.object_pronoun_ref.is_some() {
+        return false;
+    }
+    match &ctx.chain_declared_slots {
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Known(entries) => {
+            if !entries.is_empty() {
+                return false;
+            }
+        }
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Indeterminate => return false,
+    }
+    matches!(ctx.subject, None | Some(TargetFilter::SelfRef))
+}
+
+pub(super) fn parse_shuffle_ast(
+    text: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ShuffleImperativeAst> {
+    // CR 108.3 + CR 400.3: a typed object anaphor followed by an owner's
+    // library. Bare "their" needs a proven owner actor and object pin.
+    //
+    // The pronoun's referent decides the MOVEMENT AUTHORITY, not just the
+    // destination: a bare "it" with no announced antecedent names the ability's
+    // own source (CR 400.7e — the object that left is the departure event's
+    // source), so source-bound placement precedes its one terminal owner shuffle.
+    // `ParentTarget` is reserved for a genuinely announced object; lowering uses
+    // selected-population `ChangeZoneAll`, which resolves only against announced
+    // targets (CR 115.10a: being affected is not being a target).
+    if let Some(((object, owner_library), _)) = nom_on_lower(text, lower, |input| {
+        let (input, _) =
+            alt((tag::<_, _, OracleError<'_>>("shuffle "), tag("shuffles "))).parse(input)?;
+        let (input, object) = take_until(" into ").parse(input)?;
+        let (input, _) = tag(" into ").parse(input)?;
+        let (input, explicit_owner) = alt((
+            value(
+                true,
+                alt((
+                    tag("its owner's library"),
+                    tag("their owner's library"),
+                    tag("their owners' libraries"),
+                )),
+            ),
+            value(false, tag("their library")),
+        ))
+        .parse(input)?;
+        let (input, _) = all_consuming(opt(tag("."))).parse(input)?;
+        Ok((input, (object.to_string(), explicit_owner)))
+    }) {
+        let owner_context = ctx.relative_player_scope == Some(ControllerRef::ParentTargetOwner)
+            && ctx.object_pronoun_ref == Some(TargetFilter::ParentTarget);
+        if owner_library || owner_context {
+            let mut trial = ctx.clone_throwaway();
+            let (target, rest) = parse_target_with_ctx(&object, &mut trial);
+            if rest.trim().is_empty()
+                && matches!(target, TargetFilter::ParentTarget | TargetFilter::SelfRef)
+            {
+                let target = if matches!(target, TargetFilter::ParentTarget)
+                    && shuffle_it_names_the_source(&object, ctx)
+                {
+                    TargetFilter::SelfRef
+                } else {
+                    target
+                };
+                return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+                    target,
+                    owner_library: true,
+                });
+            }
+        }
+    }
     if matches!(
         lower,
         "shuffle" | "shuffles" | "then shuffle" | "then shuffles"
@@ -10610,6 +10713,14 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
             } else {
                 None
             };
+            let target = if !all
+                && origin == Some(Zone::Graveyard)
+                && matches!(&target, TargetFilter::Typed(_))
+            {
+                super::add_inferred_origin_constraints_to_target(target, origin, lower)
+            } else {
+                target
+            };
             return Some(ShuffleImperativeAst::TargetedChangeZoneToLibrary {
                 target,
                 origin,
@@ -10663,11 +10774,32 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
             target,
             owner_library,
         } => {
+            if owner_library
+                && matches!(
+                    target,
+                    TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+                )
+            {
+                return with_shuffle_sub_ability(Effect::ChangeZoneAll {
+                    origin: None,
+                    destination: Zone::Library,
+                    target,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                    library_position: None,
+                    library_shuffle: LibraryShuffleMode::TerminalShuffle,
+                    random_order: false,
+                });
+            }
             // CR 701.24c + CR 400.3: `target` and `owner_library` are
             // populated by `parse_shuffle_ast`'s combinator-based pronoun /
             // possessive classification. See the construction site for the
             // detection grammar and the owner-scoped terminal Shuffle.
             let effect = Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Library,
                 target,
@@ -10759,6 +10891,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 with_shuffle_sub_ability(effect)
             } else {
                 let effect = Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin,
                     destination: Zone::Library,
                     target,
@@ -10880,6 +11013,7 @@ pub(super) fn lower_multi_filter_search_library(
     // ends at a `SearchLibrary` (the last extra filter) so the outer intrinsic
     // continuation can append the terminal `ChangeZone` for that last search.
     let change_zone_effect = || Effect::ChangeZone {
+        library_shuffle: Default::default(),
         origin: Some(Zone::Library),
         destination,
         target: TargetFilter::Any,
@@ -11035,6 +11169,13 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         // object's owner as the anaphoric shuffle subject. Unlike a mass move,
         // this already has one exact parent object and needs no tracked-set
         // population fan-out (Chaos Warp and prevention follow-ups).
+        // CR 108.3 + CR 400.3: the source's owner is independent of any
+        // earlier announced target still carried by this ability.
+        Effect::ChangeZone {
+            target: TargetFilter::SelfRef,
+            owner_library: true,
+            ..
+        } => TargetFilter::Owner,
         Effect::ChangeZone {
             owner_library: true,
             ..
@@ -11043,13 +11184,50 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         _ => TargetFilter::Controller,
     };
     let tracks_owner_population = matches!(&effect, Effect::ChangeZoneAll { .. });
-    if let Effect::ChangeZoneAll {
-        destination: Zone::Library,
-        library_shuffle,
-        ..
-    } = &mut effect
-    {
-        *library_shuffle = MassLibraryShuffleMode::TerminalShuffle;
+    // A selected graveyard population explicitly owned by the caster or the
+    // declared player has one library subject (Dwell on the Past). ParentTarget/
+    // SelfRef moves do not establish that guarantee: their receiving owner may
+    // differ from the terminal actor.
+    let single_library_population = matches!(
+        &effect,
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Library,
+            target: TargetFilter::Typed(filter),
+            owner_library: false,
+            ..
+        } if filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Owned {
+                controller:
+                    ControllerRef::You
+                    | ControllerRef::TargetPlayer
+                    | ControllerRef::ScopedPlayer
+            }
+        ))
+    );
+    match &mut effect {
+        // CR 701.24a + CR 701.24d: every parser-emitted compound move into a
+        // library appends the terminal `Shuffle` below. Randomizing during
+        // delivery as well would shuffle twice (Watery Grasp), so defer to that
+        // single instruction. The source's own move ("shuffle it into its
+        // owner's library": Gandalf, Wandering Wizard; Alabaster Dragon) is the
+        // same operation, and CR 701.24c still shuffles when it cannot move.
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            owner_library: true,
+            library_shuffle,
+            ..
+        } => *library_shuffle = LibraryShuffleMode::TerminalShuffle,
+        Effect::ChangeZone {
+            library_shuffle, ..
+        } if single_library_population => *library_shuffle = LibraryShuffleMode::TerminalShuffle,
+        Effect::ChangeZoneAll {
+            destination: Zone::Library,
+            library_shuffle,
+            ..
+        } => *library_shuffle = LibraryShuffleMode::TerminalShuffle,
+        _ => {}
     }
     // CR 701.24c-e + CR 400.3: the terminal shuffle is driven by the owners of
     // the exact prospective subject population. Cause filtering prevents an
@@ -11082,7 +11260,7 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
 /// shuffles. Used by the terminal shuffle and by each ChangeZoneAll in the
 /// chain so they all publish the same owner population (including empty zones
 /// per CR 701.24d). Centralized here to keep publisher and consumer in sync.
-fn owner_library_shuffle_scope() -> PlayerFilter {
+pub(super) fn owner_library_shuffle_scope() -> PlayerFilter {
     PlayerFilter::TrackedSetPossessor {
         relation: PlayerRelation::All,
         possession: PossessionAxis::Owner,
@@ -11102,7 +11280,7 @@ fn change_zone_all_to_library_effect(origin: Zone, target: TargetFilter) -> Effe
         enter_with_counters: vec![],
         face_down_profile: None,
         library_position: None,
-        library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+        library_shuffle: LibraryShuffleMode::TerminalShuffle,
         random_order: false,
     }
 }
@@ -15050,7 +15228,7 @@ pub(super) fn parse_imperative_family_ast(
         }
 
         // Shuffle (CR 701.19)
-        "shuffle" | "shuffles" => parse_shuffle_ast(text, lower).map(ImperativeFamilyAst::Shuffle),
+        "shuffle" | "shuffles" => parse_shuffle_ast(text, lower, ctx).map(ImperativeFamilyAst::Shuffle),
 
         // Reveal: "reveal the top N" → Dig (via search path), else hand reveal (CR 701.16, CR 701.20)
         "reveal" | "reveals" => parse_search_and_creation_ast(text, lower, ctx)
@@ -15872,7 +16050,7 @@ pub(super) fn parse_imperative_family_ast(
             }
             // Shuffle: "that player shuffles" / "target player shuffles" have
             // non-verb first words but are exact-match shuffle patterns
-            if let Some(ast) = parse_shuffle_ast(text, lower) {
+            if let Some(ast) = parse_shuffle_ast(text, lower, ctx) {
                 return Some(ImperativeFamilyAst::Shuffle(ast));
             }
             None
@@ -17097,6 +17275,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             // the Grave, Reanimate — store Some(Graveyard); that is a different
             // phrase and not this card's.)
             let mut clause = parsed_clause(Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target,
@@ -18812,6 +18991,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                 }
             } else {
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin,
                     destination: Zone::Exile,
                     target,
@@ -19500,6 +19680,7 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::types::ability::{EffectKind, ParitySource, ZoneChoiceChooser};
     use crate::types::counter::CounterType;
     use crate::types::keywords::KeywordKind;
@@ -27441,7 +27622,7 @@ mod tests {
     #[test]
     fn parse_shuffle_cards_from_your_hand_into_your_library() {
         let text = "shuffle the cards from your hand into your library";
-        let result = parse_shuffle_ast(text, text);
+        let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
         match result {
             Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins }) => {
                 assert_eq!(origins, vec![Zone::Hand]);
@@ -27456,7 +27637,7 @@ mod tests {
     #[test]
     fn parse_shuffle_cards_from_your_graveyard_into_your_library() {
         let text = "shuffle the cards from your graveyard into your library";
-        let result = parse_shuffle_ast(text, text);
+        let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
         match result {
             Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins }) => {
                 assert_eq!(origins, vec![Zone::Graveyard]);
@@ -27471,7 +27652,7 @@ mod tests {
     #[test]
     fn parse_shuffle_cards_from_their_hand_into_their_library() {
         let text = "shuffle the cards from their hand into their library";
-        let result = parse_shuffle_ast(text, text);
+        let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
         match result {
             Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins }) => {
                 assert_eq!(origins, vec![Zone::Hand]);
@@ -27485,7 +27666,7 @@ mod tests {
     #[test]
     fn parse_shuffle_that_library_resolves_to_parent_target() {
         let text = "shuffle that library";
-        let result = parse_shuffle_ast(text, text);
+        let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
         match result {
             Some(ShuffleImperativeAst::ShuffleLibrary { target }) => {
                 assert_eq!(target, TargetFilter::ParentTarget);
@@ -27501,7 +27682,7 @@ mod tests {
             "shuffle their library",
             "shuffle his or her library",
         ] {
-            let result = parse_shuffle_ast(text, text);
+            let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
             match result {
                 Some(ShuffleImperativeAst::ShuffleLibrary { target }) => {
                     assert_eq!(target, TargetFilter::ParentTarget);
@@ -27516,7 +27697,7 @@ mod tests {
     #[test]
     fn parse_shuffle_hand_and_graveyard_into_your_library() {
         let text = "shuffle your hand and graveyard into your library";
-        let result = parse_shuffle_ast(text, text);
+        let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
         match result {
             Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins }) => {
                 assert_eq!(origins, vec![Zone::Hand, Zone::Graveyard]);
@@ -27577,7 +27758,7 @@ mod tests {
     #[test]
     fn parse_shuffle_self_ref_into_owners_library() {
         let text = "shuffle ~ into its owner's library";
-        let result = parse_shuffle_ast(text, text);
+        let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
         match result {
             Some(ShuffleImperativeAst::ChangeZoneToLibrary {
                 target,
@@ -27596,7 +27777,7 @@ mod tests {
     #[test]
     fn parse_shuffle_self_ref_into_your_library() {
         let text = "shuffle ~ into your library";
-        let result = parse_shuffle_ast(text, text);
+        let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
         match result {
             Some(ShuffleImperativeAst::ChangeZoneToLibrary {
                 target,
@@ -27615,7 +27796,7 @@ mod tests {
     #[test]
     fn parse_shuffle_their_hand_and_graveyard_into_their_library() {
         let text = "shuffle their hand and graveyard into their library";
-        let result = parse_shuffle_ast(text, text);
+        let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
         match result {
             Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins }) => {
                 assert_eq!(origins, vec![Zone::Hand, Zone::Graveyard]);
@@ -27636,7 +27817,7 @@ mod tests {
     fn parse_shuffle_enchanted_creature_into_owners_library() {
         use crate::types::ability::FilterProp;
         let text = "shuffle enchanted creature into its owner's library";
-        let result = parse_shuffle_ast(text, text);
+        let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
         match result {
             Some(ShuffleImperativeAst::ChangeZoneToLibrary {
                 target,

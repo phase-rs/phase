@@ -30,13 +30,15 @@ use crate::parser::oracle_target::{
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
-    AbilityCondition, AggregateFunction, AttachmentReferent, AttackedYouScope, CardTypeSetSource,
-    CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, Comparator, ControllerRef,
-    CountScope, DamageChannel, DamageGroupKey, DamageKindFilter, FilterProp, NumberQuality,
-    ObjectProperty, ObjectScope, Parity, PlayerFilter, PlayerRelation, PlayerScope,
-    PropertyAggregate, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation,
-    StaticCondition, TargetFilter, TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
+    is_any_target_filter, AbilityCondition, AggregateFunction, AttachmentReferent,
+    AttackedYouScope, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric,
+    CommanderOwnership, Comparator, ControllerRef, CountScope, DamageChannel, DamageGroupKey,
+    DamageKindFilter, FilterProp, NumberQuality, ObjectProperty, ObjectScope, Parity, PlayerFilter,
+    PlayerRelation, PlayerScope, PropertyAggregate, QuantityExpr, QuantityRef, SharedQuality,
+    SharedQualityRelation, StaticCondition, TargetFilter, TrackedAnaphorSource, TypeFilter,
+    TypedFilter, ZoneRef,
 };
+use crate::types::card_type::CoreType;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::event_kinds::PlayerActionKind;
 use crate::types::game_state_kinds::DayNight;
@@ -4714,6 +4716,392 @@ fn parse_parent_target_referent(input: &str) -> OracleResult<'_, ParentTargetRef
         )),
     )
     .parse(input)
+}
+
+/// CR 115.1: the object kind a "that spell/creature/permanent" referent names.
+/// "its" has no printed noun and inherits the declared target's kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObjectReferentNoun {
+    Pronoun,
+    Spell,
+    Creature,
+    Permanent,
+}
+
+/// The player a trailing condition names as the controller of the instruction's
+/// declared object target (CR 608.2c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TargetControllerReferent {
+    /// "that opponent" — bound only when the target's own type phrase
+    /// introduced the opponent ("target creature an opponent controls").
+    IntroducedOpponent,
+    /// "its controller" / "that spell's | creature's | permanent's controller".
+    ObjectController { noun: ObjectReferentNoun },
+}
+
+/// CR 608.2c: the subject of a trailing condition that names the controller of
+/// the instruction's declared object target.
+pub(crate) fn parse_target_controller_referent(
+    input: &str,
+) -> OracleResult<'_, TargetControllerReferent> {
+    alt((
+        value(
+            TargetControllerReferent::IntroducedOpponent,
+            tag("that opponent"),
+        ),
+        value(
+            TargetControllerReferent::ObjectController {
+                noun: ObjectReferentNoun::Pronoun,
+            },
+            terminated(tag("its"), tag(" controller")),
+        ),
+        value(
+            TargetControllerReferent::ObjectController {
+                noun: ObjectReferentNoun::Spell,
+            },
+            terminated(
+                (tag("that "), tag("spell"), parse_apostrophe_s),
+                tag(" controller"),
+            ),
+        ),
+        value(
+            TargetControllerReferent::ObjectController {
+                noun: ObjectReferentNoun::Creature,
+            },
+            terminated(
+                (tag("that "), tag("creature"), parse_apostrophe_s),
+                tag(" controller"),
+            ),
+        ),
+        value(
+            TargetControllerReferent::ObjectController {
+                noun: ObjectReferentNoun::Permanent,
+            },
+            terminated(
+                (tag("that "), tag("permanent"), parse_apostrophe_s),
+                tag(" controller"),
+            ),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 109.2b: a "that spell" referent names a spell on the stack. A typed
+/// spell restriction ("target creature spell") lowers to
+/// `And([StackSpell, Typed(Creature)])`, so the stack-spell kind is matched
+/// through the typed restriction. A disjunction that admits a non-spell branch
+/// ("target spell or ability") does not guarantee the noun and declines.
+fn filter_is_spell_slot(filter: &TargetFilter) -> bool {
+    if let TargetFilter::StackSpell = filter {
+        return true;
+    }
+    if let TargetFilter::And { filters } = filter {
+        return filters.iter().any(filter_is_spell_slot);
+    }
+    if let TargetFilter::Or { filters } = filter {
+        return filters.iter().all(filter_is_spell_slot);
+    }
+    false
+}
+
+/// CR 115.1: whether the declared target slot can be the object the referent
+/// names. Every noun requires a slot that guarantees an object controller. "That
+/// spell" requires a spell slot. "That creature" requires a type axis that is
+/// creature, and "that permanent" a type axis that is a permanent type or a
+/// property-only typed slot (such as "target token an opponent controls");
+/// neither matches a stack object. A disjunction matches only when every branch
+/// does and a conjunction when any conjunct does. Any other shape (no type axis,
+/// a non-typed filter) fails closed rather than binding by name alone.
+pub(crate) fn referent_noun_matches_slot(noun: ObjectReferentNoun, filter: &TargetFilter) -> bool {
+    let guarantees_controller = filter_guarantees_object_controller(filter);
+    match noun {
+        ObjectReferentNoun::Pronoun => guarantees_controller,
+        ObjectReferentNoun::Spell => filter_is_spell_slot(filter) && guarantees_controller,
+        // A stack object is not a permanent even when its type axis is a
+        // permanent type (Essence Scatter's creature spell).
+        ObjectReferentNoun::Creature => {
+            typed_slot_type_axis_matches(filter, |t| matches!(t, TypeFilter::Creature))
+                && guarantees_controller
+                && !slot_is_stack_object(filter)
+        }
+        ObjectReferentNoun::Permanent => {
+            (typed_slot_type_axis_matches(filter, type_filter_is_permanent)
+                || property_only_permanent_slot(filter))
+                && guarantees_controller
+                && !slot_is_stack_object(filter)
+        }
+    }
+}
+
+/// CR 110.1 + CR 111.1: a property-only typed filter (a token) denotes a
+/// permanent even without a type axis; the caller's controller guard
+/// (`filter_guarantees_object_controller`) confines it to battlefield objects.
+fn property_only_permanent_slot(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::Typed(tf)
+        if tf.type_filters.is_empty() && !tf.properties.is_empty())
+}
+
+/// CR 110.1 + CR 109.2: a stack object (spell or ability) is never a battlefield
+/// permanent. Checked across the whole slot so a typed spell leg cannot make
+/// an `And` look like a permanent.
+fn slot_is_stack_object(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::StackSpell | TargetFilter::StackAbility { .. } => true,
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(slot_is_stack_object)
+        }
+        _ => false,
+    }
+}
+
+fn typed_slot_type_axis_matches(
+    filter: &TargetFilter,
+    predicate: impl Fn(&TypeFilter) -> bool + Copy,
+) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .type_filters
+            .iter()
+            .any(|type_filter| type_filter_every_branch_matches(type_filter, predicate)),
+        // Composition: an `Or` guarantees the noun only when every branch does;
+        // an `And` narrows one object, so any typed conjunct is enough.
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .all(|filter| typed_slot_type_axis_matches(filter, predicate)),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .any(|filter| typed_slot_type_axis_matches(filter, predicate)),
+        // Every non-`Typed` shape names no type axis this projection can
+        // classify, so it fails closed. Listed explicitly rather than with a
+        // wildcard so a new variant requires a compiler-checked decision.
+        TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::Not { .. }
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::ExiledBySource
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+fn type_filter_every_branch_matches(
+    type_filter: &TypeFilter,
+    predicate: impl Fn(&TypeFilter) -> bool + Copy,
+) -> bool {
+    match type_filter {
+        // A disjunctive type axis matches the referent's noun only when every
+        // branch does: "target creature or enchantment" cannot guarantee the
+        // "that creature" antecedent.
+        TypeFilter::AnyOf(inner) => inner
+            .iter()
+            .all(|inner| type_filter_every_branch_matches(inner, predicate)),
+        other => predicate(other),
+    }
+}
+
+/// CR 110.4: a typed axis is permanent when its core type is one of the six
+/// permanent types; `TypeFilter::Permanent` is the direct spelling.
+fn type_filter_is_permanent(type_filter: &TypeFilter) -> bool {
+    matches!(type_filter, TypeFilter::Permanent)
+        || type_filter_to_core_type(type_filter).is_some_and(CoreType::is_permanent_type)
+}
+
+/// The card type a type-axis filter names, or `None` for a filter that names no
+/// single card type.
+pub(crate) fn type_filter_to_core_type(type_filter: &TypeFilter) -> Option<CoreType> {
+    match type_filter {
+        TypeFilter::Creature => Some(CoreType::Creature),
+        TypeFilter::Land => Some(CoreType::Land),
+        TypeFilter::Artifact => Some(CoreType::Artifact),
+        TypeFilter::Enchantment => Some(CoreType::Enchantment),
+        TypeFilter::Instant => Some(CoreType::Instant),
+        TypeFilter::Sorcery => Some(CoreType::Sorcery),
+        TypeFilter::Planeswalker => Some(CoreType::Planeswalker),
+        TypeFilter::Battle => Some(CoreType::Battle),
+        // CR 308.1: Kindred maps to its core type.
+        TypeFilter::Kindred => Some(CoreType::Kindred),
+        TypeFilter::Permanent
+        | TypeFilter::Card
+        | TypeFilter::Any
+        | TypeFilter::Non(_)
+        | TypeFilter::Subtype(_)
+        | TypeFilter::AnyOf(_) => None,
+    }
+}
+
+/// CR 109.4: whether the declared slot names an object that can have a
+/// controller. Player and off-zone object slots cannot; battlefield objects
+/// and stack objects can. Composite filters fail closed unless every
+/// disjunct (or an object conjunct) guarantees one.
+pub(crate) fn filter_guarantees_object_controller(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::StackSpell | TargetFilter::StackAbility { .. } => true,
+        TargetFilter::Or { filters } => filters.iter().all(filter_guarantees_object_controller),
+        TargetFilter::And { filters } => filters.iter().any(filter_guarantees_object_controller),
+        // CR 109.4 + CR 111.1: a property-only typed filter (Kraul Whipcracker's
+        // "target token") still denotes a battlefield object;
+        // `denotes_battlefield_objects` rejects it only because it requires a
+        // type axis. Keep the player/zone guards and accept a property axis.
+        TargetFilter::Typed(tf) => {
+            let typed = TargetFilter::Typed(tf.clone());
+            !typed.denotes_player_target()
+                && !is_any_target_filter(&typed)
+                && typed
+                    .extract_zones()
+                    .iter()
+                    .all(|zone| *zone == Zone::Battlefield)
+                && (!tf.type_filters.is_empty() || !tf.properties.is_empty())
+        }
+        other => other.denotes_battlefield_objects(),
+    }
+}
+
+/// CR 109.4: the permanents the declared target's controller controls.
+fn target_controller_population(filter: TargetFilter) -> TargetFilter {
+    inject_controller(filter, ControllerRef::ParentTargetController)
+}
+
+/// A non-empty typed type phrase consuming the whole input ("creatures").
+///
+/// CR 109.4 + CR 608.2c: a population that already carries a controller
+/// declines here. `inject_controller` would overwrite that qualifier, so
+/// "creatures you control" must not silently become "creatures the target's
+/// controller controls".
+fn parse_counted_type_phrase(input: &str) -> OracleResult<'_, TypedFilter> {
+    let (filter, rest) = parse_type_phrase_folding(input);
+    match filter {
+        TargetFilter::Typed(tf)
+            if tf.controller.is_none() && !tf.type_filters.is_empty() && rest.is_empty() =>
+        {
+            Ok((rest, tf))
+        }
+        _ => Err(oracle_err(input)),
+    }
+}
+
+/// CR 608.2c + CR 608.2h + CR 109.4: a trailing condition comparing what the
+/// controller of the instruction's declared object target controls, checked
+/// as the instruction resolves:
+/// - "<subject> controls no [other] <type>" (Skulking Killer) → that player's
+///   count is zero; "other" excludes the target itself.
+/// - "you control more <type> than <subject>" (Unified Will) → your count
+///   exceeds that player's count.
+///
+/// This is the single recognition authority. It deliberately is not reachable
+/// from [`parse_inner_condition`]: the referent must be bound by the caller
+/// against a declared target, and a static or trigger condition has no
+/// resolving ability to bind it. Predator's Gambit's "as long as its controller
+/// controls no other creatures" therefore stays explicitly unsupported rather
+/// than reading an unbound parent-target controller.
+pub(crate) fn parse_target_controller_count_condition(
+    input: &str,
+) -> OracleResult<'_, (TargetControllerReferent, StaticCondition)> {
+    alt((
+        parse_target_controller_controls_no,
+        parse_you_control_more_than_target_controller,
+    ))
+    .parse(input)
+}
+
+fn parse_target_controller_controls_no(
+    input: &str,
+) -> OracleResult<'_, (TargetControllerReferent, StaticCondition)> {
+    let (rest, referent) =
+        terminated(parse_target_controller_referent, tag(" controls no ")).parse(input)?;
+    let (rest, other) = opt(value(
+        FilterProp::DistinctFrom {
+            reference: Box::new(TargetFilter::ParentTarget),
+        },
+        tag("other "),
+    ))
+    .parse(rest)?;
+    let (rest, mut tf) = parse_counted_type_phrase(rest)?;
+    tf.properties.extend(other);
+    let condition = StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: target_controller_population(TargetFilter::Typed(tf)),
+            },
+        },
+        comparator: Comparator::EQ,
+        rhs: QuantityExpr::Fixed { value: 0 },
+    };
+    Ok((rest, (referent, condition)))
+}
+
+fn parse_you_control_more_than_target_controller(
+    input: &str,
+) -> OracleResult<'_, (TargetControllerReferent, StaticCondition)> {
+    let (rest, type_text) =
+        preceded(tag("you control more "), take_until(" than ")).parse(input)?;
+    let (rest, referent) = preceded(tag(" than "), parse_target_controller_referent).parse(rest)?;
+    let (_, tf) = nom::combinator::all_consuming(parse_counted_type_phrase).parse(type_text)?;
+    let filter = TargetFilter::Typed(tf);
+    let condition = StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: inject_controller_you(filter.clone()),
+            },
+        },
+        comparator: Comparator::GT,
+        rhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: target_controller_population(filter),
+            },
+        },
+    };
+    Ok((rest, (referent, condition)))
 }
 
 /// CR 119 + CR 603.4: The " or less life" / " or more life" suffix shared by every
@@ -10366,7 +10754,8 @@ fn parse_filtered_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> 
         return Err(oracle_err(input));
     }
     let (filter, remainder) = parse_type_phrase_folding(noun);
-    if !remainder.trim().is_empty() || !is_admissible_zone_card_count_filter(&filter) {
+    if !remainder.trim().is_empty() || !nom_quantity::is_admissible_zone_card_count_filter(&filter)
+    {
         return Err(oracle_err(input));
     }
     let (rest, _) = tag(" in ").parse(rest_after_noun)?;
@@ -10384,113 +10773,6 @@ fn parse_filtered_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> 
             scope,
         },
     ))
-}
-
-/// Limits the filtered zone-count bridge to card descriptions whose semantics
-/// remain valid in every counted zone. All other filter forms deliberately fall
-/// through to the legacy quantity grammar instead of being partially accepted.
-///
-/// CR 109.2a + CR 404.1: a card description that names a zone counts matching
-/// cards in that zone.
-/// CR 205.1 + CR 205.2a + CR 205.3m: juxtaposed subtype + non-`Card` core type
-/// ("Zombie creature cards") is a type-line conjunction (creature AND the
-/// Zombie creature type). Empty-`properties` nouns are admitted only in that
-/// shape, encoded as `filter: Some(Typed { .. })` so `matches_target_filter`
-/// ANDs the type filters. Property-free core-only ("creature cards") or
-/// subtype-only ("Lesson cards" / "Zombie cards") nouns stay on the legacy
-/// `card_types` path.
-fn is_admissible_zone_card_count_filter(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Typed(TypedFilter {
-            type_filters,
-            controller,
-            properties,
-        }) => {
-            controller.is_none()
-                && !type_filters.is_empty()
-                && !type_filters.iter().any(type_filter_contains_any)
-                && if properties.is_empty() {
-                    type_filters_are_juxtaposed_subtype_and_core(type_filters)
-                } else {
-                    properties
-                        .iter()
-                        .all(is_admissible_zone_card_count_property)
-                }
-        }
-        TargetFilter::Or { filters } => {
-            !filters.is_empty() && filters.iter().all(is_admissible_zone_card_count_filter)
-        }
-        _ => false,
-    }
-}
-
-/// `TypeFilter::Any` would make this bridge a broad unfiltered count. Descend
-/// through its recursive variants so nested `Any` filters cannot bypass that
-/// boundary.
-fn type_filter_contains_any(filter: &TypeFilter) -> bool {
-    match filter {
-        TypeFilter::Any => true,
-        TypeFilter::Non(filter) => type_filter_contains_any(filter),
-        TypeFilter::AnyOf(filters) => filters.iter().any(type_filter_contains_any),
-        TypeFilter::Creature
-        | TypeFilter::Land
-        | TypeFilter::Artifact
-        | TypeFilter::Enchantment
-        | TypeFilter::Instant
-        | TypeFilter::Sorcery
-        | TypeFilter::Planeswalker
-        | TypeFilter::Battle
-        | TypeFilter::Kindred
-        | TypeFilter::Permanent
-        | TypeFilter::Card
-        | TypeFilter::Subtype(_) => false,
-    }
-}
-
-/// CR 205.2a: non-`Card` core types that can juxtapose with a subtype in a
-/// zone-card description. `Card` / `Any` / `Subtype` / `Non` / `AnyOf` are not
-/// cores for this gate — admitting them would steal `"creature cards"` /
-/// `"Lesson cards"` / `"instant or sorcery cards"` onto the filtered bridge.
-fn type_filter_is_non_card_core(filter: &TypeFilter) -> bool {
-    match filter {
-        TypeFilter::Creature
-        | TypeFilter::Land
-        | TypeFilter::Artifact
-        | TypeFilter::Enchantment
-        | TypeFilter::Instant
-        | TypeFilter::Sorcery
-        | TypeFilter::Planeswalker
-        | TypeFilter::Battle
-        | TypeFilter::Kindred
-        | TypeFilter::Permanent => true,
-        TypeFilter::Card
-        | TypeFilter::Any
-        | TypeFilter::Subtype(_)
-        | TypeFilter::Non(_)
-        | TypeFilter::AnyOf(_) => false,
-    }
-}
-
-/// CR 205.1 + CR 205.3m: a juxtaposed subtype + non-`Card` core type
-/// ("Zombie creature") is a type-line conjunction, not a disjunction.
-fn type_filters_are_juxtaposed_subtype_and_core(type_filters: &[TypeFilter]) -> bool {
-    type_filters
-        .iter()
-        .any(|filter| matches!(filter, TypeFilter::Subtype(_)))
-        && type_filters.iter().any(type_filter_is_non_card_core)
-}
-
-/// Only static card-description properties can be evaluated meaningfully in a
-/// named card zone. The default is intentionally reject-by-default so a future
-/// property cannot widen this parser without an explicit admissibility decision.
-fn is_admissible_zone_card_count_property(property: &FilterProp) -> bool {
-    matches!(
-        property,
-        FilterProp::Historic
-            | FilterProp::NotHistoric
-            | FilterProp::HasSupertype { .. }
-            | FilterProp::NotSupertype { .. }
-    )
 }
 
 /// Self-referential source alternatives shared by the "exiled with [source]"
@@ -27789,16 +28071,30 @@ mod counters_among_condition_tests {
             (Some(CounterType::Stun), Comparator::GE, 2)
         );
     }
+
+    /// Jace, Reality Sculptor — "Jaces" is a pluralized planeswalker subtype.
+    #[test]
+    fn loyalty_counters_among_plural_planeswalker_subtype() {
+        assert_eq!(
+            counters_among(
+                "there are twenty-five or more loyalty counters among Jaces you control"
+            ),
+            (Some(CounterType::Loyalty), Comparator::GE, 25)
+        );
+    }
 }
 
 /// CR 603.4 + CR 105.2 + CR 109.2: the universal/existential state
 /// conditions an intervening-if commonly uses, at the building-block level.
 #[cfg(test)]
 mod intervening_if_state_condition_tests {
-    use super::parse_inner_condition;
+    use super::{
+        parse_inner_condition, parse_target_controller_count_condition, referent_noun_matches_slot,
+        ObjectReferentNoun,
+    };
     use crate::types::ability::{
         AggregateFunction, Comparator, FilterProp, PlayerScope, QuantityExpr, QuantityRef,
-        StaticCondition, TargetFilter,
+        StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
 
@@ -27909,5 +28205,76 @@ mod intervening_if_state_condition_tests {
         assert!(properties
             .iter()
             .any(|prop| matches!(prop, FilterProp::InZone { .. })));
+    }
+
+    /// CR 608.2c + CR 109.4: one recognizer owns the target-controller count
+    /// grammar, and it returns the referent rather than binding it. Only a
+    /// caller with a declared target can bind it; the static path keeps the
+    /// clause explicitly unsupported.
+    #[test]
+    fn target_controller_count_conditions_require_a_caller_referent() {
+        for condition in [
+            "that opponent controls no other creatures",
+            "its controller controls no creatures",
+            "you control more creatures than that spell's controller",
+        ] {
+            // The shared recognizer is the single grammar, and the effect
+            // parser binds its returned referent against the instruction's
+            // declared target.
+            let (rest, (_referent, parsed)) = parse_target_controller_count_condition(condition)
+                .unwrap_or_else(|_| panic!("must parse: {condition}"));
+            assert_eq!(rest, "", "{condition}");
+            assert!(matches!(parsed, StaticCondition::QuantityComparison { .. }));
+
+            // No static/trigger caller can bind the referent: Predator's Gambit
+            // ("as long as its controller controls no other creatures") has no
+            // resolving target, so `parse_inner_condition` must keep the clause
+            // explicitly unsupported rather than read an unbound parent-target
+            // controller.
+            assert!(
+                parse_inner_condition(condition).is_err(),
+                "a static condition cannot bind {condition}"
+            );
+        }
+    }
+
+    /// CR 115.1: the spell noun requires a spell slot; a typed creature slot
+    /// does not satisfy it.
+    #[test]
+    fn referent_noun_spell_requires_a_spell_slot() {
+        assert!(referent_noun_matches_slot(
+            ObjectReferentNoun::Spell,
+            &TargetFilter::StackSpell
+        ));
+        assert!(!referent_noun_matches_slot(
+            ObjectReferentNoun::Spell,
+            &TargetFilter::Typed(TypedFilter::creature())
+        ));
+    }
+
+    /// CR 115.1 + CR 205.2a: a disjunctive type axis can name the referent's
+    /// noun only when every branch matches; "creature or enchantment" cannot
+    /// guarantee "that creature", while both branches are permanents.
+    #[test]
+    fn referent_noun_requires_every_disjunct_to_match() {
+        let creature_or_enchantment = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::AnyOf(vec![
+                TypeFilter::Creature,
+                TypeFilter::Enchantment,
+            ])],
+            ..Default::default()
+        });
+        assert!(!referent_noun_matches_slot(
+            ObjectReferentNoun::Creature,
+            &creature_or_enchantment
+        ));
+        assert!(referent_noun_matches_slot(
+            ObjectReferentNoun::Permanent,
+            &creature_or_enchantment
+        ));
+        assert!(referent_noun_matches_slot(
+            ObjectReferentNoun::Creature,
+            &TargetFilter::Typed(TypedFilter::creature())
+        ));
     }
 }

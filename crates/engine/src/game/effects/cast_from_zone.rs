@@ -526,6 +526,7 @@ fn open_private_zone_cast_selection(
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
@@ -660,6 +661,7 @@ fn open_linked_exile_cast_selection(
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
@@ -5923,6 +5925,7 @@ mod tests {
         );
         ability.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
@@ -5962,6 +5965,7 @@ mod tests {
 
     fn parent_target_move(destination: Zone) -> Effect {
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination,
             target: TargetFilter::ParentTarget,
@@ -6284,6 +6288,7 @@ mod tests {
         let mut grant = paid_during_resolution_grant(source, target);
         let mut destination_rider = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
@@ -6404,6 +6409,7 @@ mod tests {
         let mut grant = paid_during_resolution_grant(source, ObjectId(9212));
         let mut destination_rider = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,

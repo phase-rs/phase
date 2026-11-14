@@ -2649,6 +2649,22 @@ fn parse_filtered_landing_zone_this_way(lower: &str) -> Option<QuantityRef> {
     })
 }
 
+/// CR 608.2c + CR 613.1b: "one <they | that player> gained control of this way" — the members of the chain tracked set whose control the instruction changed.
+fn parse_control_gained_this_way(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::FilteredTrackedSetSize {
+            filter: Box::new(TargetFilter::Any),
+            caused_by: Some(ThisWayCause::ControlGained),
+        },
+        (
+            tag("one "),
+            alt((tag("they "), tag("that player "))),
+            tag("gained control of this way"),
+        ),
+    )
+    .parse(input)
+}
+
 fn parse_filtered_revealed_this_way(lower: &str) -> Option<QuantityRef> {
     for suffix in [" revealed this way", "revealed this way"] {
         let result: OracleResult<'_, &str> =
@@ -3675,6 +3691,9 @@ fn parse_for_each_clause_with_they_controller(
         // revealed/destroyed helpers above; a bare "card" returns `None` and keeps
         // the unfiltered `TrackedSetSize` fallback below.
         if let Some(qty) = parse_filtered_tracked_set_this_way(&lower) {
+            return Some(qty);
+        }
+        if let Ok(("", qty)) = parse_control_gained_this_way(&lower) {
             return Some(qty);
         }
         return Some(QuantityRef::TrackedSetSize);
@@ -4779,6 +4798,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_for_each_clause_counts_control_gained_this_way() {
+        let control_gained = QuantityRef::FilteredTrackedSetSize {
+            filter: Box::new(TargetFilter::Any),
+            caused_by: Some(ThisWayCause::ControlGained),
+        };
+        for clause in [
+            "one they gained control of this way",
+            "one that player gained control of this way",
+        ] {
+            assert_eq!(parse_for_each_clause(clause), Some(control_gained.clone()));
+        }
+        assert!(!matches!(
+            parse_for_each_clause("one they exiled this way"),
+            Some(QuantityRef::FilteredTrackedSetSize {
+                caused_by: Some(ThisWayCause::ControlGained),
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn for_each_card_exiled_from_your_hand_this_way_tracks_hand_exiles() {
         let qty = parse_for_each_clause("card exiled from your hand this way").unwrap();
         assert_eq!(qty, QuantityRef::ExiledFromHandThisResolution);
@@ -5406,10 +5446,162 @@ mod tests {
         }
     }
 
+    /// CR 205.4a + CR 604.3: the supertype qualifier stays in the CDA's
+    /// per-card filter, while the unqualified count keeps its existing shape.
+    #[test]
+    fn parse_cda_quantity_opponents_graveyards_nonbasic_land_qualifier() {
+        assert_eq!(
+            parse_cda_quantity("the number of nonbasic land cards in your opponents' graveyards"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![],
+                    scope: CountScope::Opponents,
+                    filter: Some(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Land],
+                        controller: None,
+                        properties: vec![FilterProp::NotSupertype {
+                            value: crate::types::card_type::Supertype::Basic,
+                        }],
+                    })),
+                },
+            })
+        );
+        assert_eq!(
+            parse_cda_quantity("the number of cards in your opponents' graveyards"),
+            Some(opponents_graveyard_zone_count())
+        );
+    }
+
+    /// SHAPE: singular and plural qualified counts preserve their zone and scope.
+    #[test]
+    fn parse_supertype_qualified_zone_card_counts() {
+        let zone_count = |zone, scope, type_filter, property| {
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone,
+                    card_types: vec![],
+                    scope,
+                    filter: Some(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![type_filter],
+                        controller: None,
+                        properties: vec![property],
+                    })),
+                },
+            })
+        };
+        let legendary = FilterProp::HasSupertype {
+            value: crate::types::card_type::Supertype::Legendary,
+        };
+        let nonbasic = FilterProp::NotSupertype {
+            value: crate::types::card_type::Supertype::Basic,
+        };
+
+        for (phrase, parse, expected) in [
+            (
+                "the number of legendary creature cards in your graveyard",
+                parse_cda_quantity as fn(&str) -> Option<QuantityExpr>,
+                zone_count(
+                    ZoneRef::Graveyard,
+                    CountScope::Controller,
+                    TypeFilter::Creature,
+                    legendary.clone(),
+                ),
+            ),
+            (
+                "the number of nonbasic land cards in all graveyards",
+                parse_cda_quantity,
+                zone_count(
+                    ZoneRef::Graveyard,
+                    CountScope::All,
+                    TypeFilter::Land,
+                    nonbasic.clone(),
+                ),
+            ),
+            (
+                "the number of legendary creature cards in exile",
+                parse_cda_quantity,
+                zone_count(
+                    ZoneRef::Exile,
+                    CountScope::All,
+                    TypeFilter::Creature,
+                    legendary.clone(),
+                ),
+            ),
+            (
+                "legendary creature cards in your graveyard",
+                parse_for_each_clause_expr,
+                zone_count(
+                    ZoneRef::Graveyard,
+                    CountScope::Controller,
+                    TypeFilter::Creature,
+                    legendary.clone(),
+                ),
+            ),
+            (
+                "the number of nonbasic tapped land cards in your opponents' graveyards",
+                parse_cda_quantity,
+                None,
+            ),
+            (
+                "the number of nonbasic land cards in your opponents' graveyards",
+                parse_cda_quantity,
+                zone_count(
+                    ZoneRef::Graveyard,
+                    CountScope::Opponents,
+                    TypeFilter::Land,
+                    nonbasic.clone(),
+                ),
+            ),
+            (
+                "the number of legendary creature card in your graveyard",
+                parse_cda_quantity,
+                zone_count(
+                    ZoneRef::Graveyard,
+                    CountScope::Controller,
+                    TypeFilter::Creature,
+                    legendary.clone(),
+                ),
+            ),
+            (
+                "legendary creature card in your graveyard",
+                parse_for_each_clause_expr,
+                zone_count(
+                    ZoneRef::Graveyard,
+                    CountScope::Controller,
+                    TypeFilter::Creature,
+                    legendary,
+                ),
+            ),
+            (
+                "the number of nonbasic land card in your opponents' graveyards",
+                parse_cda_quantity,
+                zone_count(
+                    ZoneRef::Graveyard,
+                    CountScope::Opponents,
+                    TypeFilter::Land,
+                    nonbasic,
+                ),
+            ),
+            (
+                "the number of nonbasic tapped land card in your opponents' graveyards",
+                parse_cda_quantity,
+                None,
+            ),
+            (
+                "the number of legendary creature cardboard in your graveyard",
+                parse_cda_quantity,
+                None,
+            ),
+        ] {
+            assert_eq!(parse(phrase), expected, "{phrase}");
+        }
+    }
+
     /// CR 614.1c + CR 122.6: an enters-with amount the parser cannot read must
     /// fail closed. The shared nom grammar requires full consumption, so an
-    /// extremum head, a supertype qualifier, or a trailing relative clause must
-    /// decline the whole phrase rather than leave a truncated zone count.
+    /// extremum head or a trailing relative clause must decline the whole
+    /// phrase rather than leave a truncated zone count.
     #[test]
     fn parse_cda_quantity_opponents_graveyards_extended_text_fails_closed() {
         // Positive reach guard: the unextended phrase is still read.
@@ -5420,7 +5612,6 @@ mod tests {
         for phrase in [
             "the greatest number of cards an opponent has drawn this turn among cards in your opponents' graveyards",
             "the greatest number of cards an opponent has drawn this turn among cards in opponents' graveyards",
-            "the number of nonbasic land cards in your opponents' graveyards",
             "the number of cards in your opponents' graveyards that were put there from the battlefield this turn",
         ] {
             assert_eq!(parse_cda_quantity(phrase), None, "{phrase}");

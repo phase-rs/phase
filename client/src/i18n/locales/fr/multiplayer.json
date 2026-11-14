@@ -253,6 +253,7 @@
     "bo3": "BO3",
     "bo3Note": "Le BO3 n'est disponible que pour les matchs à 2 joueurs.",
     "commanderDamage": "Blessures de commandant",
+    "poisonCounters": "Marqueurs poison",
     "playerSeats": "Sièges des joueurs",
     "seat": "Siège {{number}}",
     "youHost": "Vous (Hôte)",

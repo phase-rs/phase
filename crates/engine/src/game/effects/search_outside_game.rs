@@ -4,7 +4,7 @@ use crate::game::printed_cards::apply_card_face_to_object;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
 use crate::types::ability::TargetFilter;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, EffectKind, LibraryShuffleMode, ResolvedAbility};
 use crate::types::card_printing::DeckSection;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -193,6 +193,7 @@ pub(crate) fn put_face_up_exile_into(
         // Search-from-outside brings cards in face up.
         face_down_profile: None,
         library_placement: None,
+        library_shuffle: LibraryShuffleMode::PerObject,
         enter_attached_to: None,
     };
     // Search-from-outside carries no entry modifications: no counters, no
@@ -405,6 +406,7 @@ mod tests {
         );
         ability.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,

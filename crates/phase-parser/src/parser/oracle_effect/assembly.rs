@@ -4701,19 +4701,14 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // Party (a Saga is not Equipment), wrong for Quest for the Holy Relic and
     // Stonehewer Giant (the searcher is not the moved Equipment).
     //
-    // CR 608.2c: The same flag also wires sub-chains whose own clauses
-    // anchor on the just-moved card via the bare-"it" anaphor
-    // (`TargetFilter::SelfRef`) — Emperor of Bones' "[…] put a creature
-    // card exiled with this creature onto the battlefield […]. It gains
-    // haste. Sacrifice it at the beginning of the next end step." The
-    // trailing GenericEffect/Pump and CreateDelayedTrigger subs target
-    // `SelfRef` so the runtime's `source_id` rewrite resolves them to the
-    // moved card instead of Emperor itself.
+    // CR 608.2c: the same flag supplies a returned-object context to ParentTarget
+    // anaphora and legacy embedded generic grants (Emperor of Bones' "It gains
+    // haste. Sacrifice it at the beginning of the next end step"). Those operands
+    // bind the moved card separately from the ability's printed source.
     //
-    // The `forward_result` flag makes the runtime forward the just-moved
-    // card's id as the sub-ability's `source_id` (see `effects/mod.rs`
-    // forward_result branch), so `Attach::resolve` operates on the correct
-    // attaching object.
+    // The runtime retains its legacy moved-object binding for attachment roles,
+    // but a primary SelfRef names the creating source and cannot be rebound by
+    // this flag. Delayed triggers likewise retain their creating source.
     rewire_result_anchored_subchain(&mut result);
     fold_enters_this_way_counter_rider(&mut result);
     // CR 608.2c + CR 701.9a + CR 701.21a: a discard/sacrifice-this-way gated
@@ -5673,6 +5668,7 @@ mod arena_tests {
 
     fn zone_change(destination: Zone, target: TargetFilter) -> Effect {
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination,
             target,

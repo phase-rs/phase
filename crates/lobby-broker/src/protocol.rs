@@ -1900,7 +1900,11 @@ pub enum LobbyClientMessage {
         player_count: u8,
         #[serde(default)]
         match_config: MatchConfig,
-        #[serde(default)]
+        /// Relayed to the host's build only, so decoded as the host's engine wrote it.
+        #[serde(
+            default,
+            deserialize_with = "FormatConfig::deserialize_recorded_option"
+        )]
         format_config: Option<FormatConfig>,
         #[serde(default)]
         room_name: Option<String>,

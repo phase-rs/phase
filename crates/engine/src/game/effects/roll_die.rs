@@ -311,6 +311,13 @@ pub(crate) fn resolve_step(
     execute_roll(state, instruction, sides, proposal, events, Some(ability))
 }
 
+/// Publish an instruction result, unlike context replay or rollback. The nested
+/// option records explicit clears and same-value writes for continuation drains.
+fn publish_die_result(state: &mut GameState, result: Option<i32>) {
+    state.die_result_this_resolution = result;
+    state.die_result_publication = Some(result);
+}
+
 /// CR 706.1 + CR 706.6: Carry out a die-roll instruction once its replacement
 /// proposal is known.
 ///
@@ -351,7 +358,7 @@ fn execute_roll(
         RollProposal::Prevented => {
             // CR 614.6: the roll never happened — no dice, no branches. Clear
             // any stale die result so "equal to the result" reads nothing.
-            state.die_result_this_resolution = None;
+            publish_die_result(state, None);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::RollDie,
                 source_id: instruction.source_id,
@@ -520,6 +527,7 @@ pub(crate) fn resume_roll_dice_after_replacement(
     // CR 608.2c + CR 400.7e + CR 616.1: replay only the instruction's owned
     // resolution scope. Legacy absence must not acquire ambient authority.
     let entry_die = state.die_result_this_resolution;
+    let entry_publication = state.die_result_publication;
     let trigger_snapshot = instruction
         .trigger_context
         .as_ref()
@@ -529,6 +537,7 @@ pub(crate) fn resume_roll_dice_after_replacement(
     let exit_die = if result.is_ok() {
         state.die_result_this_resolution
     } else {
+        state.die_result_publication = entry_publication;
         entry_die
     };
     if let Some(snapshot) = trigger_snapshot {
@@ -567,9 +576,10 @@ pub(crate) fn publish_completed_result_to_parent(state: &mut GameState) {
 ///
 /// Fresh coin-keep, pre-roll replacement-ordering, and post-roll die suspensions
 /// retain their owning scope, including explicit emptiness; legacy missing scope
-/// is not reconstructed. A die roll started by a coin's continuation drain still
-/// loses its published per-survivor result at the drain's whole-snapshot restore
-/// (pre-existing, unchanged).
+/// is not reconstructed. The continuation drain preserves only writer-published
+/// results, including a survivor before its branch pauses, a completed aggregate,
+/// or an explicit clear. Replay is not publication; errors restore both entry
+/// scalar and publication authority.
 pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // Only a mid-loop re-park drains here; a pending CR 706.6 keep prompt must
     // stay parked for its own action handler, which is the only thing that knows
@@ -588,6 +598,7 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
     // CR 706.4 + CR 608.2c: restore the instruction context; a completed
     // aggregate stays live until the parent's later instructions consume it.
     let prev_die_result = state.die_result_this_resolution;
+    let entry_publication = state.die_result_publication;
     let trigger_snapshot = pending
         .trigger_context
         .as_ref()
@@ -608,7 +619,10 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
             super::drain_pending_continuation(state, events);
             super::resume_resolution_frames(state, events);
         }
-        Err(_) => state.die_result_this_resolution = prev_die_result,
+        Err(_) => {
+            state.die_result_this_resolution = prev_die_result;
+            state.die_result_publication = entry_publication;
+        }
     }
     let exit_die = state.die_result_this_resolution;
     if let Some(snapshot) = trigger_snapshot {
@@ -752,7 +766,7 @@ pub(crate) fn resume_after_ignore(
 
         // CR 706.2 + CR 706.3a: The stored value is this die's actual result
         // while its results-table branch resolves.
-        state.die_result_this_resolution = Some(actual_amount);
+        publish_die_result(state, Some(actual_amount));
 
         // CR 706.3a: Find the matching result branch and resolve its effect.
         // Each die consults the same table independently.
@@ -850,9 +864,9 @@ pub(crate) fn resume_after_ignore(
         // result(s)". For no-table rolls the outer sub_ability is resolved by
         // the caller after this function returns, so leave the aggregate
         // available: it must read all surviving dice, not just the last one.
-        state.die_result_this_resolution = Some(total_actual);
+        publish_die_result(state, Some(total_actual));
     } else {
-        state.die_result_this_resolution = None;
+        publish_die_result(state, None);
     }
 
     events.push(GameEvent::EffectResolved {
@@ -1986,6 +2000,7 @@ mod preroll_tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(origin),
                 destination,
                 target: TargetFilter::SelfRef,
@@ -2269,47 +2284,59 @@ mod preroll_tests {
             .spawn(|| {
                 for mode in ["own", "empty", "legacy"] {
                     for links in [2, 22] {
-                        let mut branch = gain(1);
-                        for _ in 0..links {
-                            let mut parent = gain(1);
-                            parent.sub_ability = Some(Box::new(branch));
-                            branch = parent;
+                        for entry_publication in [None, Some(None), Some(Some(83))] {
+                            let mut branch = gain(1);
+                            for _ in 0..links {
+                                let mut parent = gain(1);
+                                parent.sub_ability = Some(Box::new(branch));
+                                branch = parent;
+                            }
+                            let (mut state, source, owned, caller) = fixture(branch, 3);
+                            state
+                                .pending_die_roll_instruction
+                                .as_mut()
+                                .unwrap()
+                                .trigger_context = match mode {
+                                "own" => Some(owned),
+                                "empty" => Some(empty()),
+                                "legacy" => None,
+                                _ => unreachable!(),
+                            };
+                            let event = modified(&mut state);
+                            install(&mut state, &caller);
+                            state.die_result_publication = entry_publication;
+                            let before = state.players[0].life;
+                            let mut events = vec![];
+                            let result =
+                                resume_roll_dice_after_replacement(&mut state, event, &mut events);
+                            if links == 22 {
+                                assert_eq!(result, Err(EffectError::ChainTooDeep));
+                                assert!(state.players[0].life > before);
+                                assert_eq!(state.die_result_this_resolution, Some(79));
+                                assert_eq!(state.die_result_publication, entry_publication);
+                                assert!(events.iter().any(|event| matches!(
+                                    event,
+                                    GameEvent::DieRolled {
+                                        result: Some(_),
+                                        ..
+                                    }
+                                )));
+                                assert!(!events.iter().any(|e| matches!(
+                                    e,
+                                    GameEvent::EffectResolved {
+                                        kind: EffectKind::RollDie,
+                                        ..
+                                    }
+                                )));
+                            } else {
+                                assert_eq!(result.unwrap(), ResolutionProgress::Complete);
+                                assert_eq!(state.players[0].life, before + 3);
+                                assert_eq!(state.die_result_this_resolution, Some(3));
+                                assert_eq!(state.die_result_publication, Some(Some(3)));
+                            }
+                            assert_scope(&state, &caller);
+                            consume_caller_count(&mut state, source);
                         }
-                        let (mut state, source, owned, caller) = fixture(branch, 3);
-                        state
-                            .pending_die_roll_instruction
-                            .as_mut()
-                            .unwrap()
-                            .trigger_context = match mode {
-                            "own" => Some(owned),
-                            "empty" => Some(empty()),
-                            "legacy" => None,
-                            _ => unreachable!(),
-                        };
-                        let event = modified(&mut state);
-                        install(&mut state, &caller);
-                        let before = state.players[0].life;
-                        let mut events = vec![];
-                        let result =
-                            resume_roll_dice_after_replacement(&mut state, event, &mut events);
-                        if links == 22 {
-                            assert_eq!(result, Err(EffectError::ChainTooDeep));
-                            assert!(state.players[0].life > before);
-                            assert_eq!(state.die_result_this_resolution, Some(79));
-                            assert!(!events.iter().any(|e| matches!(
-                                e,
-                                GameEvent::EffectResolved {
-                                    kind: EffectKind::RollDie,
-                                    ..
-                                }
-                            )));
-                        } else {
-                            assert_eq!(result.unwrap(), ResolutionProgress::Complete);
-                            assert_eq!(state.players[0].life, before + 3);
-                            assert_eq!(state.die_result_this_resolution, Some(3));
-                        }
-                        assert_scope(&state, &caller);
-                        consume_caller_count(&mut state, source);
                     }
                 }
             })

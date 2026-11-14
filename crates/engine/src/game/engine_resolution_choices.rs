@@ -2464,6 +2464,7 @@ pub(super) fn handle_resolution_choice(
                     EngineError::InvalidAction("No active coin-flip frame to resume".to_string())
                 })?;
             let entry_die = state.die_result_this_resolution;
+            let entry_publication = state.die_result_publication;
             // CR 608.2c + CR 400.7e: replay this owner's scope, including an
             // explicit empty scope, throughout its branch and continuation drain.
             let trigger_snapshot = pending.trigger_context.as_ref().map(|context| {
@@ -2482,6 +2483,7 @@ pub(super) fn handle_resolution_choice(
             let exit_die = if result.is_ok() {
                 state.die_result_this_resolution
             } else {
+                state.die_result_publication = entry_publication;
                 entry_die
             };
             if let Some(snapshot) = trigger_snapshot {
@@ -2560,6 +2562,7 @@ pub(super) fn handle_resolution_choice(
             // (`game/effects/effect.rs`), which reads the events slice and never
             // consults this field — that path is carried by emission ordering.
             let prev_die_result = state.die_result_this_resolution;
+            let entry_publication = state.die_result_publication;
             // CR 608.2c + CR 400.7e: restore the owning event channels before
             // any selected table row or dependent continuation executes.
             let trigger_snapshot = pending.trigger_context.as_ref().map(|context| {
@@ -2606,6 +2609,7 @@ pub(super) fn handle_resolution_choice(
             let exit_die = if result.is_ok() {
                 state.die_result_this_resolution
             } else {
+                state.die_result_publication = entry_publication;
                 prev_die_result
             };
             if let Some(snapshot) = trigger_snapshot {
@@ -6816,6 +6820,7 @@ pub(super) fn handle_resolution_choice(
                 conditional_enter_with_counters,
                 count_param,
                 library_position,
+                library_shuffle,
                 mass_library_order,
                 is_cost_payment,
                 enters_modified_if,
@@ -7511,7 +7516,10 @@ pub(super) fn handle_resolution_choice(
                             // DOWN with the specified characteristics instead of
                             // resuming face up and exposing the real object.
                             face_down_profile: face_down_profile.clone(),
-                            library_placement: None,
+                            library_placement: library_position.clone(),
+                            // CR 701.24a + CR 730.3: the parked choice carries
+                            // whether its position is a terminal shuffle's.
+                            library_shuffle,
                             enter_attached_to: None,
                         };
                         let anticipated_pause =
@@ -7596,6 +7604,7 @@ pub(super) fn handle_resolution_choice(
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         library_placement: ctx.library_placement.clone(),
+                                        library_shuffle: ctx.library_shuffle,
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
@@ -7673,6 +7682,7 @@ pub(super) fn handle_resolution_choice(
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         library_placement: ctx.library_placement.clone(),
+                                        library_shuffle: ctx.library_shuffle,
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
@@ -8001,6 +8011,7 @@ pub(super) fn handle_resolution_choice(
                         face_down_in_exile,
                         face_down_profile: face_down_profile.clone(),
                         library_placement: None,
+                        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                         enter_attached_to: None,
                     };
                     let events_before_effect = events.len();
@@ -8089,6 +8100,7 @@ pub(super) fn handle_resolution_choice(
                                         moved_count: None,
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         library_placement: ctx.library_placement.clone(),
+                                        library_shuffle: ctx.library_shuffle,
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
@@ -8139,6 +8151,7 @@ pub(super) fn handle_resolution_choice(
                                         moved_count: None,
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         library_placement: ctx.library_placement.clone(),
+                                        library_shuffle: ctx.library_shuffle,
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
@@ -13036,6 +13049,7 @@ mod tests {
         let execute = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination,
                 target: TargetFilter::ParentTarget,
@@ -13131,6 +13145,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination,
                     target: TargetFilter::Any,
@@ -13264,6 +13279,7 @@ mod tests {
         );
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
@@ -13942,6 +13958,7 @@ mod tests {
         );
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -14255,6 +14272,7 @@ mod tests {
         );
         let printed_destination = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
                 target: TargetFilter::Any,
@@ -15245,6 +15263,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
@@ -15356,6 +15375,7 @@ mod tests {
                     conditional_enter_with_counters: vec![],
                     count_param: 0,
                     library_position: None,
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     mass_library_order: None,
                     is_cost_payment: false,
                     enters_modified_if: None,
@@ -15930,7 +15950,7 @@ mod tests {
 #[cfg(test)]
 mod random_result_resolution_context_tests {
     use super::*;
-    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario::{GameRunner, GameScenario, P0};
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CoinFlipRun, DieResultBranch, EffectError, TargetFilter,
     };
@@ -15972,6 +15992,7 @@ mod random_result_resolution_context_tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(origin),
                 destination,
                 target: TargetFilter::SelfRef,
@@ -16466,6 +16487,166 @@ mod random_result_resolution_context_tests {
         state.resolution_stack.validate(&state.waiting_for).unwrap();
     }
 
+    /// Composed fixture: no printed card has this coin/continuation/context shape.
+    /// Box of Free-Range Goblins and Boing! anchor the die payload; Krark's Thumb
+    /// supplies the real keep prompt, answered through its production choice handler.
+    #[test]
+    fn coin_keep_continuation_drain_preserves_its_settled_die_result() {
+        let (mut state, source, _, mut ambient) = fixture(Boundary::Coin, gain(2));
+        let coin = state.take_active_coin_flip_frame().unwrap().unwrap();
+        *state
+            .active_ability_continuation_frame_mut()
+            .unwrap()
+            .pending
+            .chain = ResolvedAbility::new(
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 1,
+                modifier: None,
+                results: vec![DieResultBranch {
+                    min: 1,
+                    max: 1,
+                    effect: Box::new(gain(1)),
+                }],
+            },
+            vec![],
+            source,
+            P0,
+        );
+        state.push_coin_flip_frame(coin);
+        ambient.die_result = Some(11);
+        install(&mut state, &ambient);
+        let before = state.players[0].life;
+        let mut events = vec![];
+
+        resume(&mut state, Boundary::Coin, &mut events).unwrap();
+
+        assert_eq!(state.players[0].life, before + 3);
+        // CR 706.2 + CR 608.2c: the post-modifier result of a die settled by the coin's
+        // drain survives context restoration for the continuation.
+        assert_eq!(state.die_result_this_resolution, Some(1));
+        assert_scope(&state, &ambient);
+        assert!(state.resolution_stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        state.resolution_stack.validate(&state.waiting_for).unwrap();
+    }
+
+    /// Composed split-context control. Line Cutter/Command Performance anchor the
+    /// Attraction tail; Krark's Thumb supplies the public keep prompt.
+    #[test]
+    fn public_coin_keep_attraction_tail_does_not_publish_a_die_result() {
+        public_coin_keep_nonwriter_or_clear_tail(
+            Effect::RollToVisitAttractions,
+            EffectKind::RollToVisitAttractions,
+        );
+    }
+
+    /// Composed engine fail-safe: no printed card rolls a zero-sided die.
+    #[test]
+    fn public_coin_keep_prevented_die_tail_publishes_an_explicit_clear() {
+        public_coin_keep_nonwriter_or_clear_tail(
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 0,
+                modifier: None,
+                results: vec![],
+            },
+            EffectKind::RollDie,
+        );
+    }
+
+    fn public_coin_keep_nonwriter_or_clear_tail(effect: Effect, completion: EffectKind) {
+        let (mut state, source, _, mut ambient) = fixture(Boundary::Coin, gain(2));
+        if completion == EffectKind::RollToVisitAttractions {
+            let attraction = zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(2),
+                P0,
+                "Context Attraction".into(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&attraction)
+                .unwrap()
+                .attraction_lights = vec![6];
+        }
+        let coin = state.take_active_coin_flip_frame().unwrap().unwrap();
+        let frame = state.active_ability_continuation_frame_mut().unwrap();
+        *frame.pending.chain = ResolvedAbility::new(effect, vec![], source, P0);
+        frame.pending.trigger_context.as_mut().unwrap().die_result = Some(7);
+        state.push_coin_flip_frame(coin);
+        let WaitingFor::CoinFlipKeepChoice {
+            player,
+            results,
+            keep_count,
+        } = &mut state.waiting_for
+        else {
+            panic!("Krark's Thumb must create the keep prompt");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*keep_count, 1);
+        assert_eq!(results.len(), 2);
+        results[0] = true;
+        ambient.die_result = Some(11);
+        install(&mut state, &ambient);
+        // Both the scalar and synchronous authority are cleared at public ingress.
+        state.die_result_publication = Some(Some(89));
+        let before = state.players[0].life;
+        let mut runner = GameRunner::from_state(state);
+        let result = runner
+            .act(GameAction::SelectCoinFlips {
+                keep_indices: vec![0],
+            })
+            .unwrap();
+        let state = runner.state();
+
+        assert_eq!(state.players[0].life, before + 2);
+        if completion == EffectKind::RollDie {
+            assert!(result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved { kind: EffectKind::RollDie, source_id, .. }
+                    if *source_id == source
+            )));
+            assert!(!result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::DieRolled {
+                    result: Some(_),
+                    ..
+                }
+            )));
+            assert_eq!(state.die_result_publication, Some(None));
+        } else {
+            assert!(result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::DieRolled {
+                    result: Some(_),
+                    ..
+                }
+            )));
+            assert!(result
+                .events
+                .iter()
+                .any(|event| matches!(event, GameEvent::AttractionsRolledToVisit { .. })));
+            assert_eq!(state.die_result_publication, None);
+        }
+        // The honest public expectation is post-ingress None, not pre-action 11.
+        assert_eq!(state.die_result_this_resolution, None);
+        assert_scope(state, &ambient);
+        assert!(state.stack.is_empty());
+        assert!(state.resolution_stack.is_empty());
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        state.resolution_stack.validate(&state.waiting_for).unwrap();
+    }
+
     #[test]
     fn random_resolution_repark_retains_empty_owned_and_legacy_authority() {
         for boundary in [Boundary::Coin, Boundary::DieKeep, Boundary::DieDrain] {
@@ -16518,15 +16699,27 @@ mod random_result_resolution_context_tests {
             for boundary in [Boundary::Coin, Boundary::DieKeep, Boundary::DieDrain] {
                 for owned_empty in [false, true] {
                     for links in [2, 22] {
+                        for entry_publication in [None, Some(None), Some(Some(83))] {
                         let mut branch = gain(1);
                         for _ in 0..links {
                             let mut parent = gain(1);
                             parent.sub_ability = Some(Box::new(branch));
                             branch = parent;
                         }
+                        // The coin itself does not publish: reach a real die writer
+                        // before the fallible chain so rollback authority is observable.
+                        if matches!(boundary, Boundary::Coin) {
+                            branch = AbilityDefinition::new(AbilityKind::Spell, Effect::RollDie {
+                                count: QuantityExpr::Fixed { value: 1 },
+                                sides: 1,
+                                modifier: None,
+                                results: vec![DieResultBranch { min: 1, max: 1, effect: Box::new(branch) }],
+                            });
+                        }
                         let (mut state, source, owned, ambient) = fixture(boundary, branch);
                         set_owned(&mut state, boundary, Some(if owned_empty { empty() } else { owned }));
                         install(&mut state, &ambient);
+                        state.die_result_publication = entry_publication;
                         assert_scope(&state, &ambient);
                         assert!(state.current_trigger_event.is_some());
                         let before = state.players[0].life;
@@ -16546,10 +16739,16 @@ mod random_result_resolution_context_tests {
                             assert!(state.players[0].life > before, "the error is reached inside the child chain");
                             assert!(state.players[0].life < before + 1000, "sentinel parent must not drain on error");
                             assert_eq!(state.die_result_this_resolution, Some(79));
+                            assert_eq!(state.die_result_publication, entry_publication);
+                            assert!(events.iter().any(|event| matches!(
+                                event, GameEvent::DieRolled { result: Some(_), .. }
+                            )), "the failed child published before reaching its error");
                             assert!(!events.iter().any(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::RollDie, .. })));
                         } else {
                             result.unwrap();
                             assert_eq!(state.players[0].life, before + 1003);
+                            let child_result = if matches!(boundary, Boundary::DieDrain) { 3 } else { 1 };
+                            assert_eq!(state.die_result_publication, Some(Some(child_result)));
                             assert!(state.resolution_stack.is_empty());
                         }
                         assert_scope(&state, &ambient);
@@ -16561,6 +16760,7 @@ mod random_result_resolution_context_tests {
                         let before_consumer = state.players[0].life;
                         effects::resolve_ability_chain(&mut state, &consumer, &mut vec![], 0).unwrap();
                         assert_eq!(state.players[0].life, before_consumer + 17);
+                        }
                     }
                 }
             }

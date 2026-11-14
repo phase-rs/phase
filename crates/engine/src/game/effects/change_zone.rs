@@ -7,7 +7,7 @@ use crate::game::game_object::AttachTarget;
 use crate::game::zones;
 use crate::types::ability::{
     ControllerRef, Duration, Effect, EffectError, EffectKind, EffectResolutionResult, FilterProp,
-    LibraryPosition, MassLibraryShuffleMode, OpponentMayScope, QuantityExpr, ResolvedAbility,
+    LibraryPosition, LibraryShuffleMode, OpponentMayScope, QuantityExpr, ResolvedAbility,
     TargetChoiceTiming, TargetFilter, TargetRef, TargetSelectionMode, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
@@ -248,13 +248,9 @@ pub(crate) fn change_zone_all_player_scope(
 ) -> Option<PlayerId> {
     match target_filter {
         TargetFilter::Controller => Some(ability.controller),
-        // CR 400.3: "its owner's" resolves to the owner of source_id.
-        TargetFilter::Owner => state
-            .objects
-            .get(&ability.source_id)
-            .map(|obj| obj.owner)
-            .or_else(|| state.lki_cache.get(&ability.source_id).map(|lki| lki.owner))
-            .or(Some(ability.controller)),
+        TargetFilter::Owner => {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
+        }
         TargetFilter::Player => ability
             .targets
             .iter()
@@ -456,6 +452,14 @@ fn resolution_zone_candidates(
         ability,
         filter_controller,
     );
+    let terminal_shuffle_move = matches!(
+        ability.effect,
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
+            ..
+        }
+    );
     state
         .objects
         .iter()
@@ -465,6 +469,12 @@ fn resolution_zone_candidates(
                 // CR 108.2 + CR 109.1: a zone scan chooses among the cards in
                 // the zone; the CR 722.3c retained prepare copy is not one.
                 && object.is_card_population_member()
+                // CR 730.2: a merged component is part of one permanent, not a
+                // permanent the player can choose by itself.
+                // Applied to the move component of a terminal shuffle, whose
+                // chosen merged permanent this branch delivers whole; every
+                // other scan keeps the merge-base population (#10759).
+                && !(terminal_shuffle_move && state.is_absorbed_merge_component(**id))
                 && crate::game::filter::matches_target_filter_for_zone(
                     state,
                     **id,
@@ -731,9 +741,14 @@ fn bound_move_members(
     // CR 730.3c: when this effect references the object that just left the
     // battlefield (a flicker/blink's "return it") and that object was a merged
     // permanent's survivor, act on the component cards it split into as well, so
-    // the whole pile is moved — not just the survivor. A no-op for ordinary
-    // (freshly chosen) targets.
-    crate::game::merge::expand_returned_merge_components(state, targeted_objects, target_filter)
+    // the whole pile is moved — not just the survivor. Only a referent whose own
+    // departure is recorded expands; a fresh choice (one exiled card) does not.
+    crate::game::merge::expand_returned_merge_components(
+        state,
+        ability,
+        targeted_objects,
+        target_filter,
+    )
 }
 
 /// The single per-member test for "this object can no longer undergo the
@@ -821,6 +836,24 @@ pub(crate) fn optional_triggering_source_move_is_infeasible(
             .all(|id| zone_move_member_cannot_move(state, id, expected_origin))
 }
 
+// CR 701.24a + CR 701.24d: An explicitly owned terminal Shuffle randomizes the
+// delivered set once. Bottom is only a transient delivery position; a printed
+// placement remains authoritative, and ordinary library moves keep auto-shuffling.
+fn member_library_placement(
+    destination: Zone,
+    printed_position: Option<LibraryPosition>,
+    library_shuffle: LibraryShuffleMode,
+) -> Option<LibraryPosition> {
+    if destination == Zone::Library
+        && printed_position.is_none()
+        && matches!(library_shuffle, LibraryShuffleMode::TerminalShuffle)
+    {
+        Some(LibraryPosition::Bottom)
+    } else {
+        printed_position
+    }
+}
+
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -840,6 +873,7 @@ pub fn resolve(
         effect_conditional_enter_with_counters,
         face_down_profile,
         effect_enters_modified_if,
+        library_shuffle,
     ) = match &ability.effect {
         Effect::ChangeZone {
             origin,
@@ -854,6 +888,7 @@ pub fn resolve(
             conditional_enter_with_counters,
             face_down_profile,
             enters_modified_if,
+            library_shuffle,
             ..
         } => {
             // CR 122.1 + CR 614.1c: Resolve `QuantityExpr` counts to concrete
@@ -893,15 +928,48 @@ pub fn resolve(
                 conditional_enter_with_counters.clone(),
                 face_down_profile.clone(),
                 enters_modified_if.clone(),
+                *library_shuffle,
             )
         }
         _ => return Err(EffectError::MissingParam("Destination".to_string())),
     };
+    let library_placement = member_library_placement(dest_zone, None, library_shuffle);
 
     let completed_result = |count| {
         super::this_way_cause_for_zone(dest_zone)
             .map(|cause| EffectResolutionResult { cause, count })
     };
+
+    // CR 608.2b: "target player shuffles target cards from their graveyard"
+    // requires the declared player to act, even when the card targets remain legal.
+    // Read the same group as the terminal Shuffle before delivering any cards.
+    // Only this compound is skipped; the ability chain still reaches independent tails.
+    if let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Library,
+        target: TargetFilter::Typed(filter),
+        owner_library: false,
+        library_shuffle: LibraryShuffleMode::TerminalShuffle,
+        ..
+    } = &ability.effect
+    {
+        let actor_unavailable = filter.properties.iter().any(|property| match property {
+            FilterProp::Owned {
+                controller: ControllerRef::DeclaredPlayer { group },
+            } => crate::game::targeting::resolve_live_declared_player(state, ability, *group)
+                .is_none(),
+            _ => false,
+        });
+        if actor_unavailable {
+            state.last_effect_count = Some(0);
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(completed_result(0));
+        }
+    }
 
     // CR 610.3a / CR 610.3b: If the specified event occurred after this ability
     // was put onto the stack (activated) or triggered (triggered) but before its
@@ -1223,6 +1291,9 @@ pub fn resolve(
                 .draw(RandomDraw::Outcome)
                 .random_range(0..eligible.len());
             let chosen = eligible[index];
+            // CR 400.3 + CR 608.2c: a zone-union choice moves from the
+            // selected object's zone, not the prompt's default scan zone.
+            let chosen_origin = state.objects[&chosen].zone;
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);
             capture_devour_snapshot_before_single_entry(state, chosen, dest_zone);
             // CR 614.12: resolve the chosen object's gated entry counters and
@@ -1234,7 +1305,7 @@ pub fn resolve(
             match crate::game::zone_pipeline::execute_zone_move_with_controller(
                 state,
                 chosen,
-                scan_zone,
+                chosen_origin,
                 dest_zone,
                 ability.source_id,
                 ability.duration.as_ref(),
@@ -1246,7 +1317,8 @@ pub fn resolve(
                 face_down_profile.as_ref(),
                 ability.context.face_down_in_exile,
                 track_exiled_by_source,
-                None,
+                library_placement.clone(),
+                library_shuffle,
                 None,
                 Some(ability.controller),
                 // CR 608.2c: the controller follows the instruction, so it performs the move.
@@ -1300,6 +1372,9 @@ pub fn resolve(
 
         if eligible.len() == 1 && !choice_up_to && choice_count == 1 {
             let chosen = eligible[0];
+            // CR 400.3 + CR 608.2c: the singleton can occupy any member
+            // zone of the selection filter's union.
+            let chosen_origin = state.objects[&chosen].zone;
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);
             capture_devour_snapshot_before_single_entry(state, chosen, dest_zone);
             // CR 614.12: resolve the chosen object's gated entry counters and
@@ -1311,7 +1386,7 @@ pub fn resolve(
             match crate::game::zone_pipeline::execute_zone_move_with_controller(
                 state,
                 chosen,
-                scan_zone,
+                chosen_origin,
                 dest_zone,
                 ability.source_id,
                 ability.duration.as_ref(),
@@ -1323,7 +1398,8 @@ pub fn resolve(
                 face_down_profile.as_ref(),
                 ability.context.face_down_in_exile,
                 track_exiled_by_source,
-                None,
+                library_placement.clone(),
+                library_shuffle,
                 None,
                 Some(ability.controller),
                 // CR 608.2c: the controller follows the instruction, so it performs the move.
@@ -1400,7 +1476,8 @@ pub fn resolve(
             enter_with_counters: effect_enter_with_counters.clone(),
             conditional_enter_with_counters: effect_conditional_enter_with_counters.clone(),
             count_param: 0,
-            library_position: None,
+            library_position: library_placement.clone(),
+            library_shuffle,
             mass_library_order: None,
             is_cost_payment: false,
             // CR 614.12: carry the moved-object type gate across the
@@ -1429,7 +1506,8 @@ pub fn resolve(
         track_exiled_by_source,
         face_down_in_exile: ability.context.face_down_in_exile,
         face_down_profile: face_down_profile.clone(),
-        library_placement: None,
+        library_placement,
+        library_shuffle,
         enter_attached_to: forward_result_search_attach_host(state, ability),
     };
     let _ = owner_library; // routing handled by move_to_zone (CR 400.7)
@@ -1554,6 +1632,7 @@ pub fn resolve(
                         // enter face down.
                         face_down_profile: ctx.face_down_profile.clone(),
                         library_placement: ctx.library_placement,
+                        library_shuffle: ctx.library_shuffle,
                         enter_attached_to: ctx.enter_attached_to,
                         effect_kind: EffectKind::from(&ability.effect),
                     },
@@ -1606,6 +1685,7 @@ pub fn resolve(
                         // enter face down.
                         face_down_profile: ctx.face_down_profile.clone(),
                         library_placement: ctx.library_placement,
+                        library_shuffle: ctx.library_shuffle,
                         enter_attached_to: ctx.enter_attached_to,
                         effect_kind: EffectKind::from(&ability.effect),
                     },
@@ -1925,6 +2005,9 @@ pub(crate) struct ChangeZoneIterationCtx {
     /// CR 401.4 + CR 701.24a: When `Some`, suppresses auto-shuffle and places
     /// each object at the specified library position.
     pub library_placement: Option<LibraryPosition>,
+    /// CR 701.24a + CR 730.3: `TerminalShuffle` when `library_placement` is the
+    /// transient position of a "shuffle [set] into [library]" move.
+    pub library_shuffle: LibraryShuffleMode,
     /// CR 303.4f: Pre-resolved Aura host for search/tutor "enters attached" wiring.
     pub enter_attached_to: Option<AttachTarget>,
 }
@@ -2024,6 +2107,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
         ctx.face_down_in_exile,
         ctx.track_exiled_by_source,
         ctx.library_placement.clone(),
+        ctx.library_shuffle,
         ctx.enter_attached_to,
         Some(ctx.controller),
         // CR 608.2c: the controller follows the instruction, so it performs the move.
@@ -2091,6 +2175,7 @@ fn mass_library_order_effect_zone_choice(
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: Some(library_position),
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: Some(batch),
         is_cost_payment: false,
         enters_modified_if: None,
@@ -2702,6 +2787,84 @@ fn reconcile_emptied_owner_batch(
     }
 }
 
+/// CR 608.2b-c + CR 730.3c: the objects the selected-object owner-library move
+/// acts on (`effects::is_selected_owner_library_shuffle_operation`): its bound
+/// selection, with a merged permanent's recorded successors. `Ok(None)` when
+/// the node is not that operation, or its binding names the library's player
+/// rather than objects. Shared by the resolver and the stack reader
+/// (`stack_reach`), so both act on the same population.
+pub(crate) fn selected_owner_move_objects(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Result<Option<Vec<ObjectId>>, EffectError> {
+    if !super::is_selected_owner_library_shuffle_operation(ability) {
+        return Ok(None);
+    }
+    let Effect::ChangeZoneAll { target, .. } = &ability.effect else {
+        return Ok(None);
+    };
+    let target_filter = target;
+    let player_scope = change_zone_all_player_scope(state, ability, target_filter);
+    // CR 608.2b-c: discriminate player entries before filtering objects.
+    // Qualified slots are indexed in the original declaration, before
+    // illegal or stale entries are removed.
+    match target_filter {
+        TargetFilter::ParentTarget if player_scope.is_some() => {
+            if ability.targets.iter().any(|target| match target {
+                TargetRef::Object(_) => true,
+                TargetRef::Player(player) => Some(*player) != player_scope,
+            }) {
+                return Err(EffectError::InvalidParam(
+                    "ambiguous owner-library parent binding".to_string(),
+                ));
+            }
+            Ok(None)
+        }
+        TargetFilter::ParentTargetSlot { index }
+            if matches!(
+                crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index),
+                Some(TargetRef::Player(_))
+            ) =>
+        {
+            Err(EffectError::InvalidParam(
+                "owner-library object slot names a player".to_string(),
+            ))
+        }
+        _ => {
+            let objects = if ability.parent_target_missing_reason.is_some() {
+                Vec::new()
+            } else if matches!(target_filter, TargetFilter::PostReplacementDamageTarget) {
+                // CR 615.5 + CR 608.2c: the replacement continuation's own
+                // bound targets may name the damaging source; the prevented
+                // event's live object referent is the moved permanent.
+                state
+                    .post_replacement_event_target()
+                    .and_then(|target| match target {
+                        TargetRef::Object(id) => Some(*id),
+                        TargetRef::Player(_) => None,
+                    })
+                    .into_iter()
+                    .collect()
+            } else {
+                crate::game::targeting::resolved_object_ids_for_filter(
+                    state,
+                    ability,
+                    target_filter,
+                )
+            };
+            // CR 730.3c: expand merged components only after binding the
+            // actual referent; absent selections never fall back to source,
+            // and a fresh selection (Riftsweeper) is not a departure.
+            Ok(Some(crate::game::merge::expand_returned_merge_components(
+                state,
+                ability,
+                objects,
+                target_filter,
+            )))
+        }
+    }
+}
+
 /// Move all objects matching the filter from `Origin` zone to `Destination` zone.
 pub fn resolve_all(
     state: &mut GameState,
@@ -2781,21 +2944,8 @@ pub fn resolve_all(
     };
     let origin_zone = origin_zones[0];
 
-    // CR 701.24a + CR 701.24d: Parser-produced “shuffle [a set] into [a]
-    // library” operations mark their mass-move component explicitly. The generic
-    // zone-delivery tail normally shuffles every member that enters a library
-    // without a placement, so use a transient bottom placement only for that
-    // exact operation and reserve the one randomization for its terminal Shuffle.
-    // This mode is data, not an inferred relationship between arbitrary runtime
-    // continuation chains; explicit printed placement remains authoritative.
-    let member_library_placement = if dest_zone == Zone::Library
-        && effect_library_position.is_none()
-        && matches!(library_shuffle, MassLibraryShuffleMode::TerminalShuffle)
-    {
-        Some(LibraryPosition::Bottom)
-    } else {
-        effect_library_position.clone()
-    };
+    let member_library_placement =
+        member_library_placement(dest_zone, effect_library_position.clone(), library_shuffle);
 
     // CR 400.6 + CR 400.3: `TargetFilter::Controller` / player-anaphor filters
     // in a mass zone-change reference a *player*, not a set of objects. Such
@@ -2805,6 +2955,12 @@ pub fn resolve_all(
     // Translate them here to "all cards owned by that player in the origin zone"
     // — the object-level matcher would otherwise reject them outright.
     let player_scope = change_zone_all_player_scope(state, ability, &target_filter);
+
+    // CR 608.2c: only the explicit selected-object operation binds these
+    // references as a population; other mass/player instructions keep their
+    // established zone scan.
+    let selected_objects = selected_owner_move_objects(state, ability)?;
+    let selected_object_population = selected_objects.is_some();
 
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(state, ability, &target_filter);
@@ -2892,7 +3048,9 @@ pub fn resolve_all(
         ability,
         filter_controller,
     );
-    let matching: Vec<_> = if let Some(player) = player_scope {
+    let matching: Vec<_> = if let Some(objects) = selected_objects {
+        objects
+    } else if let Some(player) = player_scope {
         // Player-scoped mass move: select every card in any of the origin zones
         // belonging to the target player, regardless of type.
         //
@@ -2960,9 +3118,12 @@ pub fn resolve_all(
     };
     // CR 607.2a + CR 730.3c: the linked return finds every object an exiled merged permanent became.
     let matching = match &target_filter {
-        TargetFilter::ExiledBySource => {
-            crate::game::merge::expand_returned_merge_components(state, matching, &target_filter)
-        }
+        TargetFilter::ExiledBySource => crate::game::merge::expand_returned_merge_components(
+            state,
+            ability,
+            matching,
+            &target_filter,
+        ),
         _ => matching,
     };
     let matching: Vec<_> = if dest_zone == Zone::Exile {
@@ -2989,7 +3150,11 @@ pub fn resolve_all(
     // CR 701.24c-e + CR 400.3: a mass owner-library shuffle publishes the full
     // matched population, including typed empty-set participants, before order
     // choices or the first zone-change replacement can run.
-    publish_finalized_owner_library_subjects(state, ability, &matching);
+    if selected_object_population {
+        super::publish_selected_owner_library_subjects(state, ability, &matching);
+    } else {
+        publish_finalized_owner_library_subjects(state, ability, &matching);
+    }
 
     // Clean up consumed tracked set after scanning.
     if let TargetFilter::TrackedSet { id } = &effective_filter {
@@ -3100,6 +3265,7 @@ pub fn resolve_all(
             ability.context.face_down_in_exile,
             track_exiled_by_source,
             member_library_placement.clone(),
+            library_shuffle,
             None,
             Some(ability.controller),
             // CR 608.2c: the controller follows the instruction, so it performs the move.
@@ -3188,6 +3354,7 @@ pub fn resolve_all(
                         moved_count: Some(moved_count + i32::from(entry_target_choice)),
                         face_down_profile: face_down_profile.clone(),
                         library_placement: member_library_placement.clone(),
+                        library_shuffle,
                         enter_attached_to: None,
                         effect_kind: EffectKind::from(&ability.effect),
                     },
@@ -3253,6 +3420,7 @@ pub fn resolve_all(
                         // face down.
                         face_down_profile: face_down_profile.clone(),
                         library_placement: member_library_placement.clone(),
+                        library_shuffle,
                         enter_attached_to: None,
                         effect_kind: EffectKind::from(&ability.effect),
                     },
@@ -3433,6 +3601,7 @@ mod tests {
     fn make_hand_choice_ability(up_to: bool) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -3456,6 +3625,7 @@ mod tests {
     fn exact_scoped_graveyard_exile_ability() -> ResolvedAbility {
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter::card().properties(vec![
@@ -3656,6 +3826,7 @@ mod tests {
             });
             let ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Hand,
                     target: TargetFilter::TriggeringSource,
@@ -3694,6 +3865,7 @@ mod tests {
     fn optional_referent_move(target: TargetFilter, origin: Option<Zone>) -> ResolvedAbility {
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin,
                 destination: Zone::Battlefield,
                 target,
@@ -3866,6 +4038,7 @@ mod tests {
             face_down_in_exile: Default::default(),
             face_down_profile: None,
             library_placement: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
         };
         let member = ChangeZoneMemberEntry {
@@ -3897,6 +4070,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -3939,6 +4113,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -3983,6 +4158,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -4066,6 +4242,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -4138,6 +4315,7 @@ mod tests {
                 .push(core);
             let ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Hand),
                     destination: Zone::Battlefield,
                     target: TargetFilter::Any,
@@ -4212,6 +4390,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -4282,6 +4461,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SpecificObject { id: aura_id },
@@ -4352,6 +4532,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SpecificObject { id: aura_id },
@@ -4425,6 +4606,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SpecificObject { id: aura_id },
@@ -4548,6 +4730,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -4767,6 +4950,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SpecificObject { id: aura_id },
@@ -4859,6 +5043,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter {
@@ -4944,6 +5129,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter {
@@ -4997,6 +5183,45 @@ mod tests {
         assert_eq!(state.objects[&opposing_land].zone, Zone::Graveyard);
     }
 
+    /// CR 608.2c: supplemental authority coverage for Unification's zone
+    /// union. Its printed choice is not random; the random sibling exercises
+    /// the same immediate-delivery authority without inventing a card fixture.
+    #[test]
+    fn immediate_zone_union_choices_use_the_selected_objects_origin() {
+        for random in [false, true] {
+            for origin in [Zone::Hand, Zone::Graveyard] {
+                let mut state = GameState::new_two_player(42);
+                let chosen = create_object(
+                    &mut state,
+                    CardId(11),
+                    PlayerId(0),
+                    "Spacecraft subject".to_string(),
+                    origin,
+                );
+                let mut ability = make_hand_choice_ability(false);
+                if let Effect::ChangeZone { origin, target, .. } = &mut ability.effect {
+                    *origin = None;
+                    *target = TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        FilterProp::InAnyZone {
+                            zones: vec![Zone::Hand, Zone::Graveyard],
+                        },
+                    ]));
+                }
+                ability.target_choice_timing = TargetChoiceTiming::Resolution;
+                if random {
+                    ability.target_selection_mode = TargetSelectionMode::Random;
+                }
+                let mut events = Vec::new();
+                resolve(&mut state, &ability, &mut events).unwrap();
+                assert_eq!(state.objects[&chosen].zone, Zone::Battlefield);
+                assert!(events.iter().any(|event| matches!(event,
+                    GameEvent::ZoneChanged { object_id, from, to: Zone::Battlefield, .. }
+                        if *object_id == chosen && *from == Some(origin)
+                )));
+            }
+        }
+    }
+
     /// CR 608.2c: an explicit one-zone `InAnyZone` filter is still an
     /// authoritative zone constraint. Both the interactive and mass
     /// ChangeZone resolvers must scan that zone instead of defaulting to the
@@ -5020,6 +5245,7 @@ mod tests {
         );
         let mut choice_ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Hand,
                 target: TargetFilter::Typed(TypedFilter::default().properties(vec![
@@ -5224,6 +5450,7 @@ mod tests {
             });
             let mut ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Hand),
                     destination: Zone::Battlefield,
                     target: TargetFilter::Typed(TypedFilter {
@@ -5328,6 +5555,7 @@ mod tests {
         )];
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination,
                 target: TargetFilter::Any,
@@ -5457,6 +5685,7 @@ mod tests {
 
         let mut move_ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter {
@@ -5651,6 +5880,7 @@ mod tests {
         };
         ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -5786,6 +6016,7 @@ mod tests {
 
             let mut move_ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
                     target: TargetFilter::Typed(TypedFilter {
@@ -6757,6 +6988,7 @@ mod tests {
                 }
                 let mut ability = ResolvedAbility::new(
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         origin: Some(Zone::Hand),
                         destination: Zone::Battlefield,
                         target: TargetFilter::Typed(TypedFilter {
@@ -7097,6 +7329,7 @@ mod tests {
         });
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::TriggeringSource,
@@ -7144,6 +7377,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -7193,6 +7427,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -7231,6 +7466,7 @@ mod tests {
         let source_id = ObjectId(100);
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -7278,6 +7514,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -7316,6 +7553,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -7398,6 +7636,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Library,
                 target: TargetFilter::Any,
@@ -7445,6 +7684,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Library,
                 target: TargetFilter::Any,
@@ -7492,6 +7732,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Library,
                 target: TargetFilter::SelfRef,
@@ -8280,6 +8521,7 @@ mod tests {
         let source_id = ObjectId(100);
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -8337,6 +8579,7 @@ mod tests {
         let source_id = ObjectId(100);
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -8390,6 +8633,7 @@ mod tests {
         // Try to exile from battlefield, but object is in graveyard
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -8449,6 +8693,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -8553,6 +8798,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Hand,
                 target: TargetFilter::Any,
@@ -8628,6 +8874,7 @@ mod tests {
         .sub_ability(
             ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Battlefield),
                     destination: Zone::Exile,
                     target: TargetFilter::Typed(
@@ -8744,6 +8991,7 @@ mod tests {
             )
             .sub_ability(ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
                     target: TargetFilter::ParentTargetSlot { index: 1 },
@@ -8797,6 +9045,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(
@@ -8872,6 +9121,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(
@@ -8939,6 +9189,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
@@ -8996,6 +9247,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
@@ -9897,6 +10149,7 @@ mod tests {
     fn make_exhume_ability(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter {
@@ -10079,6 +10332,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter {
@@ -10227,6 +10481,7 @@ mod tests {
             moved_count: None,
             face_down_profile: None,
             library_placement: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
             effect_kind: EffectKind::ChangeZone,
         });
@@ -10342,6 +10597,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
@@ -10390,6 +10646,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -10441,6 +10698,7 @@ mod tests {
         trigger.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
@@ -10535,6 +10793,7 @@ mod tests {
     ) -> Vec<GameEvent> {
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -10789,6 +11048,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -10931,6 +11191,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -11435,6 +11696,7 @@ mod tests {
             //   Exile seed from opponent's graveyard → multi_zone
             let exile_seed = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Exile,
                     target: TargetFilter::Any,
@@ -11548,6 +11810,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -12108,6 +12371,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter {
@@ -12173,6 +12437,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -12217,6 +12482,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -12269,6 +12535,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter::card().properties(vec![
@@ -12394,6 +12661,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -12529,6 +12797,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -12697,6 +12966,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -12872,7 +13142,7 @@ mod tests {
     /// moves must not auto-shuffle, leaving exactly the one terminal Shuffle.
     fn paused_terminal_mass_library_shuffle_events(cant_shuffle: bool) -> Vec<GameEvent> {
         use crate::types::ability::{
-            AbilityDefinition, AbilityKind, MassLibraryShuffleMode, ReplacementDefinition,
+            AbilityDefinition, AbilityKind, LibraryShuffleMode, ReplacementDefinition,
             ReplacementMode,
         };
         use crate::types::replacements::ReplacementEvent;
@@ -12912,6 +13182,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,
@@ -12953,7 +13224,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
-                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
                 random_order: false,
             },
             vec![],
@@ -13057,6 +13328,222 @@ mod tests {
         );
     }
 
+    /// Supplemental authority fixture for Scientists' selected population.
+    /// Malformed bindings below have no printed-card counterpart; production
+    /// coverage uses the full Scientists and Unification integration cards.
+    fn selected_owner_shuffle_for_test(source: ObjectId) -> ResolvedAbility {
+        let definition = crate::parser::oracle_effect::parse_effect_chain(
+            "Shuffle all permanents you own into your library.",
+            AbilityKind::Spell,
+        );
+        let mut ability =
+            crate::game::ability_utils::build_resolved_from_def(&definition, source, PlayerId(0));
+        let Effect::ChangeZoneAll { origin, target, .. } = &mut ability.effect else {
+            panic!("mass shuffle fixture must reach ChangeZoneAll");
+        };
+        *origin = None;
+        *target = TargetFilter::ParentTarget;
+        assert!(ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(super::super::is_owner_library_shuffle_consumer));
+        ability
+    }
+
+    /// CR 701.24c + CR 608.2c: successive selected instructions replace the
+    /// prospective owners, including an empty declaration after a nonempty one.
+    #[test]
+    fn selected_owner_shuffle_publication_is_fresh_even_when_empty() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(9600),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let first = create_object(
+            &mut state,
+            CardId(9601),
+            PlayerId(0),
+            "First".to_string(),
+            Zone::Graveyard,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(9602),
+            PlayerId(1),
+            "Second".to_string(),
+            Zone::Exile,
+        );
+        let mut ability = selected_owner_shuffle_for_test(source);
+        let mut previous = None;
+        for (objects, owners) in [
+            (vec![first], vec![PlayerId(0)]),
+            (vec![second], vec![PlayerId(1)]),
+            (vec![], vec![]),
+        ] {
+            ability.targets = objects.iter().copied().map(TargetRef::Object).collect();
+            resolve_all(&mut state, &ability, &mut Vec::new()).unwrap();
+            let id = state.chain_tracked_set_id.expect("fresh owner publication");
+            assert_ne!(Some(id), previous);
+            previous = Some(id);
+            let published: Vec<_> = state.tracked_set_participants[&id]
+                .iter()
+                .map(|(player, _)| *player)
+                .collect();
+            assert_eq!(published, owners);
+            for object in objects {
+                assert_eq!(state.objects[&object].zone, Zone::Library);
+            }
+            assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+        }
+    }
+
+    /// CR 608.2c: contradictory parent bindings cannot choose an arbitrary
+    /// player's population or publish owners before refusing the instruction.
+    #[test]
+    fn selected_owner_shuffle_refuses_mixed_parent_binding() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(9600),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = selected_owner_shuffle_for_test(source);
+        for targets in [
+            vec![TargetRef::Object(source), TargetRef::Player(PlayerId(1))],
+            vec![
+                TargetRef::Player(PlayerId(0)),
+                TargetRef::Player(PlayerId(1)),
+            ],
+        ] {
+            ability.targets = targets;
+            assert!(resolve_all(&mut state, &ability, &mut Vec::new()).is_err());
+            assert_eq!(state.chain_tracked_set_id, None);
+            assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+        }
+    }
+
+    /// CR 400.7 + CR 608.2b-c: a declaration stamped illegal at resolution never
+    /// renumbers the later live object slot; a qualified player is not empty.
+    /// Supplemental consumer test: models the stack's legality stamp, rather
+    /// than testing announcement-pin validation through the public pipeline.
+    #[test]
+    fn selected_owner_shuffle_illegal_slots_preserve_declared_positions() {
+        let mut state = GameState::new_two_player(42);
+        let first = create_object(
+            &mut state,
+            CardId(9601),
+            PlayerId(0),
+            "First".to_string(),
+            Zone::Graveyard,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(9602),
+            PlayerId(1),
+            "Second".to_string(),
+            Zone::Graveyard,
+        );
+        let source = ObjectId(9600);
+        let mut ability = selected_owner_shuffle_for_test(source);
+        ability.targets = vec![TargetRef::Object(first), TargetRef::Object(second)];
+        ability.announce_target_pins(&state);
+        let mut root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(first)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(second)],
+            source,
+            PlayerId(0),
+        ));
+        root.announce_target_pins(&state);
+        zones::move_to_zone(&mut state, first, Zone::Exile, &mut Vec::new());
+        zones::move_to_zone(&mut state, first, Zone::Graveyard, &mut Vec::new());
+        // CR 608.2b: stack::record_illegal_target_slots writes this chain-indexed
+        // stamp to the resolving carrier before executing its validated ability.
+        root.illegal_target_slots = vec![0];
+        state.resolving_stack_entry = Some(StackEntry {
+            id: source,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        });
+        assert_eq!(
+            crate::game::targeting::resolve_live_parent_slot_from_root(&state, &ability, 0),
+            None
+        );
+        assert_eq!(
+            crate::game::targeting::resolve_live_parent_slot_from_root(&state, &ability, 1),
+            Some(TargetRef::Object(second))
+        );
+        if let Effect::ChangeZoneAll { target, .. } = &mut ability.effect {
+            *target = TargetFilter::ParentTargetSlot { index: 1 };
+        }
+        resolve_all(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert_eq!(state.objects[&first].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&second].zone, Zone::Library);
+
+        let root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        state.resolving_stack_entry.as_mut().unwrap().kind = StackEntryKind::ActivatedAbility {
+            source_id: source,
+            ability: Box::new(root),
+        };
+        if let Effect::ChangeZoneAll { target, .. } = &mut ability.effect {
+            *target = TargetFilter::ParentTargetSlot { index: 0 };
+        }
+        let publication = state.chain_tracked_set_id;
+        assert!(resolve_all(&mut state, &ability, &mut Vec::new()).is_err());
+        assert_eq!(state.chain_tracked_set_id, publication);
+        assert_eq!(state.objects[&first].zone, Zone::Graveyard);
+    }
+
+    /// CR 608.2c: an origin-less typed population retains mass semantics;
+    /// the selected-object gate must not swallow it as an empty parent set.
+    #[test]
+    fn originless_typed_owner_shuffle_retains_mass_population() {
+        let mut state = GameState::new_two_player(42);
+        let object = create_object(
+            &mut state,
+            CardId(9600),
+            PlayerId(0),
+            "Population member".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = selected_owner_shuffle_for_test(ObjectId(9601));
+        if let Effect::ChangeZoneAll { target, .. } = &mut ability.effect {
+            *target = TargetFilter::Typed(TypedFilter::card());
+        }
+        resolve_all(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert_eq!(state.objects[&object].zone, Zone::Library);
+        let id = state.chain_tracked_set_id.expect("mass publication");
+        assert_eq!(
+            state.tracked_set_participants[&id],
+            vec![(PlayerId(0), ThisWayCause::OwnerLibraryShuffleSubject)]
+        );
+    }
+
     /// CR 614.12 + CR 701.24a: A parser-produced owner shuffle publishes its
     /// complete owner population before the first replacement pause and keeps
     /// that same ledger through every resumed member. The terminal shuffle then
@@ -13107,6 +13594,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,
@@ -13132,7 +13620,7 @@ mod tests {
         assert!(matches!(
             definition.effect.as_ref(),
             Effect::ChangeZoneAll {
-                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
                 ..
             }
         ));
@@ -13288,6 +13776,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -13349,6 +13838,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -13429,6 +13919,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -13530,6 +14021,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -13763,6 +14255,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
@@ -13830,6 +14323,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -13931,6 +14425,7 @@ mod tests {
 
         let put_sub = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Hand,
                 target: TargetFilter::TrackedSetFiltered {
@@ -14061,6 +14556,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Exile),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -14144,6 +14640,7 @@ mod tests {
         // must still flip control to the sole opponent, player 1.
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -14207,6 +14704,7 @@ mod tests {
         }
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -14491,6 +14989,7 @@ mod exile_card_population_tests {
         let (mut state, card, copy) = board();
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,
                 target: owned_exiled_instants(),

@@ -23,6 +23,8 @@ use crate::analysis::decision_template::{
     DecisionTemplate, IterationIndex,
 };
 use crate::game::game_object::GameObject;
+use crate::game::players::{self, PoisonLossScope};
+use crate::game::topology;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityUseTally, ActivationRestriction, CastingPermission,
     DamageModification, QuantityRef, TargetRef,
@@ -1058,7 +1060,7 @@ impl CleanupPair {
     fn repetitions(self, state: &GameState, caster: PlayerId) -> Option<i64> {
         let max_hand = crate::game::turns::maximum_hand_size(state, caster)? as i64;
         let hand = state.players.iter().find(|p| p.id == caster)?.hand.len() as i64;
-        ResourceVector::narrowed_repetitions(&[(
+        ResourceVector::narrowed_repetitions([(
             max_hand - (hand + self.to_cleanup) + self.growth,
             self.growth,
         )])
@@ -1823,9 +1825,10 @@ impl PeriodicDelta {
     /// crosses a CR 704 threshold under `declaration`, or `None` when no axis takes it there.
     ///
     /// The minimum over the three axes, each measured against the headroom its own rule leaves:
-    /// the seat's whole life total (CR 704.5a: 0 or less loses), one short of ten poison
-    /// (CR 704.5c), and the whole remaining library (CR 104.3c + CR 121.4: an empty library is
-    /// lethal at the next DRAW ATTEMPT and not on state alone, so every card left is headroom).
+    /// the seat's whole life total (CR 704.5a: 0 or less loses), one short of the poison-loss
+    /// threshold the SBA applies to this seat ([`ResourceVector::poison_axis`]), and the whole
+    /// remaining library (CR 104.3c + CR 121.4: an empty library is lethal at the next DRAW
+    /// ATTEMPT and not on state alone, so every card left is headroom).
     ///
     /// `horizon` is the WALK's, not this seat's, for the reason
     /// [`PeriodicDelta::elimination_cascade`] states where it derives it.
@@ -1864,16 +1867,12 @@ impl PeriodicDelta {
         // The strict answer is the largest count after which no axis has crossed, so the
         // crossing is the next one — `narrowed_repetitions` is the same division
         // `seat_headroom_bound` performs, over these two axes' own headrooms.
-        let non_life = ResourceVector::narrowed_repetitions(&[
-            (
-                9 - i64::from(p.poison_counters),
-                self.delta.poison.get(&p.id).copied().unwrap_or(0),
-            ),
-            (
+        let non_life = ResourceVector::narrowed_repetitions(
+            self.delta.poison_axis(state, p).into_iter().chain([(
                 state.library_of(p.id).len() as i64,
                 -self.delta.library_delta.get(&p.id).copied().unwrap_or(0),
-            ),
-        ])
+            )]),
+        )
         .and_then(|strict| u32::try_from(strict.saturating_add(1)).ok());
         [life, non_life].into_iter().flatten().min()
     }
@@ -3078,11 +3077,36 @@ impl ResourceVector {
     /// ONE STATEMENT OF THE ARITHMETIC, over explicit pairs rather than over a seat, because the
     /// headroom a caller divides is not always the seat's full one — a walk that has already
     /// spent repetitions divides what is LEFT through the same division.
-    fn narrowed_repetitions(axes: &[(i64, i64)]) -> Option<i64> {
-        axes.iter()
-            .filter(|(_, magnitude)| *magnitude > 0)
-            .map(|&(headroom, magnitude)| headroom.max(0) / magnitude)
+    fn narrowed_repetitions(axes: impl IntoIterator<Item = (i64, i64)>) -> Option<i64> {
+        axes.into_iter()
+            .filter(|&(_, magnitude)| magnitude > 0)
+            .map(|(headroom, magnitude)| headroom.max(0) / magnitude)
             .min()
+    }
+
+    /// CR 704.5c / CR 704.6b: `p`'s poison axis as a [`ResourceVector::narrowed_repetitions`]
+    /// pair, measured on the poison-loss rule the SBA applies
+    /// ([`players::poison_loss_measure`]): the headroom one short of that rule's threshold, and
+    /// the per-period gain of the count it measures. `None` when no poison-loss rule applies to
+    /// `p`, so the axis is unarmed.
+    ///
+    /// CR 810.10: poison counters a team shares rise by every member's own gain, so a
+    /// shared-poison seat's magnitude is its team's summed gain, over the same members
+    /// [`players::team_poison_total`] counts.
+    fn poison_axis(&self, state: &GameState, p: &Player) -> Option<(i64, i64)> {
+        let measure = players::poison_loss_measure(state, p)?;
+        let gain = |seat: &PlayerId| self.poison.get(seat).copied().unwrap_or(0);
+        let magnitude = match measure.scope {
+            PoisonLossScope::Player => gain(&p.id),
+            PoisonLossScope::Team => topology::shared_poison_members(state, p.id)
+                .iter()
+                .map(gain)
+                .sum(),
+        };
+        Some((
+            i64::from(measure.threshold) - 1 - i64::from(measure.count),
+            magnitude,
+        ))
     }
 
     /// CR 704.5a / CR 704.5c / CR 104.3c + CR 121.4: ONE seat's strict headroom in whole
@@ -3121,21 +3145,18 @@ impl ResourceVector {
             .iter()
             .find(|(seat, _)| *seat == p.id)
             .map_or(0, |(_, magnitude)| *magnitude);
-        Self::narrowed_repetitions(&[
-            (p.life as i64 - 1, life_magnitude),
-            // CR 704.5c (ten or more poison counters lose): a positive poison delta is the
-            // per-period gain.
-            (
-                9 - p.poison_counters as i64,
-                self.poison.get(&p.id).copied().unwrap_or(0),
-            ),
-            // CR 104.3c + CR 121.4 (drawing from an empty library loses): a negative
-            // library delta is the per-period drain.
-            (
-                state.library_of(p.id).len() as i64,
-                -self.library_delta.get(&p.id).copied().unwrap_or(0),
-            ),
-        ])
+        Self::narrowed_repetitions(
+            [(p.life as i64 - 1, life_magnitude)]
+                .into_iter()
+                // CR 704.5c / CR 704.6b: the poison-loss rule the SBA applies to this seat.
+                .chain(self.poison_axis(state, p))
+                // CR 104.3c + CR 121.4 (drawing from an empty library loses): a negative
+                // library delta is the per-period drain.
+                .chain([(
+                    state.library_of(p.id).len() as i64,
+                    -self.library_delta.get(&p.id).copied().unwrap_or(0),
+                )]),
+        )
     }
 
     /// CR 732.2a: **controller-scoped** net-progress. Returns true iff the cycle makes
@@ -6822,8 +6843,21 @@ fn grown_objects_are_inert(current: &GameState, grown: &HashSet<ObjectId>) -> bo
 ///
 /// WHICH axes those are is `impl PartialEq for GameState`'s own decision, and
 /// `_gamestate_partition_is_total`'s doc is the single authority on what its totality guard
-/// buys. The two hand conjuncts at the end of this function are where this gate compensates
-/// for an axis that decision left out; each states its own one-sided-safety argument.
+/// buys. The three hand conjuncts at the end of this function are where this gate compensates
+/// for an axis that decision left out; each states its own one-sided-safety argument. The
+/// shield conjunct is `game_state::pending_shields_loop_eq` — the SAME predicate
+/// `loop_states_equal` uses, so the cover adds no second shield semantics. It narrows only:
+/// alongside `PartialEq` it can never turn an unequal pair equal. What it tolerates is
+/// identical LIVE-shield growth, and it ignores spent shields entirely, because a consumed
+/// definition (CR 615.3 + CR 614.3) can never apply to a later damage event and so is not
+/// part of the game position. That is exactly why the pinned cover row
+/// `loop_period_remade_token_source::copy_effects_used_up_inside_each_spawn_period_leave_the_periods_covered`
+/// passes: its periods append only used-up `Mystic Reflection` copies — each naming a
+/// DIFFERENT per-period Spawn token in its inline `execute`
+/// (`Effect::BecomeCopy { target: SpecificObject { id } }`) — so the raw registries grow and
+/// differ while the live position recurs. Its two production callers
+/// (`loop_states_cover_modulo_object_growth`, `fodder_growth_cover_refusals`) therefore both
+/// refuse a period whose frames differ in live shield content.
 ///
 /// Tracked object sets are an append-only arena: each resolution that says "this way" (CR 608.2c)
 /// or "until" (CR 610.3) allocates its own, so the later frame's sets allocated inside the window
@@ -6909,6 +6943,11 @@ fn eq_except_growable(pa: &GameState, pb: &GameState, grown: &HashSet<ObjectId>)
     a == b
         && a.post_replacement_token_substitution_count
             == b.post_replacement_token_substitution_count
+        // CR 104.4b + CR 615.3: `PartialEq` skips the floating registry, so this gate asks
+        // the same `pending_shields_loop_eq` as `loop_states_equal`; it compares only LIVE
+        // shields (a spent one can never apply again, CR 615.3 + CR 614.3), so identical
+        // live growth covers and any differing live shield does not.
+        && crate::types::game_state::pending_shields_loop_eq(&a, &b)
 }
 
 /// CR 603.7a + CR 603.7b: a one-shot delayed trigger for a step after the frame's, whose every
@@ -11523,10 +11562,11 @@ mod tests {
     // ===================================================================
 
     use crate::types::ability::{
-        AbilityCondition, Comparator, ControllerRef, CountScope, Effect, FilterProp, PlayerScope,
-        PtStat, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-        ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter,
-        TargetRef, TriggerCondition, TriggerDefinition, TypedFilter,
+        AbilityCondition, Comparator, ControllerRef, CopyRecipient, CountScope, Effect, FilterProp,
+        PlayerScope, PreventionAmount, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+        ReplacementCondition, ReplacementDefinition, ResolvedAbility, RestrictionExpiry,
+        StaticCondition, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
+        TriggerDefinition, TypedFilter,
     };
     use crate::types::counter::CounterMatch;
     use crate::types::player::PlayerCounterKind;
@@ -29494,6 +29534,98 @@ mod tests {
         );
     }
 
+    /// CR 704.5c + CR 732.2a: the cascade's poison crossing is measured against the poison-loss
+    /// rule the SBA applies (`players::poison_loss_measure`), so the count a bounded shortcut
+    /// offers moves with the format's configured threshold, and a format with no individual
+    /// threshold arms no poison axis at all.
+    ///
+    /// CR 704.6b + CR 810.10: a shared-poison seat is measured on its team's total against
+    /// fifteen, and the team's total rises by every member's per-period gain.
+    ///
+    /// # Discrimination
+    ///
+    /// Restore the literal ten-counter headroom and every leg answers 10: the 15 and 5 legs fire,
+    /// the `None` leg finds a crossing where no rule makes one, and the Two-Headed Giant leg
+    /// answers 10 where the team crosses at 8. Measure the shared team's count but divide by one
+    /// member's gain and that leg answers 15.
+    #[test]
+    fn the_cascades_poison_crossing_reads_the_configured_loss_threshold() {
+        // One poison counter per period on each victim and nothing else, so poison is the only
+        // axis.
+        let poisoned = |victims: &[u8]| {
+            let mut delta = ResourceVector::default();
+            for &seat in victims {
+                delta.poison.insert(PlayerId(seat), 1);
+            }
+            charged_signature(delta, &[], &[])
+        };
+        let cascade = |state: &GameState, victims: &[u8]| {
+            poisoned(victims)
+                .elimination_cascade(
+                    state,
+                    PlayerId(0),
+                    None,
+                    None,
+                    &[],
+                    ChargeBound::Ceiling,
+                    AnnouncedLead::None,
+                )
+                .map(|cascade| (cascade.count, cascade.entries))
+        };
+        let departs = |repetition: u32, seats: &[u8]| {
+            vec![PredictedDeparture {
+                repetition,
+                seats: seats.iter().copied().map(PlayerId).collect(),
+            }]
+        };
+        let with_threshold = |threshold: Option<u8>| {
+            let mut state = bound_board(&[40, 40]);
+            state.format_config.poison_counter_threshold = threshold;
+            state
+        };
+
+        assert_eq!(
+            bound_board(&[40, 40])
+                .format_config
+                .poison_counter_threshold,
+            Some(10),
+            "REACH-GUARD: the default board carries the CR 704.5c threshold of ten"
+        );
+        assert_eq!(
+            cascade(&with_threshold(Some(10)), &[1]),
+            Some((10, departs(10, &[1]))),
+            "CR 704.5c: the tenth counter arrives on the tenth repetition"
+        );
+        assert_eq!(
+            cascade(&with_threshold(Some(15)), &[1]),
+            Some((15, departs(15, &[1]))),
+            "a fifteen-counter house threshold keeps P1 in the game until the fifteenth"
+        );
+        assert_eq!(
+            cascade(&with_threshold(Some(5)), &[1]),
+            Some((5, departs(5, &[1]))),
+            "a five-counter house threshold takes P1 out on the fifth"
+        );
+        assert_eq!(
+            cascade(&with_threshold(None), &[1]),
+            None,
+            "no individual poison-loss rule, so poison is no CR 704 axis and nothing is measured"
+        );
+
+        // CR 704.6b + CR 810.10: each opponent gets a counter, so the opposing team's shared
+        // total rises by two a period: 14 of headroom under fifteen is 7 strict, crossing on 8.
+        let giant = GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 7);
+        assert_eq!(
+            giant.format_config.poison_counter_threshold, None,
+            "REACH-GUARD: the shared-poison format has no individual threshold"
+        );
+        assert_eq!(
+            cascade(&giant, &[2, 3]),
+            Some((8, departs(8, &[2, 3]))),
+            "the opposing team crosses together when its shared total reaches fifteen"
+        );
+    }
+
     /// **T5** — the subtraction is inert unless the declaration pinned a charged slot with a
     /// `Targets` pin.
     ///
@@ -30001,6 +30133,7 @@ mod tests {
     fn a_stack_entry_is_scanned_under_the_loop_firewall() {
         use crate::types::ability::{Effect, TargetFilter, TypedFilter};
         let particular_move = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
             target: TargetFilter::ParentTarget,
@@ -30650,30 +30783,349 @@ mod tests {
         );
     }
 
+    /// CR 615.5: the `GainLife` rider the floating shields in this section name.
+    fn gain_life_rider(amount: i32) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: amount },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
     /// CR 615.5: a floating prevention shield naming `rider` through a freshly
     /// installed arena entry, after `padding` earlier entries.
     fn floating_rider_frame(padding: usize, rider_amount: i32) -> GameState {
-        let rider = |amount| {
-            crate::types::ability::ResolvedAbility::new(
-                Effect::GainLife {
-                    amount: QuantityExpr::Fixed { value: amount },
-                    player: TargetFilter::Controller,
-                },
-                vec![],
-                ObjectId(1),
-                PlayerId(0),
-            )
-        };
         let mut state = GameState::new_two_player(42);
         for _ in 0..padding {
-            state.install_replacement_continuation(rider(rider_amount));
+            state.install_replacement_continuation(gain_life_rider(rider_amount));
         }
-        let id = state.install_replacement_continuation(rider(rider_amount));
+        let id = state.install_replacement_continuation(gain_life_rider(rider_amount));
         state.pending_damage_replacements.push(
             ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone)
                 .runtime_execute(id),
         );
         state
+    }
+
+    /// CR 615.5: [`floating_rider_frame`] plus `extra` further shields of the same content,
+    /// each naming a FRESH arena position — so two frames hold the same shields by value at
+    /// different allocation history.
+    fn floating_rider_growth(padding: usize, rider_amount: i32, extra: usize) -> GameState {
+        let mut state = floating_rider_frame(padding, rider_amount);
+        for _ in 0..extra {
+            let id = state.install_replacement_continuation(gain_life_rider(rider_amount));
+            state.pending_damage_replacements.push(
+                ReplacementDefinition::new(
+                    crate::types::replacements::ReplacementEvent::DamageDone,
+                )
+                .runtime_execute(id),
+            );
+        }
+        state
+    }
+
+    /// CR 615.7: the class printed amount-shield cards install — a floating `Next(n)`
+    /// prevention for the rest of the turn, unconsumed, with no rider.
+    fn prevention_shield(amount: u32) -> ReplacementDefinition {
+        ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::Next(amount))
+            .expiry(RestrictionExpiry::EndOfTurn)
+    }
+
+    /// A frame whose ENTIRE floating replacement registry is `defs`: `new_two_player` is
+    /// otherwise empty, so a difference between two such frames is the registry's alone.
+    fn shield_frames(defs: &[ReplacementDefinition]) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.pending_damage_replacements = defs.to_vec();
+        state
+    }
+
+    /// CR 104.4b + CR 732.2a: both comparators refuse the pair. The `PartialEq` reach-guard
+    /// proves the refusal is the shield conjunct's — `PartialEq` skips the whole registry — and
+    /// the registry `assert_ne!` proves the rows are not degenerate.
+    fn assert_shield_frames_differ(a: &GameState, b: &GameState) {
+        assert_eq!(a, b, "reach-guard: `PartialEq` skips the registry");
+        assert_ne!(
+            a.pending_damage_replacements, b.pending_damage_replacements,
+            "reach-guard: the registries really differ"
+        );
+        assert!(
+            !loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "`loop_states_equal` must refuse a differing LIVE floating shield"
+        );
+        assert!(
+            !eq_except_growable(a, b, &HashSet::new()),
+            "`eq_except_growable` must refuse a differing LIVE floating shield"
+        );
+    }
+
+    /// CR 104.4b: both comparators accept the pair.
+    fn assert_shield_frames_match(a: &GameState, b: &GameState) {
+        assert!(
+            loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "`loop_states_equal` must accept equal floating shields"
+        );
+        assert!(
+            eq_except_growable(a, b, &HashSet::new()),
+            "`eq_except_growable` must accept equal floating shields"
+        );
+    }
+
+    /// CR 614.3 + CR 732.2a: synthetic spent-entry fixture with an inline `execute` naming
+    /// `id`. It isolates the differing inline-payload axis of the Mystic Reflection cover
+    /// regression, not that card's event/filter definition. The caller marks each definition
+    /// consumed before comparison; the fixture is never applied to an event.
+    fn copy_effect_naming(id: ObjectId) -> ReplacementDefinition {
+        ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone)
+            .execute(AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::BecomeCopy {
+                    target: TargetFilter::SpecificObject { id },
+                    recipient: CopyRecipient::Source,
+                    duration: None,
+                    mana_value_limit: None,
+                    additional_modifications: Vec::new(),
+                },
+            ))
+    }
+
+    /// CR 615.3 + CR 614.3: the same definition, USED UP — `find_applicable_replacements`
+    /// skips it, so it is not part of the position either comparator reads.
+    fn spent(mut def: ReplacementDefinition) -> ReplacementDefinition {
+        def.is_consumed = true;
+        def
+    }
+
+    /// CR 615.7: a shield's AMOUNT is content — "the next 5 damage" and "the next
+    /// 3 damage" are different loop positions.
+    #[test]
+    fn loop_comparators_refuse_a_differing_floating_shield_amount() {
+        let a = shield_frames(&[prevention_shield(5)]);
+        let b = shield_frames(&[prevention_shield(3)]);
+        assert_shield_frames_differ(&a, &b);
+    }
+
+    /// CR 615.3 + CR 614.3: a SPENT shield is not part of the position. Both comparators
+    /// ignore consumed entries — the live-only reading `analysis::resource::replacement_def_is_live`
+    /// gives the loop firewall — so two registries whose spent entries differ in content are
+    /// the same loop point, and so is a spent entry against an empty registry. `PartialEq`
+    /// skips the registry entirely, and the `assert_ne!` proves the raw registries really
+    /// differ, so the verdict cannot pass vacuously.
+    #[test]
+    fn loop_comparators_ignore_a_spent_floating_shield() {
+        let a = shield_frames(&[spent(prevention_shield(5))]);
+        let b = shield_frames(&[spent(prevention_shield(3))]);
+        assert_eq!(a, b, "reach-guard: `PartialEq` skips the registry");
+        assert_ne!(
+            a.pending_damage_replacements, b.pending_damage_replacements,
+            "reach-guard: the spent entries differ in content"
+        );
+        assert_shield_frames_match(&a, &b);
+
+        let empty = shield_frames(&[]);
+        assert_eq!(empty, a, "reach-guard: `PartialEq` skips the registry");
+        assert_shield_frames_match(&empty, &a);
+    }
+
+    /// CR 615.3 + CR 614.3: mixed registries compare as if only their LIVE entries existed.
+    /// A spent entry beside live ones is invisible; a differing LIVE entry still refuses
+    /// through the common-prefix compare. The two comparators share the predicate, so both
+    /// verdicts are pinned by the shared helpers.
+    #[test]
+    fn loop_comparators_compare_mixed_registries_by_their_live_shields() {
+        let live = prevention_shield(5);
+        let a = shield_frames(std::slice::from_ref(&live));
+        let b = shield_frames(&[
+            spent(prevention_shield(3)),
+            live,
+            spent(prevention_shield(7)),
+        ]);
+        assert_eq!(a, b, "reach-guard: `PartialEq` skips the registry");
+        assert_ne!(
+            a.pending_damage_replacements, b.pending_damage_replacements,
+            "reach-guard: the registries really differ"
+        );
+        assert_shield_frames_match(&a, &b);
+
+        // The live half is still content: same live count, differing amount.
+        let a = shield_frames(&[prevention_shield(5), spent(prevention_shield(5))]);
+        let b = shield_frames(&[spent(prevention_shield(5)), prevention_shield(3)]);
+        assert_shield_frames_differ(&a, &b);
+    }
+
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: the fail-closed
+    /// lone-install rule reads the LIVE sequence, so one live shield against a registry whose
+    /// entries are all spent still refuses (the live registry is
+    /// empty on one side), while two identical live instalments accept.
+    #[test]
+    fn loop_comparators_refuse_a_live_floating_shield_against_a_spent_only_registry() {
+        let spent_only = shield_frames(&[spent(prevention_shield(5))]);
+        let once = shield_frames(&[prevention_shield(5)]);
+        let twice = shield_frames(&[
+            spent(prevention_shield(5)),
+            prevention_shield(5),
+            prevention_shield(5),
+        ]);
+        assert_shield_frames_differ(&spent_only, &once);
+        assert_shield_frames_match(&spent_only, &twice);
+    }
+
+    /// CR 514.2 + CR 611.2a: "this turn" versus no expiry is content.
+    #[test]
+    fn loop_comparators_refuse_a_differing_floating_shield_expiry() {
+        let mut persistent = prevention_shield(5);
+        persistent.expiry = None;
+        let a = shield_frames(&[prevention_shield(5)]);
+        let b = shield_frames(&[persistent]);
+        assert_shield_frames_differ(&a, &b);
+    }
+
+    /// Loop-comparison policy: the installing source anchors the shield's attribution, so it is
+    /// compared as content (no single rule requires the anchor; CR 615.5 keeps the rider with it).
+    #[test]
+    fn loop_comparators_refuse_a_differing_floating_shield_source() {
+        let mut from_first = prevention_shield(5);
+        from_first.source_object = Some(ObjectId(3));
+        let mut from_second = prevention_shield(5);
+        from_second.source_object = Some(ObjectId(4));
+        let a = shield_frames(&[from_first]);
+        let b = shield_frames(&[from_second]);
+        assert_shield_frames_differ(&a, &b);
+    }
+
+    /// CR 615.5 + CR 614.6: "that many" / follow-up riders are content. Both shields name arena
+    /// position 0, so the difference cannot be blamed on allocation history — only on the
+    /// resolved riders (`GainLife{3}` vs `GainLife{5}`).
+    #[test]
+    fn loop_comparators_refuse_floating_shields_whose_riders_differ() {
+        let a = floating_rider_frame(0, 3);
+        let b = floating_rider_frame(0, 5);
+        assert_eq!(
+            a.pending_damage_replacements[0].runtime_execute,
+            b.pending_damage_replacements[0].runtime_execute,
+            "reach-guard: both shields name arena position 0"
+        );
+        assert_ne!(
+            a.replacement_rider(&a.pending_damage_replacements[0]),
+            b.replacement_rider(&b.pending_damage_replacements[0]),
+            "reach-guard: the resolved riders differ by value (GainLife 3 vs GainLife 5)"
+        );
+        assert_eq!(a, b, "reach-guard: `PartialEq` skips the registry");
+        assert!(
+            !loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "`loop_states_equal` must refuse differing riders"
+        );
+        assert!(
+            !eq_except_growable(&a, &b, &HashSet::new()),
+            "`eq_except_growable` must refuse differing riders"
+        );
+    }
+
+    /// CR 104.4b: re-installing an identical shield is allocation history, not content, even
+    /// when the fresh copy names a new arena position.
+    #[test]
+    fn loop_comparators_accept_floating_shields_whose_riders_differ_only_in_arena_position() {
+        let a = floating_rider_frame(1, 5);
+        let b = floating_rider_growth(0, 5, 1);
+        assert_eq!(a.pending_damage_replacements.len(), 1);
+        assert_eq!(b.pending_damage_replacements.len(), 2);
+        assert_ne!(
+            a.pending_damage_replacements[0].runtime_execute,
+            b.pending_damage_replacements[0].runtime_execute,
+            "reach-guard: the first shields name different arena positions"
+        );
+        assert_eq!(
+            a.pending_damage_replacements[0].runtime_execute,
+            b.pending_damage_replacements[1].runtime_execute,
+            "reach-guard: the appended shield names the arena position the single one names"
+        );
+        assert_shield_frames_match(&a, &b);
+    }
+
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: one identical
+    /// live shield growing into two is accepted by the loop comparator's multiplicity policy.
+    /// Both comparators must accept it, and `PartialEq` (blind to the whole registry) already does.
+    #[test]
+    fn loop_comparators_accept_an_identical_floating_shield_multiplicity() {
+        let shield = prevention_shield(5);
+        let a = shield_frames(std::slice::from_ref(&shield));
+        let b = shield_frames(&[shield.clone(), shield]);
+        assert_eq!(a, b, "reach-guard: `PartialEq` skips the registry");
+        assert_eq!(a.pending_damage_replacements.len(), 1);
+        assert_eq!(b.pending_damage_replacements.len(), 2);
+        assert_shield_frames_match(&a, &b);
+    }
+
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: an appended LIVE
+    /// shield of a DIFFERENT class breaks the recurrence — the tail rule only tolerates repeats
+    /// of the class the shorter live registry ended on.
+    #[test]
+    fn loop_comparators_refuse_an_appended_differing_floating_shield() {
+        let a = shield_frames(&[prevention_shield(5)]);
+        let b = shield_frames(&[prevention_shield(5), prevention_shield(3)]);
+        assert_shield_frames_differ(&a, &b);
+    }
+
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: with no live
+    /// shield observed yet the comparator cannot infer a class, so a single install is refused
+    /// (fail-closed, delays a draw by at most one cycle) while two identical installs are accepted.
+    /// Empty versus empty is the regression row for the
+    /// short-circuit: without it every shield-free loop in the engine would stop drawing.
+    #[test]
+    fn loop_comparators_refuse_a_lone_floating_shield_against_an_empty_registry() {
+        let empty = shield_frames(&[]);
+        let once = shield_frames(&[prevention_shield(5)]);
+        let twice = shield_frames(&[prevention_shield(5), prevention_shield(5)]);
+        assert_shield_frames_differ(&empty, &once);
+        assert_shield_frames_match(&empty, &twice);
+        assert_shield_frames_match(&empty, &shield_frames(&[]));
+    }
+
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: the comparator
+    /// conservatively preserves live registry order. Growth that repeats the last class is
+    /// still accepted.
+    #[test]
+    fn loop_comparators_refuse_reordered_floating_shields() {
+        let a = shield_frames(&[prevention_shield(5), prevention_shield(3)]);
+        let b = shield_frames(&[prevention_shield(3), prevention_shield(5)]);
+        assert_shield_frames_differ(&a, &b);
+        let grown = shield_frames(&[
+            prevention_shield(5),
+            prevention_shield(3),
+            prevention_shield(3),
+        ]);
+        assert_shield_frames_match(&a, &grown);
+    }
+
+    /// CR 614.3 + CR 615.3 + CR 732.2a: the differing spent-payload axis of the pinned
+    /// `Mystic Reflection` regression — each period appends one more USED-UP copy effect whose
+    /// inline `execute` names a DIFFERENT per-period Spawn token, so the raw registries grow in
+    /// length AND differ in content.
+    /// Neither difference is part of the position: the appended definitions are spent
+    /// (CR 615.3 + CR 614.3), so the live sequences are empty on both sides and both
+    /// comparators accept. This is the unit-level discriminator for the pinned integration
+    /// row `loop_period_remade_token_source::copy_effects_used_up_inside_each_spawn_period_leave_the_periods_covered`.
+    #[test]
+    fn loop_comparators_ignore_growth_of_spent_floating_copy_effects() {
+        let a = shield_frames(&[spent(copy_effect_naming(ObjectId(10)))]);
+        let b = shield_frames(&[
+            spent(copy_effect_naming(ObjectId(10))),
+            spent(copy_effect_naming(ObjectId(11))),
+        ]);
+        assert_eq!(a, b, "reach-guard: `PartialEq` skips the registry");
+        assert_ne!(
+            a.pending_damage_replacements[0].execute, b.pending_damage_replacements[1].execute,
+            "reach-guard: the appended effect names a different per-period object"
+        );
+        assert_ne!(
+            a.pending_damage_replacements, b.pending_damage_replacements,
+            "reach-guard: the raw registries grow and differ"
+        );
+        assert_shield_frames_match(&a, &b);
     }
 
     /// CR 104.4b: two loop samples taken after 3 and 4 iterations, each of which

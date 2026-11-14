@@ -3,27 +3,50 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4505
-- **Total card appearances across root causes:** 4538 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4502
+- **Total card appearances across root causes:** 4535 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
+Cards listed in `crates/phase-ast/data/confirmed-misparses.toml` are held unsupported in coverage until their fix lands; fixing one means deleting its row there and regenerating card data (and the committed test fixture only when its copy of that face carries the `confirmed_misparse` marker).
+
+## Regression coverage boundaries
+
+The owner/phasing repairs in PR #10635 retain distinct binding authorities:
+
+- A source-owner shuffle retains the source binding and its owner's shuffle obligation without announcing a target. Alabaster Dragon's death trigger follows its recorded graveyard successor; a stolen token copy still shuffles its owner's library after it ceases to exist. Etrata's source shuffle remains independent of its earlier exile target.
+- A forwarded result never replaces a primary source reference. After Beacon of Unrest pays for Mox Diamond's real entry-cost discard, the Artifact-only Mox stays on the battlefield while Beacon alone enters its owner's shuffled library. Returned-object anaphora use their separate context; a primary `SelfRef` retains the creating source and does not enable result forwarding by itself.
+- A library search publishes its chosen card as a later bare-object anaphor's referent. The composed search-then-counter controls put counters on the found creature after entry, so Elemental Bond still reads its entry-time power; printed Green Sun's Zenith controls keep the spell's own shuffle separate from the creature it found.
+- Coordinated owner instructions defer source placement to one terminal owner shuffle, then draw for that owner. Gandalf, Wandering Wizard shuffles once and draws three under own or stolen control; an opposing Cosi's Trickster receives one counter. If Gandalf is returned to hand in response, the source stays there while the owner still shuffles once and draws three. Oblation draws two for the selected permanent's owner.
+- A merged source carries that same library-placement authority into each physical component's replacement-aware batch request. Gemrazer cast underneath Gandalf enters the owner's library with Gandalf before the one shuffle and three draws; component delivery does not add its own shuffles.
+- An owner-population shuffle uses the selected objects' owners, but does not rewrite an explicit origin possessor. A stolen Elixir of Immortality still moves its activator's graveyard.
+- Compound phasing distinguishes an announced optional target from an untargeted combat partner. Dream Fighter captures the partner's incarnation when the trigger binds: blinking that partner does not phase out the returned object, including after save/restore. Ordinary mixed source/creature filters still phase out only their announced target.
+- Entering-blocker effects publish attacker-side combat events without pretending the new creature declared a block. Mirror Match triggers the original attacking Dream Fighter once per entering copy, never the copy's own blocks ability; a bare becomes-blocked trigger such as Drelnoch fires only on the first blocked transition.
+- The shared attacker-blocked family and Ring emblem consume those same occurrences. Afflict loses life only on the first blocked transition; Ring level three schedules the entering creature's sacrifice at end of combat. The public Ring control counters Mirror Match's separate expiry with Stifle, distinguishing the exact sacrifice from the spell's ordinary exile.
+- Entering-blocker admission reads the entrant's effective type after layers settle. A Mirror Match copy of a crewed Smuggler's Copter is an uncrewed noncreature Vehicle: it establishes no block or Cunning Evasion trigger, the original deals its combat damage, and the token still expires at end of combat.
+- Supported compound phasing references use their own binding authority. An indexed parent slot is selected before incarnation checks, so a stale earlier slot cannot renumber a later one; a missing or stale selected slot cannot revive another inherited object. Unsupported context unions retain ordinary announced-target behavior.
+- Authoritative raw and trusted restores reject a constructed combat-phase instruction whose live battlefield partner lacks a captured incarnation. Exact stale pins and already-departed partners remain admissible; unplaced trigger blueprints are not mistaken for constructed stack abilities.
+- A target filter containing only properties is still constrained. Forge of Heroes retains both commander designation and entry-this-turn restrictions.
+- An untargeted Aura-host instruction remains a resolution-time attachment operand. Watery Grasp can shuffle its enchanted creature into that creature's owner's library after the host gains shroud; the activation does not announce the host as a target.
+
+The full-Oracle controls establish these clauses, not complete support for every ability on those cards. Etrata's conditional game-loss clause remains a separate parser gap under [#10728](https://github.com/phase-rs/phase/issues/10728); Forge of Heroes' conditional dual-counter tail remains unsupported under [#8112](https://github.com/phase-rs/phase/issues/8112). Fblthp, Impossibly Lost is a gendered source-reference parsing control, not a claim that its trigger condition is supported.
+
 ## Ranked root causes
 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
 | 1 | Relative-clause / filter restriction on target dropped | 724 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
-| 2 | Dropped intervening-if / gating condition (condition: null) | 570 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
+| 2 | Dropped intervening-if / gating condition (condition: null) | 568 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
 | 3 | Anaphor bound to wrong referent | 400 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 380 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 323 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 225 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 207 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 208 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
-| 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 178 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
+| 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 177 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
 | 10 | Trigger event/mode unrecognized → Unknown | 164 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
 | 11 | Replacement / prevention / 'instead' effect mis-modeled | 151 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
 | 12 | Modal 'choose one/N' parsed as independent abilities | 132 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
@@ -45,7 +68,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2397/4538 ≈ 52.8% of all misparse appearances; the top 10 cover 3379/4538 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped below row 8 as cards were fixed.
+> The top **5** root causes cover 2395/4535 ≈ 52.8% of all misparse appearances; the top 10 cover 3376/4535 ≈ 74.4%. Fix these first. Row order is the original ranking; row 7 has since dropped below row 8 as cards were fixed.
 
 ## Full card lists per root cause
 
@@ -784,7 +807,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 2. Dropped intervening-if / gating condition (condition: null)  (570 cards)
+### 2. Dropped intervening-if / gating condition (condition: null)  (568 cards)
 
 **Signature.** Trigger/static/replacement/spell condition left null though Oracle has an 'if/while/as long as/unless' game-state gate; the effect resolves unconditionally (CR 603.4 / 608.2c).
 
@@ -1233,7 +1256,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Sigil Captain
 - Silhouette
 - Silver Bolt
-- Skulking Killer
 - Slingbow Trap
 - Smart Ass
 - Smuggler's Share
@@ -1307,7 +1329,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Underdog Racer
 - Undersimplify
 - Unified Strike
-- Unified Will
 - Unnatural Summons
 - Unswerving Sloth
 - Unyaro
@@ -3176,7 +3197,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 9. Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed)  (178 cards)
+### 9. Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed)  (177 cards)
 
 **Signature.** Effect recipient / filter controller / chooser uses You/Controller where Opponent/TargetPlayer/ScopedPlayer/DefendingPlayer is required, or per-player fan-out is dropped.
 
@@ -3278,7 +3299,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Lembas
 - Liliana's Indignation
 - Liliana's Triumph
-- Loaming Shaman
 - Lobelia, Defender of Bag End
 - Lord of Tresserhorn
 - Lozhan, Dragons' Legacy

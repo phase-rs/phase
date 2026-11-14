@@ -7296,9 +7296,29 @@ id = "060956cd-74d3-5eab-8057-50a1dfc76020"
 category = "Creature"
 fidelity = "Full"
 source_card_names = [
-    "Icatian Crier",
-    "Icatian Town",
-    "Sarpadian Empires, Vol. VII",
+    "Boss's Chauffeur",
+    "Cabaretti Charm",
+    "Caldaia Guardian",
+    "Citizen's Crowbar",
+    "Courier's Briefcase",
+    "Darling of the Masses",
+    "Exhibition Magician",
+    "Grand Crescendo",
+    "Halo Fountain",
+    "Indulge // Excess",
+    "Kitt Kanto, Mayhem Diva",
+    "Luxurious Libation",
+    "Master of Ceremonies",
+    "Origin of the Hulk",
+    "Phabine, Boss's Confidant",
+    "Prosperous Partnership",
+    "Rabble Rousing",
+    "Rakish Revelers",
+    "Rope Line Attendant",
+    "Sanctuary Warden",
+    "Scepter of Celebration",
+    "Stimulus Package",
+    "Warm Welcome",
 ]
 set_code = "TRC"
 set_name = "Star Trek Commander"
@@ -7313,12 +7333,25 @@ toughness = 1
 core_types = ["Creature"]
 subtypes = ["Citizen"]
 supertypes = []
-colors = ["White"]
+colors = [
+    "Green",
+    "White",
+]
 keywords = []
+
+[[token.source_card_refs]]
+card_name = "Grand Crescendo"
+scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
+scryfall_id = "b41a1ff1-8e72-4269-825c-aaa12b3a4dca"
+
+[[token.source_card_refs]]
+card_name = "Grand Crescendo"
+scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
+scryfall_id = "a149748e-f192-4ec6-bae3-5a18ffcec140"
 
 [token.token_image_ref]
 scryfall_id = "f801903a-5db6-4566-ad33-2c1de8ac4287"
-scryfall_oracle_id = "e31c15d7-f89e-480b-a22f-5823343342bb"
+scryfall_oracle_id = "ffbc4833-01db-45f8-b8b4-c2e2c8235d0c"
 preset_id = "060956cd-74d3-5eab-8057-50a1dfc76020"
 
 [[token]]
@@ -49596,6 +49629,77 @@ scryfall_oracle_id = "f351e0ab-44bf-4895-a05f-c0bb473da1ef"
 preset_id = "3968de9a-3aac-5b38-8a48-51f1cdfe3f9d"
 
 [[token]]
+id = "399734a1-fe83-56ec-89cd-ef707c0fcfd8"
+category = "Creature"
+fidelity = "Full"
+source_card_names = ["Phyrexian Processor"]
+set_code = "SLD"
+set_name = "Secret Lair Drop"
+collector_number = "2446"
+released_at = "2019-12-02"
+type_line = "Token Creature — Phyrexian Minion"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
+
+[token.body]
+display_name = "Phyrexian Minion"
+core_types = ["Creature"]
+subtypes = [
+    "Phyrexian",
+    "Minion",
+]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Phyrexian Processor"
+scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
+scryfall_id = "04789161-f0a8-4ba5-832f-4d585c5117a6"
+
+[[token.source_card_refs]]
+card_name = "Phyrexian Processor"
+scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
+scryfall_id = "c49eed6b-d446-4ce1-ab51-6f42e145b1a7"
+
+[[token.source_card_refs]]
+card_name = "Phyrexian Processor"
+scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
+scryfall_id = "34cefcd1-9aa2-4c34-ba68-736c7889cc92"
+
+[[token.source_card_refs]]
+card_name = "Phyrexian Processor"
+scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
+scryfall_id = "a2e35d8d-050f-4f7a-809a-c0aea30c0dbb"
+
+[[token.source_card_refs]]
+card_name = "Phyrexian Processor"
+scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
+scryfall_id = "56df1833-4c93-499b-9f40-f8c2d0f29342"
+
+[[token.source_card_refs]]
+card_name = "Phyrexian Processor"
+scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
+scryfall_id = "86238bde-8a82-4e85-bd64-2fdce77fb72b"
+
+[[token.source_card_refs]]
+card_name = "Phyrexian Processor"
+scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
+scryfall_id = "6cd99a2f-d20a-409e-9cf7-b3eb4399c8b8"
+
+[[token.source_card_refs]]
+card_name = "Phyrexian Processor"
+scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
+scryfall_id = "554fdc29-279d-4297-b8d3-01d90c96c7ba"
+
+[token.token_image_ref]
+scryfall_id = "f85b3716-0352-4401-afae-e5927f2acae0"
+scryfall_oracle_id = "6488080c-132c-4c5e-8ea2-1b689c519d83"
+preset_id = "399734a1-fe83-56ec-89cd-ef707c0fcfd8"
+
+[[token]]
 id = "399a0137-524e-559d-9d11-e41db7e4897a"
 category = "Creature"
 fidelity = "Full"
@@ -74263,7 +74367,6 @@ preset_id = "534ff50b-4189-562a-89cb-ec8790d38620"
 id = "53518bdd-3f35-5b95-9591-255a1036fda8"
 category = "Creature"
 fidelity = "Full"
-source_card_names = ["Phyrexian Processor"]
 set_code = "DDE"
 set_name = "Duel Decks: Phyrexia vs. the Coalition"
 collector_number = "2"
@@ -74281,46 +74384,6 @@ subtypes = ["Minion"]
 supertypes = []
 colors = ["Black"]
 keywords = []
-
-[[token.source_card_refs]]
-card_name = "Phyrexian Processor"
-scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
-scryfall_id = "04789161-f0a8-4ba5-832f-4d585c5117a6"
-
-[[token.source_card_refs]]
-card_name = "Phyrexian Processor"
-scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
-scryfall_id = "c49eed6b-d446-4ce1-ab51-6f42e145b1a7"
-
-[[token.source_card_refs]]
-card_name = "Phyrexian Processor"
-scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
-scryfall_id = "34cefcd1-9aa2-4c34-ba68-736c7889cc92"
-
-[[token.source_card_refs]]
-card_name = "Phyrexian Processor"
-scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
-scryfall_id = "a2e35d8d-050f-4f7a-809a-c0aea30c0dbb"
-
-[[token.source_card_refs]]
-card_name = "Phyrexian Processor"
-scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
-scryfall_id = "56df1833-4c93-499b-9f40-f8c2d0f29342"
-
-[[token.source_card_refs]]
-card_name = "Phyrexian Processor"
-scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
-scryfall_id = "86238bde-8a82-4e85-bd64-2fdce77fb72b"
-
-[[token.source_card_refs]]
-card_name = "Phyrexian Processor"
-scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
-scryfall_id = "6cd99a2f-d20a-409e-9cf7-b3eb4399c8b8"
-
-[[token.source_card_refs]]
-card_name = "Phyrexian Processor"
-scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
-scryfall_id = "554fdc29-279d-4297-b8d3-01d90c96c7ba"
 
 [token.token_image_ref]
 scryfall_id = "a9930d11-4772-4fc2-abbd-9af0a9b23a3e"
@@ -104313,8 +104376,10 @@ source_card_names = [
     "Gonti, Night Minister",
     "Gorbag of Minas Morgul",
     "Grabby Giant // That's Mine",
+    "Grand Nagus Zek",
     "Great Train Heist",
     "Greedy Freebooter",
+    "Grilka, Widowed Warrior",
     "Grim Bounty",
     "Grim Hireling",
     "Guild Artisan",
@@ -104424,6 +104489,7 @@ source_card_names = [
     "Prosperous Thief",
     "Prying Blade",
     "Puppet Master, String Puller",
+    "Quark, Humble Proprietor",
     "RMS Titanic",
     "Ragavan, Nimble Pilferer",
     "Rain of Riches",
@@ -104442,6 +104508,7 @@ source_card_names = [
     "Revel in Riches",
     "Riveteers Requisitioner",
     "Rocketeer Boostbuggy",
+    "Rom and Leeta, Unlikely Pair",
     "Rose Room Treasurer",
     "Ruthless Knave",
     "Ruthless Technomancer",
@@ -104449,6 +104516,7 @@ source_card_names = [
     "Sailor of Means",
     "Sanar, Unfinished Genius // Wild Idea",
     "Sarkhan, Dragon Ascendant",
+    "Savvy Profiteer",
     "Scion of Opulence",
     "Scuzzback Scrounger",
     "Season of the Bold",
@@ -104486,12 +104554,14 @@ source_card_names = [
     "Sword of Wealth and Power",
     "Tataru Taru",
     "Tavern Scoundrel",
+    "Temporal Conqueror",
     "Tempting Contract",
     "Teval's Judgment",
     "The Balrog of Moria",
     "The Belligerent",
     "The Gold Saucer",
     "The Golden City of Orazca",
+    "The Inner Light",
     "The Matrix of Time",
     "The Misty Mountains Cold",
     "The Reaver Cleaver",
@@ -179948,8 +180018,10 @@ source_card_names = [
     "Gonti, Night Minister",
     "Gorbag of Minas Morgul",
     "Grabby Giant // That's Mine",
+    "Grand Nagus Zek",
     "Great Train Heist",
     "Greedy Freebooter",
+    "Grilka, Widowed Warrior",
     "Grim Bounty",
     "Grim Hireling",
     "Guild Artisan",
@@ -180059,6 +180131,7 @@ source_card_names = [
     "Prosperous Thief",
     "Prying Blade",
     "Puppet Master, String Puller",
+    "Quark, Humble Proprietor",
     "RMS Titanic",
     "Ragavan, Nimble Pilferer",
     "Rain of Riches",
@@ -180077,6 +180150,7 @@ source_card_names = [
     "Revel in Riches",
     "Riveteers Requisitioner",
     "Rocketeer Boostbuggy",
+    "Rom and Leeta, Unlikely Pair",
     "Rose Room Treasurer",
     "Ruthless Knave",
     "Ruthless Technomancer",
@@ -180084,6 +180158,7 @@ source_card_names = [
     "Sailor of Means",
     "Sanar, Unfinished Genius // Wild Idea",
     "Sarkhan, Dragon Ascendant",
+    "Savvy Profiteer",
     "Scion of Opulence",
     "Scuzzback Scrounger",
     "Season of the Bold",
@@ -180121,12 +180196,14 @@ source_card_names = [
     "Sword of Wealth and Power",
     "Tataru Taru",
     "Tavern Scoundrel",
+    "Temporal Conqueror",
     "Tempting Contract",
     "Teval's Judgment",
     "The Balrog of Moria",
     "The Belligerent",
     "The Gold Saucer",
     "The Golden City of Orazca",
+    "The Inner Light",
     "The Matrix of Time",
     "The Misty Mountains Cold",
     "The Reaver Cleaver",
@@ -192814,17 +192891,7 @@ keywords = []
 [[token.source_card_refs]]
 card_name = "Grand Crescendo"
 scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
-scryfall_id = "b41a1ff1-8e72-4269-825c-aaa12b3a4dca"
-
-[[token.source_card_refs]]
-card_name = "Grand Crescendo"
-scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
 scryfall_id = "a60834b0-38ab-40c9-9fd9-db3a23b13076"
-
-[[token.source_card_refs]]
-card_name = "Grand Crescendo"
-scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
-scryfall_id = "a149748e-f192-4ec6-bae3-5a18ffcec140"
 
 [token.token_image_ref]
 scryfall_id = "b7171de9-476d-4bfa-8cc0-b4fbc168cf4d"
@@ -203428,8 +203495,10 @@ source_card_names = [
     "Gonti, Night Minister",
     "Gorbag of Minas Morgul",
     "Grabby Giant // That's Mine",
+    "Grand Nagus Zek",
     "Great Train Heist",
     "Greedy Freebooter",
+    "Grilka, Widowed Warrior",
     "Grim Bounty",
     "Grim Hireling",
     "Guild Artisan",
@@ -203539,6 +203608,7 @@ source_card_names = [
     "Prosperous Thief",
     "Prying Blade",
     "Puppet Master, String Puller",
+    "Quark, Humble Proprietor",
     "RMS Titanic",
     "Ragavan, Nimble Pilferer",
     "Rain of Riches",
@@ -203557,6 +203627,7 @@ source_card_names = [
     "Revel in Riches",
     "Riveteers Requisitioner",
     "Rocketeer Boostbuggy",
+    "Rom and Leeta, Unlikely Pair",
     "Rose Room Treasurer",
     "Ruthless Knave",
     "Ruthless Technomancer",
@@ -203564,6 +203635,7 @@ source_card_names = [
     "Sailor of Means",
     "Sanar, Unfinished Genius // Wild Idea",
     "Sarkhan, Dragon Ascendant",
+    "Savvy Profiteer",
     "Scion of Opulence",
     "Scuzzback Scrounger",
     "Season of the Bold",
@@ -203601,12 +203673,14 @@ source_card_names = [
     "Sword of Wealth and Power",
     "Tataru Taru",
     "Tavern Scoundrel",
+    "Temporal Conqueror",
     "Tempting Contract",
     "Teval's Judgment",
     "The Balrog of Moria",
     "The Belligerent",
     "The Gold Saucer",
     "The Golden City of Orazca",
+    "The Inner Light",
     "The Matrix of Time",
     "The Misty Mountains Cold",
     "The Reaver Cleaver",
@@ -210819,8 +210893,10 @@ source_card_names = [
     "Gonti, Night Minister",
     "Gorbag of Minas Morgul",
     "Grabby Giant // That's Mine",
+    "Grand Nagus Zek",
     "Great Train Heist",
     "Greedy Freebooter",
+    "Grilka, Widowed Warrior",
     "Grim Bounty",
     "Grim Hireling",
     "Guild Artisan",
@@ -210930,6 +211006,7 @@ source_card_names = [
     "Prosperous Thief",
     "Prying Blade",
     "Puppet Master, String Puller",
+    "Quark, Humble Proprietor",
     "RMS Titanic",
     "Ragavan, Nimble Pilferer",
     "Rain of Riches",
@@ -210948,6 +211025,7 @@ source_card_names = [
     "Revel in Riches",
     "Riveteers Requisitioner",
     "Rocketeer Boostbuggy",
+    "Rom and Leeta, Unlikely Pair",
     "Rose Room Treasurer",
     "Ruthless Knave",
     "Ruthless Technomancer",
@@ -210955,6 +211033,7 @@ source_card_names = [
     "Sailor of Means",
     "Sanar, Unfinished Genius // Wild Idea",
     "Sarkhan, Dragon Ascendant",
+    "Savvy Profiteer",
     "Scion of Opulence",
     "Scuzzback Scrounger",
     "Season of the Bold",
@@ -210992,12 +211071,14 @@ source_card_names = [
     "Sword of Wealth and Power",
     "Tataru Taru",
     "Tavern Scoundrel",
+    "Temporal Conqueror",
     "Tempting Contract",
     "Teval's Judgment",
     "The Balrog of Moria",
     "The Belligerent",
     "The Gold Saucer",
     "The Golden City of Orazca",
+    "The Inner Light",
     "The Matrix of Time",
     "The Misty Mountains Cold",
     "The Reaver Cleaver",
@@ -223487,10 +223568,30 @@ id = "f1a4c23e-3433-5f96-bd82-ec2a3f1c81a1"
 category = "Creature"
 fidelity = "Full"
 source_card_names = [
+    "Boss's Chauffeur",
+    "Cabaretti Charm",
+    "Caldaia Guardian",
     "Citizen",
-    "Icatian Crier",
-    "Icatian Town",
-    "Sarpadian Empires, Vol. VII",
+    "Citizen's Crowbar",
+    "Courier's Briefcase",
+    "Darling of the Masses",
+    "Exhibition Magician",
+    "Grand Crescendo",
+    "Halo Fountain",
+    "Indulge // Excess",
+    "Kitt Kanto, Mayhem Diva",
+    "Luxurious Libation",
+    "Master of Ceremonies",
+    "Origin of the Hulk",
+    "Phabine, Boss's Confidant",
+    "Prosperous Partnership",
+    "Rabble Rousing",
+    "Rakish Revelers",
+    "Rope Line Attendant",
+    "Sanctuary Warden",
+    "Scepter of Celebration",
+    "Stimulus Package",
+    "Warm Welcome",
 ]
 set_code = "TRC"
 set_name = "Star Trek Commander"
@@ -223505,12 +223606,15 @@ toughness = 1
 core_types = ["Creature"]
 subtypes = ["Citizen"]
 supertypes = []
-colors = ["White"]
+colors = [
+    "Green",
+    "White",
+]
 keywords = []
 
 [token.token_image_ref]
 scryfall_id = "bb355701-39e2-428e-a62b-feac0bdada72"
-scryfall_oracle_id = "e31c15d7-f89e-480b-a22f-5823343342bb"
+scryfall_oracle_id = "ffbc4833-01db-45f8-b8b4-c2e2c8235d0c"
 preset_id = "f1a4c23e-3433-5f96-bd82-ec2a3f1c81a1"
 
 [[token]]

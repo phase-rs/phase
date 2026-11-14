@@ -22,6 +22,7 @@ import {
   InitiativeBadge,
   MonarchBadge,
   PendingSpellBadge,
+  PoisonCounterBadge,
   StatusBadge,
   UnboundedBadge,
 } from "../hud/HudBadges.tsx";
@@ -197,7 +198,7 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
               />
             ) : null}
             {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
-            {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
+            {poisonCounters > 0 ? <PoisonCounterBadge playerId={playerId} value={poisonCounters} /> : null}
             {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
             {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
             {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}

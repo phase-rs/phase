@@ -663,6 +663,12 @@ fn hash_waiting_for(waiting_for: &WaitingFor, hasher: &mut impl Hasher) {
     hash_rules_projection(waiting_for, "WaitingFor", hasher);
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test witness: rules projections the planner keys ran on this thread.
+    static RULES_PROJECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The planner keys' only door from serialized state to a hash: every root is
 /// hashed through the engine's rules projection, so display-only data never
 /// reaches a key (CR 203.1 + CR 206.1). Object entries are hashed in sorted key
@@ -718,6 +724,8 @@ fn hash_rules_projection<T: Serialize + ?Sized>(
         }
     }
 
+    #[cfg(test)]
+    RULES_PROJECTIONS.with(|c| c.set(c.get() + 1));
     let projected = rules_projection(value)
         .unwrap_or_else(|error| panic!("{root} serializes for the planner key: {error}"));
     hash_json_value(&projected, hasher);
@@ -1327,18 +1335,25 @@ impl<'a> PlannerServices<'a> {
             // Mulligan as the complete legal set; neither can fail apply_as_current.
             // Skipping the clone+simulate eliminates ~2 state clones per mulligan step.
             engine::types::actions::GameAction::MulliganDecision { .. } => true,
-            // CR 608.2d + CR 614.12a + CR 701.23a: a named-choice answer from the prompt's
-            // enumerated domain, or a library search selection, is admitted by
-            // its submission guard without mutating the game; the engine decides that
-            // through the same authority `SimulationFilter` consults before its
-            // probe. Under `PromptAnswerValidation::AtSubmission` no state copy is
+            // CR 608.2d + CR 614.12a + CR 701.23a + CR 732.2b: a named-choice answer from the
+            // prompt's enumerated domain, a library search selection, or a loop-shortcut
+            // responder's answer is admitted by its submission guard without mutating the game;
+            // the engine decides that through the same authority `SimulationFilter` consults
+            // before its probe. Under `PromptAnswerValidation::AtSubmission` no state copy is
             // made here: the root search simulates the answers in its beam until one fails, and
             // the caller the one answer it submits. A shape
             // the authority declines (a scoped search, a card name, a free-entry
             // number, an answer given while a cast or activation is in progress),
             // and every answer under `EachCandidate`, is simulated below.
+            //
+            // The shortcut arm must be listed HERE and not only in the authority: the arm is
+            // gated on `admits_without_simulation`, so an unlisted shape still takes `_ =>
+            // simulation_accepts` below while the chooser's own submission check (which reads
+            // `admits_without_simulation` directly) then simulates the same answer a second
+            // time — two takes where the unadmitted shape paid one.
             engine::types::actions::GameAction::ChooseOption { .. }
             | engine::types::actions::GameAction::SelectCards { .. }
+            | engine::types::actions::GameAction::RespondToShortcut { .. }
                 if prompt_answers.admits_without_simulation(state, &candidate.action) =>
             {
                 true
@@ -2083,9 +2098,10 @@ impl<'a> PlannerServices<'a> {
 }
 
 /// How the planner legality gate (`PlannerServices::candidate_is_valid`)
-/// validates a prompt answer, a named-choice answer or a library search
-/// selection, that `engine::ai_support::structurally_valid_prompt_answer`
-/// admits. Every other candidate is validated the same way under both.
+/// validates a prompt answer, a named-choice answer, a library search selection
+/// or a loop-shortcut answer, that
+/// `engine::ai_support::structurally_valid_prompt_answer` admits. Every other
+/// candidate is validated the same way under both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PromptAnswerValidation {
     /// Simulate each answer on a state copy, as the gate's catch-all does. The
@@ -3434,11 +3450,11 @@ pub(crate) mod tests {
 
     // ------------------------------------------------------------------
     // Prompt-answer legality gate: `candidate_is_valid` admits a named-choice
-    // answer or a library search selection through
-    // `engine::ai_support::structurally_valid_prompt_answer` instead of a state
-    // copy + simulation, and only at the `NamedChoice` / `SearchChoice`
-    // windows. Every base board is reached through the real cast/play pipeline
-    // from the card's verbatim Oracle text.
+    // answer, a library search selection, or a loop-shortcut responder's answer
+    // through `engine::ai_support::structurally_valid_prompt_answer` instead of a
+    // state copy + simulation, and only at the `NamedChoice` / `SearchChoice` /
+    // `RespondToShortcut` windows. Every base board is reached through the real
+    // cast/play pipeline from the card's verbatim Oracle text.
     // ------------------------------------------------------------------
 
     const DISTANT_MELODY_ORACLE: &str =
@@ -4011,6 +4027,63 @@ pub(crate) mod tests {
             clones >= 1,
             "an answer the authority declines must be simulated"
         );
+    }
+
+    /// #10464: a loop-shortcut responder's answer passes the legality gate without a state copy.
+    ///
+    /// The gate arm is gated on `admits_without_simulation`, so a shape missing from it falls to
+    /// `_ => simulation_accepts` — and for the last responder that simulation is the whole take.
+    /// The chooser's own submission check reads the authority directly, so it then simulates the
+    /// same answer AGAIN: two takes where the unlisted shape paid one. Fails on revert of the
+    /// `RespondToShortcut` arm (one legality clone), which is why the arm is listed at the gate and
+    /// not only in the authority.
+    #[test]
+    fn shortcut_answers_pass_the_legality_gate_without_a_state_copy() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = engine::types::game_state::WaitingFor::RespondToShortcut {
+            player: P0,
+            remaining_players: vec![P1],
+            proposal: engine::analysis::loop_check::ShortcutProposal {
+                proposer: P1,
+                predicted_winner: None,
+                count: engine::analysis::decision_template::IterationCount::Fixed(2),
+                unbounded: Vec::new(),
+                rising: Vec::new(),
+                win_kind: None,
+                win_kind_at: None,
+                template: None,
+                per_cycle: None,
+                shortened_by: None,
+                published_declaration: None,
+                leading_aims: Vec::new(),
+                road: engine::analysis::loop_check::OfferRoad::Ring,
+                counted_take: Default::default(),
+                period: Default::default(),
+            },
+        };
+        let accept = GameAction::RespondToShortcut {
+            response: engine::analysis::loop_check::ShortcutResponse::Accept,
+        };
+
+        let (verdict, clones) = gate_verdict(&state, &accept);
+        assert!(verdict, "the prompt offers this answer");
+        assert_eq!(
+            clones, 0,
+            "the gate must admit a shortcut answer structurally, not simulate the take"
+        );
+
+        // Paired reach guard: the same gate still simulates an answer outside the proposal's
+        // places, so the counter above is live rather than dead.
+        let (verdict, clones) = gate_verdict(
+            &state,
+            &GameAction::RespondToShortcut {
+                response: engine::analysis::loop_check::ShortcutResponse::Shorten {
+                    at_iteration: 2,
+                },
+            },
+        );
+        assert!(!verdict, "place 2 is at the proposed count, not a place");
+        assert!(clones >= 1, "an answer the authority declines is simulated");
     }
 
     /// T2. Every selection at Demonic Tutor's library search passes the
@@ -6352,10 +6425,10 @@ pub(crate) mod tests {
         assert_ne!(search_position_hash(&a), search_position_hash(&b));
     }
 
-    // Row 8b: the keyword fold path is exercised on a keyword-DENSE board (both
-    // the discriminant fast path and the serde payload branch) and stays cheap.
+    // Row 8b: keyword-dense board: the 400 `Flying` take the discriminant path,
+    // and the 8 `Ward` take the serde branch.
     #[test]
-    fn search_position_hash_keyword_dense_stays_fast() {
+    fn search_position_hash_projects_only_payload_keywords() {
         let mut state = make_state();
         for i in 0..400 {
             let owner = if i % 2 == 0 { PlayerId(0) } else { PlayerId(1) };
@@ -6366,14 +6439,12 @@ pub(crate) mod tests {
                 obj.keywords.push(Keyword::Ward(WardCost::PayLife(2))); // serde branch
             }
         }
-        let start = std::time::Instant::now();
-        for _ in 0..50 {
-            let _ = search_position_hash(&state);
-        }
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed.as_millis() < 500,
-            "keyword-dense position hash too slow ({elapsed:?}) — the fold regressed"
+        RULES_PROJECTIONS.with(|c| c.replace(0));
+        let _ = search_position_hash(&state);
+        assert_eq!(
+            RULES_PROJECTIONS.with(|c| c.replace(0)),
+            8,
+            "only the Ward payloads serde-fold; unit keywords hash by discriminant"
         );
     }
 
@@ -6647,7 +6718,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn planner_key_projection_dense_waiting_for_stays_fast() {
+    fn planner_key_projection_dense_waiting_for_projects_once() {
         let mut state = make_state();
         let mut targets = HashMap::new();
         let mut requirements = HashMap::new();
@@ -6683,30 +6754,12 @@ pub(crate) mod tests {
             );
         }
 
-        let start = std::time::Instant::now();
-        for _ in 0..50 {
-            let _ = transposition_key(&state);
-        }
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed.as_millis() < 1000,
-            "projection-hashed dense WaitingFor too slow ({elapsed:?})"
-        );
-
-        // Measurement only (not asserted): projection cost relative to `to_value`.
-        let start = std::time::Instant::now();
-        for _ in 0..50 {
-            let _ = rules_projection(&state.waiting_for).unwrap();
-        }
-        let projection = start.elapsed();
-        let start = std::time::Instant::now();
-        for _ in 0..50 {
-            let _ = serde_json::to_value(&state.waiting_for).unwrap();
-        }
-        let to_value = start.elapsed();
-        eprintln!(
-            "MEASURE 50x rules_projection={projection:?} 50x to_value={to_value:?} ratio={:.2}",
-            projection.as_secs_f64() / to_value.as_secs_f64()
+        RULES_PROJECTIONS.with(|c| c.replace(0));
+        let _ = transposition_key(&state);
+        assert_eq!(
+            RULES_PROJECTIONS.with(|c| c.replace(0)),
+            1,
+            "a dense WaitingFor is hashed through one projection, not one per entry"
         );
     }
 

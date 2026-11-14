@@ -357,7 +357,8 @@ fn resolve_choice(
         WaitingFor::MulliganDecision { .. }
         | WaitingFor::OpeningHandBottomCards { .. }
         | WaitingFor::BetweenGamesSideboard { .. }
-        | WaitingFor::BetweenGamesChoosePlayDraw { .. } => {
+        | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. } => {
             return Err(BailReason::MulliganOrSideboardEncountered);
         }
         WaitingFor::GameOver { .. } => {
