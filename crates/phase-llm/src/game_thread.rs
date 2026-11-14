@@ -26,7 +26,7 @@
 //!   and a reply id can be continued only once, so the thread cannot go on
 //!   from its last answered turn and the seat's next decision starts a new one.
 //! - **Start over.** A new thread is created, with the full request, when the
-//!   endpoint or model changes, when the system prompt changes (difficulty,
+//!   match moves on to its next game, when the endpoint or model changes, when the system prompt changes (difficulty,
 //!   format, or the table itself), when the last reply reported more context
 //!   than [`THREAD_CONTEXT_BUDGET_TOKENS`] or no usage at all, when the log
 //!   was rewound under the thread, and when more was logged since the seat's
@@ -128,6 +128,9 @@ impl ThreadEndpoint {
 /// A thread the API holds for a seat, as of the seat's last accepted reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OpenThread {
+    /// The game of the match the thread belongs to. A thread never continues
+    /// into the next game of a match, which replaces the game in place.
+    game_number: u8,
     endpoint: ThreadEndpoint,
     /// Fingerprint of the system prompt the thread was created with. A
     /// continue cannot send a new one, so a change starts a new thread.
@@ -149,6 +152,7 @@ struct PendingTurn {
     /// The decision the request was built for. A reply is committed only for
     /// this decision.
     fingerprint: String,
+    game_number: u8,
     endpoint: ThreadEndpoint,
     system: String,
     /// The newest log entry the request showed the seat.
@@ -165,7 +169,8 @@ impl OpenThread {
             (Some(_), None) => false,
             (None, _) => true,
         };
-        self.endpoint == next.endpoint
+        self.game_number == next.game_number
+            && self.endpoint == next.endpoint
             && self.system == next.system
             && self
                 .context_tokens
@@ -218,6 +223,7 @@ impl LlmThreadMemory {
 
         let next = PendingTurn {
             fingerprint: decision.fingerprint.clone(),
+            game_number: decision.game_number(),
             endpoint: target,
             system: fingerprint_of([decision.prompt.system.as_str()]),
             seen_through: history.iter().map(|entry| entry.seq).max(),
@@ -295,6 +301,7 @@ impl LlmThreadMemory {
                 thread.open =
                     continuable_message_id(reply.provider, reply.body).map(|message_id| {
                         OpenThread {
+                            game_number: turn.game_number,
                             endpoint: turn.endpoint,
                             system: turn.system,
                             message_id,
@@ -311,8 +318,22 @@ impl LlmThreadMemory {
                     thread.refused = Some(turn.endpoint);
                 }
             }
-            Err(_) if (200..300).contains(&reply.status) => thread.open = None,
-            Err(_) => {}
+            Err(
+                LlmError::Configuration { .. }
+                | LlmError::MalformedResponse { .. }
+                | LlmError::Provider { .. }
+                | LlmError::EmptyCompletion
+                | LlmError::UndecodableChoice { .. }
+                | LlmError::ChoiceOutOfRange { .. }
+                | LlmError::UnsupportedDecision { .. }
+                | LlmError::StaleDecision,
+            ) => {
+                // A 2xx reply was stored by the API whatever the engine made
+                // of it; a non-2xx one stored nothing.
+                if (200..300).contains(&reply.status) {
+                    thread.open = None;
+                }
+            }
         }
     }
 
@@ -379,6 +400,15 @@ mod tests {
     /// One decision. A different `revision` is a different decision, with its
     /// own fingerprint, over the same two options.
     fn decision(revision: u64, difficulty: AiDifficulty) -> GameDecisionRequest {
+        decision_in_game(revision, difficulty, GameState::default().game_number)
+    }
+
+    /// [`decision`] in game `game_number` of a match.
+    fn decision_in_game(
+        revision: u64,
+        difficulty: AiDifficulty,
+        game_number: u8,
+    ) -> GameDecisionRequest {
         let contract = AiDecisionContract {
             semantic_owner: SEAT,
             authorized_actor: SEAT,
@@ -394,7 +424,9 @@ mod tests {
             })
             .collect(),
         };
-        build_game_decision_prompt(&GameState::default(), &contract, difficulty, None, &[]).unwrap()
+        let mut state = GameState::default();
+        state.game_number = game_number;
+        build_game_decision_prompt(&state, &contract, difficulty, None, &[]).unwrap()
     }
 
     /// A log of `count` public events numbered `0..count`, as the client
@@ -1019,6 +1051,38 @@ mod tests {
         };
         assert_eq!(continued_from(&after(window)), Some("msg_1".to_string()));
         assert!(is_create(&after(window + 1)));
+    }
+
+    /// The next game of a match replaces the game in place; its first
+    /// decision starts a new thread rather than continuing the last game's.
+    #[test]
+    fn the_next_game_of_a_match_starts_a_new_thread() {
+        let mut memory = LlmThreadMemory::new();
+        let game_one = decision_in_game(1, AiDifficulty::Medium, 1);
+        answer(&mut memory, &threaded(), &game_one, &log(4), "msg_1");
+        let same_game = memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision_in_game(2, AiDifficulty::Medium, 1),
+                &log(6),
+            )
+            .unwrap()
+            .request;
+        assert_eq!(continued_from(&same_game), Some("msg_1".to_string()));
+
+        let mut memory = LlmThreadMemory::new();
+        answer(&mut memory, &threaded(), &game_one, &log(4), "msg_1");
+        let next_game = memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision_in_game(2, AiDifficulty::Medium, 2),
+                &log(6),
+            )
+            .unwrap()
+            .request;
+        assert!(is_create(&next_game));
     }
 
     /// The thread setting off, or any protocol but Anthropic Messages, sends

@@ -56,6 +56,9 @@ struct ThreadUpdateParts {
     /// The seat's difficulty-driven history window, which also bounds how much
     /// of what happened since its last answer a continue may carry.
     history: HistoryBudget,
+    /// The game of the match the decision belongs to. The next game of a match
+    /// replaces this one in place, and a thread never continues across games.
+    game_number: u8,
 }
 
 impl GameDecisionRequest {
@@ -69,6 +72,11 @@ impl GameDecisionRequest {
         self.update.history.summarized_cycles > 0
     }
 
+    /// The game of the match this decision belongs to.
+    pub fn game_number(&self) -> u8 {
+        self.update.game_number
+    }
+
     /// The one user message that continues a seat's message thread with this
     /// decision, or `None` when a continue cannot carry everything since the
     /// seat's last answer.
@@ -80,10 +88,20 @@ impl GameDecisionRequest {
     /// stated outside the fence. The reply contract is not repeated: it is in
     /// the system prompt the thread was created with.
     ///
-    /// When more was logged than the seat's history window shows, a continue
-    /// would have to drop the oldest of it, where the full request summarizes
-    /// it per turn; `None` tells the caller to start a new thread instead.
+    /// When the log handed over no longer reaches back to `since`, or more was
+    /// logged than the seat's history window shows, a continue would have to
+    /// drop some of it, where the full request summarizes it per turn; `None`
+    /// tells the caller to start a new thread instead.
     pub fn thread_update(&self, history: &[GameLogEntry], since: Option<u32>) -> Option<String> {
+        // The client hands over only its newest entries, so the log must still
+        // reach back to the entry after `since`: a gap would lose events
+        // without a trace, and only the full request can stand in for them.
+        if let Some(seen) = since {
+            let oldest = history.iter().map(|entry| entry.seq).min();
+            if !oldest.is_some_and(|oldest| oldest <= seen.saturating_add(1)) {
+                return None;
+            }
+        }
         let unseen = unseen_timeline_entries(history, since);
         if unseen.len() > self.update.history.current_cycle_entries {
             return None;
@@ -448,6 +466,7 @@ pub fn build_game_decision_prompt(
             live_position: format!("{live_board}\n{waiting_for}"),
             options: options_section,
             history: render.history,
+            game_number: state.game_number,
         },
     })
 }
@@ -1963,6 +1982,30 @@ mod tests {
         assert!(request.thread_update(&history, Some(0)).is_some());
         // ...one entry more does not.
         assert_eq!(request.thread_update(&history, None), None);
+    }
+
+    /// The client hands over only its newest log entries. When they no longer
+    /// reach back to the entry after the thread's last one, events would be
+    /// lost, so no continue is built.
+    #[test]
+    fn a_thread_update_is_refused_when_the_log_no_longer_reaches_back() {
+        let history: Vec<GameLogEntry> = (50..55)
+            .map(|seq| logged(seq, &format!("event {seq}"), LogCategory::Stack))
+            .collect();
+        let request = build_game_decision_prompt(
+            &GameState::default(),
+            &two_option_contract(),
+            AiDifficulty::Medium,
+            None,
+            &history,
+        )
+        .unwrap();
+        // Entry 50 follows 49 directly: nothing is missing.
+        assert!(request.thread_update(&history, Some(49)).is_some());
+        // Entries 11 to 49 were never handed over.
+        assert_eq!(request.thread_update(&history, Some(10)), None);
+        // An empty hand-over cannot show what happened either.
+        assert_eq!(request.thread_update(&[], Some(10)), None);
     }
 
     /// The two near-term difficulties never keep a thread; every other one may.

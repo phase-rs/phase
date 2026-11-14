@@ -5064,6 +5064,32 @@ mod restored_card_db_requirements_tests {
         clear_game_state();
     }
 
+    /// A best-of-three moves on to its next game by replacing the installed
+    /// game in place (`restart_between_games_with_starting_player`), without
+    /// a new-game boundary: the next game's first decision must not continue
+    /// the last game's thread.
+    #[test]
+    fn the_next_game_of_a_match_never_continues_the_last_games_thread() {
+        let seat = PlayerId(1);
+        install_llm_decision(seat);
+        let choice = non_pass_choice(seat);
+        let first = build_llm_decision(seat);
+        resolve_llm_reply(seat, &first, 200, &anthropic_reply("msg_1", choice));
+        assert_eq!(
+            thread_of(&build_llm_decision(seat)),
+            serde_json::json!({ "type": "continue", "previous_message_id": "msg_1" })
+        );
+
+        with_installed_state_mut(|state| state.game_number += 1).expect("the game is installed");
+        let next_game = build_llm_decision(seat);
+        assert_eq!(
+            thread_of(&next_game),
+            serde_json::json!({ "type": "create" })
+        );
+
+        clear_game_state();
+    }
+
     /// A new game (or a cleared one) never continues the last game's thread.
     #[test]
     fn clearing_the_game_clears_llm_message_threads() {

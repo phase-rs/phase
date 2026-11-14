@@ -526,7 +526,7 @@
     "apiKeyGet": "Schlüssel holen",
     "messageThreads": {
       "label": "Frühere Entscheidungen merken",
-      "hint": "KI-Plätze ab der Schwierigkeit „Mittel“ führen die ganze Partie über einen Anthropic-Nachrichtenthread, sodass das Modell auf seinen früheren Überlegungen aufbaut."
+      "hint": "KI-Plätze ab der Schwierigkeit „Mittel“ führen ihre Partie in einem Anthropic-Nachrichtenthread, sodass das Modell auf seinen früheren Überlegungen aufbaut."
     },
     "test": "Verbindung testen",
     "testing": "Test läuft …",

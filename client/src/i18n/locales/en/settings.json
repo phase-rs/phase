@@ -526,7 +526,7 @@
     "apiKeyGet": "Get a key",
     "messageThreads": {
       "label": "Remember earlier decisions",
-      "hint": "AI seats on Medium difficulty and above keep one Anthropic message thread for the whole game, so the model builds on its earlier reasoning."
+      "hint": "AI seats on Medium difficulty and above keep their game in an Anthropic message thread, so the model builds on its earlier reasoning."
     },
     "test": "Test connection",
     "testing": "Testing…",

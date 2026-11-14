@@ -526,7 +526,7 @@
     "apiKeyGet": "Obtener una clave",
     "messageThreads": {
       "label": "Recordar decisiones anteriores",
-      "hint": "Los asientos de IA con dificultad Media o superior mantienen un hilo de mensajes de Anthropic durante toda la partida, para que el modelo parta de su razonamiento anterior."
+      "hint": "Los asientos de IA con dificultad Media o superior mantienen su partida en un hilo de mensajes de Anthropic, para que el modelo parta de su razonamiento anterior."
     },
     "test": "Probar conexión",
     "testing": "Probando…",

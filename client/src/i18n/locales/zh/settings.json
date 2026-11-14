@@ -167,7 +167,7 @@
     "apiKeyGet": "获取密钥",
     "messageThreads": {
       "label": "记住之前的决策",
-      "hint": "难度为“中等”及以上的 AI 座位在整局中使用同一个 Anthropic 消息线程，让模型延续之前的推理。"
+      "hint": "难度为“中等”及以上的 AI 座位在 Anthropic 消息线程中进行对局，让模型延续之前的推理。"
     },
     "apiKeyMissing": "请重新输入 API 密钥。密钥不会在重新加载后保留，在此之前该提供方不会用于 AI 座位或轮抽机器人。",
     "apiKeyOptional": "本地服务器可留空",

@@ -526,7 +526,7 @@
     "apiKeyGet": "Ottieni una chiave",
     "messageThreads": {
       "label": "Ricorda le decisioni precedenti",
-      "hint": "I posti IA con difficoltà Media o superiore mantengono un thread di messaggi Anthropic per tutta la partita, così il modello parte dal ragionamento precedente."
+      "hint": "I posti IA con difficoltà Media o superiore mantengono la partita in un thread di messaggi Anthropic, così il modello parte dal ragionamento precedente."
     },
     "test": "Prova connessione",
     "testing": "Prova in corso…",

@@ -45,13 +45,14 @@ pub fn connection_probe_prompt() -> LlmPrompt {
     }
 }
 
-/// The probe request for `config`: the [`connection_probe_prompt`] in the shape
-/// the endpoint's first game decision is sent in.
+/// The probe request for `config`: the [`connection_probe_prompt`] in the
+/// shape the endpoint's game decisions use.
 ///
 /// For a profile that keeps its seats on Anthropic message threads, that is a
 /// thread create (the `thread` field, the beta header and the top-level
-/// `cache_control`), so a probe that passes proves a proxy or gateway in front
-/// of the API accepts them too. The thread it creates is never continued, and
+/// `cache_control`), the first request of every seat that uses a thread (Medium
+/// difficulty and above), so a probe that passes proves a proxy or gateway in
+/// front of the API accepts them too. The thread it creates is never continued, and
 /// the API drops it after five idle minutes. Every other profile is probed with
 /// exactly the request [`build_chat_request`] builds.
 ///

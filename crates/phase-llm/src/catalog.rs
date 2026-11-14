@@ -316,7 +316,12 @@ mod tests {
             let wire = serde_json::to_value(entry).unwrap()["decisionContexts"].clone();
             let expected = match entry.provider {
                 LlmProvider::Anthropic => serde_json::json!(["selfContained", "messageThread"]),
-                _ => serde_json::json!(["selfContained"]),
+                LlmProvider::OpenAi
+                | LlmProvider::Gemini
+                | LlmProvider::DeepSeek
+                | LlmProvider::OpenRouter
+                | LlmProvider::OpenAiCompatible
+                | LlmProvider::Jev => serde_json::json!(["selfContained"]),
             };
             assert_eq!(wire, expected, "{:?}", entry.provider);
         }
