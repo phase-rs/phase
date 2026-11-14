@@ -3670,6 +3670,20 @@ fn chose_object(node: &ResolvedAbility, id: ObjectId) -> bool {
 /// is a referent, and never for an instruction that deals damage to the parent's own target
 /// (`damages_parent_target`). The object is snapshot live, after the layers settle (CR 613.1:
 /// The Provider's counters count).
+/// Stamps `snapshot` as the next instruction's effect-context object. Boxed and
+/// kept out of line so the clone stays off the recursive chain walker's frame.
+#[inline(never)]
+fn with_next_effect_context_object(
+    ability: &ResolvedAbility,
+    snapshot: &CostPaidObjectSnapshot,
+) -> Box<ResolvedAbility> {
+    let mut owned = Box::new(ability.clone());
+    if let Some(next) = owned.sub_ability.as_deref_mut() {
+        next.effect_context_object = Some(snapshot.clone());
+    }
+    owned
+}
+
 fn announced_object_context(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -25105,12 +25119,8 @@ fn resolve_chain_body(
     let announced_owned;
     let ability = match &announced_object {
         Some(snapshot) if ability.sub_ability.is_some() => {
-            let mut owned = ability.clone();
-            if let Some(next) = owned.sub_ability.as_deref_mut() {
-                next.effect_context_object = Some(snapshot.clone());
-            }
-            announced_owned = owned;
-            &announced_owned
+            announced_owned = with_next_effect_context_object(ability, snapshot);
+            &*announced_owned
         }
         _ => ability,
     };
