@@ -1408,9 +1408,19 @@ fn a_from_anywhere_observer_that_left_with_its_owner_does_not_trigger() {
 /// trigger."). P2 concedes at the Metamorph's prompt, so the Diviner (and
 /// Hushbringer) leave the game, and P0 then has the Metamorph enter as a copy
 /// of the Bears. Returns how many Diviner triggers wait or are on the stack.
+/// Whose Hushbringer is on the board of the Rise rows, if any.
+#[derive(Clone, Copy, PartialEq)]
+enum RiseSuppressor {
+    None,
+    /// P2 owns and controls it, and the Diviner is P2's too (stolen by P0).
+    OwnedByLeaver,
+    /// P0 owns it and P2 controls it through Turn Against; the Diviner is P0's.
+    BorrowedByLeaver,
+}
+
 fn diviner_triggers_after_its_owner_leaves_mid_rise(
     entered_first: bool,
-    suppressor: bool,
+    suppressor: RiseSuppressor,
 ) -> usize {
     // The members of the simultaneous return are delivered in the engine's
     // order; use the board on which the Bears is on the battlefield when the
@@ -1425,14 +1435,24 @@ fn diviner_triggers_after_its_owner_leaves_mid_rise(
 
 fn diviner_triggers_on_board(
     entered_first: bool,
-    suppressor: bool,
+    suppressor: RiseSuppressor,
     metamorph_added_first: bool,
 ) -> Option<usize> {
     let db = shared_card_db().expect("integration card fixture must load");
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    let diviner = scenario.add_real_card(P2, "Twilight Diviner", Zone::Battlefield, db);
-    if suppressor {
+    let mut borrowed_hushbringer = None;
+    if suppressor == RiseSuppressor::BorrowedByLeaver {
+        borrowed_hushbringer =
+            Some(scenario.add_real_card(P0, "Hushbringer", Zone::Battlefield, db));
+    }
+    let diviner_owner = if suppressor == RiseSuppressor::BorrowedByLeaver {
+        P0
+    } else {
+        P2
+    };
+    let diviner = scenario.add_real_card(diviner_owner, "Twilight Diviner", Zone::Battlefield, db);
+    if suppressor == RiseSuppressor::OwnedByLeaver {
         scenario.add_real_card(P2, "Hushbringer", Zone::Battlefield, db);
     }
     let bears_zone = if entered_first {
@@ -1454,13 +1474,42 @@ fn diviner_triggers_on_board(
         )
     };
     let turn_against = scenario.add_real_card(P0, "Turn Against", Zone::Hand, db);
+    // P2's own Turn Against, cast on P0's Hushbringer during P0's turn.
+    let p2_turn_against = scenario.add_real_card(P2, "Turn Against", Zone::Hand, db);
+    scenario.with_mana_pool(P2, red_mana(6));
     let rise = scenario.add_real_card(P0, "Rise of the Dark Realms", Zone::Hand, db);
     let mut pool = red_mana(5);
     pool.extend((0..9).map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])));
     scenario.with_mana_pool(P0, pool);
     scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
     let mut runner = scenario.build();
-    runner.cast(turn_against).target_object(diviner).resolve();
+    if let Some(hushbringer) = borrowed_hushbringer {
+        // CR 117.3a: P2 receives priority and casts Turn Against ("Gain control
+        // of target creature until end of turn.") at instant speed here, through
+        // the public action path, then priority returns to P0.
+        {
+            let state = runner.state_mut();
+            state.priority_player = P2;
+            state.waiting_for = WaitingFor::Priority { player: P2 };
+        }
+        runner
+            .cast(p2_turn_against)
+            .target_object(hushbringer)
+            .resolve();
+        {
+            let state = runner.state_mut();
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        assert_eq!(
+            runner.state().objects[&hushbringer].controller,
+            P2,
+            "reach guard: P2 controls P0's Hushbringer through Turn Against"
+        );
+    }
+    if diviner_owner != P0 {
+        runner.cast(turn_against).target_object(diviner).resolve();
+    }
     assert_eq!(runner.state().objects[&diviner].controller, P0);
 
     runner.cast(rise).commit();
@@ -1488,7 +1537,11 @@ fn diviner_triggers_on_board(
     runner
         .act(GameAction::Concede { player_id: P2 })
         .expect("P2 concedes");
-    assert_eq!(zone(&runner, diviner), Zone::Exile);
+    if diviner_owner == P2 {
+        assert_eq!(zone(&runner, diviner), Zone::Exile);
+    } else {
+        assert_eq!(zone(&runner, diviner), Zone::Battlefield);
+    }
 
     for _ in 0..6 {
         match runner.state().waiting_for.clone() {
@@ -2206,6 +2259,22 @@ fn a_suppressor_exiled_under_the_leavers_control_still_applies_to_the_completed_
     );
 }
 
+/// CR 800.4a + CR 603.6a + CR 603.10: a suppressor that survives the
+/// concession keeps suppressing. P0 owns Twilight Diviner and Hushbringer; P2
+/// controls the Hushbringer through Turn Against, which ends when P2 concedes
+/// (CR 800.4a: control effects end before anything still controlled is exiled),
+/// so it stays on the battlefield under P0. P0's Rise of the Dark Realms pauses
+/// at the Metamorph's copy choice before anything has entered, and P2 concedes;
+/// the Hushbringer still suppresses the Metamorph's later entry, so the Diviner
+/// does not trigger.
+#[test]
+fn a_suppressor_whose_control_reverts_when_its_controller_concedes_keeps_suppressing() {
+    assert_eq!(
+        diviner_triggers_after_its_owner_leaves_mid_rise(false, RiseSuppressor::BorrowedByLeaver),
+        0
+    );
+}
+
 /// CR 603.6a + CR 603.10 + CR 603.3a: a survivor-controlled observer whose
 /// source leaves with its owner keeps the trigger for the entry completed
 /// before it left, on the hand-to-battlefield path. P0 controls P2's Welcoming
@@ -2225,7 +2294,7 @@ fn a_stolen_observer_keeps_its_trigger_for_the_hand_entry_completed_before_its_o
 #[test]
 fn a_departed_observer_does_not_trigger_for_an_entry_after_it_left() {
     assert_eq!(
-        diviner_triggers_after_its_owner_leaves_mid_rise(false, false),
+        diviner_triggers_after_its_owner_leaves_mid_rise(false, RiseSuppressor::None),
         0
     );
 }
@@ -2236,7 +2305,7 @@ fn a_departed_observer_does_not_trigger_for_an_entry_after_it_left() {
 #[test]
 fn a_departed_observer_keeps_its_trigger_for_an_entry_completed_before_it_left() {
     assert_eq!(
-        diviner_triggers_after_its_owner_leaves_mid_rise(true, false),
+        diviner_triggers_after_its_owner_leaves_mid_rise(true, RiseSuppressor::None),
         1
     );
 }
@@ -2247,7 +2316,7 @@ fn a_departed_observer_keeps_its_trigger_for_an_entry_completed_before_it_left()
 #[test]
 fn a_departed_suppressor_still_applies_to_the_entry_completed_before_its_owner_left() {
     assert_eq!(
-        diviner_triggers_after_its_owner_leaves_mid_rise(true, true),
+        diviner_triggers_after_its_owner_leaves_mid_rise(true, RiseSuppressor::OwnedByLeaver),
         0
     );
 }
