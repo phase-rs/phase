@@ -251,6 +251,7 @@ mod gideon_the_oathless;
 mod gideon_trials_emblem;
 mod gift_delivery_draw_sequence_migration;
 mod gift_recipient_phased_out_opponent;
+mod gift_token_identity;
 mod gifts_given_opponent_partition;
 mod gifts_ungiven_duplicate_candidates_8135;
 mod gix_yawgmoth_praetor_play_cast_6963;
