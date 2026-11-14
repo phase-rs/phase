@@ -27187,12 +27187,15 @@ fn explicit_any_target_clause(effect: &Effect, lower: &str) -> bool {
 }
 
 /// CR 608.2c + CR 120.1: Keep a named/self damage subject when its recipient is
-/// independent from the earlier target. An anaphor in the amount does not name
-/// the recipient: Volcanic Vision reads the returned card's mana value, while
-/// "to that creature" still binds to the earlier chosen target. A new explicit
-/// target stays independent when an earlier target already exists (Pyretic
-/// Rebirth); without one, it is promoted to the enclosing ability's announced
-/// target (Cragganwick Cremator).
+/// independent from the earlier object target. An anaphor in the amount does
+/// not name the recipient: Volcanic Vision reads the returned card's mana
+/// value, while "to that creature" still binds to the earlier chosen target.
+/// Player anaphors
+/// belong to the player-binding authorities, even when the amount names an
+/// earlier object, so object-target rewrites must preserve their operand.
+/// A new explicit target stays independent when an earlier target already
+/// exists (Pyretic Rebirth); without one, it is promoted to the enclosing
+/// ability's announced target (Cragganwick Cremator).
 fn self_damage_subject_has_independent_recipient(
     effect: &Effect,
     lower: &str,
@@ -27206,7 +27209,7 @@ fn self_damage_subject_has_independent_recipient(
         None => false,
         Some(None) => true,
         Some(Some(recipient)) => {
-            if has_anaphoric_reference(recipient) || has_player_anaphoric_reference(recipient) {
+            if has_anaphoric_reference(recipient) {
                 return false;
             }
 
@@ -50586,6 +50589,17 @@ fn parse_effect_chain_ir_body(
             (None, true) => lower::accepting_player_bindings(&text_no_qty, ctx),
             _ => Vec::new(),
         };
+        // A direct player context-reference does not enter the untargeted-object
+        // timing inference, but its accepting-player binding is read inside the
+        // accepting frame at resolution and creates no announced target slot.
+        // Keep typed bindings and clauses with a printed target on their existing
+        // timing path.
+        let accepting_clause_lower = text_no_qty.to_ascii_lowercase();
+        let accepting_player_resolution_timing =
+            (accepting_player_bindings.iter().any(|binding| {
+                binding.node == 0 && matches!(&binding.seeded, TargetFilter::ScopedPlayer)
+            }) && !nom_primitives::scan_contains(&accepting_clause_lower, "target "))
+            .then_some(TargetChoiceTiming::Resolution);
         // CR 608.2c + CR 614.1c: an entry-counter rider binds to the producer of
         // the clause right before it, so it is read here, where that clause and
         // this clause's own condition are both in scope.
@@ -52595,7 +52609,12 @@ fn parse_effect_chain_ir_body(
                 .unless_pay(unless_pay)
                 .target_selection_mode(chunk_ctx.target_selection_mode)
                 .target_chooser(chunk_ctx.target_chooser.clone())
-                .declared_target_choice_timing(chunk_ctx.declared_target_choice_timing.take())
+                .declared_target_choice_timing(
+                    chunk_ctx
+                        .declared_target_choice_timing
+                        .take()
+                        .or(accepting_player_resolution_timing),
+                )
                 .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
                 .head_window(head_window.clone())
                 .declared_player_group(clause_declared_group)

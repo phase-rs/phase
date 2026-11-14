@@ -18,70 +18,76 @@ const CRAIG_BOONE_ORACLE: &str = "Reach, lifelink\nOne for My Baby — Whenever 
 const LIE_IN_WAIT_ORACLE: &str = "Return target creature card from your graveyard to your hand. Lie in Wait deals damage equal to that card's power to target creature.";
 const PYRETIC_REBIRTH_ORACLE: &str = "Return target artifact or creature card from your graveyard to your hand. Pyretic Rebirth deals damage equal to that card's mana value to up to one target creature or planeswalker.";
 const UNSUMMON_ORACLE: &str = "Return target creature to its owner's hand.";
+const CREMATE_ORACLE: &str = "Exile target card from a graveyard. Draw a card.";
 
-/// CR 603.3d + CR 118.12 + CR 608.2c + CR 120.1: the accepting opponent is
-/// the recipient of Sin Prodder's damage, and Sin Prodder remains its source.
-/// The top card's mana value differs from the source's and the event is an
-/// actual upkeep trigger resolved through public choice actions.
+/// CR 603.3d + CR 118.12 + CR 608.2c + CR 120.1: whichever opponent accepts
+/// becomes the recipient of Sin Prodder's damage, while Sin Prodder remains its
+/// source. The event is an actual upkeep trigger resolved through public actions.
 #[test]
 fn sin_prodder_upkeep_acceptor_receives_source_damage_equal_to_top_mana_value() {
-    let (mut runner, prodder, revealed) = sin_prodder_scenario();
-    let p0_life = life(&runner, P0);
-    let p1_life = life(&runner, P1);
-    let p2_life = life(&runner, PlayerId(2));
+    let players = [P0, P1, PlayerId(2)];
+    for acceptor in [P1, PlayerId(2)] {
+        let (mut runner, prodder, revealed) = sin_prodder_scenario();
+        let initial_life = players.map(|player| life(&runner, player));
 
-    runner.auto_advance_to_main_phase();
-    reach_sin_prodder_choice(&mut runner);
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::OpponentMayChoice { player: P1, .. }
-    ));
-    let accepted = runner
-        .act(GameAction::DecideOptionalEffect { accept: true })
-        .expect("P1 accepts Sin Prodder's public choice");
-    let mut events = accepted.events;
-    drain_stack(&mut runner, &mut events);
+        runner.auto_advance_to_main_phase();
+        reach_sin_prodder_choice(&mut runner);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::OpponentMayChoice { player: P1, .. }
+        ));
+        if acceptor == PlayerId(2) {
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: false })
+                .expect("P1 declines Sin Prodder's public choice");
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::OpponentMayChoice {
+                    player: PlayerId(2),
+                    ..
+                }
+            ));
+        }
+        let accepted = runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("the accepting opponent answers Sin Prodder's public choice");
+        let mut events = accepted.events;
+        drain_stack(&mut runner, &mut events);
 
-    assert_eq!(
-        life(&runner, P0),
-        p0_life,
-        "the upkeep controller is not damaged"
-    );
-    assert_eq!(
-        life(&runner, P1),
-        p1_life - 3,
-        "the accepting player takes the top card's mana value"
-    );
-    assert_eq!(
-        life(&runner, PlayerId(2)),
-        p2_life,
-        "the other opponent is not damaged"
-    );
-    assert_eq!(runner.state().objects[&revealed].zone, Zone::Graveyard);
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(
+        for (player, starting_life) in players.into_iter().zip(initial_life) {
+            let expected_life = starting_life - if player == acceptor { 3 } else { 0 };
+            assert_eq!(
+                life(&runner, player),
+                expected_life,
+                "only the accepting player takes the top card's mana value"
+            );
+        }
+        assert_eq!(runner.state().objects[&revealed].zone, Zone::Graveyard);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::DamageDealt { source_id, .. } if *source_id == prodder
+                ))
+                .count(),
+            1,
+            "Sin Prodder deals damage to exactly the accepting player: {events:#?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
                 event,
-                GameEvent::DamageDealt { source_id, .. } if *source_id == prodder
-            ))
-            .count(),
-        1,
-        "Sin Prodder deals damage to exactly the accepting player: {events:#?}"
-    );
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            GameEvent::DamageDealt {
-                source_id,
-                target: engine::types::ability::TargetRef::Player(target),
-                amount: 3,
-                is_combat: false,
-                ..
-            } if *source_id == prodder && *target == P1
-        )),
-        "Sin Prodder must be the source of exactly the mana-value damage to P1: {events:#?}"
-    );
+                GameEvent::DamageDealt {
+                    source_id,
+                    target: engine::types::ability::TargetRef::Player(target),
+                    amount: 3,
+                    is_combat: false,
+                    ..
+                } if *source_id == prodder && *target == acceptor
+            )),
+            "Sin Prodder must be the source of exactly the mana-value damage to {acceptor:?}: {events:#?}"
+        );
+    }
 }
 
 /// CR 603.3d + CR 118.12 + CR 608.2c: if each opponent declines in turn,
@@ -270,7 +276,7 @@ fn lie_in_wait_returns_its_card_and_damages_its_independent_target() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let returned = scenario
-        .add_creature_to_graveyard(P0, "Four-Power Witness", 4, 8)
+        .add_creature_to_graveyard(P0, "Serra Angel", 4, 4)
         .id();
     let recipient = scenario.add_creature(P1, "Damage Recipient", 2, 10).id();
     let spell = scenario
@@ -327,7 +333,7 @@ fn lie_in_wait_returns_its_card_when_its_damage_target_becomes_illegal() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let returned = scenario
-        .add_creature_to_graveyard(P0, "Four-Power Witness", 4, 8)
+        .add_creature_to_graveyard(P0, "Serra Angel", 4, 4)
         .id();
     let recipient = scenario.add_creature(P1, "Damage Recipient", 2, 10).id();
     let spell = scenario
@@ -389,6 +395,71 @@ fn lie_in_wait_returns_its_card_when_its_damage_target_becomes_illegal() {
     ));
 }
 
+/// CR 601.2c + CR 608.2b + CR 120.1: when Cremate makes Lie in Wait's
+/// graveyard target illegal, the spell still resolves for its legal creature
+/// target, but cannot determine the amount from the illegal card target.
+#[test]
+fn lie_in_wait_does_not_damage_when_its_return_target_becomes_illegal() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["Cremate draw"]);
+    let returned = scenario
+        .add_creature_to_graveyard(P0, "Serra Angel", 4, 4)
+        .id();
+    let recipient = scenario.add_creature(P1, "Damage Recipient", 2, 10).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Lie in Wait", false, LIE_IN_WAIT_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::Black,
+                ManaCostShard::Green,
+                ManaCostShard::Blue,
+            ],
+            generic: 0,
+        })
+        .id();
+    let cremate = scenario
+        .add_spell_to_hand_from_oracle(P1, "Cremate", true, CREMATE_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        mana_units(&[ManaType::Black, ManaType::Green, ManaType::Blue]),
+    );
+    scenario.with_mana_pool(P1, mana_units(&[ManaType::Black]));
+    let mut runner = scenario.build();
+
+    let mut committed = runner
+        .cast(spell)
+        .target_objects(&[returned, recipient])
+        .commit();
+    committed
+        .act(GameAction::PassPriority)
+        .expect("P0 passes so P1 can exile Lie in Wait's return target");
+    let outcome = committed.cast(cremate).target_object(returned).resolve();
+
+    outcome.assert_zone(&[returned], Zone::Exile);
+    outcome.assert_zone(&[recipient], Zone::Battlefield);
+    outcome.assert_zone(&[spell, cremate], Zone::Graveyard);
+    assert_eq!(outcome.damage_marked(recipient), 0);
+    assert!(
+        !outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt { source_id, .. } if *source_id == spell
+        )),
+        "the legal damage target receives no damage when the amount's target is illegal: {:#?}",
+        outcome.events()
+    );
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
 /// CR 601.2c + CR 608.2c + CR 608.2h + CR 120.1: Pyretic Rebirth announces
 /// an artifact card and a planeswalker independently. Its mana-value amount is
 /// read from the returned card, and Pyretic Rebirth remains the damage source.
@@ -397,7 +468,7 @@ fn pyretic_rebirth_returns_its_card_and_damages_its_independent_target() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let returned = scenario
-        .add_artifact_to_graveyard(P0, "Three-Mana Artifact")
+        .add_artifact_to_graveyard(P0, "Burnished Hart")
         .with_mana_cost(ManaCost::generic(3))
         .id();
     let mut recipient_builder = scenario.add_creature(P1, "Damage Recipient", 0, 0);
@@ -457,7 +528,7 @@ fn pyretic_rebirth_returns_its_card_when_its_damage_target_becomes_illegal() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let returned = scenario
-        .add_artifact_to_graveyard(P0, "Three-Mana Artifact")
+        .add_artifact_to_graveyard(P0, "Burnished Hart")
         .with_mana_cost(ManaCost::generic(3))
         .id();
     let recipient = scenario.add_creature(P1, "Damage Recipient", 2, 10).id();
@@ -521,6 +592,73 @@ fn pyretic_rebirth_returns_its_card_when_its_damage_target_becomes_illegal() {
     ));
 }
 
+/// CR 601.2c + CR 608.2b + CR 120.1: when Cremate makes Pyretic Rebirth's
+/// graveyard target illegal, the spell still resolves for its legal creature
+/// target, but cannot determine the amount from the illegal card target.
+#[test]
+fn pyretic_rebirth_does_not_damage_when_its_return_target_becomes_illegal() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["Cremate draw"]);
+    let returned = scenario
+        .add_artifact_to_graveyard(P0, "Burnished Hart")
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let recipient = scenario.add_creature(P1, "Damage Recipient", 2, 10).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Pyretic Rebirth", true, PYRETIC_REBIRTH_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Red],
+            generic: 2,
+        })
+        .id();
+    let cremate = scenario
+        .add_spell_to_hand_from_oracle(P1, "Cremate", true, CREMATE_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        mana_units(&[
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Black,
+            ManaType::Red,
+        ]),
+    );
+    scenario.with_mana_pool(P1, mana_units(&[ManaType::Black]));
+    let mut runner = scenario.build();
+
+    let mut committed = runner
+        .cast(spell)
+        .target_objects(&[returned, recipient])
+        .commit();
+    committed
+        .act(GameAction::PassPriority)
+        .expect("P0 passes so P1 can exile Pyretic Rebirth's return target");
+    let outcome = committed.cast(cremate).target_object(returned).resolve();
+
+    outcome.assert_zone(&[returned], Zone::Exile);
+    outcome.assert_zone(&[recipient], Zone::Battlefield);
+    outcome.assert_zone(&[spell, cremate], Zone::Graveyard);
+    assert_eq!(outcome.damage_marked(recipient), 0);
+    assert!(
+        !outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt { source_id, .. } if *source_id == spell
+        )),
+        "the legal damage target receives no damage when the amount's target is illegal: {:#?}",
+        outcome.events()
+    );
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
 /// CR 601.2c: Pyretic Rebirth's "up to one target" damage recipient can be
 /// omitted even while a legal creature is available; the return target remains
 /// independent and resolves normally.
@@ -529,7 +667,7 @@ fn pyretic_rebirth_can_resolve_without_choosing_its_damage_target() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let returned = scenario
-        .add_artifact_to_graveyard(P0, "Three-Mana Artifact")
+        .add_artifact_to_graveyard(P0, "Burnished Hart")
         .with_mana_cost(ManaCost::generic(3))
         .id();
     let available_recipient = scenario.add_creature(P1, "Available Recipient", 2, 10).id();
@@ -577,7 +715,7 @@ fn craig_after_first_attack() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     scenario.with_library_top(P0, &["Craig's draw"]);
     scenario.with_library_top(P1, &["Opponent's draw"]);
     let craig = scenario
-        .add_creature_from_oracle(P0, "Craig Boone", 2, 2, CRAIG_BOONE_ORACLE)
+        .add_creature_from_oracle(P0, "Craig Boone, Novac Guard", 3, 3, CRAIG_BOONE_ORACLE)
         .id();
     let partner = scenario.add_creature(P0, "Attack Partner", 2, 2).id();
     let target = scenario.add_creature(P1, "Durable Target", 0, 12).id();
@@ -777,7 +915,7 @@ fn sin_prodder_scenario() -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new_n_player(3, 0x51_9D);
     scenario.at_phase(Phase::Untap);
     let prodder = scenario
-        .add_creature_from_oracle(P0, "Sin Prodder", 2, 2, SIN_PRODDER_ORACLE)
+        .add_creature_from_oracle(P0, "Sin Prodder", 3, 2, SIN_PRODDER_ORACLE)
         .id();
     scenario.add_spell_to_library_top(P0, "Under the Top Card", false);
     let revealed = scenario

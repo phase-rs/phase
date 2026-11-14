@@ -100961,13 +100961,13 @@ fn each_player_search_then_shuffle_anchors_the_scoped_players_library() {
     );
 }
 
-/// CR 608.2c + CR 118.12 + CR 120.1: an accepting player is the recipient of
-/// a self-named damage instruction that says "to that player". The generic
-/// accepting-player binder must see the player anaphor as dependent, so the
-/// recipient changes under its seeded parse.
+/// SHAPE: CR 608.2c + CR 118.12 + CR 120.1: an accepting player is the recipient of
+/// a self-named damage instruction that says "to that player". Object anaphors
+/// in the amount must not overwrite the recipient before the accepting-player
+/// binder applies its seeded operand.
 #[test]
 fn self_named_damage_to_that_player_keeps_accepting_player_binding() {
-    let text = "At the beginning of your upkeep, reveal the top card of your library. Any opponent may have you put that card into your graveyard. If a player does, this creature deals damage to that player equal to that card's mana value. Otherwise, put that card into your hand.";
+    let text = "Menace\nAt the beginning of your upkeep, reveal the top card of your library. Any opponent may have you put that card into your graveyard. If a player does, this creature deals damage to that player equal to that card's mana value. Otherwise, put that card into your hand.";
     let parsed = parse_oracle_text(text, "Sin Prodder", &[], &["Creature".into()], &[]);
     assert!(
         parsed
@@ -100977,21 +100977,41 @@ fn self_named_damage_to_that_player_keeps_accepting_player_binding() {
         "Sin Prodder's upkeep trigger must remain parsed"
     );
     let trigger = &parsed.triggers[0];
+    assert!(
+        !ability_chain_has_unimplemented(trigger.execute.as_deref().unwrap()),
+        "Sin Prodder's complete printed trigger must remain parsed: {trigger:#?}"
+    );
     let mut node = trigger.execute.as_deref();
-    let damage_target = loop {
+    let damage_ability = loop {
         match node {
             Some(ability) => {
-                if let Effect::DealDamage { target, .. } = ability.effect.as_ref() {
-                    break Some(target);
+                if matches!(ability.effect.as_ref(), Effect::DealDamage { .. }) {
+                    break Some(ability);
                 }
                 node = ability.sub_ability.as_deref();
             }
             None => break None,
         }
     };
+    let damage_ability = damage_ability.expect("the accepting consequence contains damage");
     assert_eq!(
-        damage_target,
-        Some(&TargetFilter::ScopedPlayer),
+        damage_ability.target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "the recipient binding is consumed inside the accepting frame: {trigger:#?}"
+    );
+    assert!(matches!(
+        damage_ability.effect.as_ref(),
+        Effect::DealDamage {
+            target: TargetFilter::ScopedPlayer,
+            damage_source: None,
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Demonstrative,
+                },
+            },
+            ..
+        }
+    ),
         "the accepted opponent must shadow the upkeep event player in the IfYouDo consequence: {trigger:#?}"
     );
 
@@ -101003,6 +101023,54 @@ fn self_named_damage_to_that_player_keeps_accepting_player_binding() {
         bindings.len(),
         1,
         "the direct recipient operand must bind to the accepting player: {bindings:#?}"
+    );
+    assert_eq!(bindings[0].node, 0);
+    assert_eq!(bindings[0].unseeded, TargetFilter::TriggeringPlayer);
+    assert_eq!(bindings[0].seeded, TargetFilter::ScopedPlayer);
+}
+
+/// SHAPE: CR 115.1a + CR 608.2c + CR 120.1: a prior announced player owns
+/// Ignite Memories' player anaphor, while its revealed card supplies only the
+/// amount and the spell remains the damage source.
+#[test]
+fn self_named_damage_to_that_player_keeps_declared_player_binding() {
+    const ORACLE: &str = "Target player reveals a card at random from their hand. Ignite Memories deals damage to that player equal to that card's mana value.\nStorm (When you cast this spell, copy it for each spell cast before it this turn. You may choose new targets for the copies.)";
+    let parsed = parse_oracle_text(
+        ORACLE,
+        "Ignite Memories",
+        &["Storm".into()],
+        &["Sorcery".into()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    let definition = &parsed.abilities[0];
+    assert!(
+        !ability_chain_has_unimplemented(definition),
+        "the printed spell must reach its damage clause: {definition:#?}"
+    );
+    let group = chain_defs(definition)
+        .into_iter()
+        .find_map(|ability| ability.declares_chosen_group)
+        .expect("the reveal announces its player target");
+    let damage = effects_in_tree(definition)
+        .into_iter()
+        .find(|effect| matches!(effect, Effect::DealDamage { .. }))
+        .expect("the printed damage instruction is parsed");
+    assert!(
+        matches!(
+            damage,
+            Effect::DealDamage {
+                target: TargetFilter::DeclaredPlayer { group: recipient },
+                damage_source: None,
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Demonstrative,
+                    },
+                },
+                ..
+            } if *recipient == group
+        ),
+        "the announced player remains the recipient independently from the revealed-card amount: {definition:#?}"
     );
 }
 
