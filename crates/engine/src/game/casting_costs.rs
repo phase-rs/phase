@@ -6378,6 +6378,7 @@ pub(crate) fn handle_exile_for_cost(
     expected: usize,
     legal_cards: &[ObjectId],
     chosen: &[ObjectId],
+    paid_cost: Option<&AbilityCost>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     finish_exile_selection_for_cost(
@@ -6387,6 +6388,9 @@ pub(crate) fn handle_exile_for_cost(
         (expected, expected),
         legal_cards,
         chosen,
+        paid_cost
+            .and_then(super::casting::find_non_self_exile)
+            .and_then(|(_, _, filter)| filter),
         None,
         events,
         "card(s)",
@@ -6423,6 +6427,7 @@ pub(crate) fn handle_exile_any_number_for_cost(
     maximum: usize,
     legal_cards: &[ObjectId],
     chosen: &[ObjectId],
+    paid_cost: Option<&AbilityCost>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     finish_exile_selection_for_cost(
@@ -6432,6 +6437,9 @@ pub(crate) fn handle_exile_any_number_for_cost(
         (0, maximum),
         legal_cards,
         chosen,
+        paid_cost
+            .and_then(exile_any_number_effect_cost_parts)
+            .map(|(_, filter)| filter),
         Some(ThisWayCause::Exiled),
         events,
         "card(s)",
@@ -6482,6 +6490,7 @@ pub(crate) fn handle_exile_permanent_for_cost(
         (expected, expected),
         legal_cards,
         chosen,
+        filter.as_ref(),
         None,
         events,
         "permanent(s)",
@@ -6523,6 +6532,7 @@ fn finish_exile_selection_for_cost(
     bounds: (usize, usize),
     legal_cards: &[ObjectId],
     chosen: &[ObjectId],
+    paid_filter: Option<&TargetFilter>,
     this_way_cause: Option<ThisWayCause>,
     events: &mut Vec<GameEvent>,
     object_label: &str,
@@ -6581,16 +6591,10 @@ fn finish_exile_selection_for_cost(
     );
     if let Some(&first) = chosen.first() {
         if let Some(obj) = state.objects.get(&first) {
-            // CR 107.3a + CR 118.9: Shoal-style alternative costs ("exile a
-            // [color] card with mana value X") define X from the pitched card's
-            // mana value rather than a prior announcement.
+            // CR 107.3a: X comes from a pitched card only when the paid cost's own filter defines X.
             if pending.ability.chosen_x.is_none()
-                && pending.alternative_cost_election
-                    == crate::types::game_state::SpellAlternativeCostElection::Accepted
-                && state
-                    .objects
-                    .get(&pending.object_id)
-                    .is_some_and(|spell| cost_has_x(&spell.mana_cost))
+                && paid_filter
+                    .is_some_and(super::cost_payability::target_filter_has_x_mana_value_constraint)
             {
                 // CR 202.3d + CR 709.4b: the pitched card is exiled from hand
                 // (off the stack), so a split card defines X from its combined
@@ -6770,6 +6774,7 @@ pub(crate) fn handle_exile_materials_for_cost(
         bounds,
         legal_cards,
         chosen,
+        Some(&materials),
         None,
         events,
         "material(s)",
@@ -11842,8 +11847,10 @@ fn pay_additional_cost_with_source(
                 choices: eligible,
                 count: count as usize,
                 min_count: 0,
-                resume: CostResume::Spell {
+                resume: CostResume::SpellCost {
                     spell: Box::new(pending),
+                    cost: Box::new(cost.clone()),
+                    source: cost_source,
                 },
             });
         }
@@ -27676,6 +27683,7 @@ mod tests {
             1,
             &[blue_a, blue_b],
             &[blue_a, blue_b],
+            None,
             &mut events,
         );
         assert!(
@@ -27784,6 +27792,7 @@ mod tests {
             1,
             &[blue],
             &[red],
+            None,
             &mut events,
         );
         assert!(

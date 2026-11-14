@@ -34195,9 +34195,11 @@ fn escape_phyrexian_cost_deducts_life_after_exile() {
         WaitingFor::PayCost {
             kind: PayCostKind::ExileFromZone { .. },
             choices: cards,
-            resume: CostResume::Spell {
-                spell: pending_cast,
-            },
+            resume:
+                CostResume::SpellCost {
+                    spell: pending_cast,
+                    ..
+                },
             count: 3,
             ..
         } => (cards, pending_cast),
@@ -34213,6 +34215,7 @@ fn escape_phyrexian_cost_deducts_life_after_exile() {
         3,
         &exile_cards,
         &chosen,
+        None,
         &mut events,
     )
     .expect("exile cost payment should succeed");

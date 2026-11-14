@@ -2052,6 +2052,7 @@ pub(super) fn handle_exile_for_cost(
     count: usize,
     legal_cards: &[ObjectId],
     chosen: &[ObjectId],
+    paid_cost: Option<&AbilityCost>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     casting_costs::handle_exile_for_cost(
@@ -2062,6 +2063,7 @@ pub(super) fn handle_exile_for_cost(
         count,
         legal_cards,
         chosen,
+        paid_cost,
         events,
     )
 }
