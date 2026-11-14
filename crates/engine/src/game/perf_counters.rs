@@ -122,6 +122,17 @@ pub struct DeclaredLifeChargeCounters {
     pub reads: u64,
 }
 
+/// Test-only counter for the combinations the AI candidate enumerator's
+/// combination helpers (`ai_support::candidates::{combinations_generic,
+/// combinations_usize}` and the bounded object enumerator) materialize, before
+/// any selection constraint or dedup sees them. Kept out of [`PerfCounterSnapshot`]
+/// for the same reason as the counter sets above.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SelectionCombinationCounters {
+    pub materialized: u64,
+}
+
 /// Test-only counters for work a bounded reader, such as the untap priority
 /// hold, must never reach: the game copies the ability-mana affordability probe
 /// (`casting::can_pay_ability_mana_cost_after_auto_tap_excluding`) takes to run
@@ -561,6 +572,10 @@ thread_local! {
         Cell::new(DeclaredLifeChargeCounters { reads: 0 })
     };
     #[cfg(feature = "test-support")]
+    static SELECTION_COMBINATION_COUNTERS: Cell<SelectionCombinationCounters> = const {
+        Cell::new(SelectionCombinationCounters { materialized: 0 })
+    };
+    #[cfg(feature = "test-support")]
     static BOUNDED_READER_COUNTERS: Cell<BoundedReaderCounters> = const {
         Cell::new(BoundedReaderCounters {
             state_clones: 0,
@@ -763,6 +778,16 @@ pub fn record_declared_life_charge_read() {
     DECLARED_LIFE_CHARGE_COUNTERS.with(|cell| {
         let mut counters = cell.get();
         counters.reads += 1;
+        cell.set(counters);
+    });
+}
+
+/// Recorded with every batch of combinations the AI candidate enumerator builds.
+#[cfg(feature = "test-support")]
+pub fn record_selection_combinations(count: usize) {
+    SELECTION_COMBINATION_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.materialized += count as u64;
         cell.set(counters);
     });
 }
@@ -1056,6 +1081,11 @@ pub fn prior_target_binding_snapshot() -> PriorTargetBindingCounters {
 #[cfg(feature = "test-support")]
 pub fn declared_life_charge_snapshot() -> DeclaredLifeChargeCounters {
     DECLARED_LIFE_CHARGE_COUNTERS.with(Cell::get)
+}
+
+#[cfg(feature = "test-support")]
+pub fn selection_combination_snapshot() -> SelectionCombinationCounters {
+    SELECTION_COMBINATION_COUNTERS.with(Cell::get)
 }
 
 #[cfg(feature = "test-support")]
@@ -1403,6 +1433,9 @@ pub fn reset() {
     reset_prior_target_binding_counters();
     #[cfg(feature = "test-support")]
     reset_declared_life_charge_counters();
+    #[cfg(feature = "test-support")]
+    SELECTION_COMBINATION_COUNTERS
+        .with(|counters| counters.set(SelectionCombinationCounters::default()));
     #[cfg(feature = "test-support")]
     BOUNDED_READER_COUNTERS.with(|counters| counters.set(BoundedReaderCounters::default()));
     #[cfg(feature = "test-support")]

@@ -26079,6 +26079,9 @@ fn pending_activation_after_cost_pause(
         activation_cost_snapshot,
         payment_mode,
     );
+    pending.activation_cost_paused_on_draw = remaining_cost
+        .as_ref()
+        .is_some_and(crate::game::engine::cost_includes_draw_instruction);
     pending.activation_cost = remaining_cost;
     pending
 }
@@ -31771,7 +31774,7 @@ fn activate_with_cost_carrier(
             &mut resolved.context.cost_removed_counter_amount,
             events,
         )? {
-            let pending = pending_activation_after_cost_pause(
+            let mut pending = pending_activation_after_cost_pause(
                 source_id,
                 resolved.clone(),
                 ability_index,
@@ -31779,6 +31782,10 @@ fn activate_with_cost_carrier(
                 carrier.clone(),
                 payment_mode,
             );
+            // CR 118.12: the activation's full cost owns the paused instruction,
+            // not the unpaid suffix that remains after the pause.
+            pending.activation_cost_paused_on_draw =
+                crate::game::engine::cost_includes_draw_instruction(cost);
             if let Some(pending) =
                 casting_costs::attach_pending_cast_to_cost_move(state, Box::new(pending))
             {
