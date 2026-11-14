@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use thiserror::Error;
 
 use crate::types::ability::{
-    DigSource, DurationEvent, Effect, EffectKind, KeywordAction, ResolvedAbility, TargetRef,
+    AbilityCondition, DigSource, DurationEvent, Effect, EffectKind, KeywordAction, QuantityExpr,
+    QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -18,15 +19,15 @@ use crate::types::actions::{
 use crate::types::events::ManaTapState;
 use crate::types::events::{BendingType, ContestRound, GameEvent};
 use crate::types::game_state::{
-    ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
-    CastingVariant, ConvokeMode, CostResume, CounterCostRootSubtree, DistributionScope,
-    DistributionUnit, GameState, LandPlayRecord, LoopDetectionMode, ManaAbilityResume,
-    MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveCompletion, PendingCostMoveResume,
-    PendingCounterPostAction, PendingEffectResolved, PendingManaAbility, PersistedRestoreError,
-    PostReplacementDrainStack, ResolveAllConsentParticipant, ResolveAllConsentRun,
-    ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind,
-    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
-    StackResolutionPolicy, StackResolutionSession, WaitingFor,
+    ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, BatchCompletion,
+    CastOfferKind, CastingVariant, ConvokeMode, CostResume, CounterCostRootSubtree,
+    DistributionScope, DistributionUnit, GameState, LandPlayRecord, LoopDetectionMode,
+    ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveCompletion,
+    PendingCostMoveResume, PendingCounterPostAction, PendingEffectResolved, PendingManaAbility,
+    PersistedRestoreError, PostReplacementDrainStack, ResolveAllConsentParticipant,
+    ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress,
+    StackEntry, StackEntryKind, StackResolutionAutoPassOverlay, StackResolutionBudget,
+    StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -35,7 +36,7 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::TokenAttackRequest;
 #[cfg(debug_assertions)]
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
-use crate::types::resolution::ResolutionStack;
+use crate::types::resolution::{ResolutionFrame, ResolutionStack};
 use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
     ResolvedOncePerTurnPermission, ResolvedRulesCommand,
@@ -2749,6 +2750,10 @@ fn finish_action_boundary_with_lifecycle(
     // event stream is correct and cheapest.
     mark_public_state_from_events(state, &result.events);
     elide_middle_repetitions(&mut result.events);
+    if !transient_reveal_outlives_action_boundary(state) && !ripple_resolution_cast_in_flight(state)
+    {
+        state.revealed_cards.clear();
+    }
     finalize_rules_state(state);
     super::un_actions::announce_pending_tells(state);
     super::un_actions::refresh_menu(state);
@@ -12788,7 +12793,7 @@ fn revoke_resolve_all_consent(
 /// resolution-owned permission carrying `RippleOfferRemaining` cleanup. The
 /// permission lingers on a successfully cast hit while it sits on the stack,
 /// so its mere presence is not proof the announcement is still running.
-fn ripple_resolution_cast_in_flight(state: &GameState) -> bool {
+pub(super) fn ripple_resolution_cast_in_flight(state: &GameState) -> bool {
     if state.revealed_cards.is_empty() {
         return false;
     }
@@ -12877,6 +12882,127 @@ fn private_look_outlives_action_boundary(state: &GameState) -> bool {
         })
 }
 
+fn filter_operates_on_revealed_cards(state: &GameState, filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::LastRevealed
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. } => true,
+        TargetFilter::SpecificObject { id } => state.revealed_cards.contains(id),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|f| filter_operates_on_revealed_cards(state, f)),
+        TargetFilter::Not { filter } => filter_operates_on_revealed_cards(state, filter),
+        _ => false,
+    }
+}
+
+fn quantity_references_revealed(qty: &QuantityExpr) -> bool {
+    match qty {
+        QuantityExpr::Ref { qty } => matches!(
+            qty,
+            QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. }
+        ),
+        QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::UpTo { max: inner } => quantity_references_revealed(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_references_revealed),
+        _ => false,
+    }
+}
+
+fn condition_references_revealed(cond: &AbilityCondition) -> bool {
+    match cond {
+        AbilityCondition::RevealedHasCardType { .. } => true,
+        AbilityCondition::ConditionInstead { inner } => condition_references_revealed(inner),
+        AbilityCondition::Not { condition } => condition_references_revealed(condition),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_references_revealed)
+        }
+        _ => false,
+    }
+}
+
+fn effect_operates_on_revealed_cards(state: &GameState, effect: &Effect) -> bool {
+    if let Some(target) = effect.target_filter() {
+        if filter_operates_on_revealed_cards(state, target) {
+            return true;
+        }
+    }
+    match effect {
+        Effect::ChangeZoneAll { target, .. } => filter_operates_on_revealed_cards(state, target),
+        _ => false,
+    }
+}
+
+fn link_operates_on_revealed_cards(state: &GameState, link: &ResolvedAbility) -> bool {
+    if link.targets.iter().any(|t| match t {
+        TargetRef::Object(id) => state.revealed_cards.contains(id),
+        TargetRef::Player(_) => false,
+    }) {
+        return true;
+    }
+    if link
+        .condition
+        .as_ref()
+        .is_some_and(condition_references_revealed)
+    {
+        return true;
+    }
+    let mut quantity_found = false;
+    link.effect.for_each_quantity_expr(&mut |qty| {
+        if quantity_references_revealed(qty) {
+            quantity_found = true;
+        }
+    });
+    if quantity_found {
+        return true;
+    }
+    effect_operates_on_revealed_cards(state, &link.effect)
+}
+
+fn continuation_retains_revealed_cards(state: &GameState) -> bool {
+    state
+        .resolution_stack
+        .ability_continuations()
+        .any(|parked| {
+            super::triggers::any_reachable_link(&parked.chain, &|link| {
+                link_operates_on_revealed_cards(state, link)
+            })
+        })
+        || state.resolution_stack.iter().any(|frame| match frame {
+            ResolutionFrame::BatchDelivery(batch) => {
+                batch
+                    .remaining
+                    .iter()
+                    .any(|id| state.revealed_cards.contains(id))
+                    || matches!(
+                        batch.completion,
+                        Some(BatchCompletion::RevealRestPile { .. })
+                    )
+                    || batch.library_reorder.is_some()
+            }
+            ResolutionFrame::ChangeZone(frame) => frame.pending.as_ref().is_some_and(|p| {
+                p.remaining
+                    .iter()
+                    .any(|m| state.revealed_cards.contains(&m.object_id))
+            }),
+            _ => false,
+        })
+        || state.active_batch_delivery().is_some_and(|batch| {
+            batch
+                .remaining
+                .iter()
+                .any(|id| state.revealed_cards.contains(id))
+                || matches!(
+                    batch.completion,
+                    Some(BatchCompletion::RevealRestPile { .. })
+                )
+                || batch.library_reorder.is_some()
+        })
+}
+
 /// CR 701.20a: Whether the transient reveal set
 /// ([`GameState::revealed_cards`]) must survive the action now being applied
 /// because the pending prompt is a later step of the very instruction that
@@ -12888,18 +13014,14 @@ fn private_look_outlives_action_boundary(state: &GameState) -> bool {
 /// The same list carries the reveal-"until" retirement paths (`zones.rs`
 /// `retire_reordered_library_reveals`): an owner-ordered placement must still
 /// find the pile it revealed when the owner's answer arrives (CR 701.20d).
-fn transient_reveal_outlives_action_boundary(state: &GameState) -> bool {
+pub(super) fn transient_reveal_outlives_action_boundary(state: &GameState) -> bool {
     // CR 701.20a: a reveal published while an instruction is resolving belongs
-    // to that resolution. It stays revealed through every prompt that
-    // resolution opens — a replacement choice, a named choice, or any other
-    // intervening step — until the instruction that owns it continues. A
-    // prompt-variant allowlist cannot express that invariant: each new prompt
-    // variant silently dropped the membership, and a later CR 701.20d reorder
-    // ("put the revealed cards on the bottom of your library in any order")
-    // then had nothing to retire. The live resolution carrier is the authority
-    // for "this reveal is still owned"; the arms below cover the prompts whose
-    // publishing resolution has no carrier installed.
-    if state.resolving_stack_entry.is_some() {
+    // to that resolution. It stays revealed while its own continuation frames
+    // still operate on the revealed cards (e.g. Charbelcher dealing damage and
+    // reordering library bottom across intervening Swans/Abundance choices).
+    // Bind reveal retention to the specific instruction that published it, not
+    // to any live resolution carrier, and clear it when that instruction completes.
+    if continuation_retains_revealed_cards(state) {
         return true;
     }
     match &state.waiting_for {
@@ -12925,6 +13047,7 @@ fn transient_reveal_outlives_action_boundary(state: &GameState) -> bool {
         }
         | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::RevealUntilBottomOrder { .. }
+        | WaitingFor::RevealUntilKeptChoice { .. }
         | WaitingFor::DigBottomOrder { .. } => true,
         // CR 701.20a + CR 701.20d + CR 401.4: "Put the revealed cards on the
         // bottom of your library in any order" pauses for the pile's owner to

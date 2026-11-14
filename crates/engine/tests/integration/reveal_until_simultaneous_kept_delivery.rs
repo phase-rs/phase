@@ -32,6 +32,9 @@ use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::resolved_commands::{
+    ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
+};
 use engine::types::zones::Zone;
 
 const KINDRED_SUMMONS: &str = "Choose a creature type. Reveal cards from the top of your library until you reveal X creature cards of the chosen type, where X is the number of creatures you control of that type. Put those cards onto the battlefield, then shuffle the rest of the revealed cards into your library.";
@@ -1062,5 +1065,192 @@ fn kindred_summons_batched_observer_without_turn_limit_fires_once() {
         runner.life(P0),
         life_before + 1,
         "the batched observer must trigger exactly once for the one entry event"
+    );
+}
+
+/// CR 701.20a: An instruction-owned transient reveal must end at the resolution
+/// completion boundary before viewer projections are published, even when
+/// followed by a subsequent resolution that pauses on a non-priority prompt
+/// while an active `resolving_stack_entry` carrier is installed.
+/// Opponent and spectator views must conceal the previously revealed library cards,
+/// while independently valid stack-bound reveals remain visible and cards in the
+/// library remain in place and retain their identities.
+#[test]
+fn reveal_effect_concealed_before_later_resolution_prompt() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Staged library for target opponent P1: 4 misses and 4 lands
+    let miss_one = scenario.add_card_to_library_top(P1, "Grizzly Bears");
+    let land_one = scenario.add_land_to_library_top(P1, "Forest").id();
+    let miss_two = scenario.add_card_to_library_top(P1, "Counterspell");
+    let land_two = scenario.add_land_to_library_top(P1, "Island").id();
+    let miss_three = scenario.add_card_to_library_top(P1, "Lightning Bolt");
+    let land_three = scenario.add_land_to_library_top(P1, "Mountain").id();
+    let miss_four = scenario.add_card_to_library_top(P1, "Swords to Plowshares");
+    let land_four = scenario.add_land_to_library_top(P1, "Plains").id();
+
+    // P1 has 3 cards in hand so Mind Rot ("discards two cards") creates WaitingFor::DiscardChoice
+    let p1_card1 = scenario.add_card_to_hand(P1, "Hand Card 1");
+    let _p1_card2 = scenario.add_card_to_hand(P1, "Hand Card 2");
+    let _p1_card3 = scenario.add_card_to_hand(P1, "Hand Card 3");
+
+    let leased_card = p1_card1;
+
+    let db = crate::support::shared_card_db().expect("the fixture contains Mind Funeral");
+    let mind_rot = scenario.add_real_card(P0, "Mind Rot", Zone::Hand, db);
+    let mind_funeral = scenario.add_real_card(P0, "Mind Funeral", Zone::Hand, db);
+
+    // Fund P0's mana pool: Mind Rot {2}{B} (3) + Mind Funeral {1}{U}{B} (3) = 6 mana
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+
+    // Give Mind Funeral flash so it can be cast at instant speed in response to Mind Rot
+    let mf = runner.state_mut().objects.get_mut(&mind_funeral).unwrap();
+    mf.keywords.push(Keyword::Flash);
+    mf.base_keywords.push(Keyword::Flash);
+    arrange_library_top_first(
+        &mut runner,
+        &[
+            miss_one, land_one, miss_two, land_two, miss_three, land_three, miss_four, land_four,
+        ],
+    );
+
+    // Cast Mind Rot targeting P1, committing it to the stack
+    runner.cast(mind_rot).target_player(P1).commit();
+    let rot_entry_id = runner.state().stack.last().expect("Mind Rot on stack").id;
+
+    // Establish an independent stack-bound reveal on leased_card tied to Mind Rot's stack entry
+    runner
+        .state_mut()
+        .resolve_and_apply_information(
+            &[leased_card],
+            ResolvedInformationAudience::Public,
+            ResolvedInformationLifetime::UntilStackObjectLeaves {
+                stack_entry: rot_entry_id,
+            },
+            ResolvedInformationEdit::Reveal,
+        )
+        .expect("grant stack-bound reveal");
+    assert!(
+        runner.state().holds_stack_bound_reveal(leased_card),
+        "reach guard: stack-bound reveal active"
+    );
+
+    // Cast Mind Funeral targeting P1 on top of Mind Rot
+    runner.cast(mind_funeral).target_player(P1).commit();
+    assert_eq!(runner.state().stack.len(), 2);
+
+    // Advance priority until Mind Funeral resolves and Mind Rot pauses for WaitingFor::DiscardChoice
+    let mut all_events = Vec::new();
+    for _ in 0..16 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        all_events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority")
+                .events,
+        );
+    }
+
+    // 1. Authorized viewers saw GameEvent::CardsRevealed with the 8 visited cards during resolution
+    let revealed_cards: Vec<ObjectId> = all_events
+        .iter()
+        .filter_map(|e| match e {
+            GameEvent::CardsRevealed {
+                player, card_ids, ..
+            } if player == &P1 => Some(card_ids.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(
+        revealed_cards,
+        vec![miss_one, land_one, miss_two, land_two, miss_three, land_three, miss_four, land_four,],
+        "Mind Funeral revealed the 8 visited cards during resolution"
+    );
+
+    // 2. runner.state().waiting_for is WaitingFor::DiscardChoice and resolving_stack_entry is Some
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DiscardChoice { player, count: 2, .. } if player == P1
+        ),
+        "Mind Rot must pause for P1 to discard two cards; waiting_for={:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().resolving_stack_entry.is_some(),
+        "Mind Rot is currently the active resolving stack entry"
+    );
+    assert_eq!(
+        runner.state().resolving_stack_entry.as_ref().map(|e| e.id),
+        Some(rot_entry_id)
+    );
+
+    // 3. Opponent and spectator snapshots conceal all 8 library cards
+    for (label, projected) in [
+        ("opponent P0", filter_state_for_viewer(runner.state(), P0)),
+        (
+            "spectator",
+            filter_state_for_unseated_viewer(runner.state()),
+        ),
+    ] {
+        for &id in &revealed_cards {
+            assert_eq!(
+                projected.objects[&id].name, HIDDEN_CARD_NAME,
+                "{label}: revealed library card {id:?} must be concealed after Mind Funeral completes"
+            );
+        }
+    }
+
+    // 4. Independent stack-bound reveal is preserved
+    assert!(
+        runner.state().holds_stack_bound_reveal(leased_card),
+        "stack-bound reveal on leased_card must be held while Mind Rot resolves"
+    );
+    for (label, projected) in [
+        ("opponent P0", filter_state_for_viewer(runner.state(), P0)),
+        (
+            "spectator",
+            filter_state_for_unseated_viewer(runner.state()),
+        ),
+    ] {
+        assert_ne!(
+            projected.objects[&leased_card].name, HIDDEN_CARD_NAME,
+            "{label}: stack-bound revealed card must be visible to viewers"
+        );
+    }
+
+    // 5. Cards in P1's library remain in place and retain their object identities
+    for (id, label) in [
+        (miss_one, "first miss"),
+        (land_one, "first land"),
+        (miss_two, "second miss"),
+        (land_two, "second land"),
+        (miss_three, "third miss"),
+        (land_three, "third land"),
+        (miss_four, "fourth miss"),
+        (land_four, "fourth land"),
+    ] {
+        assert_zone(&runner, id, Zone::Library, label);
+    }
+    assert_eq!(
+        runner.state().players[P1.0 as usize].library.len(),
+        8,
+        "all 8 cards remain in P1's library in place"
     );
 }
