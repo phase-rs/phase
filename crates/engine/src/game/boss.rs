@@ -2534,6 +2534,45 @@ mod tests {
         );
     }
 
+    /// The engine-projected Horde identity tracks a stage clear: stage 1
+    /// projects its one deployed Boss, and after the SBA-driven clear the
+    /// same projection names the two stage-2 Bosses instead of the exiled
+    /// stage-1 Boss. The seat client re-derives from this projection on
+    /// every snapshot, so continuous play and a remount agree.
+    #[test]
+    fn horde_projection_tracks_stage_advance() {
+        let (mut state, horde) = turtle_teamup_game(2);
+        let stage_1 = crate::game::derived_views::derive_views(&state, None)
+            .horde
+            .expect("stage 1 projects a Horde view");
+        assert_eq!(stage_1.horde_seat_ids, vec![horde]);
+        assert_eq!(stage_1.deployed_boss_ids.len(), 1);
+
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == horde)
+            .expect("horde seat")
+            .life = 0;
+        crate::game::sba::check_state_based_actions(&mut state, &mut Vec::new());
+
+        let stage_2 = crate::game::derived_views::derive_views(&state, None)
+            .horde
+            .expect("stage 2 projects a Horde view");
+        assert_eq!(stage_2.horde_seat_ids, vec![horde]);
+        assert_eq!(
+            stage_2.deployed_boss_ids.len(),
+            2,
+            "stage 2 deploys two Bosses"
+        );
+        assert!(
+            !stage_2
+                .deployed_boss_ids
+                .contains(&stage_1.deployed_boss_ids[0]),
+            "the cleared stage-1 Boss is exiled, not re-projected"
+        );
+    }
+
     /// Chrome Dome's "+1/+0 for each boss in play" is a LIVE count: rigged
     /// first in the two-boss stage 2, the grafted static grants +2/+0 once
     /// the second Boss deploys (no re-graft), and the bonus is gone after

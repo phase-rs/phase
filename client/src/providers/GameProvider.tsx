@@ -194,9 +194,16 @@ function setupCommanderAvatars(
  * this the random fallback `setupRandomAvatars` seeds names the TMNT villains
  * after arbitrary planeswalkers ("Vivien") and gives survivors arbitrary
  * avatar art ("Karn"). Horde seats take the deployed Boss's short name and
- * pinned art instead; survivors take the Turtle roster in seat order. The
- * Boss read is the command-zone list only — never the face-down Boss pile —
- * so hidden Bosses cannot leak through the seat identity. Other challenge
+ * pinned art instead; survivors take the Turtle roster in seat order.
+ *
+ * Seat and Boss SELECTION is the engine's (`derived.horde`, built from the
+ * game-state authorities): this renders that projection and only formats it —
+ * short names, Turtle theming, image lookup. It never scans `command_zone`
+ * for a Boss and never classifies seats from the raw seat vector, so a
+ * snapshot omitting that vector still resolves. The projection lists deployed
+ * Bosses only — never the face-down Boss pile — so hidden Bosses cannot leak
+ * through the seat identity. The Turtle-Team-Up gate below is presentation
+ * theming (which avatar roster), not game-state derivation: other challenge
  * decks keep the existing random/commander identities.
  *
  * Like `setupCommanderAvatars`, writes NOTHING and answers `false` when this
@@ -206,10 +213,14 @@ function setupCommanderAvatars(
 function setupHordeAvatars(
   gameState: {
     format_config?: { format?: string; horde_ruleset?: { challenge_deck?: string } | null } | null;
-    horde_seats?: readonly number[];
-    command_zone?: readonly number[];
-    players: readonly { id: number }[];
-    objects: Record<number, { name: string; is_horde_deck_token?: boolean; token_image_ref?: TokenImageRef | null }>;
+    derived?: {
+      horde?: {
+        horde_seat_ids?: readonly number[];
+        hero_player_ids?: readonly number[];
+        deployed_boss_ids?: readonly number[];
+      } | null;
+    };
+    objects: Record<number, { name: string; token_image_ref?: TokenImageRef | null }>;
   },
   gameId: string,
 ): boolean {
@@ -217,41 +228,43 @@ function setupHordeAvatars(
   if (gameState.format_config?.horde_ruleset?.challenge_deck !== "TurtleTeamUpHorde") {
     return false;
   }
-  const boss = (gameState.command_zone ?? [])
-    .map((id) => gameState.objects[id])
-    .find((obj) => obj?.is_horde_deck_token);
-  if (!boss) return false;
-  const hordeSeats = new Set(gameState.horde_seats ?? []);
+  const horde = gameState.derived?.horde;
+  const bossId = horde?.deployed_boss_ids?.[0];
+  const boss = bossId != null ? gameState.objects[bossId] : undefined;
+  if (!horde || bossId == null || !boss) return false;
+  const hordeSeats = horde.horde_seat_ids ?? [];
   const names = new Map<number, string>();
   const playerAvatars = new Map<number, PlayerAvatarIdentity>();
   const bossShortName = boss.name.split(",")[0].split(" //")[0];
-  let survivorIndex = 0;
-  const seats = [...gameState.players].sort((a, b) => a.id - b.id);
-  for (const player of seats) {
-    if (hordeSeats.has(player.id)) {
-      names.set(player.id, bossShortName);
-      continue;
-    }
+  for (const seatId of hordeSeats) {
+    names.set(seatId, bossShortName);
+  }
+  (horde.hero_player_ids ?? []).forEach((seatId, survivorIndex) => {
     const turtle = TURTLE_TEAMUP_SURVIVOR_IDENTITIES[
       survivorIndex % TURTLE_TEAMUP_SURVIVOR_IDENTITIES.length
     ];
-    survivorIndex += 1;
-    names.set(player.id, turtle.name);
-    playerAvatars.set(player.id, { kind: "card", cardName: turtle.cardName });
-  }
+    names.set(seatId, turtle.name);
+    playerAvatars.set(seatId, { kind: "card", cardName: turtle.cardName });
+  });
   useMultiplayerStore.setState({ playerNames: names, playerAvatars });
   // Boss art resolves async through the token-image sidecar, so names never
-  // wait on it. Merged into the stored map when it lands, fenced on the
-  // game id (same fence as the draft-match seat branch): a late resolve
-  // must not paint a newer game's Horde seat. A sidecar miss leaves the
-  // seat without an avatar entry and the HUD renders the initial tile.
+  // wait on it. Merged into the stored map when it lands, bound to the game
+  // id, the session generation, and the requested Boss: a debug import
+  // replaces the session under the same route id (bumping only the
+  // generation), and a stage clear replaces the Boss under the same session,
+  // so an id-only fence would paint a stale portrait either way. A sidecar
+  // miss leaves the seat without an avatar entry and the HUD renders the
+  // initial tile.
   const bossRef = boss.token_image_ref;
   if (bossRef?.scryfall_id) {
-    const hordeSeatIds = [...hordeSeats];
+    const generation = useGameStore.getState().gameSessionGeneration;
     void fetchBossAvatarUrl(bossRef).then((url) => {
-      if (!url || useGameStore.getState().gameId !== gameId) return;
+      const current = useGameStore.getState();
+      if (!url || current.gameId !== gameId) return;
+      if (current.gameSessionGeneration !== generation) return;
+      if (current.gameState?.derived?.horde?.deployed_boss_ids?.[0] !== bossId) return;
       const next = new Map(useMultiplayerStore.getState().playerAvatars);
-      for (const seatId of hordeSeatIds) {
+      for (const seatId of hordeSeats) {
         next.set(seatId, { kind: "external", url });
       }
       useMultiplayerStore.setState({ playerAvatars: next });
@@ -838,38 +851,6 @@ export function GameProvider({
   onNoDeckRef.current = onNoDeck;
   onResumeResetRef.current = onResumeReset;
   tRef.current = t;
-
-  useEffect(() => {
-    if (mode !== "ai") return;
-    let applied = false;
-    // Horde games with themed seats take Horde identities; everything else
-    // falls through to the commander derivation. Applies as soon as the
-    // state carries a commander, in whatever zone it is in — see
-    // `setupCommanderAvatars` for why the command zone is the wrong gate.
-    // Waits (by answering `false`, so the subscription keeps listening)
-    // until a commander object exists.
-    const applyCommanderAvatars = (state: ReturnType<typeof useGameStore.getState>) => {
-      if (state.gameId !== gameId || !state.gameState) return false;
-      return setupCommanderAvatars(state.gameState);
-    };
-    const applyHordeAvatars = (state: ReturnType<typeof useGameStore.getState>) => {
-      if (state.gameId !== gameId || !state.gameState) return false;
-      return setupHordeAvatars(state.gameState, gameId);
-    };
-    const applySeatIdentities = (state: ReturnType<typeof useGameStore.getState>) =>
-      applyHordeAvatars(state) || applyCommanderAvatars(state);
-    const unsub = useGameStore.subscribe((state) => {
-      if (applied || !applySeatIdentities(state)) return;
-      applied = true;
-      unsub();
-    });
-    const state = useGameStore.getState();
-    if (!applied && applySeatIdentities(state)) {
-      applied = true;
-      unsub();
-    }
-    return unsub;
-  }, [mode, gameId]);
 
   useEffect(() => {
     // A Commander pod's launched game is admitted here for its names and
@@ -2473,6 +2454,78 @@ export function GameProvider({
       }
     };
   }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName, source, draftId, originUrl, pile]);
+
+  // Seat identities derive AFTER the setup effect above: setup re-seeds the
+  // random fallback on every mount, so a derivation placed before it would
+  // lose on a remount with loaded state (and the Horde continuity key would
+  // then suppress every later snapshot as "unchanged"). Deriving last, the
+  // mount run wins over the seed and continuous play and a remount agree.
+  useEffect(() => {
+    if (mode !== "ai") return;
+    // Horde games with themed seats take Horde identities; everything else
+    // falls through to the commander derivation. The commander branch is
+    // one-shot — it applies as soon as the state carries a commander, in
+    // whatever zone it is in (see `setupCommanderAvatars` for why the
+    // command zone is the wrong gate), then unsubscribes. The Horde branch
+    // is continuous: a stage clear replaces the deployed Boss under the
+    // same session, so the seat must re-derive whenever the engine's
+    // projected identity changes. Only the commander branch unsubscribes.
+    let commanderDone = false;
+    let lastHordeKey: string | null = null;
+    // The projected Horde identity this snapshot themes, or null when no
+    // themed seats apply (non-Horde format, other challenge deck, or no
+    // Boss deployed yet). Bound to the game id and the session generation
+    // as well as the projection: a debug import replaces the session under
+    // the same route id and can reuse the same object ids, so an id-only
+    // key would match a different game and keep its stale names.
+    const hordeKeyFor = (
+      gameState: NonNullable<ReturnType<typeof useGameStore.getState>["gameState"]>,
+      generation: number,
+    ): string | null => {
+      if (gameState.format_config?.format !== "Horde") return null;
+      if (gameState.format_config?.horde_ruleset?.challenge_deck !== "TurtleTeamUpHorde") {
+        return null;
+      }
+      const horde = gameState.derived?.horde;
+      if (!horde || (horde.deployed_boss_ids?.length ?? 0) === 0) return null;
+      return JSON.stringify([
+        gameId,
+        generation,
+        horde.horde_seat_ids ?? [],
+        horde.hero_player_ids ?? [],
+        horde.deployed_boss_ids ?? [],
+      ]);
+    };
+    const applyCommanderAvatars = (state: ReturnType<typeof useGameStore.getState>) => {
+      if (commanderDone || state.gameId !== gameId || !state.gameState) return false;
+      return setupCommanderAvatars(state.gameState);
+    };
+    const applyHordeAvatars = (state: ReturnType<typeof useGameStore.getState>) => {
+      if (state.gameId !== gameId || !state.gameState) return false;
+      const key = hordeKeyFor(state.gameState, state.gameSessionGeneration);
+      if (key === null) return false;
+      // Identity unchanged: themed seats are already active, so neither a
+      // rewrite (which would clobber a user rename) nor a refetch is due.
+      // Returning true keeps the commander fallback short-circuited.
+      if (key === lastHordeKey) return true;
+      if (!setupHordeAvatars(state.gameState, gameId)) return false;
+      lastHordeKey = key;
+      return true;
+    };
+    const unsub = useGameStore.subscribe((state) => {
+      if (applyHordeAvatars(state)) return;
+      if (applyCommanderAvatars(state)) {
+        commanderDone = true;
+        unsub();
+      }
+    });
+    const state = useGameStore.getState();
+    if (!applyHordeAvatars(state) && applyCommanderAvatars(state)) {
+      commanderDone = true;
+      unsub();
+    }
+    return unsub;
+  }, [mode, gameId]);
 
   return (
     <GameDispatchContext.Provider value={dispatchAction}>

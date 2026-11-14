@@ -1620,6 +1620,46 @@ pub fn install_card_db(state: &mut GameState, db: std::sync::Arc<CardDatabase>) 
     state.card_db = Some(CardDbHandle::new(db));
 }
 
+/// Repair the display route of Horde token-layout objects from saves written
+/// before creation stamped it: such an object persists `is_horde_deck_token`
+/// with default `Card` routing and no `printed_ref`, so the reapply above
+/// skips it and the client discards its token art ref for `Card` routing
+/// (a revealed graveyard Event renders as a blank placeholder).
+///
+/// The predicate mirrors the layer authority (`seed_live_characteristics_from_base`
+/// routes `Token` iff `is_token && base_printed_ref.is_none()`), which heals
+/// battlefield recipients on every pass — this covers exactly the
+/// off-battlefield population the layers pass never visits. Real cards keep
+/// `Card` routing: classic Horde library cards carry `is_token = false`,
+/// token-copies of real cards carry `base_printed_ref`, and a live
+/// `printed_ref` the reapply confirmed is conservatively left alone. Display
+/// only: contributes no `changed_any`, so no revision bump, layer flush, or
+/// finalization follows. Hidden library and Boss-pile objects repair here too
+/// and are re-concealed per-projection by `redact_printed_identity`.
+fn repair_horde_token_display_routes(state: &mut GameState) {
+    use crate::game::game_object::DisplaySource;
+
+    // `ObjectMap` offers no `values_mut`: collect ids first, then mutate
+    // through `get_mut` (the `reapply_printed_faces_from_card_db` pattern).
+    let object_ids: Vec<_> = state.objects.keys().copied().collect();
+    for object_id in object_ids {
+        let repair = state.objects.get(&object_id).is_some_and(|obj| {
+            obj.is_horde_deck_token
+                && obj.is_token
+                && obj.printed_ref.is_none()
+                && obj.base_printed_ref.is_none()
+                && obj.display_source != DisplaySource::Token
+        });
+        if repair {
+            state
+                .objects
+                .get_mut(&object_id)
+                .expect("id from live keys")
+                .display_source = DisplaySource::Token;
+        }
+    }
+}
+
 /// Rehydrate printed-card state while explicitly choosing whether this call is
 /// its public-state boundary. Restore owners use [`CardDbRehydrationFinalization::Defer`]
 /// so the prepared restore token can perform the sole finalization after all
@@ -1633,6 +1673,7 @@ pub fn rehydrate_game_from_card_db_with_finalization(
     restore_legacy_swap_snapshot_provenance(state);
     let (changed_any, changed_battlefield) = reapply_printed_faces_from_card_db(state, db);
     repair_battlefield_trigger_index_after_face_reapply(state, changed_battlefield);
+    repair_horde_token_display_routes(state);
 
     if changed_any || state.layers_dirty.is_dirty() {
         bump_state_revision(state);
@@ -2097,6 +2138,180 @@ mod tests {
     use crate::game::game_object::PrototypeFormState;
     use crate::types::ability::ChooseOneOfKind;
     use crate::types::format::FormatConfig;
+
+    /// Pre-PR saves persist Horde token-layout objects with default `Card`
+    /// routing and no `printed_ref`, so the face reapply skips them and a
+    /// revealed graveyard Event keeps rendering as a blank placeholder. The
+    /// restore boundary repairs the route to `Token`; hidden library and
+    /// Boss-pile objects repair too but stay concealed per-projection, and a
+    /// token-copy-like object (live `printed_ref` present) is left alone.
+    ///
+    /// The old-save shape is exact, not hand-waved: the state serializes,
+    /// every `display_source` key is stripped (the pre-PR `skip_serializing_if`
+    /// omission), and the stripped JSON deserializes before rehydration.
+    #[test]
+    fn restore_repairs_horde_token_display_routes_but_keeps_hidden_piles_concealed() {
+        use crate::game::game_object::DisplaySource;
+        use crate::types::card::TokenImageRef;
+        use crate::types::player::PlayerId;
+
+        let mut state = GameState::new_two_player(42);
+        let smackdown_ref = || TokenImageRef {
+            scryfall_id: "fac36345-b2fb-4a44-a499-f68bbe87e736".to_string(),
+            scryfall_oracle_id: Some("4e7833c7-e9ff-4550-b2fd-36afe6087e0f".to_string()),
+            face_name: None,
+            preset_id: "f13c9091-91b6-51b4-91d5-214180ff03ee".to_string(),
+        };
+        // A revealed Event already in the public graveyard (old shape: token
+        // flags + art ref, default Card routing, no printed identity).
+        let event = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(1),
+            "Event: Leatherhead's Smackdown".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&event).expect("graveyard Event");
+            obj.is_token = true;
+            obj.is_horde_deck_token = true;
+            obj.token_image_ref = Some(smackdown_ref());
+            obj.display_source = DisplaySource::Card;
+        }
+        // A hidden Horde library card and a face-down Boss-pile card.
+        let hidden_library = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(1),
+            "Event: Bebop's Rampage".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state
+                .objects
+                .get_mut(&hidden_library)
+                .expect("library card");
+            obj.is_token = true;
+            obj.is_horde_deck_token = true;
+            obj.token_image_ref = Some(smackdown_ref());
+            obj.display_source = DisplaySource::Card;
+        }
+        let pile_boss = create_object(
+            &mut state,
+            CardId(103),
+            PlayerId(1),
+            "Shredder, Foot Clan Overlord".to_string(),
+            Zone::Command,
+        );
+        state.command_zone.retain(|id| *id != pile_boss);
+        {
+            let obj = state.objects.get_mut(&pile_boss).expect("pile Boss");
+            obj.is_token = true;
+            obj.is_horde_deck_token = true;
+            obj.token_image_ref = Some(smackdown_ref());
+            obj.display_source = DisplaySource::Card;
+            obj.face_down = true;
+        }
+        state.boss_deck.push_back(pile_boss);
+        // Control: a token-copy-like object whose live printed identity the
+        // repair must not touch.
+        let copy_like = create_object(
+            &mut state,
+            CardId(104),
+            PlayerId(1),
+            "Token Copy".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&copy_like).expect("control");
+            obj.is_token = true;
+            obj.is_horde_deck_token = true;
+            obj.printed_ref = Some(crate::types::card::PrintedCardRef {
+                oracle_id: "control-oracle".to_string(),
+                face_name: "Token Copy".to_string(),
+            });
+            obj.display_source = DisplaySource::Card;
+        }
+
+        let json = serde_json::to_string(&state).expect("serialize pre-PR save");
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse save");
+        let objects = value
+            .get_mut("objects")
+            .and_then(|o| o.as_object_mut())
+            .expect("saved objects map");
+        for obj in objects.values_mut() {
+            obj.as_object_mut()
+                .expect("saved object")
+                .remove("display_source");
+        }
+        let stripped = serde_json::to_string(&value).expect("re-serialize stripped save");
+        assert!(
+            !stripped.contains("display_source"),
+            "precondition: the old save omits every display route"
+        );
+        let mut restored: GameState =
+            serde_json::from_str(&stripped).expect("a compatible old save loads");
+        assert_eq!(
+            restored
+                .objects
+                .get(&event)
+                .expect("restored Event")
+                .display_source,
+            DisplaySource::Card,
+            "precondition: the omission deserializes to Card routing"
+        );
+
+        rehydrate_game_from_card_db(&mut restored, &CardDatabase::default());
+
+        assert_eq!(
+            restored
+                .objects
+                .get(&event)
+                .expect("rehydrated Event")
+                .display_source,
+            DisplaySource::Token,
+            "the revealed Event routes as a token after restore"
+        );
+        assert!(
+            restored
+                .objects
+                .get(&event)
+                .expect("rehydrated Event")
+                .token_image_ref
+                .is_some(),
+            "the repair keeps the pinned art ref the client resolves"
+        );
+        assert_eq!(
+            restored
+                .objects
+                .get(&copy_like)
+                .expect("control")
+                .display_source,
+            DisplaySource::Card,
+            "a live printed identity keeps Card routing"
+        );
+
+        // Hidden piles stay concealed in the delivered viewer snapshot while
+        // the revealed Event keeps its exposed token art.
+        let filtered = crate::game::visibility::filter_state_for_viewer(&restored, PlayerId(0));
+        let shown = filtered.objects.get(&event).expect("projected Event");
+        assert_eq!(shown.display_source, DisplaySource::Token);
+        assert!(
+            shown.token_image_ref.is_some(),
+            "the public Event exposes its token art ref"
+        );
+        for (id, what) in [(hidden_library, "library card"), (pile_boss, "pile Boss")] {
+            let hidden = filtered.objects.get(&id).expect(what);
+            assert_eq!(hidden.name, "Hidden Card", "{what} name concealed");
+            assert_eq!(
+                hidden.display_source,
+                DisplaySource::Card,
+                "{what} routing concealed"
+            );
+            assert!(hidden.token_image_ref.is_none(), "{what} art ref concealed");
+            assert!(!hidden.is_horde_deck_token, "{what} Horde flag concealed");
+        }
+    }
 
     /// CR 611.2c + CR 613.1 (issue #8485, round-5 HIGH-1): a transform ROUND TRIP
     /// must not seed `base_replacement_definitions` with a resolution-created
