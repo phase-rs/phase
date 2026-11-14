@@ -1,7 +1,9 @@
 import "fake-indexeddb/auto";
-import { act, cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GameProvider } from "../GameProvider";
+import { useResumables } from "../../hooks/useResumables";
 import { PROTOCOL_VERSION } from "../../adapter/ws-adapter";
 import type { WsAdapterEvent } from "../../adapter/ws-adapter";
 import { gameStateFactory } from "../../test/factories/gameStateFactory";
@@ -10,6 +12,7 @@ import {
   clearGame,
   loadActiveGame,
   saveActiveGame,
+  saveGame,
   type ActiveGameMeta,
   type NativeSoloSession,
 } from "../../services/gamePersistence";
@@ -91,7 +94,7 @@ class BridgeSocket {
     queueMicrotask(() => {
       switch (message.type) {
         case "BootstrapTerminalDelivery":
-          this.receive({ type: "TerminalBootstrapResult", data: { delivery: bootstrap } });
+          this.receive({ type: "TerminalBootstrapResult", data: bootstrap ? { delivery: bootstrap } : {} });
           break;
         case "ReadTerminalResult":
           this.receive({ type: "TerminalResult", data: { delivery } });
@@ -241,7 +244,7 @@ describe("native solo terminal recovery across real persistence and reopen", () 
       id: GAME_ID, mode: "ai", difficulty: "Medium",
       nativeSession: { gameCode: "NEXT", playerId: 0, playerToken: "next-token", fullKey: { game_code: "NEXT", generation: 1 } },
     }],
-  ] as const)("preserves %s written while display cleanup is pending and clears matching pointer after navigation", async (_case, replacement) => {
+  ] as const)("preserves %s written while display cleanup is pending and clears matching pointer after navigation through the real resume consumer", async (_case, replacement) => {
     ackOutcome = "pending";
     const { live, events, unmount, displayCleared } = await resumeLiveGame();
     await act(async () => { live.receive({ type: "TerminalResult", data: { delivery } }); });
@@ -249,7 +252,12 @@ describe("native solo terminal recovery across real persistence and reopen", () 
     await waitFor(() => expect(pendingAcks).toHaveLength(1));
 
     // Install replacement while display cleanup is pending.
-    if (replacement) saveActiveGame(replacement);
+    if (replacement) {
+      if (!("nativeSession" in replacement) || !replacement.nativeSession) {
+        await saveGame(replacement.id, gameStateFactory.build());
+      }
+      saveActiveGame(replacement);
+    }
     await displayCleared();
     // Replacement is preserved while display cleanup resolves.
     if (replacement) {
@@ -258,14 +266,61 @@ describe("native solo terminal recovery across real persistence and reopen", () 
       expect(pointer()?.nativeSession).toEqual({ ...session, terminalOnly: true });
     }
 
-    // Unmount before ACK lands to simulate navigation away from the game page.
+    // Unmount before ACK lands to simulate navigation away from the game page (Return to Menu).
     unmount();
+
+    // Mount the real resume consumer in the Menu while ACK is still in flight.
+    const menuConsumer = renderHook(() => useResumables(), {
+      wrapper: ({ children }) => <MemoryRouter>{children}</MemoryRouter>,
+    });
+
+    if (replacement) {
+      await waitFor(() => expect(menuConsumer.result.current.match?.id).toBe(replacement.id));
+    } else {
+      // Terminal-only pointer is never offered as a playable resume match.
+      await waitFor(() => expect(menuConsumer.result.current.match).toBeNull());
+    }
 
     await act(async () => {
       pendingAcks[0]!.receive({ type: "TerminalDeliveryAcknowledged", data: { delivery_id: delivery.deliveryId } });
     });
     // Matching pointer is cleared after navigation; replacement pointer is kept.
     await waitFor(() => expect(pointer()).toEqual(replacement));
+
+    // After a successful ACK, expired action cannot start a fresh match.
+    if (!replacement) {
+      expect(menuConsumer.result.current.match).toBeNull();
+      act(() => {
+        menuConsumer.result.current.resumeMatch();
+      });
+      expect(pointer()).toBeNull();
+    } else {
+      expect(menuConsumer.result.current.match?.id).toBe(replacement.id);
+    }
+  });
+
+  it("preserves failed ACKs in storage and through the real resume consumer", async () => {
+    ackOutcome = "pending";
+    const { live, events, unmount, displayCleared } = await resumeLiveGame();
+    await act(async () => { live.receive({ type: "TerminalResult", data: { delivery } }); });
+    await waitFor(() => expect(events).toHaveBeenCalledWith({ type: "terminalDelivery", delivery }));
+    await waitFor(() => expect(pendingAcks).toHaveLength(1));
+
+    await displayCleared();
+    expect(pointer()?.nativeSession).toEqual({ ...session, terminalOnly: true });
+
+    // Unmount before ACK lands to simulate Return to Menu.
+    unmount();
+
+    // Reject the pending ACK (failed ACK).
+    await act(async () => {
+      pendingAcks[0]!.onerror?.();
+    });
+
+    // Pointer is preserved on failed ACK.
+    expect(pointer()).toEqual({
+      id: GAME_ID, mode: "ai", difficulty: "Medium", nativeSession: { ...session, terminalOnly: true },
+    });
   });
 
   describe("terminal response identity binding", () => {

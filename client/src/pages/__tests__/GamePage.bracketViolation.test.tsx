@@ -80,7 +80,7 @@ let capturedGameMenuProps: Record<string, unknown> | undefined;
 const { mockMultiplayerState, mockUseMultiplayerStore } = vi.hoisted(() => {
   const mockMultiplayerState = {
     serverInfo: null,
-    activePlayerId: null,
+    activePlayerId: null as number | null,
     playerNames: new Map<string, string>(),
     playerAvatars: new Map<string, string>(),
     connectionStatus: "disconnected",
@@ -1976,6 +1976,101 @@ describe("GamePage — rematch preserves the format the game was played with", (
     expect(await screen.findByText("Commander victory")).toBeInTheDocument();
     expect(screen.queryByText(/You:/)).toBeNull();
     expect(screen.queryByText(/Opponent:/)).toBeNull();
+  });
+
+  it("labels reopened guest life totals from authoritative seat 1 perspective", async () => {
+    mockSetGameState.mockImplementation((update: Record<string, unknown>) => {
+      Object.assign(storeOverrides, update);
+    });
+    storeOverrides.gameState = null;
+    storeOverrides.waitingFor = null;
+    mockMultiplayerState.activePlayerId = 1;
+    renderGamePage("/game/reopened-seat-1?mode=join");
+
+    act(() => {
+      capturedOnWsEvent?.({
+        type: "terminalDelivery",
+        delivery: {
+          key: { game_code: "SEAT01", generation: 1 },
+          terminalRevision: 1,
+          deliveryId: "del-seat-1",
+          credential: "cred-seat-1",
+          display: { winner: 1, reason: "Life reduction victory (CR 704.5a)" },
+          finalView: gameStateFactory.withPlayers(
+            { id: 0, life: 0 },
+            { id: 1, life: 12 },
+          ).build({
+            waiting_for: { type: "GameOver", data: { winner: 1 } },
+          }),
+        },
+      });
+    });
+
+    expect(await screen.findByText("Life reduction victory (CR 704.5a)")).toBeInTheDocument();
+    expect(screen.getByText("VICTORY")).toBeInTheDocument();
+    const summary = screen.getByText(/You:/);
+    expect(summary).toHaveTextContent("You: 12 / Opponent: 0");
+  });
+
+  it("labels reopened native solo life totals from seat 0 perspective", async () => {
+    mockSetGameState.mockImplementation((update: Record<string, unknown>) => {
+      Object.assign(storeOverrides, update);
+    });
+    storeOverrides.gameState = null;
+    storeOverrides.waitingFor = null;
+    mockMultiplayerState.activePlayerId = 0;
+    renderGamePage("/game/reopened-native-seat-0?mode=ai");
+
+    act(() => {
+      capturedOnWsEvent?.({
+        type: "terminalDelivery",
+        delivery: {
+          key: { game_code: "NATIVE01", generation: 1 },
+          terminalRevision: 1,
+          deliveryId: "del-native-0",
+          credential: "cred-native-0",
+          display: { winner: 0, reason: "Victory" },
+          finalView: gameStateFactory.withPlayers(
+            { id: 0, life: 20 },
+            { id: 1, life: 0 },
+          ).build({
+            waiting_for: { type: "GameOver", data: { winner: 0 } },
+          }),
+        },
+      });
+    });
+
+    expect(await screen.findByText("Victory")).toBeInTheDocument();
+    const summary = screen.getByText(/You:/);
+    expect(summary).toHaveTextContent("You: 20 / Opponent: 0");
+  });
+
+  it("rejects a matching identity with a malformed finalView without crashing GamePage", async () => {
+    mockSetGameState.mockImplementation((update: Record<string, unknown>) => {
+      Object.assign(storeOverrides, update);
+    });
+    storeOverrides.gameState = null;
+    storeOverrides.waitingFor = null;
+    renderGamePage("/game/reopened-malformed-view?mode=ai");
+
+    expect(() => {
+      act(() => {
+        capturedOnWsEvent?.({
+          type: "terminalDelivery",
+          delivery: {
+            key: { game_code: "MALF01", generation: 1 },
+            terminalRevision: 1,
+            deliveryId: "del-malf",
+            credential: "cred-malf",
+            display: { winner: 0, reason: "Commander victory" },
+            finalView: {} as never,
+          },
+        });
+      });
+    }).not.toThrow();
+
+    expect(await screen.findByText("Commander victory")).toBeInTheDocument();
+    expect(screen.queryByText(/You:/)).toBeNull();
   });
 });
 

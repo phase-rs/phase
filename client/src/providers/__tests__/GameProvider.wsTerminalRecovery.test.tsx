@@ -5,6 +5,7 @@ import { GameProvider } from "../GameProvider";
 import { PROTOCOL_VERSION, WebSocketAdapter } from "../../adapter/ws-adapter";
 import { gameStateFactory } from "../../test/factories/gameStateFactory";
 import { useGameStore } from "../../stores/gameStore";
+import { useMultiplayerStore } from "../../stores/multiplayerStore";
 import { saveWsSession, loadWsSession, WS_SESSION_TTL_MS, type WsSessionData } from "../../services/multiplayerSession";
 import {
   commitFullTerminalDelivery, loadFullTerminalDelivery, type FullTerminalDelivery,
@@ -89,7 +90,7 @@ class ServerSocket extends EventTarget {
           break;
         case "BootstrapTerminalDelivery":
           if (holdBootstrap) pendingBootstraps.push(this);
-          else this.receive({ type: "TerminalBootstrapResult", data: { delivery: bootstrap } });
+          else this.receive({ type: "TerminalBootstrapResult", data: bootstrap ? { delivery: bootstrap } : {} });
           break;
         case "AckTerminalDelivery":
           if (ackOutcome === "reject") this.onerror?.();
@@ -382,6 +383,32 @@ describe("ordinary WebSocket terminal routing across real persistence and remoun
       expect(sentTypes()).toEqual(["ReadTerminalResult", "AckTerminalDelivery"]);
       expect(events).toHaveBeenCalledWith({ type: "terminalDelivery", delivery });
       expect(loadWsSession()).toEqual({ ...session, terminalOnly: true });
+    });
+
+    it("restores authoritative guest seat 1 identity upon terminal recovery", async () => {
+      const guestSession: WsSessionData = {
+        ...session,
+        playerId: 1,
+        terminalOnly: true,
+      };
+      saveWsSession(guestSession);
+      const guestDelivery: FullTerminalDelivery = {
+        ...delivery,
+        display: { winner: 1, reason: "Life reduction victory (CR 704.5a)" },
+      };
+      await commitFullTerminalDelivery(guestDelivery);
+
+      useMultiplayerStore.getState().setActivePlayerId(null as never);
+      expect(useMultiplayerStore.getState().activePlayerId).toBeNull();
+
+      const { events } = mountProvider();
+      await waitFor(() => expect(events).toHaveBeenCalledWith({
+        type: "terminalDelivery",
+        delivery: { ...guestDelivery, finalView: undefined },
+      }));
+
+      // The authoritative recipient seat 1 is restored before identity event
+      expect(useMultiplayerStore.getState().activePlayerId).toBe(1);
     });
   });
 });

@@ -504,6 +504,19 @@ describe("game persistence", () => {
       expect(stored()).toEqual(fresh);
     });
 
+    it.each(clears)("%s preserves IndexedDB cleanup and resolves when pointer storage is denied", async (_name, clear) => {
+      vi.mocked(idbDel).mockClear();
+      const getItemSpy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+        throw new DOMException("Access denied", "SecurityError");
+      });
+      try {
+        await expect(clear("native-game")).resolves.toBeUndefined();
+        expect(idbDel).toHaveBeenCalled();
+      } finally {
+        getItemSpy.mockRestore();
+      }
+    });
+
     it.each(clears)("%s releases its own unchanged pointer", async (_name, clear) => {
       // Positive control for the replacement cases above.
       const own = { id: "native-game", mode: "ai" as const, difficulty: "Medium" };

@@ -136,11 +136,14 @@ async function terminalSocketRequest(
  * absent result would otherwise send the caller to an ordinary reconnect).
  */
 function terminalReplyDelivery(data: unknown): FullTerminalDelivery | null {
-  if (typeof data !== "object" || data === null) {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
     throw new Error("Malformed terminal reply");
   }
-  const delivery = (data as { delivery?: unknown }).delivery;
-  if (delivery === undefined || delivery === null) return null;
+  const record = data as Record<string, unknown>;
+  if (!("delivery" in record) || record.delivery === undefined) {
+    return null;
+  }
+  const delivery = record.delivery;
   if (!isValidFullTerminalDelivery(delivery)) {
     throw new Error("Malformed terminal delivery");
   }
@@ -4976,6 +4979,7 @@ export class WebSocketAdapter implements EngineAdapter {
     }
     return {
       gameCode: this._gameCode,
+      ...(this._playerId !== null ? { playerId: this._playerId } : {}),
       playerToken: this.playerToken,
       fullKey: this.fullSessionKey,
       serverUrl: this.serverUrl,

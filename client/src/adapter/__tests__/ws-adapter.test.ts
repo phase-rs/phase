@@ -1516,7 +1516,7 @@ describe("WebSocketAdapter", () => {
       await expect(bootstrap({ type: "TerminalBootstrapResult", data: { delivery } })).resolves.toEqual(delivery);
       await expect(bootstrap({ type: "TerminalBootstrapResult", data: {} })).resolves.toBeNull();
       await expect(read({ type: "TerminalResult", data: { delivery } })).resolves.toEqual(delivery);
-      await expect(read({ type: "TerminalResult", data: { delivery: null } })).resolves.toBeNull();
+      await expect(read({ type: "TerminalResult", data: {} })).resolves.toBeNull();
     });
 
     it.each([
@@ -1535,9 +1535,12 @@ describe("WebSocketAdapter", () => {
     it.each([
       ["an absent data payload", undefined],
       ["a null data payload", null],
+      ["an array envelope", []],
+      ["a null delivery", { delivery: null }],
       ["an empty delivery", { delivery: {} }],
       ["a delivery with a null key", { delivery: { ...delivery, key: null } }],
       ["a delivery with a null display", { delivery: { ...delivery, display: null } }],
+      ["a delivery with a malformed finalView", { delivery: { ...delivery, finalView: {} } }],
     ])("rejects %s rather than reporting no result", async (_case, data) => {
       await expect(bootstrap({ type: "TerminalBootstrapResult", data })).rejects.toThrow(/^Malformed terminal/);
       await expect(read({ type: "TerminalResult", data })).rejects.toThrow(/^Malformed terminal/);

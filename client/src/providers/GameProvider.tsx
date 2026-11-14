@@ -1455,6 +1455,9 @@ export function GameProvider({
           return;
         }
         if (reconnectSession) {
+          if (reconnectSession.playerId !== undefined) {
+            useMultiplayerStore.getState().setActivePlayerId(reconnectSession.playerId);
+          }
           const outcome = await recoverFullTerminal(
             {
               serverUrl: reconnectSession.serverUrl,
@@ -2105,6 +2108,7 @@ export function GameProvider({
           // that result through the same terminal-only flow as online seats;
           // only a seat the server reports as live resumes play.
           if (nativeResume) {
+            useMultiplayerStore.getState().setActivePlayerId(nativeResume.playerId ?? 0);
             const outcome = await recoverFullTerminal(
               {
                 serverUrl: NATIVE_ENGINE_SERVER_URL,

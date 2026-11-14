@@ -33,13 +33,25 @@ function recordKey(key: FullTerminalDelivery["key"]): string {
   return `${FULL_TERMINAL_PREFIX}${key.game_code}:${key.generation}`;
 }
 
+/** Validates that a finalView has the required structure of a GameState to prevent crashes. */
+export function isValidFinalView(value: unknown): value is GameState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const state = value as Partial<GameState>;
+  return Array.isArray(state.players)
+    && state.objects !== null
+    && typeof state.objects === "object"
+    && !Array.isArray(state.objects);
+}
+
 /** A legacy state snapshot is never a terminal delivery capability. */
 export function isValidFullTerminalDelivery(value: unknown): value is FullTerminalDelivery {
-  if (!value || typeof value !== "object") return false;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const delivery = value as Partial<FullTerminalDelivery>;
   const key = delivery.key;
   const display = delivery.display;
-  if (!key || typeof key !== "object" || !display || typeof display !== "object") return false;
+  if (!key || typeof key !== "object" || Array.isArray(key) || !display || typeof display !== "object" || Array.isArray(display)) {
+    return false;
+  }
   return typeof key.game_code === "string"
     && key.game_code.length > 0
     && typeof key.generation === "number"
@@ -54,8 +66,7 @@ export function isValidFullTerminalDelivery(value: unknown): value is FullTermin
     && delivery.credential.length > 0
     && typeof display.reason === "string"
     && (typeof display.winner === "number" || display.winner === null)
-    && (delivery.finalView === undefined
-      || (typeof delivery.finalView === "object" && delivery.finalView !== null));
+    && (delivery.finalView === undefined || isValidFinalView(delivery.finalView));
 }
 
 /**

@@ -578,8 +578,26 @@ export async function loadCheckpoints(gameId: string): Promise<PersistedGameStat
 
 // ── Active Game Meta (localStorage — tiny, synchronous) ─────────────────
 
+export const ACTIVE_GAME_CHANGED_EVENT = "phase:active-game-changed";
+
+export function notifyActiveGameChange(): void {
+  if (typeof window !== "undefined") {
+    try {
+      window.dispatchEvent(new Event("storage"));
+      window.dispatchEvent(new CustomEvent(ACTIVE_GAME_CHANGED_EVENT));
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 export function saveActiveGame(meta: ActiveGameMeta): void {
-  localStorage.setItem(ACTIVE_GAME_KEY, JSON.stringify(meta));
+  try {
+    localStorage.setItem(ACTIVE_GAME_KEY, JSON.stringify(meta));
+    notifyActiveGameChange();
+  } catch {
+    /* storage denied */
+  }
 }
 
 export function loadActiveGame(): ActiveGameMeta | null {
@@ -593,12 +611,21 @@ export function loadActiveGame(): ActiveGameMeta | null {
 }
 
 export function clearActiveGame(): void {
-  localStorage.removeItem(ACTIVE_GAME_KEY);
+  try {
+    localStorage.removeItem(ACTIVE_GAME_KEY);
+    notifyActiveGameChange();
+  } catch {
+    /* storage denied */
+  }
 }
 
 /** The stored pointer exactly as written: game cleanup's compare-and-delete token. */
 function activeGamePointerToken(): string | null {
-  return localStorage.getItem(ACTIVE_GAME_KEY);
+  try {
+    return localStorage.getItem(ACTIVE_GAME_KEY);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -634,13 +661,21 @@ export function markNativeSoloSessionTerminal(
   gameId: string,
   expected: NativeSoloSessionIdentity,
 ): void {
-  const active = loadActiveGame();
-  if (!holdsNativeSoloSession(active, gameId, expected)) return;
-  saveActiveGame({ ...active, nativeSession: { ...active.nativeSession, terminalOnly: true } });
+  try {
+    const active = loadActiveGame();
+    if (!holdsNativeSoloSession(active, gameId, expected)) return;
+    saveActiveGame({ ...active, nativeSession: { ...active.nativeSession, terminalOnly: true } });
+  } catch {
+    /* storage denied */
+  }
 }
 
 /** Removes this game's native pointer after its session has ended. A pointer
  *  for any other game or session is a replacement and is kept. */
 export function clearNativeSoloSession(gameId: string, expected: NativeSoloSessionIdentity): void {
-  if (holdsNativeSoloSession(loadActiveGame(), gameId, expected)) clearActiveGame();
+  try {
+    if (holdsNativeSoloSession(loadActiveGame(), gameId, expected)) clearActiveGame();
+  } catch {
+    /* storage denied */
+  }
 }

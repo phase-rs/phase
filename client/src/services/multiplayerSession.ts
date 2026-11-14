@@ -1,4 +1,4 @@
-import type { FormatConfig, MatchType } from "../adapter/types";
+import type { FormatConfig, MatchType, PlayerId } from "../adapter/types";
 import { sameFullSessionKey } from "./fullSessionKey";
 
 export const WS_SESSION_STORAGE_KEY = "phase-ws-session";
@@ -18,6 +18,7 @@ export interface FullSessionKey {
 
 export interface WsSessionData {
   gameCode: string;
+  playerId?: PlayerId;
   playerToken: string;
   fullKey: FullSessionKey;
   serverUrl: string;

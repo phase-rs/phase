@@ -43,6 +43,7 @@ import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
 import { useResolvedGridRows, useResolvedSplitGridRows } from "../hooks/useResolvedGridRows.ts";
 import { useDebugHandReveal } from "../hooks/useDebugHandReveal";
+import { isValidFinalView } from "../services/fullTerminalResult";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
 import { formatLifeReadout, lifeReadout } from "../hooks/useDisplayedLife.ts";
 import { useLocalizedCardContent } from "../hooks/useLocalizedCardContent.ts";
@@ -540,7 +541,9 @@ export function GamePage() {
         setTerminalReason(event.delivery.display.reason);
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.delivery.display.winner } },
-          ...(event.delivery.finalView ? { gameState: event.delivery.finalView } : {}),
+          ...(event.delivery.finalView && isValidFinalView(event.delivery.finalView)
+            ? { gameState: event.delivery.finalView }
+            : {}),
         });
         break;
       case "terminalUnavailable":
@@ -1015,7 +1018,7 @@ function GamePageContent({
   // committed atomically with the waiting state.
   const engineWaitingFor = useGameStore((s) => s.waitingFor);
   const deckPools = useGameStore((s) => s.gameState?.deck_pools);
-  const stackLength = useGameStore((s) => s.gameState?.stack.length ?? 0);
+  const stackLength = useGameStore((s) => s.gameState?.stack?.length ?? 0);
   const isSandboxGame = useGameStore(
     (s) => s.gameState?.format_config?.allow_debug_actions === true,
   );
