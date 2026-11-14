@@ -13039,11 +13039,33 @@ pub(crate) fn compute_current_copiable_values(
     state: &GameState,
     object_id: ObjectId,
 ) -> Option<CopiableValues> {
+    compute_copiable_values_where(state, object_id, |_| true)
+}
+
+/// CR 613.2a + CR 613.7 + CR 730.2a: copiable values at the merge effect's own
+/// position in layer 1a: every earlier copy effect, none after it or the merge itself.
+pub(crate) fn compute_copiable_values_preceding(
+    state: &GameState,
+    object_id: ObjectId,
+    merge_effect_id: u64,
+    merge_timestamp: u64,
+) -> Option<CopiableValues> {
+    compute_copiable_values_where(state, object_id, |effect| {
+        effect.timestamp < merge_timestamp && effect.transient_id != Some(merge_effect_id)
+    })
+}
+
+fn compute_copiable_values_where(
+    state: &GameState,
+    object_id: ObjectId,
+    include: impl Fn(&ActiveContinuousEffect) -> bool,
+) -> Option<CopiableValues> {
     let obj = state.objects.get(&object_id)?;
     let mut values = intrinsic_copiable_values(obj);
     let mut copy_effects: Vec<ActiveContinuousEffect> =
         gather_active_effects_for_layer(state, Layer::Copy)
             .into_iter()
+            .filter(|effect| include(effect))
             .filter(|effect| {
                 let condition_controller = active_effect_condition_controller(state, effect);
                 matches_target_filter(

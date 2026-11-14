@@ -4037,6 +4037,10 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     obj.spellbook.clear();
     obj.parse_warnings.clear();
     obj.back_face = None;
+    // Redacted with `back_face`. Only a double-faced copy token carries it. Such a token can be in a
+    // hidden zone only between a zone change and the state-based action that removes it (CR 111.7),
+    // and it can't be turned face down (CR 712.16); the redaction covers that window.
+    obj.double_faced_token_alternative = None;
     // CR 400.2: a hidden card's token-ness identifies its pile position
     // (Horde libraries mix tokens and cards), so it redacts like every other
     // printed characteristic — mirroring `redact_zone_change_record`'s

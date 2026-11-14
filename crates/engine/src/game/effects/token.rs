@@ -38,7 +38,8 @@ use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    CopyTokenSpec, EntryChoices, ProposedEvent, TokenAttackRequest, TokenHostRequest, TokenSpec,
+    CopiedFaceUp, CopyTokenSpec, EntryChoices, ProposedEvent, TokenAttackRequest, TokenHostRequest,
+    TokenSpec,
 };
 use crate::types::resolution::ChildStackDepth;
 use crate::types::resolved_commands::{
@@ -2036,9 +2037,8 @@ pub(crate) fn materialize_token_spec_body(
 /// rather than on `GameState`, which is what lets one implementation serve the
 /// liminal build-then-insert ordering and the direct insert-then-build ordering.
 ///
-/// `reset_for_battlefield_entry` touches no copiable characteristic, so running
-/// it after the keyword grant (the liminal order) is equivalent to running it
-/// before (the former direct order).
+/// Entry under `RoomDoorAssignment::CopiableValues` assigns no door, so running it
+/// after the exceptions keeps a CR 707.9a grant outside both doors (CR 709.5).
 pub(crate) fn materialize_token_copy_body(
     object: &mut GameObject,
     copy: &CopyTokenSpec,
@@ -2061,18 +2061,7 @@ pub(crate) fn materialize_token_copy_body(
     values.static_definitions = Arc::new(cda_pruning.definitions);
     apply_copiable_values_to_liminal_object(object, &values, &copy.display);
 
-    // CR 707.9a + CR 702: "except it has [keyword]" — grant additional keywords
-    // on top of the copied characteristics. Twinflame's haste copies are the
-    // canonical case. Idempotent under repeats.
-    for kw in &copy.extra_keywords {
-        let already_live = object.keywords.contains(kw); // allow-raw-authority: structural live keyword insertion de-dupe, not an effective keyword query
-        if !already_live {
-            object.keywords.push(kw.clone());
-        }
-        if !object.base_keywords.contains(kw) {
-            object.base_keywords.push(kw.clone());
-        }
-    }
+    grant_copy_extra_keywords(object, &copy.extra_keywords);
 
     match modifications {
         // CR 707.2: the copiable values are the whole body.
@@ -2094,10 +2083,71 @@ pub(crate) fn materialize_token_copy_body(
         ResolvedCopyBodyModifications::DeferredToUnjournaledSeam { .. } => {}
     }
 
+    // CR 707.8a: a token copy of a double-faced object is a double-faced token, up
+    // on the face its source showed, with the copy's exceptions on both faces
+    // (CR 707.9a/b/d). The non-liminal seam folds its deferred stamps onto the
+    // stored face itself, right after this call.
+    if let Some(faces) = &copy.double_faced {
+        // CR 707.8a + CR 722.2b + CR 709.5b: the copied values' prepare spell or Room half is
+        // kept beside the other face, which takes `back_face`.
+        object.double_faced_token_alternative =
+            crate::game::printed_cards::stored_alternative_of_values(&values);
+        let (stamped, all_creature_types): (&[ContinuousModification], &[String]) =
+            match modifications {
+                ResolvedCopyBodyModifications::Folded {
+                    modifications,
+                    all_creature_types,
+                } => (modifications.as_slice(), all_creature_types.as_slice()),
+                ResolvedCopyBodyModifications::NoExceptions
+                | ResolvedCopyBodyModifications::DeferredToUnjournaledSeam { .. } => (&[], &[]),
+            };
+        object.back_face = Some(super::token_copy::fold_copy_exceptions_into_face(
+            &faces.hidden,
+            &copy.additional_modifications,
+            &copy.extra_keywords,
+            stamped,
+            all_creature_types,
+        ));
+        match faces.up {
+            // CR 712.8d: the front face is up.
+            CopiedFaceUp::Front => {}
+            // CR 712.8e: a transformed permanent's back face is up.
+            CopiedFaceUp::TransformedBack => object.transformed = true,
+            // CR 712.8f: a modal double-faced permanent's back face is up. CR 707.8a:
+            // also when the copied values are a Room's; `room::live_face_door` then
+            // reads the halves from the slot above, not from this orientation.
+            CopiedFaceUp::ModalBack => object.modal_back_face = true,
+        }
+    }
+
     // CR 400.7 + CR 302.6: Single authority for ETB state. Haste granted via
     // `extra_keywords` is folded in at query time by `has_summoning_sickness`.
-    object.reset_for_battlefield_entry(turn_number, entry_timestamp);
+    // CR 707.2 + CR 709.5 + CR 707.9a: the copiable values assign the doors; an
+    // exception the copy gained stays outside both.
+    object.reset_for_battlefield_entry_with_room_text(
+        turn_number,
+        entry_timestamp,
+        crate::game::game_object::RoomDoorAssignment::CopiableValues,
+    );
     object.tapped = tapped;
+}
+
+/// CR 707.9a + CR 702: "except it has [keyword]" — grants a copy's additional
+/// keywords on top of the copied characteristics, live and base. Twinflame's
+/// haste copies are the canonical case. Idempotent under repeats. The copy
+/// materializer applies it to the token, and
+/// `token_copy::fold_copy_exceptions_into_face` to a double-faced copy's stored
+/// face (CR 707.8a), so the grant has one authority.
+pub(crate) fn grant_copy_extra_keywords(object: &mut GameObject, keywords: &[Keyword]) {
+    for kw in keywords {
+        let already_live = object.keywords.contains(kw); // allow-raw-authority: structural live keyword insertion de-dupe, not an effective keyword query
+        if !already_live {
+            object.keywords.push(kw.clone());
+        }
+        if !object.base_keywords.contains(kw) {
+            object.base_keywords.push(kw.clone());
+        }
+    }
 }
 
 pub(crate) fn reserve_liminal_token_object(
@@ -9544,6 +9594,8 @@ mod tests {
                     controller: PlayerId(0),
                     // Liminal resume carries values only; empty mods are stamp-proof.
                     donor: None,
+                    // Single-faced fixture values: no other face to carry.
+                    double_faced: None,
                 })),
                 spec_resume: None,
                 enter_tapped: EtbTapState::Unspecified,

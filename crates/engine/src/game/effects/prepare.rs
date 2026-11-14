@@ -546,6 +546,7 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     copy.layer1_name_origin = None;
     copy.copied_room_halves = None;
     copy.copied_prepare_face = None;
+    copy.double_faced_token_alternative = None;
     copy.base_name_origin = None;
 
     // CR 707.2: the choices made while casting are copied only from an object
@@ -1444,6 +1445,10 @@ mod tests {
         obj.prepared_copy_source = Some(ObjectId(80));
         obj.loyalty_activations_this_turn = 1;
         obj.extra_loyalty_activations_this_turn = 2;
+        obj.double_faced_token_alternative = Some(crate::game::game_object::BackFaceData {
+            name: "Jump".to_string(),
+            ..Default::default()
+        });
 
         strip_non_copiable_state(&mut obj);
 
@@ -1484,6 +1489,7 @@ mod tests {
         assert_eq!(obj.prepared_copy_source, None);
         assert_eq!(obj.loyalty_activations_this_turn, 0);
         assert_eq!(obj.extra_loyalty_activations_this_turn, 0);
+        assert_eq!(obj.double_faced_token_alternative, None);
     }
 
     #[test]

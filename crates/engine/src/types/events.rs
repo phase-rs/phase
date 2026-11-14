@@ -1708,6 +1708,12 @@ pub enum GameEvent {
     },
     DayNightChanged {
         new_state: String,
+        /// CR 731.1a: the designation the game lost. `None` when the game gained
+        /// its first designation (CR 731.1 + CR 702.145d + CR 702.145g).
+        /// `day_night::set_designation` emits nothing for an unchanged designation,
+        /// so `Some(_)` always represents a change from one designation to the other.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous: Option<crate::types::game_state::DayNight>,
     },
     TurnedFaceUp {
         object_id: ObjectId,

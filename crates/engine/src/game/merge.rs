@@ -188,6 +188,10 @@ pub fn merge_object_onto(
         // When a face-down permanent becomes face up as a result of merging, other
         // effects don't count it as turned face up, so no `GameEvent::TurnedFaceUp`
         // is pushed here.
+        // CR 730.2e: the survivor keeps its own status as a component.
+        if survivor.component_face_down.is_none() && survivor.face_down != topmost_is_face_down {
+            survivor.component_face_down = Some(survivor.face_down);
+        }
         survivor.face_down = topmost_is_face_down;
     }
 
@@ -224,6 +228,18 @@ fn merged_copiable_values(
     topmost_id: ObjectId,
 ) -> Option<(CopiableValues, DisplayIdentity)> {
     let topmost = state.objects.get(&topmost_id)?;
+    let values = crate::game::layers::compute_current_copiable_values(state, topmost_id)
+        .unwrap_or_else(|| intrinsic_copiable_values(topmost));
+    merged_copiable_values_from(state, ordered, topmost_id, values)
+}
+
+fn merged_copiable_values_from(
+    state: &GameState,
+    ordered: &[ObjectId],
+    topmost_id: ObjectId,
+    mut values: CopiableValues,
+) -> Option<(CopiableValues, DisplayIdentity)> {
+    let topmost = state.objects.get(&topmost_id)?;
     let printed_ref = topmost
         .base_printed_ref
         .clone()
@@ -235,8 +251,6 @@ fn merged_copiable_values(
         printed_ref,
         ..topmost.display_identity()
     };
-    let mut values = crate::game::layers::compute_current_copiable_values(state, topmost_id)
-        .unwrap_or_else(|| intrinsic_copiable_values(topmost));
     let mut abilities = Vec::new();
     let mut triggers = Vec::new();
     let mut trigger_printed_origins = Vec::new();
@@ -305,6 +319,58 @@ fn merged_copiable_values(
     values.replacement_definitions = Arc::new(replacements);
     values.keywords = keywords;
     Some((values, display))
+}
+
+/// CR 730.2i + CR 730.2a + CR 702.140e: a turned component changes the pile's
+/// characteristics and ability union. CR 613.2a + CR 613.7: derive at the merge
+/// effect's own layer position, retaining its merge-time timestamp.
+pub(crate) fn rederive_merge_layer_effect(state: &mut GameState, survivor_id: ObjectId) {
+    use crate::game::game_object::MergeKind;
+
+    let Some(survivor) = state.objects.get(&survivor_id) else {
+        return;
+    };
+    match survivor.merge_kind {
+        Some(MergeKind::Mutate) => {}
+        Some(MergeKind::Meld | MergeKind::Augment) | None => return,
+    }
+    let Some(effect_id) = survivor.merge_layer_effect_id else {
+        return;
+    };
+    let ordered = survivor.merged_components.clone();
+    let Some(&topmost_id) = ordered.first() else {
+        return;
+    };
+    let Some(effect) = state
+        .transient_continuous_effects
+        .iter()
+        .find(|e| e.id == effect_id)
+    else {
+        return;
+    };
+    let Some(values) = crate::game::layers::compute_copiable_values_preceding(
+        state,
+        topmost_id,
+        effect_id,
+        effect.timestamp,
+    ) else {
+        return;
+    };
+    let Some((values, display)) = merged_copiable_values_from(state, &ordered, topmost_id, values)
+    else {
+        return;
+    };
+    if let Some(effect) = state
+        .transient_continuous_effects
+        .iter_mut()
+        .find(|e| e.id == effect_id)
+    {
+        effect.modifications = vec![ContinuousModification::CopyValues {
+            values: Box::new(values),
+            display,
+        }];
+    }
+    crate::game::layers::mark_layers_full(state);
 }
 
 pub(crate) fn remove_merge_layer_effect(state: &mut GameState, target_id: ObjectId) {

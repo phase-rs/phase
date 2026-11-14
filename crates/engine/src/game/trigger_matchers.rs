@@ -4501,7 +4501,10 @@ pub(super) fn match_manifest_dread(
     true
 }
 
-/// DayTimeChanges: fires when day/night changes.
+/// CR 731.1a + CR 603.2: "day becomes night" and "night becomes day" refer to the game losing
+/// one designation and gaining the other, which is exactly the event
+/// `day_night::set_designation` emits with a `previous` designation. A first designation gained
+/// from neither (CR 731.1 + CR 702.145d/g) loses nothing and does not match.
 pub(super) fn match_day_time_changes(
     event: &GameEvent,
     _trigger: &TriggerDefinition,
@@ -4510,8 +4513,8 @@ pub(super) fn match_day_time_changes(
 ) -> bool {
     matches!(
         event,
-        GameEvent::EffectResolved {
-            kind: EffectKind::DayTimeChange,
+        GameEvent::DayNightChanged {
+            previous: Some(_),
             ..
         }
     )

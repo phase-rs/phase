@@ -1,8 +1,7 @@
-use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, ResolvedAbility,
-    SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, Effect, EffectKind, ResolvedAbility, SacrificeRequirement,
+    SubAbilityLink, TargetFilter, TargetRef,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
@@ -384,211 +383,128 @@ fn handle_opponent_may_choice_inner(
 
     if accept {
         if let Some(frame) = state.active_optional_effect_frame().cloned() {
+            // CR 608.2d + CR 104.3a + CR 800.4a: a seat judged able when offered can
+            // lose its options before it answers (another player left the game and
+            // took their objects with them), so the accepting seat is judged again,
+            // by the same authority. The next seat is offered, or every seat has
+            // declined.
+            if effects::offered_seat_cannot_accept(state, &frame.ability, promptee) {
+                return advance_opponent_may_offer(
+                    state,
+                    &remaining,
+                    decision_subject_id,
+                    source_id,
+                    description,
+                    events,
+                    events_before,
+                );
+            }
+
             let mut ability = frame.ability.clone();
             // CR 608.2c: "their" in an accepted any-player instruction binds
             // to the player who accepted across the complete local chain.
             // `controller` remains the controller of the resolving ability.
-            ability.set_scoped_player_recursive(promptee);
-            ability.context.accepting_player = Some(promptee);
-
-            // CR 608.2d: a player cannot accept an exact resolution-time
-            // selection they cannot make. This query deliberately recognizes
-            // only counted `their graveyard` exile instructions; every
-            // adjacent optional effect stays on the established path below.
-            if crate::game::effects::change_zone::exact_scoped_graveyard_exile_is_infeasible(
-                state, &ability,
-            ) == Some(true)
-            {
-                if let Some((&next, rest)) = remaining.split_first() {
-                    state.waiting_for = WaitingFor::OpponentMayChoice {
-                        player: next,
-                        decision_subject_id,
-                        source_id,
-                        description,
-                        remaining: rest.to_vec(),
-                    };
-                    return Ok(state.waiting_for.clone());
-                }
-
-                state
-                    .take_active_optional_effect_frame()
-                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
-                    .expect("cloned optional-effect frame remains active until final decision");
-                set_active_priority(state);
-                resolve_all_declined_opponent_may(state, &frame.ability, events)?;
-                resume_pending_continuation_if_priority(state, events)?;
-                super::triggers::collect_and_drain_observer_triggers_if_settled(
-                    state,
-                    events,
-                    events_before,
-                );
-                return Ok(state.waiting_for.clone());
-            }
-
+            effects::bind_accepting_seat(&mut ability, promptee);
             ability.optional = false;
             ability.optional_for = None;
 
-            // CR 701.21a + CR 608.2c: only a permanent's controller can sacrifice
-            // it, so an accepted "any player/opponent may sacrifice a creature"
-            // instruction is performed by the accepting player. Bind the head's
-            // pool to them: the parsed scope (`Opponent` for Desecration Demon,
-            // none for Argothian Wurm) names the offer, not the sacrificer.
-            if let Effect::Sacrifice {
-                target: TargetFilter::Typed(typed),
-                ..
-            } = &mut ability.effect
+            if let Some(effects::SeatSelectionPool { legal, required }) =
+                effects::opponent_may_selection_pool(state, &ability, promptee)
             {
-                typed.controller = Some(ControllerRef::ScopedPlayer);
-            }
-
-            let target_selection = match &ability.effect {
-                // CR 701.21a (sacrifice) / CR 701.26a (tap): an optional
-                // sacrifice or single-target tap cost. Tap requires an untapped
-                // permanent (CR 701.26a); sacrifice has no such restriction.
-                Effect::Sacrifice { target, .. }
-                | Effect::SetTapState {
-                    target,
-                    scope: EffectScope::Single,
-                    state: TapStateChange::Tap,
-                } => {
-                    let require_untapped = matches!(
-                        ability.effect,
-                        Effect::SetTapState {
-                            scope: EffectScope::Single,
-                            state: TapStateChange::Tap,
-                            ..
-                        }
-                    );
-                    // CR 701.21a: the sacrifice pool is read in the ability's own
-                    // frame, exactly as the Sacrifice resolver reads it. Tap
-                    // keeps the acceptor's frame.
-                    let filter_ctx = if require_untapped {
-                        filter::FilterContext::from_source_with_controller(
-                            ability.source_id,
-                            promptee,
-                        )
-                    } else {
-                        filter::FilterContext::from_ability(&ability)
-                    };
-                    let legal: Vec<ObjectId> = state
-                        .objects
-                        .iter()
-                        .filter(|(_, obj)| {
-                            obj.zone == Zone::Battlefield
-                                && obj.controller == promptee
-                                && (!require_untapped || !obj.tapped)
-                                && filter::matches_target_filter(state, obj.id, target, &filter_ctx)
-                                // CR 701.21a + CR 609.3: an option to sacrifice
-                                // is one a player can't take when the sacrifice
-                                // can't happen (Sigarda, Host of Herons).
-                                && (require_untapped
-                                    || effects::sacrifice::can_sacrifice_for_ability(
-                                        state, &ability, obj.id, promptee,
-                                    ))
-                        })
-                        .map(|(id, _)| *id)
-                        .collect();
-                    // CR 608.2d: the printed count is exact ("sacrifice two
-                    // creatures"), so a smaller pool can't perform the option.
-                    let required = match &ability.effect {
-                        Effect::Sacrifice { count, .. } => {
-                            let (count, _) = count.peel_up_to();
-                            crate::game::quantity::resolve_quantity_with_targets(
-                                state, count, &ability,
-                            )
-                            .max(1) as usize
-                        }
-                        _ => 1,
-                    };
-                    Some((
-                        if legal.len() < required {
-                            Vec::new()
-                        } else {
-                            legal
-                        },
-                        required,
-                    ))
-                }
-                _ => None,
-            };
-
-            if let Some((legal, required)) = target_selection {
-                if !legal.is_empty() {
-                    state
-                        .take_active_optional_effect_frame()
-                        .map_err(|error| EngineError::InvalidAction(error.to_string()))?
-                        .expect(
-                            "cloned optional-effect frame remains active until target selection",
-                        );
-                    ability.context.optional_effect_performed = true;
-                    state
-                        .player_actions_this_way
-                        .insert((promptee, PlayerActionKind::AcceptedOptionalEffect));
-                    if let Some(mut sub) = ability.sub_ability.take() {
-                        // CR 608.2c + CR 608.2d: the "If a player does, …"
-                        // consequence runs because the player accepted. Carry the
-                        // accepted ability's context (with
-                        // `optional_effect_performed = true`) onto the stashed
-                        // continuation so its `OptionalEffectPerformed` gate
-                        // evaluates true when the continuation drains after the
-                        // sacrifice/tap target is chosen — otherwise the
-                        // consequence (e.g. "put this creature on top of its
-                        // owner's library") is silently skipped.
-                        // `handle_multi_target_selection` retracts the mark if
-                        // the chosen instruction then does nothing.
-                        sub.context = ability.context.clone();
-                        sub.context.optional_effect_performed = true;
-                        state.park_ability_continuation(PendingContinuation::new(sub, state));
-                    }
-                    state.waiting_for = WaitingFor::MultiTargetSelection {
-                        player: promptee,
-                        legal_targets: legal,
-                        min_targets: required,
-                        max_targets: required,
-                        pending_ability: ability,
-                    };
-                    return Ok(state.waiting_for.clone());
-                }
-
-                if !remaining.is_empty() {
-                    let next = remaining[0];
-                    let rest = remaining[1..].to_vec();
-                    state.waiting_for = WaitingFor::OpponentMayChoice {
-                        player: next,
-                        decision_subject_id,
-                        source_id,
-                        description,
-                        remaining: rest,
-                    };
-                    return Ok(state.waiting_for.clone());
-                }
-
+                // The acceptance-time judgment above includes the empty-pool case.
+                debug_assert!(
+                    !legal.is_empty(),
+                    "an accepted any-player selection has a legal pool"
+                );
                 state
                     .take_active_optional_effect_frame()
                     .map_err(|error| EngineError::InvalidAction(error.to_string()))?
-                    .expect("cloned optional-effect frame remains active until final decision");
-                set_active_priority(state);
-                resolve_all_declined_opponent_may(state, &ability, events)?;
-            } else {
-                state
-                    .take_active_optional_effect_frame()
-                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
-                    .expect("cloned optional-effect frame remains active until final decision");
+                    .expect("cloned optional-effect frame remains active until target selection");
                 ability.context.optional_effect_performed = true;
                 state
                     .player_actions_this_way
                     .insert((promptee, PlayerActionKind::AcceptedOptionalEffect));
-                if matches!(ability.effect, Effect::DealDamage { .. }) {
-                    ability.set_unpinned_targets(vec![TargetRef::Player(promptee)]);
+                if let Some(mut sub) = ability.sub_ability.take() {
+                    // CR 608.2c + CR 608.2d: the "If a player does, …"
+                    // consequence runs because the player accepted. Carry the
+                    // accepted ability's context (with
+                    // `optional_effect_performed = true`) onto the stashed
+                    // continuation so its `OptionalEffectPerformed` gate
+                    // evaluates true when the continuation drains after the
+                    // sacrifice/tap target is chosen — otherwise the
+                    // consequence (e.g. "put this creature on top of its
+                    // owner's library") is silently skipped.
+                    // `handle_multi_target_selection` retracts the mark if
+                    // the chosen instruction then does nothing.
+                    sub.context = ability.context.clone();
+                    sub.context.optional_effect_performed = true;
+                    state.park_ability_continuation(PendingContinuation::new(sub, state));
                 }
-                set_active_priority(state);
-                effects::resolve_ability_chain(state, &ability, events, 1)
-                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                state.waiting_for = WaitingFor::MultiTargetSelection {
+                    player: promptee,
+                    legal_targets: legal,
+                    min_targets: required,
+                    max_targets: required,
+                    pending_ability: ability,
+                };
+                return Ok(state.waiting_for.clone());
             }
+
+            state
+                .take_active_optional_effect_frame()
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                .expect("cloned optional-effect frame remains active until final decision");
+            ability.context.optional_effect_performed = true;
+            state
+                .player_actions_this_way
+                .insert((promptee, PlayerActionKind::AcceptedOptionalEffect));
+            if matches!(ability.effect, Effect::DealDamage { .. }) {
+                ability.set_unpinned_targets(vec![TargetRef::Player(promptee)]);
+            }
+            set_active_priority(state);
+            effects::resolve_ability_chain(state, &ability, events, 1)
+                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
         }
-    } else if !remaining.is_empty() {
-        let next = remaining[0];
-        let rest = remaining[1..].to_vec();
+    } else {
+        return advance_opponent_may_offer(
+            state,
+            &remaining,
+            decision_subject_id,
+            source_id,
+            description,
+            events,
+            events_before,
+        );
+    }
+
+    resume_pending_continuation_if_priority(state, events)?;
+    super::triggers::collect_and_drain_observer_triggers_if_settled(state, events, events_before);
+    Ok(state.waiting_for.clone())
+}
+
+/// CR 608.2d + CR 101.4: the handler's single advance past the seat that just
+/// declined or could not accept. The next seat in `remaining` that can be offered
+/// is asked (`effects::next_offerable_seat`, which judges each seat at its own
+/// turn); with none left, every seat has declined and the all-declined completion
+/// runs.
+fn advance_opponent_may_offer(
+    state: &mut GameState,
+    remaining: &[PlayerId],
+    decision_subject_id: Option<ObjectId>,
+    source_id: ObjectId,
+    description: Option<String>,
+    events: &mut Vec<GameEvent>,
+    events_before: usize,
+) -> Result<WaitingFor, EngineError> {
+    let next = match state.active_optional_effect_frame() {
+        Some(frame) => effects::next_offerable_seat(state, &frame.ability, remaining),
+        // No producer leaves an `OpponentMayChoice` without its frame; with no
+        // ability to judge, the next queued seat is offered unjudged.
+        None => remaining
+            .split_first()
+            .map(|(&next, rest)| (next, rest.to_vec())),
+    };
+    if let Some((next, rest)) = next {
         state.waiting_for = WaitingFor::OpponentMayChoice {
             player: next,
             decision_subject_id,
@@ -597,16 +513,15 @@ fn handle_opponent_may_choice_inner(
             remaining: rest,
         };
         return Ok(state.waiting_for.clone());
-    } else {
-        set_active_priority(state);
-        if let Some(frame) = state
-            .take_active_optional_effect_frame()
-            .map_err(|error| EngineError::InvalidAction(error.to_string()))?
-        {
-            resolve_all_declined_opponent_may(state, &frame.ability, events)?;
-        }
     }
 
+    set_active_priority(state);
+    if let Some(frame) = state
+        .take_active_optional_effect_frame()
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+    {
+        resolve_all_declined_opponent_may(state, &frame.ability, events)?;
+    }
     resume_pending_continuation_if_priority(state, events)?;
     super::triggers::collect_and_drain_observer_triggers_if_settled(state, events, events_before);
     Ok(state.waiting_for.clone())
@@ -617,46 +532,9 @@ fn resolve_all_declined_opponent_may(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
-    if let Some(ref sub) = ability.sub_ability {
-        if sub
-            .condition
-            .as_ref()
-            .is_some_and(AbilityCondition::is_optional_effect_performed)
-        {
-            // CR 608.2d: "If a player does, X. If no one does, Y." — no one
-            // performed the optional action, so fire Y (the else branch of the
-            // OptionalEffectPerformed sub).
-            if let Some(ref else_branch) = sub.else_ability {
-                let mut else_resolved = else_branch.as_ref().clone();
-                // CR 608.2c: the else branch resolves as the continuation of the
-                // stashed optional ability. Preserve a captured event-context
-                // target (such as the affected player of a replaced Draw) after
-                // the post-replacement drain that supplied it has retired.
-                if else_resolved.targets.is_empty() && !ability.targets.is_empty() {
-                    else_resolved.mirror_targets_from(ability);
-                }
-                else_resolved.context = ability.context.clone();
-                else_resolved
-                    .set_replacement_applied_recursive(ability.replacement_applied.clone());
-                effects::resolve_ability_chain(state, &else_resolved, events, 1)
-                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-            }
-        } else if sub
-            .condition
-            .as_ref()
-            .is_some_and(AbilityCondition::is_not_optional_effect_performed)
-        {
-            // CR 608.2d + CR 101.4: standalone "If no one does, Y" reward on
-            // an "any opponent/player may" head (Browbeat, Book Burning). The
-            // reward is carried directly on the `Not(OptionalEffectPerformed)`
-            // gated sub. No one performed the optional action, so fire the
-            // sub's effect now. (On accept, the head's own chain resolution
-            // evaluates this same negated condition as false and skips it.)
-            let mut sub_resolved = sub.as_ref().clone();
-            sub_resolved.context = ability.context.clone();
-            effects::resolve_ability_chain(state, &sub_resolved, events, 1)
-                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-        }
+    if let Some(branch) = effects::declined_by_every_seat_branch(ability) {
+        effects::resolve_ability_chain(state, &branch, events, 1)
+            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
     }
     Ok(())
 }
@@ -5643,6 +5521,10 @@ mod tests {
         assert!(state.active_optional_effect_frame().is_none());
     }
 
+    /// CR 608.2d + CR 701.21a: the accepting seat is judged again when it accepts.
+    /// P0 controls no creature, so its acceptance can't sacrifice one; the offer
+    /// advances to P1, who controls a creature and so passes its own offer-time
+    /// judgment, with the latched subject unchanged.
     #[test]
     fn opponent_may_infeasible_accept_reprompt_preserves_latched_subject() {
         let effect = Effect::Sacrifice {
@@ -5651,6 +5533,21 @@ mod tests {
             min_count: 0,
         };
         let mut state = opponent_may_state(effect, vec![PlayerId(1)]);
+        let p1_creature = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(7),
+            PlayerId(1),
+            "P1 Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let creature = state.objects.get_mut(&p1_creature).unwrap();
+            creature
+                .base_card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            creature.card_types = creature.base_card_types.clone();
+        }
 
         crate::game::engine::apply(
             &mut state,

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::game::game_object::{AttachTarget, DisplayIdentity};
+use crate::game::game_object::{AttachTarget, BackFaceData, DisplayIdentity};
 
 use super::counter::CounterType;
 
@@ -365,6 +365,33 @@ pub struct CopyTokenSpec {
     /// `None` where no donor is in scope; consumers fall back to the token id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub donor: Option<ObjectIncarnationRef>,
+    /// CR 707.8a: both faces when the copy source is a double-faced permanent or
+    /// card; `None` for a single-faced source and for every producer that is not
+    /// an effect creating a token copy (each states why at its literal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub double_faced: Option<CopiedDoubleFaces>,
+}
+
+/// CR 707.8a: the faces of a token copy of a double-faced permanent, or of a
+/// double-faced card in another zone. `hidden` is the face that is not up,
+/// installed as the token's stored face with the copy's exceptions folded in
+/// (CR 707.9a/b/d); `up` names the face that is up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopiedDoubleFaces {
+    pub hidden: Box<BackFaceData>,
+    pub up: CopiedFaceUp,
+}
+
+/// CR 707.8a: which face of a double-faced copy token is up, as the copied
+/// object showed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CopiedFaceUp {
+    /// CR 712.8d: the front face.
+    Front,
+    /// CR 712.8e: a nonmodal double-faced permanent's back face (`transformed`).
+    TransformedBack,
+    /// CR 712.8f: a modal double-faced permanent's back face (`modal_back_face`).
+    ModalBack,
 }
 
 /// CR 614.1a + CR 111.1 + CR 616.1f: one batch of a CreateToken event — the
@@ -1943,6 +1970,7 @@ mod tests {
             source_id: ObjectId(1),
             controller: PlayerId(0),
             donor: None,
+            double_faced: None,
         }
     }
 
@@ -1975,6 +2003,35 @@ mod tests {
         assert!(with_named.get("attack_request").is_some(), "{with_named}");
         let back: CopyTokenSpec = serde_json::from_value(with_named).expect("round-trips");
         assert_eq!(back.attack_request, named);
+    }
+
+    /// CR 707.8a: a single-faced copy omits `double_faced` from the wire, a
+    /// payload without the key reads as single-faced, and both faces round-trip.
+    #[test]
+    fn copy_token_double_faced_wire_shape_is_additive() {
+        let plain = serde_json::to_value(copy_token_spec_with(TokenAttackRequest::Unspecified))
+            .expect("serializes");
+        assert!(plain.get("double_faced").is_none(), "{plain}");
+        let back: CopyTokenSpec = serde_json::from_value(plain).expect("reads without the key");
+        assert_eq!(back.double_faced, None);
+
+        let mut spec = copy_token_spec_with(TokenAttackRequest::Unspecified);
+        let hidden = BackFaceData {
+            name: "Sinuous Predator".to_string(),
+            power: Some(4),
+            toughness: Some(4),
+            layout_kind: Some(crate::types::card::LayoutKind::Transform),
+            ..BackFaceData::default()
+        };
+        let faces = CopiedDoubleFaces {
+            hidden: Box::new(hidden),
+            up: CopiedFaceUp::TransformedBack,
+        };
+        spec.double_faced = Some(faces.clone());
+        let with_faces = serde_json::to_value(&spec).expect("serializes");
+        assert!(with_faces.get("double_faced").is_some(), "{with_faces}");
+        let back: CopyTokenSpec = serde_json::from_value(with_faces).expect("round-trips");
+        assert_eq!(back.double_faced, Some(faces));
     }
 
     #[test]

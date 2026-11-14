@@ -386,6 +386,9 @@ pub(crate) fn apply_zone_exit_cleanup(
 
         // CR 712.8a + CR 400.7: Transformed permanents revert to front face on any
         // zone exit (transform DFCs are only valid in transformed state on the battlefield).
+        // `swap_object_faces` stores the face shown on the battlefield or stack as
+        // its copiable values (CR 707.2), so the card in its new zone keeps no
+        // anthem, counter or granted ability in it.
         if obj_mut.transformed && obj_mut.back_face.is_some() {
             swap_object_faces(obj_mut);
             obj_mut.transformed = false;
@@ -401,6 +404,9 @@ pub(crate) fn apply_zone_exit_cleanup(
         // CR 712.8a + CR 400.7: MDFC objects showing their back face revert to
         // front face in any zone other than the stack or battlefield (back face is
         // valid on the stack while the spell is being cast, and on the battlefield).
+        // `swap_object_faces` stores the face shown on the battlefield or stack as
+        // its copiable values (CR 707.2), so the card in its new zone keeps no
+        // anthem, counter or granted ability in it.
         if obj_mut.modal_back_face
             && to != Zone::Stack
             && to != Zone::Battlefield
@@ -2083,16 +2089,23 @@ pub(crate) fn move_to_zone_with_entry_flags(
     if to == Zone::Battlefield {
         if let Some(designation) = state.day_night {
             use crate::types::game_state::DayNight;
-            use crate::types::keywords::Keyword;
-            if let Some(obj) = state.objects.get(&object_id) {
+            if state
+                .objects
+                .get(&object_id)
+                .is_some_and(|obj| crate::game::day_night::face_disagrees_with(obj, designation))
+            {
                 match designation {
-                    DayNight::Night if obj.has_keyword(&Keyword::Daybound) && !obj.transformed => {
+                    DayNight::Night => {
                         let _ = super::transform::enter_back_face_up(state, object_id);
                     }
-                    DayNight::Day if obj.has_keyword(&Keyword::Nightbound) && obj.transformed => {
-                        let _ = super::transform::transform_permanent(state, object_id, events);
+                    DayNight::Day => {
+                        let _ = super::transform::transform_permanent_with_cause(
+                            state,
+                            object_id,
+                            super::transform::TransformCause::DayNightDesignation,
+                            events,
+                        );
                     }
-                    DayNight::Night | DayNight::Day => {}
                 }
             }
         }

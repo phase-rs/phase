@@ -28,6 +28,7 @@ use crate::types::identifiers::{CardId, ObjectId, ObjectIdentityBinding, ObjectI
 use crate::types::keywords::{Keyword, KeywordKind, PartnerType};
 use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip, ManaType};
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::CopiedFaceUp;
 use crate::types::stickers::AppliedSticker;
 use crate::types::zones::Zone;
 
@@ -350,6 +351,18 @@ pub enum PhaseOutCause {
 pub struct CaseState {
     pub is_solved: bool,
     pub solve_condition: SolveCondition,
+}
+
+/// CR 709.5: where a Room object's door assignment comes from as it enters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoomDoorAssignment {
+    /// CR 709.5 + CR 709.5d: a Room card's own printed halves. Entry assigns each
+    /// unassigned definition to the live face's door and installs the other half's text.
+    PrintedHalves,
+    /// CR 707.2 + CR 709.5: the object's base is copiable values, which already say which
+    /// half each characteristic is in. Entry assigns nothing; a definition they leave
+    /// unassigned is in neither half — an ability the copy gained (CR 707.9a).
+    CopiableValues,
 }
 
 /// CR 709.5c: Unlocked designations carried by a Room permanent.
@@ -984,6 +997,18 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub back_face: Option<BackFaceData>,
 
+    /// CR 707.8a + CR 722.2b + CR 709.5b: the alternative characteristics a double-faced copy
+    /// token's copied values carry — a prepare spell, or a Room's other half — which every other
+    /// object keeps in `back_face`. A double-faced token's `back_face` holds its other face, so the
+    /// copy-token materializer stores them here. Both faces share them: no printed double-faced
+    /// card has a prepare spell or a Room half, so they reach a token only through values a copy
+    /// effect gave the copied object, and CR 707.8a gives each face those values "as modified by
+    /// any other copy effects that apply to that object". Written once at the token's birth.
+    /// Read through `printed_cards::stored_alternative_face`, and by
+    /// `transform::stored_double_face`'s Room gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub double_faced_token_alternative: Option<BackFaceData>,
+
     /// Digital-only Specialize: specialized faces keyed by added color pip.
     #[serde(
         default,
@@ -1284,6 +1309,13 @@ pub struct GameObject {
     /// leaves the battlefield. `None` when no override is active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pre_merge_is_token: Option<bool>,
+
+    /// CR 730.2e: this object's own face-down status as a component of the merged
+    /// permanent it survives as, while `face_down` holds the topmost component's
+    /// status, and the two differ. `None` otherwise. Written by
+    /// `merge::merge_object_onto`; read through `is_face_down_component`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_face_down: Option<bool>,
 
     /// CR 730.3c: When a merged permanent leaves the battlefield it "becomes"
     /// multiple new objects (CR 730.3 / CR 400.7). Each absorbed component records
@@ -1905,6 +1937,10 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         // the §5.2c ADD set exists to catch.
         parse_warnings: _,
         back_face: _,
+        // OMITTED, SAFE BY WRITE SITE: written only at a double-faced copy token's birth
+        // (`materialize_token_copy_body`) and cleared by the prepared-copy strip; nothing
+        // mutates it while the object exists, so two compared states of one object agree on it.
+        double_faced_token_alternative: _,
         specialize_faces: _,
         specialized_color: _,
         base_power: _,
@@ -1954,6 +1990,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         merge_kind: _,
         merge_layer_effect_id: _,
         pre_merge_is_token: _,
+        component_face_down: _,
         split_from_merge_survivor: _,
         cleave_form: _,
         unimplemented_mechanics: _,
@@ -2984,6 +3021,9 @@ impl GameObject {
                 face_down: self.face_down,
                 mana_cost: self.mana_cost.clone(),
                 transformed: self.transformed,
+                // CR 701.27g: latch the authority's answer for this incarnation; the raw bit
+                // above stays for reconstruction.
+                transformed_permanent: crate::game::transform::is_transformed_permanent(self),
                 is_renowned: self.is_renowned,
                 is_saddled: self.is_saddled,
                 echo_due: self.echo_due,
@@ -3248,6 +3288,7 @@ impl GameObject {
             spellbook: Vec::new(),
             parse_warnings: Vec::new(),
             back_face: None,
+            double_faced_token_alternative: None,
             specialize_faces: None,
             specialized_color: None,
             base_power: None,
@@ -3293,6 +3334,7 @@ impl GameObject {
             merged_components: Vec::new(),
             merge_kind: None,
             pre_merge_is_token: None,
+            component_face_down: None,
             merge_layer_effect_id: None,
             split_from_merge_survivor: None,
             cleave_form: None,
@@ -3440,6 +3482,9 @@ impl GameObject {
     /// projection's state-level relationships with no `GameObject` counterpart
     /// (`linked_exile_snapshot`, `cards_exiled_this_turn`, `combat_status`, `granting_object`)
     /// are left to their state-level authorities.
+    /// `transformed_permanent` is a derived rules answer with no `GameObject` field and is not
+    /// written back; the skeleton view in `filter::matches_target_filter_on_entry_observation`
+    /// installs it.
     pub(crate) fn overlay_source_projection(&mut self, context: &TriggerSourceContext) {
         let lki = &context.lki;
         // Identity.
@@ -3541,7 +3586,25 @@ impl GameObject {
     /// CR 400.7: Reset transient battlefield state when a permanent enters the battlefield.
     /// A permanent entering the battlefield is a new object with no memory of its previous
     /// existence. Callers that need enter_tapped=true override `tapped` after this call.
+    ///
+    /// A Room entering this way is a Room card's own printed halves
+    /// (`RoomDoorAssignment::PrintedHalves`).
     pub fn reset_for_battlefield_entry(&mut self, turn_number: u32, timestamp: u64) {
+        self.reset_for_battlefield_entry_with_room_text(
+            turn_number,
+            timestamp,
+            RoomDoorAssignment::PrintedHalves,
+        );
+    }
+
+    /// CR 400.7: `reset_for_battlefield_entry`, with where a Room's door
+    /// assignment comes from (CR 709.5).
+    pub(crate) fn reset_for_battlefield_entry_with_room_text(
+        &mut self,
+        turn_number: u32,
+        timestamp: u64,
+        room_text: RoomDoorAssignment,
+    ) {
         // CR 400.7: This (re-)entry creates a new object at the same storage id.
         // Bump the incarnation so self-references captured by abilities created
         // for the previous incarnation no longer match this permanent.
@@ -3638,7 +3701,11 @@ impl GameObject {
         }
         if self.card_types.subtypes.iter().any(|s| s == "Room") {
             self.room_unlocks = Some(RoomUnlockState::default());
-            self.install_room_door_text();
+            match room_text {
+                RoomDoorAssignment::PrintedHalves => self.install_room_door_text(),
+                // CR 707.2 + CR 709.5 + CR 707.9a: the copiable values assign the doors.
+                RoomDoorAssignment::CopiableValues => {}
+            }
         }
     }
 
@@ -3655,85 +3722,24 @@ impl GameObject {
     ///
     /// The live face's door follows the cast orientation (`modal_back_face`
     /// records that the right half is showing — the CR 709.5d mapping,
-    /// see `room::live_face_door`). Idempotent: a `None` stamp is claimed
-    /// once, and the other half is merged only while absent.
+    /// see `room::live_face_door`). The assignment itself is
+    /// `room::door_assigned_text`, the single door-assignment authority this
+    /// entry and an off-battlefield Room's copiable values share; it is
+    /// idempotent.
+    ///
+    /// CR 709.5b + CR 707.8a: the other half is read where the object stores its
+    /// alternative characteristics (`printed_cards::stored_alternative_face`). A
+    /// double-faced copy token keeps a copied Room's other half there as identity
+    /// only, because its copied values already carry both halves' door-stamped
+    /// text; its `back_face` is its other face, whose text is that same copied
+    /// text, so installing from it would give the token a second copy of a door's
+    /// text under the other door.
     fn install_room_door_text(&mut self) {
-        let live_door = crate::game::room::live_face_door(self);
-        let other_door = match live_door {
-            RoomDoor::Left => RoomDoor::Right,
-            RoomDoor::Right => RoomDoor::Left,
-        };
-        let should_install_other_door = {
-            let base = Arc::make_mut(&mut self.base_trigger_definitions);
-            for definition in base.iter_mut() {
-                if definition.room_door.is_none() {
-                    definition.room_door = Some(live_door);
-                }
-            }
-            self.back_face.as_ref().is_some_and(|_| {
-                !base
-                    .iter()
-                    .any(|definition| definition.room_door == Some(other_door))
-            })
-        };
-        if should_install_other_door {
-            let mut origins = crate::game::printed_cards::base_trigger_printed_origins(self)
-                .as_ref()
-                .clone();
-            let back = self
-                .back_face
-                .as_ref()
-                .expect("other Room door requires a stored face");
-            let back_origins =
-                back.trigger_definitions
-                    .iter_all()
-                    .enumerate()
-                    .map(|(printed_occurrence, _)| {
-                        back.trigger_printed_origins
-                            .get(printed_occurrence)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                back.printed_ref
-                                    .clone()
-                                    .map(|printed_ref| TriggerPrintedOrigin {
-                                        printed_ref,
-                                        printed_occurrence,
-                                    })
-                            })
-                    });
-            origins.extend(back_origins);
-            Arc::make_mut(&mut self.base_trigger_definitions).extend(
-                back.trigger_definitions.iter_all().map(|printed| {
-                    let mut definition = printed.clone();
-                    definition.room_door = Some(other_door);
-                    definition
-                }),
-            );
-            self.base_trigger_printed_origins = origins;
-        }
+        let text = crate::game::room::door_assigned_text(self);
+        self.base_trigger_definitions = text.triggers;
+        self.base_trigger_printed_origins = text.trigger_printed_origins;
         self.materialize_base_trigger_definitions();
-
-        // CR 709.5: same install for the halves' static abilities — a locked
-        // half doesn't have its rules text, so both halves' statics live
-        // door-stamped in the base set and the functioning gathers decide.
-        let base_statics = Arc::make_mut(&mut self.base_static_definitions);
-        for definition in base_statics.iter_mut() {
-            if definition.room_door.is_none() {
-                definition.room_door = Some(live_door);
-            }
-        }
-        if let Some(back) = &self.back_face {
-            if !base_statics
-                .iter()
-                .any(|definition| definition.room_door == Some(other_door))
-            {
-                base_statics.extend(back.static_definitions.iter_all().map(|printed| {
-                    let mut definition = printed.clone();
-                    definition.room_door = Some(other_door);
-                    definition
-                }));
-            }
-        }
+        self.base_static_definitions = text.statics;
         self.static_definitions = Arc::clone(&self.base_static_definitions).into();
     }
 
@@ -3938,6 +3944,8 @@ impl GameObject {
         // this reset runs; clear it defensively so a re-entering object never
         // carries a stale override value.
         self.pre_merge_is_token = None;
+        // CR 730.2e + CR 400.7: component status belongs to this battlefield object.
+        self.component_face_down = None;
         // CR 730.3 + CR 400.7: merge copy effects are battlefield-scoped and are
         // pruned at the battlefield-exit seam before this reset. Clear the stored
         // id so a re-entering object cannot point at a stale transient effect.
@@ -4007,16 +4015,25 @@ impl GameObject {
     /// | `face_down` (CR 708.9) | `from == Battlefield \|\| (from == Stack && to != Battlefield)` | reverts |
     ///
     /// **Each flag INDEPENDENTLY reverts for `Battlefield -> Graveyard`** (CR
-    /// 701.21a's transition), which is what the disjunction below relies on. The
-    /// claim is deliberately per-flag: the disjunction also admits flag
-    /// COMBINATIONS, and one is real and handled in-tree — see the next section.
+    /// 701.21a's transition), which is what the read below relies on. The
+    /// claim is deliberately per-flag: the read also admits flag COMBINATIONS,
+    /// and two are real and handled in-tree — see the next section.
     /// None of the three is exact for a battlefield-to-STACK move, where the
     /// `modal_back_face` gate does not fire. A destination parameter is not added:
     /// only the battlefield-exit value is proven, and a parameter with one proven
     /// value is speculative generality. Add it when a second transition earns its
-    /// own per-flag proof.
+    /// own per-flag proof. The two orientation flags are read through
+    /// `transform::face_up`, so a front-face-up permanent with both set reads its base.
     ///
-    /// # The one flag combination that occurs, and why it is still correct
+    /// # The flag combinations that occur, and why each is correct
+    ///
+    /// A modal card cast back face up and then transformed (Valentin, Dean of the
+    /// Vein cast as Lisette, Dean of the Root, then Moonmist: "Transform all
+    /// Humans.") sets `transformed` AND `modal_back_face`. `transform::face_up`
+    /// reads that pair as front face up, so the base is read: CR 712.8a + CR 712.8d,
+    /// the card leaves as Valentin ({B}).
+    ///
+    /// The other combination:
     ///
     /// A **flipped permanent that is then turned face down** (Ixidron, Cyber
     /// Conversion — CR 712.16 does not cover flip cards, so this is legal) sets
@@ -4061,27 +4078,27 @@ impl GameObject {
     /// `ManaCost::NoCost` (CR 708.2a). For those objects `base_mana_cost` describes
     /// the face currently shown, not the face the card will show off the battlefield.
     ///
-    /// # Known residual, stated per flag rather than as a blanket claim
+    /// # Which snapshot the stash holds
     ///
     /// The `back_face` slot is **shared** by the transform, MDFC, face-down and flip
-    /// stashes, and its writers do not agree on which snapshot they take:
-    ///   * `transform::transform_permanent`'s two `back_face` stashes call
-    ///     `printed_cards::snapshot_object_face`, which
-    ///     captures the **live** `mana_cost` (the `mana_cost: obj.mana_cost.clone()`
-    ///     field of the `BackFaceData` it builds). A permanent
-    ///     transformed while already under a mana-cost-altering copy effect therefore
-    ///     parks a polluted value, and this method will read it.
-    ///   * `effects::turn_face_down::turn_permanent_face_down` stashes
-    ///     `snapshot_object_base_face` — the
-    ///     **printed** baseline. That path is clean.
-    ///     The divergence is **BIDIRECTIONAL**, not downward-only: `intrinsic_copiable_
-    ///     values` sources `obj.base_mana_cost` from the COPY
-    ///     SOURCE and `apply_copiable_values` writes it to the RECIPIENT's live field
-    ///     with no clamp, so a `{1}{U}` Clone copying a fifteen-drop ends with live 15
-    ///     against base 2. Tracked as task #36; the fix is an engine change at the
-    ///     transform site and is out of this unit's scope.
+    /// stashes. Every face swap (the `transform.rs` stash and
+    /// `printed_cards::swap_object_faces`), flip, and
+    /// `effects::turn_face_down::turn_permanent_face_down` store
+    /// `printed_cards::snapshot_object_base_face`: the face's copiable values
+    /// (CR 707.2 + CR 613.1). A Layer-1 copy effect's `mana_cost`, which
+    /// `apply_copiable_values` writes to the live field only, therefore never
+    /// reaches the stash this method reads. The face-down entry profile
+    /// (`zone_pipeline::apply_face_down_entry_profile`) still stores the live
+    /// `printed_cards::snapshot_object_face`.
     pub fn mana_value_on_battlefield_exit(&self) -> u32 {
-        let shows_stashed_face = self.transformed || self.modal_back_face || self.face_down;
+        // CR 712.8a + CR 712.8d: a front-face-up permanent shows its front face, which is the
+        // face it keeps off the battlefield, even with both flags set (Lisette Moonmisted into
+        // Valentin).
+        let shows_stashed_face = self.face_down
+            || match crate::game::transform::face_up(self) {
+                CopiedFaceUp::Front => false,
+                CopiedFaceUp::TransformedBack | CopiedFaceUp::ModalBack => true,
+            };
         match self.back_face.as_ref().filter(|_| shows_stashed_face) {
             Some(stashed) => stashed.mana_cost.mana_value(),
             // CR 613.1: "For a card, [the characteristics are] the values printed on
@@ -4110,6 +4127,11 @@ impl GameObject {
     /// permanents instead of re-deriving it.
     pub fn is_phased_in_permanent(&self) -> bool {
         self.zone == Zone::Battlefield && self.is_phased_in()
+    }
+
+    /// CR 730.2e + CR 708.2: the component's own status, before adopting its topmost's.
+    pub fn is_face_down_component(&self) -> bool {
+        self.component_face_down.unwrap_or(self.face_down)
     }
 
     pub fn has_keyword_kind(&self, kind: KeywordKind) -> bool {
@@ -4571,13 +4593,16 @@ pub(crate) fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Op
 ///      anywhere in the tree that can copy the LIVE store INTO base, and it filters
 ///      `Resolution` defs out.
 ///   3. `printed_cards::apply_back_face_to_object` writes a `BackFaceData` snapshot
-///      to base. That snapshot comes from `printed_cards::snapshot_object_face`,
-///      which copies the LIVE store — so it MUST filter `Resolution` defs out, and
-///      does. This leg was previously (and wrongly) written as "a parsed / printed /
-///      face / snapshot source" being safe by construction; it is not, and a
-///      transform round-trip (`transform.rs` stashes the live face and restores it,
-///      also reachable via `turn_face_up.rs`, `morph.rs`, `zones.rs`, `casting.rs`,
-///      `specialize.rs`) put a `Resolution` def into base and made this function
+///      to base. Face swaps (`transform.rs`, `printed_cards::swap_object_faces`),
+///      flip and `turn_face_down` take it from `snapshot_object_base_face`, whose
+///      replacement store is base and so holds no `Resolution` def by legs 1, 2 and
+///      4. The remaining live writers (`zone_pipeline::apply_face_down_entry_profile`,
+///      `specialize.rs`, `conspiracy.rs`, the reload fallback) take it from
+///      `printed_cards::snapshot_object_face`, which copies the LIVE store — so it
+///      MUST filter `Resolution` defs out, and does. This leg was previously (and
+///      wrongly) written as "a parsed / printed / face / snapshot source" being safe
+///      by construction; it is not, and a transform round-trip that stashed the live
+///      face put a `Resolution` def into base and made this function
 ///      compute `base ++ live_resolution` on EVERY pass — unbounded per-pass
 ///      duplication of the shield. Pinned by
 ///      `printed_cards::tests::transform_round_trip_does_not_duplicate_a_resolution_shield`.
@@ -5083,6 +5108,87 @@ mod tests {
         object
             .validate_trigger_definitions()
             .expect("Room trigger definitions and origins remain aligned");
+    }
+
+    /// CR 709.5b + CR 707.8a: a double-faced copy token of a Room keeps the
+    /// Room's other half beside its other face, as identity only. Its copied
+    /// values already carry both halves' door-stamped text, and so does its other
+    /// face, so battlefield entry installs nothing more: each door keeps exactly
+    /// one copy of its text. The control is a Room whose other half is in
+    /// `back_face`, whose text is installed under the other door.
+    #[test]
+    fn room_door_install_reads_a_double_faced_tokens_room_half_beside_its_other_face() {
+        let left_trigger = TriggerDefinition {
+            room_door: Some(RoomDoor::Left),
+            ..TriggerDefinition::new(TriggerMode::Attacks)
+        };
+        let right_static = StaticDefinition {
+            room_door: Some(RoomDoor::Right),
+            ..StaticDefinition::new(crate::types::statics::StaticMode::Continuous)
+        };
+        let copied_face = BackFaceData {
+            name: "Left Door".to_string(),
+            trigger_definitions: vec![left_trigger.clone()].into(),
+            static_definitions: vec![right_static.clone()].into(),
+            layout_kind: Some(LayoutKind::Transform),
+            ..Default::default()
+        };
+        let door_count = |object: &GameObject| {
+            let triggers = |door| {
+                object
+                    .base_trigger_definitions
+                    .iter()
+                    .filter(|definition| definition.room_door == Some(door))
+                    .count()
+            };
+            let statics = |door| {
+                object
+                    .base_static_definitions
+                    .iter()
+                    .filter(|definition| definition.room_door == Some(door))
+                    .count()
+            };
+            (
+                triggers(RoomDoor::Left),
+                triggers(RoomDoor::Right),
+                statics(RoomDoor::Left),
+                statics(RoomDoor::Right),
+            )
+        };
+        let token = |alternative: Option<BackFaceData>| {
+            let mut object = trigger_test_object();
+            object.is_token = true;
+            object.card_types.subtypes.push("Room".to_string());
+            object.base_trigger_definitions = Arc::new(vec![left_trigger.clone()]);
+            object.base_static_definitions = Arc::new(vec![right_static.clone()]);
+            object.back_face = Some(copied_face.clone());
+            object.double_faced_token_alternative = alternative;
+            object
+        };
+
+        let mut slotted = token(Some(BackFaceData {
+            name: "Right Door".to_string(),
+            ..Default::default()
+        }));
+        slotted.install_room_door_text();
+        assert_eq!(
+            door_count(&slotted),
+            (1, 0, 0, 1),
+            "CR 709.5: each door keeps exactly its own copied text"
+        );
+        // CR 707.8a + CR 712.8f: a back-face-up token reads the same doors.
+        let mut back_up = token(Some(BackFaceData {
+            name: "Right Door".to_string(),
+            ..Default::default()
+        }));
+        back_up.modal_back_face = true;
+        back_up.install_room_door_text();
+        assert_eq!(door_count(&back_up), (1, 0, 0, 1));
+
+        // Control: a stored face in `back_face` is read as the other half.
+        let mut unslotted = token(None);
+        unslotted.install_room_door_text();
+        assert_eq!(door_count(&unslotted), (1, 1, 0, 1));
     }
 
     #[test]
@@ -5898,6 +6004,29 @@ mod tests {
             missing_stash.mana_value_on_battlefield_exit(),
             4,
             "a missing stash falls back to the baseline rather than panicking"
+        );
+
+        // CR 712.8a + CR 712.11b: a modal card cast back face up (Valentin, Dean of the Vein
+        // cast as Lisette, Dean of the Root) keeps its front face, stashed, off the battlefield.
+        let mut modal_back = exit_value_fixture(8, 4);
+        modal_back.modal_back_face = true;
+        install_stashed_face(&mut modal_back, 5);
+        assert_eq!(
+            modal_back.mana_value_on_battlefield_exit(),
+            5,
+            "a modal back face up restores its stashed front face"
+        );
+
+        // CR 712.8a + CR 712.8d: the same card transformed back to its front face (Moonmist)
+        // shows its front face, which is the base, even with both flags set.
+        let mut both_flags = exit_value_fixture(9, 1);
+        both_flags.transformed = true;
+        both_flags.modal_back_face = true;
+        install_stashed_face(&mut both_flags, 5);
+        assert_eq!(
+            both_flags.mana_value_on_battlefield_exit(),
+            1,
+            "a front-face-up permanent with both flags uses its base"
         );
     }
 

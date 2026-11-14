@@ -26,7 +26,7 @@ use crate::types::game_state::{
     PostReplacementDrainStack, ResolveAllConsentParticipant, ResolveAllConsentRun,
     ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind,
     StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
-    StackResolutionPolicy, StackResolutionSession, WaitingFor,
+    StackResolutionPolicy, StackResolutionSession, UntapStepProgress, WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -8575,6 +8575,17 @@ fn remade_tokens(before: &GameState, after: &GameState) -> Vec<(ObjectId, Object
 /// `intrinsic_copiable_values`, so a multiset homogeneous only under `fodder_content_eq` could mint
 /// k*N copies of ONE representative while the period produced k DIFFERENT permanents.
 ///
+/// A DOUBLE-FACED MEMBER REFUSES THE CLASS (CR 732.2a + CR 111.10i). The mint gives each token
+/// only the stored faces its own sources write: `install_copiable_values_as_base` writes a Room's
+/// other half (CR 709.5b) and a prepare spell (CR 722.2b), and
+/// `token::inject_predefined_token_abilities` fills an Incubator's back face. A member that
+/// [`crate::game::transform::stored_double_face`] classifies as double-faced may hold a face none
+/// of them writes, such as a transformed Incubator's stored Incubator face, which the mint would
+/// lose. `object_content_eq` does not compare `back_face`, so every member is asked, not only the
+/// representative. A front-face-up Incubator class is refused too, although the payload supplies
+/// its back face: the gate does not ask which source supplies a face. Refusing only leaves the
+/// loop to be played out, since a shortcut is only ever suggested (CR 732.2a).
+///
 /// THE SET IS THE MINTED MEMBERS, and the criterion is what the collapse can DELIVER rather than
 /// what the frames contain. `PersistentAxisMaterialization::Tokens`' boundary mint reproduces `k`
 /// members of the class per cycle by MINTING them (CR 111.1, with CR 111.3 / CR 707.2 fixing the
@@ -8589,10 +8600,14 @@ fn derived_fodder_class(
     let new_ids = minted_battlefield_ids(before, after);
     let mut members = new_ids.iter().filter_map(|id| after.objects.get(id));
     let class = members.next()?.clone();
+    if crate::game::transform::stored_double_face(&class).is_some() {
+        return None;
+    }
     let class_values = crate::game::printed_cards::intrinsic_copiable_values(&class);
     let mut k: u32 = 1;
     for other in members {
-        if !crate::analysis::resource::fodder_content_eq(&class, other)
+        if crate::game::transform::stored_double_face(other).is_some()
+            || !crate::analysis::resource::fodder_content_eq(&class, other)
             || crate::game::printed_cards::intrinsic_copiable_values(other) != class_values
         {
             return None;
@@ -9302,6 +9317,10 @@ fn seed_representative_fodder(
             controller: owner,
             // Source-less fodder mint from a captured profile; empty mods are stamp-proof.
             donor: None,
+            // CR 732.2a + CR 707.8a: `derived_fodder_class` admits no class with a member
+            // that is double-faced by `transform::stored_double_face`, so no minted member
+            // has an other face for CR 707.8a to carry.
+            double_faced: None,
         }),
     };
     crate::game::effects::token_copy::drive_copy_token_batches(
@@ -13441,9 +13460,15 @@ fn apply_action(
 /// the step is left when the players next pass priority. CR 502.4 gives no
 /// player priority during the untap step; this window is the handler's
 /// departure from it.
+/// The answered prompt's `progress` says where the step continues. A current
+/// prompt's resume repeats no CR 502.1/502.2 action: `begin_untap_step` already
+/// ran them, and CR 502.4 admits nothing in between. A prompt an earlier build
+/// raised before those actions restarts the step instead; its answer is
+/// discarded, so its callers pass no declines.
 fn untap_completion_waiting_for(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
+    progress: UntapStepProgress,
     chosen_not_to_untap: HashSet<ObjectId>,
 ) -> WaitingFor {
     // CR 500.1 + CR 500.8: the untap step's leave can end the turn, and the
@@ -13460,8 +13485,22 @@ fn untap_completion_waiting_for(
             player: state.active_player,
         },
     );
-    match turns::begin_untap_or_subset_prompt(state, events, chosen_not_to_untap) {
-        turns::UntapCompletion::ChooseSubset(prompt) => *prompt,
+    let completion = match progress {
+        UntapStepProgress::AfterTurnBasedActions => {
+            turns::resume_untap_step(state, events, chosen_not_to_untap)
+        }
+        // CR 502.1 + CR 502.2 + CR 502.3: the determination was offered on the board before
+        // phasing, so its answer is not a CR 502.3 determination of the board the untap acts
+        // on. Begin the step from its first action; it offers fresh determinations. A
+        // main-era save carries no previous-turn record (that build checked day and night at
+        // the previous cleanup step), so the restarted CR 502.2 check changes nothing.
+        UntapStepProgress::BeforeTurnBasedActions => {
+            state.pending_untap_declines.clear();
+            turns::begin_untap_step(state, events)
+        }
+    };
+    match completion {
+        turns::UntapCompletion::Determination(prompt) => *prompt,
         // CR 500.8 + CR 500.9: a later step the interpreter reaches without
         // priority (another added untap step, or the cleanup step after a
         // step added after the end step) can defer its own transition. The
@@ -14057,9 +14096,9 @@ fn apply_non_priority_pass_action(
                         // type. A land face is put onto the battlefield via the play-land
                         // special action (CR 712.12); a spell face is cast (CR 712.11b — Esika
                         // // The Prismatic Bridge). After a swap
-                        // the new back_face (from snapshot_object_face) has layout_kind: None,
-                        // and a front-face choice clears it explicitly — so neither the
-                        // both-faces-land intercept nor the spell-face intercept re-fires.
+                        // the shared swap keeps the pair's `layout_kind` on the new back_face;
+                        // `cast_face_committed` (set above) is what keeps the both-faces-land
+                        // intercept and the spell-face intercept from re-firing.
                         let active_is_land = state.objects.get(object_id).is_some_and(|obj| {
                             obj.card_types
                                 .core_types
@@ -16583,6 +16622,7 @@ fn apply_non_priority_pass_action(
                 player,
                 candidates,
                 chosen_not_to_untap,
+                progress,
             },
             GameAction::ChooseUntap { object_id, untap },
         ) => {
@@ -16607,18 +16647,28 @@ fn apply_non_priority_pass_action(
                 declined.push(object_id);
             }
 
-            if !remaining.is_empty() {
-                WaitingFor::UntapChoice {
-                    player: *player,
-                    candidates: remaining,
-                    chosen_not_to_untap: declined,
+            match progress {
+                // CR 502.3: the next optional decline of this determination.
+                UntapStepProgress::AfterTurnBasedActions if !remaining.is_empty() => {
+                    WaitingFor::UntapChoice {
+                        player: *player,
+                        candidates: remaining,
+                        chosen_not_to_untap: declined,
+                        progress: *progress,
+                    }
                 }
-            } else {
-                // CR 502.3: Declines are recorded; now either surface the
-                // required bounded `ChooseUntapSubset` prompt (a MaxUntapPerType
-                // cap is over its limit after declines) or untap + advance.
-                let skipped: std::collections::HashSet<ObjectId> = declined.into_iter().collect();
-                untap_completion_waiting_for(state, &mut events, skipped)
+                UntapStepProgress::AfterTurnBasedActions => {
+                    // CR 502.3: Declines are recorded; now either surface the
+                    // required bounded `ChooseUntapSubset` prompt (a MaxUntapPerType
+                    // cap is over its limit after declines) or untap + advance.
+                    let skipped: std::collections::HashSet<ObjectId> =
+                        declined.into_iter().collect();
+                    untap_completion_waiting_for(state, &mut events, *progress, skipped)
+                }
+                // CR 502.1 + CR 502.3: a prompt raised before phasing restarts the step.
+                UntapStepProgress::BeforeTurnBasedActions => {
+                    untap_completion_waiting_for(state, &mut events, *progress, HashSet::new())
+                }
             }
         }
         // CR 502.3: The active player directly determines which permanents untap
@@ -16629,7 +16679,12 @@ fn apply_non_priority_pass_action(
         // advances. The enforcement clamp inside `execute_untap_with_choices`
         // remains as a safety net for any selection that slips past validation.
         (
-            WaitingFor::ChooseUntapSubset { player, group, max },
+            WaitingFor::ChooseUntapSubset {
+                player,
+                group,
+                max,
+                progress,
+            },
             GameAction::SelectCards { cards: chosen },
         ) => {
             if state.priority_player
@@ -16654,19 +16709,27 @@ fn apply_non_priority_pass_action(
                     "Untap subset object {bad:?} is not in the over-cap group"
                 )));
             }
-            // CR 502.3: the complement of the chosen set within the prompted
-            // group stays tapped. Combine with the declines stashed from the
-            // preceding optional-decline prompt.
-            let mut skipped: std::collections::HashSet<ObjectId> =
-                std::mem::take(&mut state.pending_untap_declines)
-                    .into_iter()
-                    .collect();
-            for id in group {
-                if !chosen_set.contains(id) {
-                    skipped.insert(*id);
+            let skipped = match progress {
+                // CR 502.3: the complement of the chosen set within the prompted
+                // group stays tapped. Combine with the declines stashed from the
+                // preceding optional-decline prompt.
+                UntapStepProgress::AfterTurnBasedActions => {
+                    let mut skipped: std::collections::HashSet<ObjectId> =
+                        std::mem::take(&mut state.pending_untap_declines)
+                            .into_iter()
+                            .collect();
+                    for id in group {
+                        if !chosen_set.contains(id) {
+                            skipped.insert(*id);
+                        }
+                    }
+                    skipped
                 }
-            }
-            untap_completion_waiting_for(state, &mut events, skipped)
+                // CR 502.1 + CR 502.3: a prompt raised before phasing restarts the step,
+                // which discards this answer and the stashed declines.
+                UntapStepProgress::BeforeTurnBasedActions => HashSet::new(),
+            };
+            untap_completion_waiting_for(state, &mut events, *progress, skipped)
         }
         // CR 508.1g + CR 701.43d: the active player decides whether to pay the
         // optional "exert as it attacks" cost for the prompted attacker, one

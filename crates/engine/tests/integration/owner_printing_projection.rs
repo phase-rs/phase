@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use engine::game::combat::AttackTarget;
 use engine::game::derived_views::ClientGameStateRef;
 use engine::game::effects::create_emblem;
+use engine::game::engine::EngineError;
 use engine::game::game_object::BackFaceData;
 use engine::game::merge::MergeSide;
 use engine::game::printed_cards::{
@@ -2757,9 +2758,10 @@ impl HiddenBoard {
     }
 }
 
-/// `GameAction::Transform` is accepted on the merged survivor and on an unmerged face-down
-/// permanent (a pre-existing rules defect, recorded elsewhere); the stored face it applies
-/// carries no printing. A never-hidden double-faced card transformed the same way keeps its
+/// `GameAction::Transform` is refused on the merged survivor and on an unmerged face-down
+/// permanent: neither is represented by a double-faced card or token (CR 701.27c), and the pile
+/// contains no double-faced component that could turn (CR 730.2i), so no stored face — and no
+/// concealed printing — is applied. A never-hidden double-faced card transformed the same way keeps its
 /// own printing, beside its back face's name.
 ///
 /// "Day Face" / "Night Face" are a textless body pair, NOT a printed card: neither face has
@@ -2773,17 +2775,17 @@ impl HiddenBoard {
 fn transform_cannot_write_a_concealed_printing_back() {
     let mut h = hidden_board();
     let (buried, lone) = (h.buried, h.lone);
-    h.board.act(GameAction::Transform { object_id: buried });
-    h.board.act(GameAction::Transform { object_id: lone });
-    assert!(
-        h.board.state().objects[&buried].transformed,
-        "reach: the survivor transformed"
-    );
-    assert!(
-        h.board.state().objects[&lone].transformed,
-        "reach: the lone card transformed"
-    );
-    h.assert_hidden_cards_stay_hidden("after Transform");
+    for object_id in [buried, lone] {
+        assert!(
+            matches!(
+                h.board.runner.act(GameAction::Transform { object_id }),
+                Err(EngineError::InvalidAction(msg)) if msg == "This permanent can't transform"
+            ),
+            "CR 701.27c: {object_id:?} isn't represented by a double-faced card or token"
+        );
+        assert!(!h.board.state().objects[&object_id].transformed);
+    }
+    h.assert_hidden_cards_stay_hidden("after a refused Transform");
 
     // Control: a never-hidden double-faced card keeps its sentinel through a transform.
     let mut s = scenario();

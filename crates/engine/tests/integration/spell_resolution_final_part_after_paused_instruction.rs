@@ -2297,7 +2297,8 @@ fn second_thoughts_paused_on_its_optional_draw(below: bool) -> OptionalDrawBoard
 /// your hand onto the battlefield.") pauses after its draws triggered The
 /// Locust God twice. The answer completes the resolution; the final part's
 /// move triggers P1's Bloodchief Ascension; all three go on the stack as one
-/// APNAP batch, P0 ordering theirs first.
+/// APNAP batch, P0 ordering theirs first. CR 608.2d: the put is offered only
+/// with a land card in hand, so the first card drawn is a Forest.
 #[test]
 fn triggers_from_the_paused_resolution_and_its_final_part_go_on_the_stack_as_one_batch() {
     let mut scenario = GameScenario::new();
@@ -2305,6 +2306,7 @@ fn triggers_from_the_paused_resolution_and_its_final_part_go_on_the_stack_as_one
     let eureka = scenario.add_real_card(P0, "Eureka Moment", Zone::Hand, db());
     scenario.add_real_card(P0, "The Locust God", Zone::Battlefield, db());
     scenario.with_library_top(P0, &["Draw One", "Draw Two", "Pad"]);
+    scenario.add_land_to_library_top(P0, "Forest");
     let mut pool = mana(ManaType::Green, 2);
     pool.extend(mana(ManaType::Blue, 2));
     scenario.with_mana_pool(P0, pool);

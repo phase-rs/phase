@@ -120,9 +120,13 @@ fn fire_next_chapter(runner: &mut GameRunner) {
 }
 
 /// Declare `attackers` at P0's declare-attackers step and resolve the attack
-/// triggers.
+/// triggers. The step is reached by passing priority from the main phase:
+/// `advance_to_combat` would first re-run the precombat main phase's turn-based
+/// actions in place, putting a second lore counter on the Saga (CR 714.3c).
 fn attack(runner: &mut GameRunner, attackers: &[ObjectId]) {
-    runner.advance_to_combat();
+    drive_until(runner, |r| {
+        matches!(r.state().waiting_for, WaitingFor::DeclareAttackers { .. })
+    });
     let attacks: Vec<_> = attackers
         .iter()
         .map(|&id| (id, AttackTarget::Player(P1)))

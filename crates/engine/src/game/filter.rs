@@ -4721,19 +4721,30 @@ pub(crate) fn matches_target_filter_on_entry_observation(
     };
     // CR 400.7: only the exact observed incarnation lends its live object (and so its
     // abilities) to the view; otherwise the projection stands alone on a skeleton.
-    let mut view = match state.objects.get(&record.object_id) {
+    let view = match state.objects.get(&record.object_id) {
         Some(live) if ObjectIncarnationRef::from_object(live) == observation.identity.reference => {
-            live.clone()
+            let mut view = live.clone();
+            view.overlay_source_projection(observation);
+            view
         }
-        _ => GameObject::new(
-            record.object_id,
-            observation.card_id,
-            observation.lki.owner,
-            observation.lki.name.clone(),
-            observation.identity.expected_zone,
-        ),
+        _ => {
+            let mut view = GameObject::new(
+                record.object_id,
+                observation.card_id,
+                observation.lki.owner,
+                observation.lki.name.clone(),
+                observation.identity.expected_zone,
+            );
+            view.overlay_source_projection(observation);
+            // CR 701.27g + CR 400.7: a skeleton has no stored face and no modal flag, so its raw
+            // `transformed` is the only orientation the authority can read; it carries the
+            // latched answer, as `matches_target_filter_on_event_snapshot` reconstructs
+            // `EventObjectSnapshot.transformed`. The live-clone view keeps the raw record beside
+            // the live stash and modal flag.
+            view.transformed = observation.transformed_permanent;
+            view
+        }
     };
-    view.overlay_source_projection(observation);
     // CR 702.26b: a phased-out permanent is treated as though it does not exist.
     if view.is_phased_out() {
         return false;
@@ -10989,9 +11000,9 @@ fn matches_filter_prop(
         // stack entry's actual targets.
         // CR 707.2: Match face-down permanents on the battlefield.
         FilterProp::FaceDown => obj.face_down,
-        // CR 701.27g: Match transformed permanents (a transforming DFC on the
-        // battlefield with its back face up).
-        FilterProp::Transformed => obj.transformed,
+        // CR 701.27g: Match transformed permanents ("a double-faced permanent on the
+        // battlefield with its back face up"), read through the one authority.
+        FilterProp::Transformed => crate::game::transform::is_transformed_permanent(obj),
         // CR 115.9c: If the object is a stack entry, ALL of its targets must match
         // the inner filter. Falls back permissive for non-stack objects so trigger
         // matchers remain the primary authority (they validate separately).
@@ -17044,6 +17055,7 @@ mod tests {
     // CR 701.27g: `Transformed` matches only permanents whose back face is up.
     #[test]
     fn transformed_property_matches_only_transformed() {
+        use crate::types::card::LayoutKind;
         let mut state = setup();
         let transformed = add_creature(&mut state, PlayerId(0), "Back Face");
         let normal = add_creature(&mut state, PlayerId(0), "Front Face");
@@ -17058,6 +17070,110 @@ mod tests {
         assert!(
             !matches_target_filter(&state, normal, &filter, normal),
             "a non-transformed permanent must not match"
+        );
+
+        // CR 701.27g: the filter reads `transform::is_transformed_permanent`. Each object
+        // below stores an other face; the modal ones stand in for Valentin, Dean of the Vein
+        // cast as Lisette, Dean of the Root (and then Moonmisted), the Room for Mirror Room
+        // cast as Fractured Realm, the mutated one for Gemrazer mutated under a transformed
+        // Kessig Prowler.
+        let with_stash = |state: &mut GameState,
+                          name: &str,
+                          layout: LayoutKind,
+                          transformed: bool,
+                          modal_back_face: bool| {
+            let id = add_creature(state, PlayerId(0), name);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_card_types = obj.card_types.clone();
+            obj.back_face = Some(crate::game::game_object::BackFaceData {
+                name: format!("{name} other face"),
+                layout_kind: Some(layout),
+                ..Default::default()
+            });
+            obj.transformed = transformed;
+            obj.modal_back_face = modal_back_face;
+            id
+        };
+        let modal_back = with_stash(&mut state, "Lisette", LayoutKind::Modal, false, true);
+        assert!(
+            matches_target_filter(&state, modal_back, &filter, modal_back),
+            "CR 701.27g + CR 712.11b: a modal double-faced card back face up must match"
+        );
+        let both_flags = with_stash(&mut state, "Valentin", LayoutKind::Modal, true, true);
+        assert!(
+            !matches_target_filter(&state, both_flags, &filter, both_flags),
+            "CR 701.27g: a front-face-up permanent with both flags must not match"
+        );
+        let room = with_stash(
+            &mut state,
+            "Fractured Realm",
+            LayoutKind::Split,
+            false,
+            true,
+        );
+        {
+            let obj = state.objects.get_mut(&room).unwrap();
+            obj.base_card_types = crate::types::card_type::CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Enchantment],
+                subtypes: vec!["Room".to_string()],
+            };
+            obj.card_types = obj.base_card_types.clone();
+        }
+        assert!(
+            !matches_target_filter(&state, room, &filter, room),
+            "CR 709.2: a Room cast as its right half is not a double-faced permanent"
+        );
+        let merged = with_stash(&mut state, "Mutated", LayoutKind::Transform, true, false);
+        state.objects.get_mut(&merged).unwrap().merge_kind =
+            Some(crate::game::game_object::MergeKind::Mutate);
+        assert!(
+            !matches_target_filter(&state, merged, &filter, merged),
+            "CR 701.27g + CR 730.2i: a merged permanent must not match"
+        );
+    }
+
+    /// CR 701.27g: an event snapshot carries the authority's answer, which its skeleton
+    /// reconstruction (`matches_target_filter_on_event_snapshot`) reads back. Synthetic: no
+    /// printed card filters a connive subject or any other event snapshot on "transformed";
+    /// the nearest printed reader of the property is Mutagen Connoisseur ("This creature gets
+    /// +1/+0 for each transformed permanent you control.").
+    #[test]
+    fn event_snapshot_carries_whether_the_subject_was_a_transformed_permanent() {
+        use crate::types::card::LayoutKind;
+        let mut state = setup();
+        let dfc = |state: &mut GameState, name: &str, transformed: bool| {
+            let id = add_creature(state, PlayerId(0), name);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_card_types = obj.card_types.clone();
+            obj.back_face = Some(crate::game::game_object::BackFaceData {
+                name: format!("{name} other face"),
+                layout_kind: Some(LayoutKind::Modal),
+                ..Default::default()
+            });
+            obj.transformed = transformed;
+            obj.modal_back_face = true;
+            id
+        };
+        let modal_back = dfc(&mut state, "Lisette", false);
+        let both_flags = dfc(&mut state, "Valentin", true);
+        let filter =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Transformed]));
+        let ctx = FilterContext::from_source_with_controller(modal_back, PlayerId(0));
+
+        let snapshot = |id| {
+            state
+                .capture_connive_subject(id)
+                .expect("a live object must capture a snapshot")
+                .snapshot
+        };
+        assert!(
+            matches_target_filter_on_event_snapshot(&state, &snapshot(modal_back), &filter, &ctx),
+            "a modal double-faced card back face up was a transformed permanent"
+        );
+        assert!(
+            !matches_target_filter_on_event_snapshot(&state, &snapshot(both_flags), &filter, &ctx),
+            "a front-face-up permanent with both flags was not a transformed permanent"
         );
     }
 
@@ -25556,6 +25672,8 @@ mod tests {
                 controller: PlayerId(0),
                 // Test-only enter-as-copy fixture stages no donor; empty mods are stamp-proof.
                 donor: None,
+                // Single-faced fixture values: no other face to carry.
+                double_faced: None,
             }));
             *face_down_profile = Some(Box::new(FaceDownProfile::vanilla_2_2()));
         } else {
@@ -27856,6 +27974,15 @@ mod entry_observation_tests {
 
     /// [`fixture`] whose entrant has `keywords` when it enters.
     fn fixture_with_keywords(settle: bool, keywords: &[Keyword]) -> Fixture {
+        fixture_with_entrant(settle, keywords, |_| {})
+    }
+
+    /// [`fixture_with_keywords`] whose entrant is further shaped by `shape` before it enters.
+    fn fixture_with_entrant(
+        settle: bool,
+        keywords: &[Keyword],
+        shape: impl FnOnce(&mut GameObject),
+    ) -> Fixture {
         let mut state = GameState::new_two_player(11);
         let source = create_object(
             &mut state,
@@ -27881,6 +28008,7 @@ mod entry_observation_tests {
             obj.toughness = Some(1);
             obj.keywords = keywords.to_vec();
             obj.base_keywords = keywords.to_vec();
+            shape(obj);
         }
         mark_layers_full(&mut state);
         flush_layers(&mut state);
@@ -28030,6 +28158,79 @@ mod entry_observation_tests {
             &first_strike_kind,
             &ctx
         ));
+    }
+
+    /// CR 701.27g + CR 400.7: the enters-observer view of a departed entrant reads the
+    /// "transformed permanent" answer latched at its observation; the live-clone view keeps the
+    /// raw face record beside the live stash and modal flag. Synthetic: no printed enters
+    /// observer filters on "transformed"; the shapes stand in for Valentin, Dean of the Vein cast
+    /// as Lisette, Dean of the Root (and then Moonmisted), and a transformed Kessig Prowler. The
+    /// nearest printed reader of the property is Mutagen Connoisseur ("This creature gets +1/+0
+    /// for each transformed permanent you control.").
+    #[test]
+    fn entry_observation_skeleton_reads_the_latched_transformed_answer() {
+        use crate::types::card::LayoutKind;
+        let transformed_creature = creature_with(vec![FilterProp::Transformed]);
+        let entered = |layout: LayoutKind, transformed: bool, modal_back_face: bool| {
+            fixture_with_entrant(true, &[], |obj| {
+                obj.base_card_types = obj.card_types.clone();
+                obj.back_face = Some(crate::game::game_object::BackFaceData {
+                    name: "Entrant other face".to_string(),
+                    layout_kind: Some(layout),
+                    ..Default::default()
+                });
+                obj.transformed = transformed;
+                obj.modal_back_face = modal_back_face;
+            })
+        };
+        // CR 400.7: the entrant left; its storage id now names a new graveyard object.
+        let depart = |f: &mut Fixture| {
+            let obj = f.state.objects.get_mut(&f.entrant).unwrap();
+            obj.incarnation += 1;
+            obj.zone = Zone::Graveyard;
+            obj.transformed = false;
+            obj.modal_back_face = false;
+        };
+        let observed = |f: &Fixture| {
+            let ctx = FilterContext::from_source(&f.state, f.source);
+            matches_target_filter_on_entry_observation(
+                &f.state,
+                &f.record,
+                None,
+                &transformed_creature,
+                &ctx,
+            )
+        };
+
+        // (a) A modal card back face up (Lisette).
+        let mut lisette = entered(LayoutKind::Modal, false, true);
+        assert!(
+            observed(&lisette),
+            "reach: the live-clone view reads the live modal flag"
+        );
+        depart(&mut lisette);
+        assert!(
+            observed(&lisette),
+            "a departed modal card back face up was a transformed permanent"
+        );
+
+        // (b) A modal card front face up with both flags (Lisette Moonmisted into Valentin).
+        let mut valentin = entered(LayoutKind::Modal, true, true);
+        assert!(!observed(&valentin), "live: front face up");
+        depart(&mut valentin);
+        assert!(
+            !observed(&valentin),
+            "a departed front-face-up permanent with both flags was not a transformed permanent"
+        );
+
+        // (c) A transformed card (Sinuous Predator): the positive control.
+        let mut prowler = entered(LayoutKind::Transform, true, false);
+        assert!(observed(&prowler), "live: back face up");
+        depart(&mut prowler);
+        assert!(
+            observed(&prowler),
+            "a departed transformed card was a transformed permanent"
+        );
     }
 
     #[test]
