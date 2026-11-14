@@ -660,7 +660,8 @@ fn score_clock(scalar: f64, pool: &PoisonPool, ceiling: f64) -> PolicyVerdict {
     };
 
     let credited = pool.credited();
-    if reaches_lethal(measure, credited) {
+    // Lethal comes from the clone's confirmed elimination, never from count arithmetic.
+    if pool.delivery == Delivery::Counted && reaches_lethal(measure, credited) {
         return PolicyVerdict::score(
             scalar.min(ceiling),
             facts(PolicyReason::new("poison_clock_lethal")),

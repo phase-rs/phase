@@ -1637,6 +1637,67 @@ fn each_opponent_poison_reads_the_scoped_actor() {
     }
 }
 
+/// The real Prologue to Phyresis cast in Two-Headed Giant onto opposing heads at `seeded`, the
+/// first head controlling Platinum Angel when `with_angel`: the verdict, then each head's poison
+/// and whether it is still in the game after the cast resolves.
+fn prologue_onto_team(
+    seeded: (u32, u32),
+    with_angel: bool,
+) -> ((f64, PolicyReason), (u32, u32), [bool; 2]) {
+    let heads = [PlayerId(2), PlayerId(3)];
+    let poison = [(heads[0], seeded.0), (heads[1], seeded.1)];
+    let (mut runner, ids) = board(FormatConfig::two_headed_giant(), 4, &poison, |s| {
+        let prologue = s.add_real_card(
+            AI,
+            "Prologue to Phyresis",
+            Zone::Hand,
+            shared_integration_card_db(),
+        );
+        s.add_basic_land(AI, ManaColor::Blue);
+        s.add_basic_land(AI, ManaColor::Blue);
+        if with_angel {
+            s.add_real_card(
+                heads[0],
+                "Platinum Angel",
+                Zone::Battlefield,
+                shared_integration_card_db(),
+            );
+        }
+        vec![prologue]
+    });
+    let verdict = verdict_on(runner.state(), &cast_candidate(ids[0]));
+    runner.cast(ids[0]).resolve();
+    let state = runner.state();
+    (
+        verdict,
+        (poison_of(state, heads[0]), poison_of(state, heads[1])),
+        heads.map(|seat| engine::game::players::is_alive(state, seat)),
+    )
+}
+
+/// CR 810.8a + CR 101.2: Platinum Angel keeps its team in the game at fifteen shared poison, so
+/// Prologue onto 7 + 8 is pressure, not lethal.
+#[test]
+fn a_team_that_cannot_lose_at_its_threshold_is_not_a_lethal_target() {
+    let ((delta, reason), poison, alive) = prologue_onto_team((7, 8), true);
+    assert_eq!(poison, (8, 9));
+    assert_eq!(alive, [true, true]);
+    assert_eq!(fact(&reason, "poison_added"), Some(2));
+    assert_eq!(reason.kind, "poison_clock_pressure");
+    assert!(delta <= crate::policies::registry::STRONG_MAX);
+}
+
+/// CR 810.10 + CR 810.8d: without Platinum Angel, Prologue onto 6 + 7 brings the team to fifteen.
+#[test]
+fn a_team_brought_to_its_threshold_is_a_lethal_target() {
+    let ((delta, reason), poison, alive) = prologue_onto_team((6, 7), false);
+    assert_eq!(poison, (7, 8));
+    assert_eq!(alive, [false, false]);
+    assert_eq!(fact(&reason, "poison_added"), Some(2));
+    assert_eq!(reason.kind, "poison_clock_lethal");
+    assert!(delta > crate::policies::registry::STRONG_MAX);
+}
+
 /// Skrelv, Defector Mite: "{W/P}, {T}: Choose a color. Another target creature you control gains
 /// toxic 1 and hexproof from that color until end of turn. It can't be blocked by creatures of
 /// that color this turn." The keyword below stands in for that resolved grant.
