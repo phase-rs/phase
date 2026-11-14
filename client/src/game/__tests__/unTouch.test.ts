@@ -111,4 +111,39 @@ describe("Un-card touch pointer boundary", () => {
     capturedMove(5);
     expect(dispatched).toEqual([touchAction, touchAction]);
   });
+
+  it("hit-tests zero-button hover moves across element coordinates", () => {
+    const badge = document.createElement("span");
+    card.append(badge);
+
+    const hostRect = { left: 100, top: 100, right: 300, bottom: 400, width: 200, height: 300, x: 100, y: 100, toJSON: () => {} };
+    vi.spyOn(card, "getBoundingClientRect").mockReturnValue(hostRect as DOMRect);
+
+    const under: Element = badge;
+    Object.defineProperty(document, "elementFromPoint", { value: () => under, configurable: true });
+
+    // Pointer enters the badge outboard: clientX = 90 (left of card at 100)
+    badge.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, pointerId: 1, pointerType: "mouse", clientX: 90, clientY: 200 }));
+    expect(dispatched).toEqual([]);
+
+    // Zero-button move still outboard
+    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, buttons: 0, pointerType: "mouse", clientX: 95, clientY: 200 }));
+    expect(dispatched).toEqual([]);
+
+    // Zero-button move crosses inboard: clientX = 110 (one touch)
+    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, buttons: 0, pointerType: "mouse", clientX: 110, clientY: 200 }));
+    expect(dispatched).toEqual([touchAction]);
+
+    // Zero-button move within inboard area preserves touch
+    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, buttons: 0, pointerType: "mouse", clientX: 150, clientY: 200 }));
+    expect(dispatched).toHaveLength(1);
+
+    // Zero-button move outboard clears touch
+    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, buttons: 0, pointerType: "mouse", clientX: 90, clientY: 200 }));
+    expect(dispatched).toHaveLength(1);
+
+    // Zero-button move back inboard sends a new touch
+    document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, buttons: 0, pointerType: "mouse", clientX: 110, clientY: 200 }));
+    expect(dispatched).toEqual([touchAction, touchAction]);
+  });
 });

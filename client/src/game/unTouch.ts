@@ -90,20 +90,22 @@ function onPointerOver(event: PointerEvent): void {
 }
 
 /**
- * A pressed pointer may be captured — by `useLongPress` on the card it went
- * down on, or implicitly by the browser for a finger — and a captured pointer
- * reports its crossings only against the capturing element. Hit-test its moves
- * instead.
+ * Pointer motion updates touch state across elements and coordinates:
+ * - A hovering mouse crossing within an element that straddles the card edge
+ *   (such as a keyword badge) moves coordinates without firing a new
+ *   `pointerover` event.
+ * - A pressed pointer may be captured — by `useLongPress` on the card it went
+ *   down on, or implicitly by the browser for a finger — and reports crossings
+ *   only against the capturing element.
+ * Both routes hit-test pointer moves against the card boundary.
  */
 function onPointerMove(event: PointerEvent): void {
-  if (event.buttons === 0) return;
+  const element =
+    document.elementFromPoint?.(event.clientX, event.clientY) ??
+    (event.target as Element | null);
   pointerOverTouchable(
     event.pointerId,
-    touchableAt(
-      document.elementFromPoint?.(event.clientX, event.clientY),
-      event.clientX,
-      event.clientY,
-    ),
+    touchableAt(element, event.clientX, event.clientY),
   );
 }
 
