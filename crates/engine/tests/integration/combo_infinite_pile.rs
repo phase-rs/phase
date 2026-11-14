@@ -33,7 +33,7 @@ use engine::game::deck_loading::{
     create_object_from_card_face, load_and_hydrate_decks, resolve_deck_list, DeckList,
 };
 use engine::game::derived_views::{derive_views, FamilyCollapseState, UnboundedFamily};
-use engine::game::engine::{apply, start_game};
+use engine::game::engine::{apply, start_game_winner_plays_first};
 use engine::game::layers::{flush_layers, mark_layers_full};
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::game::zones::{add_to_zone, create_object, remove_from_zone};
@@ -580,7 +580,7 @@ fn bootstrap_4p_game(db: &CardDatabase) -> GameState {
     let mut state = GameState::new(FormatConfig::commander(), 4, RNG_SEED);
     load_and_hydrate_decks(&mut state, &payload, Some(db));
 
-    start_game(&mut state);
+    start_game_winner_plays_first(&mut state);
     assert!(
         matches!(state.waiting_for, WaitingFor::MulliganDecision { .. }),
         "start_game with real libraries must open the mulligan (got {:?})",

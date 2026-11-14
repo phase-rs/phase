@@ -418,6 +418,7 @@ mod tests {
             count_param: 0,
             is_cost_payment: false,
             library_position: None,
+            library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             enters_modified_if: None,
             duration: None,
@@ -497,6 +498,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: Some(LibraryPosition::Bottom),
+            library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: Some(MassLibraryOrderBatch {
                 owner: PlayerId(0),
                 members,
