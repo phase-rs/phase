@@ -43222,31 +43222,75 @@ fn scoped_cant_attack_prohibition_fails_closed_without_its_complete_grammar() {
     }
 }
 
-/// T6 SHAPE: a bare "can't attack" with a duration but NO defended scope is a
-/// blanket ban, not a player-only ban — the recognizer must fail closed (None)
-/// so the clause stays honestly Unimplemented instead of emitting a narrowed
-/// `ProhibitActivity::Attack`. No printed card reaches this branch (all 20
-/// that-player attack cards carry explicit scopes); the lines are synthetic.
+/// T6 SHAPE: a bare "can't attack" with NO defended scope is a blanket ban,
+/// not a player-only ban — the recognizer must fail closed (None) instead of
+/// emitting a narrowed `ProhibitActivity::Attack`.
+///
+/// Printed witness — Peace in Our Time (Star Trek, TRK; verbatim Oracle text
+/// checked against `data/mtgjson/AtomicCards.json`): "At the beginning of
+/// combat on each player's turn, that player may draw a card. If they do,
+/// they can't attack this turn and you put a peace counter on this
+/// enchantment." The "may draw" sentence and the bare-scope "they can't
+/// attack this turn" consequence both route through the guarded arm and
+/// decline it; the full card lowers the consequence to a blanket CantAttack
+/// static, never a defended-Player-only AddRestriction. (The old comment
+/// claiming no printed card reaches this branch was falsified by this card.)
+const PEACE_IN_OUR_TIME_ORACLE: &str = "At the beginning of combat on each player's turn, that player may draw a card. If they do, they can't attack this turn and you put a peace counter on this enchantment.\nAt the beginning of your upkeep, if this enchantment has twelve or more peace counters on it, you win the game.";
+
 #[test]
 fn that_player_cant_attack_bare_scope_fails_closed() {
+    use crate::types::statics::StaticMode;
     use crate::types::triggers::AttackTargetFilter;
+    // Arm level: the verbatim Peace sentences decline the guarded arm, so no
+    // player-only attack ban (and no unless-pay) is installed for them.
     for text in [
-        "that player can't attack during their next turn",
-        "they can't attack during their next turn",
-        "that player cannot attack during that player's next turn",
+        "At the beginning of combat on each player's turn, that player may draw a card.",
         "they can't attack this turn",
-        "that player cannot attack this turn",
     ] {
+        let lower = text.to_ascii_lowercase();
         assert!(
-            try_parse_that_player_cant_attack_prohibition(TextPair::new(text, text)).is_none(),
-            "bare-scope {text:?} must not parse (revert-flip: the old \
+            try_parse_that_player_cant_attack_prohibition(TextPair::new(text, &lower)).is_none(),
+            "bare-shape {text:?} must not parse (revert-flip: the old \
              unwrap_or(Player) default emitted a player-only ban)"
         );
-        // Full-pipeline honesty: no `ProhibitActivity::Attack` anywhere in the
-        // parsed chain for the bare line.
-        let parsed = parse_effect_chain(text, AbilityKind::Spell);
-        let mut node = Some(&parsed);
+    }
+    // Full-pipeline level on the verbatim card: no defended-Player-only attack
+    // ban and no unless-pay anywhere, and the consequence carries the blanket
+    // CantAttack static.
+    let parsed = parse_oracle_text(
+        PEACE_IN_OUR_TIME_ORACLE,
+        "Peace in Our Time",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    fn chain_nodes<'a>(root: &'a AbilityDefinition) -> Vec<&'a AbilityDefinition> {
+        let mut out = Vec::new();
+        let mut node = Some(root);
         while let Some(d) = node {
+            out.push(d);
+            node = d.sub_ability.as_deref();
+        }
+        out
+    }
+    let mut roots: Vec<&AbilityDefinition> = parsed.abilities.iter().collect();
+    roots.extend(
+        parsed
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref()),
+    );
+    assert!(
+        !roots.is_empty(),
+        "the verbatim card must parse to at least one ability chain"
+    );
+    for root in &roots {
+        for d in chain_nodes(root) {
+            assert!(
+                d.unless_pay.is_none(),
+                "Peace in Our Time must not install an unless-pay, got {:?}",
+                d.unless_pay
+            );
             if let Effect::AddRestriction {
                 restriction:
                     GameRestriction::ProhibitActivity {
@@ -43260,11 +43304,47 @@ fn that_player_cant_attack_bare_scope_fails_closed() {
                 ..
             } = d.effect.as_ref()
             {
-                panic!("bare-scope {text:?} must not emit a player-only attack ban");
+                panic!("Peace in Our Time must not emit a player-only attack ban");
             }
-            node = d.sub_ability.as_deref();
         }
     }
+    // The combat trigger is the optional-draw root; its consequence must be the
+    // blanket prohibition, not the narrowed AddRestriction ruled out above.
+    let combat = parsed
+        .triggers
+        .iter()
+        .find(|trigger| {
+            trigger
+                .execute
+                .as_deref()
+                .is_some_and(|exec| matches!(*exec.effect, Effect::Draw { .. }) && exec.optional)
+        })
+        .expect("Peace's combat trigger must parse to the optional-draw root");
+    let exec = combat.execute.as_deref().expect("combat trigger executes");
+    let mut saw_blanket = false;
+    for d in chain_nodes(exec) {
+        if let Effect::GenericEffect {
+            static_abilities, ..
+        } = d.effect.as_ref()
+        {
+            if static_abilities.iter().any(|s| {
+                s.mode == StaticMode::CantAttack && s.affected == Some(TargetFilter::ScopedPlayer)
+            }) {
+                assert_eq!(
+                    d.duration,
+                    Some(Duration::UntilEndOfTurn),
+                    "the blanket ban lapses at end of turn, got {:?}",
+                    d.duration
+                );
+                saw_blanket = true;
+            }
+        }
+    }
+    assert!(
+        saw_blanket,
+        "Peace's consequence must carry the blanket CantAttack static, got {:?}",
+        exec
+    );
 }
 
 /// T6: Willie Lumpkin's verbatim predicate shape keeps its explicit defended
