@@ -222,8 +222,9 @@ const CANDIDATE_DELIVERY_MAX_STEPS: usize = 64;
 
 /// CR 601.2i + CR 603.3 + CR 117.4: the board after the candidate, cast or activated on a copy
 /// with its mana paid automatically, resolves and every player passes until the stack is back to
-/// its depth. None when the cast asks the AI anything but its target, when it does not reach
-/// priority alone on top of the stack, or when another player owns a choice as it resolves.
+/// its depth. None when the cast asks the AI anything but its targets, when no choice of targets
+/// brings it to priority alone on top of the stack, or when another player owns a choice as it
+/// resolves.
 fn candidate_delivery(
     state: &GameState,
     ai_player: PlayerId,
@@ -244,38 +245,15 @@ fn candidate_delivery(
         *payment_mode = CastPaymentMode::Auto;
     }
     apply_as_current_for_simulation(&mut board, action).ok()?;
-    let mut casting = true;
-    for _ in 0..CANDIDATE_DELIVERY_MAX_STEPS {
+    let mut steps = CANDIDATE_DELIVERY_MAX_STEPS;
+    let mut board = settled_cast(board, ai_player, depth, &chosen, &mut steps)?;
+    while let Some(left) = steps.checked_sub(1) {
+        steps = left;
         let answer = match &board.waiting_for {
             WaitingFor::GameOver { .. } => return Some(board),
-            // CR 601.2i + CR 603.3: a trigger the cast caused sits above the candidate and
-            // resolves first.
-            WaitingFor::Priority { .. } if casting => {
-                let alone = board.stack.len() == depth + 1
-                    && board.stack.last().is_some_and(|top| {
-                        !matches!(top.kind, StackEntryKind::TriggeredAbility { .. })
-                    });
-                if !alone {
-                    return None;
-                }
-                casting = false;
-                GameAction::PassPriority
-            }
             WaitingFor::Priority { .. } if board.stack.len() <= depth => return Some(board),
             WaitingFor::Priority { .. } => GameAction::PassPriority,
             waiting_for if waiting_for.acting_player() != Some(ai_player) => return None,
-            WaitingFor::TargetSelection { .. } if casting => {
-                let legal = current_target_selection_targets(&board)?;
-                let target = if legal.contains(&chosen) {
-                    chosen.clone()
-                } else {
-                    legal.first()?.clone()
-                };
-                GameAction::ChooseTarget {
-                    target: Some(target),
-                }
-            }
-            _ if casting => return None,
             WaitingFor::ProliferateChoice { eligible, .. } if eligible.contains(&chosen) => {
                 GameAction::SelectTargets {
                     targets: vec![chosen.clone()],
@@ -286,6 +264,47 @@ fn candidate_delivery(
         apply_as_current_for_simulation(&mut board, answer).ok()?;
     }
     None
+}
+
+/// CR 601.2c + CR 601.2i + CR 603.3: the cast stepped to priority with the candidate alone above
+/// `depth`, trying each of the AI's legal targets in turn (`chosen` first) on its own copy; None
+/// when no choice gets there.
+fn settled_cast(
+    board: GameState,
+    ai_player: PlayerId,
+    depth: usize,
+    chosen: &TargetRef,
+    steps: &mut usize,
+) -> Option<GameState> {
+    match &board.waiting_for {
+        WaitingFor::GameOver { .. } => Some(board),
+        // CR 603.3: a trigger the cast caused sits above the candidate and resolves first.
+        WaitingFor::Priority { .. } => {
+            let alone = board.stack.len() == depth + 1
+                && board.stack.last().is_some_and(|top| {
+                    !matches!(top.kind, StackEntryKind::TriggeredAbility { .. })
+                });
+            alone.then_some(board)
+        }
+        WaitingFor::TargetSelection { .. }
+            if board.waiting_for.acting_player() == Some(ai_player) =>
+        {
+            let (seat, rest): (Vec<_>, Vec<_>) = current_target_selection_targets(&board)?
+                .iter()
+                .cloned()
+                .partition(|target| target == chosen);
+            seat.into_iter().chain(rest).find_map(|target| {
+                *steps = steps.checked_sub(1)?;
+                let mut attempt = board.clone();
+                let answer = GameAction::ChooseTarget {
+                    target: Some(target),
+                };
+                apply_as_current_for_simulation(&mut attempt, answer).ok()?;
+                settled_cast(attempt, ai_player, depth, chosen, steps)
+            })
+        }
+        _ => None,
+    }
 }
 
 /// CR 702.70a: a trigger whose instructions give poison counters (Poisonous).

@@ -2048,7 +2048,7 @@ fn infectious_bite_board(mine: &str, creatures: &[&str]) -> (GameRunner, ObjectI
 
 /// CR 601.2c + CR 702.21a: a permanent that triggers when Infectious Bite targets the opponent's
 /// creature withholds lethal (Ward, Frost Titan, Bonecrusher Giant, Diffusion Sliver watching
-/// Muscle Sliver, Kira's granted trigger); the AI targets the first legal creature.
+/// Muscle Sliver, Kira's granted trigger) unless another legal creature draws no trigger.
 #[test]
 fn a_ward_trigger_on_a_target_withholds_the_lethal_read() {
     let pressure = "poison_clock_pressure";
@@ -2061,9 +2061,9 @@ fn a_ward_trigger_on_a_target_withholds_the_lethal_read() {
         (&["Muscle Sliver", "Diffusion Sliver"], pressure),
         (&["Kira, Great Glass-Spinner"], pressure),
         (&["Grizzly Bears", "The Serpent Society"], lethal),
-        (&["The Serpent Society", "Grizzly Bears"], pressure),
+        (&["The Serpent Society", "Grizzly Bears"], lethal),
         (&["Coppercoat Vanguard", "Elite Vanguard"], lethal),
-        (&["Elite Vanguard", "Coppercoat Vanguard"], pressure),
+        (&["Elite Vanguard", "Coppercoat Vanguard"], lethal),
         (&["Grizzly Bears"], lethal),
     ];
     let kinds = expected.map(|(creatures, _)| {
