@@ -2794,10 +2794,9 @@ impl LibraryReorderOperation {
     /// revealed and becomes a new object. A lone member is left to
     /// [`reorder_within_library`], which already retires it only if it moved.
     ///
-    /// CR 701.24a + CR 701.24e: A multi-card placement randomizes knowledge even
-    /// when the chosen arrangement matches the input order (identity permutation).
-    /// Retire reveals for any set of two or more members that were in the library
-    /// before and after the operation.
+    /// CR 401.4 + CR 701.20d: A library owner may arrange simultaneously placed
+    /// cards privately. Retire reveals for two or more members present before
+    /// and after placement, even when the chosen order matches the input.
     pub(crate) fn finish(self, state: &mut GameState) {
         for (player, before) in self.libraries {
             let after: Vec<ObjectId> = state.library_of(player).iter().copied().collect();

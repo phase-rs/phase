@@ -513,17 +513,6 @@ fn multi_card_identity_shuffle_retires_reveal_lease_and_conceals_library() {
         let mut events = p0_pass.events;
         events.extend(p1_pass.events);
 
-        let witnessed_shuffle = events.iter().any(|e| {
-            matches!(
-                e,
-                GameEvent::PlayerPerformedAction {
-                    player_id,
-                    action: PlayerActionKind::ShuffledLibrary,
-                    ..
-                } if *player_id == P0
-            )
-        });
-
         // The original Calibrated Blast reflexive remains pending on the stack
         assert_eq!(
             runner.state().stack.len(),
@@ -543,9 +532,22 @@ fn multi_card_identity_shuffle_retires_reveal_lease_and_conceals_library() {
         if library_after == library_before {
             identity_witness_seen = true;
 
-            assert!(
-                witnessed_shuffle,
-                "seed {seed}: shuffle action event from library authority must be witnessed"
+            let shuffle_count = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        GameEvent::PlayerPerformedAction {
+                            player_id,
+                            action: PlayerActionKind::ShuffledLibrary,
+                            ..
+                        } if *player_id == P0
+                    )
+                })
+                .count();
+            assert_eq!(
+                shuffle_count, 1,
+                "seed {seed}: P0 must shuffle exactly once"
             );
 
             // CR 701.24a + CR 701.20d: Even with an unchanged multi-card permutation,
