@@ -382,6 +382,7 @@ pub fn resolve(
                 return Ok(());
             }
             state.waiting_for = WaitingFor::EffectZoneChoice {
+                performed_by: None,
                 player: choosing_player,
                 cards: eligible,
                 count: expected.min(eligible_count),
@@ -409,6 +410,7 @@ pub fn resolve(
                 conditional_enter_with_counters: vec![],
                 count_param: 0,
                 library_position: Some(position.clone()),
+                library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                 mass_library_order: None,
                 is_cost_payment: false,
                 enters_modified_if: None,
@@ -440,6 +442,7 @@ pub fn resolve(
     // than the placement count allows, prompt before auto-picking the first.
     if collected_targets.len() > expected && expected > 0 {
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: ability.controller,
             cards: collected_targets,
             count: expected,
@@ -494,6 +497,7 @@ pub fn resolve(
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: Some(position.clone()),
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,

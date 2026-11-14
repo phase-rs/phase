@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "draft",
+    "full"
+  ],
+  "reason": "DraftPlayerView gains deck_submission_open and post_draft_play, and the draft reducer accepts SubmitDeck at RoundComplete in Casual pods (MTR 7.3 between-round deck changes). deck_submission_open is defaulted and post_draft_play is read as absent-means-final by the client, so older peers parse the view, but an older host refuses a between-rounds revision and an older view hides the editor."
+}

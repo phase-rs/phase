@@ -2981,6 +2981,7 @@ fn frost_titan_tax_prompt_blanks_hidden_mana_source() {
         trigger_event,
         effect_description,
         remaining,
+        ..
     } = &raw.waiting_for
     else {
         panic!("reach-guard: expected UnlessPayment");
@@ -3031,6 +3032,7 @@ fn frost_titan_tax_prompt_blanks_hidden_mana_source() {
             trigger_event: view_event,
             effect_description: view_description,
             remaining: view_remaining,
+            ..
         } = &view.waiting_for
         else {
             panic!("{label}: the prompt is still UnlessPayment");

@@ -328,7 +328,9 @@ pub(crate) fn resolve_explore_effect(
                 crate::types::zones::Zone::Hand,
                 ability.source_id,
             )
-            .performed_by(controller)],
+            .actors(crate::game::zone_pipeline::MoveActors::performer_and_owner(
+                controller,
+            ))],
             Some(BatchCompletion::ExploreLandDeliveryComplete { explorer_id }),
             events,
         );
@@ -355,6 +357,9 @@ pub(crate) fn resolve_explore_effect(
             up_to: true,
             kept_destination: Some(crate::types::zones::Zone::Library),
             rest_destination: Some(crate::types::zones::Zone::Graveyard),
+            // CR 701.44a: the printed instruction names both dispositions, so
+            // this is a routed remainder, not a silent one.
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             // CR 701.44a: explore reveals exactly ONE card (the top card of the
             // library) and sends it to one place — hand, graveyard, or left on
             // top. A single card has no remainder to split.

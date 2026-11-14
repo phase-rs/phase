@@ -467,6 +467,8 @@ fn redirect_self(destination: Zone, redirected_to: Zone) -> ReplacementDefinitio
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 destination: redirected_to,
                 origin: None,
                 target: TargetFilter::SelfRef,

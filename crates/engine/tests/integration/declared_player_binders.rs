@@ -349,6 +349,8 @@ fn illegal_declared_payer_is_not_prompted() {
 
 fn exile_head() -> Effect {
     Effect::ChangeZone {
+        actor: engine::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: None,
         destination: Zone::Exile,
         target: TargetFilter::Typed(TypedFilter::creature()),

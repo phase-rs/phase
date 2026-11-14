@@ -440,10 +440,7 @@ pub(crate) fn collect_own_copy_sources(
     if copies_own_source(&ability.effect) {
         sources.extend(captured_own_source(ability));
     }
-    for branch in [&ability.sub_ability, &ability.else_ability]
-        .into_iter()
-        .flatten()
-    {
+    for (_, branch) in ability.child_links() {
         collect_own_copy_sources(branch, sources);
     }
 }
@@ -4901,6 +4898,8 @@ mod tests {
 
         let cleanup = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::LastCreated,

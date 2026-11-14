@@ -24,15 +24,16 @@ use super::oracle_effect::{
 };
 use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::{
-    ConditionObjectAntecedent, ParseContext, TriggerConditionScope, TriggerZoneChangeProvenance,
+    ConditionObjectAntecedent, ParseContext, ResolvedChainRoot, TriggerConditionScope,
+    TriggerZoneChangeProvenance,
 };
 use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::effect_chain::{
     ClauseDisposition, ClauseIr, DieResultBranchIr, EffectChainIr,
 };
 use super::oracle_ir::trigger::{
-    effect_chain_has_terminal_roll_die, FirstTimeLimit, ReflexiveParent, ReflexiveParentIr,
-    TriggerBody, TriggerIr, TriggerModifiers, TriggerNodeIr,
+    effect_chain_has_terminal_roll_die, FirstTimeLimit, ReflexiveConnector, ReflexiveParent,
+    ReflexiveParentIr, TriggerBody, TriggerIr, TriggerModifiers, TriggerNodeIr,
 };
 use super::oracle_modal::try_parse_inline_modal_ir;
 use super::oracle_nom::bridge::nom_on_lower;
@@ -52,8 +53,10 @@ use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
     split_sentence_units,
 };
+use super::oracle_nom::quantity::parse_using_mana_produced_by_self;
 use super::oracle_nom::target::parse_chosen_object_reference;
 use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
+use super::oracle_nom::target::CostChannel;
 use super::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
 use super::oracle_nom::target::{
     parse_owner_hand_possessive, split_counted_return_to_hand_object, CountedReturnObject,
@@ -411,39 +414,184 @@ fn stamp_self_return_origin_from_trigger_condition(def: &mut TriggerDefinition) 
         return;
     };
     if let Some(execute) = def.execute.as_deref_mut() {
-        stamp_self_return_origin_in_effect(&mut execute.effect, origin);
+        stamp_self_return_origin_in_ability(execute, origin);
     }
 }
 
-fn stamp_self_return_origin_in_effect(effect: &mut Effect, origin: Zone) {
+/// Where the trigger's zone-change source is while an immediate chain resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChainSourceZone {
+    /// CR 400.7e + CR 400.7j: the source is in this public zone, where the
+    /// ability (or the effect that moved it there) can still find it.
+    Known(Zone),
+    /// CR 608.2d: an optional instruction moved the source to `moved_to` only
+    /// if the player chose to perform it, so only an "if you do" instruction
+    /// (CR 608.2c) can rely on that zone.
+    IfPerformed { moved_to: Zone },
+}
+
+impl ChainSourceZone {
+    /// The zone the source occupies when `link` resolves, when that is certain.
+    fn at(self, link: &AbilityDefinition) -> Option<Zone> {
+        match self {
+            ChainSourceZone::Known(zone) => Some(zone),
+            ChainSourceZone::IfPerformed { moved_to } => link
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::is_optional_effect_performed)
+                .then_some(moved_to),
+        }
+    }
+}
+
+/// How one instruction relocated the zone-change source.
+enum SourceMove {
+    /// The instruction did not move the source.
+    Stays,
+    /// The instruction moved the source to this zone.
+    To(Zone),
+    /// The instruction may have moved the source somewhere it cannot track.
+    Untracked,
+}
+
+/// CR 400.7e + CR 400.7j + CR 603.6: stamp each immediate self-return in the
+/// chain with the public zone in which the trigger can find its source.
+///
+/// The walk follows the source through the chain: an instruction that moves
+/// it to another public zone (Lamplight Phoenix's "exile it") changes the
+/// origin of a later return, and a move into a hidden zone, or one whose
+/// outcome the walk cannot know, ends it. It also ends at the first
+/// instruction that hands a chosen or newly produced object to the next one
+/// (`introduces_chosen_object_target`, CR 608.2c): a later return then names
+/// that object, never the source (Gorex, the Tombshell; Wildgrove Summoner).
+/// The walk does not enter a delayed trigger's payload, which resolves at a
+/// later time (CR 603.7a + CR 603.7b).
+fn stamp_self_return_origin_in_ability(ability: &mut AbilityDefinition, origin: Zone) {
+    for mode in &mut ability.mode_abilities {
+        stamp_self_return_origin_in_ability(mode, origin);
+    }
+    let mut zone = ChainSourceZone::Known(origin);
+    let mut node = Some(ability);
+    while let Some(link) = node {
+        if introduces_chosen_object_target(link.effect.as_ref()) {
+            break;
+        }
+        let here = zone.at(link);
+        // CR 608.2c: an otherwise branch replaces this instruction, so it sees
+        // the source where the instruction would have found it.
+        if let (ChainSourceZone::Known(zone), Some(else_ability)) =
+            (zone, link.else_ability.as_deref_mut())
+        {
+            stamp_self_return_origin_in_ability(else_ability, zone);
+        }
+        match stamp_self_return_origin_in_effect(&mut link.effect, here) {
+            SourceMove::Stays => {}
+            SourceMove::To(moved_to) if moved_to.is_public() && link.condition.is_none() => {
+                zone = match (link.optional, zone) {
+                    (false, _) => ChainSourceZone::Known(moved_to),
+                    (true, ChainSourceZone::Known(_)) => ChainSourceZone::IfPerformed { moved_to },
+                    (true, ChainSourceZone::IfPerformed { .. }) => break,
+                };
+            }
+            // CR 400.7j: only a move to a public zone leaves the source
+            // findable, and a conditional move leaves its zone unknown.
+            SourceMove::To(_) | SourceMove::Untracked => break,
+        }
+        node = link.sub_ability.as_deref_mut();
+    }
+}
+
+/// Stamp one instruction whose source is in `here` (when known) and report how
+/// the instruction moves the source.
+fn stamp_self_return_origin_in_effect(effect: &mut Effect, here: Option<Zone>) -> SourceMove {
     match effect {
         Effect::ChangeZone {
-            origin: o,
+            origin,
             destination,
             target,
             ..
         } if matches!(
             target,
             TargetFilter::SelfRef | TargetFilter::TriggeringSource
-        ) && matches!(destination, Zone::Battlefield | Zone::Hand) =>
+        ) =>
         {
-            if o.is_none() {
-                *o = Some(origin);
+            // An explicit origin naming another zone is not a move of the
+            // source from where it is; leave it as parsed, and stop tracking.
+            if here.is_some_and(|here| origin.is_some_and(|zone| zone != here)) {
+                return SourceMove::Untracked;
             }
-            if matches!(target, TargetFilter::TriggeringSource) {
+            if let (Some(here), Zone::Battlefield | Zone::Hand) = (here, *destination) {
+                *origin = Some(here);
                 *target = TargetFilter::SelfRef;
             }
+            SourceMove::To(*destination)
         }
-        Effect::CreateDelayedTrigger { effect: inner, .. } => {
-            stamp_self_return_origin_in_effect(&mut inner.effect, origin);
-        }
+        // CR 603.7a + CR 603.7b: a delayed trigger's payload resolves at a
+        // later time. An event-based one binds the object of its own new event,
+        // not the enclosing trigger's source; a phase-based one ("at the
+        // beginning of the next end step, return it") is deliberately left
+        // unstamped, because where the source will be then is unknown here
+        // (CR 603.7c governs it as it resolves).
+        Effect::CreateDelayedTrigger { .. } => SourceMove::Stays,
         Effect::ChooseOneOf { branches, .. } => {
-            for branch in branches.iter_mut() {
-                stamp_self_return_origin_in_effect(&mut branch.effect, origin);
+            if let Some(here) = here {
+                for branch in branches.iter_mut() {
+                    stamp_self_return_origin_in_ability(branch, here);
+                }
+            }
+            // The chosen branch may have moved the source.
+            SourceMove::Untracked
+        }
+        // Any other zone-moving instruction that names the source moves it
+        // somewhere this walk does not model (CR 400.7).
+        _ => {
+            if moves_named_object(effect) && names_zone_change_source(effect) {
+                SourceMove::Untracked
+            } else {
+                SourceMove::Stays
             }
         }
-        _ => {}
     }
+}
+
+/// Whether an instruction other than `ChangeZone` moves the object(s) it names
+/// to another zone (CR 400.7): destroying or sacrificing it, bouncing it,
+/// putting it into a library, discarding it, casting it, or turning it into a
+/// different kind of object.
+fn moves_named_object(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Destroy { .. }
+            | Effect::DestroyAll { .. }
+            | Effect::Sacrifice { .. }
+            | Effect::ChangeZoneAll { .. }
+            | Effect::Bounce { .. }
+            | Effect::BounceAll { .. }
+            | Effect::Discard { .. }
+            | Effect::DiscardCard { .. }
+            | Effect::ReturnAsAura { .. }
+            | Effect::PutAtLibraryPosition { .. }
+            | Effect::PutOnTopOrBottom { .. }
+            | Effect::Meld { .. }
+            | Effect::ExileHaunting { .. }
+            | Effect::HideawayConceal { .. }
+            | Effect::ExileFaceDownPile { .. }
+            | Effect::CastFromZone { .. }
+            | Effect::Manifest { .. }
+            | Effect::Cloak { .. }
+    )
+}
+
+/// Whether any target slot of `effect` names the trigger's zone-change source.
+fn names_zone_change_source(effect: &mut Effect) -> bool {
+    let mut names = false;
+    crate::parser::oracle_effect::each_target_filter_mut(effect, &mut |filter| {
+        names |= matches!(
+            filter,
+            TargetFilter::SelfRef | TargetFilter::TriggeringSource
+        );
+    });
+    names
 }
 
 /// CR 107.3a + CR 107.3i + CR 601.2f + CR 603.2: In an ETB trigger on a spell
@@ -1918,8 +2066,14 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // the condition introduced, not a transient nested-clause value.
     let relative_player_scope = effect_ctx.relative_player_scope.clone();
 
-    // Constraint from full text (parsed during IR production so lowering has it)
-    let constraint = parse_trigger_constraint(&lower);
+    // Constraint from full text (parsed during IR production so lowering has it).
+    // CR 603.2 + CR 602.5c: a quoted ability the trigger GRANTS carries its own
+    // restrictions ("Activate only during your turn" on Q, Stacking the Deck's
+    // granted ability); they restrict that ability, never this trigger, so the
+    // quoted spans are masked before the constraint scan.
+    let constraint = parse_trigger_constraint(
+        &super::oracle_nom::primitives::strip_double_quoted_spans(&lower),
+    );
 
     // Parse the effect body
     let effect_for_parse_lower = effect_for_parse.to_lowercase();
@@ -1975,7 +2129,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     cost,
                     payment_chain: None,
                 },
-                connector,
+                connector: ReflexiveConnector::Condition(connector),
                 effect_chain,
                 modal: None,
             })))
@@ -2068,32 +2222,49 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 }
                 let (stripped_text, disposition) =
                     extract_illegal_targets_disposition(&effect_for_parse);
+                // The body is no proven single mandatory-role root when a
+                // trigger-level modifier is stamped on the root after it is
+                // parsed:
+                // - CR 118.12: a hoisted unless-payment with a targeted payer is
+                //   announced before the body's own target;
+                // - CR 603.3d + CR 115.6: the body-wide optional-target phrasing
+                //   (`has_up_to`, from an "up to one" anywhere in the body)
+                //   makes the root's own target declinable;
+                // - CR 101.1 over CR 608.2b: "This ability still resolves if its
+                //   target becomes illegal" lets the ability resolve with the
+                //   root's target pruned, and the gate would read no controller.
+                let body_root = if has_up_to
+                    || matches!(disposition, IllegalTargetsDisposition::StillResolves)
+                    || unless_pay.as_ref().is_some_and(|modifier| {
+                        crate::types::ability::payer_is_declared_target(&modifier.payer)
+                    }) {
+                    ResolvedChainRoot::Unproven
+                } else {
+                    ResolvedChainRoot::Proven
+                };
                 let (chain_text, ir) = match disposition {
                     IllegalTargetsDisposition::DoesNotResolve => {
-                        let ir = parse_effect_chain_ir_ability_root(
-                            &stripped_text,
-                            AbilityKind::Spell,
-                            &mut effect_ctx,
-                        );
+                        let ir =
+                            parse_trigger_body_chain_ir(&stripped_text, &mut effect_ctx, body_root);
                         (stripped_text, ir)
                     }
                     IllegalTargetsDisposition::StillResolves => {
                         // Parse the stripped chain on a clone: it is committed only if kept.
                         let mut stripped_ctx = effect_ctx.clone();
-                        let ir = parse_effect_chain_ir_ability_root(
+                        let ir = parse_trigger_body_chain_ir(
                             &stripped_text,
-                            AbilityKind::Spell,
                             &mut stripped_ctx,
+                            body_root,
                         );
                         if chain_creates_reflexive_ability(&lower_effect_chain_ir(&ir)) {
                             // CR 603.12 + CR 608.2b: a reflexive node is a separate ability
                             // with its own targets; the root stamp would not govern it. Fail
                             // closed: re-parse the unstripped body so the sentence stays a
                             // strict failure and the disposition stays the default.
-                            let ir = parse_effect_chain_ir_ability_root(
+                            let ir = parse_trigger_body_chain_ir(
                                 &effect_for_parse,
-                                AbilityKind::Spell,
                                 &mut effect_ctx,
+                                body_root,
                             );
                             (effect_for_parse.to_string(), ir)
                         } else {
@@ -2306,6 +2477,47 @@ fn filter_uses_departure_attachment_prop(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 603.12: a reflexive triggered ability keyed on an event — created as the
+/// parent's next instruction, it triggers only on that event having occurred
+/// earlier during the same resolution.
+pub(crate) fn reflexive_event_trigger(
+    event: &TriggerDefinition,
+    body: AbilityDefinition,
+) -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(event.clone()),
+                or_trigger: None,
+                lifetime: crate::types::ability::DelayedTriggerLifetime::Reflexive,
+            },
+            effect: Box::new(body),
+            uses_tracked_set: false,
+        },
+    )
+}
+
+/// CR 603.1 + CR 608.2c: parse a triggered ability's body, which resolves as
+/// that ability's root node, handing the chain parse the resolved-root proof
+/// ([`ResolvedChainRoot`]). The proof is cleared afterwards even when the parse
+/// never reached a chain body, because `ctx` outlives this one parse.
+///
+/// `root` is `Unproven` when lowering will stamp a trigger-level modifier on
+/// the root that breaks the body's single mandatory-role proof: a hoisted
+/// unless-payment whose payer is a declared target (CR 118.12), or the
+/// body-wide optional-target phrasing (CR 603.3d + CR 115.6).
+fn parse_trigger_body_chain_ir(
+    text: &str,
+    ctx: &mut ParseContext,
+    root: ResolvedChainRoot,
+) -> EffectChainIr {
+    ctx.resolved_chain_root = root;
+    let ir = parse_effect_chain_ir_ability_root(text, AbilityKind::Spell, ctx);
+    ctx.resolved_chain_root = ResolvedChainRoot::Unproven;
+    ir
+}
+
 pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     let mut def = ir.partial_def.clone();
     let modifiers = &ir.modifiers;
@@ -2333,7 +2545,9 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 modifiers,
                 reflexive_die_results,
             );
-            reflexive_ability.condition = Some(reflexive.connector.clone());
+            if let ReflexiveConnector::Condition(connector) = &reflexive.connector {
+                reflexive_ability.condition = Some(connector.clone());
+            }
 
             if let Some(modal) = &reflexive.modal {
                 reflexive_ability = reflexive_ability.with_modal(
@@ -2376,6 +2590,12 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 // flag and no decline prompt.
                 ReflexiveParent::Mandatory { instruction } => {
                     lower_trigger_effect_chain(instruction, modifiers, parent_die_results)
+                }
+            };
+            let reflexive_ability = match &reflexive.connector {
+                ReflexiveConnector::Condition(_) => reflexive_ability,
+                ReflexiveConnector::Event(event) => {
+                    reflexive_event_trigger(event, reflexive_ability)
                 }
             };
             parent_ability.sub_ability = Some(Box::new(reflexive_ability));
@@ -2966,9 +3186,12 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // Gated on:
     //   1. `def.mode` is an event-source-bearing mode (see
     //      `mode_carries_event_source_object`), AND
-    //   2. the ability has no explicit targeting (`valid_target.is_none()`
-    //      AND `optional_targeting == false`) — otherwise `ParentTarget`
-    //      legitimately inherits the player's chosen target.
+    //   2. a chosen OBJECT `valid_target` does not block the lift.
+    //      A player-only slot ("target opponent" as an attach host) is a
+    //      different English referent from "it"/"that card" — CR 608.2k's
+    //      zone-changed object — so it must not keep the anaphor on
+    //      `ParentTarget`. Object-target flicker (Felidar Guardian) still
+    //      blocks. `optional_targeting == false` remains required.
     if let Some(execute) = def.execute.as_deref_mut() {
         // BecomesTarget's event object is the permanent/player that received the
         // target designation, not the spell or ability that selected it. Keep
@@ -2979,7 +3202,12 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             demote_becomes_target_delayed_payloads(execute);
         }
         if mode_carries_event_source_object(&def.mode)
-            && !valid_target_blocks_event_source_lift(&def.mode, def.valid_target.as_ref())
+            && !valid_target_blocks_event_source_lift(
+                &def.mode,
+                def.valid_target.as_ref(),
+                def.valid_card.as_ref(),
+                def.destination,
+            )
             && !execute.optional_targeting
         {
             lift_parent_target_to_triggering_source_in_ability(execute);
@@ -2990,6 +3218,16 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             // parent-target lift so the counter recipient is already
             // `TriggeringSource` when this checks the target.
             lift_counter_count_self_scope_to_event_source_in_ability(execute);
+            // CR 603.6 + CR 400.7e: a self-departure trigger returning its
+            // source must find the card in the public zone it moved to. An
+            // enters-the-battlefield trigger can instead retrieve a different
+            // object from a library or outside the game; its destination is
+            // not an origin for that retrieved object.
+            if matches!(def.valid_card, Some(TargetFilter::SelfRef)) {
+                if let Some(origin @ (Zone::Graveyard | Zone::Exile)) = def.destination {
+                    stamp_self_return_origin_in_ability(execute, origin);
+                }
+            }
         }
     }
 
@@ -3338,9 +3576,25 @@ fn mode_carries_event_source_object(mode: &TriggerMode) -> bool {
 fn valid_target_blocks_event_source_lift(
     mode: &TriggerMode,
     valid_target: Option<&TargetFilter>,
+    valid_card: Option<&TargetFilter>,
+    destination: Option<Zone>,
 ) -> bool {
     match mode {
         TriggerMode::Discarded | TriggerMode::DiscardedAll | TriggerMode::Unattach => false,
+        // CR 608.2k + CR 603.6: on a self put-into-a-graveyard trigger, a
+        // player-scoped `valid_target` (Accursed Witch's "attached to target
+        // opponent" host, or the owner scope of "put into your graveyard" —
+        // Narcomoeba, Creeping Chill) is never the "it" anaphor, which names
+        // the card that moved. Other player-targeted
+        // zone-change triggers can bind later instructions to that player
+        // (Thought Prison's "from it"), so they must retain ParentTarget.
+        TriggerMode::ChangesZone
+            if matches!(valid_card, Some(TargetFilter::SelfRef))
+                && destination == Some(Zone::Graveyard)
+                && valid_target.is_some_and(TargetFilter::is_player_scope) =>
+        {
+            false
+        }
         _ => valid_target.is_some(),
     }
 }
@@ -3490,6 +3744,9 @@ fn lift_parent_target_to_triggering_source_in_ability(ability: &mut AbilityDefin
     while let Some(link) = node {
         if introduces_chosen_object_target(link.effect.as_ref()) {
             break;
+        }
+        if let Some(else_ability) = link.else_ability.as_deref_mut() {
+            lift_parent_target_to_triggering_source_in_ability(else_ability);
         }
         let allow_set_tap_lift =
             is_top_level && link.multi_target.is_none() && !link.optional_targeting;
@@ -4188,7 +4445,12 @@ fn lift_filter_shared_quality_parent_target_to_triggering_source(filter: &mut Ta
 /// A zone choice (`Effect::ChooseFromZone`, every form) also returns `true`: it
 /// hands the chosen card(s) to the next instruction, so a later `ParentTarget`
 /// binds to the pick and never to the trigger event (Gorex, the Tombshell's
-/// dies half).
+/// dies half). Seek hands its sought cards over the same way (Wildgrove
+/// Summoner).
+///
+/// An unparsed instruction (`Effect::Unimplemented`) also returns `true`: it may
+/// have produced the object a later pronoun names (Bone Rattler), so the later
+/// anaphor is left unbound rather than guessed onto the trigger event.
 ///
 /// An exile-until loop (`Effect::ExileFromTopUntil`, every `UntilCondition`)
 /// also returns `true`: it hands what it exiled to the next instruction — a
@@ -4230,10 +4492,22 @@ fn introduces_chosen_object_target(effect: &Effect) -> bool {
     // never one of them.
     // CR 608.2c + CR 701.23a: search establishes the found-object antecedent
     // for every later instruction, including sequential siblings.
+    // Seek (an Alchemy random library selection) hands its sought cards to
+    // the next instruction the same way: Wildgrove Summoner's "seek two
+    // Forest cards and put them onto the battlefield" moves the sought cards,
+    // never the dying source.
     if matches!(
         effect,
-        Effect::ChooseFromZone { .. } | Effect::SearchLibrary { .. }
+        Effect::ChooseFromZone { .. } | Effect::SearchLibrary { .. } | Effect::Seek { .. }
     ) {
+        return true;
+    }
+    // CR 608.2c: an instruction the parser could not read may have produced
+    // the object a later pronoun names (Bone Rattler's unparsed "create four
+    // Reassembling Skeleton token cards and put them into your graveyard").
+    // The later anaphor stays unbound rather than being guessed onto the
+    // trigger event; the unparsed instruction keeps the card unsupported.
+    if matches!(effect, Effect::Unimplemented { .. }) {
         return true;
     }
     // CR 608.2c + CR 701.13a: an exile-until loop ("exile cards from the top of
@@ -4732,50 +5006,22 @@ fn has_single_indicated_action_instruction(def: &AbilityDefinition) -> bool {
 
 /// Strip constraint sentences from effect text so they don't produce spurious sub-abilities.
 /// The constraint itself is already extracted by `parse_trigger_constraint` from the full text.
+///
+/// CR 113.1a + CR 603.1: a quoted ability the effect GRANTS ("It perpetually
+/// gains \"Whenever this creature becomes the target …, draw a card. This ability
+/// triggers only once each turn.\"" on Niambi, Beloved Protector) carries its own
+/// restriction as part of its own text. Only an unquoted sentence restricts this
+/// trigger; a quoted one is left in place so the granted ability's own parser
+/// reads it.
 fn strip_constraint_sentences(text: &str) -> String {
-    let patterns = [
-        "this ability triggers only once each turn.",
-        "this ability triggers only once each turn",
-        "triggers only once each turn.",
-        "triggers only once each turn",
-        "this ability triggers only once.",
-        "this ability triggers only once",
-        "this ability triggers only during your turn.",
-        "this ability triggers only during your turn",
-        "do this only once each turn.",
-        "do this only once each turn",
-    ];
     let mut result = text.to_string();
-    // Case-insensitive match: Oracle text is mixed-case ("This ability triggers...")
-    // but patterns are lowercase, so find on lowered text and remove from original.
-    let lower_for_static = result.to_lowercase();
-    for pattern in &patterns {
-        if let Some(pos) = lower_for_static.find(pattern) {
-            result.replace_range(pos..pos + pattern.len(), "");
-            break; // At most one constraint sentence per trigger
-        }
+    // At most one fixed-form constraint sentence per trigger.
+    if let Some(span) = unquoted_phrase_span(&result, parse_fixed_constraint_sentence) {
+        result.replace_range(span, "");
     }
-    // Dynamic pattern: "this ability triggers only the first N time(s) each turn."
-    // Uses scan_split_at_phrase + split_once_on instead of raw .find() for dispatch.
-    let lower = result.to_lowercase();
-    if let Some((prefix_text, matched_start)) = scan_split_at_phrase(&lower, |i| {
-        tag::<_, _, OracleError<'_>>("this ability triggers only the first ").parse(i)
-    }) {
-        let start = prefix_text.len();
-        if let Ok((_, (_, after_each_turn))) =
-            nom_primitives::split_once_on(matched_start, "each turn")
-        {
-            let end_pos = lower.len() - after_each_turn.len();
-            let end_pos = if tag::<_, _, OracleError<'_>>(".")
-                .parse(after_each_turn)
-                .is_ok()
-            {
-                end_pos + 1
-            } else {
-                end_pos
-            };
-            result = format!("{}{}", &result[..start], &result[end_pos..]);
-        }
+    // Dynamic form: "this ability triggers only the first N time(s) each turn."
+    if let Some(span) = unquoted_phrase_span(&result, parse_first_n_times_constraint_sentence) {
+        result.replace_range(span, "");
     }
     let result = result.trim().to_string();
     if result.ends_with('.') {
@@ -4783,6 +5029,56 @@ fn strip_constraint_sentences(text: &str) -> String {
     } else {
         result
     }
+}
+
+/// Byte range in `text` of the first word-boundary match of `combinator` that
+/// lies outside every double-quoted span. Matching runs on a lowercased,
+/// length-preserving quote mask, so the range indexes the original text.
+fn unquoted_phrase_span<O>(
+    text: &str,
+    mut combinator: impl for<'a> FnMut(&'a str) -> OracleResult<'a, O>,
+) -> Option<std::ops::Range<usize>> {
+    // ASCII lowercasing preserves byte length (the matched phrases are ASCII),
+    // so offsets in the mask index `text` directly.
+    let masked_lower =
+        nom_primitives::mask_double_quoted_spans_preserving_len(text).to_ascii_lowercase();
+    let (before, _, rest) = scan_preceded(&masked_lower, &mut combinator)?;
+    Some(before.len()..masked_lower.len() - rest.len())
+}
+
+/// A fixed-form trigger frequency sentence, with its terminal period if present.
+fn parse_fixed_constraint_sentence(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        terminated(
+            alt((
+                preceded(
+                    tag("this ability triggers only "),
+                    alt((tag("once each turn"), tag("once"), tag("during your turn"))),
+                ),
+                tag("triggers only once each turn"),
+                // CR 603.2h: "Do this only once each turn."
+                tag("do this only once each turn"),
+            )),
+            opt(tag(".")),
+        ),
+    )
+    .parse(input)
+}
+
+/// "this ability triggers only the first N time(s) each turn", with its
+/// terminal period if present.
+fn parse_first_n_times_constraint_sentence(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag("this ability triggers only the first "),
+            take_until("each turn"),
+            tag("each turn"),
+            opt(tag(".")),
+        ),
+    )
+    .parse(input)
 }
 
 /// CR 118.12a + CR 107.4: Parse mana / energy unless-payment tails after
@@ -4874,6 +5170,27 @@ fn extract_unless_pay_modifier(
     }
 }
 
+/// The sentence of `lower` that directly contains the " unless " at
+/// `unless_pos`: forward-scans past each preceding sentence boundary.
+fn unless_enclosing_sentence(lower: &str, unless_pos: usize) -> &str {
+    let mut enclosing = &lower[..unless_pos];
+    while let Ok((_, (_, after))) = nom_primitives::split_once_on(enclosing, ". ") {
+        enclosing = after;
+    }
+    enclosing
+}
+
+/// CR 608.2c: instructions are followed in the order written, and an "unless"
+/// binds to the instruction that carries it. True when an earlier instruction
+/// precedes that one — a previous sentence, or a ", then " sequencer inside the
+/// unless-bearing sentence — so hoisting the "unless" onto the whole trigger
+/// would wrongly gate the earlier instructions too. Single authority shared by
+/// the unless-payment hoist and the game-state unless hoist.
+fn unless_binds_to_later_instruction(lower: &str, unless_pos: usize) -> bool {
+    let enclosing = unless_enclosing_sentence(lower, unless_pos);
+    enclosing.len() < unless_pos || nom_primitives::split_once_on(enclosing, ", then ").is_ok()
+}
+
 /// CR 118.12: Detect "unless [player] pays {cost}" in trigger effect text.
 /// Returns (cleaned effect text without the unless clause, optional UnlessPayModifier).
 ///
@@ -4908,34 +5225,21 @@ fn hoist_unless_pay_modifier(
     // `split_once_on` combinator) so `enclosing` is just the sentence that
     // directly contains it; the byte offset back into `text` preserves original
     // case for `strip_temporal_prefix`.
-    let mut enclosing = &lower[..unless_pos];
-    while let Ok((_, (_, after))) = nom_primitives::split_once_on(enclosing, ". ") {
-        enclosing = after;
-    }
-    let unless_sentence_start = unless_pos - enclosing.len();
-    // CR 118.12a + CR 608.2c: an "unless" binds to the sentence that contains it.
-    // Hoisting one from a later sentence would gate the whole trigger — including
-    // the earlier sentences' instructions — on the payment (Delaying Shield: paying
-    // {1}{W} would skip removing the delay counters). Decline; the per-clause path
-    // (`extract_resolution_unless_pay_modifier`) attaches the cost to its own clause.
-    if unless_sentence_start > 0 {
+    let enclosing = unless_enclosing_sentence(&lower, unless_pos);
+    // CR 118.12a + CR 608.2c: an "unless" binds to its own instruction. Hoisting
+    // one from a later sentence (Delaying Shield: paying {1}{W} would skip
+    // removing the delay counters) or from after a ", then " sequencer (Cyclone,
+    // Phantasmal Sphere: the prompt must follow the counter) would gate the
+    // earlier instructions on the payment. Decline; the per-clause path
+    // (`extract_resolution_unless_pay_modifier`) attaches the cost to its own
+    // clause.
+    if unless_binds_to_later_instruction(&lower, unless_pos) {
         return (text.to_string(), None);
     }
-    if crate::parser::oracle_effect::lower::strip_temporal_prefix(
-        text[unless_sentence_start..].trim_start(),
-    )
-    .1
-    .is_some()
+    if crate::parser::oracle_effect::lower::strip_temporal_prefix(text.trim_start())
+        .1
+        .is_some()
     {
-        return (text.to_string(), None);
-    }
-    // CR 608.2c + CR 118.12a: instructions are followed in the order written, and an
-    // "unless" binds to its own instruction. When the unless-bearing sentence sequences
-    // instructions with ", then ", hoisting the unless to the trigger root would ask for
-    // the payment before the earlier instructions run (Cyclone, Phantasmal Sphere: the
-    // prompt must follow the counter). Decline; the per-clause path
-    // (`extract_resolution_unless_pay_modifier`) attaches it to its own clause.
-    if nom_primitives::split_once_on(enclosing, ", then ").is_ok() {
         return (text.to_string(), None);
     }
 
@@ -5269,7 +5573,10 @@ fn split_reflexive_optional_payment(
     }
     let cost_text = effect_text.get(cost_start..cost_start + cost_len)?.trim();
     let body_text = effect_text.get(body_start..)?.trim();
-    let cost = super::oracle_cost::parse_oracle_cost(cost_text);
+    // CR 118.12 + CR 603.12: the optional payment is made as the ability
+    // resolves, so its sacrifice and self-exile legs leave a bare "it" unbound
+    // (see `CostChannel::ResolutionPayment` for the return-to-hand leg).
+    let cost = super::oracle_cost::parse_oracle_cost_in(cost_text, CostChannel::ResolutionPayment);
     if matches!(cost, AbilityCost::Unimplemented { .. })
         || !reflexive_optional_cost_payable_by_resolution_prompt(&cost)
     {
@@ -5359,7 +5666,12 @@ fn is_unsupported_disjunctive_reflexive_optional_payment(effect_text: &str) -> b
     let Some(cost_text) = effect_text.get(cost_start..cost_start + cost_len) else {
         return false;
     };
-    cost_contains_one_of(&super::oracle_cost::parse_oracle_cost(cost_text.trim()))
+    // CR 118.12 + CR 603.12: resolution-time optional payment (see
+    // `split_reflexive_optional_payment`).
+    cost_contains_one_of(&super::oracle_cost::parse_oracle_cost_in(
+        cost_text.trim(),
+        CostChannel::ResolutionPayment,
+    ))
 }
 
 fn cost_contains_one_of(cost: &AbilityCost) -> bool {
@@ -6789,7 +7101,8 @@ fn attack_clause_names_attacked_player(def: &TriggerDefinition) -> bool {
             | AttackTargetFilter::Battle
             | AttackTargetFilter::Owner
             | AttackTargetFilter::OwnerOrPlaneswalker
-            | AttackTargetFilter::PlayerOrPermanents,
+            | AttackTargetFilter::PlayerOrPermanents
+            | AttackTargetFilter::PlayerAttackedBySourceThisTurn,
         )
         | None => false,
     }
@@ -8734,13 +9047,13 @@ fn extract_if_condition_with_card_name(
     // downstream re-homer (`strip_suffix_conditional`) can attach it as a
     // clause-level `AbilityCondition`, hoisted only when it cannot be re-homed.
     //
-    // CR 603.5: A trailing `unless` is NOT a CR 603.4 intervening predicate —
-    // it is resolution-checked, not trigger-gated. We hoist it via
-    // `PostEffectPolicy::AlwaysHoist` as a pragmatic engine simplification:
-    // there is no reachable downstream re-homer for `unless`, and the guard at
-    // the head of trigger-effect lowering turns any leftover "unless" into
-    // `Effect::Unimplemented`. `unless` is the negation of `if`, so wrap the
-    // parsed predicate in `Not`. Cost-form `unless` ("unless you pay {2}",
+    // CR 608.2c: A trailing `unless` is NOT a CR 603.4 intervening predicate —
+    // it is resolution-checked, not trigger-gated. When it binds to the
+    // trigger's first instruction we hoist it via
+    // `PostEffectPolicy::DeferIfLaterInstruction` as a pragmatic engine
+    // simplification; one bound to a later instruction (CR 608.2c) stays in the
+    // effect text for `strip_unless_entered_suffix` to attach to that clause.
+    // `unless` is the negation of `if`, so wrap the parsed predicate in `Not`. Cost-form `unless` ("unless you pay {2}",
     // "unless you sacrifice a creature") is already stripped upstream by
     // `extract_unless_pay_modifier`.
     if let Some((stripped, cond)) = try_extract_spell_targets_intervening_if(&tp, &lower, text) {
@@ -8797,7 +9110,7 @@ fn extract_if_condition_with_card_name(
         &lower,
         text,
         " unless ",
-        PostEffectPolicy::AlwaysHoist,
+        PostEffectPolicy::DeferIfLaterInstruction,
         source_is_self,
         |c| TriggerCondition::Not {
             condition: Box::new(c),
@@ -10134,10 +10447,11 @@ enum PostEffectPolicy {
     /// `strip_suffix_conditional` to re-home onto a clause-level
     /// `AbilityCondition`; hoist only non-re-homeable (source-referential) ones.
     DeferIfRehomeable,
-    /// `unless`: always hoist. `unless` has no reachable downstream re-homer —
-    /// the trigger-effect lowering guard turns any leftover "unless" into
-    /// `Effect::Unimplemented` before `parse_effect_chain_ir` runs.
-    AlwaysHoist,
+    /// `unless`: hoist when the "unless" binds to the trigger's first
+    /// instruction; defer when it binds to a later one (CR 608.2c), leaving it
+    /// in the effect text for the clause-level re-homer
+    /// (`strip_unless_entered_suffix`) to attach to its own instruction.
+    DeferIfLaterInstruction,
 }
 
 /// Try to extract an intervening predicate introduced by `keyword`.
@@ -10164,8 +10478,11 @@ enum PostEffectPolicy {
 ///   Wilds' "if its power is greater than each other creature's power") has no
 ///   `AbilityCondition` form, so it is hoisted to the trigger-level condition
 ///   instead. Re-homeability is decided by `condition_text_is_rehomeable`.
-/// - `PostEffectPolicy::AlwaysHoist` (the `unless` path): always hoist. There
-///   is no reachable downstream re-homer for `unless`.
+/// - `PostEffectPolicy::DeferIfLaterInstruction` (the `unless` path): hoist
+///   only when the "unless" binds to the first instruction. One bound to a
+///   later instruction (Seven of Nine, Unassimilated: "draw a card. Then
+///   discard a card unless ...") is left for the clause-level re-homer so the
+///   earlier instructions stay unconditional (CR 608.2c).
 fn try_extract_spell_targets_intervening_if(
     _tp: &TextPair<'_>,
     lower: &str,
@@ -10273,14 +10590,22 @@ fn try_extract_intervening(
     // true intervening predicate; always hoist. A post-effect occurrence is
     // gated by policy.
     if !is_leading {
-        if let PostEffectPolicy::DeferIfRehomeable = policy {
-            let condition_text = lower[pos + keyword.len()..].trim_end_matches('.').trim();
-            if condition_text_is_rehomeable(condition_text) {
-                // leave it for strip_suffix_conditional to re-home
-                return InterveningExtraction::Absent;
+        match policy {
+            PostEffectPolicy::DeferIfRehomeable => {
+                let condition_text = lower[pos + keyword.len()..].trim_end_matches('.').trim();
+                if condition_text_is_rehomeable(condition_text) {
+                    // leave it for strip_suffix_conditional to re-home
+                    return InterveningExtraction::Absent;
+                }
+            }
+            PostEffectPolicy::DeferIfLaterInstruction => {
+                if unless_binds_to_later_instruction(lower, pos) {
+                    // leave it for strip_unless_entered_suffix to re-home
+                    return InterveningExtraction::Absent;
+                }
             }
         }
-        // AlwaysHoist, or non-re-homeable: fall through and hoist as before.
+        // Non-re-homeable, or bound to the first instruction: hoist.
     }
     let cond_fragment = &lower[pos + keyword.len()..];
     // CR 113.6b: the source-bound contraction in a leading intervening-if
@@ -16324,17 +16649,77 @@ fn try_parse_event(
         }
     }
 
-    // CR 701.13a: "is exiled" / "are exiled" — exile trigger
-    if alt((
+    // CR 701.13a + CR 603.6c: "is exiled" / "are exiled" — exile trigger, with an
+    // optional " from <zone>" source-zone tail. The tail used to be a bare
+    // prefix test that silently dropped it, so "is exiled from the battlefield"
+    // parsed with no origin (issue #10195: Soulherder, Market Gnome, Captain
+    // Marvel, Shooting Star); the battlefield observers then fired on an exile
+    // from any zone.
+    if let Ok((after_verb, ())) = alt((
         value((), tag::<_, _, OracleError<'_>>("is exiled")),
         value((), tag("are exiled")),
     ))
     .parse(rest)
-    .is_ok()
     {
+        // CR 603.6c: the source-zone constraint. `Any` when the clause names no
+        // source zone; the vocabulary is "the battlefield" and bare "anywhere"
+        // (`parse_exiled_origin_zone`). The possessive zones ("your graveyard",
+        // ...) are not readable here because `Exiled` has no owner scope
+        // (CR 108.4a). A "from <zone>" tail this grammar cannot read must not
+        // silently widen the trigger to every origin — the #10195 defect class —
+        // so the arm fails closed. Mirrors the sibling arm's fail-closed contract.
+        let Ok((tail, origin)) = parse_origin_constraint_tail(after_verb, parse_exiled_origin_zone)
+        else {
+            return None;
+        };
+        // CR 603.6c: a residual zone-list or exclusion tail ("... or your
+        // graveyard", "from anywhere other than ...") means the origin was not
+        // fully consumed; widening or narrowing it silently is the #10195 defect
+        // class, so fail the arm closed. ("anywhere other than your graveyard"
+        // reaches here as a bare "anywhere" followed by "other than ": the
+        // exclusion list is unreadable without the possessive zone.)
+        // `find_effect_boundary` ends the condition at the first ", " that none of
+        // its list-continuation predicates claim; a zone-list leg ("from the
+        // battlefield, your graveyard, or exile") is claimed by none of them, so
+        // the condition ends at that comma and the list never reaches this tail;
+        // only the comma-less connective forms below can arrive here.
+        let tail = tail.trim_start();
+        if alt((
+            value((), tag::<_, _, OracleError<'_>>("or ")),
+            value((), tag("and/or ")),
+            value((), tag("other than ")),
+        ))
+        .parse(tail)
+        .is_ok()
+        {
+            return None;
+        }
+        // Any other residual condition tail (e.g. Market Gnome's "while you're
+        // activating a craft ability") stays unrepresented: it needs a
+        // serialized `TriggerConstraint`, i.e. a game protocol bump, and is
+        // tracked in #10630. This arm's contract is the origin only.
         let mut def = make_base();
         def.mode = TriggerMode::Exiled;
         def.valid_card = Some(subject.clone());
+        match origin {
+            OriginConstraint::Any => {}
+            OriginConstraint::Equals(zone) => def.origin = Some(zone),
+            OriginConstraint::OneOf(zones) => def.origin_zones = zones,
+            // CR 603.6c: "from anywhere other than <zone>" is a source-zone
+            // exclusion; the positive zone list expresses the same set.
+            OriginConstraint::NotEquals(zone) => def.origin_zones = origin_zones_except(&[zone]),
+        }
+        // CR 113.6k: an unconstrained self-referential "When ~ is exiled" can
+        // trigger from outside the battlefield (e.g. a graveyard exile), so it
+        // must function there; `Exile` is listed because this mode is matched
+        // immediately after the move, with the source already in exile. A
+        // battlefield-origin form (Market Gnome) triggers from the battlefield
+        // and is collected by the CR 603.10a leaves-the-battlefield look-back
+        // scan; the extra zones are inert for it because `match_exiled` checks
+        // the origin. Mirrors `try_parse_put_into_exile_from`.
+        if filter_references_self(subject) {
+            def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
+        }
         return Some((TriggerMode::Exiled, def));
     }
 
@@ -20825,6 +21210,8 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         if let Some(constraint) = turn_constraint {
             def.constraint = Some(constraint);
         }
+        let (payload, mana_source_gate) = peel_trailing_cast_mana_source(payload);
+        attach_event_window(&mut def, mana_source_gate);
 
         // CR 601.2a: pre-extract the "from <zone>" cast-origin tail BEFORE
         // running the type-phrase parser. `parse_type_phrase_folding`'s
@@ -22642,6 +23029,44 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     )))
     .parse(lower)
     .ok()?;
+    // CR 122.1 + CR 603.12: active voice — "you remove a [type] counter [from
+    // <subject>]" ("When you remove a counter this way", Immard, the
+    // Stormcleaver). With no "from" subject any object's removal matches.
+    if let Ok((rest, counter_type)) = (
+        tag::<_, _, OracleError<'_>>("you remove "),
+        alt((tag("a "), tag("an "), tag("one or more "))),
+        opt(terminated(
+            nom_primitives::parse_counter_type_typed,
+            tag::<_, _, OracleError<'_>>(" "),
+        )),
+        alt((tag("counters"), tag("counter"))),
+    )
+        .map(|(_, _, counter_type, _)| counter_type)
+        .parse(after_prefix)
+    {
+        let mut def = make_base();
+        def.mode = TriggerMode::CounterRemoved;
+        if let Ok((subject, _)) = tag::<_, _, OracleError<'_>>(" from ").parse(rest) {
+            // A subject rider this arm doesn't model ("… from this card while
+            // it's exiled") declines rather than being dropped.
+            let (filter, remainder) =
+                parse_single_subject(subject.trim(), &mut ParseContext::default());
+            if !remainder.trim().is_empty() {
+                return None;
+            }
+            def.valid_card = Some(filter);
+        } else if !rest.trim().is_empty() {
+            return None;
+        }
+        if let Some(counter_type) = counter_type {
+            def.description = Some(format!("{} counter", counter_type.as_str()));
+            def.counter_filter = Some(CounterTriggerFilter {
+                counter_type,
+                threshold: None,
+            });
+        }
+        return Some((TriggerMode::CounterRemoved, def));
+    }
     let (after_a, ()) = value((), tag::<_, _, OracleError<'_>>("a "))
         .parse(after_prefix)
         .ok()?;
@@ -23547,6 +23972,35 @@ fn try_parse_returned_to_hand(
     Some((TriggerMode::ChangesZone, def))
 }
 
+/// CR 603.6c: The zone vocabulary of the "is put into exile from <zone>" tail
+/// (`try_parse_put_into_exile_from`). The "is exiled from <zone>" arm uses the
+/// narrower `parse_exiled_origin_zone`.
+fn parse_exile_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
+    alt((
+        value(Some(Zone::Battlefield), tag("the battlefield")),
+        value(None, tag("anywhere")),
+        value(Some(Zone::Library), tag("your library")),
+        value(Some(Zone::Hand), tag("your hand")),
+        value(Some(Zone::Graveyard), tag("your graveyard")),
+    ))
+    .parse(input)
+}
+
+/// CR 603.6c + CR 108.4a: The zone vocabulary of the "is/are exiled from <zone>"
+/// tail: only "the battlefield" and bare "anywhere". The possessive zones
+/// ("your library", "your hand", "your graveyard") that `parse_exile_origin_zone`
+/// accepts are deliberately excluded: a card outside the battlefield is scoped
+/// by its owner (CR 108.4a), and `TriggerMode::Exiled` carries no owner scope in
+/// `valid_card`, so a "your <zone>" origin would also fire when an opponent's
+/// card leaves that opponent's zone. Those tails fail the arm closed instead.
+fn parse_exiled_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
+    alt((
+        value(Some(Zone::Battlefield), tag("the battlefield")),
+        value(None, tag("anywhere")),
+    ))
+    .parse(input)
+}
+
 /// Parse "[subject] is/are put into exile [from <zone>]" — explicit zone-change
 /// form of the exile trigger. Mirror of `try_parse_put_into_graveyard` with exile
 /// as the destination. Example: God-Eternal Oketra — "When ~ is put into exile
@@ -23569,21 +24023,11 @@ fn try_parse_put_into_exile_from(
         value((), tag::<_, _, OracleError<'_>>("from ")).parse(after_verb)
     {
         let after_from = after_from.trim_start();
-        fn parse_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
-            alt((
-                value(Some(Zone::Battlefield), tag("the battlefield")),
-                value(None, tag("anywhere")),
-                value(Some(Zone::Library), tag("your library")),
-                value(Some(Zone::Hand), tag("your hand")),
-                value(Some(Zone::Graveyard), tag("your graveyard")),
-            ))
-            .parse(input)
-        }
         // Strict origin + tail (mirrors `parse_graveyard_origin_union`): an
         // origin this grammar cannot fully consume fails the arm. Dropping it
         // would leave an unconstrained trigger that fires on exile from any
         // zone (e.g. "from an opponent's library").
-        let (tail, origin) = parse_origin_zone.parse(after_from).ok()?;
+        let (tail, origin) = parse_exile_origin_zone(after_from).ok()?;
         if !tail.trim().is_empty() {
             return None;
         }
@@ -24363,6 +24807,36 @@ fn peel_trailing_event_window(input: &str) -> (&str, Option<TriggerCondition>) {
     }
 }
 
+/// CR 106.3 + CR 601.2h: "using mana produced by ~" as a comparison over the
+/// triggering spell's payment: at least one mana spent on it came from this
+/// trigger's own source. Attached without an intervening "if", see
+/// [`peel_trailing_cast_mana_source`].
+fn cast_mana_source_condition() -> TriggerCondition {
+    TriggerCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::TriggeringSpell,
+                metric: CastManaSpentMetric::FromSource {
+                    source_filter: TargetFilter::SelfRef,
+                },
+            },
+        },
+        comparator: Comparator::GT,
+        rhs: QuantityExpr::Fixed { value: 0 },
+    }
+}
+
+/// CR 603.2 + CR 603.4: peel a "using mana produced by ~" qualifier that ends a
+/// cast head's payload. It is part of the trigger event, not an intervening "if".
+fn peel_trailing_cast_mana_source(input: &str) -> (&str, Option<TriggerCondition>) {
+    match scan_preceded(input, |i| {
+        all_consuming(parse_using_mana_produced_by_self).parse(i)
+    }) {
+        Some((before, (), _)) => (before.trim_end(), Some(cast_mana_source_condition())),
+        None => (input, None),
+    }
+}
+
 /// CR 603.2: true when an event-trigger tail still carries a word-bounded
 /// "during " after [`peel_trailing_event_window`] — a window the combinator
 /// cannot type ("dies during your upkeep"). Callers decline the head so the
@@ -24838,6 +25312,45 @@ mod grenzo_bullet_modal_tests {
             TargetFilter::TriggeringPlayer,
             "BULLET ExileTop player must be TriggeringPlayer (damaged player), got {exile_player:?}",
         );
+    }
+
+    /// Thada Adel, Acquisitor: the controller searches the DAMAGED player's library
+    /// (not their own), and that same player shuffles.
+    #[test]
+    fn thada_adel_searches_damaged_players_library() {
+        let parsed = parse_oracle_text(
+            "Islandwalk (This creature can't be blocked as long as defending player controls an Island.)\nWhenever Thada Adel deals combat damage to a player, search that player's library for an artifact card and exile it. Then that player shuffles. Until end of turn, you may play that card.",
+            "Thada Adel, Acquisitor",
+            &[],
+            &["Creature".into()],
+            &["Merfolk".into()],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::DamageDone))
+            .expect("DamageDone trigger must parse");
+        let execute = trigger.execute.as_ref().expect("execute must be Some");
+        let effects = flatten_effects(execute);
+        let target_player = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::SearchLibrary { target_player, .. } => Some(target_player.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("must contain SearchLibrary, got {effects:?}"));
+        let Some(TargetFilter::Typed(tf)) = target_player else {
+            panic!(
+                "SearchLibrary must name the triggering player's library, got {target_player:?}"
+            );
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::TriggeringPlayer));
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::Shuffle {
+                target: TargetFilter::TriggeringPlayer
+            }
+        )));
     }
 }
 

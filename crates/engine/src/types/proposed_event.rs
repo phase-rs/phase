@@ -49,6 +49,35 @@ pub struct BoundSearchFoundDisposition {
     /// independently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant: Option<BoundSearchFoundGrant>,
+    /// CR 608.2c: who performs the found card's move. `LibraryPlayer` is the
+    /// searcher, whose own library is searched ("they exile each card they
+    /// find"); `Controller` records no performer. A named `Player` is never
+    /// bound.
+    #[serde(
+        default,
+        skip_serializing_if = "super::ability::LibraryInstructionActor::is_controller"
+    )]
+    pub actor: super::ability::LibraryInstructionActor,
+}
+
+impl BoundSearchFoundDisposition {
+    /// CR 608.2c: the player recorded as having exiled the found
+    /// card, given the event's searcher. Only a move that requests exile
+    /// records a performer. The delivery states that no player's action
+    /// decides ownership (`EntryOwnershipActor::NoPlayer`), so a replacement
+    /// that redirects the requested exile elsewhere (CR 614.6) cannot make the
+    /// searcher the card's receiver or owner.
+    pub fn performer(&self, searcher: PlayerId) -> Option<PlayerId> {
+        use super::ability::LibraryInstructionActor;
+        match &self.actor {
+            LibraryInstructionActor::LibraryPlayer if self.destination == Zone::Exile => {
+                Some(searcher)
+            }
+            LibraryInstructionActor::LibraryPlayer
+            | LibraryInstructionActor::Controller
+            | LibraryInstructionActor::Player { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -423,6 +452,49 @@ pub enum PlaneswalkCause {
     RulesProcess,
 }
 
+/// The `EntryOwnership::ActorOwns` input of a zone move
+/// (`zone_pipeline::entry_receiver`), recorded apart from the move's performer.
+///
+/// Every current writer records `NoPlayer` or `Player`, so a replacement that
+/// redirects a move (CR 614.6: "A modified event occurs instead") keeps the
+/// input the move was requested with. `Unrecorded` is what a save from before
+/// the field existed decodes to: those writers recorded one player, in
+/// `performed_by`, for both roles, and delivery keeps reading it for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum EntryOwnershipActor {
+    /// The field is absent: a save from a writer that had no separate input.
+    #[default]
+    Unrecorded,
+    /// No player's action decides ownership; the card keeps its owner.
+    NoPlayer,
+    /// This player's action decides ownership.
+    Player(PlayerId),
+}
+
+impl EntryOwnershipActor {
+    /// Serde skip-helper: `Unrecorded` is the absent field.
+    pub fn is_unrecorded(&self) -> bool {
+        matches!(self, Self::Unrecorded)
+    }
+
+    /// The ownership input, given the event's recorded performer for a save
+    /// that predates the separate field.
+    pub fn resolve(self, legacy_performer: Option<PlayerId>) -> Option<PlayerId> {
+        match self {
+            Self::Player(player) => Some(player),
+            Self::NoPlayer => None,
+            Self::Unrecorded => legacy_performer,
+        }
+    }
+}
+
+impl From<Option<PlayerId>> for EntryOwnershipActor {
+    /// A current writer's input: a named player or, explicitly, nobody.
+    fn from(actor: Option<PlayerId>) -> Self {
+        actor.map_or(Self::NoPlayer, Self::Player)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProposedEvent {
     ZoneChange {
@@ -451,6 +523,14 @@ pub enum ProposedEvent {
         /// Each entry is (counter_type, count). Set by ETB-counter replacements.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         enter_with_counters: Vec<(CounterType, u32)>,
+        /// CR 614.1c + CR 611.2a: "and with …" entry grants folded from the
+        /// applied replacements' execute chains, in application (CR 616.1)
+        /// order. They ride the event — like counters — so every applicable
+        /// same-entry rider survives, and delivery installs them on the new
+        /// object after CR 400.7's reset, exactly as the post-entry drain
+        /// would have for a single rider.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_grants: Vec<EnterWithGrant>,
         /// Override the controller on ETB. Used by Earthbending return ("under your control")
         /// and other "enters the battlefield under [player]'s control" effects.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -502,12 +582,29 @@ pub enum ProposedEvent {
         /// object ("that player exiles that card" names the drawer; a
         /// controller-worded instruction names the controller). Rides the
         /// event through replacement and CR 616.1 pause/resume so delivery can
-        /// record, per CR 406.6 + CR 400.8, who exiled the new exile object.
+        /// record who exiled the object, including when re-exile creates a new
+        /// object without a zone change (CR 400.8).
         /// `None` for moves no player performs (rules processes, raw movers).
-        /// Under `EntryOwnership::ActorOwns` delivery also reads it as the
-        /// player who becomes the card's owner (`zone_pipeline::entry_receiver`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         performed_by: Option<PlayerId>,
+        /// The player whose action decides entry ownership under
+        /// `EntryOwnership::ActorOwns` (`zone_pipeline::entry_receiver`), kept
+        /// apart from `performed_by`: an instruction's subject performs the move
+        /// while the instruction's controller (the zone prompt's chooser on the
+        /// interactive route) stays the ownership input.
+        #[serde(default, skip_serializing_if = "EntryOwnershipActor::is_unrecorded")]
+        ownership_actor: EntryOwnershipActor,
+        /// CR 701.24a + CR 730.3: whether this move is the move component of a
+        /// "shuffle [set] into [library]" operation whose chained `Shuffle`
+        /// randomizes the library. Its library position is then transient, so
+        /// a merged permanent's components share it instead of each taking the
+        /// zone default. Rides the event through replacement and CR 616.1
+        /// pause/resume, like `face_down_in_exile`.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+        )]
+        library_shuffle: crate::types::ability::LibraryShuffleMode,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -901,6 +998,19 @@ impl EntryChoices {
     }
 }
 
+/// CR 614.1c + CR 611.2a: one "and with …" entry grant riding a battlefield
+/// entry (`ZoneChange::enter_with_grants`). The grant is a single stripped
+/// chain link — a `GenericEffect` carrying only `static_abilities` with
+/// `Duration::UntilHostLeavesPlay` for `SelfRef`, no `sub_ability` or
+/// `else_ability` — plus the granting replacement's controller (CR 109.5),
+/// so delivery installs exactly what the post-entry drain would have, for
+/// every applicable same-entry replacement instead of just the first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnterWithGrant {
+    pub grant: crate::types::ability::AbilityDefinition,
+    pub controller: PlayerId,
+}
+
 impl ProposedEvent {
     /// Construct a `ZoneChange` with default `enter_tapped: Unspecified` and empty `applied` set.
     pub fn zone_change(object_id: ObjectId, from: Zone, to: Zone, cause: Option<ObjectId>) -> Self {
@@ -913,6 +1023,7 @@ impl ProposedEvent {
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
@@ -922,6 +1033,8 @@ impl ProposedEvent {
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: HashSet::new(),
         }
     }
@@ -1958,5 +2071,35 @@ mod tests {
         };
         assert!(applied.contains(&AppliedReplacementKey::floating(2)));
         assert!(!applied.contains(&AppliedReplacementKey::step_end_mana(2)));
+    }
+
+    /// CR 608.2c: the searcher is recorded only for the found
+    /// card's exile; any other destination records nobody, so the delivery's
+    /// legacy ownership fallback never reads the searcher.
+    #[test]
+    fn search_found_performer_is_recorded_only_for_an_exile() {
+        use crate::types::ability::LibraryInstructionActor;
+        let disposition = |destination, actor| BoundSearchFoundDisposition {
+            destination,
+            source: crate::types::identifiers::ObjectIncarnationRef::of(
+                crate::types::identifiers::ObjectId(9),
+                0,
+            ),
+            grant: None,
+            actor,
+        };
+        let searcher = PlayerId(1);
+        assert_eq!(
+            disposition(Zone::Exile, LibraryInstructionActor::LibraryPlayer).performer(searcher),
+            Some(searcher)
+        );
+        assert_eq!(
+            disposition(Zone::Hand, LibraryInstructionActor::LibraryPlayer).performer(searcher),
+            None
+        );
+        assert_eq!(
+            disposition(Zone::Exile, LibraryInstructionActor::Controller).performer(searcher),
+            None
+        );
     }
 }

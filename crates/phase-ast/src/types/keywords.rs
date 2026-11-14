@@ -747,6 +747,9 @@ pub enum ProtectionColorSet {
     /// color identity of the granting effect's controller's commander(s); undefined
     /// (no colors) when that player has no commander.
     OutsideCommanderColorIdentity,
+    /// CR 702.16i + CR 611.3a + CR 109.5: current colors of permanents
+    /// controlled by the granting static ability's current controller.
+    AmongPermanentsYouControl,
 }
 
 /// CR 702.21a: Ward cost — what the targeting player must pay.
@@ -3460,6 +3463,12 @@ pub fn parse_protection_target(s: &str) -> ProtectionTarget {
         // CR 702.16: "the chosen player" resolves from the
         // protected permanent's persisted `ChosenAttribute::Player`.
         "the chosen player" | "chosen player" => ProtectionTarget::ChosenPlayer,
+        // CR 702.16k + CR 608.2c: "protection from that player" — the
+        // declared-target anaphor (Eon Frolicker). The quality is not a
+        // characteristic; it names the player targeted by the enclosing
+        // ability, so it carries a player reference and is fixed to that
+        // player when the effect is applied.
+        "that player" => ProtectionTarget::FromPlayer(super::ability::ControllerRef::TargetPlayer),
         // CR 702.16j: "protection from everything" — typed variant, not stringly-typed
         "everything" => ProtectionTarget::Everything,
         // CR 702.16k: "protection from each of your opponents" (Figure of
@@ -3489,25 +3498,32 @@ pub fn parse_protection_target(s: &str) -> ProtectionTarget {
     }
 }
 
-/// CR 702.16i + CR 903.4: Parse "each color that's not in your commander's color
-/// identity" (and its "that is not in" / "not in" spellings) into a
-/// `ProtectionColorSet`. One trailing period is tolerated because the keyword
-/// quality splitter can preserve sentence punctuation.
+/// CR 702.16i: Parse a qualified color set, read live from the board or fixed at
+/// game start (a commander's color identity, CR 903.4a). One trailing period is
+/// tolerated because the keyword quality splitter can preserve punctuation.
 fn parse_protection_color_set(s: &str) -> Option<ProtectionColorSet> {
     type E<'a> = nom::error::Error<&'a str>;
 
     all_consuming(terminated(
-        value(
-            ProtectionColorSet::OutsideCommanderColorIdentity,
-            (
-                tag::<_, _, E<'_>>("each color "),
-                alt((
-                    tag("that's not in "),
-                    tag("that is not in "),
-                    tag("not in "),
-                )),
-                super::text_grammar::parse_your_commanders_color_identity,
-            ),
+        preceded(
+            tag::<_, _, E<'_>>("each color "),
+            alt((
+                value(
+                    ProtectionColorSet::OutsideCommanderColorIdentity,
+                    (
+                        alt((
+                            tag("that's not in "),
+                            tag("that is not in "),
+                            tag("not in "),
+                        )),
+                        super::text_grammar::parse_your_commanders_color_identity,
+                    ),
+                ),
+                value(
+                    ProtectionColorSet::AmongPermanentsYouControl,
+                    (tag("among "), tag("permanents "), tag("you control")),
+                ),
+            )),
         ),
         opt(tag(".")),
     ))
@@ -4435,6 +4451,30 @@ mod tests {
     use super::test_helpers::{pay_life_cost, payload_bearing_samples};
     use super::*;
 
+    /// CR 702.16k + CR 608.2c: "protection from that player" names the player
+    /// targeted by the enclosing ability, not a card type. The atomic-quality
+    /// classifier emits the typed player reference the resolver fixes to the
+    /// declared target; the neighbouring anaphors keep their own variants.
+    #[test]
+    fn parse_protection_target_player_anaphors() {
+        assert_eq!(
+            parse_protection_target("that player"),
+            ProtectionTarget::FromPlayer(super::super::ability::ControllerRef::TargetPlayer),
+        );
+        assert_eq!(
+            parse_protection_target("the chosen player"),
+            ProtectionTarget::ChosenPlayer,
+        );
+        assert_eq!(
+            parse_protection_target("each of your opponents"),
+            ProtectionTarget::FromPlayer(super::super::ability::ControllerRef::Opponent),
+        );
+        assert_eq!(
+            parse_protection_target("red"),
+            ProtectionTarget::Color(ManaColor::Red),
+        );
+    }
+
     /// Card data exported before `EntwineCost` gained its `Mana`/`NonMana` wrapper
     /// stored Entwine as a bare `ManaCost`; it must still load as `Mana`.
     #[test]
@@ -5251,6 +5291,51 @@ mod tests {
             .unwrap(),
             serde_json::json!({"EachColor": "OutsideCommanderColorIdentity"})
         );
+    }
+
+    #[test]
+    fn parse_protection_target_among_controlled_permanents_and_serde() {
+        let expected = ProtectionTarget::EachColor(ProtectionColorSet::AmongPermanentsYouControl);
+        for phrase in [
+            "each color among permanents you control",
+            "Each color among permanents you control.",
+        ] {
+            assert_eq!(parse_protection_target(phrase), expected);
+        }
+        assert_eq!(
+            Keyword::from_str("Protection:each color among permanents you control").unwrap(),
+            Keyword::Protection(expected.clone())
+        );
+        for (quality, wire) in [
+            (
+                expected,
+                serde_json::json!({"EachColor": "AmongPermanentsYouControl"}),
+            ),
+            (
+                ProtectionTarget::EachColor(ProtectionColorSet::OutsideCommanderColorIdentity),
+                serde_json::json!({"EachColor": "OutsideCommanderColorIdentity"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&quality).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<ProtectionTarget>(wire).unwrap(),
+                quality
+            );
+        }
+        assert!(serde_json::from_value::<ProtectionTarget>(
+            serde_json::json!({"EachColor": "UnknownSet"})
+        )
+        .is_err());
+        for phrase in [
+            "each color among permanents you control while attacking",
+            "each color among creatures you control",
+            "each color among permanents your opponents control",
+        ] {
+            assert_eq!(
+                parse_protection_target(phrase),
+                ProtectionTarget::CardType(phrase.into())
+            );
+        }
     }
 
     /// Hostile siblings of the color-set phrase stay untyped card-type strings.

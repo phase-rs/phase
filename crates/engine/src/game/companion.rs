@@ -323,6 +323,9 @@ pub fn check_companion_reveal(state: &GameState, player: PlayerId) -> Option<Wai
 /// Returns the first CompanionReveal WaitingFor found, or None.
 pub fn check_all_companion_reveals(state: &GameState) -> Option<WaitingFor> {
     for &player_id in &state.seat_order {
+        if !super::players::is_alive(state, player_id) {
+            continue;
+        }
         if let Some(wf) = check_companion_reveal(state, player_id) {
             return Some(wf);
         }
@@ -333,7 +336,7 @@ pub fn check_all_companion_reveals(state: &GameState) -> Option<WaitingFor> {
 /// CR 702.139a: Handle companion declaration or decline.
 /// `eligible_companions` is the pre-computed list from `WaitingFor::CompanionReveal`,
 /// ensuring the typed response exactly matches a card that was presented.
-/// Returns the next WaitingFor state (next player's reveal or mulligans).
+/// Returns the next WaitingFor state (next player's reveal or the agenda step).
 pub fn handle_declare_companion(
     state: &mut GameState,
     player: PlayerId,
@@ -456,8 +459,26 @@ pub fn handle_declare_companion(
     Ok(advance_companion_reveal(state, player, events))
 }
 
-/// Move to the next player's companion reveal, or start mulligans if all done.
-fn advance_companion_reveal(
+/// CR 702.139a + CR 103.2b: Start the pregame companion-reveal step. If any
+/// living player has an eligible companion, offer the first reveal; otherwise
+/// hand off to the conspiracy agenda step, which hands off to mulligans.
+pub(super) fn companion_reveals_or_agenda(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    check_all_companion_reveals(state)
+        .unwrap_or_else(|| super::conspiracy::agenda_choices_or_mulligan(state, events))
+}
+
+/// CR 702.139a: Move past `current_player` to the next living player's
+/// companion reveal, or start the agenda step (CR 103.2e) once the walk is done.
+///
+/// CR 800.4a: `elimination::prune_mulligan_pending` resumes a departed chooser's
+/// prompt here, so the walk continues from that chooser's seat cursor — later
+/// living seats still get their offers, and a companion a living player already
+/// declined behind the cursor is never re-offered (unlike the fresh
+/// `check_all_companion_reveals` walk).
+pub(super) fn advance_companion_reveal(
     state: &mut GameState,
     current_player: PlayerId,
     events: &mut Vec<GameEvent>,
@@ -470,13 +491,16 @@ fn advance_companion_reveal(
 
     // Check remaining players for eligible companions
     for &player_id in seat_order.iter().skip(current_idx + 1) {
+        if !super::players::is_alive(state, player_id) {
+            continue;
+        }
         if let Some(wf) = check_companion_reveal(state, player_id) {
             return wf;
         }
     }
 
-    // All players done — proceed to mulligans
-    super::mulligan::start_mulligan(state, events)
+    // All players done — proceed to the conspiracy agenda step, then mulligans.
+    super::conspiracy::agenda_choices_or_mulligan(state, events)
 }
 
 // ── Special Action: Pay {3} to Move Companion to Hand ───────────────────

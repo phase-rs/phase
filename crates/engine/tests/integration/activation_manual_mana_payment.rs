@@ -6,8 +6,11 @@
 //!
 //! https://github.com/phase-rs/phase/issues/6016
 
+use std::collections::BTreeMap;
+
 use crate::support::shared_card_db;
 use engine::ai_support::legal_actions_full;
+use engine::game::derived_views::derive_views;
 use engine::game::mana_abilities::is_mana_ability;
 use engine::game::printed_cards::rehydrate_game_from_card_db;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -25,7 +28,7 @@ use engine::types::game_state::{
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::KeywordKind;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaPipId, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
@@ -959,9 +962,10 @@ fn activation(
 }
 
 /// An interaction candidate for a manual activation is offered for an ability
-/// that has a payment to make, and not for a mana ability, which is activated
-/// during a payment rather than paid for (CR 605.3a). The pair is told apart
-/// by the payment mode in its presentation, as a manual cast is.
+/// that has a payment to make, and not for a mana ability with no mana in its
+/// cost (Sol Ring), which has no payment of its own to make (CR 605.3a). The
+/// pair is told apart by the payment mode in its presentation, as a manual cast
+/// is.
 #[test]
 fn a_manual_sibling_is_offered_for_an_equip_and_not_for_a_mana_ability() {
     let EquipBoard {
@@ -1008,9 +1012,10 @@ fn a_manual_sibling_is_offered_for_an_equip_and_not_for_a_mana_ability() {
 
 /// CR 605.3a + CR 113.6b: Elvish Spirit Guide ("Exile this card from your hand:
 /// Add {G}.") is a mana ability that works from the hand, so it sits in the
-/// Priority candidate list itself rather than being appended after it. It is
-/// offered once, automatically, and gets no manual twin; Bonesplitter's equip
-/// beside it still does, so the gate is on the mana ability and not on the board.
+/// Priority candidate list itself rather than being appended after it. It is a
+/// mana ability with no mana in its cost, so it is offered once, automatically,
+/// and gets no manual twin; Bonesplitter's equip beside it still does, so the
+/// gate is on the mana ability and not on the board.
 #[test]
 fn a_mana_ability_activated_from_the_hand_has_no_manual_sibling_at_priority() {
     let mut scenario = scenario_at_main();
@@ -4357,4 +4362,752 @@ fn manual_formidable_speaker_restore_keeps_the_controller_when_it_is_not_the_own
             "trusted {trusted}: the target untapped"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// CR 602.2b + CR 601.2g-h + CR 605.3a: a mana ability whose cost holds a mana
+// payment (Rakdos Signet's `{1}`, Doubling Cube's `{3}`) is paid the way any
+// activation is. In `CastPaymentMode::Manual` it stops in its own
+// `ManaAbilityManaPayment` window before anything is paid, the player directs
+// which pool units pay (CR 118.3a), and passing confirms the payment.
+// ---------------------------------------------------------------------------
+
+const DOUBLING_CUBE: &str = "{3}, {T}: Double the amount of each type of unspent mana you have.";
+
+/// P0's floating mana, counted per type.
+fn pool(runner: &GameRunner, player: PlayerId) -> BTreeMap<ManaType, usize> {
+    let mut counts = BTreeMap::new();
+    for unit in runner.state().players[player.0 as usize].mana_pool.units() {
+        *counts.entry(unit.color).or_default() += 1;
+    }
+    counts
+}
+
+fn mana(entries: &[(ManaType, usize)]) -> BTreeMap<ManaType, usize> {
+    entries.iter().copied().collect()
+}
+
+/// Every floating unit of `color` in P0's pool, in pool order.
+fn pips_of(runner: &GameRunner, color: ManaType) -> Vec<ManaPipId> {
+    runner.state().players[0]
+        .mana_pool
+        .units()
+        .filter(|unit| unit.color == color)
+        .map(|unit| unit.pip_id)
+        .collect()
+}
+
+fn pin(runner: &mut GameRunner, pip_id: ManaPipId) -> WaitingFor {
+    act(runner, GameAction::SpendPoolMana { pip_id })
+}
+
+fn mana_ability_index(runner: &GameRunner, source: ObjectId) -> usize {
+    runner.state().objects[&source]
+        .abilities
+        .iter()
+        .position(is_mana_ability)
+        .expect("the source's mana ability")
+}
+
+fn is_mana_ability_payment(waiting_for: &WaitingFor) -> bool {
+    matches!(waiting_for, WaitingFor::ManaAbilityManaPayment { player, .. } if *player == P0)
+}
+
+fn is_unless_payment(waiting_for: &WaitingFor) -> bool {
+    matches!(waiting_for, WaitingFor::UnlessPayment { player, .. } if *player == P0)
+}
+
+/// Rakdos Signet (`{1}, {T}: Add {B}{R}.`) with a Swamp and a Mountain already
+/// tapped for mana: P0 has {B}{R} floating, either of which can pay the `{1}`.
+fn floating_signet_board() -> (GameRunner, ObjectId, usize) {
+    let mut scenario = scenario_at_main();
+    let signet = add(&mut scenario, P0, "Rakdos Signet", Zone::Battlefield);
+    let swamp = add(&mut scenario, P0, "Swamp", Zone::Battlefield);
+    let mountain = add(&mut scenario, P0, "Mountain", Zone::Battlefield);
+    let mut runner = build(scenario);
+    tap_land_for_mana(&mut runner, swamp);
+    tap_land_for_mana(&mut runner, mountain);
+    assert_eq!(
+        pool(&runner, P0),
+        mana(&[(ManaType::Black, 1), (ManaType::Red, 1)]),
+        "reach guard: {{B}}{{R}} floats"
+    );
+    let index = mana_ability_index(&runner, signet);
+    (runner, signet, index)
+}
+
+/// CR 602.2b + CR 601.2g + CR 605.3a: a manual Rakdos Signet stops before its
+/// `{1}` is paid, with the Signet untapped and the pool untouched. CR 118.3a +
+/// CR 601.2h: the pinned unit is the one spent, so the pin alone decides
+/// whether {B}{B}{R} or {B}{R}{R} is left.
+#[test]
+fn a_manual_signet_pays_its_cost_with_the_pool_unit_the_player_pins() {
+    for (pinned, left) in [
+        (
+            ManaType::Red,
+            mana(&[(ManaType::Black, 2), (ManaType::Red, 1)]),
+        ),
+        (
+            ManaType::Black,
+            mana(&[(ManaType::Black, 1), (ManaType::Red, 2)]),
+        ),
+    ] {
+        let (mut runner, signet, index) = floating_signet_board();
+        let waiting_for = activate_index(&mut runner, signet, index, CastPaymentMode::Manual);
+        assert!(
+            is_mana_ability_payment(&waiting_for),
+            "CR 601.2g: the manual mana ability stops before paying, got {waiting_for:?}"
+        );
+        assert!(!tapped(&runner, signet), "nothing is paid yet");
+        assert_eq!(
+            pool(&runner, P0),
+            mana(&[(ManaType::Black, 1), (ManaType::Red, 1)]),
+            "nothing is paid yet"
+        );
+
+        let pip = pips_of(&runner, pinned)[0];
+        let waiting_for = pin(&mut runner, pip);
+        assert!(is_mana_ability_payment(&waiting_for), "{waiting_for:?}");
+        let waiting_for = pass(&mut runner);
+        assert!(is_priority(&waiting_for), "{waiting_for:?}");
+        assert!(tapped(&runner, signet), "the Signet paid {{T}}");
+        assert_eq!(
+            pool(&runner, P0),
+            left,
+            "the pinned {pinned:?} paid the {{1}}"
+        );
+    }
+}
+
+/// The requester's scenario. CR 605.3b: Doubling Cube's ability is a mana
+/// ability, so it never uses the stack. CR 601.2h: with {B}{B}{B}{R}{R}{R}
+/// floating, the player picks which three units pay `{3}`; CR 701.10f: the
+/// three left are doubled. Paying with red leaves six black, and the reverse.
+#[test]
+fn a_manual_doubling_cube_doubles_the_mana_the_player_did_not_pay_with() {
+    for (paid, doubled) in [
+        (ManaType::Red, ManaType::Black),
+        (ManaType::Black, ManaType::Red),
+    ] {
+        let db = shared_card_db().expect("the checked-in fixture contains the cards");
+        let mut scenario = scenario_at_main();
+        let cube = scenario
+            .add_artifact_from_oracle(P0, "Doubling Cube", DOUBLING_CUBE)
+            .id();
+        let lands: Vec<ObjectId> = [
+            "Swamp", "Swamp", "Swamp", "Mountain", "Mountain", "Mountain",
+        ]
+        .into_iter()
+        .map(|name| scenario.add_real_card(P0, name, Zone::Battlefield, db))
+        .collect();
+        let mut runner = scenario.build();
+        for land in lands {
+            tap_land_for_mana(&mut runner, land);
+        }
+        assert_eq!(
+            pool(&runner, P0),
+            mana(&[(ManaType::Black, 3), (ManaType::Red, 3)]),
+            "reach guard: six mana floats"
+        );
+        let index = mana_ability_index(&runner, cube);
+
+        let waiting_for = activate_index(&mut runner, cube, index, CastPaymentMode::Manual);
+        assert!(
+            is_mana_ability_payment(&waiting_for),
+            "the manual Cube asks which mana pays {{3}}, got {waiting_for:?}"
+        );
+        assert!(runner.state().stack.is_empty(), "CR 605.3b: no stack");
+        for pip in pips_of(&runner, paid) {
+            pin(&mut runner, pip);
+        }
+        let waiting_for = pass(&mut runner);
+        assert!(is_priority(&waiting_for), "{waiting_for:?}");
+        assert!(runner.state().stack.is_empty(), "CR 605.3b: no stack");
+        assert!(tapped(&runner, cube), "the Cube paid {{T}}");
+        assert_eq!(
+            pool(&runner, P0),
+            mana(&[(doubled, 6)]),
+            "the {paid:?} paid {{3}} and the {doubled:?} doubled"
+        );
+    }
+}
+
+/// P0 floats {B}{R} beside Rakdos Signet and has cast Grizzly Bears; P1's Mana
+/// Leak ("Counter target spell unless its controller pays {3}.") resolves and
+/// asks P0 to pay. Returns at that `UnlessPayment` prompt.
+fn mana_leak_unless_board() -> (GameRunner, ObjectId, usize, ObjectId) {
+    let mut scenario = scenario_at_main();
+    let forests = [
+        add(&mut scenario, P0, "Forest", Zone::Battlefield),
+        add(&mut scenario, P0, "Forest", Zone::Battlefield),
+    ];
+    let swamp = add(&mut scenario, P0, "Swamp", Zone::Battlefield);
+    let mountain = add(&mut scenario, P0, "Mountain", Zone::Battlefield);
+    let signet = add(&mut scenario, P0, "Rakdos Signet", Zone::Battlefield);
+    let bears = add(&mut scenario, P0, "Grizzly Bears", Zone::Hand);
+    add(&mut scenario, P1, "Island", Zone::Battlefield);
+    add(&mut scenario, P1, "Island", Zone::Battlefield);
+    let mana_leak = add(&mut scenario, P1, "Mana Leak", Zone::Hand);
+    let mut runner = build(scenario);
+
+    for forest in forests {
+        tap_land_for_mana(&mut runner, forest);
+    }
+    let card_id = runner.state().objects[&bears].card_id;
+    let waiting_for = act(
+        &mut runner,
+        GameAction::CastSpell {
+            object_id: bears,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    );
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    tap_land_for_mana(&mut runner, swamp);
+    tap_land_for_mana(&mut runner, mountain);
+    pass(&mut runner);
+
+    let card_id = runner.state().objects[&mana_leak].card_id;
+    act(
+        &mut runner,
+        GameAction::CastSpell {
+            object_id: mana_leak,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    );
+    while matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+        pass(&mut runner);
+    }
+    let waiting_for = runner.state().waiting_for.clone();
+    assert!(
+        is_unless_payment(&waiting_for),
+        "reach guard: Mana Leak asks P0 to pay {{3}}, got {waiting_for:?}"
+    );
+    assert_eq!(
+        pool(&runner, P0),
+        mana(&[(ManaType::Black, 1), (ManaType::Red, 1)]),
+        "reach guard: P0's {{B}}{{R}} still floats (CR 106.4)"
+    );
+    assert!(tapped(&runner, swamp) && tapped(&runner, mountain));
+    assert!(
+        !tapped(&runner, signet),
+        "reach guard: the Signet is unused"
+    );
+    let index = mana_ability_index(&runner, signet);
+    (runner, signet, index, bears)
+}
+
+/// CR 605.3a + CR 117.1d + CR 118.12a: an unless cost asks for a mana payment,
+/// and a manual Rakdos Signet activated to pay it stops in its own window,
+/// pays its `{1}` with the pinned unit and returns to the unless prompt, which
+/// the player then pays.
+#[test]
+fn a_manual_signet_during_an_unless_payment_opens_its_own_window_and_returns() {
+    let (mut runner, signet, index, bears) = mana_leak_unless_board();
+
+    let waiting_for = activate_index(&mut runner, signet, index, CastPaymentMode::Manual);
+    assert!(
+        is_mana_ability_payment(&waiting_for),
+        "the manual Signet stops before paying, got {waiting_for:?}"
+    );
+    assert!(!tapped(&runner, signet), "nothing is paid yet");
+    assert_eq!(
+        pool(&runner, P0),
+        mana(&[(ManaType::Black, 1), (ManaType::Red, 1)])
+    );
+
+    let red = pips_of(&runner, ManaType::Red)[0];
+    pin(&mut runner, red);
+    let waiting_for = pass(&mut runner);
+    assert!(is_unless_payment(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, signet), "the Signet paid {{T}}");
+    assert_eq!(
+        pool(&runner, P0),
+        mana(&[(ManaType::Black, 2), (ManaType::Red, 1)]),
+        "the pinned {{R}} paid the {{1}}"
+    );
+
+    act(&mut runner, GameAction::PayUnlessCost { pay: true });
+    while !runner.state().stack.is_empty() {
+        pass(&mut runner);
+    }
+    assert!(
+        in_zone(&runner, bears, Zone::Battlefield),
+        "Mana Leak's {{3}} was paid"
+    );
+    assert!(pool(&runner, P0).is_empty(), "the {{3}} spent the pool");
+}
+
+/// The automatic sibling at the same prompt pays itself without a window, and
+/// withdrawing the manual window (CR 733.1) returns to the unless prompt with
+/// the Signet untapped and the pool as it was.
+#[test]
+fn an_auto_or_withdrawn_signet_during_an_unless_payment_returns_to_the_prompt() {
+    let (mut runner, signet, index, _) = mana_leak_unless_board();
+    let waiting_for = activate_index(&mut runner, signet, index, CastPaymentMode::Auto);
+    assert!(is_unless_payment(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, signet), "the Signet paid {{T}}");
+    assert_eq!(pool(&runner, P0).values().sum::<usize>(), 3);
+
+    let (mut runner, signet, index, _) = mana_leak_unless_board();
+    let waiting_for = activate_index(&mut runner, signet, index, CastPaymentMode::Manual);
+    assert!(is_mana_ability_payment(&waiting_for), "{waiting_for:?}");
+    let red = pips_of(&runner, ManaType::Red)[0];
+    pin(&mut runner, red);
+    let waiting_for = cancel(&mut runner);
+    assert!(is_unless_payment(&waiting_for), "{waiting_for:?}");
+    assert!(!tapped(&runner, signet), "the withdrawn Signet is untapped");
+    assert_eq!(
+        pool(&runner, P0),
+        mana(&[(ManaType::Black, 1), (ManaType::Red, 1)])
+    );
+}
+
+/// The default stays automatic: an Auto Rakdos Signet with {B}{R} floating pays
+/// its `{1}` itself, with no window (CR 605.3b). Which unit paid is engine
+/// policy the card does not decide, so only the total is asserted.
+#[test]
+fn an_auto_signet_still_pays_its_cost_from_the_pool_itself() {
+    let (mut runner, signet, index) = floating_signet_board();
+    let waiting_for = activate_index(&mut runner, signet, index, CastPaymentMode::Auto);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, signet), "the Signet paid {{T}}");
+    assert_eq!(pool(&runner, P0).values().sum::<usize>(), 3);
+}
+
+/// CR 605.3a + CR 117.1d: in a manual Signet's window the player activates the
+/// mana abilities that pay it. Tapping the Mountain keeps the window open, and
+/// confirming spends that {R}: Sol Ring, which could also have paid, is untouched.
+#[test]
+fn a_manual_signet_is_paid_with_the_mana_ability_the_player_activates() {
+    let mut scenario = scenario_at_main();
+    let signet = add(&mut scenario, P0, "Rakdos Signet", Zone::Battlefield);
+    let sol_ring = add(&mut scenario, P0, "Sol Ring", Zone::Battlefield);
+    let mountain = add(&mut scenario, P0, "Mountain", Zone::Battlefield);
+    let mut runner = build(scenario);
+    let index = mana_ability_index(&runner, signet);
+
+    let waiting_for = activate_index(&mut runner, signet, index, CastPaymentMode::Manual);
+    assert!(is_mana_ability_payment(&waiting_for), "{waiting_for:?}");
+    assert!(
+        !tapped(&runner, mountain) && !tapped(&runner, sol_ring),
+        "nothing is tapped for the player"
+    );
+
+    tap_land_for_mana(&mut runner, mountain);
+    let waiting_for = runner.state().waiting_for.clone();
+    assert!(
+        is_mana_ability_payment(&waiting_for),
+        "the window stays open until the player confirms, got {waiting_for:?}"
+    );
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, mountain) && tapped(&runner, signet));
+    assert!(!tapped(&runner, sol_ring), "Sol Ring was not used to pay");
+    assert_eq!(
+        pool(&runner, P0),
+        mana(&[(ManaType::Black, 1), (ManaType::Red, 1)])
+    );
+}
+
+/// CR 601.2h: confirming a payment the pool cannot cover is refused, and the
+/// window stays open with nothing paid — the untapped Mountain is not tapped
+/// for the player.
+#[test]
+fn confirming_an_unpayable_manual_signet_is_refused_and_the_window_stays() {
+    let mut scenario = scenario_at_main();
+    let signet = add(&mut scenario, P0, "Rakdos Signet", Zone::Battlefield);
+    let mountain = add(&mut scenario, P0, "Mountain", Zone::Battlefield);
+    let mut runner = build(scenario);
+    let index = mana_ability_index(&runner, signet);
+
+    let waiting_for = activate_index(&mut runner, signet, index, CastPaymentMode::Manual);
+    assert!(is_mana_ability_payment(&waiting_for), "{waiting_for:?}");
+    assert!(
+        runner.act(GameAction::PassPriority).is_err(),
+        "an empty pool cannot pay {{1}}"
+    );
+    assert!(is_mana_ability_payment(&runner.state().waiting_for));
+    assert!(!tapped(&runner, signet) && !tapped(&runner, mountain));
+}
+
+/// CR 733.1: withdrawing a manual Signet at its window reverses the
+/// activation: the Signet is untapped, the pool is as it was, and its pins are
+/// gone with it.
+#[test]
+fn cancelling_a_manual_signet_window_reverses_it_and_drops_its_pins() {
+    let (mut runner, signet, index) = floating_signet_board();
+    activate_index(&mut runner, signet, index, CastPaymentMode::Manual);
+    let red = pips_of(&runner, ManaType::Red)[0];
+    pin(&mut runner, red);
+    let view = derive_views(runner.state(), Some(P0)).mana_ability_payment;
+    assert_eq!(
+        view.map(|view| view.pinned_pool_units),
+        Some(vec![red]),
+        "reach guard: the pin is shown before the cancel"
+    );
+
+    let waiting_for = cancel(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(!tapped(&runner, signet), "the withdrawn Signet is untapped");
+    assert_eq!(
+        pool(&runner, P0),
+        mana(&[(ManaType::Black, 1), (ManaType::Red, 1)])
+    );
+    assert_eq!(
+        derive_views(runner.state(), Some(P0)).mana_ability_payment,
+        None
+    );
+}
+
+/// CR 106.6 + CR 118.3a: a pin is accepted only for a unit that can pay this
+/// activation. Eldrazi Temple's restricted {C}{C} ("Spend this mana only to
+/// cast colorless Eldrazi spells or activate abilities of colorless Eldrazi.")
+/// cannot pay Rakdos Signet's `{1}`; the Mountain's {R} can, and unpinning it
+/// clears the selection.
+#[test]
+fn a_manual_signet_refuses_a_pin_on_mana_it_cannot_spend() {
+    let mut scenario = scenario_at_main();
+    let signet = add(&mut scenario, P0, "Rakdos Signet", Zone::Battlefield);
+    let temple = add(&mut scenario, P0, "Eldrazi Temple", Zone::Battlefield);
+    let mountain = add(&mut scenario, P0, "Mountain", Zone::Battlefield);
+    let mut runner = build(scenario);
+    tap_land_for_mana(&mut runner, mountain);
+    let (_, _, grouped) = legal_actions_full(runner.state());
+    let restricted_tap = grouped[&temple]
+        .iter()
+        .find(|action| {
+            matches!(action, GameAction::TapLandForMana { selection } if !selection.restrictions.is_empty())
+        })
+        .cloned()
+        .expect("the Temple's restricted {C}{C} ability is offered");
+    act(&mut runner, restricted_tap);
+    let units: Vec<_> = runner.state().players[0].mana_pool.units().collect();
+    let restricted: Vec<ManaPipId> = units
+        .iter()
+        .filter(|unit| unit.color == ManaType::Colorless && !unit.restrictions.is_empty())
+        .map(|unit| unit.pip_id)
+        .collect();
+    assert_eq!(restricted.len(), 2, "reach guard: {units:?}");
+    assert_eq!(units.len(), 3, "reach guard: {units:?}");
+    assert!(
+        units
+            .iter()
+            .any(|unit| unit.color == ManaType::Red && unit.restrictions.is_empty()),
+        "reach guard: {units:?}"
+    );
+
+    let index = mana_ability_index(&runner, signet);
+    let waiting_for = activate_index(&mut runner, signet, index, CastPaymentMode::Manual);
+    assert!(is_mana_ability_payment(&waiting_for), "{waiting_for:?}");
+    assert!(
+        runner
+            .act(GameAction::SpendPoolMana {
+                pip_id: restricted[0]
+            })
+            .is_err(),
+        "CR 106.6: the Temple's mana cannot pay the Signet"
+    );
+    let red = pips_of(&runner, ManaType::Red)[0];
+    pin(&mut runner, red);
+    act(&mut runner, GameAction::UnspendPoolMana { pip_id: red });
+    assert_eq!(
+        derive_views(runner.state(), Some(P0))
+            .mana_ability_payment
+            .map(|view| view.pinned_pool_units),
+        Some(vec![]),
+        "the unpin clears the selection"
+    );
+}
+
+/// Celestial Prism (`{2}, {T}: Add one mana of any color.`) with {B} floating,
+/// Ashnod's Altar and Grizzly Bears: the pool cannot pay `{2}` and no `{T}`
+/// source is left, so even an Auto activation opens the window for the Altar.
+fn prism_board() -> (GameRunner, ObjectId, usize) {
+    let mut scenario = scenario_at_main();
+    let prism = add(&mut scenario, P0, "Celestial Prism", Zone::Battlefield);
+    let swamp = add(&mut scenario, P0, "Swamp", Zone::Battlefield);
+    add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+    add(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
+    let mut runner = build(scenario);
+    tap_land_for_mana(&mut runner, swamp);
+    assert_eq!(pool(&runner, P0), mana(&[(ManaType::Black, 1)]));
+    let index = mana_ability_index(&runner, prism);
+    (runner, prism, index)
+}
+
+/// Directing pool units is the manual window's move. The automatic window
+/// (CR 605.3a + CR 117.1d, paid by activating mana abilities) refuses a pin on
+/// the {B} the Prism's `{2}` could spend and shows no view; the manual twin on
+/// the same board accepts it.
+#[test]
+fn only_a_manual_mana_ability_window_takes_pool_pins() {
+    let (mut runner, prism, index) = prism_board();
+    let waiting_for = activate_index(&mut runner, prism, index, CastPaymentMode::Auto);
+    assert!(
+        is_mana_ability_payment(&waiting_for),
+        "reach guard: the Auto window opens for the Altar, got {waiting_for:?}"
+    );
+    let black = pips_of(&runner, ManaType::Black)[0];
+    assert!(
+        runner
+            .act(GameAction::SpendPoolMana { pip_id: black })
+            .is_err(),
+        "an automatic window takes no pins"
+    );
+    assert!(is_mana_ability_payment(&runner.state().waiting_for));
+    assert_eq!(pool(&runner, P0), mana(&[(ManaType::Black, 1)]));
+    assert_eq!(
+        derive_views(runner.state(), Some(P0)).mana_ability_payment,
+        None
+    );
+
+    let (mut runner, prism, index) = prism_board();
+    let waiting_for = activate_index(&mut runner, prism, index, CastPaymentMode::Manual);
+    assert!(is_mana_ability_payment(&waiting_for), "{waiting_for:?}");
+    let black = pips_of(&runner, ManaType::Black)[0];
+    pin(&mut runner, black);
+    assert_eq!(
+        derive_views(runner.state(), Some(P0))
+            .mana_ability_payment
+            .map(|view| view.pinned_pool_units),
+        Some(vec![black])
+    );
+}
+
+/// CR 605.3a: a manual Rakdos Signet activated inside Lightning Bolt's manual
+/// `ManaPayment` opens its own window and, once confirmed, returns to the
+/// spell's payment with its {B}{R} added; the {R} then pays for Bolt.
+#[test]
+fn a_manual_signet_inside_a_manual_spell_payment_opens_its_own_window() {
+    let mut scenario = scenario_at_main();
+    let bolt = add(&mut scenario, P0, "Lightning Bolt", Zone::Hand);
+    let signet = add(&mut scenario, P0, "Rakdos Signet", Zone::Battlefield);
+    let swamp = add(&mut scenario, P0, "Swamp", Zone::Battlefield);
+    let mut runner = build(scenario);
+    tap_land_for_mana(&mut runner, swamp);
+    let card_id = runner.state().objects[&bolt].card_id;
+    let mut waiting_for = act(
+        &mut runner,
+        GameAction::CastSpell {
+            object_id: bolt,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        },
+    );
+    if matches!(waiting_for, WaitingFor::TargetSelection { .. }) {
+        waiting_for = act(
+            &mut runner,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1)],
+            },
+        );
+    }
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+
+    let index = mana_ability_index(&runner, signet);
+    let waiting_for = activate_index(&mut runner, signet, index, CastPaymentMode::Manual);
+    assert!(
+        is_mana_ability_payment(&waiting_for),
+        "the nested manual Signet opens its own window, got {waiting_for:?}"
+    );
+    let black = pips_of(&runner, ManaType::Black)[0];
+    pin(&mut runner, black);
+    let waiting_for = pass(&mut runner);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    assert_eq!(
+        pool(&runner, P0),
+        mana(&[(ManaType::Black, 1), (ManaType::Red, 1)])
+    );
+
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(
+        runner.state().stack.iter().any(|entry| entry.id == bolt),
+        "Bolt is on the stack"
+    );
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().players[1].life, 17);
+}
+
+/// CR 605.3b: a mana ability resolves at once and commits no play, so
+/// confirming a manual Rakdos Signet leaves the earlier land taps undoable, as
+/// the Auto activation does. The Mountain's unspent {R} can still be taken
+/// back; the Swamp's {B}, pinned to pay the `{1}`, is spent and cannot.
+#[test]
+fn confirming_a_manual_signet_keeps_the_unspent_land_taps_undoable() {
+    let mut scenario = scenario_at_main();
+    let signet = add(&mut scenario, P0, "Rakdos Signet", Zone::Battlefield);
+    let swamp = add(&mut scenario, P0, "Swamp", Zone::Battlefield);
+    let mountain = add(&mut scenario, P0, "Mountain", Zone::Battlefield);
+    let mut runner = build(scenario);
+    tap_land_for_mana(&mut runner, swamp);
+    tap_land_for_mana(&mut runner, mountain);
+    let index = mana_ability_index(&runner, signet);
+
+    let waiting_for = activate_index(&mut runner, signet, index, CastPaymentMode::Manual);
+    assert!(is_mana_ability_payment(&waiting_for), "{waiting_for:?}");
+    let black = pips_of(&runner, ManaType::Black)[0];
+    pin(&mut runner, black);
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, signet), "reach guard: the Signet resolved");
+    assert_eq!(
+        pool(&runner, P0),
+        mana(&[(ManaType::Black, 1), (ManaType::Red, 2)]),
+        "reach guard: the pinned {{B}} paid the {{1}}"
+    );
+
+    assert!(
+        runner
+            .act(GameAction::UntapLandForMana { object_id: swamp })
+            .is_err(),
+        "the Swamp's {{B}} was spent on the Signet"
+    );
+    let waiting_for = act(
+        &mut runner,
+        GameAction::UntapLandForMana {
+            object_id: mountain,
+        },
+    );
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(!tapped(&runner, mountain), "the Mountain's tap is undone");
+    assert!(tapped(&runner, swamp));
+    assert_eq!(
+        pool(&runner, P0),
+        mana(&[(ManaType::Black, 1), (ManaType::Red, 1)]),
+        "only the Mountain's {{R}} left the pool; the Signet's {{B}}{{R}} stays"
+    );
+}
+
+/// The same inside Lightning Bolt's manual `ManaPayment`: confirming the nested
+/// manual Rakdos Signet returns to the spell's payment with the Mountain's
+/// unspent tap still undoable, and Bolt is then paid with the Signet's {R}.
+#[test]
+fn confirming_a_nested_manual_signet_keeps_the_spell_payment_land_taps_undoable() {
+    let mut scenario = scenario_at_main();
+    let bolt = add(&mut scenario, P0, "Lightning Bolt", Zone::Hand);
+    let signet = add(&mut scenario, P0, "Rakdos Signet", Zone::Battlefield);
+    let swamp = add(&mut scenario, P0, "Swamp", Zone::Battlefield);
+    let mountain = add(&mut scenario, P0, "Mountain", Zone::Battlefield);
+    let mut runner = build(scenario);
+    let card_id = runner.state().objects[&bolt].card_id;
+    let mut waiting_for = act(
+        &mut runner,
+        GameAction::CastSpell {
+            object_id: bolt,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        },
+    );
+    if matches!(waiting_for, WaitingFor::TargetSelection { .. }) {
+        waiting_for = act(
+            &mut runner,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1)],
+            },
+        );
+    }
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    tap_land_for_mana(&mut runner, swamp);
+    tap_land_for_mana(&mut runner, mountain);
+    assert!(
+        is_mana_payment(&runner.state().waiting_for),
+        "reach guard: the manual spell payment waits for confirmation"
+    );
+
+    let index = mana_ability_index(&runner, signet);
+    let waiting_for = activate_index(&mut runner, signet, index, CastPaymentMode::Manual);
+    assert!(is_mana_ability_payment(&waiting_for), "{waiting_for:?}");
+    let black = pips_of(&runner, ManaType::Black)[0];
+    pin(&mut runner, black);
+    let waiting_for = pass(&mut runner);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    assert_eq!(
+        pool(&runner, P0),
+        mana(&[(ManaType::Black, 1), (ManaType::Red, 2)]),
+        "reach guard: the pinned {{B}} paid the {{1}}"
+    );
+
+    let waiting_for = act(
+        &mut runner,
+        GameAction::UntapLandForMana {
+            object_id: mountain,
+        },
+    );
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    assert!(!tapped(&runner, mountain), "the Mountain's tap is undone");
+    assert_eq!(
+        pool(&runner, P0),
+        mana(&[(ManaType::Black, 1), (ManaType::Red, 1)])
+    );
+
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().players[1].life, 17);
+}
+
+/// The interaction schema of the manual window offers confirming and pinning,
+/// and at priority a mana ability with mana in its cost (Rakdos Signet,
+/// Doubling Cube) has a manual sibling while Sol Ring still has none.
+#[test]
+fn a_mana_ability_with_mana_in_its_cost_has_a_manual_sibling_and_window_moves() {
+    let mut scenario = scenario_at_main();
+    let signet = add(&mut scenario, P0, "Rakdos Signet", Zone::Battlefield);
+    let swamp = add(&mut scenario, P0, "Swamp", Zone::Battlefield);
+    let mountain = add(&mut scenario, P0, "Mountain", Zone::Battlefield);
+    let sol_ring = add(&mut scenario, P0, "Sol Ring", Zone::Battlefield);
+    let cube = scenario
+        .add_artifact_from_oracle(P0, "Doubling Cube", DOUBLING_CUBE)
+        .id();
+    let mut runner = build(scenario);
+    for land in [swamp, mountain] {
+        tap_land_for_mana(&mut runner, land);
+    }
+    let signet_index = mana_ability_index(&runner, signet);
+    let cube_index = mana_ability_index(&runner, cube);
+    let ring_index = mana_ability_index(&runner, sol_ring);
+
+    assert_eq!(
+        offered_surfaces(
+            &runner,
+            &activation(signet, signet_index, CastPaymentMode::Manual)
+        )
+        .len(),
+        1,
+        "the Signet has a manual sibling"
+    );
+    assert_eq!(
+        offered_surfaces(
+            &runner,
+            &activation(cube, cube_index, CastPaymentMode::Manual)
+        )
+        .len(),
+        1,
+        "Doubling Cube has a manual sibling"
+    );
+    assert!(!offered_surfaces(
+        &runner,
+        &activation(sol_ring, ring_index, CastPaymentMode::Auto)
+    )
+    .is_empty());
+    assert!(
+        offered_surfaces(
+            &runner,
+            &activation(sol_ring, ring_index, CastPaymentMode::Manual)
+        )
+        .is_empty(),
+        "Sol Ring has no mana in its cost and no manual sibling"
+    );
+
+    activate_index(&mut runner, signet, signet_index, CastPaymentMode::Manual);
+    let red = pips_of(&runner, ManaType::Red)[0];
+    assert!(!offered_surfaces(&runner, &GameAction::PassPriority).is_empty());
+    assert!(!offered_surfaces(&runner, &GameAction::SpendPoolMana { pip_id: red }).is_empty());
 }

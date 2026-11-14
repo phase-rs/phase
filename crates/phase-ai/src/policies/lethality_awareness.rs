@@ -106,14 +106,26 @@ fn score_pass_under_lethal(state: &GameState, ai_player: PlayerId) -> f64 {
                     .core_types
                     .contains(&engine::types::card_type::CoreType::Instant)
                     && obj.abilities.iter().any(|a| {
-                        matches!(
-                            &*a.effect,
-                            Effect::Destroy { .. }
-                                | Effect::DealDamage { .. }
-                                | Effect::Counter { .. }
-                                | Effect::Bounce { .. }
-                                | Effect::ChangeZone { .. }
-                        )
+                        // CR 115.1: a `TargetOnly` root only declares the target
+                        // of the instruction it hands its selection to
+                        // ("the owner of target permanent shuffles it into their
+                        // library", Chaos Warp).
+                        let acting = match &*a.effect {
+                            Effect::TargetOnly { .. } => {
+                                a.sub_ability.as_deref().map(|sub| &*sub.effect)
+                            }
+                            effect => Some(effect),
+                        };
+                        acting.is_some_and(|effect| {
+                            matches!(
+                                effect,
+                                Effect::Destroy { .. }
+                                    | Effect::DealDamage { .. }
+                                    | Effect::Counter { .. }
+                                    | Effect::Bounce { .. }
+                            ) || engine::game::effects::bound_object_move_destination(effect)
+                                .is_some()
+                        })
                     })
             })
         });
@@ -212,6 +224,37 @@ mod tests {
             score < -2.0,
             "Should heavily penalize non-removal under lethal, got {score}"
         );
+    }
+
+    /// CR 115.1 + CR 608.2c: Chaos Warp's printed text lowers to a `TargetOnly`
+    /// root whose bound move tucks the declared permanent; an instant holding
+    /// it is interaction under lethal.
+    #[test]
+    fn chaos_warp_in_hand_is_instant_interaction() {
+        let mut state = make_lethal_state();
+        let spell = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Chaos Warp".to_string(),
+            Zone::Hand,
+        );
+        let definition = engine::parser::oracle_effect::parse_effect_chain(
+            "The owner of target permanent shuffles it into their library, then reveals the top card of their library. If it's a permanent card, they put it onto the battlefield.",
+            engine::types::ability::AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*definition.effect,
+                engine::types::ability::Effect::TargetOnly { .. }
+            ),
+            "reach guard: the root only declares the target"
+        );
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types.push(CoreType::Instant);
+        std::sync::Arc::make_mut(&mut obj.abilities).push(definition);
+
+        assert_eq!(score_pass_under_lethal(&state, PlayerId(0)), 0.3);
     }
 
     #[test]
