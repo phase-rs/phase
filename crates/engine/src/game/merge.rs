@@ -513,6 +513,7 @@ pub(crate) fn move_merged_permanent_on_leave(
 /// once. Any other library placement leaves each component at the zone
 /// default; the owner's CR 730.3a arrangement of an ordered placement is not
 /// modeled here.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn move_merged_permanent_for_parent(
     state: &mut GameState,
     merged_id: ObjectId,
