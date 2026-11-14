@@ -3252,14 +3252,23 @@ fn priority_action_is_allowed_by_loop_guards(
             ability_index,
             ..
         } => {
+            // CR 602.2a + CR 602.5c: fold the per-acquisition budget; the
+            // pending guard compares the announcement-bound usage key, not
+            // `(source_id, ability_index)` — layer recomputes shift indices,
+            // so an index-keyed entry would suppress the innocent ability
+            // that shifted into the recorded slot. An unresolvable slot
+            // matches no pending key and reads a missing tally entry as
+            // count 0.
+            let usage =
+                engine::game::restrictions::ability_usage_key(state, *source_id, *ability_index);
+            let pending_hit = usage
+                .as_ref()
+                .is_some_and(|key| state.pending_activations.contains(key));
             !state.cancelled_casts.contains(source_id)
-                && !state
-                    .pending_activations
-                    .contains(&(*source_id, *ability_index))
-                && state
-                    .activated_abilities_this_turn
-                    .get(&(*source_id, *ability_index))
-                    .copied()
+                && !pending_hit
+                && usage
+                    .as_ref()
+                    .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
                     .unwrap_or(0)
                     < MAX_ACTIVATIONS_PER_SOURCE_PER_TURN
         }
@@ -13202,11 +13211,29 @@ mod tests {
     fn score_candidates_filters_activation_pending_on_stack() {
         // CR 117.1b + pending_activations guard: when an activated ability's
         // prior activation is still on the stack, the AI filter rejects the
-        // same (source_id, ability_index) from the candidate list to prevent
-        // softmax re-pick loops.
+        // same usage key from the candidate list to prevent softmax re-pick
+        // loops. A bare `add_creature` object carries no abilities, so a real
+        // parsed ability is attached at slot 0 (mirroring the per-turn-cap
+        // test) and the pending entry is the announcement-bound key the
+        // placement path records.
         let mut state = make_state();
         let creature = add_creature(&mut state, PlayerId(0), 1, 1);
-        state.pending_activations.push((creature, 0));
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            "{T}: Add {G}.",
+            "Creature",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert!(
+            !parsed.abilities.is_empty(),
+            "tap ability parses to a definition"
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&creature).unwrap().abilities)
+            .extend(parsed.abilities);
+        let pending = engine::game::restrictions::ability_usage_key(&state, creature, 0)
+            .expect("slot 0 resolves after attaching the ability");
+        state.pending_activations.push(pending);
 
         // Construct a candidate for ActivateAbility on the pending pair.
         let blocked = CandidateAction {
@@ -13234,14 +13261,23 @@ mod tests {
                     ability_index,
                     ..
                 } => {
+                    // CR 602.2a + CR 602.5c: fold the per-acquisition
+                    // budget; the pending guard compares usage keys (see
+                    // `priority_action_is_allowed_by_loop_guards`); an
+                    // unresolvable slot reads a missing entry as count 0.
+                    let usage = engine::game::restrictions::ability_usage_key(
+                        &state,
+                        *source_id,
+                        *ability_index,
+                    );
+                    let pending_hit = usage
+                        .as_ref()
+                        .is_some_and(|key| state.pending_activations.contains(key));
                     !state.cancelled_casts.contains(source_id)
-                        && !state
-                            .pending_activations
-                            .contains(&(*source_id, *ability_index))
-                        && state
-                            .activated_abilities_this_turn
-                            .get(&(*source_id, *ability_index))
-                            .copied()
+                        && !pending_hit
+                        && usage
+                            .as_ref()
+                            .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
                             .unwrap_or(0)
                             < MAX_ACTIVATIONS_PER_SOURCE_PER_TURN
                 }
@@ -13264,9 +13300,30 @@ mod tests {
         // source, further activations are rejected regardless of stack state.
         let mut state = make_state();
         let creature = add_creature(&mut state, PlayerId(0), 1, 1);
+        // CR 602.5c: the per-turn budget is keyed by the resolved acquisition
+        // (provenance stamp + rules text), and an unresolvable slot reads
+        // count 0 — so the bare `add_creature` object (no abilities) cannot
+        // carry a budget. Attach a real printed ability at slot 0 and derive
+        // the insert key with the same helper the filter reads, instead of
+        // hand-building the key and duplicating the helper's binding.
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            "{T}: Add {G}.",
+            "Creature",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert!(
+            !parsed.abilities.is_empty(),
+            "tap ability parses to a definition"
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&creature).unwrap().abilities)
+            .extend(parsed.abilities);
+        let usage = engine::game::restrictions::ability_usage_key(&state, creature, 0)
+            .expect("slot 0 resolves after attaching the ability");
         state
             .activated_abilities_this_turn
-            .insert((creature, 0), MAX_ACTIVATIONS_PER_SOURCE_PER_TURN);
+            .insert(usage, MAX_ACTIVATIONS_PER_SOURCE_PER_TURN);
 
         let blocked = CandidateAction {
             action: GameAction::ActivateAbility {
@@ -13285,14 +13342,23 @@ mod tests {
                     ability_index,
                     ..
                 } => {
+                    // CR 602.2a + CR 602.5c: fold the per-acquisition
+                    // budget; the pending guard compares usage keys (see
+                    // `priority_action_is_allowed_by_loop_guards`); an
+                    // unresolvable slot reads a missing entry as count 0.
+                    let usage = engine::game::restrictions::ability_usage_key(
+                        &state,
+                        *source_id,
+                        *ability_index,
+                    );
+                    let pending_hit = usage
+                        .as_ref()
+                        .is_some_and(|key| state.pending_activations.contains(key));
                     !state.cancelled_casts.contains(source_id)
-                        && !state
-                            .pending_activations
-                            .contains(&(*source_id, *ability_index))
-                        && state
-                            .activated_abilities_this_turn
-                            .get(&(*source_id, *ability_index))
-                            .copied()
+                        && !pending_hit
+                        && usage
+                            .as_ref()
+                            .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
                             .unwrap_or(0)
                             < MAX_ACTIVATIONS_PER_SOURCE_PER_TURN
                 }
@@ -13304,6 +13370,128 @@ mod tests {
             gated.is_empty(),
             "activation at per-turn cap should be filtered"
         );
+    }
+
+    /// CR 602.2a: the real loop guard compares announcement-bound usage
+    /// keys, not slot indices. A recorded key still suppresses its own
+    /// activation, but an ability that shifted into the recorded slot after
+    /// a grant withdrawal carries a different key and stays offered.
+    /// Reverting the guard to index comparison suppresses the shifted
+    /// ability (RED).
+    #[test]
+    fn pending_key_guard_still_offers_ability_shifted_into_recorded_slot() {
+        fn parse_tap_mana(color: &str) -> Vec<engine::types::ability::AbilityDefinition> {
+            let text = format!("{{T}}: Add {color}.");
+            let parsed = engine::parser::oracle::parse_oracle_text(
+                &text,
+                "Creature",
+                &[],
+                &["Creature".to_string()],
+                &[],
+            );
+            assert!(
+                !parsed.abilities.is_empty(),
+                "tap ability parses to a definition"
+            );
+            parsed.abilities
+        }
+
+        let mut state = make_state();
+        let holder = add_creature(&mut state, PlayerId(0), 1, 1);
+        let mut green = parse_tap_mana("{G}");
+        let mut red = parse_tap_mana("{R}");
+        // Twins share the description so only the fingerprint tells the
+        // recorded key from the shifted ability apart.
+        for def in green.iter_mut().chain(red.iter_mut()) {
+            def.description = Some("Twin shift ability".to_string());
+        }
+        Arc::make_mut(&mut state.objects.get_mut(&holder).unwrap().abilities).extend(green);
+        Arc::make_mut(&mut state.objects.get_mut(&holder).unwrap().abilities).extend(red);
+
+        let recorded = engine::game::restrictions::ability_usage_key(&state, holder, 0)
+            .expect("slot 0 resolves");
+        let shifted = engine::game::restrictions::ability_usage_key(&state, holder, 1)
+            .expect("slot 1 resolves");
+        assert_ne!(
+            recorded, shifted,
+            "the twins must carry different keys for the shift to discriminate"
+        );
+        state.pending_activations.push(recorded);
+
+        let candidate = |index: usize| GameAction::ActivateAbility {
+            source_id: holder,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        };
+        // Paired guard: its own activation is still suppressed.
+        assert!(
+            !priority_action_is_allowed_by_loop_guards(&state, PlayerId(0), &candidate(0)),
+            "the recorded activation must stay suppressed"
+        );
+
+        // The recompute shift: the slot-0 grant is withdrawn and the slot-1
+        // ability moves into the recorded slot.
+        Arc::make_mut(&mut state.objects.get_mut(&holder).unwrap().abilities).remove(0);
+        let now_at_zero = engine::game::restrictions::ability_usage_key(&state, holder, 0)
+            .expect("the shifted ability resolves at slot 0");
+        assert_eq!(
+            now_at_zero, shifted,
+            "slot 0 must now carry the shifted ability"
+        );
+
+        // The next AI decision still offers it: the pending key names the
+        // withdrawn activation, not the survivor.
+        assert!(
+            priority_action_is_allowed_by_loop_guards(&state, PlayerId(0), &candidate(0)),
+            "the shifted ability must stay offered after moving into the recorded slot"
+        );
+    }
+
+    /// The F5 finding's "preserve separate identical printed entries"
+    /// sub-claim is REJECTED: identical printed natives share one key by
+    /// approved contract (the index is not in the key), so one pending entry
+    /// suppresses every identical slot.
+    #[test]
+    fn pending_key_suppresses_identical_twins_sharing_one_key() {
+        let mut state = make_state();
+        let holder = add_creature(&mut state, PlayerId(0), 1, 1);
+        for _ in 0..2 {
+            let parsed = engine::parser::oracle::parse_oracle_text(
+                "{T}: Add {G}.",
+                "Creature",
+                &[],
+                &["Creature".to_string()],
+                &[],
+            );
+            assert!(
+                !parsed.abilities.is_empty(),
+                "tap ability parses to a definition"
+            );
+            Arc::make_mut(&mut state.objects.get_mut(&holder).unwrap().abilities)
+                .extend(parsed.abilities);
+        }
+
+        let first = engine::game::restrictions::ability_usage_key(&state, holder, 0)
+            .expect("slot 0 resolves");
+        let second = engine::game::restrictions::ability_usage_key(&state, holder, 1)
+            .expect("slot 1 resolves");
+        assert_eq!(
+            first, second,
+            "identical printed bodies share one usage key by contract"
+        );
+        state.pending_activations.push(first);
+
+        for index in [0, 1] {
+            let action = GameAction::ActivateAbility {
+                source_id: holder,
+                ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
+            };
+            assert!(
+                !priority_action_is_allowed_by_loop_guards(&state, PlayerId(0), &action),
+                "identical slot {index} must stay suppressed under the shared key"
+            );
+        }
     }
 
     #[test]
@@ -19227,6 +19415,7 @@ mod tests {
                     rules_execution_node: None,
                     ability_snapshot: Some(ability),
                     announced_source_incarnation: None,
+                    announced_usage_key: None,
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,

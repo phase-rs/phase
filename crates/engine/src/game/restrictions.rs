@@ -7,7 +7,9 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
-use crate::types::game_state::{BattlefieldEntryRecord, CastOccurrence, CastingVariant};
+use crate::types::game_state::{
+    AbilityUsageKey, BattlefieldEntryRecord, CastOccurrence, CastingVariant,
+};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
@@ -932,16 +934,98 @@ pub(crate) fn tap_permanent_for_cost(
 /// CR 602.5b: If an activated ability has a restriction on its use (e.g., "Activate only once
 /// each turn"), the restriction continues to apply even if its controller changes.
 ///
-/// CR 602.2 + CR 601.2i: `record` is the activation's facts captured before
-/// its cost was paid; it joins the activator's turn journal here.
-pub fn record_ability_activation(
-    state: &mut crate::types::game_state::GameState,
+/// CR 602.5b + CR 602.5c + CR 113.2c: the per-instance usage key for the
+/// ability at `ability_index` on `source_id`, bound at activation-check or
+/// record time from the resolved definition — never stored on the def. The
+/// index is not in the key: layer recomputes shift indices while the
+/// acquisition (provenance stamp + rules text) stays the same. `None` when
+/// the source or slot no longer resolves (e.g. the source was sacrificed to
+/// pay its own cost before the placement recorded): the check side then reads
+/// a missing entry as count 0 and the record side skips, matching today's
+/// missing-entry semantics.
+///
+/// Shared with phase-ai's AI loop guards, which fold the same per-acquisition
+/// budget through this helper rather than rebuilding the key. Keep the
+/// `None` => count-0 / record-skip contract when changing this.
+pub fn ability_usage_key(
+    state: &crate::types::game_state::GameState,
     source_id: ObjectId,
     ability_index: usize,
+) -> Option<AbilityUsageKey> {
+    let definition =
+        super::casting::activation_ability_definition(state, source_id, ability_index)?;
+    Some(ability_usage_key_for_definition(source_id, &definition))
+}
+
+/// CR 602.2a + CR 602.5c: stable identity of an announced ability
+/// definition's `(cost, effect, ability_tag)` triple. Pure function of the
+/// definition body: identical at load synthesis, runtime synthesis, layer
+/// recompute, and index shift — cost concretization runs inside
+/// `activation_ability_definition` before this is computed, so Brawl-style
+/// placeholders never fingerprint as `{0}`.
+///
+/// CR 612.1 + CR 612.2: the triple is deworded through the engine's own
+/// carrier classifier before fingerprinting — every serialized string leaf
+/// sitting at a `Word`-classified carrier position (the exact positions a
+/// text-changing effect may rewrite) is blanked, in BOTH word domains. A
+/// Magical Hack rewrite moves only those leaves, so the post-rewrite live
+/// re-derivation equals the announced key and the acquisition budget follows
+/// the ability through the rewrite (CR 602.5c). Non-carrier leaves are
+/// touched by neither rewrite nor dewording, so distinct bodies (two equip
+/// costs, reconfigure's attach vs unattach modes) still fingerprint apart.
+/// The normalized triple prints as its canonical JSON `Value`
+/// (`serde_json::Map` is key-sorted, so the encoding is deterministic within
+/// a save-compatible binary — saves already fail closed across binaries).
+pub fn ability_fingerprint(definition: &AbilityDefinition) -> String {
+    use crate::types::ability::TextWordDomain;
+    use crate::types::text_word_carriers::{carrier_class, walk_strings, WordClass};
+    let mut value = serde_json::to_value((
+        &definition.cost,
+        &definition.effect,
+        &definition.ability_tag,
+    ))
+    .expect("ability triple serializes");
+    walk_strings(&mut value, None, "", &mut |tag, key, leaf| {
+        let is_word = [TextWordDomain::ColorWord, TextWordDomain::BasicLandType]
+            .iter()
+            .any(|domain| carrier_class(tag, key, *domain) == Some(WordClass::Word));
+        if is_word {
+            leaf.clear();
+        }
+    });
+    format!("{value:?}")
+}
+
+/// CR 602.2a: pure constructor for the per-instance usage key from an
+/// already-resolved definition (the announcement's own def, or the check
+/// side's live re-derivation). The announcement capture path binds the key
+/// here; the check side reaches the same value through `ability_usage_key`.
+pub fn ability_usage_key_for_definition(
+    source_id: ObjectId,
+    definition: &AbilityDefinition,
+) -> AbilityUsageKey {
+    AbilityUsageKey {
+        source: source_id,
+        provenance: definition.granting_object,
+        description: definition.description.clone(),
+        fingerprint: ability_fingerprint(definition),
+        grant_chain: definition.grant_chain.clone(),
+    }
+}
+
+/// CR 602.2 + CR 601.2i: `record` is the activation's facts captured before
+/// its cost was paid; it joins the activator's turn journal here. `key` is
+/// the announcement-bound usage key the placement consumed off the placed
+/// entry — never re-derived here, so a cost that moved the source cannot
+/// unresolve the slot (CR 400.7).
+pub fn record_ability_activation(
+    state: &mut crate::types::game_state::GameState,
+    key: AbilityUsageKey,
     record: Option<crate::types::game_state::AbilityActivationRecord>,
-) {
-    crate::game::ledger::record_ability_activation(state, source_id, ability_index, record)
+) -> AbilityUsageKey {
+    crate::game::ledger::record_ability_activation(state, key.clone(), record)
         .expect("activated ability must have a valid ledger prefix");
+    key
 }
 
 /// CR 702.142b: Compute the effective per-turn activation limit for an ability.
@@ -1220,7 +1304,9 @@ fn activation_restriction_applies(
     restriction: &ActivationRestriction,
     gates: &ActivationRestrictionStaticGates,
 ) -> bool {
-    let key = (source_id, ability_index);
+    // CR 602.5c: the usage budget is per acquisition, not per index. A slot
+    // that no longer resolves reads a missing entry as count 0.
+    let key = ability_usage_key(state, source_id, ability_index);
 
     match restriction {
         // CR 602.5d: "Activate only as a sorcery" means the player must follow sorcery timing rules.
@@ -1270,10 +1356,9 @@ fn activation_restriction_applies(
         // CR 602.5b: Per-turn activation limit tracked via ability activation counter.
         // CR 702.142b: ModifyActivationLimit statics may raise the limit for tagged abilities.
         ActivationRestriction::OnlyOnceEachTurn => {
-            let current_count = state
-                .activated_abilities_this_turn
-                .get(&key)
-                .copied()
+            let current_count = key
+                .as_ref()
+                .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
                 .unwrap_or(0);
             let limit = effective_activation_limit(state, player, source_id, ability_index, gates);
             current_count < limit
@@ -1283,10 +1368,9 @@ fn activation_restriction_applies(
         // ModifyActivationLimit statics (Wonder Man) may raise the per-game cap
         // above 1, so the gate is `count < limit`, not `count == 0`.
         ActivationRestriction::OnlyOnce => {
-            let count = state
-                .activated_abilities_this_game
-                .get(&key)
-                .copied()
+            let count = key
+                .as_ref()
+                .and_then(|key| state.activated_abilities_this_game.get(key).copied())
                 .unwrap_or(0);
             count
                 < effective_activation_limit_per_game(
@@ -1299,10 +1383,8 @@ fn activation_restriction_applies(
         }
         // CR 602.5b: Per-turn activation count limit (e.g. "Activate only twice each turn").
         ActivationRestriction::MaxTimesEachTurn { count } => {
-            state
-                .activated_abilities_this_turn
-                .get(&key)
-                .copied()
+            key.as_ref()
+                .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
                 .unwrap_or(0)
                 < u32::from(*count)
         }
@@ -2920,13 +3002,40 @@ mod tests {
     #[test]
     fn activation_once_each_turn_uses_shared_counter() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
-        record_ability_activation(&mut state, ObjectId(10), 1, None);
+        // CR 602.5c: the counter is keyed by the resolved acquisition, so the
+        // fixture installs a real printed ability — a bare id records nothing.
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        std::sync::Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&source)
+                .expect("just created")
+                .abilities,
+        )
+        .push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .activation_restrictions(vec![ActivationRestriction::OnlyOnceEachTurn]),
+        );
+        let announced = ability_usage_key(&state, source, 0).expect("fixture slot resolves");
+        record_ability_activation(&mut state, announced, None);
 
         let result = check_activation_restrictions(
             &state,
             PlayerId(0),
-            ObjectId(10),
-            1,
+            source,
+            0,
             &[ActivationRestriction::OnlyOnceEachTurn],
         );
 

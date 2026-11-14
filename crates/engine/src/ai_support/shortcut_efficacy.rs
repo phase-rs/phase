@@ -673,6 +673,9 @@ fn ability_window_reach(def: &AbilityDefinition) -> WindowReach {
         unlowered_guard: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // windowed authority — no reach beyond the granted def.
+        grant_chain: _,
     } = def;
 
     let mut acc = effect_window_reach(effect);

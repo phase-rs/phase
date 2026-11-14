@@ -4586,6 +4586,7 @@ fn walk_ability(
         parent_target_missing_reason: _,
         activation_cost_reduction: _,
         activation_record: _,
+        announced_usage_key: _,
         control_change_instruction: _,
     } = a;
 
@@ -4740,6 +4741,9 @@ fn walk_definition(
         unlowered_guard: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // read or write — creates no resolution-time dependency.
+        grant_chain: _,
     } = a;
 
     // §4.3.2: own `player_scope` overrides the inherited scope (Brink's Discard
@@ -7230,10 +7234,11 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         // read would spuriously pair against every event-object writer
         // (damage, counters).
         AbilityCondition::ChosenLabelIs { label: _ } => RwProfile::empty(),
-        // Both `AbilityUseCountThisTurn` tallies read a per-turn journal keyed
-        // by this ability's own `(source_id, ability_index)` — the same read
-        // bucket for `Resolved` (`ability_resolutions_this_turn`) and
-        // `Activated` (`activated_abilities_this_turn`). Neither field selects a
+        // Both `AbilityUseCountThisTurn` tallies read a per-turn journal: the
+        // `Resolved` tally reads `ability_resolutions_this_turn` keyed by
+        // `(source_id, ability_index)`, while the `Activated` tally reads
+        // `activated_abilities_this_turn` keyed by the per-acquisition
+        // `AbilityUsageKey` (CR 602.5c). Neither field selects a
         // different KIND or SCOPE of state, so the profile is unchanged by the
         // tally axis; both are destructured without `..` so a future field
         // forces re-classification.

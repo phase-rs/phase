@@ -541,6 +541,12 @@ pub(super) fn resolve_mana_ability_excluding(
         rules_execution_node,
         ability_snapshot: Some(ability_def.clone()),
         announced_source_incarnation,
+        // CR 602.2a + CR 602.5c: same announcement capture as the manual
+        // path above — the resolved def is live here, before any cost.
+        announced_usage_key: Some(super::restrictions::ability_usage_key_for_definition(
+            source_id,
+            ability_def,
+        )),
         color_override,
         // The direct resolver normally leaves its caller's waiting root
         // untouched.  Its ordinary completion must therefore return to
@@ -1114,6 +1120,14 @@ pub fn activate_mana_ability_with_payment_mode(
             rules_execution_node,
             ability_snapshot: Some(ability_def.clone()),
             announced_source_incarnation,
+            // CR 602.2a + CR 602.5c: capture the usage key at this same
+            // announcement — the resolved def is live here, before any cost
+            // is paid. A self-sacrifice cost can make the slot unresolvable
+            // by completion time; the inline completion consumes this.
+            announced_usage_key: Some(super::restrictions::ability_usage_key_for_definition(
+                source_id,
+                ability_def,
+            )),
             color_override,
             resume,
             cost_move_resume: None,
@@ -1139,6 +1153,7 @@ fn complete_mana_ability_activation(
     state: &mut GameState,
     source_id: ObjectId,
     ability_index: Option<usize>,
+    announced_key: Option<crate::types::game_state::AbilityUsageKey>,
     player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) {
@@ -1147,8 +1162,13 @@ fn complete_mana_ability_activation(
     };
     // CR 602.2 + CR 605.3a: counted like every activation, but not journaled:
     // the turn journal holds non-mana activations only (see
-    // `GameState::abilities_activated_this_turn_by_player`).
-    super::restrictions::record_ability_activation(state, source_id, ability_index, None);
+    // `GameState::abilities_activated_this_turn_by_player`). The key is the
+    // announcement's own — never re-derived here, so a self-sacrifice cost
+    // cannot unresolve the slot; a missing key skips exactly like today's
+    // missing-entry semantics.
+    if let Some(key) = announced_key {
+        super::restrictions::record_ability_activation(state, key, None);
+    }
     super::casting_targets::emit_keyword_ability_event_if_tagged(
         state,
         source_id,
@@ -1519,6 +1539,7 @@ pub fn handle_choose_mana_color(
             state,
             pending.source_id,
             pending.ability_index,
+            pending.announced_usage_key.clone(),
             pending.player,
             events,
         );
@@ -3843,6 +3864,7 @@ fn finish_mana_ability_cost_payment(
             state,
             pending.source_id,
             pending.ability_index,
+            pending.announced_usage_key.clone(),
             pending.player,
             events,
         );
@@ -12865,6 +12887,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -12969,6 +12992,7 @@ mod tests {
             source_id: source,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             ability_index: Some(0),
             rules_execution_node: None,
             color_override: None,
@@ -13186,6 +13210,7 @@ mod tests {
                 rules_execution_node: None,
                 ability_snapshot: None,
                 announced_source_incarnation: None,
+                announced_usage_key: None,
                 color_override: None,
                 resume: ManaAbilityResume::Priority,
                 cost_move_resume: None,
@@ -13423,6 +13448,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -13533,6 +13559,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -14675,6 +14702,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -15602,6 +15630,7 @@ mod tests {
             source_id: land,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             ability_index: Some(0),
             rules_execution_node: None,
             color_override: None,
@@ -16055,6 +16084,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -16624,6 +16654,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -16701,6 +16732,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Black)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -16836,6 +16868,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -16906,6 +16939,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Red)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -17068,6 +17102,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,

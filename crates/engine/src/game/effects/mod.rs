@@ -4975,6 +4975,15 @@ pub(crate) fn apply_parent_chain_context(
     if child.ability_index.is_none() {
         child.ability_index = parent.ability_index;
     }
+    // CR 608.2c: a sub-ability is part of the same printed ability instance
+    // as its parent — the announced usage key is their shared identity, so a
+    // resolution-time tally on a chained sub-node (e.g. a Dragon Whelp rider)
+    // reads the same acquisition budget as the root. Mirrors the index block
+    // above, including its no-clobber guard: an explicitly keyed node keeps
+    // its own.
+    if child.announced_usage_key.is_none() {
+        child.announced_usage_key = parent.announced_usage_key.clone();
+    }
     // CR 608.2c + CR 109.4: Carry the resolution-scoped chosen-players list
     // down the chain so `ControllerRef::ChosenPlayer { index }` and later
     // `Choose(Player)` instructions resolve against players chosen by earlier
@@ -7695,6 +7704,7 @@ fn instruction_outlives_declined_gate(
         reads_chosen_group,
         declares_return_result,
         reads_return_result,
+        announced_usage_key: _,
         // Printed gates, branches, repetition, choosers and "you may": each reads
         // or asks about what happened earlier in the resolution, so each must be
         // absent. A surviving "you may" instruction is not audited (its pause
@@ -12330,6 +12340,7 @@ fn fan_out_head_is_allowlisted(head: &ResolvedAbility) -> bool {
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _, // activation-time provenance
         activation_record: _,  // activation-time provenance
+        announced_usage_key: _,
         control_change_instruction: _, // the carrier this classification stamps
     } = head;
     let Effect::GainControlAll { target } = effect else {
@@ -28743,8 +28754,9 @@ pub(crate) fn evaluate_condition(
         } => state.day_night == Some(DayNight::Night),
         // CR 608.2c: an ordinary resolution-time condition on how many times
         // THIS printed ability has been used this turn, not an intervening-if
-        // condition under CR 603.4. Both tallies are keyed by the same
-        // `(source_id, ability_index)` pair, so one lookup serves both:
+        // condition under CR 603.4. The `Resolved` tally is keyed by the
+        // `(source_id, ability_index)` pair; the `Activated` tally re-derives
+        // the per-acquisition [`AbilityUsageKey`] (CR 602.5c):
         //
         // - `Resolved` ("if this is the [Nth] time this ability has resolved
         //   this turn") reads a counter bumped at the top of
@@ -28767,11 +28779,33 @@ pub(crate) fn evaluate_condition(
             n,
         } => {
             if let Some(idx) = ability.ability_index {
-                let ledger = match tally {
-                    AbilityUseTally::Resolved => &state.ability_resolutions_this_turn,
-                    AbilityUseTally::Activated => &state.activated_abilities_this_turn,
+                let count = match tally {
+                    AbilityUseTally::Resolved => state
+                        .ability_resolutions_this_turn
+                        .get(&(ability.source_id, idx))
+                        .copied()
+                        .unwrap_or(0),
+                    // CR 602.5c + CR 608.2b: the activation budget is per
+                    // acquisition, read off the ANNOUNCED carrier — the live
+                    // board may have moved since (a cost exiled the source,
+                    // Dress Down removed the text) while resolution proceeds
+                    // on the announced identity. Falls back to a live
+                    // re-derivation for carriers that predate announcement
+                    // capture; an unresolvable slot reads a missing entry
+                    // as count 0.
+                    AbilityUseTally::Activated => ability
+                        .announced_usage_key
+                        .clone()
+                        .or_else(|| {
+                            crate::game::restrictions::ability_usage_key(
+                                state,
+                                ability.source_id,
+                                idx,
+                            )
+                        })
+                        .and_then(|key| state.activated_abilities_this_turn.get(&key).copied())
+                        .unwrap_or(0),
                 };
-                let count = ledger.get(&(ability.source_id, idx)).copied().unwrap_or(0);
                 comparator.evaluate(
                     crate::game::arithmetic::u32_to_i32_saturating(count),
                     crate::game::arithmetic::u32_to_i32_saturating(*n),
@@ -58614,7 +58648,31 @@ mod tests {
     #[test]
     fn activation_tally_gates_on_the_printed_threshold() {
         let mut state = GameState::new_two_player(42);
-        let source_id = ObjectId(1);
+        // CR 602.5c: the tally reads the per-acquisition usage key, so the
+        // fixture installs the backing printed ability the reader resolves.
+        let source_id = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Tally Source".to_string(),
+            Zone::Battlefield,
+        );
+        std::sync::Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&source_id)
+                .expect("just created")
+                .abilities,
+        )
+        .push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+        let key = crate::game::restrictions::ability_usage_key(&state, source_id, 0)
+            .expect("the printed ability resolves");
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
@@ -58636,7 +58694,7 @@ mod tests {
         for activations in 0..4 {
             state
                 .activated_abilities_this_turn
-                .insert((source_id, 0), activations);
+                .insert(key.clone(), activations);
             assert!(
                 !evaluate_condition(&condition, &state, &ability),
                 "must not fire at {activations} activations — the printed \
@@ -58644,17 +58702,13 @@ mod tests {
             );
         }
 
-        state
-            .activated_abilities_this_turn
-            .insert((source_id, 0), 4);
+        state.activated_abilities_this_turn.insert(key.clone(), 4);
         assert!(
             evaluate_condition(&condition, &state, &ability),
             "must fire once the fourth activation is recorded"
         );
         // "four OR MORE" — the gate stays satisfied past the boundary.
-        state
-            .activated_abilities_this_turn
-            .insert((source_id, 0), 7);
+        state.activated_abilities_this_turn.insert(key, 7);
         assert!(evaluate_condition(&condition, &state, &ability));
     }
 
@@ -58665,7 +58719,29 @@ mod tests {
     #[test]
     fn activation_and_resolution_tallies_read_separate_ledgers() {
         let mut state = GameState::new_two_player(42);
-        let source_id = ObjectId(1);
+        // CR 602.5c: the tally reads the per-acquisition usage key, so the
+        // fixture installs the backing printed ability the reader resolves.
+        let source_id = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Tally Source".to_string(),
+            Zone::Battlefield,
+        );
+        std::sync::Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&source_id)
+                .expect("just created")
+                .abilities,
+        )
+        .push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
@@ -58678,9 +58754,9 @@ mod tests {
         ability.ability_index = Some(0);
 
         // Four activations recorded, none of them resolved.
-        state
-            .activated_abilities_this_turn
-            .insert((source_id, 0), 4);
+        let key = crate::game::restrictions::ability_usage_key(&state, source_id, 0)
+            .expect("the printed ability resolves");
+        state.activated_abilities_this_turn.insert(key, 4);
 
         assert!(
             evaluate_condition(

@@ -1273,9 +1273,18 @@ fn redact_activation_records(filtered: &mut GameState) {
         CollectEvidenceResume, DeferredLifeCostResume, PendingCast, PendingCostMoveResume,
     };
     fn clear(pending: &mut PendingCast) {
+        // CR 602.2a + CR 602.5c: engine authority — never shown to a viewer.
         pending.ability.activation_record = None;
+        pending.ability.announced_usage_key = None;
     }
     filtered.abilities_activated_this_turn_by_player.clear();
+    // CR 602.2a + CR 602.5c: the announcement-bound journals and the
+    // per-priority AI guard are engine authority — a viewer sees neither
+    // tallies nor which acquisitions were announced. (Trusted save/restore
+    // retains them; only the projection clears them.)
+    filtered.pending_activations.clear();
+    filtered.activated_abilities_this_turn.clear();
+    filtered.activated_abilities_this_game.clear();
     if let Some(pending) = filtered.pending_cast.as_deref_mut() {
         clear(pending);
     }
@@ -1299,6 +1308,7 @@ fn redact_activation_records(filtered: &mut GameState) {
             },
             PendingCostMoveResume::LoyaltyActivation { resolved, .. } => {
                 resolved.activation_record = None;
+                resolved.announced_usage_key = None;
             }
             // Resolution-time payments and non-activation roots: no activation
             // is in flight in any of these.
@@ -1333,6 +1343,7 @@ fn redact_activation_records(filtered: &mut GameState) {
     ) {
         if let StackEntryKind::ActivatedAbility { ability, .. } = &mut entry.kind {
             ability.activation_record = None;
+            ability.announced_usage_key = None;
         }
     }
 }
@@ -4268,6 +4279,12 @@ fn redact_ability_payment(
     ability: &mut crate::types::ability::ResolvedAbility,
     hidden_ids: &HashSet<ObjectId>,
 ) {
+    // CR 602.2a + CR 602.5c: the announcement-bound usage key and the
+    // activation record are engine authority — never shown to a viewer.
+    // Cleared on every prompt-held carrier, including resolving abilities,
+    // before the trigger-source payment entries below.
+    ability.announced_usage_key = None;
+    ability.activation_record = None;
     if let Some(context) = ability.trigger_source.as_mut() {
         redact_source_context_hidden_members(context, hidden_ids);
     }
@@ -4320,6 +4337,10 @@ fn redact_pending_mana_ability_payment(
     pending: &mut crate::types::game_state::PendingManaAbility,
     hidden_ids: &HashSet<ObjectId>,
 ) {
+    // CR 602.2a + CR 602.5c: the paused mana ability's own announced usage
+    // key is engine authority — never shown to a viewer. The single
+    // choke point: every owner call site routes through here.
+    pending.announced_usage_key = None;
     redact_mana_ability_resume_payment(&mut pending.resume, hidden_ids);
     if let Some(resume) = pending.cost_move_resume.as_mut() {
         redact_mana_ability_resume_payment(resume, hidden_ids);
@@ -8166,6 +8187,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,

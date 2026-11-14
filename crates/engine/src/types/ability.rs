@@ -3194,6 +3194,15 @@ pub struct ResolvedAbility {
     /// activation records nothing. Engine authority: never shown to a viewer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_record: Option<Box<crate::types::game_state::AbilityActivationRecord>>,
+    /// CR 602.2a + CR 602.2b: the activation's own usage key, announced
+    /// before any cost is paid (`casting::record_activation_announcement`)
+    /// and published to the turn/game journals only when the ability is
+    /// placed on the stack — so a reversed activation records nothing, and a
+    /// cost that moves the source cannot unresolve the slot. An existing
+    /// capture is never overwritten, and placement never recomputes it.
+    /// Engine authority: never shown to a viewer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announced_usage_key: Option<crate::types::game_state::AbilityUsageKey>,
     /// CR 608.2b: Declared target slots — numbered as
     /// `ability_utils::flatten_targets_in_chain` numbers this chain — whose
     /// target failed the legality check made as the chain began to resolve.
@@ -3680,6 +3689,9 @@ impl PartialEq for ResolvedAbility {
             chosen_target_slots: a_chosen_target_slots,
             activation_cost_reduction: a_activation_cost_reduction,
             activation_record: a_activation_record,
+            // Transport only: the announcement's own key rides the ability
+            // to the placement journal and never participates in equality.
+            announced_usage_key: _,
             illegal_target_slots: a_illegal_target_slots,
             unjudged_target_slots: a_unjudged_target_slots,
             illegal_local_target_slots: a_illegal_local_target_slots,
@@ -3759,6 +3771,8 @@ impl PartialEq for ResolvedAbility {
             chosen_target_slots: b_chosen_target_slots,
             activation_cost_reduction: b_activation_cost_reduction,
             activation_record: b_activation_record,
+            // Transport only: never participates in equality.
+            announced_usage_key: _,
             illegal_target_slots: b_illegal_target_slots,
             unjudged_target_slots: b_unjudged_target_slots,
             illegal_local_target_slots: b_illegal_local_target_slots,
@@ -4414,6 +4428,7 @@ impl ResolvedAbility {
             chosen_target_slots: ChosenTargetSlots::Unrecorded,
             activation_cost_reduction: None,
             activation_record: None,
+            announced_usage_key: None,
             illegal_target_slots: Vec::new(),
             unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),

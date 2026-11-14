@@ -1520,15 +1520,17 @@ fn legality_equivalence_key(
             let mut key = LegalityKey::new(LegalityClass::ActivateAbility, fp);
             key.ability_index = Some(*ability_index);
             key.payment_mode = Some(*payment_mode);
-            key.activations_this_turn = state
-                .activated_abilities_this_turn
-                .get(&(*source_id, *ability_index))
-                .copied()
+            // CR 602.5c: fold the per-acquisition budget; an unresolvable
+            // slot reads a missing entry as count 0.
+            let usage =
+                crate::game::restrictions::ability_usage_key(state, *source_id, *ability_index);
+            key.activations_this_turn = usage
+                .as_ref()
+                .and_then(|usage| state.activated_abilities_this_turn.get(usage).copied())
                 .unwrap_or(0);
-            key.activations_this_game = state
-                .activated_abilities_this_game
-                .get(&(*source_id, *ability_index))
-                .copied()
+            key.activations_this_game = usage
+                .as_ref()
+                .and_then(|usage| state.activated_abilities_this_game.get(usage).copied())
                 .unwrap_or(0);
             key.source_attacked_this_turn = state.creatures_attacked_this_turn.contains(source_id);
             // CR 400.7: an activated ability's mode history is the live source's.
@@ -1554,15 +1556,17 @@ fn legality_equivalence_key(
             let ability_index = selection.ability_index;
             key.ability_index = ability_index;
             let lookup_index = ability_index.unwrap_or(0);
-            key.activations_this_turn = state
-                .activated_abilities_this_turn
-                .get(&(object_id, lookup_index))
-                .copied()
+            // CR 602.5c: fold the per-acquisition budget; an unresolvable
+            // slot reads a missing entry as count 0.
+            let usage =
+                crate::game::restrictions::ability_usage_key(state, object_id, lookup_index);
+            key.activations_this_turn = usage
+                .as_ref()
+                .and_then(|usage| state.activated_abilities_this_turn.get(usage).copied())
                 .unwrap_or(0);
-            key.activations_this_game = state
-                .activated_abilities_this_game
-                .get(&(object_id, lookup_index))
-                .copied()
+            key.activations_this_game = usage
+                .as_ref()
+                .and_then(|usage| state.activated_abilities_this_game.get(usage).copied())
                 .unwrap_or(0);
             key.source_attacked_this_turn = state.creatures_attacked_this_turn.contains(&object_id);
             key.is_attacking = crate::game::restrictions::is_source_attacking(state, object_id);
@@ -2553,7 +2557,7 @@ mod tests {
         );
     }
 
-    /// #9: per-(source, ability) activation count is folded into the key.
+    /// #9: per-acquisition activation count is folded into the key.
     #[test]
     fn activation_count_is_folded_into_key() {
         let mut state = GameState::new_two_player(42);
@@ -2562,7 +2566,24 @@ mod tests {
         };
         let a = make_object(&mut state, 100, 0, "Squirrel");
         let b = make_object(&mut state, 100, 0, "Squirrel");
-        state.activated_abilities_this_turn.insert((a, 0), 1);
+        // CR 602.5c: the folded count is keyed by the resolved acquisition,
+        // so both objects hold the same printed ability and only `a`'s
+        // instance records a use.
+        for id in [a, b] {
+            std::sync::Arc::make_mut(
+                &mut state.objects.get_mut(&id).expect("just created").abilities,
+            )
+            .push(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+        let usage = crate::game::restrictions::ability_usage_key(&state, a, 0)
+            .expect("the printed ability resolves");
+        state.activated_abilities_this_turn.insert(usage, 1);
         let poison = LegalityPoisonGates::compute(&state);
         // Shared interner: a and b have identical fingerprints, so they intern
         // to the SAME class id — the keys must still differ purely on the folded
@@ -2591,7 +2612,7 @@ mod tests {
         assert!(ka.is_some() && kb.is_some());
         assert_ne!(
             ka, kb,
-            "activation count must be folded per (source, ability) into the key"
+            "activation count must be folded per acquisition into the key"
         );
     }
 

@@ -426,6 +426,296 @@ mod tuple_key_map {
     }
 }
 
+/// Serde module for an `AbilityUsageKey -> u32` map — JSON requires string keys,
+/// so each key encodes as `{source}#{provenance}#{has_description}#{description}`
+/// where `{provenance}` is `-` for a printed ability or `{object_id}.{incarnation}`
+/// for an acquired one and `{has_description}` is `0`/`1`. The description rides
+/// in the final segment, so free text (including `#`) decodes intact; every
+/// other segment is strictly parsed. A legacy `"objectId_index"` key has no `#`
+/// and is refused — old-save wire compat is impossible (provenance is
+/// unrecoverable from an index), so decoding fails closed instead of guessing.
+mod ability_usage_key_map {
+    use super::*;
+    use serde::de::{self, MapAccess, Visitor};
+    use serde::ser::SerializeMap;
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    /// CR 602.2a: the fingerprint rides between provenance and description so
+    /// the description — the one component that may itself contain `#` —
+    /// stays the unbounded tail (parsed with `splitn(5, …)`). The fingerprint
+    /// is percent-escaped (`%` then `#`) for the same reason: its `{:?}`
+    /// encoding can carry `#` inside quoted string payloads.
+    pub(super) fn escape_component(raw: &str) -> String {
+        raw.replace('%', "%25").replace('#', "%23")
+    }
+
+    pub(super) fn unescape_component(raw: &str) -> Result<String, String> {
+        let mut out = String::with_capacity(raw.len());
+        let mut chars = raw.chars();
+        while let Some(char) = chars.next() {
+            if char != '%' {
+                out.push(char);
+                continue;
+            }
+            let (Some(high), Some(low)) = (chars.next(), chars.next()) else {
+                return Err(format!("invalid escape in ability usage key: {raw}"));
+            };
+            match (high, low) {
+                ('2', '5') => out.push('%'),
+                ('2', '3') => out.push('#'),
+                _ => return Err(format!("invalid escape in ability usage key: {raw}")),
+            }
+        }
+        Ok(out)
+    }
+
+    pub(super) fn encode_key(key: &AbilityUsageKey) -> String {
+        let provenance = match key.provenance {
+            None => "-".to_string(),
+            Some(stamp) => format!("{}.{}", stamp.object_id.0, stamp.incarnation),
+        };
+        let fingerprint = escape_component(&key.fingerprint);
+        // CR 602.5c + CR 113.2c: re-donation lineage rides its own segment
+        // (never escaped: stamps are `object_id.incarnation` pairs, which
+        // carry no `#`); the `#`-bearing description stays the unbounded
+        // tail. A pre-chain five-segment encoding no longer decodes — the
+        // chain is total, so a key without one names no live budget.
+        let chain = key
+            .grant_chain
+            .iter()
+            .map(|stamp| format!("{}.{}", stamp.object_id.0, stamp.incarnation))
+            .collect::<Vec<_>>()
+            .join(",");
+        match &key.description {
+            None => format!(
+                "{}#{}#0#{}#{}#",
+                key.source.0, provenance, fingerprint, chain
+            ),
+            Some(text) => format!(
+                "{}#{}#1#{}#{}#{}",
+                key.source.0, provenance, fingerprint, chain, text
+            ),
+        }
+    }
+
+    pub(super) fn decode_key(raw: &str) -> Result<AbilityUsageKey, String> {
+        let mut parts = raw.splitn(6, '#');
+        let (
+            Some(source),
+            Some(provenance),
+            Some(has_description),
+            Some(fingerprint),
+            Some(chain),
+            Some(description),
+        ) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        )
+        else {
+            return Err(format!("invalid ability usage key: {raw}"));
+        };
+        let source = source
+            .parse::<u64>()
+            .map(ObjectId)
+            .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+        let provenance = match provenance {
+            "-" => None,
+            stamped => {
+                let (oid, incarnation) = stamped
+                    .split_once('.')
+                    .ok_or_else(|| format!("invalid ability usage key: {raw}"))?;
+                let oid = oid
+                    .parse::<u64>()
+                    .map(ObjectId)
+                    .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+                let incarnation = incarnation
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+                Some(ObjectIncarnationRef::of(oid, incarnation))
+            }
+        };
+        let fingerprint = unescape_component(fingerprint)
+            .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+        let description = match has_description {
+            "0" if description.is_empty() => None,
+            "1" => Some(description.to_string()),
+            _ => return Err(format!("invalid ability usage key: {raw}")),
+        };
+        let grant_chain = if chain.is_empty() {
+            Vec::new()
+        } else {
+            chain
+                .split(',')
+                .map(|segment| {
+                    let (oid, incarnation) = segment
+                        .split_once('.')
+                        .ok_or_else(|| format!("invalid ability usage key: {raw}"))?;
+                    let oid = oid
+                        .parse::<u64>()
+                        .map(ObjectId)
+                        .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+                    let incarnation = incarnation
+                        .parse::<u64>()
+                        .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+                    Ok(ObjectIncarnationRef::of(oid, incarnation))
+                })
+                .collect::<Result<Vec<_>, String>>()?
+        };
+        Ok(AbilityUsageKey {
+            source,
+            provenance,
+            description,
+            fingerprint,
+            grant_chain,
+        })
+    }
+
+    pub fn serialize<'a, M, S>(map: &'a M, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        &'a M: IntoIterator<Item = (&'a AbilityUsageKey, &'a u32)>,
+        S: Serializer,
+    {
+        let mut entries: Vec<_> = map.into_iter().collect();
+        entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+
+        let mut ser_map = serializer.serialize_map(Some(entries.len()))?;
+        for (key, val) in entries {
+            ser_map.serialize_entry(&encode_key(key), val)?;
+        }
+        ser_map.end()
+    }
+
+    pub fn deserialize<'de, D, M>(deserializer: D) -> Result<M, D::Error>
+    where
+        D: Deserializer<'de>,
+        M: Default + Extend<(AbilityUsageKey, u32)>,
+    {
+        struct AbilityUsageKeyVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: Default + Extend<(AbilityUsageKey, u32)>> Visitor<'de> for AbilityUsageKeyVisitor<T> {
+            type Value = T;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a map with encoded ability usage key strings")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut map = T::default();
+                while let Some((key, val)) = access.next_entry::<String, u32>()? {
+                    let key = decode_key(&key).map_err(de::Error::custom)?;
+                    map.extend([(key, val)]);
+                }
+                Ok(map)
+            }
+        }
+
+        deserializer.deserialize_map(AbilityUsageKeyVisitor(std::marker::PhantomData))
+    }
+}
+
+#[cfg(test)]
+mod ability_usage_key_map_tests {
+    use super::*;
+
+    /// A legacy `"objectId_index"` map key has no `#` segments and is
+    /// refused: provenance is unrecoverable from an index, so decoding
+    /// fails closed instead of guessing (reach-guard: the current
+    /// encoding still decodes).
+    #[test]
+    fn legacy_tuple_key_fails_closed() {
+        #[derive(Debug, serde::Deserialize)]
+        struct Probe {
+            #[serde(with = "super::ability_usage_key_map")]
+            map: std::collections::HashMap<AbilityUsageKey, u32>,
+        }
+
+        let err = serde_json::from_str::<Probe>(r#"{"map":{"42_0":1}}"#)
+            .expect_err("legacy tuple key must fail closed");
+        assert!(
+            err.to_string().contains("invalid ability usage key"),
+            "unexpected error: {err}"
+        );
+
+        // CR 602.2a: the pre-fingerprint three-component encoding (`source`,
+        // provenance, description only) is refused too — the fingerprint is
+        // total, so a key without one names no live budget.
+        let err = serde_json::from_str::<Probe>(r#"{"map":{"42#-#0#":1}}"#)
+            .expect_err("fingerprint-less key must fail closed");
+        assert!(
+            err.to_string().contains("invalid ability usage key"),
+            "unexpected error: {err}"
+        );
+
+        // CR 602.5c + CR 113.2c: the pre-chain five-segment encoding is
+        // refused too — the chain is total, so a key without one names no
+        // live budget.
+        let err = serde_json::from_str::<Probe>(r#"{"map":{"42#-#0#fp#":1}}"#)
+            .expect_err("chain-less key must fail closed");
+        assert!(
+            err.to_string().contains("invalid ability usage key"),
+            "unexpected error: {err}"
+        );
+
+        let ok: Probe =
+            serde_json::from_str(r#"{"map":{"42#-#0#fp##":1}}"#).expect("new encoding decodes");
+        assert_eq!(ok.map.len(), 1);
+        let (key, count) = ok.map.into_iter().next().expect("one entry");
+        assert_eq!(key.source, ObjectId(42));
+        assert_eq!(key.provenance, None);
+        assert_eq!(key.description, None);
+        assert_eq!(key.fingerprint, "fp");
+        assert_eq!(key.grant_chain, Vec::new());
+        assert_eq!(count, 1);
+
+        // A chained key round-trips its lineage oldest-first.
+        let chained: Probe = serde_json::from_str(r#"{"map":{"7#9.3#1#fp#11.1,13.2#{T}: Tap":1}}"#)
+            .expect("chained encoding decodes");
+        let (key, _) = chained.map.into_iter().next().expect("one entry");
+        assert_eq!(
+            key.grant_chain,
+            vec![
+                ObjectIncarnationRef::of(ObjectId(11), 1),
+                ObjectIncarnationRef::of(ObjectId(13), 2),
+            ],
+            "chain order is oldest-first"
+        );
+        assert_eq!(key.description.as_deref(), Some("{T}: Tap"));
+    }
+
+    /// The fingerprint rides escaped between two `#` separators while a
+    /// `#`-bearing description stays the unbounded tail: the encoding
+    /// round-trips both, and a malformed escape fails closed.
+    #[test]
+    fn usage_key_escapes_fingerprint_and_description() {
+        let key = AbilityUsageKey {
+            source: ObjectId(7),
+            provenance: Some(ObjectIncarnationRef::of(ObjectId(9), 3)),
+            description: Some("{T}: Add #1.".to_string()),
+            fingerprint: "a#b%{c}".to_string(),
+            grant_chain: vec![ObjectIncarnationRef::of(ObjectId(11), 1)],
+        };
+        let encoded = super::ability_usage_key_map::encode_key(&key);
+        assert_eq!(encoded, "7#9.3#1#a%23b%25{c}#11.1#{T}: Add #1.");
+        let decoded =
+            super::ability_usage_key_map::decode_key(&encoded).expect("escaped key decodes");
+        assert_eq!(decoded, key);
+
+        let bad = super::ability_usage_key_map::decode_key("7#-#0#a%zz#");
+        assert!(
+            bad.is_err(),
+            "a malformed escape must fail closed, got {bad:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod legacy_trigger_definition_ref_map {
     use super::*;
@@ -1429,6 +1719,42 @@ pub struct AbilityActivationRecord {
     /// untargeted ability.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<ActivationTargetFact>,
+}
+
+/// CR 602.5b + CR 602.5c + CR 113.2c: the per-instance usage budget of one
+/// activated ability. A printed ability (`provenance: None`) and each
+/// acquisition of that same text from another object (`provenance: the
+/// immediate-provider stamp`) are distinct instances with distinct budgets;
+/// two textually-identical printed abilities on one source share one budget
+/// (indistinguishable instances). The index is not in the key: layer
+/// recomputes shift indices while the acquisition stays the same.
+///
+/// CR 602.2a: `fingerprint` is the stable identity of the announced
+/// definition's `(cost, effect, ability_tag)` triple
+/// (`restrictions::ability_fingerprint`). Three-part keys alone collide on
+/// undescribed same-acquisition abilities that differ only in body — two
+/// equip costs on one object, or reconfigure's attach vs unattach modes (all
+/// `description: None`) — so the fingerprint discriminates them. It is a
+/// plain `String`, never absent: every definition has a cost/effect shape.
+/// It never participates in Tier-2 definition equality or layer stamps; it is
+/// a usage-budget discriminator only.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct AbilityUsageKey {
+    /// The object holding the ability.
+    pub source: ObjectId,
+    /// The immediate provider's incarnation stamp (`None` for printed).
+    pub provenance: Option<ObjectIncarnationRef>,
+    /// The ability's rules text (`None` for an undescribed/token ability).
+    /// Stable across recomputes and index shifts; never unwrapped.
+    pub description: Option<String>,
+    /// Stable encoding of the announced def's `(cost, effect, ability_tag)`.
+    pub fingerprint: String,
+    /// CR 602.5c + CR 113.2c: re-donation lineage, oldest-first; empty for
+    /// direct/printed abilities. Carried from the announced definition's
+    /// `grant_chain` so twins re-donated through one carrier hold distinct
+    /// budgets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grant_chain: Vec<ObjectIncarnationRef>,
 }
 
 fn battlefield_zone() -> Zone {
@@ -11282,6 +11608,14 @@ pub struct PendingManaAbility {
     /// and resume; never restamped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub announced_source_incarnation: Option<u64>,
+    /// CR 602.2a + CR 602.5c: this mana ability's own usage key, announced
+    /// before any cost is paid (`mana_abilities::activate_mana_ability`) and
+    /// consumed when the inline completion records
+    /// (`complete_mana_ability_activation`) — never re-derived there, so a
+    /// self-sacrifice cost cannot unresolve the slot. An existing capture is
+    /// never overwritten; carried through every payment pause and resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announced_usage_key: Option<AbilityUsageKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_override: Option<ProductionOverride>,
     pub resume: ManaAbilityResume,
@@ -24994,18 +25328,25 @@ declare_game_state! {
     #[serde(default)]
     pub cancelled_casts: Vec<ObjectId>,
 
-    /// (source_id, ability_index) pairs for activated abilities pushed to the
-    /// stack during the current priority window. Transient AI-guard that
-    /// prevents the AI's softmax policy from re-choosing the same activated
-    /// ability while its prior activation is still unresolved on the stack —
-    /// a pathological scoring outcome when the effect is redundant (e.g.
-    /// self-exile with delayed return, or gain indestructible UEOT when the
-    /// buff is already active). CR 117.1b permits unbounded activation at
-    /// priority, and absent a CR 602.5b restriction there is no per-turn cap,
-    /// so this is a pure AI-pathology mitigation, not a rules concern.
+    /// [`AbilityUsageKey`]s for activated abilities pushed to the stack during
+    /// the current priority window. Transient AI-guard that prevents the AI's
+    /// softmax policy from re-choosing the same activated ability while its
+    /// prior activation is still unresolved on the stack — a pathological
+    /// scoring outcome when the effect is redundant (e.g. self-exile with
+    /// delayed return, or gain indestructible UEOT when the buff is already
+    /// active). CR 117.1b permits unbounded activation at priority, and
+    /// absent a CR 602.5b restriction there is no per-turn cap, so this is a
+    /// pure AI-pathology mitigation, not a rules concern.
     /// Cleared on PassPriority (when the stack will begin resolving).
+    ///
+    /// CR 602.2a: the entry is the announcement-bound usage key read off the
+    /// placed stack entry — never a `(source_id, ability_index)` pair. Layer
+    /// recomputes shift indices while the acquisition stays the same, so an
+    /// index-keyed entry goes stale when a grant is withdrawn (a cost exiles
+    /// its provider) and would then suppress the innocent ability that
+    /// shifted into the recorded slot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending_activations: Vec<(ObjectId, usize)>,
+    pub pending_activations: Vec<AbilityUsageKey>,
 
     // Triggered ability targeting
     #[serde(default)]
@@ -25676,20 +26017,20 @@ declare_game_state! {
     #[serde(
         default,
         skip_serializing_if = "im::HashMap::is_empty",
-        with = "tuple_key_map"
+        with = "ability_usage_key_map"
     )]
-    pub activated_abilities_this_turn: im::HashMap<(ObjectId, usize), u32>,
+    pub activated_abilities_this_turn: im::HashMap<AbilityUsageKey, u32>,
     #[serde(
         default,
         skip_serializing_if = "im::HashMap::is_empty",
-        with = "tuple_key_map"
+        with = "ability_usage_key_map"
     )]
-    pub activated_abilities_this_game: im::HashMap<(ObjectId, usize), u32>,
+    pub activated_abilities_this_game: im::HashMap<AbilityUsageKey, u32>,
     /// CR 602.5b + CR 702.122: Vehicles whose crew ability has been activated this
     /// turn. Populated on a successful crew announcement; read to enforce an
     /// "Activate only once each turn" crew restriction. Crew is not an
     /// `abilities[]` entry, so it cannot use `activated_abilities_this_turn`
-    /// (keyed by `(source_id, ability_index)`). Cleared at turn start.
+    /// (keyed by [`AbilityUsageKey`]). Cleared at turn start.
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub crew_activated_this_turn: HashSet<ObjectIncarnationRef>,
@@ -49954,6 +50295,7 @@ mod tests {
                         rules_execution_node: None,
                         ability_snapshot: None,
                         announced_source_incarnation: None,
+                        announced_usage_key: None,
                         color_override: None,
                         resume: ManaAbilityResume::Priority,
                         cost_move_resume: None,
@@ -50071,6 +50413,7 @@ mod tests {
                     rules_execution_node: None,
                     ability_snapshot: None,
                     announced_source_incarnation: None,
+                    announced_usage_key: None,
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,
@@ -56451,6 +56794,7 @@ mod tests {
                 rules_execution_node: None,
                 ability_snapshot: None,
                 announced_source_incarnation: None,
+                announced_usage_key: None,
                 color_override: None,
                 resume: ManaAbilityResume::UnlessPayment {
                     outer_player: None,
@@ -59784,6 +60128,7 @@ mod tests {
                     rules_execution_node: None,
                     ability_snapshot: None,
                     announced_source_incarnation: None,
+                    announced_usage_key: None,
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,
@@ -60048,6 +60393,7 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -64995,6 +65341,7 @@ mod restored_exact_attack_authority_tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume,
             cost_move_resume: None,

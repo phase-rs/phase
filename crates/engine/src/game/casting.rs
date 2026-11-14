@@ -31854,10 +31854,40 @@ pub(crate) fn record_activated_ability_placed(
     };
     let announced_zone = record.source_zone;
     let activation_cost = record.activation_cost.clone();
-    restrictions::record_ability_activation(state, source_id, ability_index, Some(record));
+    // CR 602.2a + CR 602.5b: the announced activation consumes its own key,
+    // read off the placed entry's ability — never re-derived from
+    // `(source_id, ability_index)`. Re-deriving post-payment would mis-record
+    // whenever a cost moved the source or its slot: granted cycling
+    // (hand-gated) after a discard-self cost, granted graveyard-activated
+    // abilities after a self-exile cost, or a vanished object. The slot the
+    // announcement bound (`activation_ability_definition`) is not guaranteed
+    // to resolve now (cycling's card is in the graveyard, scavenge's in
+    // exile); the record carries what the announcement captured. When
+    // announcement never ran (no record), the existing ActivationReversed
+    // fail-closed fires before this is reached — and a missing key on a
+    // recorded activation skips the ledger row exactly like today's
+    // missing-entry semantics.
+    if let Some(key) = state.stack.back().and_then(|entry| match &entry.kind {
+        StackEntryKind::ActivatedAbility { ability, .. } => ability.announced_usage_key.clone(),
+        _ => None,
+    }) {
+        restrictions::record_ability_activation(state, key, Some(record));
+    }
     // CR 117.1b: Priority permits unbounded activation. `pending_activations`
     // is a per-priority-window AI-guard — see `GameState::pending_activations`.
-    state.pending_activations.push((source_id, ability_index));
+    // CR 602.2a: the pending entry is the announcement-bound usage key read
+    // off the placed entry — never re-derived from `(source_id,
+    // ability_index)`. Post-payment re-derivation would mis-record whenever a
+    // cost moved the source or its slot (the same staleness the ledger block
+    // avoids above), and an index-keyed entry goes stale when a later layer
+    // recompute shifts indices. A missing key skips the guard exactly like
+    // the missing-entry ledger semantics above.
+    if let Some(key) = state.stack.back().and_then(|entry| match &entry.kind {
+        StackEntryKind::ActivatedAbility { ability, .. } => ability.announced_usage_key.clone(),
+        _ => None,
+    }) {
+        state.pending_activations.push(key);
+    }
     super::casting_targets::emit_ability_activated(
         state,
         player,
@@ -31941,6 +31971,19 @@ pub(crate) fn record_activation_announcement(
                 .get(&source_id)
                 .map(|source| source.incarnation),
         );
+    }
+    // CR 602.2a + CR 602.5c: capture the activation's own usage key at this
+    // same announcement — before any cost is paid. The resolved definition
+    // (cost-concretized for Brawl-style placeholders) is live here; a cost
+    // that moves the source (discard-self cycling, self-exile scavenge) can
+    // make the slot unresolvable by placement time. An existing capture is
+    // never overwritten: the earliest announcement wins.
+    if ability.announced_usage_key.is_none() {
+        if let Some(definition) = activation_ability_definition(state, source_id, ability_index) {
+            ability.announced_usage_key = Some(
+                super::restrictions::ability_usage_key_for_definition(source_id, &definition),
+            );
+        }
     }
 }
 

@@ -635,6 +635,7 @@ mod tests {
             parent_target_missing_reason: None,
             activation_cost_reduction: None,
             activation_record: None,
+            announced_usage_key: None,
             control_change_instruction: None,
         }
     }
@@ -855,6 +856,7 @@ mod tests {
             parent_target_missing_reason: None,
             activation_cost_reduction: None,
             activation_record: None,
+            announced_usage_key: None,
             control_change_instruction: None,
         }
     }
