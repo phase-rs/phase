@@ -684,6 +684,7 @@ pub(super) fn handle_tribute_choice(
         ));
     };
 
+    let events_before = events.len();
     if accept && !effects::tribute::apply_paid(state, player, source_id, count, events) {
         return Ok(action_result(events, state.waiting_for.clone()));
     } else if !accept {
@@ -694,6 +695,16 @@ pub(super) fn handle_tribute_choice(
     // the persisted TributeOutcome when its intervening-if condition is checked.
     set_active_priority(state);
     resume_pending_continuation_if_priority(state, events)?;
+    // CR 603.2 + CR 603.6a + CR 702.104a: the tribute is decided as the creature
+    // enters, so this answer puts it onto the battlefield (and may go on to a
+    // co-entrant's prompt) without reaching `run_post_action_pipeline`. Its
+    // battlefield entries go to the entry gate here; its other events are left
+    // as before.
+    super::triggers::collect_and_drain_entry_observer_triggers_if_settled(
+        state,
+        events,
+        events_before,
+    );
     Ok(action_result(events, state.waiting_for.clone()))
 }
 

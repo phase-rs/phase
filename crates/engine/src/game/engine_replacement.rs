@@ -259,6 +259,11 @@ pub(super) fn handle_replacement_choice(
     // parked for the next answer; only a settled round trip may close the batch.
     // Nothing is left behind on this path — the anchor is a local that dies here.
     let WaitingFor::Priority { player } = waiting_for else {
+        state.waiting_for = waiting_for.clone();
+        // CR 603.6a + CR 616.1f: this answer's battlefield entries leave with its
+        // buffer. Hand them to the entry gate: an entrant whose instruction is
+        // still suspended is held for the scan that follows its last co-entrant.
+        super::triggers::park_entry_observer_triggers_if_paused(state, events, action_event_start);
         return Ok(waiting_for);
     };
     // CR 800.4j: the handler hands a settled choice back to the active player's
@@ -2958,7 +2963,25 @@ fn handle_copy_token_source_choice(
     Ok(state.waiting_for.clone())
 }
 
+/// CR 707.5 + CR 603.6a: the copy-choice answer, plus the same entry park as
+/// [`handle_replacement_choice`]. Answering can publish the entrant and then
+/// stop on a co-entrant's prompt; that entry leaves with this answer's buffer.
 pub(super) fn handle_copy_target_choice(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    target: Option<TargetRef>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let action_event_start = events.len();
+    let produced = handle_copy_target_choice_inner(state, waiting_for, target, events)?;
+    if !matches!(produced, WaitingFor::Priority { .. }) {
+        state.waiting_for = produced.clone();
+        super::triggers::park_entry_observer_triggers_if_paused(state, events, action_event_start);
+    }
+    Ok(produced)
+}
+
+fn handle_copy_target_choice_inner(
     state: &mut GameState,
     waiting_for: WaitingFor,
     target: Option<TargetRef>,

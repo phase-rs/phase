@@ -2090,6 +2090,14 @@ pub struct SpellContext {
     /// batch-run context equality is unaffected. Not redacted from viewer states.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ability_provenance: Option<AbilityProvenance>,
+    /// CR 603.2b + CR 102.1: the turn player a phase trigger bound its chain's `scoped_player` to
+    /// ("that player" anaphors to the player whose phase it is). Stamped only by
+    /// `ResolvedAbility::set_phase_turn_player_recursive`; cleared by every other binding
+    /// (`set_scoped_player_recursive`, the `player_scope` fan-out's seat binding). A node whose
+    /// `scoped_player` equals this is bound by its phase, not by an unfinished simultaneous
+    /// player-scope leg (CR 101.4), which is the distinction `entry_observation_deferred` reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_turn_player: Option<crate::types::player::PlayerId>,
 }
 
 impl SpellContext {
@@ -6025,8 +6033,34 @@ impl ResolvedAbility {
     /// local ability chain. This intentionally does not change `controller`.
     pub fn set_scoped_player_recursive(&mut self, player: PlayerId) {
         self.scoped_player = Some(player);
+        self.context.phase_turn_player = None;
         for (_, child) in self.child_links_mut() {
             child.set_scoped_player_recursive(player);
+        }
+    }
+
+    /// CR 603.2b + CR 102.1: bind a phase trigger's chain to the turn player whose phase it is.
+    /// Resolves exactly as `set_scoped_player_recursive` does, and additionally records that the
+    /// binding is the phase's, not a `player_scope` seat leg's (`SpellContext::phase_turn_player`).
+    pub fn set_phase_turn_player_recursive(&mut self, player: PlayerId) {
+        self.scoped_player = Some(player);
+        self.context.phase_turn_player = Some(player);
+        for (_, child) in self.child_links_mut() {
+            child.set_phase_turn_player_recursive(player);
+        }
+    }
+
+    /// CR 603.3c: carry `source`'s player binding onto this chain as the same kind of binding: a
+    /// phase trigger's turn-player binding stays one (`SpellContext::phase_turn_player`), any
+    /// other stays an instruction's.
+    pub fn carry_player_binding_recursive(&mut self, source: &ResolvedAbility) {
+        let Some(player) = source.scoped_player else {
+            return;
+        };
+        if source.context.phase_turn_player == Some(player) {
+            self.set_phase_turn_player_recursive(player);
+        } else {
+            self.set_scoped_player_recursive(player);
         }
     }
 

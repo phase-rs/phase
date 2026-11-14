@@ -971,16 +971,21 @@ fn spark_double_counter_completion_replays_copied_targeted_trigger() {
 
 mod feldon_tokens {
     use super::*;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::ability::ChosenAttribute;
     use engine::types::events::GameEvent;
     use engine::types::keywords::Keyword;
-    use engine::types::mana::{ManaType, ManaUnit};
+    use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
     use engine::types::player::PlayerId;
 
     const FELDON: &str = "{2}{R}, {T}: Create a token that's a copy of target creature card in your graveyard, except it's an artifact in addition to its other types. It gains haste. Sacrifice it at the beginning of the next end step.";
     const JACE: &str = "+2: Each player draws a card.\n−1: Target player draws a card.\n−10: Target player mills twenty cards.";
 
     fn setup() -> (GameScenario, ObjectId) {
-        let mut scenario = GameScenario::new();
+        setup_in(GameScenario::new())
+    }
+
+    fn setup_in(mut scenario: GameScenario) -> (GameScenario, ObjectId) {
         scenario.at_phase(Phase::PostCombatMain);
         scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
         scenario.with_library_top(P1, &["Forest", "Island", "Swamp", "Mountain"]);
@@ -1354,6 +1359,1198 @@ mod feldon_tokens {
     }
 
     #[test]
+    fn altar_collects_each_token_entry_across_counter_ordering_pauses() {
+        let db = crate::support::shared_card_db().expect("integration card database");
+        let (mut scenario, feldon) = setup();
+        let card = graveyard_copier(&mut scenario, false);
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        let season = scenario
+            .add_enchantment_from_oracle(P0, "Doubling Season", SEASON)
+            .id();
+        scenario.add_real_card(P0, "Altar of the Brood", Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        let before = runner.state().players[1].library.len();
+        assert!(before >= 4);
+        let mut events = runner
+            .activate(feldon, 0)
+            .target_object(card)
+            .resolve()
+            .events()
+            .to_vec();
+        let (first, copy_events) = choose_copy(&mut runner, feldon);
+        events.extend(copy_events);
+        events.extend(choose_token_counter_order(&mut runner, first, scales));
+        let (second, copy_events) = choose_copy(&mut runner, feldon);
+        events.extend(copy_events);
+        assert_ne!(first, second, "Season creates two distinct entrants");
+        events.extend(choose_token_counter_order(&mut runner, second, season));
+        assert_entry_publication(&runner, first, &events);
+        assert_entry_publication(&runner, second, &events);
+        runner.advance_until_stack_empty();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty());
+        // CR 603.2 + CR 603.3b: each entrant contributes one Altar trigger,
+        // even when identical triggers share a batched stack entry.
+        assert_eq!(
+            runner.state().players[1].library.len(),
+            before - 2,
+            "Altar mills exactly once for each entrant"
+        );
+    }
+
+    #[test]
+    fn counter_ordering_answers_do_not_split_one_or_more_token_observers() {
+        counter_ordering_observer_draws(false);
+    }
+
+    #[test]
+    fn counter_ordering_answers_do_not_spend_parked_one_or_more_firing_limits() {
+        counter_ordering_observer_draws(true);
+    }
+
+    fn counter_ordering_observer_draws(with_firing_limit: bool) {
+        let db = crate::support::shared_card_db().expect("integration card database");
+        let (mut scenario, feldon) = setup();
+        let card = graveyard_copier(&mut scenario, false);
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        let season = scenario
+            .add_enchantment_from_oracle(P0, "Doubling Season", SEASON)
+            .id();
+        scenario.add_real_card(P0, "Altar of the Brood", Zone::Battlefield, db);
+        let observer = if with_firing_limit {
+            scenario
+                .add_enchantment_from_oracle(
+                    P0,
+                    "Tocasia's Welcome",
+                    "Whenever one or more creatures you control with mana value 3 or less enter, draw a card. This ability triggers only once each turn.",
+                )
+                .id()
+        } else {
+            scenario
+                .add_creature_from_oracle(
+                    P0,
+                    "Mister Fantastic, Reed Richards",
+                    2,
+                    4,
+                    "Reach\nWhenever one or more tokens you control enter, you may draw a card.",
+                )
+                .as_legendary()
+                .id()
+        };
+        let later_entry = with_firing_limit.then(|| {
+            scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Raise the Alarm",
+                    true,
+                    "Create two 1/1 white Soldier creature tokens.",
+                )
+                .id()
+        });
+        let mut runner = scenario.build();
+        let library_before = runner.state().players[1].library.len();
+        let hand_before = runner.state().players[0].hand.len();
+        runner.activate(feldon, 0).target_object(card).resolve();
+        let (first, _) = choose_copy(&mut runner, feldon);
+        choose_token_counter_order(&mut runner, first, scales);
+        let (second, _) = choose_copy(&mut runner, feldon);
+        assert_ne!(first, second, "Season creates two distinct entrants");
+        choose_token_counter_order(&mut runner, second, season);
+        for _ in 0..3 {
+            runner.advance_until_stack_empty();
+            let WaitingFor::OptionalEffectChoice {
+                player, source_id, ..
+            } = &runner.state().waiting_for
+            else {
+                break;
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(
+                *source_id, observer,
+                "only the token observer offers a draw"
+            );
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap();
+        }
+        assert_token_entry_complete(&mut runner);
+        assert_eq!(
+            runner.state().players[1].library.len(),
+            library_before - 2,
+            "Altar still mills exactly once for each entrant"
+        );
+        let drawn = runner.state().players[0].hand.len() - hand_before;
+        // CR 603.2c + CR 603.6a: the two entrants are one entry event, so a
+        // "one or more" observer triggers once for it, after the last entrant.
+        assert_ne!(drawn, 2, "one batch must not produce two observer draws");
+        assert_eq!(
+            drawn, 1,
+            "positive reach guard: the observer actually triggers and its draw resolves"
+        );
+        if let Some(spell) = later_entry {
+            let outcome = runner.cast(spell).resolve();
+            outcome.assert_hand_drawn(P0, 0);
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+            assert_token_entry_complete(&mut runner);
+            assert_eq!(
+                runner
+                    .state()
+                    .objects
+                    .values()
+                    .filter(|object| object.is_token && object.zone == Zone::Battlefield)
+                    .count(),
+                6,
+                "four later qualifying entrants do not bypass Welcome's spent turn limit"
+            );
+        }
+    }
+
+    // Oracle text below is from the generated card data (MTGJSON), reminder text omitted.
+    const BODY_DOUBLE: &str =
+        "You may have this creature enter as a copy of any creature card in a graveyard.";
+    const HUSHBRINGER: &str =
+        "Flying, lifelink\nCreatures entering or dying don't cause abilities to trigger.";
+    const SOUL_WARDEN: &str = "Whenever another creature enters, you gain 1 life.";
+    const SERVANT_OF_THE_SCALE: &str = "This creature enters with a +1/+1 counter on it.\nWhen this creature dies, put X +1/+1 counters on target creature you control, where X is the number of +1/+1 counters on this creature.";
+    const ASCENDANT_EVINCAR: &str =
+        "Flying\nOther black creatures get +1/+1.\nNonblack creatures get -1/-1.";
+    const ELEMENTAL_BOND: &str =
+        "Whenever a creature you control with power 3 or greater enters, draw a card.";
+    const MOON_GIRL: &str = "Whenever you draw your second card each turn, until end of turn, Moon Girl and Devil Dinosaur's base power and toughness become 6/6 and they gain trample.\nWhenever an artifact you control enters, draw a card. This ability triggers only once each turn.";
+    const TOCASIAS_WELCOME: &str = "Whenever one or more creatures you control with mana value 3 or less enter, draw a card. This ability triggers only once each turn.";
+
+    /// The board every later-co-entrant row shares. Feldon targets a Body Double
+    /// card in the graveyard; Doubling Season makes two tokens of it, and with
+    /// Hardened Scales a first copy that enters with +1/+1 counters stops on a
+    /// CR 616.1 ordering choice. Its answer puts that token onto the battlefield
+    /// and then stops again on the second token's copy offer, so the first
+    /// entrant is on the battlefield while its co-entrant is still entering.
+    struct BodyDoubleBoard {
+        scenario: GameScenario,
+        feldon: ObjectId,
+        body_double: ObjectId,
+        scales: ObjectId,
+        season: ObjectId,
+    }
+
+    fn body_double_board() -> BodyDoubleBoard {
+        body_double_board_in(GameScenario::new())
+    }
+
+    fn body_double_board_in(scenario: GameScenario) -> BodyDoubleBoard {
+        let (mut scenario, feldon) = setup_in(scenario);
+        let body_double = scenario
+            .add_creature_to_graveyard(P0, "Body Double", 0, 0)
+            .with_subtypes(vec!["Shapeshifter"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 4,
+            })
+            .from_oracle_text(BODY_DOUBLE)
+            .id();
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        let season = scenario
+            .add_enchantment_from_oracle(P0, "Doubling Season", SEASON)
+            .id();
+        BodyDoubleBoard {
+            scenario,
+            feldon,
+            body_double,
+            scales,
+            season,
+        }
+    }
+
+    fn graveyard_triskelion(scenario: &mut GameScenario) -> ObjectId {
+        scenario
+            .add_creature_to_graveyard(P0, "Triskelion", 1, 1)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Construct"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![],
+                generic: 6,
+            })
+            .from_oracle_text(TRISKELION)
+            .id()
+    }
+
+    fn graveyard_hushbringer(scenario: &mut GameScenario) -> ObjectId {
+        scenario
+            .add_creature_to_graveyard(P0, "Hushbringer", 1, 2)
+            .with_subtypes(vec!["Faerie"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 1,
+            })
+            .from_oracle_text_with_keywords(&["Flying", "Lifelink"], HUSHBRINGER)
+            .id()
+    }
+
+    fn graveyard_servant_of_the_scale(scenario: &mut GameScenario) -> ObjectId {
+        scenario
+            .add_creature_to_graveyard(P0, "Servant of the Scale", 0, 0)
+            .with_subtypes(vec!["Human", "Soldier"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            })
+            .from_oracle_text(SERVANT_OF_THE_SCALE)
+            .id()
+    }
+
+    /// Activate Feldon and bring the first Body Double token in as a copy of
+    /// `donor`, which enters with +1/+1 counters. Returns that token, on the
+    /// battlefield, with the second token's copy offer open.
+    fn enter_first_copy_before_second_offer(
+        runner: &mut GameRunner,
+        feldon: ObjectId,
+        body_double: ObjectId,
+        donor: ObjectId,
+        first_counter_replacement: ObjectId,
+    ) -> ObjectId {
+        runner
+            .activate(feldon, 0)
+            .target_object(body_double)
+            .resolve();
+        let (first, _) = choose_copy(runner, donor);
+        choose_token_counter_order(runner, first, first_counter_replacement);
+        assert_first_entered_with_second_offer_open(runner, first, donor);
+        first
+    }
+
+    /// Reach guard: the first entrant has entered and the entry event is not
+    /// finished. Every later-co-entrant row depends on this exact pause.
+    fn assert_first_entered_with_second_offer_open(
+        runner: &GameRunner,
+        first: ObjectId,
+        donor: ObjectId,
+    ) {
+        let entered = &runner.state().objects[&first];
+        assert_eq!(entered.zone, Zone::Battlefield);
+        assert!(entered.is_token);
+        assert_eq!(entered.name, runner.state().objects[&donor].name);
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ),
+            "second entrant's copy offer is open: {:?}",
+            runner.state().waiting_for
+        );
+    }
+
+    fn graveyard_hill_giant(scenario: &mut GameScenario) -> ObjectId {
+        // Hill Giant is a vanilla 3/3 red Giant with no entry counters.
+        scenario
+            .add_creature_to_graveyard(P0, "Hill Giant", 3, 3)
+            .with_subtypes(vec!["Giant"])
+            .with_color(vec![ManaColor::Red])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 3,
+            })
+            .id()
+    }
+
+    /// Soul Warden's life gain for one activation whose tokens copy `first`
+    /// and then `second`. `persist` round-trips the game through the persisted
+    /// wire at the pause between the two entrants.
+    fn warden_life_for_copies(first: FirstCopy, second: SecondCopy, persist: bool) -> i32 {
+        let BodyDoubleBoard {
+            mut scenario,
+            feldon,
+            body_double,
+            scales,
+            season,
+        } = body_double_board();
+        let triskelion = graveyard_triskelion(&mut scenario);
+        let hushbringer = graveyard_hushbringer(&mut scenario);
+        let hill_giant = graveyard_hill_giant(&mut scenario);
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        let mut runner = scenario.build();
+        let life = runner.life(P0);
+        let first = match first {
+            // The counter-ordering answer publishes this entrant.
+            FirstCopy::Triskelion => enter_first_copy_before_second_offer(
+                &mut runner,
+                feldon,
+                body_double,
+                triskelion,
+                scales,
+            ),
+            // No entry counters: the copy-choice answer publishes this entrant.
+            FirstCopy::HillGiant => {
+                runner
+                    .activate(feldon, 0)
+                    .target_object(body_double)
+                    .resolve();
+                let (token, _) = choose_copy(&mut runner, hill_giant);
+                assert_first_entered_with_second_offer_open(&runner, token, hill_giant);
+                token
+            }
+        };
+        assert_eq!(runner.life(P0), life, "nothing has resolved at the pause");
+        if persist {
+            runner = restore(runner);
+        }
+        let second_token = match second {
+            SecondCopy::Hushbringer => {
+                let (token, _) = choose_copy(&mut runner, hushbringer);
+                token
+            }
+            SecondCopy::Triskelion => {
+                let (token, _) = choose_copy(&mut runner, triskelion);
+                choose_token_counter_order(&mut runner, token, season);
+                token
+            }
+        };
+        assert_ne!(first, second_token, "Season creates two distinct entrants");
+        assert_token_entry_complete(&mut runner);
+        let entered = &runner.state().objects[&second_token];
+        assert_eq!(entered.zone, Zone::Battlefield);
+        assert_eq!(
+            entered.name,
+            match second {
+                SecondCopy::Hushbringer => "Hushbringer",
+                SecondCopy::Triskelion => "Triskelion",
+            }
+        );
+        runner.life(P0) - life
+    }
+
+    #[derive(Clone, Copy)]
+    enum FirstCopy {
+        Triskelion,
+        HillGiant,
+    }
+
+    #[derive(Clone, Copy)]
+    enum SecondCopy {
+        Hushbringer,
+        Triskelion,
+    }
+
+    /// CR 603.6a: each time an event puts one or more permanents onto the
+    /// battlefield, all permanents on the battlefield, including the newcomers,
+    /// are checked for enters triggers that match the event. Both tokens are one
+    /// event, so Hushbringer ("Creatures entering or dying don't cause abilities
+    /// to trigger.") is on the battlefield for the check and Soul Warden
+    /// ("Whenever another creature enters, you gain 1 life.") triggers for
+    /// neither token, although the Triskelion copy entered an answer earlier.
+    #[test]
+    fn later_co_entrant_suppressor_governs_the_whole_token_entry_event() {
+        assert_eq!(
+            warden_life_for_copies(FirstCopy::Triskelion, SecondCopy::Triskelion, false),
+            2,
+            "positive control: without a suppressor Soul Warden sees both entrants"
+        );
+        assert_eq!(
+            warden_life_for_copies(FirstCopy::Triskelion, SecondCopy::Hushbringer, false),
+            0,
+            "the completed entry event includes Hushbringer, so no entrant triggers Soul Warden"
+        );
+    }
+
+    /// The same rows with the game saved and restored at the pause between the
+    /// two entrants: the first entrant's unmatched entry survives the wire and
+    /// is still judged against the completed event.
+    #[test]
+    fn later_co_entrant_suppressor_survives_persisted_restore_at_the_pause() {
+        assert_eq!(
+            warden_life_for_copies(FirstCopy::Triskelion, SecondCopy::Triskelion, true),
+            2,
+            "positive control: the first entrant's entry is not lost across restore"
+        );
+        assert_eq!(
+            warden_life_for_copies(FirstCopy::Triskelion, SecondCopy::Hushbringer, true),
+            0,
+            "the restored game still checks the first entrant against the completed event"
+        );
+    }
+
+    /// Cards Elemental Bond draws for one activation whose first token copies
+    /// Servant of the Scale and whose second copies `second`.
+    fn bond_draws_for_second_copy(
+        second: impl FnOnce(&mut GameScenario) -> ObjectId,
+    ) -> (usize, i32) {
+        let BodyDoubleBoard {
+            mut scenario,
+            feldon,
+            body_double,
+            scales: _,
+            season,
+        } = body_double_board();
+        let servant = graveyard_servant_of_the_scale(&mut scenario);
+        let second = second(&mut scenario);
+        scenario.add_enchantment_from_oracle(P0, "Elemental Bond", ELEMENTAL_BOND);
+        let mut runner = scenario.build();
+        let hand = runner.state().players[0].hand.len();
+        // Season first, then Scales: one counter doubled to two, plus one.
+        let first =
+            enter_first_copy_before_second_offer(&mut runner, feldon, body_double, servant, season);
+        assert_eq!(
+            runner.state().objects[&first]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&3)
+        );
+        assert_eq!(runner.state().objects[&first].power, Some(3));
+        choose_copy(&mut runner, second);
+        assert_token_entry_complete(&mut runner);
+        (
+            runner.state().players[0].hand.len() - hand,
+            runner.state().objects[&first]
+                .power
+                .expect("first entrant is still a creature"),
+        )
+    }
+
+    /// CR 603.6b + CR 611.3c: continuous effects that modify a permanent's
+    /// characteristics apply as it enters, before determining whether it causes
+    /// an ability to trigger. Ascendant Evincar ("Nonblack creatures get -1/-1.")
+    /// enters in the same event as the 3/3 Servant of the Scale copy, so that
+    /// copy enters as a 2/2 and Elemental Bond ("Whenever a creature you control
+    /// with power 3 or greater enters, draw a card.") triggers only for the 3/3
+    /// Evincar.
+    #[test]
+    fn later_co_entrant_characteristic_modifier_governs_the_earlier_entrant() {
+        let (draws, first_power) = bond_draws_for_second_copy(graveyard_hill_giant);
+        assert_eq!(first_power, 3);
+        assert_eq!(
+            draws, 2,
+            "positive control: with no modifier both 3-power entrants draw"
+        );
+        let (draws, first_power) = bond_draws_for_second_copy(|scenario| {
+            scenario
+                .add_creature_to_graveyard(P0, "Ascendant Evincar", 3, 3)
+                .as_legendary()
+                .with_subtypes(vec!["Phyrexian", "Vampire", "Noble"])
+                .with_color(vec![ManaColor::Black])
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                    generic: 4,
+                })
+                .from_oracle_text(ASCENDANT_EVINCAR)
+                .id()
+        });
+        assert_eq!(first_power, 2, "Evincar shrinks the nonblack first entrant");
+        assert_eq!(
+            draws, 1,
+            "only Evincar enters with power 3 or greater in the completed event"
+        );
+    }
+
+    /// CR 603.6a: a "triggers only once each turn" ability is spent only by an
+    /// event that triggers it, and the suppressed entry event triggers
+    /// nothing. Moon Girl and Devil Dinosaur ("Whenever an artifact you control
+    /// enters, draw a card. This ability triggers only once each turn.") must
+    /// not draw for Feldon's artifact tokens when the second is Hushbringer,
+    /// and must still be able to trigger for a later artifact that turn.
+    #[test]
+    fn suppressed_token_entry_event_does_not_spend_a_once_each_turn_limit() {
+        let BodyDoubleBoard {
+            mut scenario,
+            feldon,
+            body_double,
+            scales,
+            season: _,
+        } = body_double_board();
+        let triskelion = graveyard_triskelion(&mut scenario);
+        let hushbringer = graveyard_hushbringer(&mut scenario);
+        scenario
+            .add_creature_from_oracle(P0, "Moon Girl and Devil Dinosaur", 2, 2, MOON_GIRL)
+            .as_legendary();
+        // Hushbringer stops creatures entering from causing triggers; a
+        // noncreature artifact still triggers Moon Girl.
+        let spellbook = scenario
+            .add_artifact_to_hand_from_oracle(P0, "Spellbook", "You have no maximum hand size.")
+            .id();
+        let mut runner = scenario.build();
+        let library = runner.state().players[0].library.len();
+        let first = enter_first_copy_before_second_offer(
+            &mut runner,
+            feldon,
+            body_double,
+            triskelion,
+            scales,
+        );
+        assert!(
+            runner.state().objects[&first]
+                .card_types
+                .core_types
+                .contains(&engine::types::card_type::CoreType::Artifact),
+            "the first entrant is an artifact Moon Girl would see"
+        );
+        choose_copy(&mut runner, hushbringer);
+        assert_token_entry_complete(&mut runner);
+        assert_eq!(
+            runner.state().players[0].library.len(),
+            library,
+            "the suppressed entry event draws nothing"
+        );
+        let outcome = runner.cast(spellbook).resolve();
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        assert_token_entry_complete(&mut runner);
+        assert_eq!(runner.state().objects[&spellbook].zone, Zone::Battlefield);
+        assert_eq!(
+            runner.state().players[0].library.len(),
+            library - 1,
+            "the once-each-turn trigger was still available for the later artifact"
+        );
+    }
+
+    /// CR 603.2c: a "one or more" ability triggers once for an event with
+    /// several occurrences. Tocasia's Welcome ("Whenever one or more creatures
+    /// you control with mana value 3 or less enter, draw a card. This ability
+    /// triggers only once each turn.") must see the mana value 1 Servant of the
+    /// Scale copy although the entrant that completes the event, a Triskelion
+    /// copy, has mana value 6, and that one trigger spends the turn's limit.
+    #[test]
+    fn one_or_more_observer_sees_a_qualifying_entrant_that_is_not_the_last() {
+        let BodyDoubleBoard {
+            mut scenario,
+            feldon,
+            body_double,
+            scales,
+            season,
+        } = body_double_board();
+        let servant = graveyard_servant_of_the_scale(&mut scenario);
+        let triskelion = graveyard_triskelion(&mut scenario);
+        scenario.add_enchantment_from_oracle(P0, "Tocasia's Welcome", TOCASIAS_WELCOME);
+        let later_entry = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Raise the Alarm",
+                true,
+                "Create two 1/1 white Soldier creature tokens.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let library = runner.state().players[0].library.len();
+        enter_first_copy_before_second_offer(&mut runner, feldon, body_double, servant, scales);
+        let (second, _) = choose_copy(&mut runner, triskelion);
+        choose_token_counter_order(&mut runner, second, season);
+        assert_token_entry_complete(&mut runner);
+        assert_eq!(
+            runner.state().players[0].library.len(),
+            library - 1,
+            "Welcome draws once for the event's qualifying entrant"
+        );
+        let outcome = runner.cast(later_entry).resolve();
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        assert_token_entry_complete(&mut runner);
+        assert_eq!(
+            runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| object.is_token && object.zone == Zone::Battlefield)
+                .count(),
+            6,
+            "positive reach guard: Raise the Alarm's Season-doubled qualifying tokens entered"
+        );
+        assert_eq!(
+            runner.state().players[0].library.len(),
+            library - 1,
+            "the limit was spent by the completed entry event"
+        );
+    }
+
+    /// A first copy with no entry counters is published by the copy-choice
+    /// answer itself, which then stops on the second token's copy offer. That
+    /// entry is still part of the one event (CR 603.6a): Soul Warden sees it
+    /// when nothing suppresses the event, and does not when the second copy is
+    /// Hushbringer.
+    #[test]
+    fn copy_choice_answer_keeps_its_entrant_for_the_completed_event() {
+        assert_eq!(
+            warden_life_for_copies(FirstCopy::HillGiant, SecondCopy::Triskelion, false),
+            2,
+            "the entrant published by the copy-choice answer is not lost"
+        );
+        assert_eq!(
+            warden_life_for_copies(FirstCopy::HillGiant, SecondCopy::Hushbringer, false),
+            0,
+            "and it is checked against the completed event, which Hushbringer suppresses"
+        );
+    }
+
+    const BESTIAL_MENACE: &str = "Create a 1/1 green Snake creature token, a 2/2 green Wolf creature token, and a 3/3 green Elephant creature token.";
+    const METALLIC_MIMIC: &str = "As this creature enters, choose a creature type.\nThis creature is the chosen type in addition to its other types.\nEach other creature you control of the chosen type enters with an additional +1/+1 counter on it.";
+    const BRANCHING_EVOLUTION: &str = "If one or more +1/+1 counters would be put on a creature you control, twice that many +1/+1 counters are put on that creature instead.";
+
+    /// CR 603.2c + CR 603.6a: Bestial Menace's three tokens are one entry event,
+    /// so Mister Fantastic ("Whenever one or more tokens you control enter, you
+    /// may draw a card.") triggers once for it. Metallic Mimic naming Elephant
+    /// gives only the Elephant an entry counter; Hardened Scales and Branching
+    /// Evolution make that a CR 616.1 ordering choice, so the resolving spell
+    /// itself puts the Snake and the Wolf onto the battlefield and then stops.
+    #[test]
+    fn resolving_spell_that_stops_on_its_last_token_matches_the_event_once() {
+        let (mut scenario, _feldon) = setup();
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Branching Evolution", BRANCHING_EVOLUTION);
+        let mimic = scenario
+            .add_creature_from_oracle(P0, "Metallic Mimic", 2, 1, METALLIC_MIMIC)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Shapeshifter"])
+            .id();
+        let fantastic = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Mister Fantastic, Reed Richards",
+                2,
+                4,
+                "Reach\nWhenever one or more tokens you control enter, you may draw a card.",
+            )
+            .as_legendary()
+            .id();
+        let menace = scenario
+            .add_spell_to_hand_from_oracle(P0, "Bestial Menace", false, BESTIAL_MENACE)
+            .id();
+        let mut runner = scenario.build();
+        // Board setup: Metallic Mimic is already on the battlefield, so its
+        // as-enters choice (Elephant) is written as the value it recorded then.
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&mimic)
+            .unwrap()
+            .chosen_attributes = vec![ChosenAttribute::CreatureType("Elephant".to_string())];
+        let hand = runner.state().players[0].hand.len();
+        let tokens_named = |runner: &GameRunner, name: &str| {
+            runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| {
+                    object.is_token && object.zone == Zone::Battlefield && object.name == name
+                })
+                .count()
+        };
+        runner.cast(menace).resolve();
+        // Reach guard: two entrants have entered and the third is still
+        // entering, stopped on the order of its entry counter's replacements.
+        assert_eq!(tokens_named(&runner, "Snake"), 1);
+        assert_eq!(tokens_named(&runner, "Wolf"), 1);
+        let elephant = runner
+            .state()
+            .objects
+            .values()
+            .find(|object| object.is_token && object.name == "Elephant")
+            .map(|object| object.id)
+            .expect("the Elephant token is being created");
+        assert_eq!(
+            runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .expect("a replacement is parked")
+                .proposed
+                .affected_object_id(),
+            Some(elephant)
+        );
+        assert_eq!(
+            runner.state().objects[&elephant]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            None,
+            "the Elephant's entry counter has not been placed"
+        );
+        let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+            panic!(
+                "required the Elephant's counter order, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == scales)
+            .expect("Hardened Scales is offered");
+        runner.act(GameAction::ChooseReplacement { index }).unwrap();
+        let mut offers = 0;
+        for _ in 0..4 {
+            runner.advance_until_stack_empty();
+            let WaitingFor::OptionalEffectChoice { source_id, .. } = &runner.state().waiting_for
+            else {
+                break;
+            };
+            assert_eq!(*source_id, fantastic, "only Mister Fantastic offers a draw");
+            offers += 1;
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap();
+        }
+        assert_token_entry_complete(&mut runner);
+        // Scales first, then Branching Evolution: (1 + 1) doubled.
+        assert_eq!(
+            runner.state().objects[&elephant]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&4)
+        );
+        assert_eq!(offers, 1, "one entry event offers one draw");
+        assert_eq!(
+            runner.state().players[0].hand.len(),
+            hand,
+            "the one accepted draw replaces the cast card"
+        );
+    }
+
+    const BRUDICLAD: &str = "Creature tokens you control have haste.\nAt the beginning of combat on your turn, create a 2/1 blue Phyrexian Myr artifact creature token. Then you may choose a token you control. If you do, each other token you control becomes a copy of that token.";
+    const GLORIOUS_ANTHEM: &str = "Creatures you control get +1/+1.";
+
+    /// Cards Elemental Bond draws when Brudiclad's combat trigger creates its
+    /// Myr and then, after the "you may" choice, makes it a copy of a resident
+    /// 3/3 Elephant token. Returns the draws and the Myr's final power.
+    fn bond_draws_for_brudiclad_myr(anthem: bool) -> (usize, i32) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario
+            .add_creature_from_oracle(P0, "Brudiclad, Telchor Engineer", 4, 4, BRUDICLAD)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Phyrexian", "Artificer"])
+            .as_legendary();
+        scenario.add_enchantment_from_oracle(P0, "Elemental Bond", ELEMENTAL_BOND);
+        if anthem {
+            scenario.add_enchantment_from_oracle(P0, "Glorious Anthem", GLORIOUS_ANTHEM);
+        }
+        // Board setup (synthetic): a resident 3/3 green Elephant token, the
+        // token Bestial Menace makes, built as a creature and marked a token.
+        let elephant = scenario
+            .add_creature(P0, "Elephant", 3, 3)
+            .with_subtypes(vec!["Elephant"])
+            .with_color(vec![ManaColor::Green])
+            .id();
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&elephant)
+            .unwrap()
+            .is_token = true;
+        let library = runner.state().players[0].library.len();
+        // Both players pass: beginning of combat, Brudiclad's trigger on the stack.
+        runner.act(GameAction::PassPriority).unwrap();
+        runner.act(GameAction::PassPriority).unwrap();
+        assert_eq!(runner.state().phase, Phase::BeginCombat);
+        assert_eq!(runner.state().stack.len(), 1);
+        runner.advance_until_stack_empty();
+        // Reach guard: the Myr has entered and the trigger stopped on its later
+        // "you may choose a token" instruction.
+        let myr = runner
+            .state()
+            .objects
+            .values()
+            .find(|object| object.is_token && object.name == "Phyrexian Myr")
+            .map(|object| object.id)
+            .expect("the Myr token entered");
+        assert_eq!(runner.state().objects[&myr].zone, Zone::Battlefield);
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "the later instruction's choice is open: {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        // The accepted instruction chooses a token at resolution (no target is printed): the
+        // Elephant, so the Myr becomes its copy.
+        let WaitingFor::ChooseFromZoneChoice { cards, .. } = &runner.state().waiting_for else {
+            panic!(
+                "required the token choice, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert!(cards.contains(&elephant) && cards.contains(&myr));
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![elephant],
+            })
+            .unwrap();
+        assert_token_entry_complete(&mut runner);
+        assert_eq!(runner.state().objects[&myr].name, "Elephant");
+        (
+            library - runner.state().players[0].library.len(),
+            runner.state().objects[&myr]
+                .power
+                .expect("the Myr is still a creature"),
+        )
+    }
+
+    /// CR 603.6a + CR 603.10: the Myr's entry is its own completed event; the
+    /// "you may choose a token" prompt belongs to a later instruction, not to
+    /// that entry. Elemental Bond ("Whenever a creature you control with power 3
+    /// or greater enters, draw a card.") is checked against the 2/1 that
+    /// entered, not against the 3/3 Elephant copy it became afterwards.
+    #[test]
+    fn a_later_instructions_choice_does_not_hold_a_completed_token_entry() {
+        let (draws, power) = bond_draws_for_brudiclad_myr(true);
+        assert_eq!(power, 4);
+        assert_eq!(
+            draws, 1,
+            "positive control: under Glorious Anthem the Myr enters as a 3/2 and draws once"
+        );
+        let (draws, power) = bond_draws_for_brudiclad_myr(false);
+        assert_eq!(power, 3, "the Myr became a copy of the 3/3 Elephant");
+        assert_eq!(draws, 0, "the Myr entered as a 2/1");
+    }
+
+    const GIMBAL: &str = "Artifact creatures you control have trample.\nAt the beginning of your end step, create a 0/0 red Gremlin artifact creature token. Put X +1/+1 counters on it, where X is the number of differently named artifact tokens you control.";
+
+    /// CR 603.6a + CR 608.2c: Gimbal, Gremlin Prodigy's Gremlin enters as a 0/0;
+    /// the counters come from the next instruction, which stops on the CR 616.1
+    /// order of Hardened Scales and Branching Evolution. That prompt belongs to
+    /// the counter event, not to the entry, so the entry is matched as it
+    /// happened: Soul Warden ("Whenever another creature enters, you gain 1
+    /// life.") sees it, and Elemental Bond ("Whenever a creature you control with
+    /// power 3 or greater enters, draw a card.") does not.
+    #[test]
+    fn a_later_instructions_replacement_prompt_does_not_hold_a_completed_entry() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PostCombatMain);
+        scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario
+            .add_creature_from_oracle(P0, "Gimbal, Gremlin Prodigy", 4, 4, GIMBAL)
+            .with_subtypes(vec!["Gremlin", "Artificer"])
+            .as_legendary();
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Branching Evolution", BRANCHING_EVOLUTION);
+        scenario.add_enchantment_from_oracle(P0, "Elemental Bond", ELEMENTAL_BOND);
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        let mut runner = scenario.build();
+        let library = runner.state().players[0].library.len();
+        let life = runner.life(P0);
+        // Both players pass: the end step begins with Gimbal's trigger on the stack.
+        runner.act(GameAction::PassPriority).unwrap();
+        runner.act(GameAction::PassPriority).unwrap();
+        assert_eq!(runner.state().phase, Phase::End);
+        assert_eq!(runner.state().stack.len(), 1);
+        runner.advance_until_stack_empty();
+        // Reach guard: the Gremlin has entered and the counter instruction stopped
+        // on the order of its replacements.
+        let gremlin = runner
+            .state()
+            .objects
+            .values()
+            .find(|object| object.is_token && object.name == "Gremlin")
+            .map(|object| object.id)
+            .expect("the Gremlin token entered");
+        assert_eq!(runner.state().objects[&gremlin].zone, Zone::Battlefield);
+        let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+            panic!(
+                "required the counter order, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == scales)
+            .expect("Hardened Scales is offered");
+        runner.act(GameAction::ChooseReplacement { index }).unwrap();
+        assert_token_entry_complete(&mut runner);
+        // Scales first, then Branching Evolution: (1 + 1) doubled.
+        assert_eq!(
+            runner.state().objects[&gremlin]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&4)
+        );
+        assert_eq!(
+            runner.life(P0) - life,
+            1,
+            "positive control: Soul Warden matches the Gremlin's entry once"
+        );
+        assert_eq!(
+            runner.state().players[0].library.len(),
+            library,
+            "the Gremlin entered as a 0/0: Elemental Bond does not draw"
+        );
+    }
+
+    const SUPERIOR_SPIDER_MAN: &str = "Mind Swap — You may have Superior Spider-Man enter as a copy of any creature card in a graveyard, except his name is Superior Spider-Man and he's a 4/4 Spider Human Hero in addition to his other types. When you do, exile that card.";
+    const PARALLEL_LIVES: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.";
+
+    /// Soul Warden's life gain when Feldon makes four Superior Spider-Man tokens
+    /// (Doubling Season and Parallel Lives) that copy Hill Giant three times and
+    /// then `last`. Each copy runs Superior Spider-Man's own rider chain while the
+    /// later tokens are still to enter.
+    fn warden_life_for_spider_man_copies(last: SecondCopy) -> i32 {
+        let (mut scenario, feldon) = setup();
+        scenario.add_enchantment_from_oracle(P0, "Doubling Season", SEASON);
+        scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+        let spider_man = scenario
+            .add_creature_to_graveyard(P0, "Superior Spider-Man", 4, 4)
+            .as_legendary()
+            .with_subtypes(vec!["Spider", "Human", "Hero"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Black],
+                generic: 2,
+            })
+            .from_oracle_text(SUPERIOR_SPIDER_MAN)
+            .id();
+        let hill_giant = graveyard_hill_giant(&mut scenario);
+        let hushbringer = graveyard_hushbringer(&mut scenario);
+        let triskelion = graveyard_triskelion(&mut scenario);
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        let mut runner = scenario.build();
+        let life = runner.life(P0);
+        runner
+            .activate(feldon, 0)
+            .target_object(spider_man)
+            .resolve();
+        let mut tokens = Vec::new();
+        for _ in 0..3 {
+            let (token, _) = choose_copy(&mut runner, hill_giant);
+            // Reach guard: this entrant is on the battlefield and the next
+            // token's copy offer is open.
+            assert_eq!(runner.state().objects[&token].zone, Zone::Battlefield);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            tokens.push(token);
+        }
+        let (token, _) = choose_copy(
+            &mut runner,
+            match last {
+                SecondCopy::Hushbringer => hushbringer,
+                SecondCopy::Triskelion => triskelion,
+            },
+        );
+        tokens.push(token);
+        tokens.sort();
+        tokens.dedup();
+        assert_eq!(
+            tokens.len(),
+            4,
+            "Season and Parallel Lives make four entrants"
+        );
+        for _ in 0..8 {
+            runner.advance_until_stack_empty();
+            let WaitingFor::OrderTriggers { triggers, .. } = &runner.state().waiting_for else {
+                break;
+            };
+            let order = (0..triggers.len()).collect();
+            runner.act(GameAction::OrderTriggers { order }).unwrap();
+        }
+        assert_token_entry_complete(&mut runner);
+        runner.life(P0) - life
+    }
+
+    /// CR 603.6a: all four tokens are one entry event, so Hushbringer, the last
+    /// of them, is on the battlefield when it is checked, and Soul Warden
+    /// triggers for none. The rider chain each earlier copy runs ("When you do,
+    /// exile that card.") passes instruction boundaries of its own; they do not
+    /// complete the instruction that is still putting tokens onto the
+    /// battlefield.
+    #[test]
+    fn a_copy_rider_chain_between_co_entrants_does_not_complete_the_entry_event() {
+        assert_eq!(
+            warden_life_for_spider_man_copies(SecondCopy::Triskelion),
+            4,
+            "positive control: without a suppressor Soul Warden sees all four entrants"
+        );
+        assert_eq!(
+            warden_life_for_spider_man_copies(SecondCopy::Hushbringer),
+            0,
+            "the completed entry event includes Hushbringer"
+        );
+    }
+
+    const CALLOUS_DISMISSAL: &str =
+        "Return target nonland permanent to its owner's hand.\nAmass Zombies 1.";
+
+    /// CR 701.47a + CR 603.6a: Amass creates the 0/0 Zombie Army and then puts
+    /// its counter on it, inside one instruction. The counter's CR 616.1 order of
+    /// Hardened Scales and Branching Evolution is a replacement of the counter
+    /// event on a permanent that has already entered, not of its entry, so the
+    /// Army's entry is matched as it happened: Soul Warden sees it, and Elemental
+    /// Bond does not draw for the 0/0.
+    #[test]
+    fn a_counter_prompt_on_an_entered_permanent_does_not_hold_its_entry() {
+        let (mut scenario, _feldon) = setup();
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Branching Evolution", BRANCHING_EVOLUTION);
+        scenario.add_enchantment_from_oracle(P0, "Elemental Bond", ELEMENTAL_BOND);
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        // Grizzly Bears: a vanilla 2/2 for Callous Dismissal to return.
+        let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let dismissal = scenario
+            .add_spell_to_hand_from_oracle(P0, "Callous Dismissal", false, CALLOUS_DISMISSAL)
+            .id();
+        let mut runner = scenario.build();
+        let library = runner.state().players[0].library.len();
+        let life = runner.life(P0);
+        runner.cast(dismissal).target_object(bears).resolve();
+        // Reach guard: the Army has entered and its counter stopped on the order
+        // of its replacements.
+        let army = runner
+            .state()
+            .objects
+            .values()
+            .find(|object| {
+                object.is_token
+                    && object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Army")
+            })
+            .map(|object| object.id)
+            .expect("the Army token entered");
+        assert_eq!(runner.state().objects[&army].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&bears].zone, Zone::Hand);
+        let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+            panic!(
+                "required the counter order, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == scales)
+            .expect("Hardened Scales is offered");
+        runner.act(GameAction::ChooseReplacement { index }).unwrap();
+        assert_token_entry_complete(&mut runner);
+        // Scales first, then Branching Evolution: (1 + 1) doubled.
+        assert_eq!(
+            runner.state().objects[&army]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&4)
+        );
+        assert_eq!(
+            runner.life(P0) - life,
+            1,
+            "positive control: Soul Warden matches the Army's entry once"
+        );
+        assert_eq!(
+            runner.state().players[0].library.len(),
+            library,
+            "the Army entered as a 0/0: Elemental Bond does not draw"
+        );
+    }
+
+    /// Life each Soul Warden controller gains in a three-player game when Feldon
+    /// makes two Body Double tokens, the first a Triskelion copy and the second
+    /// a copy of `second`, and `conceder` concedes at the pause between the two
+    /// entrants. The first player and the second player each control a Soul
+    /// Warden. Returns the first and second player's gains.
+    fn warden_life_with_concession_at_the_pause(
+        conceder: PlayerId,
+        second: SecondCopy,
+    ) -> (i32, i32) {
+        let BodyDoubleBoard {
+            mut scenario,
+            feldon,
+            body_double,
+            scales,
+            season,
+        } = body_double_board_in(GameScenario::new_n_player(3, 42));
+        let triskelion = graveyard_triskelion(&mut scenario);
+        let hushbringer = graveyard_hushbringer(&mut scenario);
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        scenario.add_creature_from_oracle(P1, "Soul Warden", 1, 1, SOUL_WARDEN);
+        let mut runner = scenario.build();
+        let (life_0, life_1) = (runner.life(P0), runner.life(P1));
+        enter_first_copy_before_second_offer(&mut runner, feldon, body_double, triskelion, scales);
+        runner
+            .act(GameAction::Concede {
+                player_id: conceder,
+            })
+            .expect("a player may concede at any time");
+        if conceder != P0 {
+            let (token, _) = choose_copy(
+                &mut runner,
+                match second {
+                    SecondCopy::Hushbringer => hushbringer,
+                    SecondCopy::Triskelion => triskelion,
+                },
+            );
+            if matches!(second, SecondCopy::Triskelion) {
+                choose_token_counter_order(&mut runner, token, season);
+            }
+        }
+        for _ in 0..8 {
+            runner.advance_until_stack_empty();
+            let WaitingFor::OrderTriggers { triggers, .. } = &runner.state().waiting_for else {
+                break;
+            };
+            let order = (0..triggers.len()).collect();
+            runner.act(GameAction::OrderTriggers { order }).unwrap();
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "the game continues at priority: {:?}",
+            runner.state().waiting_for
+        );
+        assert!(runner.state().stack.is_empty());
+        (runner.life(P0) - life_0, runner.life(P1) - life_1)
+    }
+
+    /// CR 800.4a + CR 603.6a: another player leaving the game at the pause
+    /// does not complete or discard the entry event still being made. The
+    /// first player's Soul Warden still sees the event as a whole: nothing when
+    /// the second token is a Hushbringer copy, both entrants otherwise. The
+    /// second player's Soul Warden is under the same Hushbringer.
+    #[test]
+    fn another_players_concession_at_the_pause_leaves_the_entry_event_whole() {
+        let p2 = PlayerId(2);
+        assert_eq!(
+            warden_life_with_concession_at_the_pause(p2, SecondCopy::Triskelion),
+            (2, 2),
+            "positive control: both Soul Wardens see both entrants"
+        );
+        assert_eq!(
+            warden_life_with_concession_at_the_pause(p2, SecondCopy::Hushbringer),
+            (0, 0),
+            "the completed entry event includes Hushbringer"
+        );
+    }
+
+    /// CR 800.4a + CR 603.2: when the player whose instruction is putting the
+    /// tokens onto the battlefield leaves the game at the pause, the rest of the
+    /// instruction never happens, but the first token's entry did. The second
+    /// player's Soul Warden triggers for it once; the first player's abilities
+    /// left the game with them.
+    #[test]
+    fn the_choosers_concession_at_the_pause_still_checks_the_entry_that_happened() {
+        assert_eq!(
+            warden_life_with_concession_at_the_pause(P0, SecondCopy::Hushbringer),
+            (0, 1)
+        );
+    }
+
+    #[test]
     fn t8_triskelion_self_counters_and_spark_share_one_scales_application() {
         let (mut scenario, feldon) = setup();
         let donor = scenario
@@ -1463,6 +2660,1853 @@ mod feldon_tokens {
             );
         }
         finish_and_sacrifice(&mut runner, &[first, second], &[donor]);
+    }
+
+    /// CR 603.6a + CR 614.12a: the first Spark Double token copies Painter's
+    /// Servant and enters once its copied "As this creature enters, choose a
+    /// color." is answered; that answer then stops on the second token's copy
+    /// offer. Its entry is part of the one event, so Soul Warden ("Whenever
+    /// another creature enters, you gain 1 life.") sees both tokens.
+    #[test]
+    fn a_copied_as_enters_choice_answer_keeps_its_entrant_for_the_completed_event() {
+        let (mut scenario, feldon) = setup();
+        let donor = scenario
+            .add_creature_from_oracle(P0, "Painter's Servant", 1, 3, PAINTERS_SERVANT)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Scarecrow"])
+            .id();
+        let laezel = scenario
+            .add_creature_from_oracle(P0, "Lae'zel, Vlaakith's Champion", 3, 3, LAEZEL)
+            .as_legendary()
+            .id();
+        let season = scenario
+            .add_enchantment_from_oracle(P0, "Doubling Season", SEASON)
+            .id();
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        let card = graveyard_copier(&mut scenario, false);
+        let mut runner = scenario.build();
+        let life = runner.life(P0);
+        let first = activate_copy(&mut runner, feldon, card, donor);
+        choose_counter_replacement(&mut runner, laezel);
+        choose_color(&mut runner, first, "blue");
+        // Reach guard: the color answer put the first token onto the battlefield
+        // and stopped on the second token's copy offer.
+        assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        let (second, _) = choose_copy(&mut runner, donor);
+        assert_ne!(first, second);
+        choose_counter_replacement(&mut runner, season);
+        choose_color(&mut runner, second, "red");
+        assert_token_entry_complete(&mut runner);
+        assert_eq!(runner.life(P0) - life, 2, "Soul Warden sees both tokens");
+    }
+
+    const FANATIC_OF_XENAGOS: &str = "Trample\nTribute 1 (As this creature enters, an opponent of your choice may put a +1/+1 counter on it.)\nWhen this creature enters, if tribute wasn't paid, it gets +1/+1 and gains haste until end of turn.";
+    const CACKLING_COUNTERPART: &str = "Create a token that's a copy of target creature you control.\nFlashback {5}{U}{U} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+
+    /// Cackling Counterpart under Doubling Season copies Fanatic of Xenagos
+    /// twice. Each copy's Tribute is answered by `tribute_payer`, the opponent
+    /// chosen for it, in a game of `players`, who pays it when `pay` is set;
+    /// Hardened Scales is then on the battlefield, so each paid counter stops on
+    /// its CR 616.1 order with Doubling Season. Returns each Fanatic token's
+    /// power and haste, and Soul Warden's life gain.
+    fn fanatic_copies_and_warden_life(
+        players: u8,
+        tribute_payer: PlayerId,
+        pay: bool,
+    ) -> (Vec<(Option<i32>, bool)>, i32) {
+        let mut scenario = GameScenario::new_n_player(players, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let fanatic = scenario
+            .add_creature_from_oracle(P0, "Fanatic of Xenagos", 3, 3, FANATIC_OF_XENAGOS)
+            .with_subtypes(vec!["Centaur", "Warrior"])
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Doubling Season", SEASON);
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        let scales = pay.then(|| {
+            scenario
+                .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+                .id()
+        });
+        let counterpart = scenario
+            .add_spell_to_hand_from_oracle(P0, "Cackling Counterpart", true, CACKLING_COUNTERPART)
+            .id();
+        let mut runner = scenario.build();
+        let life = runner.life(P0);
+        runner.cast(counterpart).target_object(fanatic).resolve();
+        let mut tributes = 0;
+        let mut counter_orders = 0;
+        for _ in 0..40 {
+            match &runner.state().waiting_for {
+                WaitingFor::NamedChoice { options, .. } => {
+                    let choice = options
+                        .iter()
+                        .find(|option| option.as_str() == tribute_payer.0.to_string())
+                        .cloned()
+                        .expect("the tribute payer is an opponent to choose");
+                    runner.act(GameAction::ChooseOption { choice }).unwrap();
+                }
+                WaitingFor::TributeChoice { player, .. } => {
+                    assert_eq!(*player, tribute_payer, "the chosen opponent decides");
+                    tributes += 1;
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: pay })
+                        .unwrap();
+                }
+                WaitingFor::ReplacementChoice { candidates, .. } => {
+                    let index = candidates
+                        .iter()
+                        .position(|candidate| Some(candidate.source_id) == scales)
+                        .expect("only a paid tribute counter is ordered");
+                    counter_orders += 1;
+                    runner.act(GameAction::ChooseReplacement { index }).unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        // Reach guard: each copy stopped on its own Tribute, answered by the
+        // chosen opponent; the first answer went on to the second copy's choice.
+        if pay {
+            // Reach guard: the paid counter stopped on its order for each copy.
+            // The second copy is not offered its own Tribute after the first
+            // copy's ordered counter; the merge base behaves the same.
+            assert_eq!(
+                (tributes, counter_orders),
+                (1, 2),
+                "KNOWN-WRONG, pre-existing, as at the merge base: the second copy is not \
+                 offered its own Tribute (CR 702.104a) after the first copy's ordered counter"
+            );
+        } else {
+            assert_eq!((tributes, counter_orders), (2, 0), "one Tribute per copy");
+        }
+        let copies = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.is_token
+                    && object.zone == Zone::Battlefield
+                    && object.name == "Fanatic of Xenagos"
+            })
+            .map(|object| (object.power, object.has_keyword(&Keyword::Haste)))
+            .collect();
+        (copies, runner.life(P0) - life)
+    }
+
+    /// CR 702.104a + CR 603.6a + CR 603.2: Tribute is decided as the creature
+    /// enters, so the opponent's answer is what puts each copy onto the
+    /// battlefield. Both copies are one entry event: Soul Warden ("Whenever
+    /// another creature enters, you gain 1 life.") sees both, and each copy's own
+    /// "When this creature enters, if tribute wasn't paid, it gets +1/+1 and
+    /// gains haste until end of turn." triggers and resolves.
+    #[test]
+    fn a_tribute_answer_puts_its_entrant_into_the_entry_event() {
+        for (players, payer) in [(2, P1), (3, PlayerId(2))] {
+            let (copies, gained) = fanatic_copies_and_warden_life(players, payer, false);
+            assert_eq!(
+                copies.len(),
+                2,
+                "Doubling Season makes two copies ({players} players)"
+            );
+            assert_eq!(
+                gained, 2,
+                "Soul Warden sees both copies ({players} players)"
+            );
+            assert_eq!(
+                copies,
+                vec![(Some(4), true); 2],
+                "each copy's own tribute-unpaid trigger resolved ({players} players)"
+            );
+        }
+    }
+
+    /// The same event when the opponent pays the Tribute and its counter stops
+    /// on its Hardened Scales / Doubling Season order: the order's answer puts
+    /// the copy onto the battlefield and hands its entry to the event, so Soul
+    /// Warden sees both copies. Not a clean Tribute witness: the second copy is
+    /// not asked for its own Tribute (see the reach guard), which is the state
+    /// of the merge base.
+    #[test]
+    fn a_paid_tribute_whose_counter_is_ordered_keeps_its_entrant_in_the_event() {
+        let (copies, gained) = fanatic_copies_and_warden_life(2, P1, true);
+        assert_eq!(copies.len(), 2, "Doubling Season makes two copies");
+        assert_eq!(gained, 2, "Soul Warden sees both copies");
+    }
+
+    const SATORU: &str = "Menace\nWhenever Satoru and/or one or more other nontoken creatures you control enter, if none of them were cast or no mana was spent to cast them, draw a card.";
+    const EVER_AFTER: &str = "Return up to two target creature cards from your graveyard to the battlefield. Each of those creatures is a black Zombie in addition to its other colors and types. Put Ever After on the bottom of its owner's library.";
+
+    /// Put Hardened Scales first in each counter order, keep trigger order, and
+    /// pass priority until the stack is empty.
+    fn settle_answering(runner: &mut GameRunner, scales: ObjectId) {
+        for _ in 0..40 {
+            match &runner.state().waiting_for {
+                WaitingFor::ReplacementChoice { candidates, .. } => {
+                    let index = candidates
+                        .iter()
+                        .position(|candidate| candidate.source_id == scales)
+                        .expect("Hardened Scales is offered");
+                    runner.act(GameAction::ChooseReplacement { index }).unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        panic!("the game did not settle");
+    }
+
+    /// Ever After returns two Servant of the Scale cards as one event with Satoru, the
+    /// Infiltrator on the battlefield. With `paused`, Hardened Scales and Doubling Season make
+    /// each Servant's counter stop on a CR 616.1 order, so the move is delivered in two
+    /// segments. Returns the cards Satoru's ability drew and the orders answered; asserts that
+    /// both Servants entered, that every order the setup requires was reached and answered
+    /// (none unpaused, two paused: one per Servant) and that Ever After ended as the bottom
+    /// card of its owner's library. The return and the draws are asserted separately.
+    fn ever_after_satoru_draws(paused: bool) -> (usize, usize) {
+        let (mut scenario, _feldon) = setup();
+        scenario
+            .add_creature_from_oracle(P0, "Satoru, the Infiltrator", 2, 3, SATORU)
+            .as_legendary()
+            .with_subtypes(vec!["Human", "Ninja", "Rogue"]);
+        let scales = paused.then(|| {
+            let scales = scenario
+                .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+                .id();
+            scenario.add_enchantment_from_oracle(P0, "Doubling Season", SEASON);
+            scales
+        });
+        let first = graveyard_servant_of_the_scale(&mut scenario);
+        let second = graveyard_servant_of_the_scale(&mut scenario);
+        let ever_after = scenario
+            .add_spell_to_hand_from_oracle(P0, "Ever After", false, EVER_AFTER)
+            .id();
+        let mut runner = scenario.build();
+        let library = runner.state().players[0].library.len();
+        let hand = runner.state().players[0].hand.len();
+        runner
+            .cast(ever_after)
+            .target_objects(&[first, second])
+            .resolve();
+        let mut orders = 0;
+        match scales {
+            Some(scales) => {
+                // The batch stops on a counter order for each Servant: answer both.
+                for _ in 0..2 {
+                    let WaitingFor::ReplacementChoice { candidates, .. } =
+                        &runner.state().waiting_for
+                    else {
+                        panic!(
+                            "required a counter order, got {:?}",
+                            runner.state().waiting_for
+                        );
+                    };
+                    let index = candidates
+                        .iter()
+                        .position(|candidate| candidate.source_id == scales)
+                        .expect("Hardened Scales is offered");
+                    orders += 1;
+                    runner.act(GameAction::ChooseReplacement { index }).unwrap();
+                }
+                settle_answering(&mut runner, scales);
+            }
+            None => assert_token_entry_complete(&mut runner),
+        }
+        assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
+        // CR 608.2c: "Put Ever After on the bottom of its owner's library."
+        assert_eq!(runner.state().objects[&ever_after].zone, Zone::Library);
+        assert_eq!(
+            runner.state().players[0].library.last(),
+            Some(&ever_after),
+            "Ever After is the bottom card of its owner's library"
+        );
+        // Ever After left the hand when it was cast; every other change is a draw.
+        let draws = runner.state().players[0].hand.len() + 1 - hand;
+        assert_eq!(
+            runner.state().players[0].library.len() + draws,
+            library + 1,
+            "each draw left the library and Ever After returned to it"
+        );
+        (draws, orders)
+    }
+
+    /// CR 603.2c: Satoru, the Infiltrator's "Whenever Satoru and/or one or more other nontoken
+    /// creatures you control enter … draw a card." triggers once for the two Servants Ever After
+    /// returns together: exactly one draw, and, asserted separately in the helper, Ever After
+    /// is the bottom card of its owner's library (CR 608.2c).
+    #[test]
+    fn a_card_batch_triggers_a_one_or_more_observer_once() {
+        assert_eq!(ever_after_satoru_draws(false), (1, 0));
+    }
+
+    /// The same batch delivered in two segments, each Servant's counter stopping on the order of
+    /// Hardened Scales and Doubling Season. Both orders must be reached and answered, and Ever
+    /// After must still end as the bottom card of its owner's library. BASELINE LIMITATION, not
+    /// correct batching: the logical zone-change owner collects each completed slice
+    /// (`zone_pipeline.rs` hands it to `append_and_collect_logical_zone_trigger_segment`), so
+    /// Satoru triggers once per segment and draws two cards for the one event (CR 603.2c asks
+    /// for one). The same setup and answers draw two on main, outside this change.
+    #[test]
+    fn a_counter_order_answer_inside_a_card_batch_keeps_the_card_batch_owners_collection() {
+        let (draws, orders) = ever_after_satoru_draws(true);
+        assert_eq!(orders, 2, "one counter order per Servant, both answered");
+        assert_eq!(
+            draws, 2,
+            "baseline limitation: the card-batch owner draws once per delivered segment"
+        );
+    }
+
+    const MYTHOS_OF_ILLUNA: &str = "Create a token that's a copy of target permanent. If {R}{G} was spent to cast this spell, instead create a token that's a copy of that permanent, except the token has \"When this token enters, if it's a creature, it fights up to one target creature you don't control.\"";
+    const ALTAR_OF_THE_BROOD: &str =
+        "Whenever another permanent you control enters, each opponent mills a card.";
+
+    /// Mythos of Illuna copies Pacifism (an Aura): each Aura token's host is
+    /// chosen as it enters (CR 303.4f), so each token's entry follows its own
+    /// host prompt. Returns the cards milled by Altar of the Brood ("Whenever
+    /// another permanent you control enters, each opponent mills a card.") and
+    /// the draws Mister Fantastic offered ("Whenever one or more tokens you
+    /// control enter, you may draw a card."), with and without Doubling Season.
+    fn aura_token_entries(season: bool) -> (usize, usize, usize) {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario.with_library_top(
+            P1,
+            &["Forest", "Island", "Swamp", "Mountain", "Plains", "Forest"],
+        );
+        scenario.with_mana_pool(
+            P0,
+            (0..4)
+                .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let db = crate::support::shared_card_db().expect("integration card database");
+        // Board setup: Grizzly Bears is Pacifism's only legal host while it
+        // enters, so the real card attaches without a prompt; a second creature
+        // then gives each token copy a host choice.
+        scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+        let pacifism = scenario.add_real_card(P0, "Pacifism", Zone::Battlefield, db);
+        let host = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+        scenario.add_artifact_from_oracle(P0, "Altar of the Brood", ALTAR_OF_THE_BROOD);
+        let fantastic = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Mister Fantastic, Reed Richards",
+                2,
+                4,
+                "Reach\nWhenever one or more tokens you control enter, you may draw a card.",
+            )
+            .as_legendary()
+            .id();
+        if season {
+            scenario.add_enchantment_from_oracle(P0, "Doubling Season", SEASON);
+        }
+        let mythos = scenario
+            .add_spell_to_hand_from_oracle(P0, "Mythos of Illuna", false, MYTHOS_OF_ILLUNA)
+            .id();
+        let mut runner = scenario.build();
+        let library = runner.state().players[1].library.len();
+        runner.cast(mythos).target_object(pacifism).resolve();
+        let (mut hosts, mut offers) = (0, 0);
+        for _ in 0..20 {
+            match &runner.state().waiting_for {
+                WaitingFor::ReturnAsAuraTarget { legal_targets, .. } => {
+                    let target = legal_targets
+                        .iter()
+                        .find(|target| matches!(target, TargetRef::Object(id) if *id == host))
+                        .cloned()
+                        .expect("Hill Giant is a legal host");
+                    hosts += 1;
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(target),
+                        })
+                        .unwrap();
+                }
+                WaitingFor::OptionalEffectChoice { source_id, .. } => {
+                    assert_eq!(*source_id, fantastic);
+                    offers += 1;
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: true })
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        let tokens = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.is_token && object.zone == Zone::Battlefield && object.name == "Pacifism"
+            })
+            .count();
+        // Reach guard: each Aura token asked for its own host.
+        assert_eq!((hosts, tokens), if season { (2, 2) } else { (1, 1) });
+        (
+            library - runner.state().players[1].library.len(),
+            offers,
+            tokens,
+        )
+    }
+
+    /// CR 603.2 + CR 603.6a + CR 303.4f: an Aura token's entry is checked when
+    /// its host is chosen. Both tokens under Doubling Season are one entry event:
+    /// Altar mills once for each (two), and Mister Fantastic's "one or more"
+    /// ability triggers once for the event, not once per token.
+    #[test]
+    fn aura_token_entries_are_checked_once_each_across_their_host_prompts() {
+        assert_eq!(
+            aura_token_entries(false),
+            (1, 1, 1),
+            "positive control: a single Aura token is checked"
+        );
+        assert_eq!(
+            aura_token_entries(true),
+            (2, 1, 2),
+            "two entries, one batched trigger"
+        );
+    }
+
+    const REPLENISH: &str = "Return all enchantment cards from your graveyard to the battlefield. (Auras with nothing to enchant remain in your graveyard.)";
+
+    /// CR 603.2 + CR 303.4f: Replenish returns two Pacifism cards as one card
+    /// batch, each asking for its own host. The card path is collected by its
+    /// logical zone-change owner, and the Aura-host answer's entry collector must
+    /// not add to it: Altar of the Brood mills exactly once for each entry.
+    /// A positive witness, not a discriminator: the merge base mills the same.
+    #[test]
+    fn a_card_aura_batch_through_the_host_answer_is_checked_once_each() {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(
+            P1,
+            &[
+                "Forest", "Island", "Swamp", "Mountain", "Plains", "Forest", "Forest", "Island",
+            ],
+        );
+        scenario.with_mana_pool(
+            P0,
+            (0..4)
+                .map(|_| ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let db = crate::support::shared_card_db().expect("integration card database");
+        let host = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+        scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+        let first = scenario.add_real_card(P0, "Pacifism", Zone::Graveyard, db);
+        let second = scenario.add_real_card(P0, "Pacifism", Zone::Graveyard, db);
+        scenario.add_artifact_from_oracle(P0, "Altar of the Brood", ALTAR_OF_THE_BROOD);
+        let replenish = scenario
+            .add_spell_to_hand_from_oracle(P0, "Replenish", false, REPLENISH)
+            .id();
+        let mut runner = scenario.build();
+        let library = runner.state().players[1].library.len();
+        runner.cast(replenish).resolve();
+        let mut hosts = 0;
+        for _ in 0..16 {
+            match &runner.state().waiting_for {
+                WaitingFor::ReturnAsAuraTarget { legal_targets, .. } => {
+                    let target = legal_targets
+                        .iter()
+                        .find(|target| matches!(target, TargetRef::Object(id) if *id == host))
+                        .cloned()
+                        .expect("Hill Giant is a legal host");
+                    hosts += 1;
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(target),
+                        })
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        // Reach guard: each card asked for its own host and entered.
+        assert_eq!(hosts, 2);
+        assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
+        assert_eq!(
+            library - runner.state().players[1].library.len(),
+            2,
+            "one mill for each Aura that entered"
+        );
+    }
+
+    fn graveyard_soul_warden(scenario: &mut GameScenario) -> ObjectId {
+        scenario
+            .add_creature_to_graveyard(P0, "Soul Warden", 1, 1)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 0,
+            })
+            .from_oracle_text(SOUL_WARDEN)
+            .id()
+    }
+
+    /// Soul Warden's life gain when Feldon's two Body Double tokens copy Triskelion and a
+    /// graveyard Soul Warden (no Soul Warden on the battlefield), in either order, with the
+    /// game optionally saved and restored at the pause between the two entrants.
+    fn life_with_warden_as_a_co_entrant(warden_second: bool, persist: bool) -> i32 {
+        let BodyDoubleBoard {
+            mut scenario,
+            feldon,
+            body_double,
+            scales,
+            season,
+        } = body_double_board();
+        let triskelion = graveyard_triskelion(&mut scenario);
+        let warden = graveyard_soul_warden(&mut scenario);
+        let mut runner = scenario.build();
+        let life = runner.life(P0);
+        if warden_second {
+            enter_first_copy_before_second_offer(
+                &mut runner,
+                feldon,
+                body_double,
+                triskelion,
+                scales,
+            );
+            if persist {
+                runner = restore(runner);
+            }
+            choose_copy(&mut runner, warden);
+        } else {
+            runner
+                .activate(feldon, 0)
+                .target_object(body_double)
+                .resolve();
+            choose_copy(&mut runner, warden);
+            if persist {
+                runner = restore(runner);
+            }
+            let (token, _) = choose_copy(&mut runner, triskelion);
+            choose_token_counter_order(&mut runner, token, season);
+        }
+        assert_token_entry_complete(&mut runner);
+        runner.life(P0) - life
+    }
+
+    /// CR 603.6a: each time an event puts one or more permanents onto the battlefield, all
+    /// permanents on the battlefield, including the newcomers, are checked for matching
+    /// triggers. Both tokens are one entry event, so the Soul Warden token ("Whenever another
+    /// creature enters, you gain 1 life.") triggers for the Triskelion token whichever of them
+    /// entered first, and not for itself: one life, in both orders and across a restore.
+    #[test]
+    fn a_co_entrant_observer_sees_the_entrants_of_its_own_entry_event() {
+        for persist in [false, true] {
+            assert_eq!(
+                life_with_warden_as_a_co_entrant(false, persist),
+                1,
+                "control: the Warden token enters first (restore: {persist})"
+            );
+            assert_eq!(
+                life_with_warden_as_a_co_entrant(true, persist),
+                1,
+                "the Warden token enters after the Triskelion token (restore: {persist})"
+            );
+        }
+    }
+
+    const BLOT_OUT_THE_SKY: &str = "Create X tapped 2/1 white and black Inkling creature tokens with flying. If X is 6 or more, destroy all noncreature, nonland permanents.";
+    const TORPOR_ORB: &str = "Creatures entering don't cause abilities to trigger.";
+    const BRANCHING_EVOLUTION_TEXT: &str = "If one or more +1/+1 counters would be put on a creature you control, twice that many +1/+1 counters are put on that creature instead.";
+
+    /// Blot Out the Sky with X = 6 under Metallic Mimic (naming Inkling, so each Inkling enters
+    /// with a counter), Hardened Scales and Branching Evolution (a CR 616.1 order for each
+    /// token), with Soul Warden on the battlefield and, optionally, Torpor Orb. The spell's
+    /// second instruction destroys Orb, Scales and Evolution after the tokens entered.
+    /// Returns Soul Warden's life gain and whether Torpor Orb survived. The game is optionally
+    /// saved and restored at the first pause.
+    fn blot_out_the_sky_life(torpor_orb: bool, persist: bool) -> (i32, bool) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PostCombatMain);
+        scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario.with_mana_pool(
+            P0,
+            (0..8)
+                .map(|index| {
+                    ManaUnit::new(
+                        if index == 1 {
+                            ManaType::Black
+                        } else {
+                            ManaType::White
+                        },
+                        ObjectId(0),
+                        false,
+                        vec![],
+                    )
+                })
+                .collect(),
+        );
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Branching Evolution", BRANCHING_EVOLUTION_TEXT);
+        let mimic = scenario
+            .add_creature_from_oracle(P0, "Metallic Mimic", 2, 1, METALLIC_MIMIC)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Shapeshifter"])
+            .id();
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        let orb = torpor_orb.then(|| {
+            scenario
+                .add_artifact_from_oracle(P0, "Torpor Orb", TORPOR_ORB)
+                .id()
+        });
+        let mut blot =
+            scenario.add_spell_to_hand_from_oracle(P0, "Blot Out the Sky", false, BLOT_OUT_THE_SKY);
+        blot.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::White, ManaCostShard::Black],
+            generic: 0,
+        });
+        let blot = blot.id();
+        let mut runner = scenario.build();
+        // Board setup: Metallic Mimic is already on the battlefield, so its as-enters choice
+        // (Inkling) is written as the value it recorded then.
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&mimic)
+            .unwrap()
+            .chosen_attributes = vec![ChosenAttribute::CreatureType("Inkling".to_string())];
+        let life = runner.life(P0);
+        runner.cast(blot).x(6).resolve();
+        let mut orders = 0;
+        for _ in 0..40 {
+            match &runner.state().waiting_for {
+                WaitingFor::ReplacementChoice { candidates, .. } => {
+                    let index = candidates
+                        .iter()
+                        .position(|candidate| candidate.source_id == scales)
+                        .expect("Hardened Scales is offered");
+                    orders += 1;
+                    if persist && orders == 1 {
+                        runner = restore(runner);
+                    }
+                    runner.act(GameAction::ChooseReplacement { index }).unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        // Reach guard: six Inklings entered, each after its own counter order, and the spell's
+        // second instruction destroyed the noncreature, nonland permanents.
+        let inklings = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.is_token && object.zone == Zone::Battlefield && object.name == "Inkling"
+            })
+            .count();
+        assert_eq!(inklings, 6);
+        assert!(orders >= 5, "the tokens' counters were ordered: {orders}");
+        assert_eq!(runner.state().objects[&scales].zone, Zone::Graveyard);
+        let orb_alive =
+            orb.is_some_and(|orb| runner.state().objects[&orb].zone == Zone::Battlefield);
+        assert!(
+            !orb_alive,
+            "Torpor Orb was destroyed by the spell's second instruction"
+        );
+        (runner.life(P0) - life, orb_alive)
+    }
+
+    /// CR 603.2 + CR 603.6a: Torpor Orb ("Creatures entering don't cause abilities to
+    /// trigger.") is on the battlefield when the six Inklings enter, so Soul Warden triggers for
+    /// none of them, although the spell's second instruction destroys Orb before anything is
+    /// scanned for the first five entrants, which wait for the sixth.
+    #[test]
+    fn a_later_instruction_does_not_change_what_the_held_entries_are_matched_against() {
+        for persist in [false, true] {
+            assert_eq!(
+                blot_out_the_sky_life(false, persist).0,
+                6,
+                "positive control: without Orb Soul Warden sees all six Inklings (restore: {persist})"
+            );
+            assert_eq!(
+                blot_out_the_sky_life(true, persist).0,
+                0,
+                "Orb was there when they entered (restore: {persist})"
+            );
+        }
+    }
+
+    const SEASONED_PYROMANCER: &str = "When this creature enters, discard two cards, then draw two cards. For each nonland card discarded this way, create a 1/1 red Elemental creature token.\n{3}{R}{R}, Exile this card from your graveyard: Create two 1/1 red Elemental creature tokens.";
+    const MISTER_FANTASTIC: &str =
+        "Reach\nWhenever one or more tokens you control enter, you may draw a card.";
+
+    /// CR 603.6a + CR 603.2c: Seasoned Pyromancer's "For each nonland card discarded this way,
+    /// create a 1/1 red Elemental creature token" is one creation instruction, although the engine
+    /// runs it as a repeat. With Metallic Mimic (Elemental), Hardened Scales and Branching
+    /// Evolution each Elemental stops on its counter order; the two entries are still one event:
+    /// Mister Fantastic's "one or more tokens" triggers once, and Altar of the Brood once for each
+    /// entrant (the Pyromancer itself and the two Elementals: three mills).
+    #[test]
+    fn a_for_each_token_creation_stays_one_entry_event_across_its_pauses() {
+        for persist in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+            scenario.with_library_top(
+                P1,
+                &["Plains", "Island", "Swamp", "Mountain", "Forest", "Plains"],
+            );
+            scenario.with_mana_pool(
+                P0,
+                (0..3)
+                    .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+                    .collect(),
+            );
+            let scales = scenario
+                .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+                .id();
+            scenario.add_enchantment_from_oracle(
+                P0,
+                "Branching Evolution",
+                BRANCHING_EVOLUTION_TEXT,
+            );
+            let mimic = scenario
+                .add_creature_from_oracle(P0, "Metallic Mimic", 2, 1, METALLIC_MIMIC)
+                .as_artifact_creature()
+                .with_subtypes(vec!["Shapeshifter"])
+                .id();
+            let fantastic = scenario
+                .add_creature_from_oracle(
+                    P0,
+                    "Mister Fantastic, Reed Richards",
+                    2,
+                    4,
+                    MISTER_FANTASTIC,
+                )
+                .as_legendary()
+                .id();
+            scenario.add_artifact_from_oracle(P0, "Altar of the Brood", ALTAR_OF_THE_BROOD);
+            let discards: Vec<ObjectId> = (0..2)
+                .map(|_| {
+                    scenario
+                        .add_spell_to_hand_from_oracle(
+                            P0,
+                            "Raise the Alarm",
+                            true,
+                            "Create two 1/1 white Soldier creature tokens.",
+                        )
+                        .id()
+                })
+                .collect();
+            let mut pyromancer = scenario.add_creature_to_hand_from_oracle(
+                P0,
+                "Seasoned Pyromancer",
+                2,
+                2,
+                SEASONED_PYROMANCER,
+            );
+            pyromancer.with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+                generic: 1,
+            });
+            let pyromancer = pyromancer.id();
+            let mut runner = scenario.build();
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&mimic)
+                .unwrap()
+                .chosen_attributes = vec![ChosenAttribute::CreatureType("Elemental".to_string())];
+            let library = runner.state().players[1].library.len();
+            let card_id = runner.state().objects[&pyromancer].card_id;
+            runner
+                .act(GameAction::CastSpell {
+                    object_id: pyromancer,
+                    card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .expect("cast Seasoned Pyromancer");
+            let (mut orders, mut fantastic_triggers) = (0, 0);
+            for _ in 0..60 {
+                if persist && !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                    runner = restore(runner);
+                }
+                match &runner.state().waiting_for {
+                    WaitingFor::ReplacementChoice { candidates, .. } => {
+                        let index = candidates
+                            .iter()
+                            .position(|candidate| candidate.source_id == scales)
+                            .expect("Hardened Scales is offered");
+                        orders += 1;
+                        runner.act(GameAction::ChooseReplacement { index }).unwrap();
+                    }
+                    WaitingFor::DiscardChoice { .. } => {
+                        runner
+                            .act(GameAction::SelectCards {
+                                cards: discards.clone(),
+                            })
+                            .unwrap();
+                    }
+                    WaitingFor::OptionalEffectChoice { source_id, .. } => {
+                        assert_eq!(*source_id, fantastic);
+                        fantastic_triggers += 1;
+                        runner
+                            .act(GameAction::DecideOptionalEffect { accept: false })
+                            .unwrap();
+                    }
+                    WaitingFor::OrderTriggers { triggers, .. } => {
+                        let order = (0..triggers.len()).collect();
+                        runner.act(GameAction::OrderTriggers { order }).unwrap();
+                    }
+                    WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                    WaitingFor::Priority { .. } => {
+                        runner.act(GameAction::PassPriority).unwrap();
+                    }
+                    other => panic!("unexpected prompt: {other:?}"),
+                }
+            }
+            assert!(runner.state().deferred_triggers.is_empty());
+            let elementals = runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| {
+                    object.is_token
+                        && object.zone == Zone::Battlefield
+                        && object.name == "Elemental"
+                })
+                .count();
+            assert_eq!(elementals, 2, "restore: {persist}");
+            assert_eq!(
+                orders, 2,
+                "one counter order per Elemental (restore: {persist})"
+            );
+            assert_eq!(
+                fantastic_triggers, 1,
+                "one \"one or more tokens\" event (restore: {persist})"
+            );
+            assert_eq!(
+                library - runner.state().players[1].library.len(),
+                3,
+                "the Pyromancer and each Elemental (restore: {persist})"
+            );
+        }
+    }
+
+    const BLACK_MARKET_CONNECTIONS: &str = "At the beginning of your first main phase, choose one or more —\n• Sell Contraband — Create a Treasure token. You lose 1 life.\n• Buy Information — Draw a card. You lose 2 life.\n• Hire a Mercenary — Create a 3/2 colorless Shapeshifter creature token with changeling. You lose 3 life. (It is every creature type.)";
+    const RIGHTEOUS_VALKYRIE: &str = "Flying\nWhenever another Angel or Cleric you control enters, you gain life equal to that creature's toughness.\nAs long as you have at least 7 life more than your starting life total, creatures you control get +2/+2.";
+    const WHERE_ANCIENTS_TREAD: &str = "Whenever a creature you control with power 5 or greater enters, you may have this enchantment deal 5 damage to any target.";
+
+    /// Black Market Connections' "Hire a Mercenary" mode ("Create a 3/2 colorless Shapeshifter
+    /// creature token with changeling. You lose 3 life.") chosen at the beginning of the first
+    /// main phase, with Righteous Valkyrie ("As long as you have at least 7 life more than your
+    /// starting life total, creatures you control get +2/+2.") and Where Ancients Tread, starting
+    /// at `life`. Returns the number of Where Ancients Tread triggers.
+    fn hired_mercenary_ancients_triggers(life: i32, persist: bool) -> usize {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Draw);
+        scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario.with_library_top(P1, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario.with_life(P0, life);
+        scenario.add_enchantment_from_oracle(
+            P0,
+            "Black Market Connections",
+            BLACK_MARKET_CONNECTIONS,
+        );
+        scenario
+            .add_creature_from_oracle(P0, "Righteous Valkyrie", 2, 4, RIGHTEOUS_VALKYRIE)
+            .with_subtypes(vec!["Angel", "Cleric"]);
+        scenario.add_enchantment_from_oracle(P0, "Where Ancients Tread", WHERE_ANCIENTS_TREAD);
+        let mut runner = scenario.build();
+        let mut triggers = 0;
+        let mut mode_choices = 0;
+        for _ in 0..40 {
+            if persist && !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                runner = restore(runner);
+            }
+            match &runner.state().waiting_for {
+                WaitingFor::AbilityModeChoice { .. } => {
+                    mode_choices += 1;
+                    runner
+                        .act(GameAction::SelectModes { indices: vec![2] })
+                        .unwrap();
+                }
+                WaitingFor::TriggerTargetSelection { .. } => {
+                    triggers += 1;
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(TargetRef::Player(P1)),
+                        })
+                        .unwrap();
+                }
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: true })
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. }
+                    if runner.state().stack.is_empty() && mode_choices == 1 =>
+                {
+                    break
+                }
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        assert_eq!(mode_choices, 1, "the modes were chosen once");
+        assert_eq!(runner.state().phase, Phase::PreCombatMain);
+        let mercenary = runner
+            .state()
+            .objects
+            .values()
+            .find(|object| object.is_token && object.name == "Shapeshifter")
+            .expect("the Mercenary entered");
+        assert_eq!(mercenary.zone, Zone::Battlefield);
+        triggers
+    }
+
+    /// CR 603.3c + CR 603.6a + CR 608.2c: the modes chosen for a phase trigger keep its binding to
+    /// the turn player as the phase's own, so the mode's token instruction is a boundary. At 29
+    /// life the Mercenary enters as a 5/4 under Righteous Valkyrie and the mode's "You lose 3
+    /// life" then turns the bonus off: Where Ancients Tread sees the 5/4 that entered. Control:
+    /// at 20 life it enters as a 3/2.
+    #[test]
+    fn a_modal_phase_triggers_later_instruction_does_not_change_what_its_entry_matches() {
+        for persist in [false, true] {
+            assert_eq!(
+                hired_mercenary_ancients_triggers(29, persist),
+                1,
+                "the Mercenary entered as a 5/4 (restore: {persist})"
+            );
+            assert_eq!(
+                hired_mercenary_ancients_triggers(20, persist),
+                0,
+                "control: the Mercenary entered as a 3/2 (restore: {persist})"
+            );
+        }
+    }
+
+    const FULL_FLOWERING: &str = "Populate X times. (To populate, create a token that's a copy of a creature token you control. Do this X times.)";
+    const PHYREXIAN_METAMORPH: &str = "You may have this creature enter as a copy of any artifact or creature on the battlefield, except it's an artifact in addition to its other types.";
+    const SERRATED_ARROWS: &str = "This artifact enters with three arrowhead counters on it.\nAt the beginning of your upkeep, if there are no arrowhead counters on this artifact, sacrifice it.\n{T}, Remove an arrowhead counter from this artifact: Put a -1/-1 counter on target creature.";
+    const TEMPERED_STEEL: &str = "Artifact creatures you control get +2/+2.";
+    const WINDING_CONSTRICTOR: &str = "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead.\nIf you would get one or more counters, you get that many plus one of each of those kinds of counters instead.";
+    const VORINCLEX: &str = "Trample, haste\nIf you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
+
+    /// Full Flowering at X=2 populates an uncopied Phyrexian Metamorph token (kept alive by
+    /// Tempered Steel) twice. The first copy enters as Serrated Arrows and stops on the CR 616.1
+    /// order of its arrowhead counters (Winding Constrictor, Vorinclex); the Metamorph is still
+    /// the only creature token, so the second populate copies it again, and that copy enters as
+    /// Altar of the Brood. Returns (copy offers, counter orders, cards the opponent milled).
+    /// The game is optionally saved and restored at every prompt.
+    fn full_flowering_metamorph_mills(persist: bool) -> (usize, usize, usize) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PostCombatMain);
+        scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario.with_library_top(
+            P1,
+            &["Plains", "Island", "Swamp", "Mountain", "Forest", "Plains"],
+        );
+        scenario.with_mana_pool(
+            P0,
+            (0..5)
+                .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        scenario.add_enchantment_from_oracle(P0, "Tempered Steel", TEMPERED_STEEL);
+        let constrictor = scenario
+            .add_creature_from_oracle(P0, "Winding Constrictor", 2, 3, WINDING_CONSTRICTOR)
+            .id();
+        scenario
+            .add_creature_from_oracle(P0, "Vorinclex, Monstrous Raider", 6, 6, VORINCLEX)
+            .as_legendary();
+        let altar = scenario
+            .add_artifact_from_oracle(P0, "Altar of the Brood", ALTAR_OF_THE_BROOD)
+            .id();
+        let arrows = scenario
+            .add_artifact_from_oracle(P0, "Serrated Arrows", SERRATED_ARROWS)
+            .id();
+        let metamorph = scenario
+            .add_creature_from_oracle(P0, "Phyrexian Metamorph", 0, 0, PHYREXIAN_METAMORPH)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Phyrexian", "Shapeshifter"])
+            .id();
+        let mut spell =
+            scenario.add_spell_to_hand_from_oracle(P0, "Full Flowering", false, FULL_FLOWERING);
+        spell.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::X, ManaCostShard::Green],
+            generic: 0,
+        });
+        let spell = spell.id();
+        let mut runner = scenario.build();
+        // Board setup: the Metamorph is a token that copied nothing as it entered.
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&metamorph)
+            .unwrap()
+            .is_token = true;
+        let library = runner.state().players[1].library.len();
+        runner.cast(spell).x(2).resolve();
+        let (mut offers, mut orders) = (0, 0);
+        for _ in 0..40 {
+            if persist && !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                runner = restore(runner);
+            }
+            match &runner.state().waiting_for {
+                WaitingFor::ReplacementChoice { candidates, .. } => {
+                    if let Some(index) = candidates
+                        .iter()
+                        .position(|candidate| candidate.source_id == constrictor)
+                    {
+                        orders += 1;
+                        runner.act(GameAction::ChooseReplacement { index }).unwrap();
+                    } else {
+                        // The first copy enters as Serrated Arrows, the second as the Altar.
+                        let donor = if offers == 0 { arrows } else { altar };
+                        offers += 1;
+                        choose_copy(&mut runner, donor);
+                    }
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().deferred_triggers.is_empty());
+        let named = |name: &str| {
+            runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| {
+                    object.is_token && object.zone == Zone::Battlefield && object.name == name
+                })
+                .count()
+        };
+        assert_eq!(named("Serrated Arrows"), 1);
+        assert_eq!(named("Altar of the Brood"), 1);
+        (
+            offers,
+            orders,
+            library - runner.state().players[1].library.len(),
+        )
+    }
+
+    /// CR 608.2c + CR 603.6a: "Populate X times" is X successive populate instructions (Full
+    /// Flowering's ruling: "The tokens enter the battlefield one at a time"). The Altar of the
+    /// Brood that was already there sees both tokens enter: two mills. The Altar token entered
+    /// after the Serrated Arrows token, so it does not see that entry, although the Arrows entry
+    /// was still waiting when the second populate began.
+    #[test]
+    fn counted_repeat_occurrences_are_successive_entry_events() {
+        for persist in [false, true] {
+            let (offers, orders, milled) = full_flowering_metamorph_mills(persist);
+            assert_eq!(
+                offers, 2,
+                "one copy offer per populate (restore: {persist})"
+            );
+            assert_eq!(
+                orders, 1,
+                "the Arrows' counters are ordered (restore: {persist})"
+            );
+            assert_eq!(milled, 2, "the resident Altar, twice (restore: {persist})");
+        }
+    }
+
+    /// Edgar Markov's Coffin's upkeep trigger under Metallic Mimic (Vampire), Doubling Season and
+    /// Hardened Scales, with Where Ancients Tread. Returns the number of replacement-order prompts
+    /// the chain stopped on, the number of Where Ancients Tread triggers (each resolved, 5 damage
+    /// to the opponent), and the finished game. A `persist` run saves and restores at each
+    /// order prompt, before it is answered.
+    /// With `anthem` a Glorious Anthem is also in play, so the Vampires enter as 5/5s.
+    fn coffin_vampires_trigger_count(
+        anthem: bool,
+        persist: bool,
+    ) -> (usize, usize, GameRunner, ObjectId) {
+        let db = crate::support::shared_card_db().expect("integration card database");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::End);
+        scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario.with_library_top(P1, &["Plains", "Island", "Swamp", "Mountain"]);
+        // The Coffin is the back face of Edgar, Charmed Groom: turn it over below.
+        let coffin = scenario.add_real_card(P0, "Edgar, Charmed Groom", Zone::Battlefield, db);
+        scenario.with_counter(coffin, CounterType::Generic("bloodline".to_string()), 2);
+        let mimic = scenario.add_real_card(P0, "Metallic Mimic", Zone::Battlefield, db);
+        let season = scenario.add_real_card(P0, "Doubling Season", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Hardened Scales", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Where Ancients Tread", Zone::Battlefield, db);
+        if anthem {
+            scenario.add_real_card(P0, "Glorious Anthem", Zone::Battlefield, db);
+        }
+        let mut runner = scenario.build();
+        engine::game::transform::transform_permanent(runner.state_mut(), coffin, &mut Vec::new())
+            .expect("Edgar turns over to Edgar Markov's Coffin");
+        assert_eq!(
+            runner.state().objects[&coffin].name,
+            "Edgar Markov's Coffin"
+        );
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&mimic)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::CreatureType("Vampire".to_string()));
+        engine::game::layers::mark_layers_full(runner.state_mut());
+        engine::game::layers::flush_layers(runner.state_mut());
+        // Pass to the next turn of P0's: the upkeep trigger is put on the stack.
+        for _ in 0..64 {
+            if runner.state().phase == Phase::Upkeep
+                && runner.state().active_player == P0
+                && runner.state().turn_number > 1
+            {
+                break;
+            }
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert_eq!(runner.state().phase, Phase::Upkeep);
+        assert_eq!(runner.state().active_player, P0);
+        assert_eq!(runner.state().stack.len(), 1, "Coffin's upkeep trigger");
+        let mut prompts = 0;
+        for _ in 0..8 {
+            runner.advance_until_stack_empty();
+            let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for
+            else {
+                break;
+            };
+            prompts += 1;
+            // CR 616.1f: Doubling Season before Hardened Scales makes the Mimic's one counter three.
+            let index = candidates
+                .iter()
+                .position(|candidate| candidate.source_id == season)
+                .expect("Doubling Season is among the replacements to order");
+            if persist {
+                runner = restore(runner);
+            }
+            runner.act(GameAction::ChooseReplacement { index }).unwrap();
+        }
+        // Count Where Ancients Tread's triggers: each asks for its target, then for its "may".
+        let mut triggers = 0;
+        for _ in 0..12 {
+            match &runner.state().waiting_for {
+                WaitingFor::TriggerTargetSelection { .. } => {
+                    triggers += 1;
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(TargetRef::Player(P1)),
+                        })
+                        .unwrap();
+                }
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: true })
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        assert!(runner.state().stack.is_empty());
+        (prompts, triggers, runner, coffin)
+    }
+
+    /// CR 603.6a + CR 603.10 + CR 608.2c: the Coffin's token instruction completes before its
+    /// "put a bloodline counter" instruction, and the counters transform the Coffin into Edgar,
+    /// Charmed Groom, who gives the Vampires +1/+1 afterwards. The Vampires entered as 4/4s, so
+    /// Where Ancients Tread ("power 5 or greater") sees neither entry. Control: under Glorious
+    /// Anthem they enter as 5/5s and it sees both.
+    #[test]
+    fn a_phase_triggers_later_instruction_does_not_change_what_its_entries_match() {
+        for persist in [false, true] {
+            let life = 20;
+            let (prompts, triggers, runner, _) = coffin_vampires_trigger_count(true, persist);
+            assert_eq!(
+                prompts, 2,
+                "one order prompt per Vampire (restore: {persist})"
+            );
+            assert_eq!(
+                triggers, 2,
+                "positive control: both 5/5 entrants trigger Where Ancients Tread (restore: {persist})"
+            );
+            assert_eq!(runner.life(P1), life - 10, "restore: {persist}");
+            let (prompts, triggers, runner, coffin) = coffin_vampires_trigger_count(false, persist);
+            assert_eq!(
+                prompts, 2,
+                "one order prompt per Vampire (restore: {persist})"
+            );
+            assert_eq!(
+                triggers, 0,
+                "the Vampires entered as 4/4s (restore: {persist})"
+            );
+            assert_eq!(runner.life(P1), life, "restore: {persist}");
+            // Reach guards: the Coffin did transform, so the final board does read 5/5.
+            assert_eq!(runner.state().objects[&coffin].name, "Edgar, Charmed Groom");
+            let powers: Vec<_> = runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| object.is_token && object.name == "Vampire")
+                .map(|object| object.power)
+                .collect();
+            assert_eq!(powers, vec![Some(5), Some(5)], "restore: {persist}");
+        }
+    }
+
+    /// The captured game at the pause between two co-entrants of the four-token
+    /// Body Double batch (Doubling Season, Parallel Lives), with `tamper` applied to the
+    /// state before it is persisted. Returns the restore's verdict.
+    fn restore_after_tampering_at_the_pause(
+        tamper: impl FnOnce(&mut engine::types::game_state::GameState),
+    ) -> Result<(), String> {
+        use engine::types::game_state::PersistedGameState;
+        let (mut scenario, feldon) = setup();
+        scenario.add_enchantment_from_oracle(P0, "Doubling Season", SEASON);
+        scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        let body_double = scenario
+            .add_creature_to_graveyard(P0, "Body Double", 0, 0)
+            .with_subtypes(vec!["Shapeshifter"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 4,
+            })
+            .from_oracle_text(BODY_DOUBLE)
+            .id();
+        let triskelion = graveyard_triskelion(&mut scenario);
+        let mut runner = scenario.build();
+        enter_first_copy_before_second_offer(&mut runner, feldon, body_double, triskelion, scales);
+        let mut state = runner.state().clone();
+        assert_eq!(
+            state.unsettled_entry_batch_events.len(),
+            1,
+            "reach guard: the first entrant is held at the pause"
+        );
+        tamper(&mut state);
+        let wire = serde_json::to_value(PersistedGameState::capture(state)).unwrap();
+        serde_json::from_value::<PersistedGameState>(wire)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    /// CR 603.6a + CR 608.2c: a restored game cannot be handed completion metadata or a held
+    /// entry list that would release unfinished entries early or collect one twice. The
+    /// instruction-boundary marks must lie within the ledger and the held entries must be
+    /// distinct, so the restore refuses them instead of resuming the batch.
+    #[test]
+    fn a_restore_at_the_pause_refuses_forged_entry_hold_metadata() {
+        restore_after_tampering_at_the_pause(|_| {})
+            .expect("positive control: the untampered pause restores");
+        let error = restore_after_tampering_at_the_pause(|state| {
+            state.instruction_boundary_marks = vec![1_000_000];
+        })
+        .expect_err("a mark past the ledger is refused");
+        assert!(error.contains("instruction_boundary_marks"), "{error}");
+        let error = restore_after_tampering_at_the_pause(|state| {
+            let held = state.unsettled_entry_batch_events[0].clone();
+            state.unsettled_entry_batch_events.push(held);
+        })
+        .expect_err("a duplicated held entry is refused");
+        assert!(error.contains("holds one entry twice"), "{error}");
+        let error = restore_after_tampering_at_the_pause(|state| {
+            if let GameEvent::ZoneChanged { from, .. } = &mut state.unsettled_entry_batch_events[0]
+            {
+                *from = Some(Zone::Graveyard);
+            }
+        })
+        .expect_err("a held entry whose origin disagrees with its record is refused");
+        assert!(error.contains("disagrees with its own record"), "{error}");
+    }
+
+    /// Soul Warden's life gain for the four-token Body Double batch (Doubling Season, Parallel
+    /// Lives) whose first three tokens copy Triskelion and whose fourth copies Hushbringer. The
+    /// game is saved at the pause after the first token entered, `tamper` is applied to the saved
+    /// state, and the game is restored through the persisted-state reader. Returns the life
+    /// gained and the instruction marks the restore kept.
+    fn four_token_hushbringer_last_life(
+        tamper: impl FnOnce(&mut engine::types::game_state::GameState),
+    ) -> (i32, Vec<usize>) {
+        use engine::types::game_state::{PersistedGameState, PersistedRestoreFinalization};
+        let (mut scenario, feldon) = setup();
+        scenario.add_enchantment_from_oracle(P0, "Doubling Season", SEASON);
+        scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        let body_double = scenario
+            .add_creature_to_graveyard(P0, "Body Double", 0, 0)
+            .with_subtypes(vec!["Shapeshifter"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 4,
+            })
+            .from_oracle_text(BODY_DOUBLE)
+            .id();
+        let triskelion = graveyard_triskelion(&mut scenario);
+        let hushbringer = graveyard_hushbringer(&mut scenario);
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        let mut runner = scenario.build();
+        let life = runner.life(P0);
+        enter_first_copy_before_second_offer(&mut runner, feldon, body_double, triskelion, scales);
+        let mut state = runner.state().clone();
+        assert_eq!(
+            state.unsettled_entry_batch_events.len(),
+            1,
+            "reach guard: the first entrant is held at the pause"
+        );
+        tamper(&mut state);
+        let wire = serde_json::to_value(PersistedGameState::capture(state)).unwrap();
+        let state = serde_json::from_value::<PersistedGameState>(wire)
+            .expect("the save restores")
+            .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+            .unwrap()
+            .finalize_after_rehydration(|_| Ok(()))
+            .unwrap();
+        let marks = state.instruction_boundary_marks.clone();
+        let mut runner = GameRunner::from_state(state);
+        for entered in 2..=3 {
+            let (token, _) = choose_copy(&mut runner, triskelion);
+            choose_token_counter_order(&mut runner, token, scales);
+            // The batch is unfinished: every entrant so far is still held, none matched.
+            assert_eq!(
+                runner.state().unsettled_entry_batch_events.len(),
+                entered,
+                "entries held while the fourth token is still to come"
+            );
+            assert!(runner.state().deferred_triggers.is_empty());
+            assert_eq!(
+                runner.life(P0),
+                life,
+                "nothing is matched before the batch ends"
+            );
+        }
+        choose_copy(&mut runner, hushbringer);
+        assert_token_entry_complete(&mut runner);
+        assert_eq!(
+            runner.state().objects[&hushbringer].zone,
+            Zone::Graveyard,
+            "the donor card stays in the graveyard"
+        );
+        (runner.life(P0) - life, marks)
+    }
+
+    /// CR 603.6a: a saved instruction mark is a ledger position, not proof that the instruction
+    /// below it completed. A save taken while the first of four co-entrants is held, with the
+    /// current ledger length appended as a mark, restores with that mark withheld: the held entry
+    /// still waits for the fourth token, Hushbringer ("Creatures entering and dying don't cause
+    /// abilities to trigger."), and Soul Warden gains nothing, exactly as in the untouched save.
+    #[test]
+    fn a_restored_completion_mark_cannot_release_a_held_entry_early() {
+        let (gained, marks) = four_token_hushbringer_last_life(|_| {});
+        assert_eq!(gained, 0, "control: the untouched save");
+        let valid_marks = marks;
+        let (gained, marks) = four_token_hushbringer_last_life(|state| {
+            let ledger_len = state.zone_changes_this_turn.len();
+            assert!(state
+                .instruction_boundary_marks
+                .last()
+                .is_none_or(|mark| *mark < ledger_len));
+            state.instruction_boundary_marks.push(ledger_len);
+        });
+        assert_eq!(
+            gained, 0,
+            "the held entry was not released before Hushbringer"
+        );
+        assert_eq!(marks, valid_marks, "the forged mark is not restored");
+    }
+
+    const GRISMOLD: &str = "Trample\nAt the beginning of your end step, each player creates a 1/1 green Plant creature token.\nWhenever a creature token dies, put a +1/+1 counter on Grismold.";
+    const IMPOSING_SOVEREIGN: &str = "Creatures your opponents control enter tapped.";
+    const MENTOR_OF_THE_MEEK: &str = "Whenever another creature you control with power 2 or less enters, you may pay {1}. If you do, draw a card.";
+    const ARCHELOS: &str = "As long as Archelos is tapped, other permanents enter tapped.\nAs long as Archelos is untapped, other permanents enter untapped.";
+
+    /// Grismold, the Dreadsower's end-step trigger with Imposing Sovereign and an untapped
+    /// Archelos, Lagoon Mystic under the active player's control: each opponent's Plant has two
+    /// competing tap-state replacements to order, the active player's has none. Soul Warden
+    /// watches every Plant; Mentor of the Meek watches the active player's, a 2/2 under
+    /// Glorious Anthem. Returns the ordering prompts, the entries held at each ordering prompt,
+    /// the life Soul Warden gained and the number of Mentor of the Meek triggers.
+    fn grismold_plants_held(players: u8, persist: bool) -> (usize, Vec<usize>, i32, usize) {
+        let mut scenario = GameScenario::new_n_player(players, 42);
+        scenario.at_phase(Phase::PostCombatMain);
+        for player in (0..players).map(PlayerId) {
+            scenario.with_library_top(player, &["Plains", "Island", "Swamp", "Mountain"]);
+        }
+        scenario
+            .add_creature_from_oracle(P0, "Grismold, the Dreadsower", 3, 3, GRISMOLD)
+            .as_legendary()
+            .with_subtypes(vec!["Troll", "Shaman"]);
+        scenario
+            .add_creature_from_oracle(P0, "Imposing Sovereign", 2, 1, IMPOSING_SOVEREIGN)
+            .with_subtypes(vec!["Human", "Noble"]);
+        scenario
+            .add_creature_from_oracle(P0, "Archelos, Lagoon Mystic", 2, 4, ARCHELOS)
+            .as_legendary()
+            .with_subtypes(vec!["Turtle", "Shaman"]);
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        let mentor = scenario
+            .add_creature_from_oracle(P0, "Mentor of the Meek", 2, 2, MENTOR_OF_THE_MEEK)
+            .with_subtypes(vec!["Human", "Soldier"])
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Glorious Anthem", GLORIOUS_ANTHEM);
+        let mut runner = scenario.build();
+        let life = runner.life(P0);
+        let mut mentor_triggers = std::collections::HashSet::new();
+        // Every player passes in turn: the end step begins.
+        for _ in 0..players {
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert_eq!(runner.state().phase, Phase::End);
+        assert_eq!(runner.state().stack.len(), 1, "Grismold's trigger");
+        let mut orders = 0;
+        let mut held_at_orders = Vec::new();
+        for _ in 0..60 {
+            if persist && !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                runner = restore(runner);
+            }
+            match &runner.state().waiting_for {
+                WaitingFor::ReplacementChoice { player, .. } => {
+                    assert_ne!(*player, P0, "only the opponents' Plants have an order");
+                    orders += 1;
+                    held_at_orders.push(runner.state().unsettled_entry_batch_events.len());
+                    assert!(
+                        runner.state().deferred_triggers.is_empty(),
+                        "nothing is matched while a seat's Plant is still to enter"
+                    );
+                    runner
+                        .act(GameAction::ChooseReplacement { index: 0 })
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. }
+                    if runner.state().stack.is_empty()
+                        && runner.state().deferred_triggers.is_empty() =>
+                {
+                    break
+                }
+                WaitingFor::OptionalEffectChoice { source_id, .. } => {
+                    assert_eq!(*source_id, mentor, "only Mentor of the Meek asks");
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: false })
+                        .unwrap();
+                }
+                WaitingFor::Priority { .. } => {
+                    mentor_triggers.extend(
+                        runner
+                            .state()
+                            .stack
+                            .iter()
+                            .filter(|entry| entry.source_id == mentor)
+                            .map(|entry| entry.id),
+                    );
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        let plants = |controller: PlayerId| {
+            runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| {
+                    object.is_token
+                        && object.zone == Zone::Battlefield
+                        && object.name == "Plant"
+                        && object.controller == controller
+                })
+                .count()
+        };
+        for player in (0..players).map(PlayerId) {
+            assert_eq!(plants(player), 1, "each player created a Plant");
+        }
+        let own_plant_power = runner
+            .state()
+            .objects
+            .values()
+            .find(|object| object.is_token && object.name == "Plant" && object.controller == P0)
+            .and_then(|object| object.power);
+        assert_eq!(own_plant_power, Some(2), "a 2/2 under Glorious Anthem");
+        (
+            orders,
+            held_at_orders,
+            runner.life(P0) - life,
+            mentor_triggers.len(),
+        )
+    }
+
+    /// CR 603.6a + CR 101.4: "each player creates a 1/1 green Plant creature token" is one
+    /// simultaneous event, although each opponent orders their Plant's tap-state replacements
+    /// in turn. In a three-player game the active player's Plant and the first opponent's are
+    /// both still held, with nothing matched (neither Soul Warden nor Mentor of the Meek), at
+    /// the second opponent's prompt. Once the cohort is complete Soul Warden gains 1 life for
+    /// each Plant and Mentor of the Meek ("power 2 or less") triggers once for the active
+    /// player's 2/2 Plant. Control: with one opponent there is one order.
+    #[test]
+    fn resumed_seat_legs_keep_one_simultaneous_entry_event() {
+        for persist in [false, true] {
+            assert_eq!(
+                grismold_plants_held(3, persist),
+                (2, vec![1, 2], 3, 1),
+                "the earlier Plants wait for the last (restore: {persist})"
+            );
+            assert_eq!(
+                grismold_plants_held(2, persist),
+                (1, vec![1], 2, 1),
+                "control: one opponent (restore: {persist})"
+            );
+        }
+    }
+
+    const CRAFTY_CUTPURSE: &str = "Flash\nWhen this creature enters, each token that would be created under an opponent's control this turn is created under your control instead.";
+    const JETMIR: &str = "Creatures you control get +1/+0 and have vigilance as long as you control three or more creatures.\nCreatures you control also get +1/+0 and have trample as long as you control six or more creatures.\nCreatures you control also get +1/+0 and have double strike as long as you control nine or more creatures.";
+    const ILLNESS_IN_THE_RANKS: &str = "Creature tokens get -1/-1.";
+    const SPIDERSILK_ARMOR: &str =
+        "Creatures you control get +0/+1 and have reach. (They can block creatures with flying.)";
+    const ORB_OF_DREAMS: &str = "Permanents enter tapped.";
+
+    /// Grismold, the Dreadsower's end-step trigger in a three-player game after the active
+    /// player resolved Crafty Cutpurse this turn, so every seat's Plant is created under the
+    /// active player's control. Orb of Dreams and an untapped Archelos, Lagoon Mystic give each
+    /// Plant two tap-state replacements to order. Jetmir, Nexus of Revels gives the active
+    /// player's creatures +1/+0 at three, six and nine creatures; Illness in the Ranks and
+    /// Spidersilk Armor make a Plant a 0/1 before Jetmir. With `fillers` other creatures the
+    /// active player controls `5 + fillers` creatures before the Plants. Returns the ordering
+    /// prompts, each Plant's final power and the number of Mentor of the Meek triggers.
+    fn grismold_cutpurse_mentor(fillers: usize, persist: bool) -> (usize, Vec<Option<i32>>, usize) {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PostCombatMain);
+        for player in (0..3).map(PlayerId) {
+            scenario.with_library_top(player, &["Plains", "Island", "Swamp", "Mountain"]);
+        }
+        scenario
+            .add_creature_from_oracle(P0, "Grismold, the Dreadsower", 3, 3, GRISMOLD)
+            .as_legendary()
+            .with_subtypes(vec!["Troll", "Shaman"]);
+        scenario
+            .add_creature_from_oracle(P0, "Archelos, Lagoon Mystic", 2, 4, ARCHELOS)
+            .as_legendary()
+            .with_subtypes(vec!["Turtle", "Shaman"]);
+        scenario
+            .add_creature_from_oracle(P0, "Jetmir, Nexus of Revels", 5, 4, JETMIR)
+            .as_legendary()
+            .with_subtypes(vec!["Cat", "Demon"]);
+        let mentor = scenario
+            .add_creature_from_oracle(P0, "Mentor of the Meek", 2, 2, MENTOR_OF_THE_MEEK)
+            .with_subtypes(vec!["Human", "Soldier"])
+            .id();
+        for _ in 0..fillers {
+            // Grizzly Bears: a vanilla 2/2.
+            scenario.add_creature(P0, "Grizzly Bears", 2, 2);
+        }
+        scenario.add_artifact_from_oracle(P0, "Orb of Dreams", ORB_OF_DREAMS);
+        scenario.add_enchantment_from_oracle(P0, "Illness in the Ranks", ILLNESS_IN_THE_RANKS);
+        scenario.add_enchantment_from_oracle(P0, "Spidersilk Armor", SPIDERSILK_ARMOR);
+        let cutpurse = scenario
+            .add_creature_to_hand_from_oracle(P0, "Crafty Cutpurse", 2, 2, CRAFTY_CUTPURSE)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        // Crafty Cutpurse resolves, then its enters trigger: tokens are redirected this turn.
+        // Its own entry orders the same two tap-state replacements.
+        runner.cast(cutpurse).resolve();
+        for _ in 0..12 {
+            match &runner.state().waiting_for {
+                WaitingFor::ReplacementChoice { .. } => {
+                    runner
+                        .act(GameAction::ChooseReplacement { index: 0 })
+                        .unwrap();
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        assert_eq!(runner.state().objects[&cutpurse].zone, Zone::Battlefield);
+        assert_eq!(runner.state().phase, Phase::PostCombatMain);
+        // Every player passes in turn: the end step begins.
+        for _ in 0..3 {
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert_eq!(runner.state().phase, Phase::End);
+        assert_eq!(runner.state().stack.len(), 1, "Grismold's trigger");
+        let mut orders = 0;
+        let mut mentor_triggers = std::collections::HashSet::new();
+        for _ in 0..60 {
+            if persist && !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                runner = restore(runner);
+            }
+            match &runner.state().waiting_for {
+                WaitingFor::ReplacementChoice { .. } => {
+                    orders += 1;
+                    runner
+                        .act(GameAction::ChooseReplacement { index: 0 })
+                        .unwrap();
+                }
+                WaitingFor::OptionalEffectChoice { source_id, .. } => {
+                    assert_eq!(*source_id, mentor, "only Mentor of the Meek asks");
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: false })
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. }
+                    if runner.state().stack.is_empty()
+                        && runner.state().deferred_triggers.is_empty() =>
+                {
+                    break
+                }
+                WaitingFor::Priority { .. } => {
+                    mentor_triggers.extend(
+                        runner
+                            .state()
+                            .stack
+                            .iter()
+                            .filter(|entry| entry.source_id == mentor)
+                            .map(|entry| entry.id),
+                    );
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        let powers: Vec<_> = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.is_token
+                    && object.zone == Zone::Battlefield
+                    && object.name == "Plant"
+                    && object.controller == P0
+            })
+            .map(|object| object.power)
+            .collect();
+        (orders, powers, mentor_triggers.len())
+    }
+
+    /// CR 603.6a + CR 611.3c + CR 101.4: the three Plants of "each player creates a 1/1 green
+    /// Plant creature token" enter as one event, each after its own ordering prompt. With six
+    /// other creatures the active player controls seven and eight creatures while the cohort is
+    /// partial (a Plant is a 2/1 under Jetmir) and nine once it is complete (a 3/1), so Mentor of
+    /// the Meek ("power 2 or less") triggers for none of them. Control: with five other
+    /// creatures the completed cohort leaves each Plant a 2/1 and Mentor triggers for all three.
+    #[test]
+    fn resumed_seat_legs_match_the_completed_cohorts_power() {
+        for persist in [false, true] {
+            assert_eq!(
+                grismold_cutpurse_mentor(1, persist),
+                (3, vec![Some(3); 3], 0),
+                "the completed cohort's Plants are 3/1s (restore: {persist})"
+            );
+            assert_eq!(
+                grismold_cutpurse_mentor(0, persist),
+                (3, vec![Some(2); 3], 3),
+                "control: the completed cohort's Plants are 2/1s (restore: {persist})"
+            );
+        }
+    }
+
+    const SECRETS_OF_THE_KEY: &str = "Investigate. If this spell was cast from a graveyard, investigate twice instead. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")\nFlashback {3}{U}";
+
+    /// Mister Fantastic's "Whenever one or more tokens you control enter, you may draw a card."
+    /// prompts for one spell cast with four blue mana: Secrets of the Key from the graveyard
+    /// (flashback), or Raise the Alarm from hand. Returns (prompts, tokens that entered).
+    fn fantastic_triggers_for(flashback_secrets: bool) -> (usize, usize) {
+        use engine::types::game_state::CastingVariant;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario.with_mana_pool(
+            P0,
+            (0..4)
+                .map(|index| {
+                    ManaUnit::new(
+                        if flashback_secrets || index > 0 {
+                            ManaType::Blue
+                        } else {
+                            ManaType::White
+                        },
+                        ObjectId(0),
+                        false,
+                        vec![],
+                    )
+                })
+                .collect(),
+        );
+        let fantastic = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Mister Fantastic, Reed Richards",
+                2,
+                4,
+                MISTER_FANTASTIC,
+            )
+            .as_legendary()
+            .id();
+        let spell = if flashback_secrets {
+            scenario
+                .add_spell_to_graveyard(P0, "Secrets of the Key", true)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 0,
+                })
+                .from_oracle_text(SECRETS_OF_THE_KEY)
+                .id()
+        } else {
+            scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Raise the Alarm",
+                    true,
+                    "Create two 1/1 white Soldier creature tokens.",
+                )
+                .id()
+        };
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("cast the spell");
+        let mut prompts = 0;
+        for _ in 0..40 {
+            match &runner.state().waiting_for {
+                WaitingFor::CastingVariantChoice { options, .. } => {
+                    let index = options
+                        .iter()
+                        .position(|option| option.variant == CastingVariant::Flashback)
+                        .expect("flashback is offered");
+                    runner
+                        .act(GameAction::ChooseCastingVariant { index })
+                        .unwrap();
+                }
+                WaitingFor::OptionalEffectChoice { source_id, .. } => {
+                    assert_eq!(*source_id, fantastic);
+                    prompts += 1;
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: false })
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        assert!(runner.state().deferred_triggers.is_empty());
+        if flashback_secrets {
+            assert_eq!(
+                runner.state().objects[&spell].zone,
+                Zone::Exile,
+                "the spell was cast with flashback"
+            );
+        }
+        let tokens = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| object.is_token && object.zone == Zone::Battlefield)
+            .count();
+        (prompts, tokens)
+    }
+
+    /// CR 608.2c + CR 701.16a: Secrets of the Key cast from a graveyard investigates twice, two
+    /// successive "Create a Clue token" actions with no pause between them, so Mister Fantastic's
+    /// "one or more tokens" ability triggers once for each. Control: Raise the Alarm creates its
+    /// two Soldiers in one instruction, one trigger.
+    #[test]
+    fn unpaused_repeated_keyword_actions_are_separate_entry_events() {
+        assert_eq!(
+            fantastic_triggers_for(true),
+            (2, 2),
+            "investigate twice: two Clues, two entry events"
+        );
+        assert_eq!(
+            fantastic_triggers_for(false),
+            (1, 2),
+            "control: two Soldiers created together, one entry event"
+        );
     }
 
     #[test]

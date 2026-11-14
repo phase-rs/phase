@@ -35,6 +35,7 @@ use crate::types::keywords::WardCost;
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::phase::Phase;
 use crate::types::player::{Player, PlayerCounterKind, PlayerId};
+use crate::types::proposed_event::ProposedEvent;
 use crate::types::resolved_commands::{
     ResolvedDelayedTriggerCommand, ResolvedDelayedTriggerReplayInvariantError,
     ResolvedTriggerCollection, ResolvedTriggerCollectionCommand,
@@ -3901,6 +3902,84 @@ fn battlefield_entry_observation_indices(
     boundaries
 }
 
+/// CR 603.6a: the ledger index of each entrant's LAST battlefield entry in `events`, for the
+/// entries recorded on this turn's ledger. It identifies the instruction that put the entrant
+/// onto the battlefield ([`GameState::instruction_of_zone_change`]).
+fn battlefield_entry_ledger_indices(
+    state: &GameState,
+    events: &[GameEvent],
+) -> std::collections::HashMap<ObjectId, usize> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                record,
+                ..
+            } if record.recorded_turn_number == state.turn_number => {
+                Some((*object_id, record.turn_zone_change_index))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 603.6a: "each time an event puts one or more permanents onto the battlefield, all
+/// permanents on the battlefield (including the newcomers) are checked for any
+/// enters-the-battlefield triggers that match the event." Entrants of one instruction are one
+/// event, so a newcomer observes the entry of a co-entrant even when its own entry record comes
+/// later in the batch: the positional lifetime guard
+/// ([`live_battlefield_source_was_present_at_event`]) separates events that happened in order
+/// (issue #8160), not the entries of one simultaneous event.
+fn source_enters_with_event(
+    state: &GameState,
+    event: &GameEvent,
+    source_id: ObjectId,
+    entry_ledger_index: &std::collections::HashMap<ObjectId, usize>,
+) -> bool {
+    let GameEvent::ZoneChanged {
+        to: Zone::Battlefield,
+        record,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    if record.recorded_turn_number != state.turn_number {
+        return false;
+    }
+    // Only a cohort that included an entry held across answers: an entry that was never held
+    // keeps the positional lifetime guard.
+    if !state
+        .released_entry_rows
+        .contains(&record.turn_zone_change_index)
+    {
+        return false;
+    }
+    entry_ledger_index
+        .get(&source_id)
+        .is_some_and(|source_entry| {
+            state.instruction_of_zone_change(record.turn_zone_change_index)
+                == state.instruction_of_zone_change(*source_entry)
+        })
+}
+
+/// CR 113.6 + CR 603.2 + CR 603.6a: could the live battlefield source `source_id` observe
+/// `events[event_idx]`: it was on the battlefield when the event happened, or it entered in the
+/// same simultaneous entry event.
+fn battlefield_source_observes_event(
+    state: &GameState,
+    event_idx: usize,
+    events: &[GameEvent],
+    source_id: ObjectId,
+    battlefield_entry_index: &std::collections::HashMap<ObjectId, usize>,
+    entry_ledger_index: &std::collections::HashMap<ObjectId, usize>,
+) -> bool {
+    live_battlefield_source_was_present_at_event(event_idx, source_id, battlefield_entry_index)
+        || source_enters_with_event(state, &events[event_idx], source_id, entry_ledger_index)
+}
+
 fn storm_copy_count_before_cast(state: &GameState) -> i32 {
     state
         .spells_cast_this_turn_by_player
@@ -5350,6 +5429,7 @@ fn collect_pending_triggers_with_collection(
     // retroactively "sees" a sacrifice/etc. that occurred earlier in the same
     // chain, before it was there to observe it (issue #8160).
     let battlefield_entry_index = battlefield_entry_observation_indices(events);
+    let entry_ledger_index = battlefield_entry_ledger_indices(state, events);
     // CR 603.10a: built on the first co-departure group this pass sees.
     let mut co_departure_index: Option<CoDepartureObserverIndex> = None;
 
@@ -5404,10 +5484,13 @@ fn collect_pending_triggers_with_collection(
 
         // Scan candidate permanents for matching triggers
         for obj_id in candidates.iter().copied() {
-            if !live_battlefield_source_was_present_at_event(
+            if !battlefield_source_observes_event(
+                state,
                 event_idx,
+                events,
                 obj_id,
                 &battlefield_entry_index,
+                &entry_ledger_index,
             ) {
                 continue;
             }
@@ -5893,10 +5976,13 @@ fn collect_pending_triggers_with_collection(
                     .map(|(id, _)| *id)
                     .collect();
                 for obj_id in shadow_population {
-                    if !live_battlefield_source_was_present_at_event(
+                    if !battlefield_source_observes_event(
+                        state,
                         event_idx,
+                        events,
                         obj_id,
                         &battlefield_entry_index,
+                        &entry_ledger_index,
                     ) {
                         continue;
                     }
@@ -9546,21 +9632,462 @@ pub(crate) fn park_observer_triggers_if_paused(
     events: &mut Vec<GameEvent>,
     slice_start: usize,
 ) {
+    park_observer_triggers_if_paused_matching(
+        state,
+        events,
+        slice_start,
+        |_| true,
+        DelayedObservers::Collect,
+    );
+}
+
+/// CR 603.2 + CR 603.6a + CR 616.1f: the park for a replacement or copy-choice
+/// answer that pauses on the next prompt. Only this answer's battlefield entries
+/// are scanned: the replacement handler's inner discard collectors already own
+/// its `Discarded` events, and queued-context witnesses deduplicate only zone
+/// changes, so a whole-slice pass here would collect those observers twice.
+///
+/// The entries are not matched here while their entering instruction is still
+/// suspended: [`settle_entry_batch_scan`] holds them until it has completed.
+pub(crate) fn park_entry_observer_triggers_if_paused(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    slice_start: usize,
+) {
+    park_observer_triggers_if_paused_matching(
+        state,
+        events,
+        slice_start,
+        is_battlefield_entry,
+        DelayedObservers::Skip,
+    );
+}
+
+/// CR 603.2 + CR 603.6a + CR 702.104a + CR 303.4f: the entry collector for an
+/// answer handler that returns its result directly, bypassing
+/// `run_post_action_pipeline` (the Tribute answer, which is what puts the
+/// creature onto the battlefield, and the Aura-host answer, which does the same
+/// for an entering Aura, token or card). Only this answer's battlefield entries,
+/// filtered as [`park_entry_observer_triggers_if_paused`] filters them; once the
+/// action has settled they are queued and the deferred queue is drained, as
+/// [`collect_and_drain_observer_triggers_if_settled`] drains it.
+pub(crate) fn collect_and_drain_entry_observer_triggers_if_settled(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    slice_start: usize,
+) {
+    if triggered_mana_sidecar_owns_local_collection(state) {
+        return;
+    }
+    collect_answer_slice_matching(
+        state,
+        events,
+        slice_start,
+        is_battlefield_entry,
+        DelayedObservers::Skip,
+    );
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && !state.deferred_triggers.is_empty()
+    {
+        let _ = drain_deferred_trigger_queue(state, events);
+    }
+}
+
+fn is_battlefield_entry(event: &GameEvent) -> bool {
+    matches!(
+        event,
+        GameEvent::ZoneChanged {
+            to: Zone::Battlefield,
+            ..
+        }
+    )
+}
+
+fn park_observer_triggers_if_paused_matching(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    slice_start: usize,
+    keep: impl Fn(&GameEvent) -> bool,
+    delayed: DelayedObservers,
+) {
     if triggered_mana_sidecar_owns_local_collection(state) {
         return;
     }
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         return;
     }
+    collect_answer_slice_matching(state, events, slice_start, keep, delayed);
+}
+
+/// The slice an answer emitted, minus what a live announcement owns and what
+/// another collector already queued, narrowed by `keep`, through the action-end
+/// collector (and so the entry gate).
+fn collect_answer_slice_matching(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    slice_start: usize,
+    keep: impl Fn(&GameEvent) -> bool,
+    delayed: DelayedObservers,
+) {
+    // A resumed simultaneous move can hand back a buffer the batch drain has
+    // already taken into its pending frame, leaving events shorter than the
+    // anchor captured before the answer ran (zone_pipeline::drain_pending_batch_deliveries).
+    if slice_start >= events.len() {
+        return;
+    }
     // CR 601.2h + CR 602.2b + CR 603.3: under a live announcement these events
     // wait in its carrier; only the span it does not own is parked here.
     let owned = super::announcement_triggers::take_inline_trigger_span(state, events, slice_start);
-    collect_unclaimed_ordinary_observers(state, &events[..owned.end], slice_start);
-    // CR 603.7 + CR 603.3: an action that pauses here is not scanned by the
-    // post-action pipeline, and the answer runs on a new event buffer, so a
-    // delayed trigger watching these events ("When that creature dies this
-    // turn") is collected now, by the paused-exit collector's delayed half.
-    collect_unclaimed_delayed_observers(state, &events[..owned.end], slice_start);
+    let slice = &events[..owned.end.min(events.len())];
+    collect_unclaimed_ordinary_observers_matching(
+        state,
+        slice,
+        slice_start,
+        keep,
+        ObserverCollection::ThroughEntryGate,
+    );
+    match delayed {
+        DelayedObservers::Collect => {
+            // CR 603.7 + CR 603.3: an action that pauses here is not scanned by the
+            // post-action pipeline, and the answer runs on a new event buffer, so a
+            // delayed trigger watching these events ("When that creature dies this
+            // turn") is collected now, by the paused-exit collector's delayed half.
+            collect_unclaimed_delayed_observers(state, slice, slice_start);
+        }
+        DelayedObservers::Skip => {}
+    }
+}
+
+/// Whether an answer's paused collection also queues the delayed triggers watching its events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DelayedObservers {
+    /// Every paused observer park: the delayed half is collected beside the ordinary one.
+    Collect,
+    /// The entry-only collectors of the replacement, copy-choice, Tribute and Aura-host
+    /// answers: they own battlefield entries only, as before.
+    Skip,
+}
+
+/// CR 603.2 + CR 603.3b + CR 603.6a: the collect-only seam for a handler that
+/// collects its own slice as its action pauses or settles, instead of leaving
+/// it to the post-action scan. Battlefield entries pass the entry gate first
+/// ([`settle_entry_batch_scan`]); everything else is queued exactly as
+/// [`collect_triggers_into_deferred`] queues it.
+///
+/// The gate reads the action's wait (`state.waiting_for`) to decide whether the
+/// action has settled, so the caller must have installed the wait it is about to
+/// return: entries are held only while that wait is not `Priority`, and are
+/// released by the first collector that runs once it is.
+pub(crate) fn collect_action_end_triggers_into_deferred(
+    state: &mut GameState,
+    events: &[GameEvent],
+) {
+    if action_has_settled(state) && state.unsettled_entry_batch_events.is_empty() {
+        collect_triggers_into_deferred(state, events);
+        return;
+    }
+    let scan = settle_entry_batch_scan(state, events.to_vec());
+    collect_triggers_into_deferred(state, &scan);
+}
+
+/// CR 603.6a + CR 603.6b + CR 611.3c + CR 603.2c: the entry event of an instruction that was
+/// held across answers is matched when the instruction completes, against the board it left,
+/// not after the later instructions of the same resolution have changed which permanents
+/// observe or suppress it. The whole event is collected once: the held entries and the entries
+/// of the same instruction in `events` (ledger rows `first_row..` below the new instruction
+/// mark). Those in `events` are claimed for ordinary collectors, so the action's own scan does
+/// not collect them again, while delayed triggers keep their view of them (CR 603.7). The
+/// triggers are queued, not put on the stack: that waits for a player to receive priority
+/// (CR 603.3b). An instruction whose entries were never held is left to the action's scan, as
+/// it is for every other resolution (`CompletedEntryCollection::HeldInstruction`), unless the
+/// boundary separates two performances of a repeated keyword action
+/// (`CompletedEntryCollection::Occurrence`): those are successive entry events (CR 608.2c), so
+/// the completed one is collected here whether or not it was held, and the action's one scan
+/// cannot batch it with the next.
+pub(crate) fn collect_completed_entry_instruction(
+    state: &mut GameState,
+    events: &[GameEvent],
+    first_row: usize,
+    collection: CompletedEntryCollection,
+) {
+    let held = std::mem::take(&mut state.unsettled_entry_batch_events);
+    match collection {
+        CompletedEntryCollection::HeldInstruction if held.is_empty() => return,
+        CompletedEntryCollection::HeldInstruction | CompletedEntryCollection::Occurrence => {}
+    }
+    let completed_through = state.completed_instruction_ledger_len();
+    let held_keys: Vec<_> = held.iter().filter_map(battlefield_entry_key).collect();
+    let mut scan = held;
+    let mut claims = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        let Some(key) = battlefield_entry_key(event) else {
+            continue;
+        };
+        let (turn, row, _) = key;
+        if turn == state.turn_number
+            && (first_row..completed_through).contains(&row)
+            && !held_keys.contains(&key)
+        {
+            scan.push(event.clone());
+            claims.push(ConsumedTriggerEventOccurrence {
+                event: event.clone(),
+                occurrence: trigger_event_occurrence(events, index),
+                scope: ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+            });
+        }
+    }
+    if scan.is_empty() {
+        return;
+    }
+    note_released_entry_cohorts(state, &scan, &held_keys);
+    collect_triggers_into_deferred(state, &scan);
+    resolve_and_apply_trigger_collection(
+        state,
+        ResolvedTriggerCollection::ConsumeBeforePriority {
+            occurrences: claims,
+        },
+    )
+    .expect("an entry-instruction claim must have a live journal cause");
+}
+
+/// Which completed entering instructions an instruction boundary collects itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompletedEntryCollection {
+    /// Only an instruction whose entries were held across answers.
+    HeldInstruction,
+    /// CR 608.2c: a completed performance of a repeated keyword action, held or not.
+    Occurrence,
+}
+
+/// CR 603.6a: the ledger identity of a battlefield-entry occurrence. The row
+/// index rather than full event equality, as in
+/// `zones::settle_battlefield_entry_observations`, so later record stamping
+/// cannot make one entry look like two.
+fn battlefield_entry_key(event: &GameEvent) -> Option<(u32, usize, ObjectId)> {
+    match event {
+        GameEvent::ZoneChanged {
+            object_id,
+            to: Zone::Battlefield,
+            record,
+            ..
+        } => Some((
+            record.recorded_turn_number,
+            record.turn_zone_change_index,
+            *object_id,
+        )),
+        _ => None,
+    }
+}
+
+/// CR 117.5 + CR 614.12a + CR 616.1f: has the action settled? `Priority` with no
+/// replacement parked is the complement of "any pause", so no prompt shape is
+/// enumerated, as in `effects::token::realize_settled_token_battlefield_entry`.
+/// `pending_replacement` is read as a field because the record is parked before
+/// its wait is installed (see `engine_priority::run_post_action_pipeline`).
+fn action_has_settled(state: &GameState) -> bool {
+    matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.pending_replacement.is_none()
+}
+
+/// CR 614.12a + CR 616.1 + CR 707.5: is a battlefield entry still being made?
+/// Every carrier of an entry that has been decided but not completed: a parked
+/// replacement that modifies an entry ([`parked_replacement_modifies_an_entry`]:
+/// an ordering choice, a copy offer, an entry-controller choice), an entrant
+/// held liminal for its copy choice, a token committed before its entry
+/// record, an entry parked for its own mid-entry choice, and an entering Aura's
+/// host choice (CR 303.4f: it is made as the Aura enters, and its entry tail is
+/// stashed behind the prompt). A pause that holds none of them belongs to a later
+/// event, not to an entry.
+pub(crate) fn battlefield_entry_in_progress(state: &GameState) -> bool {
+    state
+        .pending_replacement
+        .as_ref()
+        .is_some_and(|pending| parked_replacement_modifies_an_entry(state, &pending.proposed))
+        || matches!(state.waiting_for, WaitingFor::ReturnAsAuraTarget { .. })
+        || !state.liminal_entries.is_empty()
+        || state.pending_token_battlefield_entry.is_some()
+        || !state.deferred_entry_events.is_empty()
+}
+
+/// CR 614.12a + CR 614.1c + CR 616.1: does a parked replacement modify a
+/// battlefield entry still being made? The entry itself (a zone change to the
+/// battlefield, a token's creation or entry), or an event on an object that is
+/// on the battlefield with its entry not recorded yet (a token's counters it
+/// enters with, placed before its entry record). An event on a permanent that
+/// has already entered (counters put on it afterwards, as Amass does to the
+/// Army it has just created) or on an object elsewhere (a discarded or found
+/// card) is not part of any entry. A card's enters-with counters are placed
+/// after its zone-change record, so they do not count here; a card entering
+/// with co-entrants is delivered by a logical zone-change group, whose entries
+/// this gate passes through unheld (see [`settle_entry_batch_scan`]).
+fn parked_replacement_modifies_an_entry(state: &GameState, proposed: &ProposedEvent) -> bool {
+    match proposed {
+        ProposedEvent::ZoneChange { to, .. } => *to == Zone::Battlefield,
+        ProposedEvent::TokenEntry { .. } | ProposedEvent::CreateToken { .. } => true,
+        other => other
+            .affected_object_id()
+            .is_some_and(|object_id| battlefield_entrant_unrecorded(state, object_id)),
+    }
+}
+
+/// CR 400.7 + CR 603.6a: is this object on the battlefield with its current
+/// entry not yet recorded? Not when it entered on an earlier turn, or when this
+/// turn's zone-change ledger holds the entry of its current incarnation.
+fn battlefield_entrant_unrecorded(state: &GameState, object_id: ObjectId) -> bool {
+    let Some(object) = state
+        .objects
+        .get(&object_id)
+        .filter(|object| object.zone == Zone::Battlefield)
+    else {
+        return false;
+    };
+    !(object
+        .entered_battlefield_turn
+        .is_some_and(|turn| turn < state.turn_number)
+        || state.zone_changes_this_turn.iter().any(|record| {
+            record.object_id == object_id
+                && record.to_zone == Zone::Battlefield
+                && record
+                    .entered_incarnation
+                    .is_none_or(|incarnation| incarnation == object.incarnation)
+        }))
+}
+
+/// CR 608.2c + CR 603.6a: has the instruction that put this permanent onto the
+/// battlefield completed? An instruction boundary
+/// (`effects::settle_entries_before_instruction`) has passed since it was
+/// recorded (`GameState::instruction_boundary_marks`), or it was
+/// recorded on an earlier turn. The boundary records nothing while a
+/// co-entering step, a choice of the same instruction, or any other
+/// battlefield entry is outstanding ([`battlefield_entry_in_progress`]: a rider
+/// chain run inside an entry passes boundaries of its own), nor between the
+/// seat legs of a paused player-scope clause resuming under its scope sidecar
+/// (CR 101.4: one simultaneous event).
+fn battlefield_entry_instruction_completed(state: &GameState, event: &GameEvent) -> bool {
+    matches!(
+        event,
+        GameEvent::ZoneChanged { record, .. }
+            if record.recorded_turn_number < state.turn_number
+                || record.turn_zone_change_index < state.completed_instruction_ledger_len()
+    )
+}
+
+/// CR 603.6a + CR 603.6b + CR 611.3c: the one gate between battlefield-entry
+/// events and the ordinary observer scan.
+///
+/// Each time an event puts one or more permanents onto the battlefield, all
+/// permanents on the battlefield, including the newcomers, are checked for
+/// enters triggers that match it (CR 603.6a), with the continuous effects that
+/// exist once the permanents are there (CR 603.6b + CR 611.3c). One entering
+/// instruction can span several actions: each entrant's replacement choices are
+/// made before it enters (CR 614.12a + CR 616.1), so an entrant can be on the
+/// battlefield while a co-entrant's prompt is open. Matching it then would read
+/// a battlefield the event has not finished building: a later co-entrant's
+/// trigger suppression or characteristic-changing static would be missed, and a
+/// firing limit could be spent on an event the completed state does not match.
+///
+/// So a battlefield entry that reaches a collector while its action has not
+/// settled and another battlefield entry is still being made
+/// ([`battlefield_entry_in_progress`]), and whose entering instruction has not
+/// completed ([`battlefield_entry_instruction_completed`]), is held in
+/// `GameState::unsettled_entry_batch_events` instead of being matched. It is
+/// released, ahead of the caller's own events, to the first collector that runs
+/// once no entry is in progress, its instruction has completed, or the action
+/// has settled; or, when the instruction's own boundary comes first, it is
+/// collected there, before a later instruction of the same resolution can change
+/// what observes or suppresses it ([`collect_completed_entry_instruction`]). That collector matches the whole event in one scan against the
+/// completed state, so batched ("one or more", CR 603.2c) definitions and
+/// firing limits see it once. Nothing is held at a pause with no entry in
+/// progress (a later instruction's own choice, or the replacement of a later
+/// event on a permanent that has already entered), nor an entry whose
+/// instruction has completed: what reached such a pause is matched there, as
+/// before.
+///
+/// The collectors that run as an action pauses or settles route through here:
+/// the post-action scan, and [`collect_action_end_triggers_into_deferred`] for
+/// the paused-observer helpers (the replacement and copy-choice answers among
+/// them), the resolution-choice answers, and the Tribute and Aura-host answers
+/// ([`collect_and_drain_entry_observer_triggers_if_settled`]). Existing owners
+/// of entries keep their own timing and do not pass through: a logical
+/// zone-change group's segment collection (an entry it retains is passed through
+/// unheld here), the replay of an entry parked for its own mid-entry choice
+/// (`engine_replacement::collect_deferred_entry_replay`), the initial collection
+/// of a payment transaction's events
+/// (`payment_transaction::collect_initial_payment_events`), and the delayed-trigger
+/// scans (which read the acting buffer only). `meld::refresh_meld_entry_records`
+/// rewrites the records parked in `deferred_entry_events` and not the held ones; a
+/// meld result is not an entry the gate holds today.
+pub(crate) fn settle_entry_batch_scan(
+    state: &mut GameState,
+    candidates: Vec<GameEvent>,
+) -> Vec<GameEvent> {
+    state.released_entry_rows.clear();
+    let unsettled = !action_has_settled(state) && battlefield_entry_in_progress(state);
+    if !unsettled && state.unsettled_entry_batch_events.is_empty() {
+        return candidates;
+    }
+    let held = std::mem::take(&mut state.unsettled_entry_batch_events);
+    let held_keys: Vec<_> = held.iter().filter_map(battlefield_entry_key).collect();
+    let (mut scan, still_held): (Vec<_>, Vec<_>) = held
+        .into_iter()
+        .partition(|event| !unsettled || battlefield_entry_instruction_completed(state, event));
+    state.unsettled_entry_batch_events = still_held;
+    let mut owner_retained: Option<Vec<GameEvent>> = None;
+    for event in candidates {
+        let Some(key) = battlefield_entry_key(&event) else {
+            scan.push(event);
+            continue;
+        };
+        // The same occurrence, re-read from a buffer this gate already saw.
+        if held_keys.contains(&key) {
+            continue;
+        }
+        if !unsettled || battlefield_entry_instruction_completed(state, &event) {
+            scan.push(event);
+            continue;
+        }
+        let owner_retained = owner_retained
+            .get_or_insert_with(|| super::engine_priority::retained_logical_zone_events(state));
+        if owner_retained.contains(&event) {
+            scan.push(event);
+        } else {
+            state.unsettled_entry_batch_events.push(event);
+        }
+    }
+    note_released_entry_cohorts(state, &scan, &held_keys);
+    scan
+}
+
+/// CR 603.6a + CR 608.2c: the entries of `scan` in an instruction that held an entry across
+/// answers (`held_keys`) are one event whose co-entrants observe each other, whichever answer
+/// recorded them; they are noted for the collection that follows
+/// (`GameState::released_entry_rows`).
+fn note_released_entry_cohorts(
+    state: &mut GameState,
+    scan: &[GameEvent],
+    held_keys: &[(u32, usize, ObjectId)],
+) {
+    let held_instructions: Vec<usize> = held_keys
+        .iter()
+        .filter(|(turn, _, _)| *turn == state.turn_number)
+        .map(|(_, row, _)| state.instruction_of_zone_change(*row))
+        .collect();
+    let rows: Vec<usize> = scan
+        .iter()
+        .filter_map(battlefield_entry_key)
+        .filter(|(turn, row, _)| {
+            *turn == state.turn_number
+                && held_instructions.contains(&state.instruction_of_zone_change(*row))
+        })
+        .map(|(_, row, _)| row)
+        .collect();
+    state.released_entry_rows = rows;
+}
+
+/// CR 117.5 + CR 603.3b: a settled action still holds entries whose observers
+/// have not been checked. They must be before any player receives priority, so
+/// the action boundary runs the scan for handlers that reach no pipeline.
+pub(crate) fn settled_entry_batch_awaits_scan(state: &GameState) -> bool {
+    !state.unsettled_entry_batch_events.is_empty() && action_has_settled(state)
 }
 
 /// CR 603.2c + CR 603.3b: the paused-exit collector. An action that ends at a
@@ -9615,6 +10142,35 @@ fn collect_unclaimed_ordinary_observers(
     events: &[GameEvent],
     event_start: usize,
 ) {
+    collect_unclaimed_ordinary_observers_matching(
+        state,
+        events,
+        event_start,
+        |_| true,
+        ObserverCollection::Direct,
+    );
+}
+
+/// How [`collect_unclaimed_ordinary_observers_matching`] queues what it collects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObserverCollection {
+    /// Matched now, as every paused exit inside a payment is.
+    Direct,
+    /// CR 603.6a: battlefield entries pass [`settle_entry_batch_scan`] first, so an entry
+    /// whose entering instruction is still suspended is held, not matched.
+    ThroughEntryGate,
+}
+
+/// [`collect_unclaimed_ordinary_observers`] narrowed to the events `keep` accepts, queued as
+/// `collection` says. The occurrences are claimed either way: a held entry is released from
+/// the gate's own list, never re-read from a buffer.
+fn collect_unclaimed_ordinary_observers_matching(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+    keep: impl Fn(&GameEvent) -> bool,
+    collection: ObserverCollection,
+) {
     let retained = paused_exit_retained_events(state);
     let mut zone_change_witnesses: Vec<GameEvent> = state
         .deferred_triggers
@@ -9636,6 +10192,7 @@ fn collect_unclaimed_ordinary_observers(
             event,
             GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
         ) || retained.contains(event)
+            || !keep(event)
         {
             return false;
         }
@@ -9651,7 +10208,12 @@ fn collect_unclaimed_ordinary_observers(
     if ordinary.events.is_empty() {
         return;
     }
-    collect_triggers_into_deferred(state, &ordinary.events);
+    match collection {
+        ObserverCollection::Direct => collect_triggers_into_deferred(state, &ordinary.events),
+        ObserverCollection::ThroughEntryGate => {
+            collect_action_end_triggers_into_deferred(state, &ordinary.events)
+        }
+    }
     let occurrences = ordinary
         .positions
         .iter()
@@ -9741,10 +10303,8 @@ pub(crate) fn collect_and_drain_observer_triggers_if_settled(
         TriggerCollectionRequester::Ordinary,
         &state.consumed_before_priority_trigger_events,
     );
-    let trigger_events = paused_observer_trigger_events(state, candidates);
-    if !trigger_events.is_empty() {
-        collect_triggers_into_deferred(state, &trigger_events);
-    }
+    let candidates = paused_observer_trigger_events(state, candidates);
+    collect_action_end_triggers_into_deferred(state, &candidates);
     if !state.deferred_triggers.is_empty() {
         let _ = drain_deferred_trigger_queue(state, events);
     }
@@ -19498,7 +20058,7 @@ pub(super) fn build_triggered_ability_from_context(
         // Crescent Moon / Howling Mine-class triggers no longer fall back to
         // the source's controller.
         if matches!(trig_def.mode, TriggerMode::Phase) {
-            resolved.set_scoped_player_recursive(state.active_player);
+            resolved.set_phase_turn_player_recursive(state.active_player);
         }
         resolved.set_trigger_source_recursive(source_context.clone());
         // CR 400.7 + CR 509.1c: Source-referential force-block instructions
@@ -19568,7 +20128,7 @@ pub(super) fn build_triggered_ability(
     }
     resolved.unless_pay.clone_from(&trig_def.unless_pay);
     if matches!(trig_def.mode, TriggerMode::Phase) {
-        resolved.set_scoped_player_recursive(state.active_player);
+        resolved.set_phase_turn_player_recursive(state.active_player);
     }
     resolved
 }
@@ -46119,6 +46679,251 @@ pub mod tests {
                 "settled={settled}: the owner's store is untouched"
             );
         }
+    }
+
+    /// A "whenever a creature enters" observer and one battlefield entry it
+    /// matches, paused the way `observer_helper_fixture` pauses. Synthetic
+    /// building block; the nearest printed observer is Soul Warden ("Whenever
+    /// another creature enters, you gain 1 life."), which excludes itself.
+    fn entry_observer_fixture() -> (GameState, Vec<GameEvent>) {
+        let (mut state, _) = observer_helper_fixture(false);
+        let observer = make_creature(&mut state, PlayerId(0), "Entry observer", 1, 1);
+        let mut enters = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        enters.destination = Some(Zone::Battlefield);
+        let object = state.objects.get_mut(&observer).expect("observer exists");
+        object.trigger_definitions.push(enters.clone());
+        std::sync::Arc::make_mut(&mut object.base_trigger_definitions).push(enters);
+        object.materialize_base_trigger_definitions();
+        let entrant = make_creature(&mut state, PlayerId(0), "Entrant", 2, 2);
+        let mut events = Vec::new();
+        crate::game::zones::record_and_emit_entry_from_no_zone(&mut state, entrant, &mut events)
+            .expect("entrant exists");
+        (state, events)
+    }
+
+    /// CR 603.6a + CR 608.2c: entrants of one instruction whose entry was held across answers
+    /// are one entry event, so a newcomer observes a co-entrant's entry even when its own entry
+    /// record comes later in the batch; the entries of separate instructions happen in order,
+    /// and a newcomer does not observe an entry that preceded it (issue #8160), nor one that
+    /// was never held. Synthetic: three hand-made entries on the ledger cut by one
+    /// instruction boundary.
+    #[test]
+    fn a_newcomer_observes_only_the_entries_of_its_own_instruction() {
+        let mut state = setup();
+        let mut events = Vec::new();
+        let mut entrants = Vec::new();
+        for name in ["First", "Second", "Third"] {
+            let id = make_creature(&mut state, PlayerId(0), name, 1, 1);
+            crate::game::zones::record_and_emit_entry_from_no_zone(&mut state, id, &mut events)
+                .expect("entrant exists");
+            entrants.push(id);
+        }
+        // The boundary falls between the second and third entries: First and Second are one
+        // instruction, Third is the next.
+        state.instruction_boundary_marks = vec![2];
+        // An entry that was never held keeps the positional guard: nothing is observed.
+        {
+            let boundaries = battlefield_entry_observation_indices(&events);
+            let ledger = battlefield_entry_ledger_indices(&state, &events);
+            assert!(!battlefield_source_observes_event(
+                &state,
+                0,
+                &events,
+                entrants[1],
+                &boundaries,
+                &ledger,
+            ));
+        }
+        // The cohort of an instruction that held an entry across answers is observed.
+        state.released_entry_rows = vec![0, 1, 2];
+        let boundaries = battlefield_entry_observation_indices(&events);
+        let ledger = battlefield_entry_ledger_indices(&state, &events);
+        let observes = |event_idx: usize, source: ObjectId| {
+            battlefield_source_observes_event(
+                &state,
+                event_idx,
+                &events,
+                source,
+                &boundaries,
+                &ledger,
+            )
+        };
+        assert!(
+            observes(0, entrants[1]),
+            "Second entered in the same instruction as First's entry"
+        );
+        assert!(observes(1, entrants[0]), "First was on the battlefield");
+        assert!(
+            !observes(0, entrants[2]) && !observes(1, entrants[2]),
+            "Third's instruction came after theirs"
+        );
+        assert!(observes(2, entrants[2]), "Third observes its own entry");
+    }
+
+    /// CR 614.12a: a co-entrant whose entry is still being made, parked for its
+    /// own mid-entry choice the way `capture_deferred_entry_events_if_mid_entry_choice`
+    /// parks one.
+    fn park_co_entrant_mid_entry(state: &mut GameState) {
+        let co_entrant = make_creature(state, PlayerId(0), "Co-entrant", 2, 2);
+        let mut parked = Vec::new();
+        crate::game::zones::record_and_emit_entry_from_no_zone(state, co_entrant, &mut parked)
+            .expect("co-entrant exists");
+        state.deferred_entry_events.extend(parked);
+    }
+
+    /// CR 603.6a: the paused-resolution helper is handed a battlefield entry
+    /// while a co-entrant is still entering. It must not match it there, and the
+    /// entry must still be checked once the action settles, even though the
+    /// settling action's own buffer no longer holds it. A pause with no entry in
+    /// progress belongs to a later instruction: the entry is matched there.
+    #[test]
+    fn observer_helpers_leave_an_unsettled_battlefield_entry_for_the_settled_scan() {
+        // Positive reach guard: at a settled action the same entry is collected.
+        let (mut settled, mut settled_events) = entry_observer_fixture();
+        settled.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        collect_and_drain_observer_triggers_if_settled(&mut settled, &mut settled_events, 0);
+        assert_eq!(
+            settled.stack.len() + settled.deferred_triggers.len(),
+            1,
+            "positive reach guard: the observer matches this entry"
+        );
+
+        // A later instruction's pause, no entry in progress: matched at the pause.
+        let (mut later, mut later_events) = entry_observer_fixture();
+        park_observer_triggers_if_paused(&mut later, &mut later_events, 0);
+        assert_eq!(
+            later.deferred_triggers.len(),
+            1,
+            "no entry is being made: the completed entry is matched at the pause"
+        );
+        assert!(later.unsettled_entry_batch_events.is_empty());
+
+        let (mut state, mut events) = entry_observer_fixture();
+        park_co_entrant_mid_entry(&mut state);
+        park_observer_triggers_if_paused(&mut state, &mut events, 0);
+        // Reading the same buffer again must not match it either.
+        park_observer_triggers_if_paused(&mut state, &mut events, 0);
+        assert!(
+            state.deferred_triggers.is_empty() && state.stack.is_empty(),
+            "a co-entrant is still entering: nothing is matched at the pause"
+        );
+        state.deferred_entry_events.clear();
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let mut settling_events = Vec::new();
+        collect_and_drain_observer_triggers_if_settled(&mut state, &mut settling_events, 0);
+        assert_eq!(
+            state.stack.len() + state.deferred_triggers.len(),
+            1,
+            "the earlier entry is checked once when the action settles"
+        );
+    }
+
+    /// CR 614.12a + CR 614.1c: a parked replacement belongs to an entry still
+    /// being made only when it modifies the entry itself or an event on a
+    /// battlefield object whose entry has not been recorded (its entering
+    /// counters). Counters on a permanent whose entry is recorded (Amass's
+    /// Army) and a discard of a card in hand belong to later events.
+    #[test]
+    fn a_parked_replacement_belongs_to_an_entry_only_through_an_unrecorded_entrant() {
+        let mut state = setup();
+        let add_counter = |object_id| crate::types::proposed_event::ProposedEvent::AddCounter {
+            placement: crate::types::proposed_event::CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id,
+                counter_type: CounterType::Plus1Plus1,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let entering = make_creature(&mut state, PlayerId(0), "Entering", 0, 0);
+        assert!(
+            parked_replacement_modifies_an_entry(&state, &add_counter(entering)),
+            "positive reach guard: counters on an entrant with no entry record yet"
+        );
+        let entered = make_creature(&mut state, PlayerId(0), "Entered", 0, 0);
+        crate::game::zones::record_and_emit_entry_from_no_zone(
+            &mut state,
+            entered,
+            &mut Vec::new(),
+        )
+        .expect("entrant exists");
+        assert!(!parked_replacement_modifies_an_entry(
+            &state,
+            &add_counter(entered)
+        ));
+        let in_hand = crate::game::zones::create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Discarded".to_string(),
+            Zone::Hand,
+        );
+        let discard = crate::types::proposed_event::ProposedEvent::Discard {
+            player_id: PlayerId(0),
+            object_id: in_hand,
+            source_id: None,
+            caused_by_effect: true,
+            discard_frame: None,
+            applied: HashSet::new(),
+        };
+        assert!(!parked_replacement_modifies_an_entry(&state, &discard));
+    }
+
+    /// CR 608.2c + CR 603.6a + CR 611.3c: an entrant published in an earlier
+    /// answer is observed at the instruction boundary a later answer reaches,
+    /// with its co-entrants, and from then on its entry is a completed event: the
+    /// next pause matches it while a later instruction's own unsettled entry
+    /// still waits.
+    #[test]
+    fn instruction_boundary_observes_an_entrant_published_in_an_earlier_answer() {
+        let (mut state, mut events) = entry_observer_fixture();
+        let GameEvent::ZoneChanged { record, .. } = events[0].clone() else {
+            panic!("the fixture emits a battlefield entry");
+        };
+        park_co_entrant_mid_entry(&mut state);
+        park_observer_triggers_if_paused(&mut state, &mut events, 0);
+        assert!(state.battlefield_entry_observation(&record).is_none());
+        // The co-entrant finishes entering, and the boundary runs in a later answer,
+        // whose buffer does not hold the entry: it records the completed
+        // instructions' ledger rows and observes the entrants.
+        state.deferred_entry_events.clear();
+        state.instruction_boundary_marks = vec![state.zone_changes_this_turn.len()];
+        crate::game::zones::settle_battlefield_entry_observations(&mut state, &[]);
+        assert!(
+            state.battlefield_entry_observation(&record).is_some(),
+            "the earlier entrant is observed at the instruction boundary"
+        );
+        let later = make_creature(&mut state, PlayerId(0), "Later entrant", 2, 2);
+        let mut later_events = Vec::new();
+        crate::game::zones::record_and_emit_entry_from_no_zone(
+            &mut state,
+            later,
+            &mut later_events,
+        )
+        .expect("later entrant exists");
+        park_co_entrant_mid_entry(&mut state);
+        park_observer_triggers_if_paused(&mut state, &mut later_events, 0);
+        assert_eq!(
+            state.deferred_triggers.len(),
+            1,
+            "only the completed instruction's entry is matched at this pause"
+        );
+        assert_eq!(
+            state.unsettled_entry_batch_events, later_events,
+            "the later instruction's own entry is the one still held"
+        );
     }
 
     /// Round-18 closure: the ordinary (no-sidecar) branch of both helpers now

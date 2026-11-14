@@ -1799,6 +1799,11 @@ fn apply_action_boundary_core(
             };
             let realized_token_entry =
                 effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
+            // CR 603.6a + CR 603.3b: the same convergence for entries of a completed
+            // entering instruction still held by `triggers::settle_entry_batch_scan`:
+            // a handler that settled without reaching the pipeline has not had them
+            // checked, and they are checked before any player receives priority.
+            let settled_entry_batch = settled_entry_batch_is_due(state, &result);
             // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
             // completed on a route that never reached the pipeline (a spell cast during
             // a resolution, CR 608.2g, finishes its announcement here): the resolving
@@ -1810,6 +1815,7 @@ fn apply_action_boundary_core(
             if ((resumed_parked_root || reconciled_unless_payment)
                 && matches!(result.waiting_for, WaitingFor::Priority { .. }))
                 || realized_token_entry
+                || settled_entry_batch
                 || owed_spell_final_part_is_due
             {
                 if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
@@ -1865,6 +1871,20 @@ fn apply_action_boundary_core(
         committed_departure,
         follow_up_failure,
     })
+}
+
+/// CR 117.5 + CR 603.3b: a Priority result still holds entries of a completed
+/// entering instruction whose observers have not been checked. The state's wait
+/// is synchronized first, as for [`owed_spell_final_part_is_due`], because the
+/// entry gate reads it and the state's copy is only synchronized at
+/// `finish_action_boundary`.
+fn settled_entry_batch_is_due(state: &mut GameState, result: &ActionResult) -> bool {
+    let holds_entries = matches!(result.waiting_for, WaitingFor::Priority { .. })
+        && !state.unsettled_entry_batch_events.is_empty();
+    if holds_entries {
+        sync_waiting_for(state, &result.waiting_for);
+    }
+    holds_entries && triggers::settled_entry_batch_awaits_scan(state)
 }
 
 /// CR 608.2c + CR 608.2n: whether the action's result leaves a Priority window
@@ -16864,6 +16884,7 @@ fn apply_non_priority_pass_action(
             let pending = pending_effect.clone();
             let returned = *returned_id;
             let active_player = *player;
+            let action_event_start = events.len();
             let (filter, grants) = match &pending.effect {
                 crate::types::ability::Effect::ReturnAsAura {
                     enchant_filter,
@@ -16907,6 +16928,18 @@ fn apply_non_priority_pass_action(
                         super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
                     }
                     resume_pending_continuation_if_priority(state, &mut events)?;
+                    // CR 603.2 + CR 603.6a + CR 303.4f: this answer (a token's or a
+                    // card's host choice) puts the Aura entrant onto the battlefield
+                    // (its entry tail was stashed behind the host prompt) and returns
+                    // without the post-action pipeline,
+                    // so its battlefield entries go to the entry gate here: held
+                    // while a co-entrant's host prompt is pending, matched once when
+                    // the last entrant has entered.
+                    triggers::collect_and_drain_entry_observer_triggers_if_settled(
+                        state,
+                        &mut events,
+                        action_event_start,
+                    );
                     return Ok(ActionResult::applied(events, state.waiting_for.clone()));
                 }
             };
@@ -17536,6 +17569,7 @@ fn apply_non_priority_pass_action(
         }
         (waiting_for, action) if engine_resolution_choices::handles(waiting_for) => {
             let carrier = state.resolving_stack_entry.as_ref().map(|entry| entry.id);
+            let action_event_start = events.len();
             match engine_resolution_choices::handle_resolution_choice(
                 state,
                 waiting_for.clone(),
@@ -17543,14 +17577,32 @@ fn apply_non_priority_pass_action(
                 &mut events,
             )? {
                 engine_resolution_choices::ResolutionChoiceOutcome::WaitingFor(waiting_for) => {
-                    if matches!(waiting_for, WaitingFor::Priority { .. })
-                        && state.game_end.is_none()
-                        && state.payment_transaction.is_none()
-                        && !state.payment_transaction_replay
-                        && state.resolving_stack_entry.is_none()
-                        && !triggers::is_pending_trigger_construction_active(state)
+                    if matches!(waiting_for, WaitingFor::Priority { .. }) {
+                        if state.game_end.is_none()
+                            && state.payment_transaction.is_none()
+                            && !state.payment_transaction_replay
+                            && state.resolving_stack_entry.is_none()
+                            && !triggers::is_pending_trigger_construction_active(state)
+                        {
+                            completed_resolution = carrier;
+                        }
+                    } else if state.pending_trigger.is_none()
+                        && state.pending_trigger_order.is_none()
                     {
-                        completed_resolution = carrier;
+                        // CR 603.6a + CR 614.12a: an answer that puts an entrant onto the
+                        // battlefield and stops on a co-entrant's prompt (a copied
+                        // "as this creature enters, choose …" answered before the next
+                        // token's copy offer) reaches no pipeline; its battlefield entries
+                        // go to the entry gate, as a replacement or copy-choice answer's do.
+                        // An answer that already collected its slice and drained it to a
+                        // trigger prompt (a pending trigger, or an ordering choice) has had
+                        // it checked, and the queued-context witnesses are gone by now.
+                        state.waiting_for = waiting_for.clone();
+                        triggers::park_entry_observer_triggers_if_paused(
+                            state,
+                            &mut events,
+                            action_event_start,
+                        );
                     }
                     waiting_for
                 }
