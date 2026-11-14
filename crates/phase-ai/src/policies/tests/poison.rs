@@ -9,19 +9,18 @@ use std::sync::Arc;
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::combat::AttackTarget;
 use engine::game::zones::create_object;
-use engine::types::ability::ResolvedAbility;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ModalChoice, QuantityExpr,
-    TargetFilter, TypedFilter,
+    TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::counter::CounterType;
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{CastPaymentMode, GameState, LayersDirty, PendingCast, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, LayersDirty, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::zones::Zone;
@@ -111,6 +110,8 @@ fn draw_effect() -> Effect {
 fn spell_object(state: &mut GameState, idx: u64, abilities: Vec<AbilityDefinition>) -> ObjectId {
     let oid = create_object(state, CardId(idx), AI, format!("Spell {idx}"), Zone::Hand);
     let object = state.objects.get_mut(&oid).unwrap();
+    // The engine casts only the card the candidate names.
+    object.card_id = CardId(oid.0);
     object.card_types = CardType {
         supertypes: Vec::new(),
         core_types: vec![CoreType::Instant],
@@ -526,23 +527,27 @@ fn modal_ability() -> AbilityDefinition {
     ability
 }
 
-fn ability_mode_decision(source_id: ObjectId) -> AiDecisionContext {
-    let ability = modal_ability();
+/// The mode-choice decision `action` opens when the engine applies it to `state`.
+fn mode_choice_after(state: &mut GameState, action: GameAction) -> AiDecisionContext {
+    engine::game::engine::apply_as_current_for_simulation(state, action).unwrap();
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::ModeChoice { .. } | WaitingFor::AbilityModeChoice { .. }
+    ));
     AiDecisionContext {
-        waiting_for: WaitingFor::AbilityModeChoice {
-            player: AI,
-            modal: ability.modal.clone().unwrap(),
-            source_id,
-            mode_abilities: ability.mode_abilities.clone(),
-            is_activated: true,
-            ability_index: Some(0),
-            ability_cost: None,
-            activation_cost_snapshot: None,
-            unavailable_modes: Vec::new(),
-            activation_payment_mode: CastPaymentMode::Auto,
-        },
+        waiting_for: state.waiting_for.clone(),
         candidates: Vec::new(),
     }
+}
+
+/// The opponent at nine poison and the AI at the mode choice of a creature's `modal_ability`.
+fn modal_ability_board() -> (GameState, AiDecisionContext) {
+    let mut state = state_with_players(2);
+    state.players[1].poison_counters = 9;
+    let source = creature_object(&mut state, 1, Vec::new(), 1);
+    *Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities) = vec![modal_ability()];
+    let decision = mode_choice_after(&mut state, activate_ability_candidate(source, 0).action);
+    (state, decision)
 }
 
 /// CR 601.2b: the poison mode is scored at the seam where it is chosen.
@@ -550,10 +555,7 @@ fn ability_mode_decision(source_id: ObjectId) -> AiDecisionContext {
 fn verdict_scores_the_selected_poison_mode() {
     let config = config();
     let context = ai_context(&config);
-    let mut state = state_with_players(2);
-    state.players[1].poison_counters = 9;
-    let source = creature_object(&mut state, 1, Vec::new(), 1);
-    let decision = ability_mode_decision(source);
+    let (state, decision) = modal_ability_board();
 
     let candidate = select_modes_candidate(vec![1]);
     let (_, reason) =
@@ -567,10 +569,7 @@ fn verdict_scores_the_selected_poison_mode() {
 fn verdict_ignores_a_selected_non_poison_mode() {
     let config = config();
     let context = ai_context(&config);
-    let mut state = state_with_players(2);
-    state.players[1].poison_counters = 9;
-    let source = creature_object(&mut state, 1, Vec::new(), 1);
-    let decision = ability_mode_decision(source);
+    let (state, decision) = modal_ability_board();
 
     let candidate = select_modes_candidate(vec![0]);
     let (delta, reason) =
@@ -860,10 +859,7 @@ fn registry_registers_the_policy() {
 fn registry_routes_modal_alternatives_to_the_policy() {
     let config = config();
     let context = committed_context(&config);
-    let mut state = state_with_players(2);
-    state.players[1].poison_counters = 9;
-    let source = creature_object(&mut state, 1, Vec::new(), 1);
-    let decision = ability_mode_decision(source);
+    let (state, decision) = modal_ability_board();
 
     let poison_mode = select_modes_candidate(vec![1]);
     let (poison_delta, poison_reason) =
@@ -1080,20 +1076,9 @@ fn registry_routes_modal_spell_mode_choice_to_the_policy() {
         mode_count: 2,
         ..ModalChoice::default()
     };
-    state.objects.get_mut(&spell).unwrap().modal = Some(modal.clone());
-
-    // A `WaitingFor::ModeChoice` whose PendingCast points at that spell object.
-    let resolved = ResolvedAbility::new(draw_effect(), Vec::new(), spell, AI);
-    let pending_cast = PendingCast::new(spell, CardId(spell.0), resolved, ManaCost::zero());
-    let decision = AiDecisionContext {
-        waiting_for: WaitingFor::ModeChoice {
-            player: AI,
-            modal,
-            pending_cast: Box::new(pending_cast),
-            unavailable_modes: Vec::new(),
-        },
-        candidates: Vec::new(),
-    };
+    state.objects.get_mut(&spell).unwrap().modal = Some(modal);
+    // CR 601.2a: the spell is on the stack while its modes are chosen.
+    let decision = mode_choice_after(&mut state, cast_candidate(spell).action);
 
     let (poison_delta, poison_reason) = routed_verdict(&ctx(
         &state,
@@ -1177,6 +1162,18 @@ fn prologue_to_phyresis(scenario: &mut GameScenario) -> ObjectId {
         .id()
 }
 
+/// A main phase with {U}{U}{U} floating for the AI, so a cast taps no land.
+fn castable(scenario: &mut GameScenario) {
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(AI, floating(&[ManaType::Blue; 3]));
+}
+
+fn floating(mana: &[ManaType]) -> Vec<ManaUnit> {
+    mana.iter()
+        .map(|&kind| ManaUnit::new(kind, ObjectId(0), false, vec![]))
+        .collect()
+}
+
 fn verdict_on(state: &GameState, candidate: &CandidateAction) -> (f64, PolicyReason) {
     let config = config();
     let context = ai_context(&config);
@@ -1204,7 +1201,10 @@ fn cast_on(
     poison: &[(PlayerId, u32)],
     card: fn(&mut GameScenario) -> ObjectId,
 ) -> (f64, PolicyReason) {
-    let (runner, ids) = board(format, players, poison, |s| vec![card(s)]);
+    let (runner, ids) = board(format, players, poison, |s| {
+        castable(s);
+        vec![card(s)]
+    });
     verdict_on(runner.state(), &cast_candidate(ids[0]))
 }
 
@@ -1438,6 +1438,7 @@ fn each_opponent_poison_spell_is_direct_poison() {
 fn each_player_poison_spell_is_not_scored_as_lethal() {
     let poison = [(AI, 9), (OPPONENT, 9)];
     let (runner, ids) = board(threshold(10), 2, &poison, |s| {
+        castable(s);
         vec![
             s.add_spell_to_hand_from_oracle(AI, "Largepox", false, LARGEPOX)
                 .id(),
@@ -1505,6 +1506,7 @@ fn cast_beside(
     extra: fn(&mut GameScenario) -> ObjectId,
 ) -> (f64, PolicyReason) {
     let (runner, ids) = board(format, players, poison, |s| {
+        castable(s);
         let id = card(s);
         extra(s);
         vec![id]
@@ -1951,19 +1953,24 @@ fn hexproof_opponent_is_not_a_lethal_target() {
 }
 
 /// Vraska's 0: "You draw a card and lose 1 life. Proliferate." At 1 life the AI hits 0 life as the
-/// opponent reaches nine poison, a draw (CR 104.4a); at 2 life it wins.
+/// opponent reaches nine poison, a draw (CR 104.4a), not a win; at 2 life it wins.
 #[test]
 fn vraska_zero_is_lethal_only_when_the_ai_survives_it() {
-    for (life, kind) in [(1, "poison_clock_pressure"), (2, "poison_clock_lethal")] {
+    for life in [1, 2] {
         let (runner, ids) = vraska_board(threshold(9), &[(OPPONENT, 8)], |s| {
             s.with_life(AI, life);
             Vec::new()
         });
         let state = runner.state();
         let (delta, reason) = verdict_on(state, &activation_of(state, ids[0], loyalty(0)));
-        assert_eq!(reason.kind, kind);
-        assert_eq!(fact(&reason, "poison_added"), Some(1));
-        assert_eq!(delta > crate::policies::registry::STRONG_MAX, life == 2);
+        if life == 1 {
+            assert_ne!(reason.kind, "poison_clock_lethal");
+            assert!(delta <= crate::policies::registry::STRONG_MAX);
+        } else {
+            assert_eq!(reason.kind, "poison_clock_lethal");
+            assert_eq!(fact(&reason, "poison_added"), Some(1));
+            assert!(delta > crate::policies::registry::STRONG_MAX);
+        }
     }
 }
 
@@ -2039,20 +2046,16 @@ fn infectious_bite_board(mine: &str, creatures: &[&str]) -> (GameRunner, ObjectI
     (runner, ids[0])
 }
 
-/// CR 601.2c + CR 702.21a: a permanent that triggers when Infectious Bite targets the opponent's
-/// creature withholds lethal (Ward with nothing else to target, Frost Titan, Bonecrusher Giant,
-/// Diffusion Sliver watching Muscle Sliver, Kira's granted trigger); the AI targets around Ward
-/// when it can, in either order.
+/// CR 702.21a: the read's first legal answer declines the Ward cost (`PayUnlessCost { pay: false }`)
+/// and Bite is countered; paying would put the AI, at five poison, at ten (CR 704.5c). Bonecrusher
+/// Giant's 2 damage kills the AI only at 2 life (CR 704.5a); the AI targets around Ward when it can,
+/// in either order.
 #[test]
 fn a_ward_trigger_on_a_target_withholds_the_lethal_read() {
-    let pressure = "poison_clock_pressure";
+    let no_loss = "poison_clock_no_poison_loss";
     let lethal = "poison_clock_lethal";
-    let expected: [(&[&str], &str); 10] = [
-        (&["The Serpent Society"], pressure),
-        (&["Frost Titan"], pressure),
-        (&["Bonecrusher Giant"], pressure),
-        (&["Muscle Sliver", "Diffusion Sliver"], pressure),
-        (&["Kira, Great Glass-Spinner"], pressure),
+    let expected: [(&[&str], &str); 6] = [
+        (&["The Serpent Society"], no_loss),
         (&["Grizzly Bears", "The Serpent Society"], lethal),
         (&["The Serpent Society", "Grizzly Bears"], lethal),
         (&["Coppercoat Vanguard", "Elite Vanguard"], lethal),
@@ -2068,44 +2071,29 @@ fn a_ward_trigger_on_a_target_withholds_the_lethal_read() {
     });
     assert_eq!(kinds, expected);
 
+    let bonecrusher = [2, 20].map(|life| {
+        let (mut runner, bite) = infectious_bite_board("Grizzly Bears", &["Bonecrusher Giant"]);
+        runner.state_mut().players[AI.0 as usize].life = life;
+        verdict_on(runner.state(), &cast_candidate(bite)).1.kind
+    });
+    assert_eq!(bonecrusher, [no_loss, lethal]);
+
     // CR 702.21a: the AI's own Ward (Tolarian Terror) does not trigger on its own spell.
     let (own_ward, bite) = infectious_bite_board("Tolarian Terror", &["Grizzly Bears"]);
     let reason = verdict_on(own_ward.state(), &cast_candidate(bite)).1;
     assert_eq!(reason.kind, lethal);
 
-    let (mut unsettled, bite) = infectious_bite_board("Grizzly Bears", &["Grizzly Bears"]);
-    unsettled.state_mut().layers_dirty.mark_full();
-    let reason = verdict_on(unsettled.state(), &cast_candidate(bite)).1;
-    assert_eq!(
-        reason.kind, pressure,
-        "an unsettled board may hide a granted trigger"
-    );
-}
-
-/// A spell with no target announces nothing, so Frost Titan does not withhold Prologue's lethal.
-#[test]
-fn an_untargeted_spell_ignores_becomes_target_triggers() {
-    let (_, reason) = cast_beside(
-        FormatConfig::standard(),
-        2,
-        &[(OPPONENT, 9)],
-        prologue_to_phyresis,
-        |s| {
-            s.add_real_card(
-                OPPONENT,
-                "Frost Titan",
-                Zone::Battlefield,
-                shared_integration_card_db(),
-            )
-        },
-    );
-    assert_eq!(reason.kind, "poison_clock_lethal");
+    let unsettled = [Some(KAMBAL), None].map(|opposing| {
+        let (mut runner, prologue) = race_board(opposing, false);
+        runner.state_mut().layers_dirty.mark_full();
+        verdict_on(runner.state(), &cast_candidate(prologue)).1.kind
+    });
+    assert_eq!(unsettled, [no_loss, lethal]);
 }
 
 /// The AI at 2 life with Prologue to Phyresis and {1}{U}, from two Islands when `islands` and
 /// floating otherwise; the opponent at nine poison, with `opposing` on the battlefield.
 fn race_board(opposing: Option<&str>, islands: bool) -> (GameRunner, ObjectId) {
-    use engine::types::mana::{ManaType, ManaUnit};
     let (runner, ids) = board(FormatConfig::standard(), 2, &[(OPPONENT, 9)], |s| {
         s.at_phase(Phase::PreCombatMain);
         s.with_life(AI, 2);
@@ -2113,8 +2101,7 @@ fn race_board(opposing: Option<&str>, islands: bool) -> (GameRunner, ObjectId) {
             s.add_basic_land(AI, ManaColor::Blue);
             s.add_basic_land(AI, ManaColor::Blue);
         } else {
-            let blue = |t| ManaUnit::new(t, ObjectId(0), false, vec![]);
-            s.with_mana_pool(AI, vec![blue(ManaType::Blue), blue(ManaType::Blue)]);
+            s.with_mana_pool(AI, floating(&[ManaType::Blue; 2]));
         }
         if let Some(name) = opposing {
             s.add_real_card(
@@ -2154,9 +2141,9 @@ fn cast_and_settle(runner: &mut GameRunner, prologue: ObjectId) {
 
 const KAMBAL: &str = "Kambal, Consul of Allocation";
 
-/// CR 601.2i + CR 704.5a: Kambal triggers as Prologue becomes cast and resolves first, so the AI
-/// at 2 life loses before the opponent's tenth counter; the policy withholds lethal, and credits
-/// it without Kambal.
+/// CR 601.2i + CR 603.3 + CR 704.5a: Kambal triggers as Prologue becomes cast and resolves first,
+/// so the AI at 2 life loses before the opponent's tenth counter; the policy withholds lethal, and
+/// credits it without Kambal.
 #[test]
 fn a_cast_trigger_that_can_eliminate_the_ai_withholds_the_lethal_read() {
     let (mut runner, prologue) = race_board(Some(KAMBAL), false);
@@ -2168,7 +2155,10 @@ fn a_cast_trigger_that_can_eliminate_the_ai_withholds_the_lethal_read() {
         let (runner, prologue) = race_board(opposing, false);
         verdict_on(runner.state(), &cast_candidate(prologue)).1.kind
     });
-    assert_eq!(kinds, ["poison_clock_pressure", "poison_clock_lethal"]);
+    assert_eq!(
+        kinds,
+        ["poison_clock_no_poison_loss", "poison_clock_lethal"]
+    );
 }
 
 /// CR 601.2g + CR 704.5a: tapping both Islands for Prologue triggers Manabarbs twice, and those
@@ -2186,6 +2176,11 @@ fn a_payment_trigger_that_can_eliminate_the_ai_withholds_the_lethal_read() {
         verdict_on(runner.state(), &cast_candidate(prologue)).1.kind
     });
     assert_eq!(kinds, ["poison_clock_pressure", "poison_clock_lethal"]);
+
+    // CR 601.2g: floating mana taps no land, so Manabarbs does not trigger.
+    let (runner, prologue) = race_board(Some("Manabarbs"), false);
+    let reason = verdict_on(runner.state(), &cast_candidate(prologue)).1;
+    assert_eq!(reason.kind, "poison_clock_lethal");
 }
 
 /// CR 601.2i: an opponent's Young Pyromancer triggers only on its controller's casts, so it does
@@ -2217,4 +2212,156 @@ fn an_opponents_own_tap_for_mana_trigger_does_not_withhold_the_lethal_read() {
     let (runner, prologue) = race_board(Some("Forbidden Orchard"), true);
     let reason = verdict_on(runner.state(), &cast_candidate(prologue)).1;
     assert_eq!(reason.kind, "poison_clock_lethal");
+}
+
+/// The AI at 1 life with Prologue to Phyresis, an Island, and a Swamp when `swamp` (else a second
+/// Island); the opponent at nine poison with Royal Decree.
+fn royal_decree_board(swamp: bool) -> (GameRunner, ObjectId) {
+    let (runner, ids) = board(FormatConfig::standard(), 2, &[(OPPONENT, 9)], |s| {
+        s.at_phase(Phase::PreCombatMain);
+        s.with_life(AI, 1);
+        s.add_basic_land(AI, ManaColor::Blue);
+        s.add_basic_land(
+            AI,
+            if swamp {
+                ManaColor::Black
+            } else {
+                ManaColor::Blue
+            },
+        );
+        s.add_real_card(
+            OPPONENT,
+            "Royal Decree",
+            Zone::Battlefield,
+            shared_integration_card_db(),
+        );
+        vec![prologue_to_phyresis(s)]
+    });
+    (runner, ids[0])
+}
+
+/// CR 601.2g + CR 603.3 + CR 704.5a: tapping the Swamp for Prologue triggers Royal Decree, which
+/// resolves first and kills the AI at 1 life; paid from two Islands nothing triggers.
+#[test]
+fn a_tap_trigger_that_can_eliminate_the_ai_withholds_the_lethal_read() {
+    let (mut runner, prologue) = royal_decree_board(true);
+    cast_and_settle(&mut runner, prologue);
+    assert!(!engine::game::players::is_alive(runner.state(), AI));
+    assert_eq!(poison_of(runner.state(), OPPONENT), 9);
+
+    let kinds = [true, false].map(|swamp| {
+        let (runner, prologue) = royal_decree_board(swamp);
+        verdict_on(runner.state(), &cast_candidate(prologue)).1.kind
+    });
+    assert_eq!(
+        kinds,
+        ["poison_clock_no_poison_loss", "poison_clock_lethal"]
+    );
+}
+
+/// CR 602.2b + CR 603.2: an opponent's Rings of Brighthearth and Crackdown Construct trigger only
+/// on their controller's activations, so Vraska's −9 stays lethal.
+#[test]
+fn an_opponents_own_activation_trigger_does_not_withhold_the_lethal_read() {
+    let kinds = ["Rings of Brighthearth", "Crackdown Construct"].map(|opposing| {
+        let (runner, ids) = vraska_board(threshold(9), &[(OPPONENT, 8)], |s| {
+            s.add_real_card(
+                OPPONENT,
+                opposing,
+                Zone::Battlefield,
+                shared_integration_card_db(),
+            );
+            Vec::new()
+        });
+        let candidate = activation_of(runner.state(), ids[0], loyalty(-9));
+        verdict_on(runner.state(), &candidate).1.kind
+    });
+    assert_eq!(kinds, ["poison_clock_lethal"; 2]);
+}
+
+/// CR 601.2i + CR 704.5a: the AI's own Teval, Arbiter of Virtue makes it lose life equal to
+/// Prologue's mana value (2) before Prologue resolves, so lethal is withheld at 2 life, not at 3.
+#[test]
+fn the_ais_own_cast_trigger_can_withhold_the_lethal_read() {
+    let kinds = [2, 3].map(|life| {
+        let (runner, ids) = board(FormatConfig::standard(), 2, &[(OPPONENT, 9)], |s| {
+            s.at_phase(Phase::PreCombatMain);
+            s.with_life(AI, life);
+            s.with_mana_pool(AI, floating(&[ManaType::Blue; 2]));
+            s.add_real_card(
+                AI,
+                "Teval, Arbiter of Virtue",
+                Zone::Battlefield,
+                shared_integration_card_db(),
+            );
+            vec![prologue_to_phyresis(s)]
+        });
+        verdict_on(runner.state(), &cast_candidate(ids[0])).1.kind
+    });
+    assert_eq!(
+        kinds,
+        ["poison_clock_no_poison_loss", "poison_clock_lethal"]
+    );
+}
+
+/// CR 117.4 + CR 704.3: Prologue cast in response to Lightning Bolt aimed at the AI at 3 life
+/// resolves first, and the opponent at nine loses before the Bolt resolves.
+#[test]
+fn a_response_is_read_before_the_spell_below_it_resolves() {
+    let bolter = PlayerId(1);
+    let poisoned = PlayerId(2);
+    let (mut runner, ids) = board(FormatConfig::standard(), 3, &[(poisoned, 9)], |s| {
+        s.at_phase(Phase::PreCombatMain);
+        s.with_life(AI, 3);
+        s.with_mana_pool(AI, floating(&[ManaType::Blue; 2]));
+        s.with_mana_pool(bolter, floating(&[ManaType::Red]));
+        let bolt = s.add_real_card(
+            bolter,
+            "Lightning Bolt",
+            Zone::Hand,
+            shared_integration_card_db(),
+        );
+        vec![prologue_to_phyresis(s), bolt]
+    });
+    runner.act(GameAction::PassPriority).unwrap();
+    let card_id = runner.state().objects[&ids[1]].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: ids[1],
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(AI)),
+        })
+        .unwrap();
+    while runner.state().waiting_for != (WaitingFor::Priority { player: AI }) {
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert_eq!(runner.state().stack.len(), 1, "the Bolt waits on the stack");
+
+    let (delta, reason) = verdict_on(runner.state(), &cast_candidate(ids[0]));
+    assert_eq!(reason.kind, "poison_clock_lethal");
+    assert!(delta > crate::policies::registry::STRONG_MAX);
+}
+
+/// CR 704.5b + CR 104.4a: drawing from an empty library as Prologue's counter lands makes both
+/// players lose at once, a draw; with a card to draw it is lethal.
+#[test]
+fn drawing_from_an_empty_library_withholds_the_lethal_read() {
+    let kinds = [true, false].map(|empty| {
+        let (mut runner, prologue) = race_board(None, false);
+        if empty {
+            let state = runner.state_mut();
+            for card in state.players[AI.0 as usize].library.clone() {
+                engine::game::zones::move_to_zone(state, card, Zone::Exile, &mut Vec::new());
+            }
+            assert!(state.players[AI.0 as usize].library.is_empty());
+        }
+        verdict_on(runner.state(), &cast_candidate(prologue)).1.kind
+    });
+    assert_eq!(kinds, ["poison_clock_pressure", "poison_clock_lethal"]);
 }

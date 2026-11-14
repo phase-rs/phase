@@ -64,7 +64,6 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{DerivedIndexReadiness, GameState, TriggerIndex};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
-use crate::types::player::PlayerId;
 use crate::types::triggers::{TriggerEventKey, TriggerMode};
 use crate::types::zones::Zone;
 
@@ -1064,26 +1063,6 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::AssembleContraptionOnSprocket
         | EffectKind::ReassembleContraptionOnSprocket => {}
     }
-}
-
-/// CR 603.2: whether `def` subscribes to an event carrying a key `wanted` accepts; modes routed only to `unclassified` answer false.
-pub fn trigger_subscribes_to(
-    def: &TriggerDefinition,
-    wanted: impl Fn(&TriggerEventKey) -> bool,
-) -> bool {
-    keys_from_trigger_def(def).0.iter().any(wanted)
-}
-
-/// CR 603.2: whether `def`'s player filter admits `player` as the event's acting player, read
-/// against `source` as it is now.
-pub fn trigger_admits_player(
-    state: &GameState,
-    source: &GameObject,
-    def: &TriggerDefinition,
-    player: PlayerId,
-) -> bool {
-    let source_context = super::triggers::trigger_source_context_for_latch(state, source);
-    super::trigger_matchers::valid_player_matches(def, state, player, &source_context)
 }
 
 /// CR 702.108 (Prowess), CR 702.156 (Ravenous), CR 702.147 (Decayed),

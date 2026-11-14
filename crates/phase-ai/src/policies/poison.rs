@@ -42,31 +42,25 @@
 //! `players::poison_loss_measure` call per live opponent; the combat branch is
 //! linear in the candidate's own attack list. Only a pool whose estimate
 //! reaches lethal, or a direct poison whose printed count is dynamic, pays for
-//! one state clone, on which the engine resolves the instruction or the
-//! unblocked combat damage (and the attackers' poison triggers it fires);
-//! sub-lethal candidates stay card-local.
+//! one state clone, on which the engine casts the candidate and resolves the
+//! stack, or deals the unblocked combat damage (and the attackers' poison
+//! triggers it fires); sub-lethal candidates stay card-local.
 
-use engine::ai_support::legal_actions;
-use engine::game::ability_utils::{
-    assign_targets_in_chain, build_resolved_from_def_with_targets, build_target_slots,
-};
+use engine::ai_support::{current_target_selection_targets, legal_actions};
 use engine::game::combat::AttackTarget;
 use engine::game::combat_damage::preview_unblocked_combat_damage;
 use engine::game::effects::player_counter::{
     preview_player_counter_addition, PlayerCounterAdditionPreview,
 };
-use engine::game::effects::preview_resolution;
-use engine::game::functioning_abilities::battlefield_active_triggers;
+use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::players::{self, PoisonLossMeasure, PoisonLossScope};
 use engine::game::sba::check_state_based_actions;
-use engine::game::trigger_index::{trigger_admits_player, trigger_subscribes_to};
 use engine::types::ability::{AbilityDefinition, Effect, QuantityExpr, ResolvedAbility, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::player::{PlayerCounterKind, PlayerId};
-use engine::types::TriggerEventKey;
 
 use crate::ability_chain::{collect_scoped_nodes, AbilityScope};
 use crate::features::poison::{
@@ -117,19 +111,15 @@ impl PoisonPool {
 #[derive(Debug, Clone, PartialEq)]
 enum PoisonContribution<'a> {
     /// Adds poison counters to opponents (CR 122.1f); the recipients decide how
-    /// many land on one shared pool (CR 810.10). `source` and `abilities` are
-    /// what the engine resolves to confirm a lethal claim.
+    /// many land on one shared pool (CR 810.10). A lethal claim is confirmed by
+    /// casting the candidate on a copy and resolving the stack.
     DirectPoison {
         recipients: PoisonRecipients,
-        source: ObjectId,
         abilities: Vec<&'a AbilityDefinition>,
     },
     /// Proliferates (CR 701.34a) — only advances the clock on an already
     /// poisoned opponent.
-    Proliferate {
-        source: ObjectId,
-        abilities: Vec<&'a AbilityDefinition>,
-    },
+    Proliferate,
     /// CR 508.1: an attack declaration whose poison sources are pointed at a
     /// live opponent: the closest pool the declared attackers advance if the
     /// damage connects.
@@ -145,18 +135,13 @@ impl PoisonClockPolicy {
     fn contribution<'a>(&self, ctx: &PolicyContext<'a>) -> PoisonContribution<'a> {
         match &ctx.candidate.action {
             GameAction::DeclareAttackers { attacks, .. } => combat_contribution(ctx, attacks),
-            _ => candidate_abilities(ctx)
-                .map_or(PoisonContribution::None, |(source, abilities)| {
-                    classify_abilities(source, abilities)
-                }),
+            _ => candidate_abilities(ctx).map_or(PoisonContribution::None, classify_abilities),
         }
     }
 }
 
-/// The source and the ability set a cast, activation, or mode selection commits to.
-fn candidate_abilities<'a>(
-    ctx: &PolicyContext<'a>,
-) -> Option<(ObjectId, Vec<&'a AbilityDefinition>)> {
+/// The ability set a cast, activation, or mode selection commits to.
+fn candidate_abilities<'a>(ctx: &PolicyContext<'a>) -> Option<Vec<&'a AbilityDefinition>> {
     let state = ctx.state;
     match &ctx.candidate.action {
         GameAction::CastSpell { object_id, .. } => {
@@ -165,9 +150,7 @@ fn candidate_abilities<'a>(
             // its printed modes, and mode selection is a later step of
             // announcing the spell. Crediting the cast would score a branch
             // the AI may never take — `SelectModes` is where it is decided.
-            obj.modal
-                .is_none()
-                .then(|| (*object_id, obj.abilities.iter().collect()))
+            obj.modal.is_none().then(|| obj.abilities.iter().collect())
         }
         GameAction::ActivateAbility {
             source_id,
@@ -179,16 +162,16 @@ fn candidate_abilities<'a>(
                 .get(source_id)?
                 .abilities
                 .get(*ability_index)?;
-            Some((*source_id, vec![ability]))
+            Some(vec![ability])
         }
         // CR 601.2b: the mode IS chosen here — classify exactly the branch
         // the candidate selects, so a poison mode and a non-poison mode of
         // the same card score differently.
-        GameAction::SelectModes { indices } => {
-            let waiting_for = &ctx.decision.waiting_for;
-            let source = pending_mode_source(waiting_for)?;
-            Some((source, selected_mode_abilities(state, waiting_for, indices)))
-        }
+        GameAction::SelectModes { indices } => Some(selected_mode_abilities(
+            state,
+            &ctx.decision.waiting_for,
+            indices,
+        )),
         _ => None,
     }
 }
@@ -199,20 +182,16 @@ fn candidate_abilities<'a>(
 /// The walk is always [`AbilityScope::Unconditional`]: every caller has already
 /// resolved which branch this candidate commits to, so a still-unchosen mode
 /// must not leak in.
-fn classify_abilities(
-    source: ObjectId,
-    abilities: Vec<&AbilityDefinition>,
-) -> PoisonContribution<'_> {
+fn classify_abilities(abilities: Vec<&AbilityDefinition>) -> PoisonContribution<'_> {
     if let Some(recipients) =
         opponent_poison_recipients_parts(abilities.iter().copied(), AbilityScope::Unconditional)
     {
         PoisonContribution::DirectPoison {
             recipients,
-            source,
             abilities,
         }
     } else if proliferates_parts(abilities.iter().copied(), AbilityScope::Unconditional) {
-        PoisonContribution::Proliferate { source, abilities }
+        PoisonContribution::Proliferate
     } else {
         PoisonContribution::None
     }
@@ -239,87 +218,59 @@ fn printed_poison(abilities: &[&AbilityDefinition]) -> Option<u32> {
         })
 }
 
-/// CR 608.2c + CR 701.34a: the board after the candidate's whole ability resolves with `seat` in
-/// the slot that admits it and the AI's own legal choices elsewhere; `None` when a required slot
-/// has no legal target or another player owns a choice.
-fn ability_delivery(
+/// An answer that never moves its prompt forward would otherwise loop forever.
+const CANDIDATE_DELIVERY_MAX_STEPS: usize = 64;
+
+/// CR 601.2i + CR 603.3 + CR 117.4: the board after the candidate is cast or activated on a
+/// copy and every player passes until the stack is back to its depth, with the AI's own prompts
+/// answered and the seat targeted where it is legal; None when the engine refuses the action or
+/// another player owns a choice.
+fn candidate_delivery(
     state: &GameState,
     ai_player: PlayerId,
-    source: ObjectId,
-    abilities: &[&AbilityDefinition],
+    action: &GameAction,
     seat: PlayerId,
 ) -> Option<GameState> {
     let chosen = TargetRef::Player(seat);
-    let resolved = abilities
-        .iter()
-        .map(|ability| {
-            let mut resolved =
-                build_resolved_from_def_with_targets(ability, source, ai_player, Vec::new());
-            // CR 115.1 + CR 702.11c: every target comes from its slot's legal set.
-            let targets = build_target_slots(state, &resolved)
-                .ok()?
-                .iter()
-                .map(|slot| match slot.chooser {
-                    Some(chooser) if chooser != ai_player => None,
-                    _ if slot.legal_targets.contains(&chosen) => Some(chosen.clone()),
-                    // CR 702.21a: the gate refuses a warded target whose cost the AI cannot pay.
-                    _ => slot
-                        .legal_targets
+    let mut board = state.clone();
+    // CR 601.2a: a spell whose modes are being chosen is already on the stack, so the depth is
+    // the stack below it.
+    let depth = pending_mode_source(&board.waiting_for)
+        .and_then(|spell| board.stack.iter().position(|entry| entry.id == spell))
+        .unwrap_or(board.stack.len());
+    apply_as_current_for_simulation(&mut board, action.clone()).ok()?;
+    for _ in 0..CANDIDATE_DELIVERY_MAX_STEPS {
+        let answer = match &board.waiting_for {
+            WaitingFor::GameOver { .. } => return Some(board),
+            WaitingFor::Priority { .. } if board.stack.len() <= depth => return Some(board),
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            waiting_for if waiting_for.acting_player() != Some(ai_player) => return None,
+            WaitingFor::ProliferateChoice { eligible, .. } if eligible.contains(&chosen) => {
+                GameAction::SelectTargets {
+                    targets: vec![chosen.clone()],
+                }
+            }
+            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+                let legal = current_target_selection_targets(&board)?;
+                let target = if legal.contains(&chosen) {
+                    chosen.clone()
+                } else {
+                    // CR 702.21a: an opponent's Ward triggers on being targeted, so avoid it.
+                    legal
                         .iter()
-                        .find(|target| !has_ward(state, ai_player, target))
-                        .or(slot.legal_targets.first())
-                        .cloned(),
-                })
-                .collect::<Option<Vec<_>>>()?;
-            // CR 601.2c + CR 601.2g + CR 601.2i + CR 602.2b: abilities that trigger on targeting,
-            // paying, casting or activating go on the stack first; conservative: subjects and
-            // valid_source are not evaluated because the spell isn't staged on the preview.
-            if cast_path_may_trigger(state, ai_player, &targets) {
-                return None;
+                        .find(|target| !has_ward(&board, ai_player, target))
+                        .or(legal.first())?
+                        .clone()
+                };
+                GameAction::ChooseTarget {
+                    target: Some(target),
+                }
             }
-            if !targets.is_empty() {
-                assign_targets_in_chain(state, &mut resolved, &targets).ok()?;
-            }
-            Some(resolved)
-        })
-        .collect::<Option<Vec<_>>>()?;
-    preview_resolution(state, &resolved, |preview| match &preview.waiting_for {
-        WaitingFor::ProliferateChoice { player, eligible }
-            if *player == ai_player && eligible.contains(&chosen) =>
-        {
-            Some(GameAction::SelectTargets {
-                targets: vec![chosen.clone()],
-            })
-        }
-        // Only the AI's own prompts are answered; another player's choice withholds the read.
-        waiting_for if waiting_for.acting_player() == Some(ai_player) => {
-            legal_actions(preview).into_iter().next()
-        }
-        _ => None,
-    })
-}
-
-/// CR 702.21a + CR 601.2g + CR 601.2i + CR 602.2b: Ward on a targeted object, or a live cast,
-/// payment, activation or (when targeting) becomes-target trigger that can fire on the AI's cast,
-/// on a permanent the AI doesn't control; an unsettled board may hide granted ones.
-fn cast_path_may_trigger(state: &GameState, ai_player: PlayerId, targets: &[TargetRef]) -> bool {
-    state.layers_dirty.is_dirty()
-        || targets
-            .iter()
-            .any(|target| has_ward(state, ai_player, target))
-        || battlefield_active_triggers(state).any(|(obj, active)| {
-            let def = active.definition;
-            obj.controller != ai_player
-                && trigger_subscribes_to(def, |key| match key {
-                    // These keys' matchers end with the acting player's filter, which the AI fills.
-                    TriggerEventKey::SpellCast(_) | TriggerEventKey::TapsForMana => {
-                        trigger_admits_player(state, obj, def, ai_player)
-                    }
-                    TriggerEventKey::AbilityOrCopyActivated | TriggerEventKey::ManaProduced => true,
-                    TriggerEventKey::BecomesTarget => !targets.is_empty(),
-                    _ => false,
-                })
-        })
+            _ => legal_actions(&board).into_iter().next()?,
+        };
+        apply_as_current_for_simulation(&mut board, answer).ok()?;
+    }
+    None
 }
 
 /// CR 702.21a: Ward triggers only for a spell or ability its controller's opponent controls.
@@ -581,7 +532,6 @@ impl TacticalPolicy for PoisonClockPolicy {
             // `confirm_lethal` has read the counters through the engine.
             PoisonContribution::DirectPoison {
                 recipients,
-                source,
                 abilities,
             } => {
                 let printed = printed_poison(&abilities);
@@ -599,8 +549,9 @@ impl TacticalPolicy for PoisonClockPolicy {
                             .map(|seat| (seat, estimate)),
                     ),
                 };
-                let deliver =
-                    |seat| ability_delivery(ctx.state, ctx.ai_player, source, &abilities, seat);
+                let deliver = |seat| {
+                    candidate_delivery(ctx.state, ctx.ai_player, &ctx.candidate.action, seat)
+                };
                 match closest_delivered(ctx.ai_player, pools, deliver, printed.is_none()) {
                     Some(pool) => score_clock(scalar, &pool, CRITICAL_MAX),
                     None => {
@@ -608,14 +559,15 @@ impl TacticalPolicy for PoisonClockPolicy {
                     }
                 }
             }
-            PoisonContribution::Proliferate { source, abilities } => {
+            PoisonContribution::Proliferate => {
                 // CR 701.34b: one proliferate gives a shared-poison team a single counter.
                 // CR 701.34a: proliferate chooses among permanents and players
                 // that ALREADY have a counter. With no poisoned opponent it
                 // advances nothing, so it earns nothing on this axis.
                 let pools = seat_pools(ctx.state, ctx.ai_player, 1, |measure| measure.count > 0);
-                let deliver =
-                    |seat| ability_delivery(ctx.state, ctx.ai_player, source, &abilities, seat);
+                let deliver = |seat| {
+                    candidate_delivery(ctx.state, ctx.ai_player, &ctx.candidate.action, seat)
+                };
                 match closest_delivered(ctx.ai_player, pools, deliver, false) {
                     Some(pool) => score_clock(scalar, &pool, CRITICAL_MAX),
                     None => PolicyVerdict::neutral(PolicyReason::new(
