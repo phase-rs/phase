@@ -44,19 +44,33 @@ function pointerOverTouchable(pointerId: number, objectId: number | null): void 
 }
 
 /**
- * The touchable object at `element`: the innermost permanent containing it, if
- * that permanent is marked touchable. An attachment is rendered inside its
- * host's element but is its own card, so a pointer on an attachment's exposed
- * edge touches the attachment, never the host beneath it. An attachment
- * control (such as the collapsed `+N` button or the attachment fan button) is
- * outside the host's touch region. A keyword badge in the keyword strip
- * straddles the card's top-left edge; its overhanging portion is outside the
- * card face and must not register as a touch on the host.
+ * The touchable object at `element` with pointer coordinates `clientX`/`clientY`:
+ * the innermost permanent containing it, if that permanent is marked touchable
+ * AND the pointer is within the card's rendered boundary. An attachment is
+ * rendered inside its host's element but is its own card, so a pointer on an
+ * attachment's exposed edge touches the attachment, never the host beneath it.
+ * An attachment control (such as the collapsed `+N` button or the attachment fan
+ * button) is outside the host's touch region. A keyword badge in the keyword
+ * strip straddles the card's top-left edge; its overhanging portion is outside
+ * the card face and must not register as a touch on the host, but its inboard
+ * portion IS part of the card face.
  */
-function touchableAt(element: Element | null | undefined): number | null {
+function touchableAt(
+  element: Element | null | undefined,
+  clientX?: number,
+  clientY?: number,
+): number | null {
   if (element?.closest(`[${ATTACHMENT_CONTROL_ATTRIBUTE}]`)) return null;
-  if (element?.closest(`[${KEYWORD_BADGE_ATTRIBUTE}]`)) return null;
   const card = element?.closest(`[${PERMANENT_CARD_ATTRIBUTE}]`);
+  if (!card) return null;
+  if (clientX !== undefined && clientY !== undefined) {
+    const rect = card.getBoundingClientRect();
+    if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
+      return null;
+    }
+  } else if (element?.closest(`[${KEYWORD_BADGE_ATTRIBUTE}]`)) {
+    return null;
+  }
   const marked = card?.getAttribute(UN_TOUCH_ATTRIBUTE);
   if (marked == null) return null;
   const objectId = Number(marked);
@@ -69,7 +83,10 @@ function touchableAt(element: Element | null | undefined): number | null {
  * `touchableAt`, so one entry is never counted twice.
  */
 function onPointerOver(event: PointerEvent): void {
-  pointerOverTouchable(event.pointerId, touchableAt(event.target as Element | null));
+  pointerOverTouchable(
+    event.pointerId,
+    touchableAt(event.target as Element | null, event.clientX, event.clientY),
+  );
 }
 
 /**
@@ -80,7 +97,14 @@ function onPointerOver(event: PointerEvent): void {
  */
 function onPointerMove(event: PointerEvent): void {
   if (event.buttons === 0) return;
-  pointerOverTouchable(event.pointerId, touchableAt(document.elementFromPoint?.(event.clientX, event.clientY)));
+  pointerOverTouchable(
+    event.pointerId,
+    touchableAt(
+      document.elementFromPoint?.(event.clientX, event.clientY),
+      event.clientX,
+      event.clientY,
+    ),
+  );
 }
 
 /** A pointer that left the window is over nothing; coming back is a new entry. */

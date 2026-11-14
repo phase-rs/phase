@@ -55,7 +55,11 @@ vi.mock("../../card/CardImage.tsx", () => ({
 
 vi.mock("../KeywordStrip.tsx", () => ({
   KeywordStrip: ({ keywords }: { keywords: unknown }) => (
-    <span data-keyword-badge="" data-testid="keyword-strip">
+    <span
+      data-keyword-badge=""
+      data-testid="keyword-strip"
+      style={{ position: "absolute", left: "-15%", top: "26%" }}
+    >
       {JSON.stringify(keywords)}
     </span>
   ),
@@ -1013,34 +1017,66 @@ describe("PermanentCard", () => {
       expect(badge).toBeInTheDocument();
       expect(host.contains(badge)).toBe(true);
 
-      // Route 1: an uncaptured pointer crossing onto the keyword badge, then the host face.
-      fireEvent.pointerOver(badge, { pointerId: 1, pointerType: "mouse" });
+      // Mock the host's bounding rect: card at (100, 100) to (300, 400).
+      // The badge overhangs 15% to the left, so its left edge is at 70.
+      const hostRect = { left: 100, top: 100, right: 300, bottom: 400, width: 200, height: 300, x: 100, y: 100, toJSON: () => {} };
+      vi.spyOn(host, "getBoundingClientRect").mockReturnValue(hostRect as DOMRect);
+
+      // Route 1: an uncaptured pointer crossing onto the keyword badge's OVERHANG (outboard),
+      // then into the badge's INBOARD portion (first inboard contact = one touch),
+      // then onto the host face (preserves touch), back to badge inboard (preserves),
+      // back to host face (preserves), then away to elsewhere (ends touch),
+      // then re-entering host face (new touch).
+      // Outboard: clientX = 90 (left of card's left edge at 100)
+      fireEvent.pointerOver(badge, { pointerId: 1, pointerType: "mouse", clientX: 90, clientY: 200 });
       expect(touches()).toEqual([]);
-      fireEvent.pointerOver(host, { pointerId: 1, pointerType: "mouse" });
+      // First inboard contact: clientX = 110 (inside card, on badge)
+      fireEvent.pointerOver(badge, { pointerId: 1, pointerType: "mouse", clientX: 110, clientY: 200 });
       expect(touches()).toEqual([[touchAction]]);
-
-      // Moving back to the badge sends zero new touches; re-entering the host face touches again.
-      fireEvent.pointerOver(badge, { pointerId: 1, pointerType: "mouse" });
+      // Moving to host face preserves the touch
+      fireEvent.pointerOver(host, { pointerId: 1, pointerType: "mouse", clientX: 200, clientY: 200 });
       expect(touches()).toHaveLength(1);
-      fireEvent.pointerOver(host, { pointerId: 1, pointerType: "mouse" });
+      // Moving back to badge inboard preserves the touch
+      fireEvent.pointerOver(badge, { pointerId: 1, pointerType: "mouse", clientX: 110, clientY: 200 });
+      expect(touches()).toHaveLength(1);
+      // Moving back to host face preserves the touch
+      fireEvent.pointerOver(host, { pointerId: 1, pointerType: "mouse", clientX: 200, clientY: 200 });
+      expect(touches()).toHaveLength(1);
+      // Moving away to elsewhere ends the touch
+      const elsewhere = document.createElement("div");
+      document.body.appendChild(elsewhere);
+      fireEvent.pointerOver(elsewhere, { pointerId: 1, pointerType: "mouse", clientX: 500, clientY: 500 });
+      expect(touches()).toHaveLength(1);
+      // Re-entering host face is a new touch
+      fireEvent.pointerOver(host, { pointerId: 1, pointerType: "mouse", clientX: 200, clientY: 200 });
       expect(touches()).toEqual([[touchAction], [touchAction]]);
+      elsewhere.remove();
 
-      // Route 2: a captured pointer hit-tested onto the keyword badge, then the host face.
+      // Route 2: a captured pointer hit-tested onto the keyword badge's OVERHANG (outboard),
+      // then into the badge's INBOARD portion (first inboard contact = one touch),
+      // then onto the host face (preserves touch), back to badge inboard (preserves),
+      // back to host face (preserves).
       let under: Element = badge;
       stubElementFromPoint(() => under);
-      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
+      // Outboard: clientX = 90
+      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch", clientX: 90, clientY: 200 });
       expect(touches()).toHaveLength(2);
-      under = host;
-      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
-      expect(touches()).toEqual([[touchAction], [touchAction], [touchAction]]);
-
-      // Moving back to the badge on the captured route sends zero new touches; re-entering touches.
+      // First inboard contact: clientX = 110
       under = badge;
-      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
-      expect(touches()).toHaveLength(3);
+      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch", clientX: 110, clientY: 200 });
+      expect(touches()).toEqual([[touchAction], [touchAction], [touchAction]]);
+      // Moving to host face preserves the touch
       under = host;
-      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
-      expect(touches()).toEqual([[touchAction], [touchAction], [touchAction], [touchAction]]);
+      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch", clientX: 200, clientY: 200 });
+      expect(touches()).toHaveLength(3);
+      // Moving back to badge inboard preserves the touch
+      under = badge;
+      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch", clientX: 110, clientY: 200 });
+      expect(touches()).toHaveLength(3);
+      // Moving back to host face preserves the touch
+      under = host;
+      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch", clientX: 200, clientY: 200 });
+      expect(touches()).toHaveLength(3);
     });
 
     it("touches a touchable attachment itself, not its host", () => {
