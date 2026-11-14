@@ -1,5 +1,6 @@
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::EffectKind;
 use engine::types::actions::GameAction;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::WaitingFor;
@@ -1099,6 +1100,174 @@ fn goblin_machinist_reordering_revealed_commander_offers_no_extra_command_zone_r
     assert_eq!(machinist_obj.toughness, Some(5));
 }
 
+/// CR 701.20b + CR 701.20d + CR 903.9b: Goblin Machinist reveals multiple cards
+/// including a tucked commander and a land card. When the owner answers the
+/// bottom-order choice, the tucked commander is reordered within the library
+/// through the library authority without constructing a zone-change proposal
+/// or offering an extra command-zone choice.
+#[test]
+fn goblin_machinist_reordering_multiple_revealed_cards_with_commander_offers_no_extra_command_zone_choice(
+) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let krenko = scenario
+        .add_creature(P0, "Krenko, Mob Boss", 3, 3)
+        .as_legendary()
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    scenario.with_commander(krenko);
+
+    let machinist = scenario
+        .add_creature_from_oracle(P0, "Goblin Machinist", 0, 5, GOBLIN_MACHINIST_ORACLE)
+        .id();
+
+    let griptide = scenario
+        .add_spell_to_hand_from_oracle(P1, "Griptide", true, GRIPTIDE_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let _deep = scenario.add_card_to_library_top(P0, "Deep Card");
+    let mountain = scenario
+        .add_spell_to_library_top(P0, "Mountain", false)
+        .as_land()
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+    let mut setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        krenko,
+        Zone::Battlefield,
+        &mut setup_events,
+    );
+
+    // P0 passes priority so P1 can cast Griptide targeting P0's commander Krenko
+    runner.act(GameAction::PassPriority).unwrap();
+
+    let griptide_card_id = runner.state().objects[&griptide].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: griptide,
+            card_id: griptide_card_id,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("P1 casts Griptide targeting Krenko");
+
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(engine::types::ability::TargetRef::Object(krenko)),
+        })
+        .expect("select Krenko as target for Griptide");
+
+    // Pass priority to resolve Griptide
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.act(GameAction::PassPriority).unwrap();
+
+    // CR 903.9b: Griptide moving Krenko from Battlefield to Library MUST offer
+    // the command-zone return replacement choice.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "Griptide moving commander to library must offer CR 903.9b replacement, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Decline the replacement (index 1) so Krenko is tucked onto the top of the library.
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("decline commander replacement");
+
+    // Move Mountain to index 0 on top of Krenko so Machinist reveals [Mountain, Krenko] (2 cards)
+    let mut tuck_events = Vec::new();
+    engine::game::zones::move_to_library_at_index(
+        runner.state_mut(),
+        mountain,
+        Some(0),
+        &mut tuck_events,
+    );
+
+    // Both players pass priority to clear Griptide's resolution and return to P0 priority
+    while !matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ) {
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+
+    // P0 activates Goblin Machinist
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: machinist,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("activate Goblin Machinist ability");
+
+    // Pass priority from both players to resolve Machinist ability
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.act(GameAction::PassPriority).unwrap();
+
+    // With 2 cards revealed (Mountain and Krenko), owner is prompted for bottom order
+    let WaitingFor::EffectZoneChoice { cards, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "expected EffectZoneChoice for 2 revealed cards, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        cards
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        [mountain, krenko].into_iter().collect()
+    );
+
+    // Answering bottom order with SelectCards reorders within library
+    let _res = runner
+        .act(GameAction::SelectCards {
+            cards: vec![krenko, mountain],
+        })
+        .expect("answer the bottom order");
+
+    // CR 701.20b + CR 701.20d + CR 903.9b: NO command zone choice offered!
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "in-library placement of tucked commander in multi-card reorder must not offer replacement choice, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Krenko is at the bottom in the answered order (mountain is on the bottom, krenko above it)
+    assert_eq!(
+        runner.state().players[P0.0 as usize].library.back(),
+        Some(&mountain),
+    );
+    assert_eq!(
+        runner.state().objects[&krenko].zone,
+        Zone::Library,
+        "Krenko remains in the library"
+    );
+
+    // Verify pump applied from Krenko's MV (4): base 0/5 + 4 -> 4/5
+    evaluate_layers(runner.state_mut());
+    let machinist_obj = &runner.state().objects[&machinist];
+    assert_eq!(machinist_obj.power, Some(4));
+    assert_eq!(machinist_obj.toughness, Some(5));
+}
+
 /// CR 401.2 + CR 401.4 + CR 701.20d: after the owner arranges the revealed
 /// pile, the settled order is authoritative state only. The authorized owner
 /// receives the arrangement prompt; every viewer's projection — the owner's
@@ -1263,6 +1432,45 @@ fn library_redirect(
         .description(description.to_string())
 }
 
+/// A synthetic object-scoped redirect matching a specific destination zone.
+fn zone_redirect_for_card(
+    description: &str,
+    trigger_dest: Zone,
+    destination: Zone,
+    id: ObjectId,
+) -> engine::types::ability::ReplacementDefinition {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter,
+    };
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::zones::EtbTapState;
+
+    let mut definition = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .destination_zone(trigger_dest)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                destination,
+                origin: None,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                library_shuffle: Default::default(),
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        ))
+        .description(description.to_string());
+    definition.valid_card = Some(TargetFilter::SpecificObject { id });
+    definition
+}
+
 /// The same synthetic redirect, restricted to one exact object's library move
 /// so a multi-card rest pile can keep its other members in the library.
 fn library_redirect_for_card(
@@ -1270,19 +1478,19 @@ fn library_redirect_for_card(
     destination: Zone,
     id: ObjectId,
 ) -> engine::types::ability::ReplacementDefinition {
-    let mut definition = library_redirect(description, destination);
-    definition.valid_card = Some(engine::types::ability::TargetFilter::SpecificObject { id });
-    definition
+    zone_redirect_for_card(description, Zone::Library, destination, id)
 }
 
-/// CR 614.6 + CR 616.1 + CR 401.4: "Put all cards revealed this way on the
-/// bottom of your library in any order." The owner's answer is a proposed
-/// library placement for every selected card, so it consults `Moved`
-/// replacements exactly like the ordinary delivery path: two competing
-/// library redirects surface `WaitingFor::ReplacementChoice` after the answer,
-/// and the answered replacement decides where the revealed cards end up.
+/// CR 701.20b + CR 701.20d: "Put all cards revealed this way on the
+/// bottom of your library in any order." Revealing cards does not cause them
+/// to leave the library (CR 701.20b), and putting them on the bottom of the
+/// library in any order is an in-library reorder (CR 701.20d). In-library
+/// placement delegates directly to the library reorder authority without
+/// constructing a zone-change proposal or consulting `Moved` (destination: Library)
+/// replacements. Even when competing library redirects exist, the revealed cards
+/// settle directly on the bottom of the library in the owner's chosen order.
 #[test]
-fn erratic_mutation_owner_order_consults_competing_replacements() {
+fn erratic_mutation_owner_order_reorders_in_library_without_consulting_zone_replacements() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -1351,44 +1559,36 @@ fn erratic_mutation_owner_order_consults_competing_replacements() {
         })
         .unwrap();
 
-    // CR 614.6: the owner-ordered delivery is a replaceable placement, so each
-    // selected card's move surfaces the two-way CR 616.1 ordering choice.
-    let mut answered = 0;
-    while matches!(
-        committed.state().waiting_for,
-        WaitingFor::ReplacementChoice { .. }
-    ) {
-        assert!(
-            answered < 6,
-            "each selected card surfaces at most one ordering choice, then the batch settles"
-        );
-        committed
-            .act(GameAction::ChooseReplacement { index: 0 })
-            .expect("answer the competing library redirect");
-        answered += 1;
-    }
+    // CR 701.20b + CR 701.20d: The cards are already in the library, so putting
+    // them on the bottom of the library in any order is an in-library reorder,
+    // not a zone change. It delegates directly to the library reorder authority
+    // without consulting Moved replacements (even if competing library redirects exist).
     assert!(
-        answered > 0,
-        "the owner-ordered pile must consult the competing library redirects"
+        matches!(committed.state().waiting_for, WaitingFor::Priority { .. }),
+        "in-library placement settles directly without pausing on replacement choices, got {:?}",
+        committed.state().waiting_for
     );
 
     let state = committed.state();
     for (id, label) in [(land1, "land1"), (land2, "land2"), (nonland, "nonland")] {
         assert_eq!(
             state.objects[&id].zone,
-            Zone::Exile,
-            "{label} must take the answered redirect instead of the library bottom"
+            Zone::Library,
+            "{label} must remain in the library, not redirected to exile"
+        );
+        assert!(
+            !state.revealed_cards.contains(&id),
+            "{label} must stop being revealed"
         );
     }
     assert_eq!(
-        state.objects[&other].zone,
-        Zone::Library,
-        "the unrevealed card is untouched"
-    );
-    assert!(
-        matches!(state.waiting_for, WaitingFor::Priority { .. }),
-        "the batch settled back to priority, got {:?}",
-        state.waiting_for
+        state.players[P0.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![other, land1, land2, nonland],
+        "revealed cards settle at the bottom in the chosen order"
     );
     assert!(state.active_batch_delivery().is_none());
     assert!(state.stack.is_empty());
@@ -1494,11 +1694,28 @@ fn proteus_staff_owner_order_settles_reorder_before_cleanup() {
     assert_eq!(cards, vec![miss_a, miss_b]);
 
     // CR 401.4: the owner answers with the bottom order.
-    runner
+    let res = runner
         .act(GameAction::SelectCards {
             cards: vec![miss_b, miss_a],
         })
         .expect("answer the owner's bottom order");
+
+    // F2: assert exactly one EffectResolved for RevealUntil and staff from the owner-answer
+    assert_eq!(
+        res.events
+            .iter()
+            .filter(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::RevealUntil,
+                    source_id,
+                    ..
+                } if *source_id == staff
+            ))
+            .count(),
+        1,
+        "public owner-answer must emit exactly one EffectResolved for staff RevealUntil"
+    );
 
     let state = runner.state();
     assert_eq!(
@@ -1548,11 +1765,13 @@ fn proteus_staff_owner_order_settles_reorder_before_cleanup() {
     assert!(state.stack.is_empty());
 }
 
-/// CR 701.20d + CR 616.1: The same owner answer, but the rest pile's library
-/// deliveries hit two competing `Moved` replacements. The delivery parks on
-/// `WaitingFor::ReplacementChoice` after the answer, resumes through the batch
-/// drain, and settles the arrangement's reorder before the reveal cleanup runs
-/// — once, with no stranded batch.
+/// CR 701.20d + CR 614.6 + CR 616.1: Proteus Staff's kept creature delivery
+/// to the battlefield hits two competing `Moved` (destination: Battlefield) replacements.
+/// The instruction pauses on `WaitingFor::ReplacementChoice` before the rest pile is
+/// delivered. Resuming from the pause delivers the kept creature, pauses on
+/// `WaitingFor::RevealUntilBottomOrder` for the owner's rest-pile bottom order, and
+/// answering it settles the arrangement's reorder before reveal cleanup runs — emitting
+/// exactly one `EffectResolved` for staff and retiring revealed cards at the batch boundary.
 #[test]
 fn proteus_staff_paused_owner_order_still_settles_reorder() {
     let mut scenario = GameScenario::new();
@@ -1568,10 +1787,7 @@ fn proteus_staff_paused_owner_order_still_settles_reorder() {
     let staff = scenario
         .add_artifact_from_oracle(P0, "Proteus Staff", PROTEUS_STAFF)
         .id();
-    // CR 614.6: redirect the bounced creature out of the library so the rest
-    // pile starts as the whole library and its deepest member can be placed in
-    // place. The redirects are object-scoped: the two cards that must stay in
-    // the library are not replacement targets.
+    // Redirect the bounced creature out of the library so the rest pile starts as the whole library.
     let victim = scenario.add_creature(P0, "Redirected Victim", 2, 2).id();
     scenario
         .add_creature(P0, "Victim Redirect", 0, 1)
@@ -1581,18 +1797,23 @@ fn proteus_staff_paused_owner_order_still_settles_reorder() {
             Zone::Exile,
             victim,
         ));
+    let deep = scenario.add_card_to_library_top(P0, "Deep Card");
     let kept = scenario.add_card_to_library_top(P0, "Kept Creature");
     let miss_b = scenario.add_card_to_library_top(P0, "Miss B");
     let miss_a = scenario.add_card_to_library_top(P0, "Miss A");
-    let miss_pause = scenario.add_card_to_library_top(P0, "Miss Pause");
-    // Two competing object-scoped redirects for one rest-pile member: its
-    // library delivery pauses on `ReplacementChoice` while the other two members
-    // stay revealed in the library.
-    for label in ["Pause Redirect A", "Pause Redirect B"] {
+
+    // Two competing object-scoped redirects for the kept creature entering the battlefield:
+    // Its delivery pauses on ReplacementChoice while the revealed misses stay revealed in the library.
+    for label in ["Kept Redirect A", "Kept Redirect B"] {
         scenario
             .add_creature(P0, label, 0, 1)
             .as_enchantment()
-            .with_replacement_definition(library_redirect_for_card(label, Zone::Exile, miss_pause));
+            .with_replacement_definition(zone_redirect_for_card(
+                label,
+                Zone::Battlefield,
+                Zone::Exile,
+                kept,
+            ));
     }
     let mut runner = scenario.build();
     configure_kept_creature(runner.state_mut(), kept);
@@ -1608,78 +1829,100 @@ fn proteus_staff_paused_owner_order_still_settles_reorder() {
             payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Proteus Staff");
-    // The victim's own library placement is answered inside this drive.
-    drive_to_owner_order(&mut runner, 12);
 
-    let WaitingFor::RevealUntilBottomOrder { cards, .. } = runner.state().waiting_for.clone()
-    else {
-        panic!(
-            "expected RevealUntilBottomOrder after the victim's placement, got {:?}",
-            runner.state().waiting_for
-        );
-    };
-    assert_eq!(cards, vec![miss_pause, miss_a, miss_b]);
-    // Deliver the paused member first and the two library-staying members in
-    // the order that leaves Miss B in place at its own delivery.
-    runner
-        .act(GameAction::SelectCards {
-            cards: vec![miss_pause, miss_b, miss_a],
-        })
-        .expect("answer the owner's bottom order");
-
-    // CR 616.1: the paused member's delivery surfaces the competing redirects.
-    // Both other members are still revealed and still in the library when the
-    // prompt appears.
-    let mut paused = 0;
-    while matches!(
+    // Pass priority to resolve the activation; victim is bounced to library (redirected to exile),
+    // and reveal_until begins until kept creature is found.
+    // Kept creature hits the two competing battlefield redirects and pauses on ReplacementChoice.
+    while !matches!(
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ) {
-        assert!(paused < 8, "the replacement choices are bounded");
-        if paused == 0 {
-            let state = runner.state();
-            for (id, label) in [(miss_a, "Miss A"), (miss_b, "Miss B")] {
-                assert_eq!(
-                    state.objects[&id].zone,
-                    Zone::Library,
-                    "{label} must still be in the library at the pause"
-                );
-                assert!(
-                    state.revealed_cards.contains(&id),
-                    "{label} must still be revealed at the pause"
-                );
-            }
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+
+    // CR 616.1: the kept creature's battlefield delivery surfaces the two competing redirects.
+    // Both revealed misses are still revealed and still in the library when the prompt appears.
+    {
+        let state = runner.state();
+        for (id, label) in [(miss_a, "Miss A"), (miss_b, "Miss B")] {
             assert_eq!(
-                state.players[P0.0 as usize]
-                    .library
-                    .iter()
-                    .copied()
-                    .collect::<Vec<_>>(),
-                vec![miss_pause, miss_a, miss_b],
-                "the paused member is still at the top of the rest pile"
+                state.objects[&id].zone,
+                Zone::Library,
+                "{label} must still be in the library at the pause"
             );
             assert!(
-                state
-                    .active_batch_delivery()
-                    .is_some_and(|pending| pending.library_reorder.is_some()),
-                "the whole-arrangement reorder must ride the paused batch"
+                state.revealed_cards.contains(&id),
+                "{label} must still be revealed at the pause"
             );
         }
-        runner
-            .act(GameAction::ChooseReplacement { index: 0 })
-            .expect("answer the library modifier");
-        paused += 1;
+        assert!(
+            state.active_batch_delivery().is_some(),
+            "the delivery batch must be active during the pause"
+        );
     }
-    assert!(
-        paused > 0,
-        "the owner-ordered rest pile must pause on the competing replacements"
+
+    // Answer the kept creature's replacement choice (redirect to Exile)
+    let kept_res = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("answer the kept creature replacement");
+
+    // The batch resumes from the pause and transitions to RevealUntilBottomOrder
+    let WaitingFor::RevealUntilBottomOrder { cards, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected RevealUntilBottomOrder after kept creature delivery, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(cards, vec![miss_a, miss_b]);
+
+    // Submit the owner's bottom order (Miss B then Miss A)
+    let mut all_events = kept_res.events;
+    let order_res = runner
+        .act(GameAction::SelectCards {
+            cards: vec![miss_b, miss_a],
+        })
+        .expect("answer the owner's bottom order");
+    all_events.extend(order_res.events.clone());
+
+    // F2: Assert exactly one EffectResolved for RevealUntil and staff across the answer sequence
+    assert_eq!(
+        order_res
+            .events
+            .iter()
+            .filter(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::RevealUntil,
+                    source_id,
+                    ..
+                } if *source_id == staff
+            ))
+            .count(),
+        1,
+        "owner-order answer must emit exactly one EffectResolved for staff RevealUntil"
+    );
+    assert_eq!(
+        all_events
+            .iter()
+            .filter(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::RevealUntil,
+                    source_id,
+                    ..
+                } if *source_id == staff
+            ))
+            .count(),
+        1,
+        "full resume sequence must emit exactly one EffectResolved for staff RevealUntil"
     );
 
     let state = runner.state();
     assert_eq!(
-        state.objects[&miss_pause].zone,
+        state.objects[&kept].zone,
         Zone::Exile,
-        "the paused member takes the answered redirect"
+        "kept creature took the answered redirect to exile"
     );
     assert_eq!(
         state.players[P0.0 as usize]
@@ -1687,10 +1930,9 @@ fn proteus_staff_paused_owner_order_still_settles_reorder() {
             .iter()
             .copied()
             .collect::<Vec<_>>(),
-        vec![miss_b, miss_a],
+        vec![deep, miss_b, miss_a],
         "both library-staying members keep the chosen bottom order"
     );
-    assert_eq!(state.objects[&kept].zone, Zone::Battlefield);
     assert!(
         matches!(state.waiting_for, WaitingFor::Priority { .. }),
         "the paused instruction settled back to priority, got {:?}",
@@ -1698,12 +1940,10 @@ fn proteus_staff_paused_owner_order_still_settles_reorder() {
     );
     assert!(state.active_batch_delivery().is_none());
     assert!(state.stack.is_empty());
-    // CR 701.20d + CR 616.1: the two selected members that stayed in the library
-    // are reordered occurrences, so each becomes exactly one new object and stops
-    // being revealed before the continuation. While the batch is in flight across
-    // the replacement pause, intermediate per-card deliveries do not prematurely
-    // retire active reorder members; terminal settlement at the batch boundary
-    // retires the entire arrangement atomically.
+
+    // CR 701.20d + CR 616.1: terminal reorder retirement at the batch boundary
+    // retires the entire arrangement atomically. Each card becomes exactly one new
+    // object and stops being revealed.
     for (id, label, incarnation_before) in [
         (miss_a, "Miss A", incarnations_before[0]),
         (miss_b, "Miss B", incarnations_before[1]),

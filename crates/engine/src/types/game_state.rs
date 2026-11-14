@@ -39606,11 +39606,11 @@ mod resolved_information_tests {
 
         effects::resolve_effect(&mut state, &ability, &mut events).unwrap();
 
-        // CR 701.20a: RevealOnly retains Controller UntilActionBoundary reveal
-        // (public visibility comes from the Controller reveal being accessible
-        // to all viewers via filter_state_for_scope; no Public UntilZoneChange
-        // is emitted because RevealOnly has no zone change to retire it).
-        assert!(state.revealed_cards.contains(&revealed));
+        // CR 701.20a: When RevealOnly has no downstream consumer (such as Mind Funeral
+        // where the subsequent graveyard instruction is unsupported), its reveal lifetime
+        // concludes when the instruction completes. The transient reveal is retired
+        // so opponent and spectator snapshots conceal library occurrences at priority.
+        assert!(!state.revealed_cards.contains(&revealed));
         assert!(!state.public_revealed_cards.contains(&revealed));
         let information = state
             .resolved_rules_journal
@@ -39621,8 +39621,10 @@ mod resolved_information_tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        // Only the Controller UntilActionBoundary information is recorded
-        assert_eq!(information.len(), 1);
+        // Both the Controller Reveal and terminal Hide UntilActionBoundary commands are recorded
+        assert_eq!(information.len(), 2);
+        assert_eq!(information[0].edit, ResolvedInformationEdit::Reveal);
+        assert_eq!(information[1].edit, ResolvedInformationEdit::Hide);
 
         let mut replay = pre_state;
         for command in &information {

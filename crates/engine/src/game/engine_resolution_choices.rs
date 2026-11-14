@@ -7784,12 +7784,12 @@ pub(super) fn handle_resolution_choice(
                     // `park_waiting_for` intentionally preserves the stale
                     // choice for Devour's nested-choice path.
                     state.waiting_for = WaitingFor::Priority { player };
-                    // CR 401.4 + CR 614.1 + CR 616.1: the owner's arrangement is
-                    // ONE batch through the replacement-consulting pipeline. A
-                    // selected card that already sits in a library is still a
-                    // proposed library placement, so its move consults `Moved`
-                    // replacements through the same arm every other library
-                    // placement uses — never a raw in-library reposition.
+                    // CR 401.4 + CR 701.20b + CR 701.20d: the owner's arrangement is
+                    // ONE batch through the delivery pipeline. Selected cards already
+                    // sitting in the library are reordered within the library through
+                    // the library authority without constructing a zone-change proposal
+                    // or consulting zone-change replacements, while cards entering from
+                    // other zones consult replacements.
                     let requests = effect_zone_library_placement_order(&chosen, &library_position)
                         .into_iter()
                         .map(|card_id| {

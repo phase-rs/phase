@@ -908,7 +908,11 @@ pub(crate) fn move_object_with_terminal(
     //   rg -o 'destination_zone\(Zone::\w+\)' crates/engine/src | sort | uniq -c
     if let Some(position) = req.placement.clone() {
         if req.to == Zone::Library {
-            if req.cause.is_exempt() {
+            // CR 701.20b + CR 701.20d: A card already in the library placed at a
+            // library position is an in-library reorder, not a zone change. Route it
+            // directly to the library reorder authority without constructing a zone-change
+            // proposal or consulting replacements.
+            if from_zone == Zone::Library || req.cause.is_exempt() {
                 let index = match position {
                     LibraryPosition::Top => Some(0),
                     LibraryPosition::Bottom => None,
@@ -4929,10 +4933,34 @@ fn execute_zone_move_with_applied_terminal(
     {
         return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     }
-    // CR 400.7 + CR 701.24c: a library card put into its own library at no stated
-    // position does not change zones; a shuffle the instruction names is its own step.
-    if from_zone == Zone::Library && dest_zone == Zone::Library && library_placement.is_none() {
-        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+    // CR 701.20b + CR 701.20d + CR 400.7: a card already in the library put into
+    // its own library does not change zones. When a placement position is stated,
+    // reorder it within the library through the library authority without constructing
+    // a zone-change proposal or consulting replacements. Without a stated position,
+    // it remains in place.
+    if from_zone == Zone::Library && dest_zone == Zone::Library {
+        if let Some(position) = library_placement {
+            let index = match position {
+                LibraryPosition::Top => Some(0),
+                LibraryPosition::Bottom => None,
+                LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
+                LibraryPosition::BeneathTop { depth } => match depth {
+                    crate::types::ability::QuantityExpr::Fixed { value } => {
+                        Some(value.max(0) as usize)
+                    }
+                    _ => None,
+                },
+                LibraryPosition::RandomWithinTop { .. } => None,
+            };
+            let delivery_start = events.len();
+            zones::move_to_library_at_index(state, obj_id, index, events);
+            return ZoneMoveTerminalResult::Completed(zone_move_completion_from_delivery(
+                member,
+                &events[delivery_start..],
+            ));
+        } else {
+            return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+        }
     }
     // Boss-stage Horde (Turtle Team-Up booklet, printed p. 7): Boss-owned
     // cards bound for hand go to their graveyard "instead". Normalize the

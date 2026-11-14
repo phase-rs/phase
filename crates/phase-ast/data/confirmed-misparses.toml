@@ -1593,7 +1593,6 @@ face = [
   { key = "mimeofacture", class = "wrong_player", clauses = ["Search that player's library for a card with the same name and put it onto the battlefield under your control."] },
   { key = "mind bomb", class = "wrong_count", clauses = ["Mind Bomb deals damage to each player equal to 3 minus the number of cards they discarded this way."] },
   { key = "mind extraction", class = "missing_effect", clauses = ["and discards all cards of each of the sacrificed creature's colors."] },
-  { key = "mind funeral", class = "wrong_count", clauses = ["Target opponent reveals cards from the top of their library until four land cards are revealed."] },
   { key = "mind harness", class = "missing_effect", clauses = ["Enchant red or green creature"] },
   { key = "mind spiral", class = "target_wrong", clauses = ["If the gift was promised, tap target creature an opponent controls and put a stun counter on it."] },
   { key = "mind swords", class = "wrong_count", clauses = ["Each player exiles two cards from their hand."] },
