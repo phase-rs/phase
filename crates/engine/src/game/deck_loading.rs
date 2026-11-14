@@ -1440,6 +1440,27 @@ pub fn load_horde_library(
     }
 }
 
+/// CR 903.5a: the commander is one of the 100 — a decklist that names it in both
+/// the command zone and the main deck describes ONE physical card, not two. Nets
+/// each command-zone copy out of the main deck, bounded by occurrence
+/// (`saturating_sub`), so a main deck holding more copies than the command zone
+/// claims keeps its remainder. The single netting authority: the game loader and
+/// the companion starting-deck helper both call it, so a deck the loader builds
+/// and a deck a companion condition measures can never disagree on its size.
+pub fn net_command_zone(main: &[DeckEntry], command: &[&[DeckEntry]]) -> Vec<DeckEntry> {
+    let mut netted = main.to_vec();
+    for entry in command.iter().copied().flatten() {
+        let Some(target) = netted
+            .iter_mut()
+            .find(|m| m.card.name.eq_ignore_ascii_case(&entry.card.name))
+        else {
+            continue;
+        };
+        target.count = target.count.saturating_sub(entry.count);
+    }
+    netted
+}
+
 /// Create a commander GameObject from a CardFace, placing it in the command zone.
 pub fn create_commander_from_card_face(
     state: &mut GameState,
@@ -1771,19 +1792,6 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
     // main_deck_copies)` per card, so a main deck holding more copies than the
     // command zone claims keeps its remainder (and the validator still reports
     // the CR 903.5b singleton violation).
-    let net_command_zone = |main: &[DeckEntry], command: &[&[DeckEntry]]| -> Vec<DeckEntry> {
-        let mut netted = main.to_vec();
-        for entry in command.iter().copied().flatten() {
-            let Some(target) = netted
-                .iter_mut()
-                .find(|m| m.card.name.eq_ignore_ascii_case(&entry.card.name))
-            else {
-                continue;
-            };
-            target.count = target.count.saturating_sub(entry.count);
-        }
-        netted
-    };
     // The netted slots must mirror the command-zone placement loops below
     // EXACTLY: commanders only when the format's command zone is filled from
     // the decklist's `commander` slot, signature spells only under

@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::database::legality::{LegalityFormat, LegalityStatus};
 use crate::database::CardDatabase;
 use crate::game::ante::face_uses_ante;
-use crate::game::companion::{companion_starting_deck, is_eligible_companion_with_min_deck_size};
+use crate::game::companion::{
+    companion_starting_deck_from_decklist, is_eligible_companion_with_min_deck_size,
+};
 use crate::game::deck_loading::{deserialize_draft_set_codes, DeckEntry};
 use crate::parser::oracle::{compute_deck_copy_limit_from_text, oracle_text_allows_commander};
 use crate::types::card::{CardFace, CardRules, PrintedCardRef};
@@ -206,7 +208,8 @@ pub fn companion_candidates(db: &CardDatabase, request: &DeckCompatibilityReques
             let companion = DeckEntry::from_resolved_face(db, face, 1);
             let main = deck_entries_for_names(db, &starting_main);
             let commanders = deck_entries_for_names(db, &request.commander);
-            let starting = companion_starting_deck(&main, &commanders, uses_commander);
+            let starting =
+                companion_starting_deck_from_decklist(&main, &commanders, uses_commander);
             is_eligible_companion_with_min_deck_size(
                 &companion,
                 &starting,
@@ -856,7 +859,7 @@ pub fn companion_eligibility_for_deck(
     let companion = DeckEntry::from_resolved_face(db, face, 1);
     let main = deck_entries_for_names(db, main_deck);
     let commanders = deck_entries_for_names(db, commanders);
-    let starting = companion_starting_deck(&main, &commanders, uses_commander);
+    let starting = companion_starting_deck_from_decklist(&main, &commanders, uses_commander);
     Some(is_eligible_companion_with_min_deck_size(
         &companion,
         &starting,
@@ -6542,6 +6545,47 @@ mod tests {
             verdict.selected_format_reasons
         );
         verdict.selected_format_compatible == Some(true)
+    }
+
+    /// CR 702.139b + CR 903.5a: a Commander Draft submission lists its commander
+    /// in the main deck AND in the command-zone slot; that is one physical card,
+    /// so at the 60-card minimum Yorion needs 80 cards counting it once.
+    #[test]
+    fn commander_listed_in_main_and_command_zone_counts_once_for_yorion() {
+        let db = yorion_db();
+        let deck = |size: usize| {
+            let mut main = vec!["Legal Standard".to_string()];
+            main.extend(expand("Plains", size - 1));
+            main
+        };
+        let commanders = vec!["Legal Standard".to_string()];
+        for (size, eligible) in [(79usize, false), (80, true)] {
+            assert_eq!(
+                companion_eligibility_for_deck(
+                    &db,
+                    &deck(size),
+                    &commanders,
+                    true,
+                    "Yorion, Sky Nomad",
+                    60,
+                ),
+                Some(eligible),
+                "{size}-card starting deck"
+            );
+        }
+        // A command-zone commander the main list does not name is one more card.
+        assert_eq!(
+            companion_eligibility_for_deck(
+                &db,
+                &expand("Plains", 79),
+                &commanders,
+                true,
+                "Yorion, Sky Nomad",
+                60,
+            ),
+            Some(true),
+            "79 listed cards plus an unlisted commander is 80"
+        );
     }
 
     #[test]

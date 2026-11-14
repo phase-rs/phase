@@ -193,9 +193,11 @@ fn has_repeated_mana_symbols(face: &CardFace) -> bool {
 
 // ── Pre-game Reveal Flow ────────────────────────────────────────────────
 
-/// Builds the starting deck a companion condition evaluates. Commander-family
-/// games include the commander but never the prospective companion (CR
-/// 702.139b); other formats evaluate their main deck only.
+/// Builds the starting deck a companion condition evaluates from a game-loaded
+/// pool, whose `main_deck` is already netted of the command zone (the game
+/// loader's `net_command_zone`). Commander-family games include the commander
+/// but never the prospective companion (CR 702.139b); other formats evaluate
+/// their main deck only.
 pub fn companion_starting_deck(
     main_deck: &[DeckEntry],
     commanders: &[DeckEntry],
@@ -206,6 +208,30 @@ pub fn companion_starting_deck(
         starting.extend_from_slice(commanders);
     }
     starting
+}
+
+/// `companion_starting_deck` for a decklist-shaped `main_deck`, as submitted by
+/// deck construction, a draft pod, or game admission, where the commander may
+/// be named in the main list as well as in the command-zone list.
+///
+/// CR 903.5a: the commander is one of the deck's cards, so a main list that
+/// already names it and a separate command-zone list describe ONE physical
+/// card. The command-zone copy is netted out of `main_deck` through the
+/// loader's own `net_command_zone` before it is appended, so the deck measured
+/// here has exactly the size and contents of the deck the game starts with
+/// (never one card long, which would let a 79-card Commander deck satisfy
+/// Yorion's twenty-card margin over an 80-card threshold).
+pub fn companion_starting_deck_from_decklist(
+    main_deck: &[DeckEntry],
+    commanders: &[DeckEntry],
+    uses_commander: bool,
+) -> Vec<DeckEntry> {
+    if !uses_commander {
+        return main_deck.to_vec();
+    }
+    let mut netted = deck_loading::net_command_zone(main_deck, &[commanders]);
+    netted.retain(|entry| entry.count > 0);
+    companion_starting_deck(&netted, commanders, uses_commander)
 }
 
 fn commander_allows_companion(

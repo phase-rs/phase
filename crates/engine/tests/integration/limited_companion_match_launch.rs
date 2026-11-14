@@ -1666,3 +1666,55 @@ fn commander_family_never_offers_yorion() {
         assert_eq!(was_offered, offered, "{name}: {:?}", start.waiting_for);
     }
 }
+
+/// CR 702.139b + CR 903.5a: a Commander Draft pod submits its commander in the main list as
+/// well as the command-zone slot, and the loader nets that double listing to one card. At the
+/// 60-card minimum Yorion therefore needs an 80-card deck COUNTING THE COMMANDER ONCE: it is
+/// offered at 80 and not at 79 (paired boundary).
+#[test]
+fn commander_draft_pregame_counts_a_double_listed_commander_once_for_yorion() {
+    let commander = DeckEntry {
+        card: CardFace {
+            name: "Draft Commander".to_string(),
+            card_type: CardType {
+                supertypes: vec![engine::types::card_type::Supertype::Legendary],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Human".to_string()],
+            },
+            ..Default::default()
+        },
+        count: 1,
+    };
+    for (deck_size, offered) in [(80u32, true), (79, false)] {
+        let main_deck = vec![commander.clone(), land("Plains", deck_size - 1)];
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: main_deck.clone(),
+                commander: vec![commander.clone()],
+                companion: vec![yorion_from_oracle()],
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload {
+                main_deck,
+                commander: vec![commander.clone()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut state = GameState::new(FormatConfig::commander_draft(), 2, 42);
+        load_deck_into_state(&mut state, &payload);
+        let start = start_game_with_starting_player(&mut state, P0);
+        let yorion_offered = matches!(
+            &start.waiting_for,
+            WaitingFor::CompanionReveal { player, eligible_companions }
+                if *player == P0
+                    && eligible_companions.iter().any(|c| c.name == "Yorion, Sky Nomad")
+        );
+        assert_eq!(
+            yorion_offered, offered,
+            "{deck_size}-card deck: {:?}",
+            start.waiting_for
+        );
+    }
+}
+
