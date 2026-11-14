@@ -424,6 +424,7 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         DebugAction::MoveToZone { .. }
         | DebugAction::RemoveObject { .. }
         | DebugAction::Sacrifice { .. }
+        | DebugAction::Discard { .. }
         | DebugAction::Reveal { .. }
         | DebugAction::DrawCards { .. }
         | DebugAction::Mill { .. }
