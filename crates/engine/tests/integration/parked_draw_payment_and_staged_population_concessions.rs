@@ -8,9 +8,9 @@
 //! first of the two draws into a draw by P1, which parks on P1's Obstinate
 //! Familiar. P1 concedes at that prompt (a replacement the leaver chose, inside
 //! a surviving payment). P0 then casts Fated Retribution, a destruction
-//! population in which P0 and P2 each hold an Umbra-armor choice; P2 concedes
-//! while P0's choice is open (a held decision whose chooser left, with no
-//! payment left). Printed Oracle text is quoted from the card data; the
+//! population in which P2 and P3 each hold an Umbra-armor choice; P2 concedes
+//! at the Umbra-armor choice they were asked (a replacement the leaver chose,
+//! with no payment left) and P3's choice, held behind it, is asked next. Printed Oracle text is quoted from the card data; the
 //! board is synthetic only in that no printed card makes a payment whose draw
 //! is replaced by an opponent's skip effect, as the Vortex tests it reuses.
 
@@ -117,8 +117,9 @@ fn a_concession_inside_a_parked_draw_payment_then_one_inside_a_population_each_s
         .id();
     scenario.add_creature_from_oracle(P1, "Notion Thief", 3, 1, NOTION_THIEF);
     scenario.add_creature_from_oracle(P1, "Obstinate Familiar", 1, 1, OBSTINATE_FAMILIAR);
-    let (p0_creature, p0_hyena, p0_spider) = armored(&mut scenario, P0, "Grizzly Bears");
+    let p0_creature = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let (p2_creature, p2_hyena, p2_spider) = armored(&mut scenario, P2, "Runeclaw Bear");
+    let (p3_creature, p3_hyena, p3_spider) = armored(&mut scenario, P3, "Bear Cub");
     let retribution = scenario
         .add_spell_to_hand_from_oracle(P0, "Fated Retribution", true, FATED_RETRIBUTION)
         .with_mana_cost(ManaCost::zero())
@@ -132,10 +133,10 @@ fn a_concession_inside_a_parked_draw_payment_then_one_inside_a_population_each_s
         .counters
         .insert(CounterType::Age, 1);
     for (aura, host) in [
-        (p0_hyena, p0_creature),
-        (p0_spider, p0_creature),
         (p2_hyena, p2_creature),
         (p2_spider, p2_creature),
+        (p3_hyena, p3_creature),
+        (p3_spider, p3_creature),
     ] {
         engine::game::effects::attach::attach_to(runner.state_mut(), aura, host);
     }
@@ -205,7 +206,8 @@ fn a_concession_inside_a_parked_draw_payment_then_one_inside_a_population_each_s
     );
     round_trip(&mut runner);
 
-    // The population: P0's armor choice is open, P2's is held.
+    // The population: P0's plain creature is destroyed; P2, next in turn order,
+    // is asked about their armor and P3's choice is held behind it.
     runner.cast(retribution).commit();
     for _ in 0..8 {
         if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
@@ -218,14 +220,14 @@ fn a_concession_inside_a_parked_draw_payment_then_one_inside_a_population_each_s
     assert!(
         matches!(
             runner.state().waiting_for,
-            WaitingFor::ReplacementChoice { player: P0, .. }
+            WaitingFor::ReplacementChoice { player: P2, .. }
         ),
-        "reach guard: the active player is asked first: {:?}",
+        "reach guard: P2 is the first seat with a choice: {:?}",
         runner.state().waiting_for
     );
     round_trip(&mut runner);
 
-    // Second concession: P2, whose armor decision is held, leaves.
+    // Second concession: P2 leaves at the armor choice they were asked.
     let second = concede(&mut runner, P2);
     assert_eq!(
         eliminations_of(&second, P2),
@@ -235,15 +237,15 @@ fn a_concession_inside_a_parked_draw_payment_then_one_inside_a_population_each_s
     assert!(
         matches!(
             runner.state().waiting_for,
-            WaitingFor::ReplacementChoice { player: P0, .. }
+            WaitingFor::ReplacementChoice { player: P3, .. }
         ),
-        "P0's choice is still open: {:?}",
+        "the choice held behind the leaver's is asked next: {:?}",
         runner.state().waiting_for
     );
     round_trip(&mut runner);
     runner
         .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("the survivor answers the armor choice");
+        .expect("P3 answers their armor choice");
     for _ in 0..8 {
         match runner.state().waiting_for.clone() {
             // "If it's your turn, scry 2": keep both cards on top.
@@ -261,9 +263,14 @@ fn a_concession_inside_a_parked_draw_payment_then_one_inside_a_population_each_s
         }
     }
     assert_eq!(
-        zone(&runner, p0_creature),
+        zone(&runner, p3_creature),
         Zone::Battlefield,
-        "the armor saved the survivor's creature"
+        "the armor saved P3's creature"
+    );
+    assert_eq!(
+        zone(&runner, p0_creature),
+        Zone::Graveyard,
+        "P0's plain creature was destroyed"
     );
     assert_eq!(
         zone(&runner, retribution),
