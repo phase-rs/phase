@@ -1154,8 +1154,9 @@ fn a_capped_redirects_part_meets_its_new_recipients_protection() {
 /// STRICT FAILURE (CR 616.1 + CR 702.16e, fenced by the
 /// `capped_redirect_recipient_choice_incomplete` coverage gap): the reviewer's board, with Test of
 /// Faith on the pro-red Silver Knight too. The redirected point meets two prevention effects, so
-/// the Knight's controller should choose which applies: Test of Faith (a +1/+1 counter, the
-/// shield spent) or protection (the shield kept). Today protection prevents the point at the
+/// the Knight's controller should choose which applies: Test of Faith (a +1/+1 counter and
+/// two points of prevention remaining) or protection (all three points of prevention remaining).
+/// Today protection prevents the point at the
 /// pre-replacement gate and no choice is offered. This row records that reading.
 #[test]
 fn a_capped_redirects_part_meets_protection_before_a_competing_shield() {
