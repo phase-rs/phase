@@ -3378,7 +3378,8 @@ fn collect_matching_triggers_inner(
             // moving source included. An after-read admits that source only
             // through the zone it moved to, and only while the object that
             // is there now has the ability (CR 400.7: a copy ability does not
-            // follow its card).
+            // follow its card). A token that has already ceased to exist has
+            // no such object, and its ability triggers (CR 111.7).
             let after_read_of_moving_source = use_latched_trigger_entries
                 && matches!(visit, TriggerSourceVisit::EventSubject)
                 && matches!(
@@ -3405,7 +3406,7 @@ fn collect_matching_triggers_inner(
                             || state
                                 .objects
                                 .get(&source_context.identity.reference.object_id)
-                                .is_some_and(|object| {
+                                .is_none_or(|object| {
                                     object.zone == *to
                                         && super::functioning_abilities::active_trigger_definitions(
                                             state, object,

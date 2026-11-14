@@ -1756,6 +1756,66 @@ fn a_from_anywhere_trigger_of_an_earlier_check_survives_its_source_leaving_in_th
     assert_eq!(controllers, vec![P0]);
 }
 
+/// CR 111.7 + CR 603.6c + CR 603.10: a token's ability triggers before it ceases
+/// to exist. P0 controls Dread and a token copy of it (Cackling Counterpart:
+/// "Create a token that's a copy of target creature you control."); P0's
+/// Earthquake for 6 leaves only P2 at lethal life, so in one state-based-action
+/// check P2 loses and both 6/6 creatures die. The token is gone when the
+/// abilities are collected, and still triggers, like the Dread card.
+#[test]
+fn a_token_copy_of_a_from_anywhere_ability_triggers_though_it_has_ceased_to_exist() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let dread = scenario.add_real_card(P0, "Dread", Zone::Battlefield, db);
+    let counterpart = scenario.add_real_card(P0, "Cackling Counterpart", Zone::Hand, db);
+    let earthquake = scenario.add_real_card(P0, "Earthquake", Zone::Hand, db);
+    let mut pool = red_mana(9);
+    pool.extend((0..4).map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![])));
+    pool.extend((0..4).map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![])));
+    scenario.with_mana_pool(P0, pool);
+    scenario.with_life(P2, 6);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    let mut runner = scenario.build();
+    runner.cast(counterpart).target_object(dread).resolve();
+    let token = runner
+        .state()
+        .objects
+        .iter()
+        .find(|(id, object)| **id != dread && object.name == "Dread" && object.is_token)
+        .map(|(id, _)| *id)
+        .expect("reach guard: Cackling Counterpart made a token copy of Dread");
+    runner.cast(earthquake).x(6).commit();
+    for _ in 0..4 {
+        if runner.state().players[2].is_eliminated {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Earthquake resolves");
+    }
+    assert!(runner.state().players[2].is_eliminated);
+    assert_eq!(zone(&runner, dread), Zone::Graveyard);
+    let state = runner.state();
+    let from = |source: ObjectId| {
+        state
+            .pending_trigger_order
+            .iter()
+            .flat_map(|order| order.groups.iter())
+            .flat_map(|group| group.triggers.iter())
+            .chain(state.deferred_triggers.iter())
+            .filter(|context| context.pending.source_id == source)
+            .count()
+            + triggers_from(&runner, source)
+    };
+    assert_eq!(from(dread), 1, "the Dread card triggers");
+    assert_eq!(
+        from(token),
+        1,
+        "so does its token, which has ceased to exist"
+    );
+}
+
 /// Welcoming Vampire ("Whenever one or more other creatures you control with
 /// power 2 or less enter, draw a card. This ability triggers only once each
 /// turn.") and Sol Ring on P0's side; with `suppressor`, Hushbringer
