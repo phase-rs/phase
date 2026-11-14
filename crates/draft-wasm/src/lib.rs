@@ -2236,6 +2236,23 @@ fn apply_draft_action_inner(action_json: &str) -> Result<Vec<DraftDelta>, String
     }
 
     with_draft_mut_inner(|draft_session| {
+        // CR 702.139a/b: the generic action is a public way to record a deck, so
+        // it passes the same card-database companion gate as the dedicated
+        // submit exports, BEFORE the reducer mutates.
+        if let DraftAction::SubmitDeck {
+            main_deck,
+            commanders,
+            companion,
+            ..
+        } = &action
+        {
+            check_companion_before_submit(
+                draft_session,
+                main_deck,
+                commanders,
+                companion.as_deref(),
+            )?;
+        }
         session::apply(draft_session, action, None)
             .map_err(|e| format!("Draft action failed: {}", e))
     })
@@ -6166,6 +6183,45 @@ mod create_multiplayer_draft_tests {
         submit_deck_inner(&json(&seat_deck(0, 80)), &commanders, Some(yorion))
             .expect("80 cards is twenty over the 60-card minimum");
         assert_eq!(submitted_companion(0), Some(Some(yorion.to_string())));
+        clear_state();
+    }
+
+    /// CR 702.139a/b: the generic `apply_draft_action` export records a deck too, so an
+    /// ineligible backed Gyruda is refused there before the reducer mutates, and the
+    /// session is unchanged afterwards. The same action without the designation, and
+    /// with an eligible deck, is admitted (paired control).
+    #[test]
+    fn generic_submit_deck_action_refuses_an_ineligible_companion_without_mutating() {
+        clear_state();
+        premier_pod(0, 40);
+        let (deck, companion) = companion_test_deck();
+        install_gyruda_class_db(&companion, Some("Seat 0 Card 7"));
+        let action = |companion: Option<&str>| {
+            serde_json::to_string(&DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck: deck.clone(),
+                commanders: Vec::new(),
+                companion: companion.map(str::to_string),
+                printings: Vec::new(),
+            })
+            .expect("the action serializes")
+        };
+        let snapshot = || session_cell::with_installed(|session| session.clone());
+        let before = snapshot();
+
+        let error = apply_draft_action_inner(&action(Some(&companion)))
+            .expect_err("an odd mana value breaks the Gyruda condition");
+        assert!(error.contains("not a legal companion"), "{error}");
+        assert_eq!(
+            snapshot(),
+            before,
+            "a refused action leaves the session untouched"
+        );
+        assert_eq!(submitted_companion(0), None);
+
+        // Paired control: the same deck without the designation is an ordinary submission.
+        apply_draft_action_inner(&action(None)).expect("the deck itself is legal");
+        assert_eq!(submitted_companion(0), Some(None));
         clear_state();
     }
 
