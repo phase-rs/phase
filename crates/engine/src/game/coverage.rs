@@ -16766,7 +16766,14 @@ mod tests {
     #[test]
     fn a_capped_redirect_is_a_coverage_gap() {
         const TAG: &str = "structural:capped_redirect_recipient_choice_incomplete";
-        let cards: [(&str, &str, &[&str], &[&str], bool); 4] = [
+        type Case = (
+            &'static str,
+            &'static str,
+            &'static [&'static str],
+            &'static [&'static str],
+            bool,
+        );
+        let cards: [Case; 4] = [
             (
                 "Nomads en-Kor",
                 "{0}: The next 1 damage that would be dealt to this creature this turn is dealt to target creature you control instead.",
