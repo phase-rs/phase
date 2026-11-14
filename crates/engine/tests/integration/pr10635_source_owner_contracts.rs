@@ -8,7 +8,7 @@ use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::StackEntryKind;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -725,6 +725,79 @@ fn stylus_on_a_live_merged_permanent_lets_its_owner_arrange_the_cards_on_the_bot
     assert_eq!(shuffles, 0, "an ordered placement shuffles nothing");
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     assert!(state.stack.is_empty());
+}
+
+// Oracle text from the repo's card data export.
+const CHAOS_WARP: &str = "The owner of target permanent shuffles it into their library, then reveals the top card of their library. If it's a permanent card, they put it onto the battlefield.";
+
+/// CR 701.24a + CR 730.3: Chaos Warp on a live merged permanent is a terminal
+/// shuffle, so its cards' library position is transient: their owner is not
+/// asked to arrange them, the library is shuffled exactly once, and the reveal
+/// that follows completes.
+#[test]
+fn chaos_warp_on_a_live_merged_permanent_shuffles_once_without_an_arrangement() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["Existing A", "Existing B", "Existing C"]);
+    let host = scenario.add_creature(P1, "Host Creature", 2, 2).id();
+    let component = scenario.add_creature(P1, "Migratory Greathorn", 3, 4).id();
+    let warp = scenario
+        .add_spell_to_hand_from_oracle(P0, "Chaos Warp", true, CHAOS_WARP)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.battlefield.retain(|&id| id != component);
+        let mut events = vec![];
+        merge_object_onto(state, component, host, MergeSide::Top, &mut events);
+    }
+
+    let outcome = runner.cast(warp).target_object(host).resolve();
+
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "a terminal shuffle offers no arrangement: {:?}",
+        outcome.final_waiting_for()
+    );
+    let shuffled_players: Vec<_> = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shuffled_players,
+        vec![P1],
+        "the owner shuffles exactly once"
+    );
+    let state = outcome.state();
+    for card in [host, component] {
+        // The reveal may put one permanent card straight back.
+        assert!(
+            matches!(state.objects[&card].zone, Zone::Library | Zone::Battlefield),
+            "{:?}",
+            state.objects[&card].zone
+        );
+        assert!(state.objects[&card].merged_components.is_empty());
+    }
+    assert_eq!(
+        state.players[P1.0 as usize].library.len()
+            + [host, component]
+                .iter()
+                .filter(|card| state.objects[*card].zone == Zone::Battlefield)
+                .count(),
+        5,
+        "both cards went through the library"
+    );
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
 }
 
 // Oracle text from the repo's card data export.

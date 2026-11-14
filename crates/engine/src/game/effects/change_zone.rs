@@ -2457,6 +2457,8 @@ pub(crate) fn change_zone_member_requests(
             // CR 608.2c: attribution follows the captured instruction performer.
             request.mods.performed_by = Some(ctx.performed_by);
             request.placement = ctx.library_placement.clone();
+            // CR 701.24a: a terminal-shuffle move keeps its mode on every member.
+            request.library_shuffle = ctx.library_shuffle;
             request.exile_links = crate::game::zone_pipeline::ExileLinkSpec {
                 duration: ctx.duration.clone(),
                 controller: Some(ctx.controller),
