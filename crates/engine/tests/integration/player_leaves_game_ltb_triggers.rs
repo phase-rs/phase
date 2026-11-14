@@ -5,7 +5,7 @@
 //! controls but doesn't own is exiled, and both kinds of observer see that.
 
 use engine::game::combat::AttackTarget;
-use engine::game::game_object::{PhaseOutCause, PhaseStatus};
+use engine::game::game_object::{AttachTarget, PhaseOutCause, PhaseStatus};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
@@ -1301,6 +1301,100 @@ fn a_loss_and_a_death_in_one_state_based_action_event_trigger_one_or_more_once()
     assert!(runner.state().deferred_triggers.is_empty());
 }
 
+/// Profane Memento ("Whenever a creature card is put into an opponent's
+/// graveyard from anywhere, you gain 1 life.") and Steal Artifact ("Enchant
+/// artifact", "You control enchanted artifact.") on a three-player board where
+/// `memento_owner` owns the Memento and the other of P0 and P1 owns the Aura
+/// on it. P2 controls a Grizzly Bears. P0's Earthquake for 2 ("Earthquake deals
+/// X damage to each creature without flying and each player.") leaves only P1
+/// at lethal life, so one state-based-action check has P1 lose and the Bears
+/// die. Returns how many Memento triggers wait or are on the stack, and who
+/// controls them.
+fn memento_triggers_when_the_aura_owner_leaves(memento_owner: PlayerId) -> Vec<PlayerId> {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let aura_owner = if memento_owner == P0 { P1 } else { P0 };
+    let memento = scenario.add_real_card(memento_owner, "Profane Memento", Zone::Battlefield, db);
+    let steal = scenario.add_real_card(aura_owner, "Steal Artifact", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P2, "Grizzly Bears", Zone::Battlefield, db);
+    let earthquake = scenario.add_real_card(P0, "Earthquake", Zone::Hand, db);
+    scenario.with_mana_pool(P0, red_mana(8));
+    scenario.with_life(P1, 2);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    let mut runner = scenario.build();
+    // Fixture: the Aura on the artifact (CR 303.4), its control effect applied.
+    {
+        let state = runner.state_mut();
+        state.objects.get_mut(&steal).unwrap().attached_to = Some(AttachTarget::Object(memento));
+        state
+            .objects
+            .get_mut(&memento)
+            .unwrap()
+            .attachments
+            .push(steal);
+        state.layers_dirty.mark_full();
+        engine::game::layers::flush_layers(state);
+    }
+    assert_eq!(
+        runner.state().objects[&memento].controller,
+        aura_owner,
+        "reach guard: Steal Artifact gives its owner the Memento"
+    );
+    runner.cast(earthquake).x(2).commit();
+    for _ in 0..4 {
+        if runner.state().players[1].is_eliminated {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Earthquake resolves");
+    }
+    assert!(runner.state().players[1].is_eliminated);
+    assert_eq!(zone(&runner, bears), Zone::Graveyard);
+    let state = runner.state();
+    let mut controllers: Vec<PlayerId> = state
+        .pending_trigger_order
+        .iter()
+        .flat_map(|order| order.groups.iter())
+        .flat_map(|group| group.triggers.iter())
+        .chain(state.deferred_triggers.iter())
+        .filter(|context| context.pending.source_id == memento)
+        .map(|context| context.pending.controller)
+        .collect();
+    controllers.extend(
+        state
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == memento)
+            .map(|entry| entry.controller),
+    );
+    controllers
+}
+
+/// CR 603.6c + CR 603.10 + CR 603.3a: an ability that triggers when a card is
+/// put into a zone "from anywhere" is never a leaves-the-battlefield ability,
+/// even for a card put there from the battlefield: it looks at the game after
+/// the event, and its controller is the one it has then. P1's Steal Artifact
+/// leaves with them in the state-based-action check that kills the Bears, so P0
+/// controls their own Memento again and gains the life, once.
+#[test]
+fn a_from_anywhere_observer_reverted_by_a_departure_triggers_once_for_its_owner() {
+    assert_eq!(memento_triggers_when_the_aura_owner_leaves(P0), vec![P0]);
+}
+
+/// CR 603.6c + CR 603.10: the same board with the Memento owned by the player
+/// who leaves. A "from anywhere" ability reads the game immediately after the
+/// event, where the Memento is gone with its owner (CR 800.4a), so it triggers
+/// for nobody.
+#[test]
+fn a_from_anywhere_observer_that_left_with_its_owner_does_not_trigger() {
+    assert_eq!(
+        memento_triggers_when_the_aura_owner_leaves(P1),
+        Vec::<PlayerId>::new()
+    );
+}
+
 /// The board of the two Rise of the Dark Realms rows: P0 controls P2's Twilight
 /// Diviner ("Whenever one or more other creatures you control enter, if they
 /// entered or were cast from a graveyard, create a token that's a copy of one
@@ -1431,6 +1525,130 @@ fn diviner_triggers_on_board(
         .count();
     // An ability being announced is already a stack entry; count it once.
     Some(queued + triggers_from(&runner, diviner).max(announcing))
+}
+
+/// Welcoming Vampire ("Whenever one or more other creatures you control with
+/// power 2 or less enter, draw a card. This ability triggers only once each
+/// turn.") and Sol Ring on P0's side; with `suppressor`, Hushbringer
+/// ("Creatures entering or dying don't cause abilities to trigger.") is P2's.
+/// P0 casts Tooth and Nail for its hand mode ("Put up to two creature cards
+/// from your hand onto the battlefield."), choosing Grizzly Bears and then
+/// Phyrexian Metamorph, whose optional copy replacement pauses the move. P2
+/// concedes there, and P0 has the Metamorph enter as a copy of Sol Ring.
+/// Returns how many Vampire triggers wait or are on the stack.
+fn vampire_triggers_after_a_concession_mid_tooth_and_nail(suppressor: bool) -> usize {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let vampire = scenario.add_real_card(P0, "Welcoming Vampire", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Sol Ring", Zone::Battlefield, db);
+    if suppressor {
+        scenario.add_real_card(P2, "Hushbringer", Zone::Battlefield, db);
+    }
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
+    let metamorph = scenario.add_real_card(P0, "Phyrexian Metamorph", Zone::Hand, db);
+    let tooth_and_nail = scenario.add_real_card(P0, "Tooth and Nail", Zone::Hand, db);
+    let mut pool = (0..5)
+        .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+        .collect::<Vec<_>>();
+    pool.extend((0..2).map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![])));
+    scenario.with_mana_pool(P0, pool);
+    let mut runner = scenario.build();
+    runner.cast(tooth_and_nail).modes(&[1]).commit();
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::EffectZoneChoice { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Tooth and Nail resolves");
+    }
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![bears, metamorph],
+        })
+        .expect("P0 puts the Bears and then the Metamorph onto the battlefield");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ),
+        "reach guard: the Metamorph's copy replacement pauses the move: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(zone(&runner, bears), Zone::Battlefield);
+    assert_eq!(zone(&runner, metamorph), Zone::Hand);
+
+    runner
+        .act(GameAction::Concede { player_id: P2 })
+        .expect("P2 concedes");
+    for _ in 0..6 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("P0 has the Metamorph enter as a copy");
+            }
+            WaitingFor::CopyTargetChoice { valid_targets, .. } => {
+                let sol_ring = valid_targets
+                    .iter()
+                    .copied()
+                    .find(|id| runner.state().objects[id].name == "Sol Ring")
+                    .expect("Sol Ring is a legal copy choice");
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(engine::types::ability::TargetRef::Object(sol_ring)),
+                    })
+                    .expect("P0 copies Sol Ring");
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(zone(&runner, metamorph), Zone::Battlefield);
+    let queued = runner
+        .state()
+        .pending_trigger_order
+        .iter()
+        .flat_map(|order| order.groups.iter())
+        .flat_map(|group| group.triggers.iter())
+        .chain(runner.state().deferred_triggers.iter())
+        .filter(|context| context.pending.source_id == vampire)
+        .count();
+    let announcing = runner
+        .state()
+        .pending_trigger
+        .iter()
+        .filter(|pending| pending.source_id == vampire)
+        .count();
+    // An ability being announced is already a stack entry; count it once.
+    queued + triggers_from(&runner, vampire).max(announcing)
+}
+
+/// CR 603.6a + CR 603.10 + CR 603.2g: a suppressor that applied when an entry
+/// happened still applies to it after its owner leaves, on the hand-to-
+/// battlefield path too, where the game after the entry is read at final
+/// settlement. The Bears entered under Hushbringer, so Welcoming Vampire does
+/// not trigger for it.
+#[test]
+fn a_departed_suppressor_still_applies_to_the_hand_entry_completed_before_its_owner_left() {
+    assert_eq!(
+        vampire_triggers_after_a_concession_mid_tooth_and_nail(true),
+        0
+    );
+}
+
+/// CR 603.6a + CR 603.3a: the positive control of the row above, with the same
+/// concession and the same noncreature copy: without Hushbringer the Bears'
+/// entry triggers Welcoming Vampire, once.
+#[test]
+fn a_hand_entry_completed_before_a_concession_triggers_the_survivors_observer_once() {
+    assert_eq!(
+        vampire_triggers_after_a_concession_mid_tooth_and_nail(false),
+        1
+    );
 }
 
 /// CR 603.10a + CR 800.4a: a departed observer cannot trigger for an event that

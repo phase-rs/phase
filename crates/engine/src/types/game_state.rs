@@ -3785,6 +3785,22 @@ pub struct LogicalZoneChangeGroup {
     pub immediately_after_latched: bool,
     pub immediately_after_batched_triggers: Vec<LatchedBatchedTrigger>,
     pub immediately_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
+    /// CR 603.10 + CR 800.4a: the post-event authority of a player who left
+    /// while this owner was paused (`retire_contexts_owned_by`), kept for the
+    /// occurrences completed by then and merged into the final
+    /// immediately-after latch, which is taken after their objects are gone.
+    #[serde(default)]
+    pub departed_owner_after_batched_triggers: Vec<LatchedBatchedTrigger>,
+    #[serde(default)]
+    pub departed_owner_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
+}
+
+/// CR 603.10 + CR 800.4a: the post-event authority a leaving player's objects
+/// hold, captured by `triggers::departing_owner_after_authority`.
+#[derive(Debug, Clone, Default)]
+pub struct DepartingOwnerAfterAuthority {
+    pub batched_triggers: Vec<LatchedBatchedTrigger>,
+    pub suppress_triggers: Vec<LatchedSuppressTrigger>,
 }
 
 /// CR 603.2c: one retained zone change a logical owner collected before a player
@@ -3833,6 +3849,10 @@ struct LogicalZoneChangeGroupWire {
     immediately_after_latched: bool,
     immediately_after_batched_triggers: Vec<LatchedBatchedTrigger>,
     immediately_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
+    #[serde(default)]
+    departed_owner_after_batched_triggers: Vec<LatchedBatchedTrigger>,
+    #[serde(default)]
+    departed_owner_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
 }
 
 impl From<LogicalZoneChangeGroupWire> for LogicalZoneChangeGroup {
@@ -3850,6 +3870,8 @@ impl From<LogicalZoneChangeGroupWire> for LogicalZoneChangeGroup {
             immediately_after_latched: wire.immediately_after_latched,
             immediately_after_batched_triggers: wire.immediately_after_batched_triggers,
             immediately_after_suppress_triggers: wire.immediately_after_suppress_triggers,
+            departed_owner_after_batched_triggers: wire.departed_owner_after_batched_triggers,
+            departed_owner_after_suppress_triggers: wire.departed_owner_after_suppress_triggers,
         }
     }
 }
@@ -4105,6 +4127,8 @@ impl LogicalZoneChangeGroup {
             immediately_after_latched: false,
             immediately_after_batched_triggers: Vec::new(),
             immediately_after_suppress_triggers: Vec::new(),
+            departed_owner_after_batched_triggers: Vec::new(),
+            departed_owner_after_suppress_triggers: Vec::new(),
         }
     }
 
@@ -4150,7 +4174,9 @@ impl LogicalZoneChangeGroup {
         if self.immediately_after_latched {
             return Err("logical zone-change group already has an immediately-after latch".into());
         }
-        for post_latch in batched_triggers {
+        for post_latch in batched_triggers.into_iter().chain(std::mem::take(
+            &mut self.departed_owner_after_batched_triggers,
+        )) {
             if let Some(existing) = self
                 .immediately_before_batched_triggers
                 .iter_mut()
@@ -4172,6 +4198,10 @@ impl LogicalZoneChangeGroup {
         }
         self.immediately_after_latched = true;
         self.immediately_after_suppress_triggers = suppress_triggers;
+        self.immediately_after_suppress_triggers
+            .extend(std::mem::take(
+                &mut self.departed_owner_after_suppress_triggers,
+            ));
         Ok(())
     }
 
@@ -4310,10 +4340,16 @@ impl LogicalZoneChangeGroup {
     /// speaking for the occurrences this action had already completed (its own
     /// and `held_by_child`, those a linked component child still holds for it),
     /// and for nothing later; with none completed it is dropped.
+    ///
+    /// CR 603.10 + CR 603.6a: the same holds for the immediately-after
+    /// authority, which this owner has not yet latched (it is taken at final
+    /// settlement, after the leaver's objects are gone): `owned_after`, the
+    /// authority their objects held, is kept for the completed occurrences.
     pub fn retire_contexts_owned_by(
         &mut self,
         player: PlayerId,
         held_by_child: &[CollectedZoneChange],
+        owned_after: &DepartingOwnerAfterAuthority,
     ) {
         let completed: Vec<CollectedZoneChange> = self
             .all_origin_occurrences
@@ -4364,7 +4400,40 @@ impl LogicalZoneChangeGroup {
                 true
             });
         self.immediately_after_suppress_triggers
-            .retain(|suppress| suppress.source_context.lki.owner != player);
+            .retain_mut(|suppress| {
+                if suppress.source_context.lki.owner != player {
+                    return true;
+                }
+                if completed.is_empty() {
+                    return false;
+                }
+                suppress
+                    .completed_occurrences_only
+                    .get_or_insert_with(|| completed.clone());
+                true
+            });
+        if !self.immediately_after_latched && !completed.is_empty() {
+            self.departed_owner_after_batched_triggers.extend(
+                owned_after
+                    .batched_triggers
+                    .iter()
+                    .cloned()
+                    .map(|mut latch| {
+                        latch.completed_occurrences_only = Some(completed.clone());
+                        latch
+                    }),
+            );
+            self.departed_owner_after_suppress_triggers.extend(
+                owned_after
+                    .suppress_triggers
+                    .iter()
+                    .cloned()
+                    .map(|mut latch| {
+                        latch.completed_occurrences_only = Some(completed.clone());
+                        latch
+                    }),
+            );
+        }
     }
 
     /// Record the shared zone pipeline's terminal result for one originally

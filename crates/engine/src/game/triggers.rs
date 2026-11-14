@@ -20,12 +20,12 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    AutoMayChoice, CollectedTriggerContextBatch, DamageRecord, DelayedTrigger, DistributionUnit,
-    GameState, LatchedBatchedTrigger, LatchedSuppressTrigger, LogicalZoneChangeGroup,
-    LogicalZoneChangeTerminalOutcome, MayTriggerAutoChoiceKey, MayTriggerOrigin,
-    ProductionOverride, StackEntry, StackEntryKind, SyntheticTriggerProvenance,
-    TargetSelectionConstraint, TargetSelectionSlot, TriggerObservationTime, TriggerSourceContext,
-    TriggerSourceRead, WaitingFor,
+    AutoMayChoice, CollectedTriggerContextBatch, DamageRecord, DelayedTrigger,
+    DepartingOwnerAfterAuthority, DistributionUnit, GameState, LatchedBatchedTrigger,
+    LatchedSuppressTrigger, LogicalZoneChangeGroup, LogicalZoneChangeTerminalOutcome,
+    MayTriggerAutoChoiceKey, MayTriggerOrigin, ProductionOverride, StackEntry, StackEntryKind,
+    SyntheticTriggerProvenance, TargetSelectionConstraint, TargetSelectionSlot,
+    TriggerObservationTime, TriggerSourceContext, TriggerSourceRead, WaitingFor,
 };
 use crate::types::identifiers::{
     DelayedInstallIdentity, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
@@ -2597,12 +2597,36 @@ fn trigger_observes_zone_change(
     origin_matches && destination_matches(trigger.destination, &trigger.destination_constraint)
 }
 
+/// CR 603.6c: whether the clause of `trigger` that observes this zone change
+/// names its origin zone. A trigger with no origin constraint is "from
+/// anywhere", which is never a leaves-the-battlefield ability.
+fn trigger_names_zone_change_origin(
+    trigger: &TriggerDefinition,
+    from: &Option<Zone>,
+    to: Zone,
+) -> bool {
+    if !trigger.zone_change_clauses.is_empty() {
+        return trigger.zone_change_clauses.iter().any(|clause| {
+            !clause.origin.is_any()
+                && clause.origin.matches_from(from)
+                && clause.destination.is_none_or(|expected| expected == to)
+                && clause.destination_constraint.matches_from(&Some(to))
+        });
+    }
+    trigger.origin.is_some()
+        || !trigger.origin_zones.is_empty()
+        || matches!(trigger.mode, TriggerMode::LeavesBattlefield)
+}
+
 fn zone_is_visible_to_all_players(zone: Zone) -> bool {
     !matches!(zone, Zone::Hand | Zone::Library)
 }
 
 /// CR 603.10 + CR 603.10a: Classify the only zone-change observations that
 /// look back before an event. Everything else is observed immediately after it.
+/// CR 603.6c: an ability that triggers on a card being put into a zone "from
+/// anywhere" is never a leaves-the-battlefield ability, so it is observed
+/// immediately after the event even when the object came from the battlefield.
 /// This is intentionally the single classifier for the logical-group latches.
 pub(crate) fn trigger_observation_time(
     trigger: &TriggerDefinition,
@@ -2636,7 +2660,9 @@ pub(crate) fn trigger_observation_time(
 
     let observes_event = trigger_observes_zone_change(trigger, from, *to);
     let looks_back = observes_event
-        && (matches!(from, Some(Zone::Battlefield) | Some(Zone::Graveyard))
+        && ((matches!(from, Some(Zone::Battlefield))
+            && trigger_names_zone_change_origin(trigger, from, *to))
+            || matches!(from, Some(Zone::Graveyard))
             || (matches!(to, Zone::Hand | Zone::Library)
                 && from.is_some_and(zone_is_visible_to_all_players)));
 
@@ -2663,6 +2689,24 @@ pub(crate) fn latch_logical_zone_change_group_immediately_after(
         .iter()
         .map(|occurrence| &occurrence.event)
         .collect();
+    let (batched_triggers, suppress_triggers) = immediately_after_authority(state, |definition| {
+        retained_events.iter().any(|event| {
+            trigger_observation_time(definition, event) == TriggerObservationTime::ImmediatelyAfter
+        })
+    });
+    group
+        .latch_immediately_after(batched_triggers, suppress_triggers)
+        .expect("a completed logical zone-change group is latched exactly once");
+}
+
+/// CR 603.10: the post-event authority of `state` (layers already flushed):
+/// every batched definition `observes_retained_event` admits, and every
+/// trigger-suppression static. Shared by the final latch and by the capture
+/// of a departing player's authority at an interruption.
+fn immediately_after_authority(
+    state: &GameState,
+    observes_retained_event: impl Fn(&TriggerDefinition) -> bool,
+) -> (Vec<LatchedBatchedTrigger>, Vec<LatchedSuppressTrigger>) {
     let mut batched_triggers = Vec::new();
     for zone in [
         Zone::Battlefield,
@@ -2679,10 +2723,7 @@ pub(crate) fn latch_logical_zone_change_group_immediately_after(
             for active in super::functioning_abilities::active_trigger_definitions(state, source) {
                 if active.definition.batched
                     && trigger_definition_functions_in_zone(active.definition, zone)
-                    && retained_events.iter().any(|event| {
-                        trigger_observation_time(active.definition, event)
-                            == TriggerObservationTime::ImmediatelyAfter
-                    })
+                    && observes_retained_event(active.definition)
                 {
                     batched_triggers.push(LatchedBatchedTrigger::new(
                         active.definition_ref,
@@ -2718,10 +2759,36 @@ pub(crate) fn latch_logical_zone_change_group_immediately_after(
             })
         })
         .collect();
+    (batched_triggers, suppress_triggers)
+}
 
-    group
-        .latch_immediately_after(batched_triggers, suppress_triggers)
-        .expect("a completed logical zone-change group is latched exactly once");
+/// CR 603.10 + CR 800.4a: the post-event authority a leaving player's objects
+/// hold, captured while they are still in the game: the trigger suppressors
+/// they own, and the batched observers they own that a survivor controls. A
+/// paused logical owner keeps these for the occurrences it has already
+/// completed (`LogicalZoneChangeGroup::retire_contexts_owned_by`), because its
+/// own final latch is taken after they have left.
+pub(crate) fn departing_owner_after_authority(
+    state: &GameState,
+    player: PlayerId,
+) -> DepartingOwnerAfterAuthority {
+    let projection = immediately_before_projection(state);
+    let (batched, suppress) = immediately_after_authority(&projection, |_| true);
+    DepartingOwnerAfterAuthority {
+        batched_triggers: batched
+            .into_iter()
+            .filter(|latch| {
+                latch.observations.iter().any(|observation| {
+                    observation.source_context.lki.owner == player
+                        && observation.source_context.lki.controller != player
+                })
+            })
+            .collect(),
+        suppress_triggers: suppress
+            .into_iter()
+            .filter(|latch| latch.source_context.lki.owner == player)
+            .collect(),
+    }
 }
 
 /// Allocate one fully latched logical zone-change owner for either final pause
@@ -2752,6 +2819,11 @@ enum TriggerSource<'a> {
 #[derive(Clone, Copy)]
 pub(crate) enum LogicalZoneTriggerCollection<'a> {
     Ordinary,
+    /// CR 603.10 + CR 603.6c: one of the two observation states a simultaneous
+    /// event is read in. A zone-change definition is admitted only when
+    /// `trigger_observation_time` places it in this state, so each
+    /// (definition, event) pair is matched by exactly one of the two passes.
+    Observed(TriggerObservationTime),
     Segment(&'a LogicalZoneChangeGroup),
     Settlement(&'a LogicalZoneChangeGroup),
 }
@@ -2776,7 +2848,7 @@ impl LogicalZoneTriggerCollection<'_> {
             return true;
         }
         match self {
-            Self::Ordinary => true,
+            Self::Ordinary | Self::Observed(_) => true,
             // CR 603.10a: Settlement is the one observer pass for all
             // prospective members; a leaving member uses its pre-event source
             // context rather than a successor incarnation's live ability.
@@ -2808,7 +2880,23 @@ impl LogicalZoneTriggerCollection<'_> {
                 .iter()
                 .find(|occurrence| occurrence.event == *event)
                 .is_some_and(|occurrence| group.is_member_own_occurrence(source, occurrence)),
-            Self::Ordinary | Self::Segment(_) => false,
+            Self::Ordinary | Self::Observed(_) | Self::Segment(_) => false,
+        }
+    }
+
+    /// Whether `trigger` reads `event` in this collection's observation state.
+    /// A departure's own leaves-the-game events, and the events that are not
+    /// zone changes (an unattach, a phase-out, a sacrifice), are read only in
+    /// the look-back pass: their classification is by event kind.
+    fn admits_observation(self, trigger: &TriggerDefinition, event: &GameEvent) -> bool {
+        let Self::Observed(time) = self else {
+            return true;
+        };
+        match event {
+            GameEvent::ZoneChanged { record, .. } if !record.departure.left_game() => {
+                trigger_observation_time(trigger, event) == time
+            }
+            _ => time == TriggerObservationTime::ImmediatelyBefore,
         }
     }
 }
@@ -3101,6 +3189,18 @@ fn collect_matching_triggers_inner(
     if collection.omits_member_event_subject(source_context.identity.reference, event) {
         return Vec::new();
     }
+    // CR 603.10 + CR 603.10a: the game immediately after an event has no
+    // observer that left the battlefield in it; only look-back abilities read
+    // such an object's last-known information.
+    if matches!(
+        collection,
+        LogicalZoneTriggerCollection::Observed(TriggerObservationTime::ImmediatelyAfter)
+    ) && matches!(
+        (&source, visit),
+        (TriggerSource::Context(_), TriggerSourceVisit::Observer)
+    ) {
+        return Vec::new();
+    }
     let use_latched_trigger_entries = match source {
         TriggerSource::Live(source_obj) => {
             ObjectIncarnationRef::from_object(source_obj) != source_context.identity.reference
@@ -3307,6 +3407,9 @@ fn collect_matching_triggers_inner(
         // event reaches either, so no whole-event damage def is skipped here
         // today. The gate exists so it and the carrier below do not drift apart.
         if collection.skips_batched_definitions() && fires_once_per_batch(trig_def) {
+            continue;
+        }
+        if !collection.admits_observation(trig_def, event) {
             continue;
         }
         if let LogicalZoneTriggerCollection::Settlement(group) = collection {
@@ -9378,7 +9481,7 @@ impl ImmediatelyBeforeObservers {
         let contexts = collect_pending_triggers_with_collection(
             &mut self.state,
             events,
-            LogicalZoneTriggerCollection::Ordinary,
+            LogicalZoneTriggerCollection::Observed(TriggerObservationTime::ImmediatelyBefore),
             &mut session,
         );
         for operation in session.into_operation_journal() {
@@ -9466,6 +9569,16 @@ pub(crate) fn collect_unclaimed_triggers_into_deferred(
         .collect();
         ordinary.retain(|event| !looked_back_events.contains(event));
         observers.collect_into_deferred(state, &looked_back_events);
+        // CR 603.6c + CR 603.10: the same events are read again in the game
+        // immediately after them by the definitions that do not look back
+        // ("from anywhere"), under the controller they have then.
+        let after = collect_pending_triggers_with_collection(
+            state,
+            &looked_back_events,
+            LogicalZoneTriggerCollection::Observed(TriggerObservationTime::ImmediatelyAfter),
+            &mut TriggerCollectionSession::new(TriggerCollectionOverlay::default()),
+        );
+        state.deferred_triggers.extend(after);
     }
     collect_triggers_into_deferred(state, &ordinary);
     let delayed = unclaimed_trigger_events_from(

@@ -2112,15 +2112,16 @@ fn retire_pending_zone_change_contexts_owned_by(state: &mut GameState, player: P
                 .collect()
         })
         .unwrap_or_default();
+    let owned_after = super::triggers::departing_owner_after_authority(state, player);
     state
         .resolution_stack
         .visit_active_zone_change_owners_mut(|owner| match owner {
             ZoneChangeOwnerMut::Batch(pending) => pending
                 .logical_zone_change_group
-                .retire_contexts_owned_by(player, &held_by_child),
+                .retire_contexts_owned_by(player, &held_by_child, &owned_after),
             ZoneChangeOwnerMut::ChangeZone(pending) => pending
                 .logical_zone_change_group
-                .retire_contexts_owned_by(player, &held_by_child),
+                .retire_contexts_owned_by(player, &held_by_child, &owned_after),
         });
 }
 
