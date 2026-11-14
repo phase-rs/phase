@@ -480,6 +480,7 @@ mod palace_jailer;
 mod palantir_of_orthanc;
 mod panther_habit_equipped_prevention_scope;
 mod park_heights_pegasus_draw_condition_runtime;
+mod parked_draw_payment_and_staged_population_concessions;
 mod parker_luck;
 mod parser_oracle_casting;
 mod parser_oracle_static;
