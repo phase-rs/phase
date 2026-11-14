@@ -27993,8 +27993,9 @@ fn trigger_time_counter_removed_exile() {
 
 /// CR 122.1 + CR 603.2c: the passive "a [type] counter is removed from"
 /// head lowers the printed kind to a typed `counter_filter`, so the trigger
-/// fires only for removals of that kind. The untyped and multi-word forms
-/// stay unparsed, as before.
+/// fires only for removals of that kind. The untyped form stays unparsed, as
+/// at base. A multi-word kind, which no printed card uses here and which base
+/// accepted with no filter, is now refused.
 #[test]
 fn trigger_passive_typed_counter_removed_filters_on_its_kind() {
     let typed = |counter_type| {

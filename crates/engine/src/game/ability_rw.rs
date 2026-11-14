@@ -9666,8 +9666,9 @@ mod tests {
     ///
     /// No printed card has a mass counter removal whose filter threshold reads
     /// its source. This row guards the general `filter_threshold_quantity_reads`
-    /// merge that CodeRabbit asked to pin; the nearest printed shape is the
-    /// power-versus-source filter tested beside it.
+    /// merge that CodeRabbit asked to pin; the nearest printed card is Aether
+    /// Snap ("Remove all counters from all permanents and exile all tokens."),
+    /// a mass removal whose population has no source-relative threshold.
     #[test]
     fn mass_counter_removal_source_scoped_threshold_reads_source_counters() {
         let charge = CounterType::Generic("charge".to_string());
