@@ -7048,8 +7048,7 @@ pub enum FilterProp {
     /// In zone-change record evaluation (e.g., `restrictions.rs` entry snapshots),
     /// and in spell-cost reduction predicates (e.g., `casting.rs` cost filters),
     /// the check is source-relative only — no recipient context is available there.
-    /// Used for "another [type]" predicates (CR 109.1) and per-recipient layer
-    /// contexts (CR 613.4c).
+    /// Used for "another [type]" predicates and per-recipient layer contexts.
     Another,
     /// CR 702.95b: Matches objects that are not paired with another creature.
     Unpaired,
