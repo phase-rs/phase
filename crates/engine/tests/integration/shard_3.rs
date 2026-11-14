@@ -40,6 +40,7 @@ mod demilich_helbrute_graveyard_exile_cost;
 mod demon_of_fates_design;
 mod departed_recipient_control_exchange;
 mod descendants_path_shared_creature_type_gate;
+mod desecration_demon_any_opponent_sacrifice;
 mod desperate_futurescribe_instead;
 mod destroy_redirect_to_battlefield_delivery_tail;
 mod detectives_phoenix_bestow_graveyard;
