@@ -249,6 +249,7 @@ pub fn resolve(
                 // (`engine_resolution_choices.rs`) which honors `destination`
                 // for the battlefield → hand move.
                 state.waiting_for = WaitingFor::EffectZoneChoice {
+                    performed_by: None,
                     player: ability.controller,
                     cards: eligible,
                     count: 1,
@@ -271,6 +272,7 @@ pub fn resolve(
                     conditional_enter_with_counters: vec![],
                     count_param: 0,
                     library_position: None,
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     mass_library_order: None,
                     is_cost_payment: false,
                     enters_modified_if: None,
@@ -346,6 +348,7 @@ pub fn resolve(
                 // `EffectZoneChoice` intake (`engine_resolution_choices.rs`)
                 // which honors `destination` for the graveyard → hand move.
                 state.waiting_for = WaitingFor::EffectZoneChoice {
+                    performed_by: None,
                     player: selecting_player,
                     cards: matching,
                     count: 1,
@@ -368,6 +371,7 @@ pub fn resolve(
                     conditional_enter_with_counters: vec![],
                     count_param: 0,
                     library_position: None,
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     mass_library_order: None,
                     is_cost_payment: false,
                     enters_modified_if: None,
@@ -934,6 +938,7 @@ pub fn resolve_all(
 
         if matching.len() > count {
             state.waiting_for = crate::types::game_state::WaitingFor::EffectZoneChoice {
+                performed_by: None,
                 player: ability.controller,
                 cards: matching,
                 count,
@@ -956,6 +961,7 @@ pub fn resolve_all(
                 conditional_enter_with_counters: vec![],
                 count_param: 0,
                 library_position: None,
+                library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                 mass_library_order: None,
                 is_cost_payment: false,
                 enters_modified_if: None,
@@ -1061,7 +1067,9 @@ mod tests {
             ReturnResultId, UnlessPayModifier,
         };
 
-        assert!(should_collect_player_scope_choices(&scoped_return_template()));
+        assert!(should_collect_player_scope_choices(
+            &scoped_return_template()
+        ));
 
         let gated: Vec<(&str, Box<dyn Fn(&mut ResolvedAbility)>)> = vec![
             (

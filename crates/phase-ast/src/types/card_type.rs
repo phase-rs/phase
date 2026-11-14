@@ -81,6 +81,17 @@ pub enum CoreType {
     /// conspiracy applies its abilities and a hidden-agenda conspiracy
     /// (CR 905.4a + CR 702.106) starts face down.
     Conspiracy,
+    /// Turtle Team-Up (casual Universes Beyond co-op product): Bosses —
+    /// nontraditional cards that wait face down in the Boss deck and enter the
+    /// command zone face up as stages deploy, mirroring Archenemy schemes
+    /// (CR 314.2). Not a permanent type, never cast, has no CR section of its
+    /// own — the product booklet is the rules authority.
+    Boss,
+    /// Turtle Team-Up: Events — nontraditional one-shot cards in the Boss
+    /// event deck. Revealed during the Boss Action-phase wave, resolved, then
+    /// put into the Boss graveyard. Not a permanent type, never cast, has no
+    /// CR section of its own — the product booklet is the rules authority.
+    Event,
 }
 
 impl FromStr for CoreType {
@@ -103,6 +114,8 @@ impl FromStr for CoreType {
             "Phenomenon" => Ok(CoreType::Phenomenon),
             "Scheme" => Ok(CoreType::Scheme),
             "Conspiracy" => Ok(CoreType::Conspiracy),
+            "Boss" => Ok(CoreType::Boss),
+            "Event" => Ok(CoreType::Event),
             _ => Err(()),
         }
     }
@@ -126,6 +139,8 @@ impl fmt::Display for CoreType {
             CoreType::Phenomenon => write!(f, "Phenomenon"),
             CoreType::Scheme => write!(f, "Scheme"),
             CoreType::Conspiracy => write!(f, "Conspiracy"),
+            CoreType::Boss => write!(f, "Boss"),
+            CoreType::Event => write!(f, "Event"),
         }
     }
 }
@@ -198,7 +213,9 @@ impl CoreType {
             | CoreType::Plane
             | CoreType::Phenomenon
             | CoreType::Scheme
-            | CoreType::Conspiracy => None,
+            | CoreType::Conspiracy
+            | CoreType::Boss
+            | CoreType::Event => None,
         }
     }
 }
@@ -504,7 +521,7 @@ mod tests {
             Some("planeswalker")
         );
         assert_eq!(CoreType::Land.protection_quality_str(), Some("land"));
-        // 7 None — supplemental types never offered as a chosen card type.
+        // 10 None — supplemental types never offered as a chosen card type.
         assert_eq!(CoreType::Tribal.protection_quality_str(), None);
         assert_eq!(CoreType::Battle.protection_quality_str(), None);
         assert_eq!(CoreType::Kindred.protection_quality_str(), None);
@@ -513,5 +530,7 @@ mod tests {
         assert_eq!(CoreType::Phenomenon.protection_quality_str(), None);
         assert_eq!(CoreType::Scheme.protection_quality_str(), None);
         assert_eq!(CoreType::Conspiracy.protection_quality_str(), None);
+        assert_eq!(CoreType::Boss.protection_quality_str(), None);
+        assert_eq!(CoreType::Event.protection_quality_str(), None);
     }
 }

@@ -458,10 +458,13 @@ fn words_of_wind_activation_is_not_vetoed_as_hitting_only_the_ai_board() {
     let (state, words) = wind_board();
     // Non-vacuity: the fixture really parsed an activated draw replacement.
     assert!(
-        state.objects[&words].abilities.iter().any(|ability| matches!(
-            *ability.effect,
-            engine::types::ability::Effect::CreateDrawReplacement { .. }
-        )),
+        state.objects[&words]
+            .abilities
+            .iter()
+            .any(|ability| matches!(
+                *ability.effect,
+                engine::types::ability::Effect::CreateDrawReplacement { .. }
+            )),
         "Words of Wind must parse to a draw-replacement activation"
     );
     assert_eq!(

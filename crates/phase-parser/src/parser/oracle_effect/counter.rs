@@ -1069,9 +1069,15 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
     // tells the runtime resolver to strip every counter on the source. Mirrors
     // `try_parse_move_counters`' anaphor handling. The anaphor surface is owned
     // by `parse_counter_anaphor` so the dispatch gate and this builder agree.
+    //
+    // CR 608.2c + CR 122.1: when the gating condition counted a single counter
+    // KIND on the source ("if there are three or more promotion counters on
+    // her, remove those counters"), "those counters" are exactly that kind —
+    // other counters on the source (a +1/+1 counter) are not among them and
+    // stay.
     if nom_on_lower(after_remove, after_remove, parse_counter_anaphor).is_some() {
         return Some(Effect::RemoveCounter {
-            counter_type: None,
+            counter_type: ctx.counter_anaphor_kind.clone(),
             count: QuantityExpr::Fixed { value: -1 },
             target: TargetFilter::SelfRef,
         });

@@ -253,6 +253,7 @@
     "bo3": "BO3",
     "bo3Note": "BO3は2人対戦のみ利用できます。",
     "commanderDamage": "統率者ダメージ",
+    "poisonCounters": "毒カウンター",
     "playerSeats": "プレイヤー座席",
     "seat": "座席{{number}}",
     "youHost": "自分（ホスト）",

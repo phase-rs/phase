@@ -530,6 +530,178 @@ fn throw_unpayable_with_insufficient_mana() {
     );
 }
 
+/// CR 118.1 + CR 601.2h + CR 602.2b: Throw's cost is "Unattach **an**
+/// Equipment" — exactly one. A two-Equipment selection is not a legal payment
+/// for a one-slot cost, and the refusal must leave the prompt open, nothing
+/// detached, no stack entry and no mana spent.
+///
+/// Revert probe: at base the handler only rejects an empty selection, so
+/// `SelectCards { [equip0, equip1] }` returns `Ok` and both Equipment detach —
+/// the `expect_err` panics. The empty-selection branch pins the message to the
+/// prompt's `min_count == 1` floor (`exactly 1`), so removing that floor is
+/// caught too.
+#[test]
+fn unattach_cost_rejects_two_attachments_for_one_slot() {
+    let (mut runner, cap, equips, wall) = setup(&[3, 1]);
+    let idx = throw_index(&runner, cap);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: cap,
+            ability_index: idx,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Throw");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(wall)],
+        })
+        .expect("select one target");
+
+    match runner.state().waiting_for.clone() {
+        WaitingFor::PayCost {
+            kind: engine::types::game_state::PayCostKind::UnattachFrom { .. },
+            count,
+            min_count,
+            choices,
+            ..
+        } => {
+            // CR 118.1: the prompt already announces the exact cardinality.
+            assert_eq!((count, min_count), (1, 1));
+            assert!(
+                choices.contains(&equips[0]) && choices.contains(&equips[1]),
+                "both attached Equipment are offered — the defect is acceptance, not offer"
+            );
+        }
+        other => panic!("expected PayCost UnattachFrom, got {other:?}"),
+    }
+
+    let err = runner
+        .act(GameAction::SelectCards {
+            cards: vec![equips[0], equips[1]],
+        })
+        .expect_err("CR 601.2h: two attachments cannot pay a one-Equipment cost");
+    assert!(
+        matches!(err, engine::game::EngineError::InvalidAction(_)),
+        "a two-attachment selection must be an InvalidAction, got {err:?}"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: engine::types::game_state::PayCostKind::UnattachFrom { .. },
+                ..
+            }
+        ),
+        "the payment prompt must still be open after the refusal"
+    );
+    for e in &equips {
+        assert!(
+            runner.state().objects[e].attached_to.is_some(),
+            "nothing may detach on a refused payment"
+        );
+        assert_eq!(runner.state().objects[e].zone, Zone::Battlefield);
+    }
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        pool_total(&runner, P0),
+        3,
+        "a refused payment must not spend the {{3}} leg"
+    );
+
+    // CR 601.2h: an empty selection is still a partial payment, and the
+    // prompt's `min_count == 1` floor is what must reject it.
+    let empty = runner
+        .act(GameAction::SelectCards { cards: vec![] })
+        .expect_err("CR 601.2h: an empty selection is a partial payment");
+    let engine::game::EngineError::InvalidAction(message) = &empty else {
+        panic!("an empty selection must be an InvalidAction, got {empty:?}");
+    };
+    assert!(
+        message.contains("exactly 1"),
+        "the exact-count floor must be what rejected the payment, got {message:?}"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: engine::types::game_state::PayCostKind::UnattachFrom { .. },
+                ..
+            }
+        ),
+        "the payment prompt must still be open after the empty refusal"
+    );
+
+    // CR 118.3: the same attachment cannot pay two slots either.
+    assert!(
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![equips[0], equips[0]]
+            })
+            .is_err(),
+        "the same attachment cannot pay twice"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::PayCost { .. }
+    ));
+}
+
+/// Reach guard for the negative above: with the identical two-Equipment board,
+/// prompt and reducer path, one card pays the one-slot cost, the division uses
+/// that Equipment's mana value, the sibling stays attached and the wall takes 3.
+#[test]
+fn unattach_cost_pays_with_one_of_two_attachments() {
+    let (mut runner, cap, equips, wall) = setup(&[3, 1]);
+    let idx = throw_index(&runner, cap);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: cap,
+            ability_index: idx,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Throw");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(wall)],
+        })
+        .expect("select one target");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![equips[0]],
+        })
+        .expect("one of two attachments pays the one-slot cost");
+
+    match runner.state().waiting_for.clone() {
+        WaitingFor::DistributeAmong { total, .. } => {
+            assert_eq!(total, 3, "the paid Equipment's mana value drives the total");
+        }
+        other => panic!("expected DistributeAmong after the payment, got {other:?}"),
+    }
+    runner
+        .act(GameAction::DistributeAmong {
+            distribution: vec![(TargetRef::Object(wall), 3)],
+        })
+        .expect("distribute all 3 to the wall");
+    assert_eq!(runner.state().stack.len(), 1, "one stack object");
+
+    assert!(
+        runner.state().objects[&equips[0]].attached_to.is_none(),
+        "the paid Equipment detaches"
+    );
+    assert!(
+        runner.state().objects[&equips[1]].attached_to.is_some(),
+        "the sibling Equipment stays attached"
+    );
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&wall].damage_marked,
+        3,
+        "wall takes the paid Equipment's mana value"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Change B-1 regression — an existing X-divide damage spell still resolves as a
 // Spell. Shatterskull Smashing is an X-divide sorcery (no activation index), so

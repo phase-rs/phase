@@ -1070,6 +1070,8 @@ fn redirect_self_moved_to(destination: Zone, redirected_to: Zone) -> Replacement
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 destination: redirected_to,
                 origin: None,
                 target: TargetFilter::SelfRef,

@@ -748,7 +748,7 @@ describe("LimitedDeckBuilder", () => {
     expect(screen.queryByText("Average Mana Cost")).not.toBeInTheDocument();
     const controls = screen.getByRole("button", { name: "Deck Stats" }).closest("[data-desktop-deck-controls]")!;
     expect(Array.from(controls.querySelectorAll("button")).map((button) => button.textContent))
-      .toEqual(["Add Lands", "Deck Stats"]);
+      .toEqual(["Add Lands", "Deck Stats", "Export"]);
 
     fireEvent.click(screen.getByRole("button", { name: "Deck Stats" }));
 
@@ -827,7 +827,7 @@ describe("LimitedDeckBuilder", () => {
 
     const deckControls = container.querySelector<HTMLElement>("[data-desktop-deck-controls]")!;
     expect(Array.from(deckControls.querySelectorAll("button")).map((button) => button.textContent))
-      .toEqual(["Add Lands", "Deck Stats", "Suggest Deck"]);
+      .toEqual(["Add Lands", "Deck Stats", "Export", "Suggest Deck"]);
     const deckStatusActions = container.querySelector<HTMLElement>("[data-desktop-deck-status-actions]")!;
     const deckStatus = deckStatusActions.querySelector("[data-deck-status]")!;
     const submit = within(deckStatusActions).getByRole("button", { name: "Submit Deck" });
@@ -1108,6 +1108,143 @@ describe("LimitedDeckBuilder", () => {
       expect(button).toBeEnabled();
       fireEvent.click(button);
       await waitFor(() => expect(submit).toHaveBeenCalledWith([]));
+    },
+  );
+});
+
+describe("LimitedDeckBuilder deck export", () => {
+  const WIND_DRAKE = TEST_VIEW.pool[0];
+  const SECOND_WIND_DRAKE = { ...WIND_DRAKE, instance_id: "card-2" };
+  const ONE_DRAKE_IN_DECK: DraftWorkspaceState = {
+    schemaVersion: 1,
+    placements: { "card-1": { zone: "deck", row: 0, column: 0, order: 0 } },
+    virtualBasics: [],
+  };
+
+  function editableLocal(
+    view: BuilderView,
+    workspace: DraftWorkspaceState,
+    preferences = createDefaultDraftWorkspacePreferences(),
+  ) {
+    return {
+      view,
+      workspace,
+      preferences,
+      interactionLocked: false,
+      onWorkspaceChange: () => {},
+      onPreferencesChange: () => {},
+      onSubmitDeck: () => {},
+      onAddBasicLand: () => {},
+      onRemoveBasicLand: () => {},
+    };
+  }
+
+  async function openExportText() {
+    fireEvent.click(screen.getByRole("button", { name: "Export deck" }));
+    const dialog = await screen.findByRole("dialog", { name: "Export Deck" });
+    return within(dialog).getByRole("textbox");
+  }
+
+  it("exports the deck zone as the main deck from the desktop builder", async () => {
+    const { container } = render(
+      <LimitedDeckBuilder
+        local={editableLocal(TEST_VIEW, ONE_DRAKE_IN_DECK)}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    expect(container.querySelector("[data-deck-status]")).toHaveTextContent("1 spell");
+    expect(await openExportText()).toHaveValue("[Main]\n1 Wind Drake\n");
+  });
+
+  it("exports sideboard-zone pool cards and virtual basics as the sideboard", async () => {
+    render(
+      <LimitedDeckBuilder
+        local={editableLocal(
+          { ...TEST_VIEW, pool: [WIND_DRAKE, SECOND_WIND_DRAKE] },
+          {
+            schemaVersion: 1,
+            placements: {
+              "card-1": { zone: "deck", row: 0, column: 0, order: 0 },
+              "card-2": { zone: "sideboard", row: 0, column: 0, order: 0 },
+              "island-1": { zone: "sideboard", row: 0, column: 0, order: 1 },
+            },
+            virtualBasics: [{ instanceId: "island-1", name: "Island" }],
+          },
+        )}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    expect(await openExportText()).toHaveValue(
+      "[Main]\n1 Wind Drake\n[Sideboard]\n1 Wind Drake\n1 Island\n",
+    );
+  });
+
+  it("offers export in the phone compact builder and disables it for an empty deck", () => {
+    const { unmount } = render(
+      <LimitedDeckBuilder
+        local={editableLocal(TEST_VIEW, ONE_DRAKE_IN_DECK)}
+        responsiveLayout="phone-portrait"
+      />,
+    );
+    const enabled = screen.getByRole("button", { name: "Export deck" });
+    expect(enabled).toBeEnabled();
+    expect(enabled).not.toHaveClass("cursor-not-allowed");
+    unmount();
+
+    render(
+      <LimitedDeckBuilder
+        local={editableLocal(
+          { ...TEST_VIEW, pool: [] },
+          { schemaVersion: 1, placements: {}, virtualBasics: [] },
+        )}
+        responsiveLayout="phone-portrait"
+      />,
+    );
+    const disabled = screen.getByRole("button", { name: "Export deck" });
+    expect(disabled).toBeDisabled();
+    expect(disabled).toHaveClass("cursor-not-allowed");
+  });
+
+  it("offers export in the phone compact fixed-pool builder, which has no land picker", () => {
+    render(
+      <LimitedDeckBuilder
+        local={{
+          view: TEST_VIEW,
+          workspace: ONE_DRAKE_IN_DECK,
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          capabilities: { kind: "fixed-pool" },
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: () => {},
+        }}
+        responsiveLayout="phone-portrait"
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Add Lands" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export deck" })).toBeEnabled();
+  });
+
+  it.each(["phone-portrait", "tablet-landscape"] as const)(
+    "offers export in the %s visual builder toolbar",
+    (responsiveLayout) => {
+      render(
+        <LimitedDeckBuilder
+          local={editableLocal(TEST_VIEW, ONE_DRAKE_IN_DECK, {
+            ...createDefaultDraftWorkspacePreferences(),
+            explicitView: "board",
+          })}
+          responsiveLayout={responsiveLayout}
+        />,
+      );
+
+      expect(screen.getByRole("button", { name: "Add Lands" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Export deck" })).toBeEnabled();
     },
   );
 });
@@ -1841,6 +1978,65 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     await waitFor(() => expect(submit).not.toBeDisabled());
     fireEvent.click(submit);
     await waitFor(() => expect(submitSpy).toHaveBeenCalledWith(["Vehicle Commander"]));
+  });
+
+  it("exports the designated commander under [Commander] and out of the main deck", async () => {
+    const raff = {
+      ...TEST_VIEW.pool[0],
+      instance_id: "raff",
+      name: "Raff Capashen, Ship's Mage",
+      set_code: "cmm",
+      collector_number: "351",
+      rarity: "uncommon",
+      colors: ["W", "U"],
+      cmc: 4,
+      type_line: "Legendary Creature — Human Wizard",
+    };
+    const cards = [
+      ...Array.from({ length: 59 }, (_, index) => ({
+        ...TEST_VIEW.pool[0],
+        instance_id: `wind-${index}`,
+      })),
+      raff,
+    ];
+    engineEligible.mockImplementation(async (name: string) => name === raff.name);
+    render(
+      <LimitedDeckBuilder
+        local={{
+          view: { ...COMMANDER_VIEW, pool: cards },
+          workspace: {
+            schemaVersion: 1,
+            placements: Object.fromEntries(cards.map((card, index) => [
+              card.instance_id,
+              { zone: "deck" as const, row: 0 as const, column: 0, order: index },
+            ])),
+            virtualBasics: [],
+          },
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: () => {},
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        }}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: raff.name }));
+    await waitFor(() => {
+      const panel = commanderPanelScope();
+      expect(panel.getByText(raff.name)).toBeInTheDocument();
+      expect(panel.getByRole("button", { name: "Remove" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Export deck" }));
+    const dialog = await screen.findByRole("dialog", { name: "Export Deck" });
+    expect(within(dialog).getByRole("textbox")).toHaveValue(
+      "[Commander]\n1 Raff Capashen, Ship's Mage\n[Main]\n59 Wind Drake\n",
+    );
   });
 
   it.each(["rejected", "false"] as const)("passes a 40-card Set-backed fixed-pool workspace through compatibility %s", async (outcome) => {

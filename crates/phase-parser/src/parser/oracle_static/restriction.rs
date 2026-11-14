@@ -1455,12 +1455,40 @@ pub(crate) fn parse_cant_cast_type_spells(
     }
 
     // --- "spells with even mana values" / "spells with odd mana values" ---
-    if nom_tag_lower(trimmed, trimmed, "spells with even mana value").is_some()
-        || nom_tag_lower(trimmed, trimmed, "spells with odd mana value").is_some()
-    {
-        let def =
-            StaticDefinition::new(StaticMode::CantBeCast { who }).description(text.to_string());
-        return attach_parsed_static_gate(def, gate_condition_text);
+    // CR 601.3a is the authorizing rule, and its own example is this card: "A
+    // player controls Void Winnower, which reads, in part, 'Your opponents
+    // can't cast spells with even mana values.'" That rule reads the parity as
+    // one of the "certain qualities" a prohibition names, so it belongs in
+    // `affected` — the same slot the chosen-type and chosen-color arms above
+    // use for their quality. CR 202.3 defines the mana value whose parity is
+    // taken.
+    //
+    // Attaching the filter is not decoration: `is_blocked_by_cant_be_cast_for`
+    // SKIPS its filter test when `affected` is `None` and falls through to
+    // prohibited, so an unscoped parity static locks out every spell an
+    // opponent could cast rather than the even-mana-value half — a total cast
+    // prison from a card that only ever restricts half the curve.
+    //
+    // The parity grammar itself is delegated to `parse_mana_value_suffix`, the
+    // single authority for every mana-value suffix form, instead of being
+    // respelled here; the `ManaValueParity` guard keeps this arm from claiming
+    // any other suffix form the shared parser recognizes, and full consumption
+    // keeps it from claiming a parity clause with an unparsed tail.
+    if let Some(rest) = nom_tag_lower(trimmed, trimmed, "spells ") {
+        if let Some((prop, consumed)) = parse_mana_value_suffix(rest, &mut ParseContext::default())
+        {
+            if matches!(prop, FilterProp::ManaValueParity { .. })
+                && rest[consumed..].trim().is_empty()
+            {
+                let def = StaticDefinition::new(StaticMode::CantBeCast { who })
+                    .affected(TargetFilter::Typed(TypedFilter {
+                        properties: vec![prop],
+                        ..TypedFilter::default()
+                    }))
+                    .description(text.to_string());
+                return attach_parsed_static_gate(def, gate_condition_text);
+            }
+        }
     }
 
     // --- "spells by paying alternative costs" ---

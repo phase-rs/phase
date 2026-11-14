@@ -206,6 +206,27 @@ pub enum AttackTargetFilter {
     /// `state.monarch` (The Spear of Bashenga). If there is no monarch
     /// (CR 725.1 — no monarch until an effect creates one), it never matches.
     Monarch,
+    /// CR 508.1c + CR 508.6: "a player it has already attacked this turn" — the
+    /// self-referential attack restriction that lets a creature untap into an
+    /// additional combat phase without re-attacking the same opponent
+    /// (Bloodthirster, Port Razer: "This creature can't attack a player it has
+    /// already attacked this turn."). CR 508.6 defines when a player has
+    /// "attacked [a player]"; CR 508.7a ties a creature's attack to the player
+    /// chosen as it was declared, which is what the per-creature
+    /// `creature_attacked_defenders_this_turn` ledger records (direct player
+    /// attacks only).
+    ///
+    /// KIND-GATED on the declared target: attacking a planeswalker or a battle is
+    /// not attacking a player (CR 506.3), and the printed restriction names only
+    /// planeswalkers/battles, so those pairings never match — the restriction
+    /// stops a repeat attack on a PLAYER, never an attack on a planeswalker or
+    /// battle (official Port Razer ruling, 2024-04-12).
+    ///
+    /// Source-OBJECT relative (like [`Self::Owner`]) rather than
+    /// source-CONTROLLER relative: "it" is the permanent carrying the
+    /// restriction, so the runtime matcher needs that object's id, not the
+    /// controller the `you`-scoped variants resolve.
+    PlayerAttackedBySourceThisTurn,
 }
 
 /// CR 701.31 + CR 701.31d: which role the trigger's source must occupy in the

@@ -852,6 +852,27 @@ describe("multiplayerStore", () => {
     });
   });
 
+  it("restores a remembered poison-counter threshold for a format with an individual threshold", () => {
+    const normalized = normalizeRememberedHostConfig({
+      format: "Commander",
+      formatConfig: { format: "Commander", poison_counter_threshold: 15 },
+    });
+
+    expect(normalized?.formatConfig.poison_counter_threshold).toBe(15);
+    // Reach guard: the rest of the config still comes from the defaults.
+    expect(normalized?.formatConfig.starting_life).toBe(FORMAT_DEFAULTS.Commander.starting_life);
+  });
+
+  it("ignores a remembered poison-counter threshold for Two-Headed Giant's team poison", () => {
+    const normalized = normalizeRememberedHostConfig({
+      format: "TwoHeadedGiant",
+      formatConfig: { format: "TwoHeadedGiant", poison_counter_threshold: 15 },
+    });
+
+    expect(normalized?.format).toBe("TwoHeadedGiant");
+    expect(normalized?.formatConfig.poison_counter_threshold).toBeNull();
+  });
+
   it("drops unknown persisted format names instead of indexing inherited object keys", () => {
     expect(normalizeRememberedHostConfig({ format: "toString" })).toBeNull();
   });
@@ -875,6 +896,7 @@ describe("multiplayerStore", () => {
       singleton: false,
       command_zone: false,
       commander_damage_threshold: null,
+      poison_counter_threshold: 10,
       range_of_influence: null,
       team_based: false,
       uses_commander: false,

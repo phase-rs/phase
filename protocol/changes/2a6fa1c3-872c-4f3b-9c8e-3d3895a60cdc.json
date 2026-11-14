@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "GameObject CR 702.16p start snapshots move to protection_start_snapshots keyed by grant occurrence and host incarnation; older peers drop them, an older save's slot-keyed entry for a source's own static is migrated on load"
+}

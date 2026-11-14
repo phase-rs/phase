@@ -1356,6 +1356,7 @@ function defaultSeatState(playerCount: number, formatConfig?: FormatConfig): Sea
       singleton: false,
       command_zone: false,
       commander_damage_threshold: null,
+      poison_counter_threshold: 10,
       range_of_influence: null,
       team_based: false,
       sideboard_policy: { type: "Limited", data: 15 },
@@ -1430,6 +1431,21 @@ export function playerSlotsFromSeatView(view: SeatView): PlayerSlot[] {
             ? ""
             : `Player ${playerId + 1}`,
   }));
+}
+
+/**
+ * Horde Magic: the lowest seat anchoring one contiguous run of AI seats
+ * covering the whole Horde roster (`rosterSize` = 1 + co-Horde decks), or
+ * -1 when the layout has no such run. The engine designates
+ * `archenemy..archenemy+N` as the Horde, and those seats must ALL be AI —
+ * the survivors are the humans — so the caller rejects a -1 layout rather
+ * than reassigning a human seat. Same rule as server-core's `horde_anchor`
+ * on the WS path.
+ */
+export function hordeAnchorSeat(seats: SeatKind[], rosterSize: number): number {
+  return seats.findIndex((_, s) =>
+    Array.from({ length: rosterSize }, (_, o) => seats[s + o]?.type === "Ai").every(Boolean),
+  );
 }
 
 function traceAdapter(side: "Host" | "Guest", event: string, data?: Record<string, unknown>): void {
@@ -3100,9 +3116,17 @@ export class P2PHostAdapter implements EngineAdapter {
           continue;
         }
         if (kind.type === "Ai") {
-          const deck = this.aiDecks.get(seat);
+          let deck = this.aiDecks.get(seat);
           if (!deck) {
-            throw new AdapterError("P2P_ERROR", `AI seat ${seat} is missing a resolved deck`, false);
+            // Horde: the AI seat is the self-piloting Horde, whose library is the
+            // engine-supplied challenge deck (injected — and any submitted deck
+            // cleared — at game load). It needs no user-provided deck, so use the
+            // host deck as a well-formed placeholder that the engine discards.
+            if (this.formatConfig?.format === "Horde") {
+              deck = hostDeck.player;
+            } else {
+              throw new AdapterError("P2P_ERROR", `AI seat ${seat} is missing a resolved deck`, false);
+            }
           }
           orderedOpponents.push(deck);
           orderedDifficulties.push(kind.data.difficulty);
@@ -3145,6 +3169,30 @@ export class P2PHostAdapter implements EngineAdapter {
       const playerCount = allowPartialStart
         ? orderedOpponents.length + 1
         : this.pregameSeatState.seats.length;
+      // Horde Magic: the Horde is the self-piloting deck, played by AI seats —
+      // not the host (seat 0), who is a survivor. Point `archenemy_player`
+      // (the Horde anchor) at the lowest seat starting one contiguous run of
+      // AI seats covering the whole Horde roster, so the engine designates
+      // those seats as the Horde: it loads the challenge-deck libraries
+      // there, seats the humans as the survivor team, and gives the
+      // survivors the first turn. Same rule as server-core's
+      // `horde_anchor`/`start_game` gate on the WS path: a layout with no
+      // such run (e.g. Two Towers at [human, AI, human]) is rejected here
+      // rather than reassigning a human seat.
+      let formatConfigForInit = this.formatConfig;
+      if (formatConfigForInit?.format === "Horde") {
+        const rosterSize = 1 + (formatConfigForInit.horde_ruleset?.co_horde_decks?.length ?? 0);
+        const hordeSeat = hordeAnchorSeat(this.pregameSeatState.seats, rosterSize);
+        if (hordeSeat <= 0) {
+          throw new AdapterError(
+            "P2P_ERROR",
+            `Cannot start Horde game: no run of ${rosterSize} contiguous AI seats for the Horde roster`,
+            false,
+          );
+        }
+        formatConfigForInit = { ...formatConfigForInit, archenemy_player: hordeSeat };
+      }
+
       if (this.disposed) await this.bailDisposed(false, "start");
       // The occupancy test, the install, and the multiplayer claim are one
       // engine call. `initializeMultiplayerHostGame` refuses an engine that
@@ -3160,7 +3208,7 @@ export class P2PHostAdapter implements EngineAdapter {
       try {
         transition = await this.applyBrowserMutation(() => this.wasm.initializeMultiplayerHostGame(
           deckPayload,
-          this.formatConfig,
+          formatConfigForInit,
           playerCount,
           this.matchConfig,
           undefined,

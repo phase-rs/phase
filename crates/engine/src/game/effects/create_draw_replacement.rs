@@ -73,6 +73,7 @@ pub fn resolve(
             .chain(ability.aligned_target_pins().into_iter().flatten())
             .collect(),
     );
+    crate::game::ability_utils::materialize_coin_branches(&mut substitute);
 
     // CR 614.1a + CR 113.7a: anchor the installing controller at resolution
     // time so the shield outlives the source permanent's zone/controller.

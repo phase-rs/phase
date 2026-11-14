@@ -24,6 +24,7 @@ type DigRestSplitChoice = Extract<WaitingFor, { type: "DigRestSplitChoice" }>;
 type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
 type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
 type RippleBottomOrder = Extract<WaitingFor, { type: "RippleBottomOrder" }>;
+type DigBottomOrder = Extract<WaitingFor, { type: "DigBottomOrder" }>;
 type RevealUntilBottomOrder = Extract<
   WaitingFor,
   { type: "RevealUntilBottomOrder" }
@@ -295,7 +296,7 @@ export function RippleBottomOrderModal({
 export function RevealUntilBottomOrderModal({
   data,
 }: {
-  data: RevealUntilBottomOrder["data"];
+  data: RevealUntilBottomOrder["data"] | DigBottomOrder["data"];
 }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();

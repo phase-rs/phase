@@ -830,7 +830,10 @@ fn wind_table_at_p0_choice() -> WindTable {
     resolve_stack(&mut runner);
     draw_one(&mut runner, drawer);
     let (chooser, _) = pending_return_choice(&runner);
-    assert_eq!(chooser, P0, "reach-guard: the active player announces first");
+    assert_eq!(
+        chooser, P0,
+        "reach-guard: the active player announces first"
+    );
     WindTable {
         runner,
         drawer,
@@ -890,7 +893,10 @@ fn words_of_wind_later_chooser_concedes_after_earlier_picks() {
     assert!(in_hand(&runner, p3[1]), "the later chooser still returns");
     assert!(on_battlefield(&runner, p1[1]) && on_battlefield(&runner, p3[0]));
     for id in p2 {
-        assert!(!on_battlefield(&runner, id), "the departed seat's objects left");
+        assert!(
+            !on_battlefield(&runner, id),
+            "the departed seat's objects left"
+        );
         assert!(!in_hand(&runner, id), "the departed seat returns nothing");
     }
     assert!(
