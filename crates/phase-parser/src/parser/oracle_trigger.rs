@@ -2817,11 +2817,13 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // may" is resolution-time optionality on the cast (`execute.optional`), not
     // permission to skip putting the triggered ability on the stack. Target
     // selection happens when the ability is put on the stack (CR 603.3d).
+    // CR 601.3: nor is it for a granted graveyard cast permission, whose "may"
+    // is the later cast (as for the execute ability above).
     if def.optional
-        && def
-            .execute
-            .as_ref()
-            .is_some_and(|ability| trigger_effect_requires_stack_time_targets(ability))
+        && def.execute.as_ref().is_some_and(|ability| {
+            trigger_effect_requires_stack_time_targets(ability)
+                || crate::parser::oracle_ir::ast::is_graveyard_permission_grant(&ability.effect)
+        })
     {
         def.optional = false;
     }

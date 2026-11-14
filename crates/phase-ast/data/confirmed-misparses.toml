@@ -872,7 +872,6 @@ face = [
   { key = "forerunner of the empire", class = "wrong_object", clauses = ["When this creature enters, you may search your library for a Dinosaur card, reveal it, then shuffle and put that card on top."] },
   { key = "forerunner of the legion", class = "wrong_object", clauses = ["When this creature enters, you may search your library for a Vampire card, reveal it, then shuffle and put that card on top."] },
   { key = "forgeborn phoenix", class = "wrong_zone", clauses = ["Whenever Forgeborn Phoenix or equipped creature dies, it perpetually gains \"Whenever an equipped creature you control deals combat damage to a player or planeswalker, return this card from your graveyard to battlefield tapped.\""] },
-  { key = "forgotten cellar", class = "missing_effect", clauses = ["and if a card would be put into your graveyard from anywhere this turn, exile it instead."] },
   { key = "fork", class = "missing_effect", clauses = ["Copy target instant or sorcery spell, except that the copy is red."] },
   { key = "form of the mulldrifter", class = "missing_effect", clauses = ["You may cast creature cards from your hand as though they were the card Mulldrifter."] },
   { key = "forth eorlingas!", class = "trigger_wrong", clauses = ["Whenever one or more creatures you control deal combat damage to one or more players this turn, you become the monarch."] },
