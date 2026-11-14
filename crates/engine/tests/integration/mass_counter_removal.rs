@@ -18,7 +18,7 @@ use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -423,13 +423,30 @@ fn aether_snap_triggers_protean_hydra_once_per_counter_removed() {
         2,
         "one Hydra firing per counter removed (CR 603.2c), each creating its own end-step delayed trigger"
     );
-    // Drive to the end step: decline to attack, then pass priority until both
-    // delayed triggers have fired and resolved.
-    for _ in 0..60 {
-        if count_of(&runner, hydra, &CounterType::Plus1Plus1) == 4 {
+    drive_to_settled_end_step(&mut runner);
+    assert_eq!(
+        count_of(&runner, hydra, &CounterType::Plus1Plus1),
+        4,
+        "two delayed triggers each put two +1/+1 counters on the Hydra"
+    );
+}
+
+/// Drives the current turn from its main phase to its end step: declines to
+/// attack, passes priority, and orders simultaneously fired triggers (CR
+/// 603.3b; the Hydra's delayed triggers are identical, so any order is the
+/// same). Stops once the end step's stack is empty with no delayed trigger
+/// still waiting, or at cleanup, whatever the counters on the board.
+fn drive_to_settled_end_step(runner: &mut GameRunner) {
+    for _ in 0..80 {
+        let state = runner.state();
+        let settled_end_step = state.phase == Phase::End
+            && state.stack.is_empty()
+            && state.delayed_triggers.is_empty()
+            && matches!(state.waiting_for, WaitingFor::Priority { .. });
+        if settled_end_step || state.phase == Phase::Cleanup {
             break;
         }
-        match runner.state().waiting_for.clone() {
+        match state.waiting_for.clone() {
             WaitingFor::Priority { .. } => {
                 runner.act(GameAction::PassPriority).expect("pass priority");
             }
@@ -441,17 +458,118 @@ fn aether_snap_triggers_protean_hydra_once_per_counter_removed() {
                     })
                     .expect("declare no attackers");
             }
-            // Two identical Hydra delayed triggers fire together: the
-            // controller orders them (CR 603.3b); any order is the same.
             WaitingFor::OrderTriggers { triggers, .. } => {
-                assert_eq!(triggers.len(), 2, "both Hydra delayed triggers are ordered");
                 runner
-                    .act(GameAction::OrderTriggers { order: vec![0, 1] })
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
                     .expect("order triggers");
             }
             other => panic!("unexpected prompt before the end step: {other:?}"),
         }
     }
+    let state = runner.state();
+    assert!(
+        matches!(state.phase, Phase::End | Phase::Cleanup),
+        "the drive must reach the end step; phase={:?}",
+        state.phase
+    );
+}
+
+const BOON_OF_SAFETY: &str = "Put a shield counter on target creature. (If it would be dealt damage or destroyed, remove a shield counter from it instead.)\nScry 1.";
+
+/// Protean Hydra (with `plus1` +1/+1 counters) kept alive by Glorious Anthem,
+/// given two shield counters by two Boon of Safety casts paid with real {W},
+/// then Aether Snap is cast. Returns the runner, the Hydra and the removal
+/// events of the Aether Snap resolution, after its triggers have resolved.
+fn hydra_with_two_shields_under_aether_snap(
+    plus1: u32,
+) -> (GameRunner, ObjectId, Vec<(ObjectId, CounterType, u32)>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let hydra = scenario
+        .add_creature_from_oracle(P0, "Protean Hydra", 0, 0, PROTEAN_HYDRA)
+        .id();
+    if plus1 > 0 {
+        scenario.with_counter(hydra, CounterType::Plus1Plus1, plus1);
+    }
+    scenario.add_enchantment_from_oracle(P0, "Glorious Anthem", GLORIOUS_ANTHEM);
+    let boons: Vec<ObjectId> = (0..2)
+        .map(|_| {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, "Boon of Safety", true, BOON_OF_SAFETY)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 0,
+                })
+                .id()
+        })
+        .collect();
+    let snap = scenario
+        .add_spell_to_hand_from_oracle(P0, "Aether Snap", false, AETHER_SNAP)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+
+    for boon in boons {
+        runner.cast(boon).target_object(hydra).resolve();
+    }
+    // Reach guard: both kinds are on the Hydra before the mass removal.
+    assert_eq!(count_of(&runner, hydra, &CounterType::Shield), 2);
+    assert_eq!(count_of(&runner, hydra, &CounterType::Plus1Plus1), plus1);
+
+    let outcome = runner.cast(snap).resolve();
+    let removed = removals(outcome.events());
+    runner.advance_until_stack_empty();
+    assert_eq!(count_of(&runner, hydra, &CounterType::Shield), 0);
+    assert_eq!(count_of(&runner, hydra, &CounterType::Plus1Plus1), 0);
+    assert_eq!(
+        runner.state().objects[&hydra].zone,
+        Zone::Battlefield,
+        "Glorious Anthem keeps the Hydra alive"
+    );
+    (runner, hydra, removed)
+}
+
+/// F1 (CR 122.1 + CR 603.2c): Protean Hydra's "Whenever a +1/+1 counter is
+/// removed from this creature" fires once per +1/+1 counter removed, and never
+/// for a removed counter of another kind. With two +1/+1 and two shield
+/// counters, Aether Snap removes all four but the Hydra fires twice, so the
+/// next end step restores four +1/+1 counters, not eight.
+#[test]
+fn aether_snap_triggers_protean_hydra_only_for_its_plus_one_counters() {
+    let (mut runner, hydra, removed) = hydra_with_two_shields_under_aether_snap(2);
+    assert!(
+        removed.contains(&(hydra, CounterType::Shield, 2)),
+        "{removed:?}"
+    );
+    assert!(
+        removed.contains(&(hydra, CounterType::Plus1Plus1, 2)),
+        "{removed:?}"
+    );
+    let plus1_removed: u32 = removed
+        .iter()
+        .filter(|(id, kind, _)| *id == hydra && *kind == CounterType::Plus1Plus1)
+        .map(|(_, _, n)| n)
+        .sum();
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        2,
+        "one Hydra firing per +1/+1 counter removed; the shield removals fire nothing"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len() as u32,
+        plus1_removed,
+        "the firings match the +1/+1 counters removed"
+    );
+
+    drive_to_settled_end_step(&mut runner);
     assert_eq!(
         count_of(&runner, hydra, &CounterType::Plus1Plus1),
         4,
@@ -459,36 +577,53 @@ fn aether_snap_triggers_protean_hydra_once_per_counter_removed() {
     );
 }
 
-/// F2 (CR 608.2d): a finite untyped single removal ("Remove a counter from target
-/// nonland permanent", Thrull Parasite) is not remove-all processing, so the
-/// `CounterType` ordering of the mass resolver must not decide which kind it
-/// removes. Every run removes exactly one counter in total, and across runs
-/// (each object's `HashMap` is independently seeded) both kinds are removed at
-/// least once; a fixed lowest-kind pick would remove only the +1/+1 counter.
+/// F1 (CR 122.1): removing only shield counters from Protean Hydra is not "a
+/// +1/+1 counter is removed", so it never fires and nothing returns.
 #[test]
-fn thrull_parasite_finite_removal_is_not_pinned_to_the_lowest_counter_kind() {
-    let mut removed_plus1 = 0u32;
-    let mut removed_ice = 0u32;
-    for _ in 0..24 {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        let parasite = scenario
-            .add_creature_from_oracle(P0, "Thrull Parasite", 1, 1, THRULL_PARASITE)
-            .id();
-        let victim = scenario.add_creature(P1, "Their Bear", 3, 3).id();
-        scenario.with_counter(victim, CounterType::Plus1Plus1, 1);
-        scenario.with_counter(victim, ice(), 1);
-        let mut runner = scenario.build();
+fn aether_snap_removing_only_shields_never_triggers_protean_hydra() {
+    let (mut runner, hydra, removed) = hydra_with_two_shields_under_aether_snap(0);
+    assert_eq!(
+        removed,
+        vec![(hydra, CounterType::Shield, 2)],
+        "reach guard: the shield counters are removed"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        0,
+        "a shield removal is not a +1/+1 removal"
+    );
 
-        runner.activate(parasite, 0).target_object(victim).resolve();
-        let plus1 = count_of(&runner, victim, &CounterType::Plus1Plus1);
-        let ice_left = count_of(&runner, victim, &ice());
-        assert_eq!(plus1 + ice_left, 1, "exactly one counter is removed");
-        removed_plus1 += u32::from(plus1 == 0);
-        removed_ice += u32::from(ice_left == 0);
-    }
+    drive_to_settled_end_step(&mut runner);
+    assert_eq!(runner.state().phase, Phase::End, "the end step is reached");
+    assert_eq!(count_of(&runner, hydra, &CounterType::Plus1Plus1), 0);
+}
+
+/// F2 (CR 608.2d): a finite untyped single removal ("Remove a counter from target
+/// nonland permanent", Thrull Parasite) removes exactly one counter, of one of
+/// the kinds present. Which kind is left to the counters' read order (the
+/// ordering rule itself is unit-tested beside `order_untyped_removal_kinds`),
+/// so this asserts only the invariants every run satisfies.
+#[test]
+fn thrull_parasite_finite_removal_removes_exactly_one_counter() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let parasite = scenario
+        .add_creature_from_oracle(P0, "Thrull Parasite", 1, 1, THRULL_PARASITE)
+        .id();
+    let victim = scenario.add_creature(P1, "Their Bear", 3, 3).id();
+    scenario.with_counter(victim, CounterType::Plus1Plus1, 1);
+    scenario.with_counter(victim, ice(), 1);
+    let mut runner = scenario.build();
+    // Reach guard: both kinds are present before the activation.
+    assert_eq!(count_of(&runner, victim, &CounterType::Plus1Plus1), 1);
+    assert_eq!(count_of(&runner, victim, &ice()), 1);
+
+    runner.activate(parasite, 0).target_object(victim).resolve();
+    let plus1 = count_of(&runner, victim, &CounterType::Plus1Plus1);
+    let ice_left = count_of(&runner, victim, &ice());
+    assert_eq!(plus1 + ice_left, 1, "exactly one counter is removed");
     assert!(
-        removed_plus1 > 0 && removed_ice > 0,
-        "both kinds are removable by a finite single removal: +1/+1 removed {removed_plus1}x, ice removed {removed_ice}x"
+        (plus1, ice_left) == (1, 0) || (plus1, ice_left) == (0, 1),
+        "the survivor is one of the two kinds: +1/+1={plus1}, ice={ice_left}"
     );
 }

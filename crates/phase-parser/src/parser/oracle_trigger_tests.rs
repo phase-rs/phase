@@ -27973,14 +27973,90 @@ fn trigger_opponent_dealt_noncombat_damage() {
 
 #[test]
 fn trigger_time_counter_removed_exile() {
-    // CR 122.1: "a time counter is removed from ~ while it's exiled"
+    // CR 122.1: "a time counter is removed from this card while it's exiled"
+    // carries its printed kind as a typed filter.
     let def = parse_trigger_line(
-            "Whenever a time counter is removed from ~ while it's exiled, you may cast a copy of ~ without paying its mana cost.",
-            "Rift Bolt",
-        );
+        "Whenever a time counter is removed from this card while it's exiled, draw a card.",
+        "Aeon Chronicler",
+    );
     assert_eq!(def.mode, TriggerMode::CounterRemoved);
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     assert_eq!(def.trigger_zones, vec![Zone::Exile]);
+    assert_eq!(
+        def.counter_filter,
+        Some(crate::types::ability::CounterTriggerFilter {
+            counter_type: CounterType::Time,
+            threshold: None,
+        })
+    );
+}
+
+/// CR 122.1 + CR 603.2c: the passive "a [type] counter is removed from"
+/// head lowers the printed kind to a typed `counter_filter`, so the trigger
+/// fires only for removals of that kind. The untyped and multi-word forms
+/// stay unparsed, as before.
+#[test]
+fn trigger_passive_typed_counter_removed_filters_on_its_kind() {
+    let typed = |counter_type| {
+        Some(crate::types::ability::CounterTriggerFilter {
+            counter_type,
+            threshold: None,
+        })
+    };
+
+    let hydra = parse_trigger_line(
+        "Whenever a +1/+1 counter is removed from this creature, put two +1/+1 counters on it at the beginning of the next end step.",
+        "Protean Hydra",
+    );
+    assert_eq!(hydra.mode, TriggerMode::CounterRemoved);
+    assert_eq!(hydra.counter_filter, typed(CounterType::Plus1Plus1));
+    assert_eq!(hydra.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(hydra.trigger_zones, vec![Zone::Battlefield]);
+
+    let chronicler = parse_trigger_line(
+        "Whenever a time counter is removed from this card while it's exiled, draw a card.",
+        "Aeon Chronicler",
+    );
+    assert_eq!(chronicler.mode, TriggerMode::CounterRemoved);
+    assert_eq!(chronicler.counter_filter, typed(CounterType::Time));
+    assert_eq!(chronicler.trigger_zones, vec![Zone::Exile]);
+
+    // No printed card has a passive typed removal trigger with a shield
+    // counter or a non-self subject; the nearest printed cards are Protean
+    // Hydra and Cloudsculpt Armorer (a plural 'one or more', different arm).
+    // These rows test the combinator's type and subject axes.
+    let shield = parse_trigger_line(
+        "Whenever a shield counter is removed from ~, draw a card.",
+        "Test Shield Card",
+    );
+    assert_eq!(shield.mode, TriggerMode::CounterRemoved);
+    assert_eq!(shield.counter_filter, typed(CounterType::Shield));
+    assert_eq!(shield.valid_card, Some(TargetFilter::SelfRef));
+
+    let other_subject = parse_trigger_line(
+        "Whenever a +1/+1 counter is removed from a creature you control, draw a card.",
+        "Test Subject Card",
+    );
+    assert_eq!(other_subject.mode, TriggerMode::CounterRemoved);
+    assert_eq!(other_subject.counter_filter, typed(CounterType::Plus1Plus1));
+    let Some(TargetFilter::Typed(subject)) = &other_subject.valid_card else {
+        panic!(
+            "expected a typed subject filter, got {:?}",
+            other_subject.valid_card
+        );
+    };
+    assert_eq!(subject.controller, Some(ControllerRef::You));
+    assert_eq!(other_subject.trigger_zones, vec![Zone::Battlefield]);
+
+    // Negative rows (reach-guarded by the positive rows above): an untyped
+    // removal and a multi-word kind yield no counter-removal trigger.
+    for text in [
+        "Whenever a counter is removed from ~, draw a card.",
+        "Whenever a red creature counter is removed from ~, draw a card.",
+    ] {
+        let def = parse_trigger_line(text, "Test Negative Card");
+        assert_ne!(def.mode, TriggerMode::CounterRemoved, "{text}");
+    }
 }
 
 #[test]

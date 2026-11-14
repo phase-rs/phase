@@ -23047,26 +23047,29 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
         }
         return Some((TriggerMode::CounterRemoved, def));
     }
-    let (after_a, ()) = value((), tag::<_, _, OracleError<'_>>("a "))
-        .parse(after_prefix)
-        .ok()?;
-
-    let (_, (counter_type, subject_rest)) =
-        nom_primitives::split_once_on(after_a, " counter is removed from ").ok()?;
-    let counter_type = counter_type.trim();
+    // CR 122.1: passive voice — "a [type] counter is removed from [subject]".
+    // The printed counter kind becomes a typed filter, so the trigger matches
+    // only removals of that kind; the matcher then fires once per removed
+    // counter of that kind (CR 603.2c: one event with multiple occurrences
+    // triggers that many times), never for a removed counter of another kind.
+    let (subject_rest, counter_type) = parse_counter_removed_head(after_prefix).ok()?;
     let subject_rest = subject_rest.trim();
 
     let mut def = make_base();
     def.mode = TriggerMode::CounterRemoved;
+    def.counter_filter = Some(CounterTriggerFilter {
+        counter_type,
+        threshold: None,
+    });
 
     // Parse optional "while it's exiled" / "while ~ is exiled" zone constraint
     let (subject_text, zone_constraint) =
-        if let Some(before) = subject_rest.strip_suffix("while it's exiled") {
-            (before.trim(), Some(Zone::Exile))
-        } else if let Some(before) = subject_rest.strip_suffix("while ~ is exiled") {
-            (before.trim(), Some(Zone::Exile))
-        } else {
-            (subject_rest, None)
+        match nom_primitives::scan_last_at_word_boundaries_with_offset(
+            subject_rest,
+            parse_counter_removed_zone_rider,
+        ) {
+            Some((offset, zone, _)) => (subject_rest[..offset].trim(), Some(zone)),
+            None => (subject_rest, None),
         };
 
     // Parse subject
@@ -23077,18 +23080,38 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
         def.valid_card = Some(filter);
     }
 
-    // Set counter type as description metadata (the counter_filter field could be extended
-    // but for now the type info is captured in the description)
-    if !counter_type.is_empty() {
-        def.description = Some(format!("{counter_type} counter"));
-    }
-
     // CR 122.1: Zone constraint for cards that trigger from exile (e.g. suspend)
     if let Some(zone) = zone_constraint {
         def.trigger_zones = vec![zone];
     }
 
     Some((TriggerMode::CounterRemoved, def))
+}
+
+/// CR 122.1: the head of a passive counter-removal trigger, "a [type] counter
+/// is removed from ", returning the printed counter kind. Typed-only: an
+/// untyped "a counter is removed from" fails here, because the typed
+/// combinator's open-ended fallback consumes "counter" and the closing tag
+/// then sees " is removed".
+fn parse_counter_removed_head(input: &str) -> OracleResult<'_, CounterType> {
+    preceded(
+        tag("a "),
+        terminated(
+            nom_primitives::parse_counter_type_typed,
+            tag(" counter is removed from "),
+        ),
+    )
+    .parse(input)
+}
+
+/// The "while it's exiled" / "while ~ is exiled" rider closing a passive
+/// counter-removal trigger's subject; it must end the subject text.
+fn parse_counter_removed_zone_rider(input: &str) -> OracleResult<'_, Zone> {
+    all_consuming(value(
+        Zone::Exile,
+        alt((tag("while it's exiled"), tag("while ~ is exiled"))),
+    ))
+    .parse(input)
 }
 
 /// CR 603.6c: Parse the source-zone tail of a "put into a graveyard" clause.

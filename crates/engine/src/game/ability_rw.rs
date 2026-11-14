@@ -9658,6 +9658,37 @@ mod tests {
         assert!(tapped.reads_src.is_empty(), "{tapped:?}");
     }
 
+    /// CR 608.2h: a mass removal whose counter threshold is read from its own
+    /// source ("each artifact with at least as many charge counters as this
+    /// permanent") reads the source's counters, so it is not
+    /// source-independent. The single scope's profile is unchanged, and a
+    /// fixed threshold reads no source.
+    #[test]
+    fn mass_counter_removal_source_scoped_threshold_reads_source_counters() {
+        let charge = CounterType::Generic("charge".to_string());
+        let removal = |threshold: QuantityExpr, scope| Effect::RemoveCounter {
+            counter_type: Some(charge.clone()),
+            count: qfix(1),
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                FilterProp::Counters {
+                    counters: crate::types::counter::CounterMatch::OfType(charge.clone()),
+                    comparator: Comparator::GE,
+                    count: threshold,
+                },
+            ])),
+            scope,
+        };
+
+        let mass = ability_rw_profile(&ra(removal(qref(counters_src()), EffectScope::All)));
+        assert!(mass.reads_src.object_counters, "{mass:?}");
+        assert!(!mass.source_independent(), "{mass:?}");
+        let single = ability_rw_profile(&ra(removal(qref(counters_src()), EffectScope::Single)));
+        assert!(single.reads_src.is_empty(), "{single:?}");
+        // Control: a fixed threshold in the same position reads no source.
+        let fixed = ability_rw_profile(&ra(removal(qfix(2), EffectScope::All)));
+        assert!(fixed.reads_src.is_empty(), "{fixed:?}");
+    }
+
     // ===================== (vi) event-object disjointness =====================
 
     #[test]

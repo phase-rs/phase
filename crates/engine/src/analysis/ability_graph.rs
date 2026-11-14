@@ -757,8 +757,11 @@ fn effect_projection(effect: &Effect) -> Projection {
                     // recorded as one unit of consumption. Negating the sentinel
                     // would record it as production.
                     QuantityExpr::Fixed { value: -1 } => 1,
-                    QuantityExpr::Fixed { .. }
-                    | QuantityExpr::Ref { .. }
+                    // A printed amount removes that many.
+                    QuantityExpr::Fixed { value } => i64::from(*value),
+                    // A dynamic amount is unknown statically: one unit of
+                    // consumption, with its magnitude left open below.
+                    QuantityExpr::Ref { .. }
                     | QuantityExpr::DivideRounded { .. }
                     | QuantityExpr::Offset { .. }
                     | QuantityExpr::ClampMin { .. }
@@ -767,7 +770,7 @@ fn effect_projection(effect: &Effect) -> Projection {
                     | QuantityExpr::UpTo { .. }
                     | QuantityExpr::Power { .. }
                     | QuantityExpr::Difference { .. }
-                    | QuantityExpr::Max { .. } => count_seed(count).0,
+                    | QuantityExpr::Max { .. } => 1,
                 };
                 b.add_counter(
                     class,
@@ -2592,16 +2595,28 @@ mod tests {
         assert_eq!(vector.counters.get(&loyalty_key), Some(&-2));
 
         // A dynamic count stays one unit of consumption.
-        let Projection::Modeled { vector, .. } = effect_projection(&removal(
-            CounterType::Plus1Plus1,
-            QuantityExpr::Ref {
-                qty: crate::types::ability::QuantityRef::EventContextAmount,
-            },
-            EffectScope::Single,
-        )) else {
-            panic!("modeled")
+        let dynamic = || QuantityExpr::Ref {
+            qty: crate::types::ability::QuantityRef::EventContextAmount,
         };
-        assert_eq!(vector.counters.get(&P1P1), Some(&-1));
+        for count in [
+            dynamic(),
+            QuantityExpr::UpTo {
+                max: Box::new(dynamic()),
+            },
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(dynamic()),
+            },
+        ] {
+            let Projection::Modeled { vector, .. } = effect_projection(&removal(
+                CounterType::Plus1Plus1,
+                count.clone(),
+                EffectScope::Single,
+            )) else {
+                panic!("modeled")
+            };
+            assert_eq!(vector.counters.get(&P1P1), Some(&-1), "{count:?}");
+        }
     }
 
     #[test]

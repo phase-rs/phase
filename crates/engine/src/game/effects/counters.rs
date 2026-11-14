@@ -3594,16 +3594,7 @@ pub fn resolve_remove(
                         .collect()
                 })
                 .unwrap_or_default();
-            // `obj.counters` is a `HashMap`, whose iteration order changes from run
-            // to run, and the printed instruction fixes no order among the kinds a
-            // remove-all removes. Walk the kinds in `CounterType` order so the event
-            // order is deterministic. A finite untyped single removal ("remove a
-            // counter from target permanent", Thrull Parasite) is not remove-all
-            // processing: CR 608.2d gives its kind choice to the player, so this
-            // ordering must not decide which kind its budget removes.
-            if scope == EffectScope::All || raw_count < 0 {
-                counters.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-            }
+            order_untyped_removal_kinds(&mut counters, scope, raw_count);
             if raw_count < 0 {
                 counters
             } else {
@@ -3643,6 +3634,26 @@ pub fn resolve_remove(
     drain_pending_counter_removals(state, events);
 
     Ok(())
+}
+
+/// Orders the kinds an untyped, non-interactive counter removal walks.
+///
+/// `obj.counters` is a `HashMap`, whose iteration order changes from run to
+/// run, and the printed instruction fixes no order among the kinds a
+/// remove-all removes. A mass removal (`EffectScope::All`) or a remove-all
+/// (`raw_count < 0`) walks the kinds in `CounterType` order so the event order
+/// is deterministic. A finite untyped single removal ("remove a counter from
+/// target permanent", Thrull Parasite) is not remove-all processing: CR 608.2d
+/// gives its kind choice to the player, so this ordering must not decide which
+/// kind its budget removes, and its kinds are left as read.
+fn order_untyped_removal_kinds(
+    counters: &mut [(CounterType, u32)],
+    scope: EffectScope,
+    raw_count: i32,
+) {
+    if scope == EffectScope::All || raw_count < 0 {
+        counters.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    }
 }
 
 /// CR 608.2d + CR 608.2h: the total cap of an interactive counter removal, read
@@ -10047,5 +10058,34 @@ mod tests {
             vec![(CounterType::Loyalty, 4), (CounterType::Plus1Plus1, 4),]
         );
         assert!(coalesce_entry_counters([(CounterType::Loyalty, 0)]).is_empty());
+    }
+
+    /// CR 608.2d: a mass or remove-all untyped removal walks its kinds in
+    /// `CounterType` order, whatever order the object's counters were read in,
+    /// while a finite untyped single removal ("remove a counter", Thrull
+    /// Parasite) leaves its kinds as read, so the ordering never picks the kind
+    /// its budget removes.
+    #[test]
+    fn untyped_removal_kinds_are_ordered_only_for_mass_or_remove_all() {
+        let ice = || CounterType::Generic("ice".to_string());
+        let read_orders = [
+            vec![(ice(), 1), (CounterType::Plus1Plus1, 1)],
+            vec![(CounterType::Plus1Plus1, 1), (ice(), 1)],
+        ];
+        let sorted = vec![(CounterType::Plus1Plus1, 1), (ice(), 1)];
+
+        for read in &read_orders {
+            let mut mass_finite = read.clone();
+            order_untyped_removal_kinds(&mut mass_finite, EffectScope::All, 1);
+            assert_eq!(mass_finite, sorted, "mass finite from {read:?}");
+
+            let mut single_remove_all = read.clone();
+            order_untyped_removal_kinds(&mut single_remove_all, EffectScope::Single, -1);
+            assert_eq!(single_remove_all, sorted, "single remove-all from {read:?}");
+
+            let mut single_finite = read.clone();
+            order_untyped_removal_kinds(&mut single_finite, EffectScope::Single, 1);
+            assert_eq!(&single_finite, read, "single finite keeps {read:?}");
+        }
     }
 }
