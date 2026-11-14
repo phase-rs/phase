@@ -83,7 +83,7 @@ it("waits for catalog rows before offering a provider and keeps an explicit engi
   await act(async () => {
     resolveCatalog([{
       provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null,
-      defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [],
+      defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"],
     }]);
   });
   const picker = await screen.findByRole("button", { name: /^Driven by$/i });
@@ -97,7 +97,7 @@ it("waits for catalog rows before offering a provider and keeps an explicit engi
 it("does not offer a profile absent from the loaded catalog", async () => {
   catalogMock.loadProviderCatalog.mockResolvedValue([{
     provider: "Gemini", value: "Gemini", displayName: "Gemini", defaultBaseUrl: null,
-    defaultModel: "gemini", requiresApiKey: true, apiKeyUrl: "", models: [],
+    defaultModel: "gemini", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"],
   }]);
   useLlmStore.getState().addProfile({
     provider: "OpenAi", model: "gpt-5", apiKey: "key", enabled: true,

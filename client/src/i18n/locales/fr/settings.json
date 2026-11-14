@@ -524,6 +524,10 @@
     "apiKeyMissing": "Saisissez à nouveau votre clé d'API. Les clés ne sont pas conservées après un rechargement, et ce fournisseur n'est utilisé ni pour les sièges IA ni pour les bots de draft tant que vous ne l'avez pas fait.",
     "apiKeyStorage": "Conservée en mémoire pour cette session de navigation uniquement. Les clés d'API ne sont jamais écrites sur le disque et sont exclues de l'export de sauvegarde et de la synchronisation cloud : vous la ressaisirez après un rechargement. Une clé d'API impose aussi un point de terminaison https://, sauf si le serveur est sur localhost.",
     "apiKeyGet": "Obtenir une clé",
+    "messageThreads": {
+      "label": "Se souvenir des décisions précédentes",
+      "hint": "Les sièges IA de difficulté Moyen ou plus gardent leur partie dans un fil de messages Anthropic, pour que le modèle s'appuie sur son raisonnement précédent."
+    },
     "test": "Tester la connexion",
     "testing": "Test en cours…",
     "testOk": "Connecté.",

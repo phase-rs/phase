@@ -133,6 +133,19 @@ const LLM_HISTORY_TRANSFER_LIMIT = 600;
 const MAX_CONSECUTIVE_LLM_FAILURES = 3;
 
 /**
+ * How many times one decision is asked again after the provider declines to
+ * continue the seat's message thread.
+ *
+ * A thread is best effort (the API drops one after five idle minutes), so a
+ * thread error is recovery, not failure: the engine has already dropped the
+ * seat's thread, and the resend goes out as a fresh, complete request inside
+ * the same attempt, so a recovered thread error never counts toward
+ * {@link MAX_CONSECUTIVE_LLM_FAILURES}. One resend is enough, because a fresh
+ * request has no thread left to lose.
+ */
+const LLM_THREAD_RESENDS = 1;
+
+/**
  * Run one LLM-driven decision for `playerId`.
  *
  * Returns `null` for EVERY failure — no configured profile, an adapter without
@@ -165,58 +178,77 @@ async function llmActionProposal(
   }
 
   const history = (logHistory ?? []).slice(-LLM_HISTORY_TRANSFER_LIMIT);
-  const built = await adapter.buildLlmDecisionRequest(
-    difficulty,
-    playerId,
-    JSON.stringify(resolvedEndpointOf(profile)),
-    JSON.stringify(history),
-  );
-  if (signal.aborted || !isCurrent()) return null;
-  // A decision this provider cannot be asked at all (a forced move has no
-  // question to pose) is not the provider failing: the heuristic plays it, and
-  // it does not count toward giving the seat's provider up.
-  if (built?.errorKind?.kind === "unsupportedDecision") return null;
-  // If the engine recognized a standing decision (e.g. PassPriority with no new
-  // information), return the authorized proposal immediately without contacting
-  // the provider or charging an attempt.
-  if (built?.proposal) {
-    return built.proposal;
-  }
-  // From here the provider is in play, so an outcome without a proposal counts.
-  onAttempt();
-  if (!built?.request || !built.fingerprint) {
-    // The engine's refusal text can carry a PROVIDER-authored diagnostic, and
-    // the game log is prompt-renderable. Only the Phase-authored summary is
-    // logged; the detail goes to the console.
-    reportLlmFailure(`LLM opponent (seat ${llmSeatIndex}) could not build a request`, built?.error);
-    return null;
-  }
+  const endpointJson = JSON.stringify(resolvedEndpointOf(profile));
+  const historyJson = JSON.stringify(history);
+  for (let resends = 0; ; resends += 1) {
+    const built = await adapter.buildLlmDecisionRequest(
+      difficulty,
+      playerId,
+      endpointJson,
+      historyJson,
+    );
+    if (signal.aborted || !isCurrent()) return null;
+    // A decision this provider cannot be asked at all (a forced move has no
+    // question to pose) is not the provider failing: the heuristic plays it, and
+    // it does not count toward giving the seat's provider up.
+    if (built?.errorKind?.kind === "unsupportedDecision") return null;
+    // If the engine recognized a standing decision (e.g. PassPriority with no new
+    // information), return the authorized proposal immediately without contacting
+    // the provider or charging an attempt.
+    if (built?.proposal) {
+      return built.proposal;
+    }
+    // From here the provider is in play, so an outcome without a proposal counts.
+    onAttempt();
+    if (!built?.request || !built.fingerprint) {
+      // The engine's refusal text can carry a PROVIDER-authored diagnostic, and
+      // the game log is prompt-renderable. Only the Phase-authored summary is
+      // logged; the detail goes to the console.
+      reportLlmFailure(`LLM opponent (seat ${llmSeatIndex}) could not build a request`, built?.error);
+      return null;
+    }
 
-  const { status, body } = await executeLlmRequest(built.request, { signal });
-  if (signal.aborted || !isCurrent()) return null;
-  // Status travels with the body so the engine can refuse a non-2xx reply
-  // however it parses — an error page or gateway failure must never be bound to
-  // a game action.
-  const resolved = await adapter.getAiActionProposalFromLlmResponse(
-    playerId,
-    built.fingerprint,
-    profile.provider,
-    status,
-    body,
-  );
-  // The call was paid for whether or not its reply is usable.
-  recordLlmUsage("game", `seat ${llmSeatIndex}`, built.promptChars, resolved?.usage);
-  if (!resolved?.proposal) {
+    const { status, body } = await executeLlmRequest(built.request, { signal });
+    if (signal.aborted || !isCurrent()) return null;
+    // Status travels with the body so the engine can refuse a non-2xx reply
+    // however it parses — an error page or gateway failure must never be bound to
+    // a game action.
+    // The thread turn travels back too, so the engine records the reply
+    // against the request that produced it and no other.
+    const resolved = await adapter.getAiActionProposalFromLlmResponse(
+      playerId,
+      built.fingerprint,
+      built.threadTurn ?? null,
+      profile.provider,
+      status,
+      body,
+    );
+    // The call was paid for whether or not its reply is usable.
+    recordLlmUsage("game", `seat ${llmSeatIndex}`, built.promptChars, resolved?.usage);
+    // A decision that moved on while its reply was being read is never asked
+    // again: a resend would build a request for whatever is current now.
+    if (signal.aborted || !isCurrent()) return null;
+    if (resolved?.proposal) {
+      // The model's reasoning is deliberately NOT logged. `debugLog` writes a
+      // `visibility: "Public"` entry into `logHistory` -- the shared game log,
+      // which is also the history this engine feeds back into later prompts.
+      // Publishing a seat's private deliberation there would leak it to every
+      // player and echo it into subsequent decisions. It stays on
+      // `resolved.reasoning` for a future private channel (the local-only AI
+      // decision receipt is the established one).
+      return resolved.proposal;
+    }
+    if (resolved?.errorKind?.kind === "threadUnavailable" && resends < LLM_THREAD_RESENDS) {
+      // Console only, like every provider diagnostic: the game log is
+      // prompt-renderable (see `diagnostics.ts`).
+      console.info(
+        `[LLM] seat ${llmSeatIndex}: the provider dropped its message thread; asking again`,
+      );
+      continue;
+    }
     reportLlmFailure(`LLM opponent (seat ${llmSeatIndex}) reply was refused`, resolved?.error);
     return null;
   }
-  // The model's reasoning is deliberately NOT logged. `debugLog` writes a
-  // `visibility: "Public"` entry into `logHistory` -- the shared game log, which
-  // is also the history this engine feeds back into later prompts. Publishing a
-  // seat's private deliberation there would leak it to every player and echo it
-  // into subsequent decisions. It stays on `resolved.reasoning` for a future
-  // private channel (the local-only AI decision receipt is the established one).
-  return resolved.proposal;
 }
 
 export function createAIController(config: AIControllerConfig): AIController {

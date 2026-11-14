@@ -543,6 +543,7 @@ export class EngineWorkerClient {
   async getAiActionProposalFromLlmResponse(
     playerId: number,
     fingerprint: string,
+    threadTurn: number | null,
     provider: string,
     status: number,
     responseBody: string,
@@ -552,6 +553,7 @@ export class EngineWorkerClient {
         type: "getAiActionProposalFromLlmResponse",
         playerId,
         fingerprint,
+        threadTurn,
         provider,
         status,
         responseBody,

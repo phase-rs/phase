@@ -67,9 +67,11 @@ export function buildLlmDecisionRequest(difficulty: string, player_id: number, e
  *
  * Stateless by design: a player configures a provider in Settings, usually
  * with no game running, and a test that required a live board would be
- * untestable exactly when it is most needed. The request is built by the same
- * `build_chat_request` a real decision uses, so a probe that succeeds proves
- * the endpoint, credential and model the game path will use.
+ * untestable exactly when it is most needed. The request is built in the shape
+ * a real decision's first request takes (`phase_llm::build_probe_request`:
+ * a message-thread create for a profile on threads), so a probe that succeeds
+ * proves the endpoint, credential, model and request shape the game path will
+ * use.
  */
 export function buildLlmProbeRequest(endpoint_json: string): any;
 
@@ -285,8 +287,11 @@ export function formatConfigForCustomRules(custom_rules: any): any;
  * selected action is admitted only if that contract contains it. There is
  * intentionally no endpoint by which model text becomes a `GameAction` without
  * this check.
+ *
+ * `thread_turn` is the `threadTurn` the request was built with
+ * ([`build_llm_decision_request`]), absent for a self-contained request.
  */
-export function getAiActionProposalFromLlmResponse(player_id: number, fingerprint: string, provider_label: string, status: number, response_body: string): any;
+export function getAiActionProposalFromLlmResponse(player_id: number, fingerprint: string, thread_turn: number | null | undefined, provider_label: string, status: number, response_body: string): any;
 
 /**
  * Return the authoritative list of selectable Horde challenge decks as a typed
@@ -872,7 +877,7 @@ export interface InitOutput {
     readonly export_game_state_json: () => [number, number, number, number];
     readonly export_replay_log: () => [number, number, number, number];
     readonly formatConfigForCustomRules: (a: any) => [number, number, number];
-    readonly getAiActionProposalFromLlmResponse: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
+    readonly getAiActionProposalFromLlmResponse: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
     readonly getFormatRegistry: () => any;
     readonly get_ai_action_proposal: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_action_proposal_from_scores: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];

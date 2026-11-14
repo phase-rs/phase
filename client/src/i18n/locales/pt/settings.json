@@ -524,6 +524,10 @@
     "apiKeyMissing": "Introduz novamente a tua chave de API. As chaves não são guardadas após recarregar, e este fornecedor não é usado nos lugares de IA nem nos bots do draft até o fazeres.",
     "apiKeyStorage": "Mantida em memória apenas nesta sessão do navegador. As chaves de API nunca são escritas em disco e ficam excluídas da exportação de cópia de segurança e da sincronização na nuvem, por isso terás de a introduzir novamente após recarregar. Uma chave de API exige também um endpoint https://, a menos que o servidor esteja em localhost.",
     "apiKeyGet": "Obter uma chave",
+    "messageThreads": {
+      "label": "Lembrar decisões anteriores",
+      "hint": "Os lugares de IA com dificuldade Médio ou superior mantêm a sua partida num fio de mensagens da Anthropic, para que o modelo parta do seu raciocínio anterior."
+    },
     "test": "Testar ligação",
     "testing": "A testar…",
     "testOk": "Ligado.",

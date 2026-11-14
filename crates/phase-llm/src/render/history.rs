@@ -94,6 +94,34 @@ impl TurnCycle {
     }
 }
 
+/// The part of `history` that belongs to the game in progress.
+///
+/// The next game of a best-of-three replaces the game in place while the
+/// client's log runs on, so the log handed over can still hold the last game's
+/// entries, under turn numbers the new game reuses. Every game opens with its
+/// pregame (the starting-player choice and the mulligans), which the engine
+/// logs at turn 0, before any turn begins. So the game in progress begins with
+/// the last run of turn-0 entries that follows an entry from a numbered turn.
+/// A log with no such run (the first game, or one whose earlier games were
+/// trimmed away) belongs to the game in progress throughout.
+///
+/// The log carries no typed game-start marker, so an earlier game that ended
+/// before its first turn began (a concession during the mulligans) logged
+/// nothing at a numbered turn and cannot be told apart from the next game's
+/// pregame: its entries stay in the next game's history.
+pub fn current_game(history: &[GameLogEntry]) -> &[GameLogEntry] {
+    let Some(last_pregame) = history.iter().rposition(|entry| entry.turn == 0) else {
+        return history;
+    };
+    match history[..last_pregame]
+        .iter()
+        .rposition(|entry| entry.turn > 0)
+    {
+        Some(last_of_earlier_game) => &history[last_of_earlier_game + 1..],
+        None => history,
+    }
+}
+
 /// Render the history section into `out`.
 pub fn push_history(
     out: &mut String,
@@ -180,22 +208,63 @@ fn summarize_turn(turn: u32, entries: &[&GameLogEntry]) -> String {
 }
 
 /// The cycle in progress, entry by entry: the events a player's default
-/// timeline shows (`Essential` and `Context`). Phase boundaries are dropped —
-/// every line already names its phase.
+/// timeline shows ([`shows_in_timeline`]).
 fn push_current_cycle(out: &mut String, entries: &[&GameLogEntry], limit: usize) {
-    let shown: Vec<&&GameLogEntry> = entries
+    let shown: Vec<&GameLogEntry> = entries
         .iter()
-        .filter(|entry| {
-            matches!(
-                entry.presentation.importance,
-                LogImportance::Essential | LogImportance::Context
-            ) && entry.presentation.boundary != LogBoundary::Phase
-        })
+        .copied()
+        .filter(|entry| shows_in_timeline(entry))
         .collect();
     if shown.is_empty() {
         return;
     }
     out.push_str("\n--- THIS TURN CYCLE (oldest first) ---\n");
+    push_timeline_lines(out, &shown, limit);
+}
+
+/// What the log recorded after the entry numbered `since` — the whole log
+/// when `None` — that a message-thread continue shows, oldest first.
+///
+/// The same entries the turn cycle in progress shows: the same prompt-safety
+/// filter ([`is_prompt_safe`]) and the same timeline entries
+/// ([`shows_in_timeline`]).
+pub fn unseen_timeline_entries(history: &[GameLogEntry], since: Option<u32>) -> Vec<&GameLogEntry> {
+    history
+        .iter()
+        .filter(|entry| since.is_none_or(|seen| entry.seq > seen))
+        .filter(|entry| is_prompt_safe(entry) && shows_in_timeline(entry))
+        .collect()
+}
+
+/// Render `unseen` ([`unseen_timeline_entries`]) as the opening section of a
+/// message-thread continue, in the line format of the turn cycle in progress.
+///
+/// The thread already holds everything up to the seat's last answer, so this
+/// is the only history a continue carries, and every unseen entry is rendered:
+/// a caller with more than the seat's window to show starts a new thread
+/// instead, whose full request summarizes the older turns.
+pub fn push_since_last_decision(out: &mut String, unseen: &[&GameLogEntry]) {
+    out.push_str("--- SINCE YOUR LAST DECISION (oldest first) ---\n");
+    if unseen.is_empty() {
+        out.push_str("Nothing new has been logged.\n");
+        return;
+    }
+    push_timeline_lines(out, unseen, unseen.len());
+}
+
+/// Whether an entry is one a player's default timeline shows: `Essential` and
+/// `Context` events. Phase boundaries are dropped — every line already names
+/// its phase.
+fn shows_in_timeline(entry: &GameLogEntry) -> bool {
+    matches!(
+        entry.presentation.importance,
+        LogImportance::Essential | LogImportance::Context
+    ) && entry.presentation.boundary != LogBoundary::Phase
+}
+
+/// `T5 PreCombatMain: Player 1 casts Shock`, one line for each of the newest
+/// `limit` entries, oldest first.
+fn push_timeline_lines(out: &mut String, shown: &[&GameLogEntry], limit: usize) {
     let start = shown.len().saturating_sub(limit);
     for entry in &shown[start..] {
         out.push_str(&format!(
@@ -528,5 +597,107 @@ mod tests {
             },
         ];
         assert_eq!(render_log_entry(&cast), "Player 1 casts Lightning Bolt");
+    }
+
+    // ── Since the seat's last decision ───────────────────────────────────
+
+    /// `game(turns)` with each entry numbered the way the client numbers the
+    /// log it accumulates: one `seq` per entry, in order.
+    fn numbered_game(turns: u32) -> Vec<GameLogEntry> {
+        game(turns)
+            .into_iter()
+            .zip(0u32..)
+            .map(|(mut entry, seq)| {
+                entry.seq = seq;
+                entry
+            })
+            .collect()
+    }
+
+    fn since(history: &[GameLogEntry], seen: Option<u32>) -> String {
+        let mut out = String::new();
+        push_since_last_decision(&mut out, &unseen_timeline_entries(history, seen));
+        out
+    }
+
+    #[test]
+    fn only_entries_after_the_last_answer_are_rendered() {
+        // Four entries per turn: entries 0-7 are turns 1-2, 8-11 turn 3.
+        let history = numbered_game(3);
+        let out = since(&history, Some(7));
+        assert!(out.starts_with("--- SINCE YOUR LAST DECISION"), "{out}");
+        assert!(out.contains("T3 PreCombatMain: cast on 3"), "{out}");
+        assert!(out.contains("T3 PreCombatMain: target on 3"), "{out}");
+        for earlier in ["cast on 1", "cast on 2", "target on 2"] {
+            assert!(
+                !out.contains(earlier),
+                "{earlier} was already answered: {out}"
+            );
+        }
+        // The same timeline filter as the cycle in progress.
+        assert!(!out.contains("untap on 3"), "{out}");
+    }
+
+    #[test]
+    fn a_thread_with_nothing_new_says_so() {
+        let history = numbered_game(2);
+        let newest = history.last().map(|entry| entry.seq);
+        let out = since(&history, newest);
+        assert!(out.contains("Nothing new has been logged."), "{out}");
+    }
+
+    #[test]
+    fn unseen_entries_keep_the_prompt_filters_and_are_all_rendered() {
+        let history = numbered_game(30);
+        let unseen = unseen_timeline_entries(&history, None);
+        // Three timeline entries per turn: the turn start, the cast and the
+        // target; the detail entry is not a timeline entry.
+        assert_eq!(unseen.len(), 90);
+        let out = since(&history, None);
+        assert!(
+            out.contains("cast on 1") && out.contains("cast on 30"),
+            "{out}"
+        );
+
+        let mut secret = hidden(31, "Player 0 draws Black Lotus");
+        secret.seq = 500;
+        assert!(unseen_timeline_entries(&[secret.clone()], None).is_empty());
+        assert!(!since(&[secret], None).contains("Black Lotus"));
+    }
+    // ── The game in progress ─────────────────────────────────────────────
+
+    #[test]
+    fn a_best_of_three_log_is_cut_where_the_game_in_progress_began() {
+        // As the engine logs it: a game's start at turn 0, and its first turn,
+        // mulligans included, from turn 1.
+        let mut game_one_start = entry(0, "game one started", LogImportance::Essential);
+        game_one_start.seq = 0;
+        let mut history = vec![game_one_start];
+        history.extend(game(3));
+        let mut game_two_start = entry(0, "game two started", LogImportance::Essential);
+        game_two_start.seq = 100;
+        let game_two_mulligan = entry(1, "game two mulligan", LogImportance::Essential);
+        let game_two_turn = entry(1, "game two cast", LogImportance::Essential);
+        history.extend([game_two_start, game_two_mulligan, game_two_turn]);
+
+        let current = current_game(&history);
+        assert_eq!(current.len(), 3, "{current:?}");
+        assert_eq!(current[0].seq, 100);
+        let out = render(current, two_seats(1), BUDGET);
+        assert!(out.contains("game two cast"), "{out}");
+        assert!(!out.contains("cast on 3"), "the last game leaked: {out}");
+    }
+
+    #[test]
+    fn a_log_from_the_first_game_is_kept_whole() {
+        let mut pregame = entry(0, "mulligan", LogImportance::Essential);
+        pregame.seq = 0;
+        let mut history = vec![pregame];
+        history.extend(game(4));
+        assert_eq!(current_game(&history).len(), history.len());
+        // A window that starts after the pregame was trimmed away.
+        let trimmed = game(4);
+        assert_eq!(current_game(&trimmed).len(), trimmed.len());
+        assert!(current_game(&[]).is_empty());
     }
 }

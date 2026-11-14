@@ -24,6 +24,7 @@ function profile(overrides: Partial<LlmProfile> = {}): LlmProfile {
     model: "gpt-5",
     maxOutputTokens: null,
     temperature: null,
+    decisionContext: "selfContained",
     enabled: true,
     ...overrides,
   };
@@ -134,6 +135,47 @@ describe("useLlmConnectionTest", () => {
       pending.resolve({ ok: true });
       await pending.promise;
     });
+  });
+
+  /// Turning message threads on changes the request the probe sends, so a
+  /// verdict on the old request no longer describes the profile.
+  it("clears a verdict when the profile's decision context changes", async () => {
+    probeMocks.testLlmEndpoint.mockResolvedValue({ ok: true });
+    const anthropic = { provider: "Anthropic" as const, model: "claude-sonnet-5" };
+    const { result, rerender, states } = renderTest(profile(anthropic));
+
+    await act(async () => {
+      result.current();
+    });
+    expect(last(states)).toEqual({ status: "ok" });
+
+    rerender({ p: profile({ ...anthropic, decisionContext: "messageThread" }) });
+
+    expect(last(states)).toEqual({ status: "idle" });
+  });
+
+  it("never lets a probe of the old request certify the new decision context", async () => {
+    const pending = deferred<{ ok: true }>();
+    let seenSignal: AbortSignal | undefined;
+    probeMocks.testLlmEndpoint.mockImplementation((_p, options) => {
+      seenSignal = options?.signal;
+      return pending.promise;
+    });
+    const anthropic = { provider: "Anthropic" as const, model: "claude-sonnet-5" };
+    const { result, rerender, states } = renderTest(profile(anthropic));
+
+    act(() => {
+      result.current();
+    });
+    rerender({ p: profile({ ...anthropic, decisionContext: "messageThread" }) });
+    expect(seenSignal?.aborted).toBe(true);
+    await act(async () => {
+      pending.resolve({ ok: true });
+      await pending.promise;
+    });
+
+    expect(states).not.toContainEqual({ status: "ok" });
+    expect(last(states)).toEqual({ status: "idle" });
   });
 
   it("abandons an in-flight request on unmount", async () => {

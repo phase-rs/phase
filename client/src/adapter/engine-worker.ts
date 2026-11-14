@@ -152,6 +152,7 @@ type EngineRequest =
       id: number;
       playerId: number;
       fingerprint: string;
+      threadTurn: number | null;
       provider: string;
       status: number;
       responseBody: string;
@@ -719,6 +720,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           getAiActionProposalFromLlmResponse(
             msg.playerId,
             msg.fingerprint,
+            msg.threadTurn,
             msg.provider,
             msg.status,
             msg.responseBody,

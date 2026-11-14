@@ -21,7 +21,7 @@ vi.mock("../../../services/llm/catalog", () => catalogMock);
 
 const CATALOG: LlmProviderCatalogEntry[] = [{
   provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null,
-  defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [],
+  defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"],
 }];
 
 const dispatchMocks = vi.hoisted(() => ({
@@ -63,6 +63,7 @@ interface TestAdapter {
   getAiActionProposalFromLlmResponse?: (
     playerId: number,
     fingerprint: string,
+    threadTurn: number | null,
     provider: string,
     status: number,
     responseBody: string,
@@ -425,7 +426,7 @@ describe("LLM-driven AI seats", () => {
     expect(JSON.parse(endpointJson)).toMatchObject({ provider: "OpenAi", apiKey: "default-key" });
     expect(llmMocks.executeLlmRequest).toHaveBeenCalledWith(HTTP_SPEC, expect.anything());
     expect(getAiActionProposalFromLlmResponse).toHaveBeenCalledWith(
-      1, "default-fp", "OpenAi", 200, '{"choice":1}',
+      1, "default-fp", null, "OpenAi", 200, '{"choice":1}',
     );
     expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(llmProposal);
     controller.dispose();
@@ -489,6 +490,7 @@ describe("LLM-driven AI seats", () => {
     expect(getAiActionProposalFromLlmResponse).toHaveBeenCalledWith(
       1,
       "fp-1",
+      null,
       "OpenAi",
       200,
       '{"choice":1}',
@@ -726,6 +728,7 @@ describe("LLM-driven AI seats", () => {
     expect(getAiActionProposalFromLlmResponse).toHaveBeenCalledWith(
       1,
       "fp-1",
+      null,
       "OpenAi",
       429,
       expect.any(String),
@@ -813,6 +816,185 @@ describe("LLM-driven AI seats", () => {
     expect(buildLlmDecisionRequest).toHaveBeenCalled();
     expect(llmMocks.executeLlmRequest).not.toHaveBeenCalled();
     expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(standingProposal);
+    controller.dispose();
+  });
+});
+
+describe("LLM seats on a message thread", () => {
+  const THREAD_LOST: AiLlmProposalResult = {
+    proposal: null,
+    error: "the provider refused the message thread (thread_not_found)",
+    errorKind: { kind: "threadUnavailable" },
+  };
+  const THREAD_TURN = 7;
+
+  function threadedAdapter(resolve: () => AiLlmProposalResult) {
+    const heuristic = proposal(PASS, "heuristic");
+    const buildLlmDecisionRequest = vi.fn(async () => ({
+      fingerprint: "fp-1",
+      optionCount: 2,
+      promptChars: 100,
+      request: HTTP_SPEC,
+      threadTurn: THREAD_TURN,
+    }));
+    const getAiActionProposalFromLlmResponse = vi.fn(async () => resolve());
+    storeState.adapter = {
+      getAiActionProposal: vi.fn(async () => heuristic),
+      buildLlmDecisionRequest,
+      getAiActionProposalFromLlmResponse,
+    };
+    return { heuristic, buildLlmDecisionRequest, getAiActionProposalFromLlmResponse };
+  }
+
+  beforeEach(() => {
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: "{}" });
+  });
+
+  /** Make the first dispatched proposal end the game, so exactly one decision runs. */
+  function endGameOnDispatch(): void {
+    dispatchMocks.dispatchAiActionProposal.mockImplementation(async () => {
+      const state = storeState.gameState as GameState;
+      storeState.gameState = {
+        ...state,
+        waiting_for: { type: "GameOver", data: { winner: 1 } } as unknown as WaitingFor,
+      };
+      return { status: "applied" };
+    });
+  }
+
+  it("asks the same decision once more when the provider drops the seat's thread", async () => {
+    bindSeatToProvider();
+    const llmProposal = proposal(CAST, "llm-recovered");
+    const replies = [THREAD_LOST, { proposal: llmProposal }];
+    const adapter = threadedAdapter(() => replies.shift() ?? THREAD_LOST);
+    endGameOnDispatch();
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await runOnce();
+    await runOnce();
+
+    // The engine dropped the thread, so the second build is the fresh request.
+    expect(adapter.buildLlmDecisionRequest).toHaveBeenCalledTimes(2);
+    expect(adapter.buildLlmDecisionRequest.mock.calls[1]).toEqual(
+      adapter.buildLlmDecisionRequest.mock.calls[0],
+    );
+    expect(llmMocks.executeLlmRequest).toHaveBeenCalledTimes(2);
+    expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(llmProposal);
+    expect(dispatchMocks.dispatchAiActionProposal).not.toHaveBeenCalledWith(adapter.heuristic);
+    // Recovery is not a failure, so nothing reaches the shared game log.
+    expect(debugMocks.debugLog).not.toHaveBeenCalledWith(
+      expect.stringContaining("reply was refused"),
+      expect.anything(),
+    );
+    controller.dispose();
+  });
+
+  it("hands the engine back the thread turn the request was built as", async () => {
+    bindSeatToProvider();
+    const adapter = threadedAdapter(() => ({ proposal: proposal(CAST, "llm-bound") }));
+    endGameOnDispatch();
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await runOnce();
+
+    expect(adapter.getAiActionProposalFromLlmResponse).toHaveBeenCalledWith(
+      1,
+      "fp-1",
+      THREAD_TURN,
+      "OpenAi",
+      200,
+      "{}",
+    );
+    controller.dispose();
+  });
+
+  it("does not ask again for a decision that moved on while its reply was read", async () => {
+    bindSeatToProvider();
+    const adapter = threadedAdapter(() => {
+      // The game moves on while the engine reads the reply.
+      storeState.gameSessionGeneration += 1;
+      return THREAD_LOST;
+    });
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await runOnce();
+
+    expect(adapter.getAiActionProposalFromLlmResponse).toHaveBeenCalledTimes(1);
+    expect(adapter.buildLlmDecisionRequest).toHaveBeenCalledTimes(1);
+    expect(llmMocks.executeLlmRequest).toHaveBeenCalledTimes(1);
+    controller.dispose();
+  });
+
+  it("never counts a recovered thread error toward giving up on the provider", async () => {
+    bindSeatToProvider();
+    const llmProposal = proposal(CAST, "llm-recovered");
+    let calls = 0;
+    // Every decision loses its thread once and recovers on the resend.
+    const adapter = threadedAdapter(() => {
+      calls += 1;
+      return calls % 2 === 1 ? THREAD_LOST : { proposal: llmProposal };
+    });
+    // A stale dispatch makes the controller ask again, decision after decision.
+    dispatchMocks.dispatchAiActionProposal.mockResolvedValue({ status: "stale" });
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    for (let decision = 0; decision < 12; decision += 1) await runOnce();
+
+    // Well past the three-failure ceiling, and the provider is still asked.
+    expect(adapter.getAiActionProposalFromLlmResponse.mock.calls.length).toBeGreaterThan(8);
+    expect(dispatchMocks.dispatchAiActionProposal).not.toHaveBeenCalledWith(adapter.heuristic);
+    controller.dispose();
+  });
+
+  it("falls back to the engine AI when the resend loses its thread too, counting one failure", async () => {
+    bindSeatToProvider();
+    const adapter = threadedAdapter(() => THREAD_LOST);
+    dispatchMocks.dispatchAiActionProposal.mockResolvedValue({ status: "stale" });
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    for (let decision = 0; decision < 12; decision += 1) await runOnce();
+
+    // One resend per decision, and one failure per decision: the seat gives
+    // its provider up after three decisions, not after a decision and a half.
+    expect(adapter.buildLlmDecisionRequest).toHaveBeenCalledTimes(6);
+    expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(adapter.heuristic);
+    controller.dispose();
+  });
+
+  it("does not resend a reply the engine refused for any other reason", async () => {
+    bindSeatToProvider();
+    const adapter = threadedAdapter(() => ({
+      proposal: null,
+      error: "could not decode a choice from the LLM reply",
+      errorKind: { kind: "undecodableChoice" },
+    }));
+    endGameOnDispatch();
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await runOnce();
+    await runOnce();
+
+    expect(adapter.buildLlmDecisionRequest).toHaveBeenCalledTimes(1);
+    expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(adapter.heuristic);
     controller.dispose();
   });
 });
