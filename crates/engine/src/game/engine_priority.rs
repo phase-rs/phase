@@ -927,7 +927,11 @@ fn place_priority_batch(
 
 /// The origin a boundary batch parks with behind `waiting_for`: SBA-owned
 /// choices merge with their answer; any other wait keeps the batch its own.
-fn parked_batch_origin(waiting_for: &WaitingFor) -> triggers::DeferredTriggerBatchOrigin {
+/// The single authority for both parkers: this pipeline's SBA pass and the
+/// turn interpreter's step-entry park (`turns::park_step_entry_triggers`).
+pub(crate) fn parked_batch_origin(
+    waiting_for: &WaitingFor,
+) -> triggers::DeferredTriggerBatchOrigin {
     if sba_choice_requires_combined_trigger_batch(waiting_for) {
         triggers::DeferredTriggerBatchOrigin::StateBasedActionChoice
     } else {

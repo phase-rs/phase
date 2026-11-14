@@ -73,9 +73,10 @@ use engine::types::card::LayoutKind;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::format::FormatConfig;
+use engine::types::format::{ChallengeDeck, FormatConfig, WaveTermination};
 use engine::types::game_state::{
-    CastPaymentMode, DayNight, GameState, ReplacementChoiceKind, StackEntryKind, WaitingFor,
+    CastOfferKind, CastPaymentMode, DayNight, GameState, ReplacementChoiceKind, StackEntryKind,
+    WaitingFor,
 };
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::keywords::Keyword;
@@ -264,6 +265,11 @@ const GOLGARI_THUG_ORACLE: &str = "When this creature dies, put target creature 
 const VORINCLEX: &str = "Vorinclex, Monstrous Raider";
 const VORINCLEX_ORACLE: &str = "Trample, haste\nIf you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
 const MATRIARCH_ORACLE: &str = "Menace\nWhenever this creature enters or transforms into Grub, Storied Matriarch, return up to one target Goblin card from your graveyard to your hand.\nAt the beginning of your first main phase, you may pay {R}. If you do, transform Grub.";
+const ISAMARU: &str = "Isamaru, Hound of Konda";
+const SUMMONERS_PACT: &str = "Summoner's Pact";
+const SUMMONERS_PACT_ORACLE: &str = "Search your library for a green creature card, reveal it, put it into your hand, then shuffle.\nAt the beginning of your next upkeep, pay {2}{G}{G}. If you don't, you lose the game.";
+const GERMINATION_PRACTICUM: &str = "Germination Practicum";
+const GERMINATION_PRACTICUM_ORACLE: &str = "Put two +1/+1 counters on each creature you control.\nParadigm (Then exile this spell. After you first resolve a spell with this name, you may cast a copy of it from exile without paying its mana cost at the beginning of each of your first main phases.)";
 
 /// A board at `phase`, with stocked libraries so a real draw step can't end the
 /// game (CR 704.5b).
@@ -7640,7 +7646,7 @@ fn held_scheme_trigger_survives_a_lore_counter_replacement_choice() {
     let v1 = scenario.add_real_card(P1, VORINCLEX, Zone::Battlefield, db);
     let mut runner = scenario.build();
     // Setup only: stage the archenemy's scheme deck and active player. Grub's
-    // first-main trigger joining this paused batch is DEFERRED(phase 2).
+    // first-main trigger joining this paused batch is lore_counter_choice_keeps_the_first_main_triggers.
     let scheme = create_scheme_deck_card(
         runner.state_mut(),
         &db.get_face_by_name(I_CALL_FOR_SLAUGHTER).unwrap().clone(),
@@ -7745,6 +7751,625 @@ fn held_scheme_trigger_survives_a_lore_counter_replacement_choice() {
         assert_settled(&branch);
         assert_eq!(tokens(&branch).len(), if halve_first { 3 } else { 4 });
     }
+}
+
+/// The stack's sources, bottom to top.
+fn stack_sources(runner: &GameRunner) -> Vec<ObjectId> {
+    runner
+        .state()
+        .stack
+        .iter()
+        .map(|entry| entry.source_id)
+        .collect()
+}
+
+/// Records the source of every stack entry not seen before; `seen` holds entry ids.
+fn tally_stack(runner: &GameRunner, seen: &mut Vec<ObjectId>, tally: &mut Vec<ObjectId>) {
+    for entry in &runner.state().stack {
+        if !seen.contains(&entry.id) {
+            seen.push(entry.id);
+            tally.push(entry.source_id);
+        }
+    }
+}
+
+/// P1 controls two Isamaru, Hound of Konda and a tapped Ghostly Pilferer; `vortex_controller`
+/// controls Sulfuric Vortex. Setup only: the second Isamaru is phased out, so the legend rule
+/// first sees both after it phases in during P1's untap step (CR 702.26a). P0 is active.
+/// Returns (kept Isamaru, phased-out Isamaru, Pilferer, Vortex).
+fn isamaru_board(
+    vortex_controller: PlayerId,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let (mut runner, (a, b, pilferer, vortex)) = board(Phase::PreCombatMain, |s, db| {
+        for (name, oracle) in [
+            (GHOSTLY_PILFERER, GHOSTLY_PILFERER_ORACLE),
+            (SULFURIC_VORTEX, SULFURIC_VORTEX_ORACLE),
+        ] {
+            assert_oracle(db, name, oracle);
+        }
+        assert_eq!(db.get_face_by_name(ISAMARU).unwrap().oracle_text, None);
+        (
+            s.add_real_card(P1, ISAMARU, Zone::Battlefield, db),
+            s.add_real_card(P1, ISAMARU, Zone::Battlefield, db),
+            s.add_real_card(P1, GHOSTLY_PILFERER, Zone::Battlefield, db),
+            s.add_real_card(vortex_controller, SULFURIC_VORTEX, Zone::Battlefield, db),
+        )
+    });
+    // Setup only: B phases out before the legend rule ever sees both; it phases in during
+    // P1's next untap step (CR 702.26a). Pilferer starts tapped.
+    assert_eq!(
+        engine::game::phasing::phase_out_object(
+            runner.state_mut(),
+            b,
+            engine::game::game_object::PhaseOutCause::Directly,
+            &mut Vec::new(),
+        ),
+        vec![b]
+    );
+    // Setup only: Pilferer starts tapped so the untap action triggers it.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&pilferer)
+        .unwrap()
+        .tapped = true;
+    (runner, a, b, pilferer, vortex)
+}
+
+/// CR 500.6 + CR 503.1a + CR 704.3 + CR 704.5j + CR 117.5 + CR 603.3b + CR 101.4:
+/// Ghostly Pilferer's "Whenever this creature becomes untapped, you may pay {2}. If you do,
+/// draw a card." and Sulfuric Vortex's "At the beginning of each player's upkeep, this
+/// enchantment deals 2 damage to that player." wait together behind the legend choice.
+/// Isamaru, Hound of Konda has no rules text; phasing it in makes the choice necessary.
+#[test]
+fn upkeep_legend_choice_keeps_the_upkeep_triggers() {
+    for vortex_controller in [P0, P1] {
+        let (mut runner, a, b, pilferer, vortex) = isamaru_board(vortex_controller);
+        let events = pass_until(&mut runner, |r| {
+            r.state().active_player == P1 && r.state().phase == Phase::Upkeep
+        });
+        let phased_in = events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::PermanentPhasedIn { object_id } if *object_id == b))
+            .count();
+        let untapped = events.iter().filter(|e| matches!(e, GameEvent::PermanentUntapped { object_id } if *object_id == pilferer)).count();
+        assert_eq!(phased_in, 1);
+        assert_eq!(untapped, 1);
+        match &runner.state().waiting_for {
+            WaitingFor::ChooseLegend {
+                player, candidates, ..
+            } => {
+                assert_eq!(*player, P1);
+                assert_eq!(sorted(candidates.clone()), sorted(vec![a, b]));
+            }
+            other => panic!("CR 704.5j: P1 keeps one Isamaru; got {other:?}"),
+        }
+        assert!(runner.state().stack.is_empty());
+        let life = runner.state().players[1].life;
+        runner
+            .act(GameAction::ChooseLegend { keep: a })
+            .expect("keep A");
+        assert_eq!(runner.state().objects[&b].zone, Zone::Graveyard);
+        let firsts = if vortex_controller == P0 {
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { player: P1 }
+                ),
+                "got {:?}",
+                runner.state().waiting_for
+            );
+            assert_eq!(stack_sources(&runner), vec![pilferer, vortex]);
+            vec![None]
+        } else {
+            let sources = order_prompt_sources(&runner, P1);
+            assert_eq!(sorted(sources.clone()), sorted(vec![pilferer, vortex]));
+            vec![Some(pilferer), Some(vortex)]
+        };
+        for first in firsts {
+            let mut branch = GameRunner::from_state(runner.state().clone());
+            if let Some(first) = first {
+                let sources = order_prompt_sources(&branch, P1);
+                order_first(&mut branch, &sources, first);
+                let other = if first == pilferer { vortex } else { pilferer };
+                assert_eq!(stack_sources(&branch), vec![first, other]);
+            }
+            assert!(branch.state().deferred_triggers.is_empty());
+            let (mut seen, mut tally) = (Vec::new(), Vec::new());
+            tally_stack(&branch, &mut seen, &mut tally);
+            for _ in 0..12 {
+                let action = match branch.state().waiting_for {
+                    WaitingFor::OptionalEffectChoice { .. } => {
+                        GameAction::DecideOptionalEffect { accept: false }
+                    }
+                    WaitingFor::Priority { .. } if !branch.state().stack.is_empty() => {
+                        GameAction::PassPriority
+                    }
+                    _ => break,
+                };
+                branch.act(action).expect("resolve");
+                tally_stack(&branch, &mut seen, &mut tally);
+            }
+            assert_settled(&branch);
+            assert_eq!(tally.iter().filter(|s| **s == pilferer).count(), 1);
+            assert_eq!(tally.iter().filter(|s| **s == vortex).count(), 1);
+            assert_eq!(branch.state().players[1].life, life - 2);
+        }
+    }
+}
+
+/// CR 603.7a + CR 603.7b + CR 500.6 + CR 704.3 + CR 603.3: Summoner's Pact's
+/// "At the beginning of your next upkeep, pay {2}{G}{G}. If you don't, you lose the game."
+/// survives the legend choice caused by the two textless Isamaru, Hound of Konda.
+#[test]
+fn upkeep_legend_choice_keeps_a_delayed_upkeep_trigger() {
+    let (mut runner, (a, b, pact)) = board(Phase::PreCombatMain, |s, db| {
+        assert_oracle(db, SUMMONERS_PACT, SUMMONERS_PACT_ORACLE);
+        assert_eq!(db.get_face_by_name(ISAMARU).unwrap().oracle_text, None);
+        (
+            s.add_real_card(P1, ISAMARU, Zone::Battlefield, db),
+            s.add_real_card(P1, ISAMARU, Zone::Battlefield, db),
+            s.add_real_card(P1, SUMMONERS_PACT, Zone::Hand, db),
+        )
+    });
+    // Setup only: the second Isamaru phases in during P1's next untap step.
+    assert_eq!(
+        engine::game::phasing::phase_out_object(
+            runner.state_mut(),
+            b,
+            engine::game::game_object::PhaseOutCause::Directly,
+            &mut Vec::new(),
+        ),
+        vec![b]
+    );
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    runner.cast(pact).commit();
+    for _ in 0..8 {
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::SearchChoice { .. } => GameAction::SelectCards { cards: vec![] },
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                GameAction::PassPriority
+            }
+            _ => break,
+        };
+        runner.act(action).expect("resolve pact");
+    }
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+    assert_eq!(runner.state().objects[&pact].zone, Zone::Graveyard);
+    let events = pass_until(&mut runner, |r| {
+        r.state().active_player == P1 && r.state().phase == Phase::Upkeep
+    });
+    let phased_in = events
+        .iter()
+        .filter(|e| matches!(e, GameEvent::PermanentPhasedIn { object_id } if *object_id == b))
+        .count();
+    assert_eq!(phased_in, 1);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseLegend { player: P1, .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    runner
+        .act(GameAction::ChooseLegend { keep: a })
+        .expect("keep A");
+    assert_eq!(stack_sources(&runner), vec![pact]);
+    assert!(matches!(
+        runner.state().stack[0].kind,
+        StackEntryKind::TriggeredAbility { .. }
+    ));
+    assert!(runner.state().delayed_triggers.is_empty());
+    runner
+        .act(GameAction::PassPriority)
+        .expect("first pass on the Pact trigger");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("second pass resolves the unpaid Pact trigger");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { .. }
+    ));
+    assert!(runner.state().players[1].is_eliminated);
+}
+
+/// CR 104.1 + CR 704.3: Platinum Angel's "You can't lose the game and your opponents
+/// can't win the game." stops applying when Teferi's Curse's "Enchanted permanent has
+/// phasing." phases it out. Sulfuric Vortex's "At the beginning of each player's upkeep,
+/// this enchantment deals 2 damage to that player." is not queued once the game ends.
+#[test]
+fn upkeep_state_based_loss_queues_no_step_triggers() {
+    let db = load_db().expect("card db");
+    for (name, oracle) in [
+        (PLATINUM_ANGEL, PLATINUM_ANGEL_ORACLE),
+        (TEFERIS_CURSE, TEFERIS_CURSE_ORACLE),
+        (SULFURIC_VORTEX, SULFURIC_VORTEX_ORACLE),
+    ] {
+        assert_oracle(db, name, oracle);
+    }
+    let (mut runner, (angel, curse, _vortex)) = board(Phase::PreCombatMain, |s, db| {
+        (
+            s.add_real_card(P1, PLATINUM_ANGEL, Zone::Battlefield, db),
+            s.add_real_card(P0, TEFERIS_CURSE, Zone::Hand, db),
+            s.add_real_card(P0, SULFURIC_VORTEX, Zone::Battlefield, db),
+        )
+    });
+    // Setup only: Angel is the only thing preventing P1 from losing at zero life.
+    runner.state_mut().players[1].life = 0;
+    fund(&mut runner, ManaType::Blue, 2);
+    runner.cast(curse).target_object(angel).commit();
+    pass_until_settled(&mut runner);
+    settle(&mut runner);
+    assert!(!runner.state().players[1].is_eliminated);
+    let events = pass_until(&mut runner, |r| {
+        r.state().active_player == P1 && r.state().phase == Phase::Upkeep
+    });
+    let lost = events
+        .iter()
+        .any(|e| matches!(e, GameEvent::PlayerLost { player_id: P1 }));
+    assert!(lost, "reach: P1 lost after the Angel phased out");
+    assert!(runner.state().objects[&angel].is_phased_out());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().deferred_triggers.is_empty());
+}
+
+/// CR 500.6 + CR 504.1 + CR 616.1 + CR 702.52a + CR 603.3b: Howling Mine's
+/// "At the beginning of each player's draw step, if this artifact is untapped, that player
+/// draws an additional card." waits behind Golgari Thug's "Dredge 4" choice and joins
+/// Sheoldred, the Apocalypse's "Whenever you draw a card, you gain 2 life." when drawing.
+#[test]
+fn dredge_choice_keeps_the_draw_step_trigger() {
+    let (mut runner, (mine, sheoldred, thug)) = board(Phase::PreCombatMain, |s, db| {
+        for (name, oracle) in [
+            (HOWLING_MINE, HOWLING_MINE_ORACLE),
+            (SHEOLDRED, SHEOLDRED_ORACLE),
+            (GOLGARI_THUG, GOLGARI_THUG_ORACLE),
+        ] {
+            assert_oracle(db, name, oracle);
+        }
+        s.with_library_top(
+            P1,
+            &[
+                "Top One",
+                "Top Two",
+                "Top Three",
+                "Top Four",
+                "Top Five",
+                "Top Six",
+            ],
+        );
+        (
+            s.add_real_card(P1, HOWLING_MINE, Zone::Battlefield, db),
+            s.add_real_card(P1, SHEOLDRED, Zone::Battlefield, db),
+            s.add_real_card(P1, GOLGARI_THUG, Zone::Graveyard, db),
+        )
+    });
+    pass_until(&mut runner, |r| {
+        r.state().active_player == P1 && r.state().phase == Phase::Draw
+    });
+    let candidates = match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice {
+            player: P1,
+            kind: ReplacementChoiceKind::OptionalBranch,
+            candidates,
+            ..
+        } => candidates.clone(),
+        other => panic!("P1 chooses whether to dredge: {other:?}"),
+    };
+    assert_eq!(candidates.len(), 2);
+    assert!(runner.state().stack.is_empty());
+    let life = runner.state().players[1].life;
+    for decline in [true, false] {
+        let mut branch = GameRunner::from_state(runner.state().clone());
+        let index = candidates
+            .iter()
+            .position(|c| (c.description == "Decline") == decline)
+            .unwrap();
+        let answer = branch
+            .act(GameAction::ChooseReplacement { index })
+            .expect("answer");
+        let drawn = answer
+            .events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::CardDrawn { player_id, .. } if *player_id == P1))
+            .count();
+        let firsts: Vec<Option<ObjectId>> = if decline {
+            assert_eq!(drawn, 1);
+            let sources = order_prompt_sources(&branch, P1);
+            assert_eq!(sorted(sources.clone()), sorted(vec![mine, sheoldred]));
+            vec![Some(mine), Some(sheoldred)]
+        } else {
+            assert_eq!(branch.state().objects[&thug].zone, Zone::Hand);
+            assert!(matches!(
+                branch.state().waiting_for,
+                WaitingFor::Priority { player: P1 }
+            ));
+            assert_eq!(stack_sources(&branch), vec![mine]);
+            vec![None]
+        };
+        for first in firsts {
+            let mut run = GameRunner::from_state(branch.state().clone());
+            if let Some(first) = first {
+                let sources = order_prompt_sources(&run, P1);
+                order_first(&mut run, &sources, first);
+                let other = if first == mine { sheoldred } else { mine };
+                assert_eq!(stack_sources(&run), vec![first, other]);
+            }
+            assert!(run.state().deferred_triggers.is_empty());
+            let (mut seen, mut tally) = (Vec::new(), Vec::new());
+            tally_stack(&run, &mut seen, &mut tally);
+            for _ in 0..20 {
+                let action = match run.state().waiting_for.clone() {
+                    WaitingFor::ReplacementChoice { candidates, .. } => {
+                        GameAction::ChooseReplacement {
+                            index: candidates
+                                .iter()
+                                .position(|c| c.description == "Decline")
+                                .unwrap(),
+                        }
+                    }
+                    WaitingFor::OptionalEffectChoice { .. } => {
+                        GameAction::DecideOptionalEffect { accept: false }
+                    }
+                    WaitingFor::Priority { .. } if !run.state().stack.is_empty() => {
+                        GameAction::PassPriority
+                    }
+                    _ => break,
+                };
+                run.act(action).expect("settle");
+                tally_stack(&run, &mut seen, &mut tally);
+            }
+            assert_settled(&run);
+            assert_eq!(tally.iter().filter(|s| **s == mine).count(), 1);
+            assert_eq!(
+                run.state().players[1].life,
+                life + if decline { 4 } else { 2 }
+            );
+        }
+    }
+}
+
+/// CR 500.6 + CR 714.3c + CR 616.1 + CR 703.4e + CR 603.3b: Grub's
+/// "At the beginning of your first main phase, you may pay {R}. If you do, transform Grub."
+/// joins I Call for Slaughter's "When you set this scheme in motion, create three 1/1 red
+/// Devil creature tokens" and History of Benalia's "I, II — Create a 2/2 white Knight
+/// creature token with vigilance." behind the opposing Vorinclex replacements:
+/// "put twice that many of each of those kinds of counters" and "they put half that many
+/// of each of those kinds of counters on that permanent or player instead, rounded down."
+#[test]
+fn lore_counter_choice_keeps_the_first_main_triggers() {
+    let db = load_db().expect("card db");
+    for (name, oracle) in [
+        (HISTORY_OF_BENALIA, HISTORY_OF_BENALIA_ORACLE),
+        (VORINCLEX, VORINCLEX_ORACLE),
+        (I_CALL_FOR_SLAUGHTER, I_CALL_FOR_SLAUGHTER_ORACLE),
+        (MATRIARCH, MATRIARCH_ORACLE),
+    ] {
+        assert_oracle(db, name, oracle);
+    }
+    let mut format = FormatConfig::archenemy();
+    format.archenemy_player = Some(P0);
+    let mut scenario = GameScenario::new_with_format(format, 2, 42);
+    scenario.at_phase(Phase::Draw);
+    for i in 0..7 {
+        scenario.add_card_to_library_top(P0, &format!("P0 Library {i}"));
+        scenario.add_card_to_library_top(P1, &format!("P1 Library {i}"));
+    }
+    let saga = scenario.add_real_card(P0, HISTORY_OF_BENALIA, Zone::Battlefield, db);
+    let v0 = scenario.add_real_card(P0, VORINCLEX, Zone::Battlefield, db);
+    let v1 = scenario.add_real_card(P1, VORINCLEX, Zone::Battlefield, db);
+    let grub = scenario.add_real_card(P0, MATRIARCH, Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    let scheme = create_scheme_deck_card(
+        runner.state_mut(),
+        &db.get_face_by_name(I_CALL_FOR_SLAUGHTER).unwrap().clone(),
+        P0,
+    );
+    // Setup only: stage the archenemy's scheme deck and active player.
+    runner.state_mut().archenemy = Some(P0);
+    runner.state_mut().active_player = P0;
+    let events = pass_until(&mut runner, |r| r.state().phase == Phase::PreCombatMain);
+    let set = events
+        .iter()
+        .filter(
+            |e| matches!(e, GameEvent::SchemeSetInMotion { scheme_id, .. } if *scheme_id == scheme),
+        )
+        .count();
+    assert_eq!(set, 1);
+    assert!(runner.state().scheme_deck.is_empty());
+    assert_eq!(
+        runner.state().objects[&saga]
+            .counters
+            .get(&CounterType::Lore)
+            .copied()
+            .unwrap_or(0),
+        1
+    );
+    let candidates = match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice {
+            player: P0,
+            candidates,
+            ..
+        } => candidates.clone(),
+        other => panic!("P0 orders the lore replacements: {other:?}"),
+    };
+    assert!(runner.state().stack.is_empty());
+    for halve_first in [true, false] {
+        let mut branch = GameRunner::from_state(runner.state().clone());
+        let first_v = if halve_first { v1 } else { v0 };
+        let index = candidates
+            .iter()
+            .position(|c| c.source_id == first_v)
+            .unwrap();
+        branch
+            .act(GameAction::ChooseReplacement { index })
+            .expect("answer");
+        assert_eq!(
+            branch.state().objects[&saga]
+                .counters
+                .get(&CounterType::Lore)
+                .copied()
+                .unwrap_or(0),
+            if halve_first { 1 } else { 2 }
+        );
+        let expected = if halve_first {
+            vec![grub, scheme]
+        } else {
+            vec![grub, saga, scheme]
+        };
+        let sources = order_prompt_sources(&branch, P0);
+        assert_eq!(sorted(sources.clone()), sorted(expected.clone()));
+        for first in expected.clone() {
+            let mut run = GameRunner::from_state(branch.state().clone());
+            let sources = order_prompt_sources(&run, P0);
+            order_first(&mut run, &sources, first);
+            let stack = stack_sources(&run);
+            assert_eq!(stack[0], first);
+            assert_eq!(sorted(stack.clone()), sorted(expected.clone()));
+            assert!(run.state().deferred_triggers.is_empty());
+            let (mut seen, mut tally) = (Vec::new(), Vec::new());
+            tally_stack(&run, &mut seen, &mut tally);
+            for _ in 0..20 {
+                let action = match run.state().waiting_for.clone() {
+                    WaitingFor::OptionalEffectChoice { .. } => {
+                        GameAction::DecideOptionalEffect { accept: false }
+                    }
+                    WaitingFor::Priority { .. } if !run.state().stack.is_empty() => {
+                        GameAction::PassPriority
+                    }
+                    _ => break,
+                };
+                run.act(action).expect("settle");
+                tally_stack(&run, &mut seen, &mut tally);
+            }
+            assert_settled(&run);
+            assert_eq!(tally.iter().filter(|s| **s == grub).count(), 1);
+            assert_eq!(tally.iter().filter(|s| **s == scheme).count(), 1);
+            assert_eq!(
+                tally.iter().filter(|s| **s == saga).count(),
+                if halve_first { 0 } else { 1 }
+            );
+            assert_eq!(tokens(&run).len(), if halve_first { 3 } else { 4 });
+        }
+    }
+}
+
+/// CR 500.6 + CR 117.5 + CR 603.3: Grub's "At the beginning of your first main phase,
+/// you may pay {R}. If you do, transform Grub." survives Germination Practicum's
+/// "you may cast a copy of it from exile without paying its mana cost at the beginning
+/// of each of your first main phases." offer. Paradigm's own modeling is unchanged
+/// (charter decision 2.7), so this row asserts no relative order with its copy.
+#[test]
+fn paradigm_offer_keeps_the_first_main_trigger() {
+    for accept in [false, true] {
+        let (mut runner, (grub, practicum)) = board(Phase::PreCombatMain, |s, db| {
+            assert_oracle(db, MATRIARCH, MATRIARCH_ORACLE);
+            assert_oracle(db, GERMINATION_PRACTICUM, GERMINATION_PRACTICUM_ORACLE);
+            (
+                s.add_real_card(P0, MATRIARCH, Zone::Battlefield, db),
+                s.add_real_card(P0, GERMINATION_PRACTICUM, Zone::Hand, db),
+            )
+        });
+        fund(&mut runner, ManaType::Green, 5);
+        runner.cast(practicum).resolve();
+        assert_eq!(runner.state().objects[&practicum].zone, Zone::Exile);
+        let start_turn = runner.state().turn_number;
+        pass_until(&mut runner, |r| {
+            r.state().active_player == P0
+                && r.state().phase == Phase::PreCombatMain
+                && r.state().turn_number > start_turn
+        });
+        match &runner.state().waiting_for {
+            WaitingFor::CastOffer {
+                player: P0,
+                kind: CastOfferKind::Paradigm { offers },
+            } => assert_eq!(offers, &vec![practicum]),
+            other => panic!("the Paradigm offer opens: {other:?}"),
+        }
+        assert!(runner.state().stack.is_empty());
+        let action = if accept {
+            GameAction::CastParadigmCopy { source: practicum }
+        } else {
+            GameAction::PassParadigmOffer
+        };
+        runner.act(action).expect("answer offer");
+        let stack = stack_sources(&runner);
+        assert_eq!(stack.iter().filter(|s| **s == grub).count(), 1);
+        assert_eq!(stack.len(), if accept { 2 } else { 1 });
+        assert!(runner.state().deferred_triggers.is_empty());
+        let (mut seen, mut tally) = (Vec::new(), Vec::new());
+        tally_stack(&runner, &mut seen, &mut tally);
+        for _ in 0..20 {
+            let action = match runner.state().waiting_for.clone() {
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    GameAction::DecideOptionalEffect { accept: false }
+                }
+                WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                    GameAction::PassPriority
+                }
+                _ => break,
+            };
+            runner.act(action).expect("settle");
+            tally_stack(&runner, &mut seen, &mut tally);
+        }
+        assert_settled(&runner);
+        assert_eq!(tally.iter().filter(|s| **s == grub).count(), 1);
+    }
+}
+
+/// CR 500.6 + CR 117.5 + CR 603.3: Grub's "At the beginning of your first main phase,
+/// you may pay {R}. If you do, transform Grub." survives the Horde wave reveal beside
+/// the textless Grizzly Bears. Horde Magic is not a CR variant, so no order is asserted.
+#[test]
+fn horde_reveal_keeps_the_first_main_trigger() {
+    let db = load_db().expect("db");
+    assert_oracle(db, MATRIARCH, MATRIARCH_ORACLE);
+    let mut ruleset = ChallengeDeck::CybermanHorde.default_ruleset();
+    ruleset.wave = WaveTermination::FixedCount(1);
+    ruleset.horde_creatures_forced_attackers = true;
+    let mut s = GameScenario::new_with_format(FormatConfig::horde(ruleset), 2, 42);
+    s.with_library_top(P1, &["Top One", "Top Two", "Top Three", "Top Four"]);
+    let grub = s.add_real_card(P0, MATRIARCH, Zone::Battlefield, db);
+    let bears = s.add_real_card(P0, BEARS, Zone::Library, db);
+    let mut runner = s.build();
+    {
+        // Setup only: the Horde's turn 4 upkeep, with priority.
+        let state = runner.state_mut();
+        state.turn_number = 4;
+        state.active_player = P0;
+        state.phase = Phase::Upkeep;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+    pass_until(&mut runner, |r| r.state().phase == Phase::PreCombatMain);
+    let stack = stack_sources(&runner);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Stack);
+    assert_eq!(runner.state().horde_wave_remaining, 0);
+    assert_eq!(sorted(stack), sorted(vec![bears, grub]));
+    assert!(runner.state().deferred_triggers.is_empty());
+    let (mut seen, mut tally) = (Vec::new(), Vec::new());
+    tally_stack(&runner, &mut seen, &mut tally);
+    for _ in 0..20 {
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalEffectChoice { .. } => {
+                GameAction::DecideOptionalEffect { accept: false }
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                GameAction::PassPriority
+            }
+            _ => break,
+        };
+        runner.act(action).expect("settle");
+        tally_stack(&runner, &mut seen, &mut tally);
+    }
+    assert_settled(&runner);
+    assert_eq!(tally.iter().filter(|s| **s == grub).count(), 1);
 }
 
 /// CR 502.2 + CR 731.1a + CR 603.2c: The Celestus's "Whenever day becomes
