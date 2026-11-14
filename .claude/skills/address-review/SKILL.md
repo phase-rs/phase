@@ -54,7 +54,8 @@ Draft the PR-body and title edits first (narrowed claims, `## Claimed parse impa
 - the maintainer review text and your disposition list, with the evidence for each dispute;
 - `git diff REVIEWED_HEAD HEAD`;
 - the drafted title and body;
-- an instruction to apply PR Review Mode, so Reach and the late-finding rules govern its findings.
+- every earlier maintainer review, and the number of them that requested changes (including any now `DISMISSED`);
+- an instruction to apply PR Review Mode, so Reach, carried findings and the late-finding and round-limit rules govern its findings.
 
 Ask it to state, for each open finding, whether it is cleared at this head, and to review the delta and the drafted claims as new work.
 
