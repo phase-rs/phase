@@ -1181,6 +1181,99 @@ describe("Scryfall generation scripts — reversible cards (issue #2031)", () =>
   });
 });
 
+describe("Scryfall generation scripts — printings face images (#10899)", () => {
+  const hareOracle = "3ef02f2b-b611-40c3-a1d5-8b34989643cf";
+  const delverOracle = "delver-oracle";
+
+  const urls = (key: string) => ({
+    normal: `https://img.example/${key}.jpg`,
+    art_crop: `https://img.example/${key}-art.jpg`,
+  });
+
+  /** An adventure printing: Scryfall puts its single image on the card, and
+   *  its `card_faces` carry no `image_uris`. */
+  const harePrinting = (id: string, released: string) => ({
+    id,
+    oracle_id: hareOracle,
+    layout: "adventure",
+    name: "Pollen-Shield Hare // Hare Raising",
+    set: "woe",
+    set_name: "Wilds of Eldraine",
+    collector_number: id,
+    released_at: released,
+    border_color: "black",
+    full_art: false,
+    image_uris: urls(id),
+    card_faces: [{ name: "Pollen-Shield Hare" }, { name: "Hare Raising" }],
+  });
+
+  /** A transform printing: each face carries its own image. The card-level
+   *  `image_uris` is present only to pin that a face's own URL wins. */
+  const delverPrinting = (id: string, released: string) => ({
+    id,
+    oracle_id: delverOracle,
+    layout: "transform",
+    name: "Delver of Secrets // Insectile Aberration",
+    set: "isd",
+    set_name: "Innistrad",
+    collector_number: id,
+    released_at: released,
+    border_color: "black",
+    full_art: false,
+    image_uris: urls(`${id}-card`),
+    card_faces: [
+      { name: "Delver of Secrets", image_uris: urls(`${id}-front`) },
+      { name: "Insectile Aberration", image_uris: urls(`${id}-back`) },
+    ],
+  });
+
+  it("gives every face of a one-image printing that printing's card image, and keeps per-face images", () => {
+    withTempDir((dir) => {
+      const input = path.join(dir, "default-cards.json");
+      const output = path.join(dir, "scryfall-printings.json");
+      writeFileSync(
+        input,
+        JSON.stringify([
+          harePrinting("hare-old", "2023-09-08"),
+          harePrinting("hare-new", "2024-01-01"),
+          delverPrinting("delver-old", "2011-09-30"),
+          delverPrinting("delver-new", "2016-04-08"),
+        ]),
+      );
+
+      execFileSync("bash", [path.join(REPO_ROOT, "scripts/gen-scryfall-printings.sh")], {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          SCRYFALL_DEFAULT_CARDS_FILE: input,
+          SCRYFALL_PRINTINGS_OUTPUT: output,
+        },
+        stdio: "pipe",
+      });
+
+      const generated = JSON.parse(readFileSync(output, "utf8"));
+      const facesById = (oracle: string) =>
+        Object.fromEntries(
+          generated[oracle].map((printing: { id: string; faces: unknown[] }) => [
+            printing.id,
+            printing.faces,
+          ]),
+        );
+
+      // Both faces of each Hare printing carry that printing's own card image.
+      expect(facesById(hareOracle)).toEqual({
+        "hare-new": [urls("hare-new"), urls("hare-new")],
+        "hare-old": [urls("hare-old"), urls("hare-old")],
+      });
+      // Each Delver face keeps its own image over the card-level one.
+      expect(facesById(delverOracle)).toEqual({
+        "delver-new": [urls("delver-new-front"), urls("delver-new-back")],
+        "delver-old": [urls("delver-old-front"), urls("delver-old-back")],
+      });
+    });
+  });
+});
+
 describe("fetchTokenImageUrl — ability-aware printing selection (issue #502)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
