@@ -61,7 +61,7 @@ pub struct BoundSearchFoundDisposition {
 }
 
 impl BoundSearchFoundDisposition {
-    /// CR 608.2c + CR 406.6: the player recorded as having exiled the found
+    /// CR 608.2c: the player recorded as having exiled the found
     /// card, given the event's searcher. Only a move that requests exile
     /// records a performer. The delivery states that no player's action
     /// decides ownership (`EntryOwnershipActor::NoPlayer`), so a replacement
@@ -582,7 +582,8 @@ pub enum ProposedEvent {
         /// object ("that player exiles that card" names the drawer; a
         /// controller-worded instruction names the controller). Rides the
         /// event through replacement and CR 616.1 pause/resume so delivery can
-        /// record, per CR 406.6 + CR 400.8, who exiled the new exile object.
+        /// record who exiled the object, including when re-exile creates a new
+        /// object without a zone change (CR 400.8).
         /// `None` for moves no player performs (rules processes, raw movers).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         performed_by: Option<PlayerId>,
@@ -2072,7 +2073,7 @@ mod tests {
         assert!(!applied.contains(&AppliedReplacementKey::step_end_mana(2)));
     }
 
-    /// CR 608.2c + CR 406.6: the searcher is recorded only for the found
+    /// CR 608.2c: the searcher is recorded only for the found
     /// card's exile; any other destination records nobody, so the delivery's
     /// legacy ownership fallback never reads the searcher.
     #[test]

@@ -1,9 +1,9 @@
 //! Issue #10414 — the exiling player is the instruction's acting player.
 //!
-//! A zone move's `performed_by` feeds `GameObject::exiled_by` (CR 406.6 +
-//! CR 607.2a/b, the per-card record the exile-cast permissions read). Entry
-//! ownership under `EntryOwnership::ActorOwns` (Dandân) reads a separate input
-//! that this change leaves on the resolving controller, or the zone prompt's
+//! A zone move's `performed_by` follows the instruction's subject (CR 608.2c).
+//! Delivery writes that player to `GameObject::exiled_by` on each card that
+//! reaches exile. Entry ownership under `EntryOwnership::ActorOwns` (Dandân)
+//! reads a separate input from the resolving controller or the zone prompt's
 //! chooser on the interactive route. When the printed instruction
 //! names another player as its subject ("that player exiles a card from their
 //! hand", "target opponent exiles a creature they control", "each opponent
@@ -445,7 +445,7 @@ fn strategic_betrayal_mass_leg_records_the_subject() {
     }
 }
 
-/// CR 608.2c + CR 730.3 + CR 406.6: Strategic Betrayal when the creature the
+/// CR 608.2c + CR 730.3: Strategic Betrayal when the creature the
 /// opponent exiles is a merged permanent made by a printed mutate cast, all
 /// through public actions and the runner's turn advance. In P0's main phase P0
 /// casts Gemrazer (real card data) for its mutate cost onto P0's own printed

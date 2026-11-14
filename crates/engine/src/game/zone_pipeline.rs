@@ -170,7 +170,7 @@ pub struct EntryMods {
     pub attach_to: Option<AttachTarget>,
     /// CR 608.2c: the player performing the instruction that moves the object;
     /// seeded onto `ProposedEvent::ZoneChange.performed_by` so delivery records
-    /// who exiled it (CR 406.6). `None` when no player performs the move.
+    /// who exiled it. `None` when no player performs the move.
     pub performed_by: Option<PlayerId>,
     /// The player whose action decides entry ownership under
     /// `EntryOwnership::ActorOwns` ([`entry_receiver`]), kept apart from
@@ -182,7 +182,7 @@ pub struct EntryMods {
     pub ownership_actor: Option<PlayerId>,
 }
 
-/// CR 608.2c + CR 406.6: the two players a zone move can name, passed apart.
+/// CR 608.2c: the two players a zone move can name, passed apart.
 /// `performed_by` is recorded as the player who performed the move (who exiled
 /// it); `ownership_actor` is the input `EntryOwnership::ActorOwns` reads for the
 /// receiving hand and the entering card's owner. An instruction's subject
@@ -630,7 +630,7 @@ impl ZoneMoveRequest {
         self
     }
 
-    /// CR 608.2c + CR 406.6: name the player performing this move, so a
+    /// CR 608.2c: name the player performing this move, so a
     /// delivery that settles the object in exile records who exiled it, and,
     /// separately, the player `EntryOwnership::ActorOwns` reads for ownership.
     pub(crate) fn actors(mut self, actors: MoveActors) -> Self {
@@ -4914,7 +4914,7 @@ fn execute_zone_move_with_applied_terminal(
     library_shuffle: LibraryShuffleMode,
     enter_attached_to: Option<AttachTarget>,
     exile_controller: Option<PlayerId>,
-    // CR 608.2c + CR 406.6: the player performing this move and, apart, the
+    // CR 608.2c: the player performing this move and, apart, the
     // ownership input (`MoveActors`).
     actors: MoveActors,
     replacement_applied: HashSet<AppliedReplacementKey>,

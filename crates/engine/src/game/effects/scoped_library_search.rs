@@ -1954,7 +1954,7 @@ mod tests {
 
         assert_eq!(state.objects[&cards[0]].zone, Zone::Hand);
         assert_eq!(state.objects[&cards[1]].zone, Zone::Exile);
-        // CR 406.6 + CR 608.2c: the batch delivery records the searching
+        // CR 608.2c: the batch delivery records the searching
         // player (P1) as the exiler of the redirected member; the member that
         // kept its original disposition records nobody. Synthetic: a
         // `LibraryPlayer` exile disposition bound onto a mixed scoped search.

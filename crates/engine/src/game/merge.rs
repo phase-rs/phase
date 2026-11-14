@@ -540,7 +540,7 @@ pub(crate) fn move_merged_permanent_on_leave(
             };
             ZoneMoveRequest::merged_component(component_id, dest, placement, library_shuffle)
                 .with_replacement_applied(applied.clone())
-                // CR 608.2c + CR 730.3 + CR 406.6: every component is moved by the
+                // CR 608.2c + CR 730.3: every component is moved by the
                 // player who performed the merged permanent's move, so each card
                 // that reaches exile records that player as its exiler. No
                 // ownership input is carried, as before: a component goes to its
