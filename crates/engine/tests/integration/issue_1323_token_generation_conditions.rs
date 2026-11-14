@@ -162,9 +162,10 @@ fn drive_end_step_to_settle(runner: &mut GameRunner) {
 /// 1 (behind); P3 holds 3 (ahead) — exactly one Soldier, with no ordering
 /// prompt (single-firing proof).
 ///
-/// Currently RED (stop-and-return): the fan-out builder reads only the
-/// effect tree, so Keeper never fans out on the shared turn — no firing, no
-/// token — until the F2 fix admits condition-scoped turn-player references.
+/// Was red until the F2 condition arm landed: the fan-out builder used to
+/// read only the effect tree, so Keeper never fanned out on the shared
+/// turn — no firing, no token — until condition-scoped turn-player
+/// references were admitted.
 #[test]
 fn issue_1323_keeper_shared_end_step_fires_only_for_qualifying_seat() {
     let mut runner = keeper_shared_board(1, 1, 3);
@@ -198,9 +199,9 @@ fn issue_1323_keeper_shared_end_step_fires_only_for_qualifying_seat() {
 /// way.
 ///
 /// REVERT-FAIL (kept condition dropped): two tokens (CR 603.4 violation).
-/// Currently RED (stop-and-return): same builder-gate cause as the delivery
-/// test — the ordering prompt never surfaces until the F2 fix admits
-/// condition-scoped references.
+/// Was red until the F2 condition arm landed (same builder-gate cause as the
+/// delivery test): the ordering prompt never surfaced until condition-scoped
+/// references were admitted.
 #[test]
 fn issue_1323_keeper_shared_end_step_rechecks_condition_at_resolution() {
     let mut runner = keeper_shared_board(1, 3, 3);

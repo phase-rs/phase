@@ -2384,7 +2384,7 @@ fn v3_aethermage_decline_no_mana_and_captured_controller() {
     {
         let mut s = GameScenario::new();
         s.at_phase(Phase::PreCombatMain);
-        let source = s
+        let _source = s
             .add_creature_from_oracle(P0, "Azorius Aethermage", 1, 1, AETHERMAGE)
             .id();
         let victim = s.add_creature(P0, "Returned creature", 2, 2).id();

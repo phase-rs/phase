@@ -1926,7 +1926,8 @@ fn occurrence_trigger_events(
 /// CR 805.4d: the per-player phase occurrences for an opponent-scoped phase
 /// trigger on a shared team turn. Returns `None` unless every gate holds —
 /// the trigger is opponent-turn-scoped, its effect names the turn's player
-/// (never through a team-collective payment, CR 805.6), the active side
+/// (never through a team-collective payment, which names no "that player"
+/// per CR 805.4d plus the Bow 2017-06-13 ruling), the active side
 /// shares its turn, and at least two eligible opponents share it — so every
 /// other phase trigger keeps the single firing below.
 fn shared_turn_phase_occurrences(
@@ -1941,7 +1942,8 @@ fn shared_turn_phase_occurrences(
     if trig_def.constraint != Some(TriggerConstraint::OnlyDuringOpponentsTurn) {
         return None;
     }
-    // CR 805.6: a team-collective payment names the TEAM, not "that player".
+    // CR 805.4d (no "that player" reference) + the Bow 2017-06-13 ruling: a
+    // team-collective payment names the TEAM, not "that player".
     // The veto fires FIRST: it suppresses fan-out even when the trigger also
     // carries a turn-player condition (no printed card pairs the two; the
     // order is load-bearing and pinned by W2's veto-first case).
@@ -1984,9 +1986,10 @@ fn shared_turn_phase_occurrences(
 /// fanning out cannot differentiate them, so counting them would duplicate
 /// identical firings.
 ///
-/// CR 805.4d + CR 805.6: a team-collective payment (Bow to My Command's "they
-/// may tap … with total power 8 or greater", `collective: true`) refers to the
-/// TEAM, not "that opponent" — the collective payment authority distributes
+/// CR 805.4d (no "that player" reference) + the Bow 2017-06-13 ruling: a
+/// team-collective payment (Bow to My Command's "they may tap … with total
+/// power 8 or greater", `collective: true`) refers to the TEAM, not "that
+/// opponent" — the collective payment authority distributes
 /// the per-hero prompts internally, so the single firing must never fan out.
 /// Any collective node anywhere in the tree disqualifies the whole firing:
 /// duplicating it per opponent would demand the team threshold N times.
@@ -31134,7 +31137,8 @@ pub mod tests {
         );
     }
 
-    /// CR 805.4d + CR 805.6 — a team-collective payment never fans out: Bow
+    /// CR 805.4d + the Bow 2017-06-13 ruling — a team-collective payment
+    /// never fans out: Bow
     /// to My Command's "they may tap … with total power 8 or greater" names
     /// the TEAM, not "that opponent", so on the same shared 2HG turn that
     /// fans a singular payment out, the collective shape keeps the single
@@ -31900,7 +31904,7 @@ pub mod tests {
             state,
             &raw,
             None,
-            &[raw.clone()],
+            std::slice::from_ref(&raw),
             trig_def,
             &source_context,
             controller,
@@ -32101,10 +32105,11 @@ pub mod tests {
     /// is evaluated per occurrence, not once from the representative seat.
     /// Only the nonrepresentative seat (P3) is ahead here, so exactly one
     /// firing rides P3's occurrence.
-    /// Currently RED (stop-and-return): the fan-out builder reads only the
-    /// effect tree, so condition-scoped Keeper never fans out and zero groups
-    /// fire. The F2 fix must admit condition-scoped turn-player references;
-    /// the U2 per-occurrence evaluation below then yields exactly this firing.
+    /// Was red until the F2 condition arm landed: the fan-out builder used to
+    /// read only the effect tree, so condition-scoped Keeper never fanned out
+    /// and zero groups fired. The condition walker now admits condition-scoped
+    /// turn-player references, and the per-occurrence evaluation below yields
+    /// exactly this firing.
     #[test]
     fn keeper_shared_turn_fires_only_for_qualifying_nonrepresentative_seat() {
         let (state, source, trig_def) = keeper_shared_intervening_if_board(1, 3);
@@ -32128,8 +32133,8 @@ pub mod tests {
 
     /// K2 (CR 805.4d): both seats qualify, so both occurrences fire — one
     /// group per seat, each bound to its own player.
-    /// Currently RED (stop-and-return): same builder-gate cause as K1 — zero
-    /// groups fire until the F2 fix admits condition-scoped references.
+    /// Was red until the F2 condition arm landed (same builder-gate cause as
+    /// K1): zero groups fired until condition-scoped references were admitted.
     #[test]
     fn keeper_shared_turn_fires_once_per_qualifying_seat() {
         let (state, source, trig_def) = keeper_shared_intervening_if_board(3, 3);

@@ -16955,9 +16955,15 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         } => transform_effect::optional_self_transform_is_impossible(state, ability),
         // CR 118.3 + CR 119.4 + CR 608.2d: a player without the resources can't pay, so an
         // unaffordable optional payment is an impossible option and is never offered.
-        Effect::PayCost { cost, payer, .. }
-            if optional_pay_cost_affordability_is_decidable(cost) =>
-        {
+        // Scaled costs are excluded (mirrors `is_synchronous_mana_pay_cost`): a
+        // pay-any-amount scale resolves times=0 to a trivially payable {0}
+        // (pay.rs), so the offer is always possible and never decidable here.
+        Effect::PayCost {
+            cost,
+            payer,
+            scale: None,
+            ..
+        } if optional_pay_cost_affordability_is_decidable(cost) => {
             let Some(payer) =
                 crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
             else {
