@@ -1169,12 +1169,11 @@ mod tests {
         assert_eq!(revealed.unwrap().len(), 3);
     }
 
-    /// C5 discriminating test (CR 614.6 + CR 701.20a): a kept card placed back
-    /// into a library must run the `Moved` replacement consult. The old raw
-    /// `move_to_zone(..., Library)` skipped this synthetic Library→Exile
-    /// redirect and left the card in the library.
+    /// CR 701.20b + CR 400.7: a kept card put "back" into the library it is
+    /// already in is a reorder, not a zone change, so the synthetic
+    /// Library→Exile redirect has no event to replace.
     #[test]
-    fn reveal_until_kept_library_redirected_to_exile() {
+    fn reveal_until_kept_library_to_library_is_not_redirected() {
         let mut state = GameState::new_two_player(42);
         install_library_to_exile_redirect(&mut state);
 
@@ -1202,8 +1201,8 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.objects[&creature].zone, Zone::Exile);
-        assert!(!state.players[0].library.contains(&creature));
+        assert_eq!(state.objects[&creature].zone, Zone::Library);
+        assert!(state.players[0].library.contains(&creature));
     }
 
     /// C5 discriminating test (CR 614.6 + CR 701.20a): a kept card put into a
@@ -1242,12 +1241,11 @@ mod tests {
         assert!(!state.players[0].hand.contains(&creature));
     }
 
-    /// C5 discriminating test (CR 614.6 + CR 701.20a): a reveal-until rest pile
-    /// returned to the bottom of a library must still run through the placement
-    /// pipeline. The old raw `move_to_library_position(..., bottom)` skipped
-    /// this synthetic Library→Exile redirect.
+    /// CR 701.20b + CR 400.7: a reveal-until rest pile bottomed in the library
+    /// it was revealed from is reordered in place, not moved, so the synthetic
+    /// Library→Exile redirect must not fire.
     #[test]
-    fn reveal_until_library_rest_redirected_to_exile() {
+    fn reveal_until_library_rest_reorder_is_not_redirected() {
         let mut state = GameState::new_two_player(42);
         install_library_to_exile_redirect(&mut state);
 
@@ -1291,8 +1289,8 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(state.players[0].hand.contains(&creature));
-        assert_eq!(state.objects[&land].zone, Zone::Exile);
-        assert!(!state.players[0].library.contains(&land));
+        assert_eq!(state.objects[&land].zone, Zone::Library);
+        assert!(state.players[0].library.contains(&land));
     }
 
     #[test]
