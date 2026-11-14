@@ -543,6 +543,163 @@ mod trigger_occurrence_tests {
         assert_eq!(saw_absent, 4);
         assert_eq!(saw_none_absent, 4);
     }
+
+    #[test]
+    fn loop_relational_active_producer_lookup_checks_shape_and_retirement() {
+        let provider = TriggerDefinitionRef {
+            source: ObjectIncarnationRef::of(ObjectId(9), 5),
+            occurrence: TriggerDefinitionOccurrenceRef::ExpandedGrant {
+                grant_instance: TriggerGrantInstanceRef(11),
+                provider: Box::new(TriggerDefinitionRef {
+                    source: ObjectIncarnationRef::of(ObjectId(10), 6),
+                    occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                        base_set: TriggerBaseSetInstanceRef::INITIAL,
+                        printed_index: 3,
+                    },
+                }),
+                provider_output_index: 2,
+            },
+        };
+        let producers = [
+            TriggerGrantProducerKey::KeywordCompanion {
+                origin: static_origin(),
+                keyword_output_index: 4,
+                companion_index: 2,
+            },
+            TriggerGrantProducerKey::CopyRetained {
+                origin: static_origin(),
+                source_base_set: TriggerBaseSetInstanceRef::INITIAL,
+                source_printed_index: 2,
+            },
+            TriggerGrantProducerKey::Granted {
+                origin: static_origin(),
+                output_index: 3,
+            },
+            TriggerGrantProducerKey::ExpandedGrant {
+                origin: static_origin(),
+                provider: Box::new(provider),
+                provider_output_index: 4,
+            },
+        ];
+        let mut state = TriggerOccurrenceState::default();
+        let entries: Vec<_> = producers
+            .into_iter()
+            .map(|producer| {
+                let instance = state.grant_instance_for(producer.clone()).unwrap();
+                let occurrence = occurrence_for_grant(&producer, instance);
+                (producer, occurrence, instance)
+            })
+            .collect();
+        for (producer, occurrence, instance) in &entries {
+            assert_eq!(state.producer_for_occurrence(occurrence), Some(producer));
+            let mut malformed = occurrence.clone();
+            match &mut malformed {
+                TriggerDefinitionOccurrenceRef::KeywordCompanion {
+                    companion_index, ..
+                } => {
+                    *companion_index += 1;
+                }
+                TriggerDefinitionOccurrenceRef::CopyRetained {
+                    source_printed_index,
+                    ..
+                } => {
+                    *source_printed_index += 1;
+                }
+                TriggerDefinitionOccurrenceRef::Granted { .. } => {
+                    malformed = TriggerDefinitionOccurrenceRef::KeywordCompanion {
+                        grant_instance: *instance,
+                        companion_index: 0,
+                    };
+                }
+                TriggerDefinitionOccurrenceRef::ExpandedGrant { provider, .. } => {
+                    provider.source.incarnation += 1;
+                }
+                _ => unreachable!("fixtures are granted occurrences"),
+            }
+            assert_eq!(
+                state.producer_for_occurrence(&malformed),
+                None,
+                "the active number alone does not establish the occurrence shape"
+            );
+
+            match occurrence {
+                TriggerDefinitionOccurrenceRef::CopyRetained {
+                    grant_instance,
+                    source_printed_index,
+                    ..
+                } => {
+                    let other_base = TriggerDefinitionOccurrenceRef::CopyRetained {
+                        grant_instance: *grant_instance,
+                        source_base_set: TriggerBaseSetInstanceRef(2),
+                        source_printed_index: *source_printed_index,
+                    };
+                    assert_eq!(state.producer_for_occurrence(&other_base), None);
+                }
+                TriggerDefinitionOccurrenceRef::ExpandedGrant {
+                    provider_output_index,
+                    ..
+                } => {
+                    let mut other_output = occurrence.clone();
+                    let TriggerDefinitionOccurrenceRef::ExpandedGrant {
+                        provider_output_index: output,
+                        ..
+                    } = &mut other_output
+                    else {
+                        unreachable!()
+                    };
+                    *output = provider_output_index + 1;
+                    assert_eq!(state.producer_for_occurrence(&other_output), None);
+                    let mut other_nested_pin = occurrence.clone();
+                    let TriggerDefinitionOccurrenceRef::ExpandedGrant { provider, .. } =
+                        &mut other_nested_pin
+                    else {
+                        unreachable!()
+                    };
+                    let TriggerDefinitionOccurrenceRef::ExpandedGrant { provider, .. } =
+                        &mut provider.occurrence
+                    else {
+                        unreachable!()
+                    };
+                    provider.source.incarnation += 1;
+                    assert_eq!(
+                        state.producer_for_occurrence(&other_nested_pin),
+                        None,
+                        "the entire finite provider subtree must agree"
+                    );
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            state.producer_for_occurrence(&TriggerDefinitionOccurrenceRef::Printed {
+                base_set: TriggerBaseSetInstanceRef::INITIAL,
+                printed_index: 0,
+            }),
+            None,
+            "printed base identity is not a grant generation"
+        );
+        assert_eq!(
+            state.producer_for_occurrence(&TriggerDefinitionOccurrenceRef::Granted {
+                grant_instance: TriggerGrantInstanceRef(1000),
+            }),
+            None
+        );
+        state.retire_absent_grants(&[]);
+        for (_, occurrence, _) in &entries {
+            assert_eq!(state.producer_for_occurrence(occurrence), None);
+        }
+        let (producer, retired, _) = &entries[0];
+        let fresh = state.grant_instance_for(producer.clone()).unwrap();
+        assert_eq!(
+            state.producer_for_occurrence(&occurrence_for_grant(producer, fresh)),
+            Some(producer)
+        );
+        assert_eq!(
+            state.producer_for_occurrence(retired),
+            None,
+            "reminting the same producer does not revive its spent retired occurrence"
+        );
+    }
 }
 
 /// CR 101.4 + CR 102.3 + CR 115.1: Which players a [`ZoneOwner::Each`]
@@ -7076,7 +7233,14 @@ pub enum FilterProp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<ControllerRef>,
     },
-    /// Matches any object that is NOT the trigger source (for "another creature" triggers).
+    /// Excludes a reference object for predicates such as "another creature."
+    /// Live object matching excludes a bound recipient (for example, an
+    /// attachment's host). With no recipient, a captured trigger source excludes
+    /// only its exact live incarnation in the expected zone. Without a trigger
+    /// source context, matching excludes the source object ID.
+    /// Zone-change record matching excludes records whose `object_id` is the
+    /// source. Spell-cost matching excludes the spell that is the source; with no
+    /// spell bound it fails closed and never matches.
     Another,
     /// CR 702.95b: Matches objects that are not paired with another creature.
     Unpaired,
@@ -8133,14 +8297,16 @@ pub enum ThisWayCause {
     /// wider blast radius than adding one new leaf — out of scope for a
     /// single-card bug fix (issue #8159).
     PutIntoGraveyard,
+    /// CR 613.1b + CR 608.2c: the member's control changed to the recipient this way — only an actual controller change counts; a target the recipient already controlled is not "gained" (Coveted Falcon: "Draw a card for each one they gained control of this way.").
+    ControlGained,
 }
 
 impl ThisWayCause {
     /// The origin zone the producing transition must have departed, when the
     /// action determines one. `None` for destination-named actions (Exiled,
     /// Returned, Bounced, PutIntoGraveyard, OwnerLibraryShuffleSubject),
-    /// which arrive from anywhere, and for `Tapped`, which names no transition
-    /// at all (callers gate on [`Self::is_zone_transition`] first). The
+    /// which arrive from anywhere, and for `Tapped` and `ControlGained`, which
+    /// name no transition at all (callers gate on [`Self::is_zone_transition`] first). The
     /// origin-stamp site requires the
     /// member's latest zone-change record to agree; a mismatch means the
     /// record is not the producing transition and no origin is stamped.
@@ -8153,8 +8319,9 @@ impl ThisWayCause {
             // CR 701.9a: discard moves hand cards to the graveyard.
             ThisWayCause::Discarded => Some(Zone::Hand),
             // CR 701.26a: tapping is not a zone transition (see
-            // `is_zone_transition`), so it determines no departed zone.
-            ThisWayCause::Tapped => None,
+            // `is_zone_transition`), so it determines no departed zone; a
+            // control change, like a tap, is not a zone transition either.
+            ThisWayCause::Tapped | ThisWayCause::ControlGained => None,
             ThisWayCause::Exiled
             | ThisWayCause::Returned
             | ThisWayCause::Bounced
@@ -8164,13 +8331,13 @@ impl ThisWayCause {
     }
 
     /// CR 400.7 + CR 701.26a: does the producing action move the member between
-    /// zones? Every cause but `Tapped` names a zone-moving action; tapping
-    /// turns a permanent sideways where it is, so a tapped member's latest
-    /// zone-change record is an earlier, unrelated transition and must never be
+    /// zones? Every cause but `Tapped` and `ControlGained` names a zone-moving
+    /// action; tapping turns a permanent sideways where it is, so a tapped
+    /// member's latest zone-change record is an earlier, unrelated transition and must never be
     /// stamped as its producing origin.
     pub fn is_zone_transition(self) -> bool {
         match self {
-            ThisWayCause::Tapped => false,
+            ThisWayCause::Tapped | ThisWayCause::ControlGained => false,
             ThisWayCause::OwnerLibraryShuffleSubject
             | ThisWayCause::Discarded
             | ThisWayCause::Returned
@@ -8730,6 +8897,175 @@ pub enum TargetFilter {
     /// variant is only valid as an `UnlessPayModifier.payer`; it is never used
     /// as a target or affected filter.
     AllPlayers,
+}
+
+/// CR 115.1 + CR 601.2c: does this slot filter reference an object chosen in an
+/// EARLIER slot of the same ability, in a form a `.targets`-prefilled ability
+/// actually resolves? Exactly three encodings:
+///
+///   * `ObjectScope::Target` inside a quantity threshold (Puca's Mischief `Cmc`,
+///     Spawnbroker `PtComparison`) — resolved by `quantity::object_id_for_scope`.
+///   * `FilterProp::SharesQuality { reference: Some(ParentTarget) }` (Daring
+///     Thief) — resolved by the engine's `parent_target_shared_quality_values`.
+///   * a `ParentTargetController` controller ("another target creature that
+///     player controls", Mutiny) — resolved by the engine's
+///     `parent_target_controller_player` through its parent-target-controller
+///     lookup.
+///
+/// Each reads the first entry of `ability.targets`, and none consults
+/// `target_incarnations`.
+///
+/// DELIBERATELY EXCLUDED — the object-IDENTITY arm (`filter::filter_inner_for_object` —
+/// the `TargetFilter::ParentTarget` and `ParentTargetSlot { index }` arms) and
+/// the positional read in that same function's `ParentTargetSlot { index }` arm
+/// (via `targeting::resolve_live_parent_slot_from_root`). That arm additionally
+/// requires `!ability.target_incarnations.is_empty()` and
+/// `target_pin_is_current`, and `target_incarnations` means "pinned at
+/// DELAYED-TRIGGER creation" (`set_target_incarnations_recursive`, CR 400.7 +
+/// CR 603.7c) — announcement-time targets are pinned in the separate
+/// `target_pins`. Forging a pin here would lie to
+/// `live_object_targets` and `pinned_object_targets_all_stale`. Measured: a
+/// clone with `.targets` prefilled and pins empty returns the SAME empty set
+/// the ability-free door already returns, so excluding this arm changes no
+/// behaviour and avoids rerouting 30 corpus slots. See deferral D1.
+pub fn target_filter_binds_prior_target(filter: &TargetFilter) -> bool {
+    filter_contains(filter, &|inner| match inner {
+        TargetFilter::Typed(typed) => {
+            matches!(
+                typed.controller,
+                Some(ControllerRef::ParentTargetController)
+            ) || typed.properties.iter().any(filter_prop_binds_prior_target)
+        }
+        _ => false,
+    })
+}
+
+/// EXHAUSTIVE over `FilterProp` with NO wildcard.
+fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::Cmc { value, .. }
+        | FilterProp::Counters { count: value, .. }
+        | FilterProp::PtComparison { value, .. } => {
+            quantity_expr_contains_scope(value, ObjectScope::Target)
+        }
+        FilterProp::SharesQuality { reference, .. } => {
+            matches!(reference.as_deref(), Some(TargetFilter::ParentTarget))
+        }
+        // CR 701.3a: the filter-matched host axis boxes a `TargetFilter`; the
+        // OUTER `filter_contains` traversal visits it (through
+        // `filter_prop_contains`), mirroring `CanEnchant`, so no arm is needed
+        // for the nested filter's own position here.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        } => false,
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_binds_prior_target),
+        FilterProp::Not { prop } => filter_prop_binds_prior_target(prop),
+        // Every remaining prop enumerated explicitly (no `_ =>`) — see
+        // `filter_prop_contains_quantity_scope`'s doc for why props that box a
+        // nested `TargetFilter` (other than `SharesQuality`, handled above) need
+        // no arm here: the OUTER `filter_contains` traversal visits their nested
+        // filters independently.
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::ControllerMatches { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::CanEnchant { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedTo { to: AttachmentReferent::Source }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Recipient }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Player { .. } }
+        // CR 601.2c: carries no quantity threshold, and its declared-slot read is
+        // bound through `FilterContext::declared_slot_view`, not first-object binding.
+        | FilterProp::AttachedTo { to: AttachmentReferent::DeclaredTarget { .. } }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Prepared
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::DifferentNameFrom { .. }
+        | FilterProp::DistinctFrom { .. }
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => false,
+    }
 }
 
 /// Whether `filter`, or any filter nested anywhere inside it, satisfies `leaf`.
@@ -40492,6 +40828,52 @@ pub enum TriggerGrantProducerKey {
     },
 }
 
+impl TriggerGrantProducerKey {
+    /// Object epochs carried by this producer's origin and finite provider tree.
+    /// Borrowing collection must not clone a provider merely to read its pins.
+    pub fn for_each_incarnation(&self, f: &mut impl FnMut(ObjectId, u64)) {
+        let (Self::KeywordCompanion { origin, .. }
+        | Self::CopyRetained { origin, .. }
+        | Self::Granted { origin, .. }
+        | Self::ExpandedGrant { origin, .. }) = self;
+        if let TriggerProducerOrigin::Static { source, .. } = origin {
+            f(source.object_id, source.incarnation);
+        }
+        if let Self::ExpandedGrant { provider, .. } = self {
+            provider.for_each_incarnation(f);
+        }
+    }
+
+    pub fn for_each_incarnation_mut(&mut self, f: &mut impl FnMut(ObjectId, &mut u64)) {
+        let (Self::KeywordCompanion { origin, .. }
+        | Self::CopyRetained { origin, .. }
+        | Self::Granted { origin, .. }
+        | Self::ExpandedGrant { origin, .. }) = self;
+        if let TriggerProducerOrigin::Static { source, .. } = origin {
+            f(source.object_id, &mut source.incarnation);
+        }
+        if let Self::ExpandedGrant { provider, .. } = self {
+            provider.for_each_incarnation_mut(f);
+        }
+    }
+
+    /// Provider generations are minted by their own recipient, not by this
+    /// producer's recipient. The producer's own generation lives beside its key.
+    pub fn for_each_grant_generation(&self, f: &mut impl FnMut(ObjectId, u64)) {
+        match self {
+            Self::ExpandedGrant { provider, .. } => provider.for_each_grant_generation(f),
+            Self::KeywordCompanion { .. } | Self::CopyRetained { .. } | Self::Granted { .. } => {}
+        }
+    }
+
+    pub fn for_each_grant_generation_mut(&mut self, f: &mut impl FnMut(ObjectId, &mut u64)) {
+        match self {
+            Self::ExpandedGrant { provider, .. } => provider.for_each_grant_generation_mut(f),
+            Self::KeywordCompanion { .. } | Self::CopyRetained { .. } | Self::Granted { .. } => {}
+        }
+    }
+}
+
 /// The immutable occurrence component of a live trigger definition identity.
 ///
 /// It is intentionally a closed typed representation rather than a definition
@@ -40538,6 +40920,71 @@ pub enum TriggerDefinitionOccurrenceRef {
 }
 
 impl TriggerDefinitionOccurrenceRef {
+    /// Borrowed counterpart of [`Self::for_each_incarnation_mut`].
+    pub fn for_each_incarnation(&self, f: &mut impl FnMut(ObjectId, u64)) {
+        if let Self::ExpandedGrant { provider, .. } = self {
+            provider.for_each_incarnation(f);
+        }
+    }
+
+    /// Borrowed counterpart of [`Self::for_each_grant_generation_mut`].
+    pub fn for_each_grant_generation(
+        &self,
+        minted_by: ObjectId,
+        f: &mut impl FnMut(ObjectId, u64),
+    ) {
+        match self {
+            Self::KeywordCompanion { grant_instance, .. }
+            | Self::CopyRetained { grant_instance, .. }
+            | Self::Granted { grant_instance } => f(minted_by, grant_instance.0),
+            Self::ExpandedGrant {
+                grant_instance,
+                provider,
+                ..
+            } => {
+                f(minted_by, grant_instance.0);
+                provider.for_each_grant_generation(f);
+            }
+            Self::Printed { .. } | Self::CopiedValue { .. } | Self::Unmaterialized => {}
+        }
+    }
+
+    /// Yields every object incarnation this occurrence names, an expanded grant's
+    /// provider included (CR 400.7). An occurrence names its source object only
+    /// through [`TriggerDefinitionRef::source`], so a bare occurrence has no
+    /// source incarnation of its own.
+    pub fn for_each_incarnation_mut(&mut self, f: &mut impl FnMut(ObjectId, &mut u64)) {
+        if let Self::ExpandedGrant { provider, .. } = self {
+            provider.for_each_incarnation_mut(f);
+        }
+    }
+
+    /// Yields every layer-6 grant generation this occurrence names, an expanded
+    /// grant's provider included, keyed by the object whose allocator minted it
+    /// (`minted_by`; CR 613.1f).
+    pub fn for_each_grant_generation_mut(
+        &mut self,
+        minted_by: ObjectId,
+        f: &mut impl FnMut(ObjectId, &mut u64),
+    ) {
+        match self {
+            Self::KeywordCompanion { grant_instance, .. }
+            | Self::CopyRetained { grant_instance, .. }
+            | Self::Granted { grant_instance } => {
+                f(minted_by, &mut grant_instance.0);
+            }
+            Self::ExpandedGrant {
+                grant_instance,
+                provider,
+                provider_output_index: _,
+            } => {
+                f(minted_by, &mut grant_instance.0);
+                provider.for_each_grant_generation_mut(f);
+            }
+            Self::Printed { .. } | Self::CopiedValue { .. } | Self::Unmaterialized => {}
+        }
+    }
+
     /// CR 607.1 + CR 607.5 + CR 613.1f: whether this trigger occurrence is one
     /// of its object's characteristic abilities (and of which copiable set) or
     /// one it gained in layer 6. `None` when the occurrence carries no
@@ -40617,38 +41064,30 @@ pub struct TriggerDefinitionRef {
 }
 
 impl TriggerDefinitionRef {
+    /// Borrowed counterpart of [`Self::for_each_incarnation_mut`].
+    pub fn for_each_incarnation(&self, f: &mut impl FnMut(ObjectId, u64)) {
+        f(self.source.object_id, self.source.incarnation);
+        self.occurrence.for_each_incarnation(f);
+    }
+
+    /// Borrowed counterpart of [`Self::for_each_grant_generation_mut`].
+    pub fn for_each_grant_generation(&self, f: &mut impl FnMut(ObjectId, u64)) {
+        self.occurrence
+            .for_each_grant_generation(self.source.object_id, f);
+    }
+
     /// Yields every object incarnation this reference names, an expanded grant's provider
     /// included (CR 400.7).
     pub fn for_each_incarnation_mut(&mut self, f: &mut impl FnMut(ObjectId, &mut u64)) {
         f(self.source.object_id, &mut self.source.incarnation);
-        if let TriggerDefinitionOccurrenceRef::ExpandedGrant { provider, .. } = &mut self.occurrence
-        {
-            provider.for_each_incarnation_mut(f);
-        }
+        self.occurrence.for_each_incarnation_mut(f);
     }
 
     /// Yields every layer-6 grant generation this reference names, an expanded grant's provider
     /// included, keyed by the object whose allocator minted it.
     pub fn for_each_grant_generation_mut(&mut self, f: &mut impl FnMut(ObjectId, &mut u64)) {
-        let minted_by = self.source.object_id;
-        match &mut self.occurrence {
-            TriggerDefinitionOccurrenceRef::KeywordCompanion { grant_instance, .. }
-            | TriggerDefinitionOccurrenceRef::CopyRetained { grant_instance, .. }
-            | TriggerDefinitionOccurrenceRef::Granted { grant_instance } => {
-                f(minted_by, &mut grant_instance.0);
-            }
-            TriggerDefinitionOccurrenceRef::ExpandedGrant {
-                grant_instance,
-                provider,
-                provider_output_index: _,
-            } => {
-                f(minted_by, &mut grant_instance.0);
-                provider.for_each_grant_generation_mut(f);
-            }
-            TriggerDefinitionOccurrenceRef::Printed { .. }
-            | TriggerDefinitionOccurrenceRef::CopiedValue { .. }
-            | TriggerDefinitionOccurrenceRef::Unmaterialized => {}
-        }
+        self.occurrence
+            .for_each_grant_generation_mut(self.source.object_id, f);
     }
 
     /// CR 113.2c + CR 603.2 + CR 603.2h: the key under which `def`'s per-definition
@@ -40961,9 +41400,71 @@ impl TriggerOccurrenceState {
             .map(|active| (&active.producer, active.instance))
     }
 
-    pub fn for_each_active_grant_generation_mut(&mut self, mut f: impl FnMut(&mut u64)) {
+    /// Finds an active generation only when its entire typed occurrence agrees.
+    /// The caller must separately validate the source object's live epoch.
+    /// In particular, an expanded grant's provider is part of its identity.
+    pub fn producer_for_occurrence(
+        &self,
+        occurrence: &TriggerDefinitionOccurrenceRef,
+    ) -> Option<&TriggerGrantProducerKey> {
+        let instance = match occurrence {
+            TriggerDefinitionOccurrenceRef::KeywordCompanion { grant_instance, .. }
+            | TriggerDefinitionOccurrenceRef::CopyRetained { grant_instance, .. }
+            | TriggerDefinitionOccurrenceRef::Granted { grant_instance }
+            | TriggerDefinitionOccurrenceRef::ExpandedGrant { grant_instance, .. } => {
+                *grant_instance
+            }
+            TriggerDefinitionOccurrenceRef::Printed { .. }
+            | TriggerDefinitionOccurrenceRef::CopiedValue { .. }
+            | TriggerDefinitionOccurrenceRef::Unmaterialized => return None,
+        };
+        let active = self
+            .active_grants
+            .iter()
+            .find(|active| active.instance == instance)?;
+        let matches = match &active.producer {
+            TriggerGrantProducerKey::KeywordCompanion {
+                companion_index, ..
+            } => matches!(
+                occurrence,
+                TriggerDefinitionOccurrenceRef::KeywordCompanion { companion_index: found, .. }
+                    if found == companion_index
+            ),
+            TriggerGrantProducerKey::CopyRetained {
+                source_base_set,
+                source_printed_index,
+                ..
+            } => matches!(
+                occurrence,
+                TriggerDefinitionOccurrenceRef::CopyRetained {
+                    source_base_set: found_base, source_printed_index: found_index, ..
+                } if found_base == source_base_set && found_index == source_printed_index
+            ),
+            TriggerGrantProducerKey::Granted { .. } => {
+                matches!(occurrence, TriggerDefinitionOccurrenceRef::Granted { .. })
+            }
+            TriggerGrantProducerKey::ExpandedGrant {
+                provider,
+                provider_output_index,
+                ..
+            } => matches!(
+                occurrence,
+                TriggerDefinitionOccurrenceRef::ExpandedGrant {
+                    provider: found_provider, provider_output_index: found_index, ..
+                } if found_provider == provider && found_index == provider_output_index
+            ),
+        };
+        matches.then_some(&active.producer)
+    }
+
+    /// Renames a cached producer and its own instance together. Provider refs
+    /// inside the key use their own allocator namespace through the visitors.
+    pub fn for_each_active_grant_mut(
+        &mut self,
+        mut f: impl FnMut(&mut TriggerGrantProducerKey, &mut TriggerGrantInstanceRef),
+    ) {
         for active in &mut self.active_grants {
-            f(&mut active.instance.0);
+            f(&mut active.producer, &mut active.instance);
         }
     }
 }

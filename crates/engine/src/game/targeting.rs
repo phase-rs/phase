@@ -1125,11 +1125,7 @@ fn event_recipient_is_live_incarnation(
     obj: &crate::game::game_object::GameObject,
 ) -> bool {
     let GameEvent::DamageDealt {
-        source_id,
         target: TargetRef::Object(target_id),
-        amount,
-        is_combat,
-        source_incarnation,
         ..
     } = event
     else {
@@ -1141,13 +1137,7 @@ fn event_recipient_is_live_incarnation(
     let mut stamped = state
         .damage_dealt_this_turn
         .iter()
-        .filter(|record| {
-            record.source_id == *source_id
-                && record.source_incarnation == *source_incarnation
-                && record.target == TargetRef::Object(*target_id)
-                && record.amount == *amount
-                && record.is_combat == *is_combat
-        })
+        .filter(|record| record.matches_damage_event(event))
         .filter_map(|record| record.target_incarnation)
         .peekable();
     stamped.peek().is_none() || stamped.any(|incarnation| incarnation == obj.incarnation)

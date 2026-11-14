@@ -9551,7 +9551,7 @@ fn effect_fields_read_filter_population(
 }
 
 /// CR 611.2b: a "for as long as" duration is tested when the effect would
-/// begin (`GameState::transient_duration_begins` →
+/// begin (`GameState::transient_effect_begins` →
 /// `layers::resolved_duration_begins`) and on each later settled board, so its
 /// condition is read. An `UntilEvent` deadline's trigger matchers are matched
 /// against the live ledger when a later event fires, so they are read too. The
@@ -9836,7 +9836,7 @@ fn protection_target_reads_filter_population(
         | ProtectionTarget::ChosenCardName
         | ProtectionTarget::Everything
         | ProtectionTarget::FromPlayer(_)
-        // A color set (CR 702.16i) names colors, never an object population.
+        // A color set (CR 702.16i) carries no TargetFilter operand and does not read LastCreated.
         | ProtectionTarget::EachColor(_) => false,
     }
 }
@@ -13674,6 +13674,61 @@ fn park_resolution_object_choice(
     ResolutionProgress::Waiting
 }
 
+/// CR 608.2d: the objects a parked untargeted `TargetOnly` choice ("choose a
+/// creature you control") may pick NOW, when that choice owns the open
+/// `ChooseFromZoneChoice` prompt. The candidates stored on the prompt were
+/// scanned when it was raised; objects can leave or change controller while it
+/// is open (CR 800.4a: a player who leaves the game takes the objects they own,
+/// and control effects they owned end), and a player can't choose an illegal or
+/// impossible option. `None` when the open prompt is not such a choice.
+pub(crate) fn open_resolution_object_choice_candidates(state: &GameState) -> Option<Vec<ObjectId>> {
+    let (chain, target) = open_resolution_object_choice(state)?;
+    Some(resolution_choice_candidates(state, chain, target, |_| true))
+}
+
+/// CR 608.2d: whether a parked untargeted `TargetOnly` choice owns the open
+/// `ChooseFromZoneChoice` prompt, i.e. a resolution is paused on it.
+pub(crate) fn resolution_object_choice_is_open(state: &GameState) -> bool {
+    open_resolution_object_choice(state).is_some()
+}
+
+/// CR 109.5 + CR 608.2c + CR 800.4a: the player an open resolution-time object
+/// choice ("choose a creature you control") is put to is "you", the controller
+/// of the resolving object NOW, not the controller recorded when the choice was
+/// parked. The two differ once a control effect over the resolving spell has
+/// ended: a player who took control of it (Commandeer) left the game, and it is
+/// its previous controller's again. Rebinds the parked chain to that controller
+/// and returns them when they differ; `None` when the parked controller still
+/// controls the object or the open prompt is not such a choice.
+pub(crate) fn rebind_open_resolution_object_choice_to_live_controller(
+    state: &mut GameState,
+) -> Option<PlayerId> {
+    let (chain, _) = open_resolution_object_choice(state)?;
+    let parked = chain.controller;
+    let entry = state.resolving_stack_entry.as_ref()?;
+    let live = crate::game::stack::resolving_object_controller(state, entry);
+    if live == parked {
+        return None;
+    }
+    state
+        .active_ability_continuation_frame_mut()?
+        .pending
+        .chain
+        .set_controller_recursive(live);
+    Some(live)
+}
+
+fn open_resolution_object_choice(state: &GameState) -> Option<(&ResolvedAbility, &TargetFilter)> {
+    if !matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }) {
+        return None;
+    }
+    let chain = &state.active_ability_continuation_frame()?.pending.chain;
+    let Effect::TargetOnly { target } = &chain.effect else {
+        return None;
+    };
+    awaits_resolution_object_choice(chain).then_some((chain.as_ref(), target))
+}
+
 /// CR 608.2c + CR 608.2d: once its resolution-time object choice is answered,
 /// does the parked `head` publish its own result into the chain's tracked set?
 ///
@@ -14535,6 +14590,10 @@ fn affected_objects_with_causes(
 /// member that emitted `PermanentTapped` in `events` — this resolution's own
 /// tap — so a fallback member carries `None` and never becomes a
 /// "<type> tapped this way" source.
+///
+/// `Effect::GiveControl` is per-member on the same terms: only a member whose
+/// `ControllerChanged` this resolution emitted is stamped `ControlGained`; the
+/// declared targets remain the members (see `give_control_object_targets`).
 fn this_way_cause_for_resolved(
     state: &GameState,
     effect: &Effect,
@@ -14562,6 +14621,17 @@ fn this_way_cause_for_resolved(
             })
             .then(|| this_way_cause_for_effect(effect))
             .flatten(),
+        // CR 613.1b + CR 608.2c: only a member whose controller this resolution changed was
+        // "gained control of this way".
+        Effect::GiveControl { .. } => events
+            .iter()
+            .any(|event| {
+                matches!(
+                    event,
+                    GameEvent::ControllerChanged { object_id, .. } if *object_id == member
+                )
+            })
+            .then_some(ThisWayCause::ControlGained),
         other => this_way_cause_for_effect(other),
     }
 }
@@ -15428,18 +15498,15 @@ pub(crate) fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameE
                 }
             )
         }),
-        // CR 110.2 + CR 608.2c: "that player gains control of ~. If they do, …"
-        // gates the rider on whether control actually changed (Kain, Traitorous
-        // Dragoon). `resolve_give` emits `EffectResolved` and, when the
-        // recipient differs from the object's current controller,
-        // `ControllerChanged`.
+        // CR 118.12 + CR 613.1b: "If they do" holds once a control effect was installed, even for a recipient who already controls the object.
         Effect::GiveControl { .. } => events.iter().any(|event| {
             matches!(
                 event,
                 GameEvent::EffectResolved {
-                    kind: crate::types::ability::EffectKind::GiveControl,
+                    kind: EffectKind::GiveControl,
+                    subject: Some(_),
                     ..
-                } | GameEvent::ControllerChanged { .. }
+                }
             )
         }),
         // CR 701.12a + CR 701.12b + CR 608.2c: an exchange whose subjects can't both
@@ -35662,6 +35729,32 @@ mod tests {
             this_way_cause_for_resolved(&state, &with_rider.effect, &[], instant),
             None,
             "an empty ledger stamps nothing, whatever the rider's form"
+        );
+    }
+
+    /// CR 613.1b + CR 608.2c: `GiveControl` stamps `ControlGained` only on the
+    /// member whose `ControllerChanged` this resolution emitted.
+    #[test]
+    fn give_control_stamps_only_the_member_whose_controller_changed() {
+        let state = GameState::new_two_player(42);
+        let give = Effect::GiveControl {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            recipient: TargetFilter::TriggeringPlayer,
+        };
+        let (moved, unmoved) = (ObjectId(1), ObjectId(2));
+        let events = [GameEvent::ControllerChanged {
+            object_id: moved,
+            old_controller: PlayerId(0),
+            new_controller: PlayerId(1),
+            evidence: crate::types::events::ControlChangeEvidence::Unrecorded,
+        }];
+        assert_eq!(
+            this_way_cause_for_resolved(&state, &give, &events, moved),
+            Some(ThisWayCause::ControlGained)
+        );
+        assert_eq!(
+            this_way_cause_for_resolved(&state, &give, &events, unmoved),
+            None
         );
     }
 
@@ -61011,33 +61104,38 @@ mod tests {
         );
     }
 
-    /// CR 110.2 + CR 608.2c (issue #1335): Kain's "that player gains control of
-    /// Kain. If they do, …" gates the rider on whether control actually
-    /// transferred. `GiveControl` counts as performed only when
-    /// `ControllerChanged` or a `GiveControl` `EffectResolved` is emitted.
+    /// CR 118.12 + CR 613.1b (issue #1335): `GiveControl` counts as performed only when its resolver installed a control effect, which it reports as an `EffectResolved` subject.
     #[test]
-    fn give_control_performed_tracks_controller_changed_event() {
+    fn give_control_performed_tracks_installed_control_effect() {
         let give = Effect::GiveControl {
             target: TargetFilter::SelfRef,
             recipient: TargetFilter::TriggeringPlayer,
         };
 
-        let transferred = [GameEvent::ControllerChanged {
-            object_id: ObjectId(1),
-            old_controller: PlayerId(0),
-            new_controller: PlayerId(1),
-            // The rider gate reads only that control moved, never the evidence.
-            evidence: crate::types::events::ControlChangeEvidence::Unrecorded,
+        let mut scenario = GameScenario::new();
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let runner = scenario.build();
+        let snapshot = runner.state().capture_event_object_snapshot(bears);
+        assert!(snapshot.is_some(), "Grizzly Bears must yield a snapshot");
+
+        let installed = [GameEvent::EffectResolved {
+            kind: EffectKind::GiveControl,
+            source_id: bears,
+            subject: snapshot.map(Box::new),
         }];
         assert!(
-            mandatory_parent_effect_performed(&give, &transferred),
-            "GiveControl that changed controllers is 'performed'"
+            mandatory_parent_effect_performed(&give, &installed),
+            "GiveControl that installed a control effect is 'performed'"
         );
 
-        let not_transferred: [GameEvent; 0] = [];
+        let not_installed = [GameEvent::EffectResolved {
+            kind: EffectKind::GiveControl,
+            source_id: ObjectId(9),
+            subject: None,
+        }];
         assert!(
-            !mandatory_parent_effect_performed(&give, &not_transferred),
-            "GiveControl that failed must not seed the if-they-do rider"
+            !mandatory_parent_effect_performed(&give, &not_installed),
+            "GiveControl that installed nothing must not seed the if-they-do rider"
         );
     }
 
@@ -61104,9 +61202,8 @@ mod tests {
     ///
     /// NOTE the negative slice: it is the event trail the resolver ACTUALLY
     /// emits on a no-op (a lone `EffectResolved { ExchangeControl }`), not an
-    /// empty slice. An empty slice is never produced in production, and using
-    /// one would let a regression that keys on `EffectResolved` — the exact
-    /// defect that makes the `GiveControl` arm above vacuous — pass here.
+    /// empty slice. An empty slice is never produced in production, and using one would let a
+    /// regression that keys on `EffectResolved` pass here.
     #[test]
     fn exchange_control_performed_tracks_controller_changed_event() {
         let exchange = exchange_control_effect();
