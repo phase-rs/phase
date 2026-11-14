@@ -9,7 +9,7 @@ use engine::types::ability::{ParentTargetMissingReason, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
-use engine::types::mana::{ManaCost, ManaCostShard};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 use engine::types::ObjectId;
@@ -1527,6 +1527,166 @@ fn overlapping_reveal_leases_release_independently_bottom_first() {
     assert!(runner.state().stack.is_empty());
     assert!(stack_revealed_seen_by(runner.state(), P1).is_empty());
     assert_eq!(name_seen_by(runner.state(), P1, hit), HIDDEN);
+}
+
+const GOBLIN_MACHINIST: &str = "{2}{R}: Reveal cards from the top of your library until you reveal a nonland card. This creature gets +X/+0 until end of turn, where X is that card's mana value. Put the revealed cards on the bottom of your library in any order.";
+
+/// CR 701.20d + CR 701.20a + CR 401.4: Multi-card owner-ordered placement settles
+/// the whole arrangement and retires an overlapping stack-bound reveal lease.
+///
+/// Start with a nonland card C over a land L. Calibrated Blast reveals C and
+/// places it on the bottom, leaving the library as [L, C] with its reflexive
+/// trigger holding C's live occurrence.
+///
+/// Activate Goblin Machinist above it, which reveals L then C, and choose C then
+/// L for bottom placement. C's first delivery is in place and L's second
+/// delivery moves C up. Settling the placement through the owner-order
+/// continuation ensures C's old occurrence retires upon completion.
+#[test]
+fn owner_ordered_placement_retires_overlapping_reveal_lease() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let blast = scenario
+        .add_spell_to_hand_from_oracle(P0, "Calibrated Blast", true, CALIBRATED_BLAST)
+        .id();
+    let machinist = scenario
+        .add_creature_from_oracle(P0, "Goblin Machinist", 0, 5, GOBLIN_MACHINIST)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    // Nonland C over land L: top is nonland, second is land.
+    let land = scenario
+        .add_spell_to_library_top(P0, "Forest", false)
+        .as_land()
+        .id();
+    let nonland = scenario
+        .add_spell_to_library_top(P0, "Three Drop", false)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Cast Calibrated Blast: reveals C, bottoms it (singleton), puts reflexive on stack.
+    runner.cast(blast).commit();
+    assert!(pass_until_prompt_or_empty(&mut runner));
+    choose(&mut runner, TargetRef::Player(P1));
+
+    // Reach guard: Calibrated Blast reflexive trigger holds a lease on C's occurrence.
+    let entries = reflexive_entries(runner.state());
+    assert_eq!(
+        entries.len(),
+        1,
+        "reach guard: Calibrated Blast reflexive live"
+    );
+    assert!(
+        runner.state().holds_stack_bound_reveal(nonland),
+        "reach guard: C's occurrence held by stack-bound reveal"
+    );
+
+    // Library is now [L, C]. Activate Goblin Machinist above the reflexive trigger.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: machinist,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("activate Goblin Machinist");
+
+    // Pass priority so Goblin Machinist resolves. It reveals L (land), then C (nonland),
+    // pumps Goblin Machinist by C's MV (3), and pauses for owner library arrangement.
+    pass_once_each(&mut runner);
+
+    match &runner.state().waiting_for {
+        WaitingFor::EffectZoneChoice {
+            player,
+            cards,
+            mass_library_order,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert!(
+                mass_library_order.is_some(),
+                "expected mass_library_order for bottom arrangement"
+            );
+            assert_eq!(
+                cards
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                [land, nonland].into_iter().collect(),
+                "Goblin Machinist revealed both L and C"
+            );
+        }
+        other => panic!("expected EffectZoneChoice, got {other:?}"),
+    }
+
+    // CR 701.20a: the whole pile stays revealed while its owner arranges it.
+    // L has no other reveal carrier — only this membership reaches retirement.
+    let nonland_before = runner.state().objects[&nonland].incarnation;
+    let land_before = runner.state().objects[&land].incarnation;
+    assert!(
+        runner.state().revealed_cards.contains(&land)
+            && runner.state().revealed_cards.contains(&nonland),
+        "reach guard: both revealed cards stay public across the owner-order choice"
+    );
+
+    // Choose C, then L for bottom placement.
+    // C's first delivery is in place and L's second delivery moves C up.
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![nonland, land],
+        })
+        .expect("select owner-order for bottom placement");
+
+    // CR 701.20d: On completion of the multi-card arrangement the whole pile
+    // stops being revealed and each reordered card becomes a new object — C
+    // through its stack lease, and L through the membership carried across the
+    // choice (it moved without any other reveal carrier).
+    assert_eq!(
+        runner.state().objects[&nonland].incarnation,
+        nonland_before + 1,
+        "C is a new object after the owner-ordered placement"
+    );
+    assert_eq!(
+        runner.state().objects[&land].incarnation,
+        land_before + 1,
+        "L is a new object after the owner-ordered placement"
+    );
+    assert!(
+        !runner.state().holds_stack_bound_reveal(nonland),
+        "C's old occurrence lease must retire after owner-ordered placement"
+    );
+    assert!(
+        !runner.state().revealed_cards.contains(&land)
+            && !runner.state().revealed_cards.contains(&nonland),
+        "the reordered pile stops being revealed"
+    );
+
+    // Verify final library order: C then L at the bottom.
+    let p0_lib = &runner.state().players[P0.0 as usize].library;
+    assert_eq!(
+        p0_lib.iter().copied().collect::<Vec<_>>(),
+        vec![nonland, land],
+        "library order must match owner choice"
+    );
+
+    // Calibrated Blast reflexive resolves.
+    pass_once_each(&mut runner);
+    assert!(runner.state().stack.is_empty(), "stack must be empty");
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        17,
+        "P1 took 3 damage"
+    );
 }
 
 /// CR 701.20a: two Calibrated Blast reflexives with the same target but

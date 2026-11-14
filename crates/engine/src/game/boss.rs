@@ -2199,8 +2199,15 @@ mod tests {
             token_flags[..100].iter().any(|t| *t) && token_flags[100..].iter().any(|t| !t),
             "ID order must mix nontokens and tokens, not list them group by group"
         );
-        // Viewer reach-guard: the hero's snapshot really does project the
-        // pile ID order (the surface the fixed mapping would have exploited).
+        // CR 401.2 + CR 401.4: the hero's snapshot must not pair the pile's
+        // stable ids with their true slots, so the seed-shuffled order stays
+        // authoritative-only.
+        let mut canonical = pile_a.clone();
+        canonical.sort_unstable();
+        assert_ne!(
+            pile_a, canonical,
+            "reach guard: the fixture's allocation is not already id-sorted"
+        );
         let viewer = crate::game::visibility::filter_state_for_viewer(&state_a, hero_a);
         let seen: Vec<ObjectId> = viewer
             .players
@@ -2211,7 +2218,10 @@ mod tests {
             .iter()
             .copied()
             .collect();
-        assert_eq!(seen, pile_a, "the viewer sees the pile ID order");
+        assert_eq!(
+            seen, canonical,
+            "hidden pile members project in canonical id order"
+        );
         assert!(
             seen.iter().all(|id| viewer
                 .objects
@@ -2370,9 +2380,20 @@ mod tests {
             pile_id_name_map(&state_b, &pile_b),
             "allocation order must depend on the seed, not the deck list"
         );
+        // CR 401.2 + CR 401.4: the viewer projection breaks the identity-to-
+        // position link, so the seed-shuffled order stays authoritative-only.
+        let mut canonical = pile_a.clone();
+        canonical.sort_unstable();
+        assert_ne!(
+            pile_a, canonical,
+            "reach guard: the fixture's allocation is not already id-sorted"
+        );
         let viewer = crate::game::visibility::filter_state_for_viewer(&state_a, hero_a);
         let seen: Vec<ObjectId> = viewer.boss_deck.iter().copied().collect();
-        assert_eq!(seen, pile_a, "the viewer sees the pile ID order");
+        assert_eq!(
+            seen, canonical,
+            "hidden pile members project in canonical id order"
+        );
         assert!(
             seen.iter().all(|id| viewer
                 .objects

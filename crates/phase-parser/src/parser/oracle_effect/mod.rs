@@ -16815,7 +16815,12 @@ fn parse_reveal_until_active_filter_text(input: &str) -> OracleResult<'_, &str> 
 }
 
 fn parse_reveal_until_passive_filter_text(input: &str) -> OracleResult<'_, &str> {
-    all_consuming(alt((terminated(take_until(" card"), tag(" card")), rest))).parse(input)
+    all_consuming(alt((
+        terminated(take_until(" cards"), tag(" cards")),
+        terminated(take_until(" card"), tag(" card")),
+        rest,
+    )))
+    .parse(input)
 }
 
 /// Match a disjunction separator at the head of `input`: `", or "` / `", "` /
@@ -16896,6 +16901,28 @@ fn split_reveal_filter_disjuncts(filter_text: &str) -> Option<Vec<&str>> {
         }
     }
     (disjuncts.len() >= 2 && has_or_connective).then_some(disjuncts)
+}
+
+/// CR 608.2c / CR 701.20a: Check whether a disjunct in a reveal-until filter list
+/// opens with its own count threshold (Thought Dissector: "until an artifact card or
+/// X cards are revealed" — "X cards"; "until a land card or two creature cards are
+/// revealed" — "two creature"). A single `RevealUntil` carries one count, so a
+/// disjunct that leads with a quantity cannot be folded into the card filter.
+/// Article-prefixed disjuncts ("a land", "an artifact") are plain card filters.
+fn is_reveal_until_count_disjunct(disjunct: &str) -> bool {
+    let count_token = alt((
+        value((), nom_primitives::parse_number_or_x),
+        value((), nom_quantity::parse_that_much_or_many),
+    ));
+    preceded(
+        not(nom_primitives::parse_article),
+        terminated(
+            count_token,
+            peek(alt((value((), eof), value((), tag(" "))))),
+        ),
+    )
+    .parse(disjunct.trim())
+    .is_ok()
 }
 
 /// Build a [`TargetFilter`] from a single disjunct fragment of a reveal-until
@@ -17111,37 +17138,81 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
 
     // CR 701.20a: Passive-voice form — "…until a/an <filter> [card] is revealed
     // [and exiles that card]" (Indomitable Creativity, Blessed Reincarnation,
-    // Tunnel Vision). Passive prefix stops before the article; extract article,
+    // Tunnel Vision) or "…until four land cards are revealed" (Mind Funeral).
+    // Passive prefix stops before the article or count; extract count,
     // filter phrase, and optional exile suffix here.
-    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, parse_reveal_until_passive_prefix)?;
-    let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
+    let (_, rest_orig) = nom_on_lower(
+        count_tp.original,
+        count_tp.lower,
+        parse_reveal_until_passive_prefix,
+    )?;
+    let rest_lower = &count_tp.lower[count_tp.lower.len() - rest_orig.len()..];
 
-    // Consume the article ("a" / "an").
-    let (_, after_article_orig) =
-        nom_on_lower(rest_orig, rest_lower, nom_primitives::parse_article)?;
-    let after_article_lower = &rest_lower[rest_lower.len() - after_article_orig.len()..];
+    // Consume the article ("a" / "an") or count ("four", "X", etc.).
+    let (after_count_lower, raw_count) = parse_reveal_until_count(rest_lower).ok()?;
 
-    // Capture everything up to " is revealed" — this is the filter phrase.
-    let (remainder, captured) = take_until::<_, _, OracleError<'_>>(" is revealed")
-        .parse(after_article_lower)
-        .ok()?;
+    // Capture everything up to " is revealed" or " are revealed" — this is the filter phrase.
+    let (remainder, (captured, _)) = alt((
+        pair(
+            take_until::<_, _, OracleError<'_>>(" is revealed"),
+            tag(" is revealed"),
+        ),
+        pair(
+            take_until::<_, _, OracleError<'_>>(" are revealed"),
+            tag(" are revealed"),
+        ),
+    ))
+    .parse(after_count_lower)
+    .ok()?;
 
-    // Strip trailing " card" if present ("artifact or creature card" → "artifact or creature").
-    // Tunnel Vision's captured = "card with that name" (no " card" suffix — handled by HasChosenName).
+    // Strip trailing " cards" or " card" if present ("artifact or creature card" → "artifact or creature",
+    // "land cards" → "land"). Tunnel Vision's captured = "card with that name" (no " card" suffix — handled by HasChosenName).
     let (_, filter_text) = parse_reveal_until_passive_filter_text(captured).ok()?;
 
-    let filter = build_reveal_until_filter(filter_text);
+    // CR 608.2c / CR 701.20a: Reject compound stopping conditions where a second
+    // stopping condition is joined by "or" (e.g. Thought Dissector: "until an artifact
+    // card or X cards are revealed, whichever comes first"). If any disjunct is a standalone
+    // count expression or number, this is a compound stopping condition rather than a simple card filter.
+    if let Some(disjuncts) = split_reveal_filter_disjuncts(filter_text) {
+        // An article-prefixed disjunct ("a land") carries an implicit threshold of one,
+        // so it cannot share a leading count other than one ("four cards or a land card").
+        let leading_count_is_one = matches!(raw_count, QuantityExpr::Fixed { value: 1 });
+        let has_article_disjunct = disjuncts
+            .iter()
+            .any(|d| nom_primitives::parse_article(d.trim()).is_ok());
+        if disjuncts.iter().any(|d| is_reveal_until_count_disjunct(d))
+            || (!leading_count_is_one && has_article_disjunct)
+        {
+            return Some(parsed_clause(Effect::unimplemented(
+                "compound_reveal_until",
+                count_tp.original,
+            )));
+        }
+    }
 
-    // CR 406.2: Detect inline "and exiles that card" suffix. When present, the kept
-    // card goes directly to Exile. Consume " is revealed" via nom tag, then check
-    // the optional exile clause with a tag probe (.is_ok() since opt is infallible anyway).
-    let (after_is_revealed, _) = tag::<_, _, OracleError<'_>>(" is revealed")
-        .parse(remainder)
-        .ok()?;
-    let inline_exile = tag::<_, _, OracleError<'_>>(" and exiles that card")
-        .parse(after_is_revealed)
-        .is_ok();
-    let kept_destination = if inline_exile {
+    let filter = build_reveal_until_filter(filter_text);
+    // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
+    let count = apply_where_x_quantity_expression(
+        raw_count,
+        WhereXBinding::bare(where_x_expression.as_deref()),
+    )?;
+
+    // CR 406.2: Consume the remainder after " is revealed" / " are revealed".
+    // The only recognized trailing suffix on a passive reveal-until clause is an optional
+    // inline "and exiles that card" (Indomitable Creativity) followed by terminal
+    // punctuation. Any unconsumed tail (such as Thought Dissector's ", whichever comes first")
+    // causes this branch to fail closed as unimplemented.
+    let (after_inline_exile, inline_exile) =
+        opt(tag::<_, _, OracleError<'_>>(" and exiles that card"))
+            .parse(remainder)
+            .ok()?;
+    if !imperative::terminal_punctuation_only(after_inline_exile) {
+        return Some(parsed_clause(Effect::unimplemented(
+            "unconsumed_reveal_until_tail",
+            count_tp.original,
+        )));
+    }
+    let kept_destination = if inline_exile.is_some() {
         Zone::Exile
     } else {
         Zone::Hand
@@ -17150,7 +17221,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
     Some(parsed_clause(Effect::RevealUntil {
         player,
         filter,
-        count: QuantityExpr::Fixed { value: 1 },
+        count,
         matched_disposition: RevealUntilDisposition::KeepEach,
         kept_destination,
         rest_destination: Zone::Library,
@@ -31168,6 +31239,7 @@ fn lower_subject_predicate_ast_body(
                 .is_ok()
                 && scan_contains_phrase(&pred_lower, "top")
                 && scan_contains_phrase(&pred_lower, "library")
+                && !scan_contains_phrase(&pred_lower, "until")
             {
                 // Delegate to nom combinator (input already lowercase from pred_lower).
                 let count = if let Some(after_top) = strip_after(&pred_lower, "top ") {

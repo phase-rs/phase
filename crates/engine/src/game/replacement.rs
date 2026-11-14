@@ -324,10 +324,17 @@ fn commander_hand_or_library_return_object(
 /// format, for a commander/signature spell, and only while its proposed move
 /// would put it into its owner's hand or library.
 fn commander_hand_or_library_return_applies(state: &GameState, event: &ProposedEvent) -> bool {
-    let ProposedEvent::ZoneChange { object_id, to, .. } = event else {
+    let ProposedEvent::ZoneChange {
+        object_id,
+        from,
+        to,
+        ..
+    } = event
+    else {
         return false;
     };
     matches!(to, Zone::Hand | Zone::Library)
+        && *from != *to
         && state.format_config.command_zone
         && commander_hand_or_library_return_object(state, *object_id).is_some_and(|object| {
             // CR 903.9c: a merged/melded commander does not redirect the

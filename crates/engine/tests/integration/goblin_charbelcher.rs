@@ -9,7 +9,9 @@
 //! included, goes to the library bottom.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
+use engine::game::visibility::{
+    filter_state_for_unseated_viewer, filter_state_for_viewer, HIDDEN_CARD_NAME,
+};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -316,9 +318,32 @@ fn replacement_child_reveal_does_not_replace_the_parents_pile() {
         .id();
     let spell = scenario.add_spell_to_library_top(P0, "Spell A", false).id();
     let mut runner = scenario.build();
+    let forest_incarnation_before = runner.state().objects[&forest].incarnation;
 
     let source = charbelcher(&runner);
     runner.activate(source, 0).target_object(swans).resolve();
+
+    // CR 701.20a: the Forest is still revealed to every audience while the
+    // intervening prompts of the same resolution are open. It is still relevant
+    // to Charbelcher's pending "put the revealed cards on the bottom"
+    // instruction, so hiding it now would also leave its old occurrence for
+    // that reorder to retire.
+    let forest_visible_to =
+        |runner: &GameRunner, viewer: Option<engine::types::player::PlayerId>| {
+            let projected = match viewer {
+                Some(viewer) => filter_state_for_viewer(runner.state(), viewer),
+                None => filter_state_for_unseated_viewer(runner.state()),
+            };
+            projected.objects[&forest].name != HIDDEN_CARD_NAME
+        };
+    let assert_forest_revealed_at = |runner: &GameRunner, prompt: &str| {
+        for (label, viewer) in [("P0", Some(P0)), ("P1", Some(P1)), ("unseated", None)] {
+            assert!(
+                forest_visible_to(runner, viewer),
+                "{label}: the Forest is still revealed at the {prompt} prompt"
+            );
+        }
+    };
 
     // Reach guards: the interactive replacement path actually ran.
     let mut saw_replacement_choice = false;
@@ -327,12 +352,14 @@ fn replacement_child_reveal_does_not_replace_the_parents_pile() {
         match runner.state().waiting_for.clone() {
             WaitingFor::ReplacementChoice { .. } => {
                 saw_replacement_choice = true;
+                assert_forest_revealed_at(&runner, "replacement");
                 runner
                     .act(GameAction::ChooseReplacement { index: 0 })
                     .expect("accept Abundance's optional replacement");
             }
             WaitingFor::NamedChoice { .. } => {
                 saw_kind_choice = true;
+                assert_forest_revealed_at(&runner, "named");
                 runner
                     .act(GameAction::ChooseOption {
                         choice: "Nonland".to_string(),
@@ -354,6 +381,19 @@ fn replacement_child_reveal_does_not_replace_the_parents_pile() {
         "Abundance's optional replacement was offered"
     );
     assert!(saw_kind_choice, "the land-or-nonland choice was made");
+
+    // CR 701.20d: the Forest was reordered to the bottom by Charbelcher's own
+    // placement, so it stops being revealed and becomes a new object. Without
+    // the reveal surviving the prompts above there is no membership to retire
+    // and the old occurrence would survive the move.
+    assert!(
+        runner.state().objects[&forest].incarnation > forest_incarnation_before,
+        "the reordered Forest is a new object, not its pre-reorder occurrence"
+    );
+    assert!(
+        !runner.state().revealed_cards.contains(&forest),
+        "the reordered Forest stops being revealed"
+    );
 
     let state = runner.state();
     let hand: Vec<ObjectId> = state.players[P0.0 as usize].hand.iter().copied().collect();

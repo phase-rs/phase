@@ -952,7 +952,11 @@ pub(crate) fn move_object_with_terminal(
     //   rg -o 'destination_zone\(Zone::\w+\)' crates/engine/src | sort | uniq -c
     if let Some(position) = req.placement.clone() {
         if req.to == Zone::Library {
-            if req.cause.is_exempt() {
+            // CR 701.20b + CR 701.20d: A card already in the library placed at a
+            // library position is an in-library reorder, not a zone change. Route it
+            // directly to the library reorder authority without constructing a zone-change
+            // proposal or consulting replacements.
+            if from_zone == Zone::Library || req.cause.is_exempt() {
                 let index = match position {
                     LibraryPosition::Top => Some(0),
                     LibraryPosition::Bottom => None,
@@ -1382,9 +1386,36 @@ pub(crate) fn move_objects_simultaneously(
 /// delivery, including an inline completion tail: `Done` means that tail also
 /// settled; `NeedsChoice` means a CR 616.1 replacement choice parked it. Callers
 /// may therefore restore priority or run their own tail only after `Done`.
+///
+/// A batch that also reorders a library as one instruction passes that reorder
+/// to [`move_objects_simultaneously_settling_then`]; it must never finish the
+/// reorder after this call returns (see that function for why).
 pub(crate) fn move_objects_simultaneously_then(
     state: &mut GameState,
     reqs: Vec<ZoneMoveRequest>,
+    completion: Option<BatchCompletion>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    move_objects_simultaneously_settling_then(state, reqs, None, completion, events)
+}
+
+/// CR 701.20d + CR 603.10a + CR 616.1: As [`move_objects_simultaneously_then`],
+/// additionally owning the whole-library reorder this instruction performs.
+///
+/// `library_reorder` settles BEFORE `completion` runs on BOTH completion paths:
+/// here on the synchronous path, and in `drain_pending_batch_deliveries` after a
+/// replacement-paused delivery. A reveal-until rest pile's completion is its
+/// reveal-marker cleanup, so settling afterwards would find the markers already
+/// cleared and leave every reordered card revealed at its new position while it
+/// keeps its old occurrence (CR 701.20d requires the opposite: a reordered
+/// revealed card stops being revealed and becomes a new object). A caller that
+/// finished the reorder after this function returned would also lose it when the
+/// completion parks a child operation of its own, because that pause owns a new
+/// batch record rather than this instruction's reorder.
+pub(crate) fn move_objects_simultaneously_settling_then(
+    state: &mut GameState,
+    reqs: Vec<ZoneMoveRequest>,
+    library_reorder: Option<crate::types::game_state::LibraryReorderOperation>,
     completion: Option<BatchCompletion>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
@@ -1413,6 +1444,12 @@ pub(crate) fn move_objects_simultaneously_then(
                 &logical_zone_change_group,
                 &events[event_start..],
             );
+            // CR 701.20d + CR 616.1: every member of this library placement is
+            // now in place, so the whole-library reorder it performed settles
+            // before the completion's reveal cleanup / reveal-marker retirement.
+            if let Some(library_reorder) = library_reorder {
+                library_reorder.finish(state);
+            }
             // Synchronous completion (the common single-redirect path): run the
             // cleanup now, and surface a pause it raises to the enclosing caller.
             completion.map_or(BatchMoveResult::Done, |mut completion| {
@@ -1431,6 +1468,9 @@ pub(crate) fn move_objects_simultaneously_then(
             // once, after logical settlement.
             let pending = ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard));
             pending.completion = completion;
+            // CR 701.20d + CR 616.1: the reorder rides the same parked owner; its
+            // drain settles the reorder before running this completion.
+            pending.library_reorder = library_reorder;
             pending.attempted = ids;
             pending.zone_change_record_start = zone_change_record_start;
             pending.deferred_events.extend(events.drain(event_start..));
@@ -1477,6 +1517,7 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
         let logical_zone_change_group =
             crate::game::triggers::allocate_logical_zone_change_group(state, &announced_members);
         state.push_batch_delivery(PendingBatchDeliveries {
+            library_reorder: None,
             logical_zone_change_group,
             paused_current,
             remaining: Vec::new(),
@@ -1515,7 +1556,15 @@ fn deliver_batch(
     while let Some(req) = queue.next() {
         let destination = req.to;
         let face_down_in_exile = req.face_down_in_exile;
-        let anticipated_pause = anticipated_zone_change_delivery(state, &req);
+        // CR 701.20b + CR 400.6: In-library reorders are not moves between zones;
+        // classify same-library placement before anticipated capture.
+        let from_zone = state.objects.get(&req.object_id).map(|o| o.zone);
+        let is_same_library = from_zone == Some(Zone::Library) && destination == Zone::Library;
+        let anticipated_pause = if is_same_library {
+            None
+        } else {
+            anticipated_zone_change_delivery(state, &req)
+        };
         let delivery_start = events.len();
         let object_id = req.object_id;
         match move_object_with_terminal(state, req, events) {
@@ -1634,6 +1683,7 @@ fn stash_batch_tail(
         .map(ZoneMoveRequest::into_pending)
         .collect();
     let pending = PendingBatchDeliveries {
+        library_reorder: None,
         logical_zone_change_group,
         paused_current,
         remaining,
@@ -1669,6 +1719,11 @@ fn anticipated_zone_change_delivery(
     request: &ZoneMoveRequest,
 ) -> Option<PendingZoneChangeDelivery> {
     let object = state.objects.get(&request.object_id)?;
+    // CR 701.20b + CR 400.6: In-library reorders are not moves between zones;
+    // they construct no zone-change proposal.
+    if object.zone == Zone::Library && request.to == Zone::Library {
+        return None;
+    }
     let mut expected_event =
         ProposedEvent::zone_change(request.object_id, object.zone, request.to, request.source());
     if let ProposedEvent::ZoneChange {
@@ -1755,6 +1810,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
             enter_tapped,
             exile_tracking,
             library_placement,
+            library_reorder,
             completion,
             replacement_applied,
             requests,
@@ -1867,6 +1923,13 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                         );
                     }
                 }
+                // CR 701.20d + CR 616.1: every member of this library
+                // placement is now in place, so the whole-library reorder it
+                // performed settles before the completion (reveal-marker
+                // cleanup / continuation) runs.
+                if let Some(library_reorder) = library_reorder {
+                    library_reorder.finish(state);
+                }
                 if let Some(mut completion) = completion {
                     // The parked/settled result is deliberately unused here: the
                     // drain's callers are state-mediated (engine_replacement
@@ -1890,6 +1953,9 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 // completion and external output; never replace that owner.
                 let reparking = ensure_batch_record(state, destination);
                 reparking.completion = completion;
+                // CR 701.20d + CR 616.1: the re-parked tail still owes the
+                // library reorder this instruction performs.
+                reparking.library_reorder = library_reorder;
                 reparking.attempted = attempted;
                 reparking.zone_change_record_start = zone_change_record_start;
                 deferred_events.append(events);
@@ -1953,6 +2019,7 @@ mod paused_search_audience_tests {
         let logical_zone_change_group =
             crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[]);
         state.push_batch_delivery(PendingBatchDeliveries {
+            library_reorder: None,
             logical_zone_change_group,
             paused_current: Some(paused),
             remaining: Vec::new(),
@@ -2039,6 +2106,7 @@ mod paused_search_audience_tests {
         let logical_zone_change_group =
             crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[entrant]);
         state.push_batch_delivery(PendingBatchDeliveries {
+            library_reorder: None,
             logical_zone_change_group,
             paused_current: Some(paused_current),
             remaining: Vec::new(),
@@ -4951,10 +5019,34 @@ fn execute_zone_move_with_applied_terminal(
     {
         return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     }
-    // CR 400.7 + CR 701.24c: a library card put into its own library at no stated
-    // position does not change zones; a shuffle the instruction names is its own step.
-    if from_zone == Zone::Library && dest_zone == Zone::Library && library_placement.is_none() {
-        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+    // CR 701.20b + CR 701.20d + CR 400.7: a card already in the library put into
+    // its own library does not change zones. When a placement position is stated,
+    // reorder it within the library through the library authority without constructing
+    // a zone-change proposal or consulting replacements. Without a stated position,
+    // it remains in place.
+    if from_zone == Zone::Library && dest_zone == Zone::Library {
+        if let Some(position) = library_placement {
+            let index = match position {
+                LibraryPosition::Top => Some(0),
+                LibraryPosition::Bottom => None,
+                LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
+                LibraryPosition::BeneathTop { depth } => match depth {
+                    crate::types::ability::QuantityExpr::Fixed { value } => {
+                        Some(value.max(0) as usize)
+                    }
+                    _ => None,
+                },
+                LibraryPosition::RandomWithinTop { .. } => None,
+            };
+            let delivery_start = events.len();
+            zones::move_to_library_at_index(state, obj_id, index, events);
+            return ZoneMoveTerminalResult::Completed(zone_move_completion_from_delivery(
+                member,
+                &events[delivery_start..],
+            ));
+        } else {
+            return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+        }
     }
     // Boss-stage Horde (Turtle Team-Up booklet, printed p. 7): Boss-owned
     // cards bound for hand go to their graveyard "instead". Normalize the
@@ -6518,6 +6610,7 @@ mod w3_library_placement_tests {
             .expect("parent batch retains its pre-delivery latch");
         let parent_group_id = parent_group.logical_group_id;
         state.push_batch_delivery(PendingBatchDeliveries {
+            library_reorder: None,
             logical_zone_change_group: parent_group,
             paused_current: None,
             remaining: Vec::new(),
@@ -8431,5 +8524,253 @@ mod effect_driven_entry_noop_tests {
 
         assert!(matches!(result, ZoneMoveResult::Done), "the move completed");
         assert!(events.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod library_reorder_carrier_tests {
+    use super::*;
+    use crate::game::zones::{create_object, LibraryReorderOperation};
+    use crate::types::game_state::BatchCompletion;
+    use crate::types::identifiers::CardId;
+
+    /// CR 701.20d + CR 616.1: a library placement that paused on a replacement
+    /// ordering choice still owes its whole-library reorder. The operation rides
+    /// the batch resume carrier and settles when the drain completes the
+    /// instruction — before the completion (cleanup / continuation) runs, which
+    /// this witness pins by clearing one member's reveal inside the completion.
+    #[test]
+    fn paused_library_reorder_settles_before_the_batch_completion() {
+        let mut state = GameState::new_two_player(42);
+        let top = create_object(
+            &mut state,
+            CardId(92001),
+            PlayerId(0),
+            "Reorder A".to_string(),
+            Zone::Library,
+        );
+        let bottom = create_object(
+            &mut state,
+            CardId(92002),
+            PlayerId(0),
+            "Reorder B".to_string(),
+            Zone::Library,
+        );
+        state.library_of_mut(PlayerId(0)).push_back(top);
+        state.library_of_mut(PlayerId(0)).push_back(bottom);
+        state.revealed_cards.insert(top);
+        state.revealed_cards.insert(bottom);
+        let top_incarnation = state.objects[&top].incarnation;
+        let bottom_incarnation = state.objects[&bottom].incarnation;
+
+        // The paused delivery's completed arrangement (a genuine reorder).
+        let reorder = LibraryReorderOperation::begin(&state, &[top, bottom]);
+        let reversed: im::Vector<ObjectId> = state
+            .library_of(PlayerId(0))
+            .iter()
+            .rev()
+            .copied()
+            .collect();
+        *state.library_of_mut(PlayerId(0)) = reversed;
+
+        let logical_zone_change_group =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[]);
+        state.push_batch_delivery(PendingBatchDeliveries {
+            library_reorder: Some(reorder),
+            logical_zone_change_group,
+            paused_current: None,
+            remaining: Vec::new(),
+            destination: Zone::Library,
+            source_id: None,
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            // CR 701.20d: this cleanup drops `top`'s public reveal. Settlement
+            // must therefore run first or the retirement finds nothing.
+            completion: Some(BatchCompletion::ManifestDreadCleanup {
+                player: PlayerId(0),
+                revealed: vec![top],
+            }),
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: Vec::new(),
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+        });
+        assert!(
+            state.active_batch_delivery().is_some(),
+            "reach guard: the paused carrier is the active batch"
+        );
+
+        let mut events = Vec::new();
+        drain_pending_batch_deliveries(&mut state, &mut events);
+
+        assert!(
+            state.active_batch_delivery().is_none(),
+            "the drained delivery settles its owner"
+        );
+        assert!(
+            state.objects[&top].incarnation > top_incarnation,
+            "CR 701.20d: the reordered member became a new object before cleanup ran"
+        );
+        assert!(
+            state.objects[&bottom].incarnation > bottom_incarnation,
+            "CR 701.20d: every reordered member becomes a new object"
+        );
+        assert!(
+            !state.revealed_cards.contains(&bottom),
+            "a member the completion did not touch is retired too"
+        );
+    }
+
+    /// Library `[A, B]` owned by player 0. A's position is public
+    /// (`revealed_cards`); B is revealed only by a stack-bound lease (CR 701.20a),
+    /// which publishes its identity but not its library position.
+    struct LeasedPile {
+        state: GameState,
+        source: ObjectId,
+        a: ObjectId,
+        b: ObjectId,
+        incarnations: [u64; 2],
+    }
+
+    fn leased_pile() -> LeasedPile {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(92010),
+            PlayerId(0),
+            "Placement source".to_string(),
+            Zone::Battlefield,
+        );
+        let a = create_object(
+            &mut state,
+            CardId(92011),
+            PlayerId(0),
+            "Pile A".to_string(),
+            Zone::Library,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(92012),
+            PlayerId(0),
+            "Pile B".to_string(),
+            Zone::Library,
+        );
+        state.library_of_mut(PlayerId(0)).clear();
+        state.library_of_mut(PlayerId(0)).push_back(a);
+        state.library_of_mut(PlayerId(0)).push_back(b);
+        state.revealed_cards.insert(a);
+        state.grant_stack_bound_reveal(ObjectId(92019), &[b]);
+        let incarnations = [state.objects[&a].incarnation, state.objects[&b].incarnation];
+        LeasedPile {
+            state,
+            source,
+            a,
+            b,
+            incarnations,
+        }
+    }
+
+    /// The pile's bottom placement in the order `[B, A]`: B is already at the
+    /// bottom, so its own delivery leaves it in place; A's delivery then shifts
+    /// B up one slot. The per-card reorder retires the moved A but spares the
+    /// shifted B, whose lease publishes no position — only the whole-arrangement
+    /// settlement knows B was one of the cards this instruction reordered.
+    fn bottom_requests(pile: &LeasedPile) -> Vec<ZoneMoveRequest> {
+        [pile.b, pile.a]
+            .into_iter()
+            .map(|id| {
+                ZoneMoveRequest::effect(id, Zone::Library, pile.source)
+                    .at_library_position(LibraryPosition::Bottom)
+            })
+            .collect()
+    }
+
+    /// CR 701.20d: both members were reordered by the one instruction, so each
+    /// stops being revealed — lease included — and becomes exactly one new
+    /// object.
+    fn assert_pile_settled(pile: &LeasedPile) {
+        let state = &pile.state;
+        assert_eq!(
+            state
+                .library_of(PlayerId(0))
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![pile.b, pile.a],
+            "reach guard: the chosen bottom order was delivered"
+        );
+        for ((id, label), before) in [(pile.a, "A"), (pile.b, "B")]
+            .into_iter()
+            .zip(pile.incarnations)
+        {
+            assert_eq!(
+                state.objects[&id].incarnation,
+                before + 1,
+                "{label} becomes exactly one new object"
+            );
+            assert!(
+                !state.revealed_cards.contains(&id) && !state.holds_stack_bound_reveal(id),
+                "{label} stops being revealed"
+            );
+        }
+    }
+
+    /// CR 701.20d: the synchronous delivery path settles the whole-arrangement
+    /// reorder itself. Without that settlement B keeps its lease and its old
+    /// occurrence.
+    #[test]
+    fn synchronous_placement_settles_a_member_only_the_arrangement_reordered() {
+        let mut pile = leased_pile();
+        let reorder = LibraryReorderOperation::begin(&pile.state, &[pile.b, pile.a]);
+        let requests = bottom_requests(&pile);
+        let mut events = Vec::new();
+        let result = move_objects_simultaneously_settling_then(
+            &mut pile.state,
+            requests,
+            Some(reorder),
+            None,
+            &mut events,
+        );
+        assert!(matches!(result, BatchMoveResult::Done));
+        assert_pile_settled(&pile);
+    }
+
+    /// CR 701.20d + CR 616.1: the same arrangement resumed from its parked
+    /// carrier. The drain delivers the remaining members one at a time and its
+    /// terminal settlement retires B; without it B keeps its lease and its old
+    /// occurrence.
+    #[test]
+    fn drained_placement_settles_a_member_only_the_arrangement_reordered() {
+        let mut pile = leased_pile();
+        let reorder = LibraryReorderOperation::begin(&pile.state, &[pile.b, pile.a]);
+        let logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+            &mut pile.state,
+            &[pile.b, pile.a],
+        );
+        pile.state.push_batch_delivery(PendingBatchDeliveries {
+            library_reorder: Some(reorder),
+            logical_zone_change_group,
+            paused_current: None,
+            remaining: vec![pile.b, pile.a],
+            destination: Zone::Library,
+            source_id: Some(pile.source),
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: Some(LibraryPosition::Bottom),
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: vec![pile.b, pile.a],
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+        });
+
+        let mut events = Vec::new();
+        drain_pending_batch_deliveries(&mut pile.state, &mut events);
+
+        assert!(pile.state.active_batch_delivery().is_none());
+        assert_pile_settled(&pile);
     }
 }

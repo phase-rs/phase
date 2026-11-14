@@ -647,6 +647,11 @@ pub(crate) fn anticipated_zone_change_delivery(
     face_down_in_exile: crate::types::ability::ExileConcealment,
 ) -> Option<PendingZoneChangeDelivery> {
     let object = state.objects.get(&object_id)?;
+    // CR 701.20b + CR 400.6: In-library reorders are not moves between zones;
+    // they construct no zone-change proposal.
+    if object.zone == Zone::Library && destination == Zone::Library {
+        return None;
+    }
     let mut expected_event =
         ProposedEvent::zone_change(object_id, object.zone, destination, Some(source_id));
     if let ProposedEvent::ZoneChange {
@@ -1682,6 +1687,7 @@ pub fn resolve(
                 .expect("paused ChangeZone retains its explicit delivery prefix");
                 state.push_change_zone_iteration(
                     crate::types::game_state::PendingChangeZoneIteration {
+                        library_reorder: None,
                         pending_return_result_producer: None,
                         logical_zone_change_group,
                         paused_current: anticipated_pause.map(|mut boundary| {
@@ -1730,6 +1736,7 @@ pub fn resolve(
                 .expect("paused ChangeZone retains its explicit delivery prefix");
                 state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
+                        library_reorder: None,
                         pending_return_result_producer: None,
                         logical_zone_change_group,
                         paused_current: Some(
@@ -3314,6 +3321,12 @@ pub fn resolve_all(
         use rand::seq::SliceRandom;
         matching.shuffle(state.rng.draw(RandomDraw::Placement));
     }
+    // CR 701.20d: the members are delivered one at a time, but the instruction
+    // reorders the library once; settle reveal retirement for the whole set.
+    // A CR 616.1 pause inside the loop hands the operation to the resume
+    // carrier, so the drain that completes the instruction settles it.
+    let mut library_reorder = (dest_zone == Zone::Library)
+        .then(|| crate::game::zones::LibraryReorderOperation::begin(state, &matching));
 
     let mut moved_count: i32 = 0;
     let mut logical_zone_change_group =
@@ -3335,13 +3348,20 @@ pub fn resolve_all(
         // control" effects.
         // CR 122.1 + CR 122.1h: each object enters with the resolved counters
         // (e.g. a finality counter on Shilgengar's mass return).
-        let anticipated_pause = anticipated_zone_change_delivery(
-            state,
-            obj_id,
-            dest_zone,
-            ability.source_id,
-            ability.context.face_down_in_exile,
-        );
+        // CR 701.20b + CR 400.6: In-library reorders are not moves between zones;
+        // classify same-library placement before anticipated capture.
+        let is_same_library = per_object_origin == Zone::Library && dest_zone == Zone::Library;
+        let anticipated_pause = if is_same_library {
+            None
+        } else {
+            anticipated_zone_change_delivery(
+                state,
+                obj_id,
+                dest_zone,
+                ability.source_id,
+                ability.context.face_down_in_exile,
+            )
+        };
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
         match crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
@@ -3417,6 +3437,10 @@ pub fn resolve_all(
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
                 state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
+                        // CR 701.20d + CR 616.1: the whole-library reorder this
+                        // instruction performs settles when the resumed tail
+                        // completes.
+                        library_reorder: library_reorder.take(),
                         pending_return_result_producer: None,
                         logical_zone_change_group,
                         paused_current: (!entry_target_choice).then(|| {
@@ -3487,6 +3511,10 @@ pub fn resolve_all(
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
                 state.push_change_zone_iteration(
                     crate::types::game_state::PendingChangeZoneIteration {
+                        // CR 701.20d + CR 616.1: the whole-library reorder this
+                        // instruction performs settles when the resumed tail
+                        // completes.
+                        library_reorder: library_reorder.take(),
                         pending_return_result_producer: None,
                         logical_zone_change_group,
                         paused_current: anticipated_pause.map(|mut boundary| {
@@ -3531,6 +3559,9 @@ pub fn resolve_all(
                 return Ok(());
             }
         }
+    }
+    if let Some(library_reorder) = library_reorder {
+        library_reorder.finish(state);
     }
     // CR 614.13a: the whole co-entry event completed without pausing — clear the
     // pre-entry Devour snapshot (its lifetime = this one ChangeZone-to-battlefield
@@ -10089,6 +10120,17 @@ mod tests {
         assert_eq!(state.priority_player, PlayerId(1));
         assert_eq!(put_at_library_position_resolutions(&conceded.events), 0);
 
+        // CR 701.20a + CR 401.4: the reveal membership of an owner-ordered pile
+        // must survive the elections standing between the reveal and the
+        // placement, or the CR 701.20d retirement never finds the cards.
+        let seeded: Vec<(ObjectId, u64)> = [p1_a, p1_b, p2_a, p2_b]
+            .into_iter()
+            .map(|card| {
+                state.revealed_cards.insert(card);
+                (card, state.objects[&card].incarnation)
+            })
+            .collect();
+
         // (3) P2 is elected and arranges P1's batch.
         apply_as_current(
             &mut state,
@@ -10102,6 +10144,12 @@ mod tests {
             (PlayerId(2), PlayerId(1), Some(PlayerId(2)))
         );
         assert_eq!(state.priority_player, PlayerId(2));
+        assert!(
+            seeded
+                .iter()
+                .all(|(card, _)| state.revealed_cards.contains(card)),
+            "the election answer keeps the arrangement's reveal membership"
+        );
 
         // (4) REVERT-FAILING: the queued batch still names the departed P0, so
         // it is elected too, by P1 again.
@@ -10152,6 +10200,19 @@ mod tests {
         assert_eq!(library_ids(&state, PlayerId(2)), vec![p2_b, p2_a, p2_deep]);
         assert_eq!(put_at_library_position_resolutions(&completed.events), 1);
         assert!(state.pending_mass_library_order_choice.is_none());
+        // CR 701.20d: the one simultaneous arrangement reorders both piles, so
+        // every revealed member retires and becomes a new object.
+        for (card, incarnation) in seeded {
+            assert_eq!(
+                state.objects[&card].incarnation,
+                incarnation + 1,
+                "{card:?} is a new object after the arrangement"
+            );
+        }
+        assert!(
+            state.revealed_cards.is_empty(),
+            "no arranged card is still revealed"
+        );
     }
 
     /// CR 608.2m + CR 800.4g + CR 800.4h: a departed controller's resolution
@@ -10617,6 +10678,7 @@ mod tests {
         let logical_zone_change_group =
             crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[hero, soldier]);
         state.push_change_zone_iteration(crate::types::game_state::PendingChangeZoneIteration {
+            library_reorder: None,
             pending_return_result_producer: None,
             logical_zone_change_group,
             paused_current: None,

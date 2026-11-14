@@ -165,15 +165,21 @@ fn resolve_reveal(
     // CR 701.20a: Reveal cards one at a time until `target_match_count` matches
     // are found (or the library is exhausted). `target_match_count == 0` reveals
     // nothing (CR 701.20a — the until-condition is already satisfied).
+    // CR 701.20a: `revealed_in_order` is the visited prefix in library order —
+    // the order the cards are actually revealed — and is what the reveal
+    // publishes. The hit/miss lists drive destination handling only.
+    let mut revealed_in_order: Vec<ObjectId> = Vec::new();
     if target_match_count > 0 {
         for &card_id in &library {
             if matches_target_filter(state, card_id, filter, &ctx) {
                 hit_cards.push(card_id);
+                revealed_in_order.push(card_id);
                 if hit_cards.len() >= target_match_count {
                     break;
                 }
             } else {
                 revealed_misses.push(card_id);
+                revealed_in_order.push(card_id);
             }
         }
     }
@@ -188,28 +194,26 @@ fn resolve_reveal(
         None
     };
 
-    // Build the full list of revealed card IDs for the event.
-    let mut all_revealed: Vec<ObjectId> = revealed_misses.clone();
-    all_revealed.extend(&hit_cards);
-
     state
         .resolve_and_apply_information(
-            &all_revealed,
+            &revealed_in_order,
             ResolvedInformationAudience::Controller(ability.controller),
             ResolvedInformationLifetime::UntilActionBoundary,
             ResolvedInformationEdit::Reveal,
         )
         .expect("resolved reveal-until occurrences must be live and distinct");
 
-    // CR 701.20a + CR 400.7: Only reveal-only and paused optional dispositions
-    // retain these exact library occurrences after the resolver returns. Publish
-    // those occurrences here, before any later zone change can create a new one.
-    if matches!(matched_disposition, RevealUntilDisposition::RevealOnly)
-        || matches!((kept_optional_to, hit_cards.as_slice()), (Some(_), [_]))
-    {
+    // CR 701.20a + CR 400.7: A paused optional disposition (single hit with a
+    // controller choice) retains the exact library occurrence until the choice
+    // resolves and the card changes zones. RevealOnly has no zone change, so
+    // its public reveal lifetime is bounded by the action boundary (the
+    // Controller reveal at UntilActionBoundary already makes cards visible to
+    // all viewers via filter_state_for_scope). Do NOT publish a Public
+    // UntilZoneChange reveal for RevealOnly — it would never retire.
+    if matches!((kept_optional_to, hit_cards.as_slice()), (Some(_), [_])) {
         state
             .resolve_and_apply_information(
-                &all_revealed,
+                &revealed_in_order,
                 ResolvedInformationAudience::Public,
                 ResolvedInformationLifetime::UntilZoneChange,
                 ResolvedInformationEdit::Reveal,
@@ -218,32 +222,54 @@ fn resolve_reveal(
     }
 
     // Emit CardsRevealed for all revealed cards.
-    let card_names: Vec<String> = all_revealed
+    let card_names: Vec<String> = revealed_in_order
         .iter()
         .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
         .collect();
     events.push(GameEvent::CardsRevealed {
         player: revealing_player,
-        card_ids: all_revealed.clone(),
+        card_ids: revealed_in_order.clone(),
         card_names,
     });
 
     // Store revealed IDs for downstream reference.
-    state.last_revealed_ids = all_revealed.clone();
+    state.last_revealed_ids = revealed_in_order.clone();
     // CR 608.2c + CR 701.20a: "[quantity] revealed this way" names the cards this
     // reveal revealed — every card looked at until the until-condition was met,
     // matching or not. Publish them as the chain's tracked set so a downstream
     // "the number of nonland cards revealed this way" reads the revealed
     // population (Goblin Charbelcher) even after the cards have been moved.
-    if all_revealed.is_empty() {
+    if revealed_in_order.is_empty() {
         super::publish_fresh_tracked_set(state, Vec::new());
     } else {
-        super::publish_tracked_set(state, all_revealed.clone());
+        super::publish_tracked_set(state, revealed_in_order.clone());
     }
 
     // CR 701.20b: reveal-only until-loop — cards stay in their zones (Sanar's
     // Vivid draws nothing to hand before per-color exile from the library).
     if matches!(matched_disposition, RevealUntilDisposition::RevealOnly) {
+        // CR 701.20a: a card remains revealed for as long as necessary to complete
+        // the parts of the effect that card is relevant to. When RevealOnly has no
+        // subsequent instruction (Mind Funeral's partial resolution where the graveyard
+        // delivery is unsupported), its reveal lifetime concludes when the instruction
+        // completes. Retire the transient reveal so opponent and spectator snapshots
+        // conceal the library occurrences and positions before any additional action.
+        // Downstream placements (Erratic Mutation, Charbelcher) keep reveals visible
+        // across their execution and prompts.
+        let has_downstream_consumer = ability
+            .sub_ability
+            .as_ref()
+            .is_some_and(|sub| !matches!(&sub.effect, Effect::Unimplemented { .. }));
+        if !has_downstream_consumer {
+            state
+                .resolve_and_apply_information(
+                    &revealed_in_order,
+                    ResolvedInformationAudience::Controller(ability.controller),
+                    ResolvedInformationLifetime::UntilActionBoundary,
+                    ResolvedInformationEdit::Hide,
+                )
+                .expect("resolved reveal-only occurrences must be live and distinct");
+        }
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RevealUntil,
             source_id: ability.source_id,
@@ -293,6 +319,9 @@ fn resolve_reveal(
         _ => None,
     };
     if let Some(pile_destination) = whole_pile_destination {
+        // Destination handling groups the misses ahead of the hits.
+        let mut all_revealed = revealed_misses.clone();
+        all_revealed.extend(&hit_cards);
         let clear_markers = all_revealed.clone();
         // CR 608.2d + CR 401.4: a library pile "in any order" (PlayerChoice) of
         // 2+ cards pauses for the library's owner to announce their bottom order.
@@ -763,7 +792,20 @@ pub(crate) fn move_rest_then(
                     library_bottom_requests_in_preserve_order(cards)
                 }
             };
-            zone_pipeline::move_objects_simultaneously_then(state, reqs, completion, events)
+            // CR 701.20d: the pile is delivered one card at a time; once it has
+            // been placed, the whole pile is one reorder of the library. The
+            // delivery authority owns that reorder, so it settles before the
+            // completion's reveal cleanup — synchronously or after a CR 616.1
+            // pause — and a completion that parks a child operation cannot strand
+            // it in a batch record this caller no longer owns.
+            let library_reorder = crate::game::zones::LibraryReorderOperation::begin(state, cards);
+            zone_pipeline::move_objects_simultaneously_settling_then(
+                state,
+                reqs,
+                Some(library_reorder),
+                completion,
+                events,
+            )
         }
         dest => {
             // CR 400.7: the rest cards move themselves to `dest`; each anchors
@@ -1128,12 +1170,11 @@ mod tests {
         assert_eq!(revealed.unwrap().len(), 3);
     }
 
-    /// C5 discriminating test (CR 614.6 + CR 701.20a): a kept card placed back
-    /// into a library must run the `Moved` replacement consult. The old raw
-    /// `move_to_zone(..., Library)` skipped this synthetic Library→Exile
-    /// redirect and left the card in the library.
+    /// CR 701.20b + CR 400.7: a kept card put "back" into the library it is
+    /// already in is a reorder, not a zone change, so the synthetic
+    /// Library→Exile redirect has no event to replace.
     #[test]
-    fn reveal_until_kept_library_redirected_to_exile() {
+    fn reveal_until_kept_library_to_library_is_not_redirected() {
         let mut state = GameState::new_two_player(42);
         install_library_to_exile_redirect(&mut state);
 
@@ -1161,8 +1202,8 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.objects[&creature].zone, Zone::Exile);
-        assert!(!state.players[0].library.contains(&creature));
+        assert_eq!(state.objects[&creature].zone, Zone::Library);
+        assert!(state.players[0].library.contains(&creature));
     }
 
     /// C5 discriminating test (CR 614.6 + CR 701.20a): a kept card put into a
@@ -1201,12 +1242,11 @@ mod tests {
         assert!(!state.players[0].hand.contains(&creature));
     }
 
-    /// C5 discriminating test (CR 614.6 + CR 701.20a): a reveal-until rest pile
-    /// returned to the bottom of a library must still run through the placement
-    /// pipeline. The old raw `move_to_library_position(..., bottom)` skipped
-    /// this synthetic Library→Exile redirect.
+    /// CR 701.20b + CR 400.7: a reveal-until rest pile bottomed in the library
+    /// it was revealed from is reordered in place, not moved, so the synthetic
+    /// Library→Exile redirect must not fire.
     #[test]
-    fn reveal_until_library_rest_redirected_to_exile() {
+    fn reveal_until_library_rest_reorder_is_not_redirected() {
         let mut state = GameState::new_two_player(42);
         install_library_to_exile_redirect(&mut state);
 
@@ -1250,8 +1290,8 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(state.players[0].hand.contains(&creature));
-        assert_eq!(state.objects[&land].zone, Zone::Exile);
-        assert!(!state.players[0].library.contains(&land));
+        assert_eq!(state.objects[&land].zone, Zone::Library);
+        assert!(state.players[0].library.contains(&land));
     }
 
     #[test]
