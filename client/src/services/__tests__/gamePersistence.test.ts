@@ -24,7 +24,9 @@ import {
   clearFullTerminalCleanupStrict,
   clearGame,
   clearGameStrict,
+  clearNativeSoloSession,
   listFullTerminalCleanupStrict,
+  markNativeSoloSessionTerminal,
   loadGame,
   loadFullTerminalCleanupStrict,
   loadGameStrict,
@@ -450,6 +452,61 @@ describe("game persistence", () => {
     });
 
     await expect(loadP2PHostSession("legacy-p2p")).resolves.toBeNull();
+  });
+
+  describe("native solo recovery pointer", () => {
+    const session = {
+      gameCode: "NATIVE", playerId: 0, playerToken: "pre-terminal-token",
+      fullKey: { game_code: "NATIVE", generation: 3 },
+    };
+    const pointer = { id: "native-game", mode: "ai" as const, difficulty: "Medium", nativeSession: session };
+    const stored = () => JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY) ?? "null");
+
+    const clears = [["clearGame", clearGame], ["clearGameStrict", clearGameStrict]] as const;
+
+    it.each(clears)("%s keeps a pointer saved for another game while it awaits IndexedDB", async (_name, clear) => {
+      saveActiveGame(pointer);
+      let release!: () => void;
+      vi.mocked(idbDel).mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve(); }));
+      const pending = clear("native-game");
+      const replacement = { id: "rematch-game", mode: "ai" as const, difficulty: "Medium" };
+      saveActiveGame(replacement);
+      release();
+      await pending;
+      expect(stored()).toEqual(replacement);
+    });
+
+    it.each(clears)("%s leaves a terminal-only pointer to its acknowledgement", async (_name, clear) => {
+      saveActiveGame(pointer);
+      markNativeSoloSessionTerminal("native-game", session);
+      expect(stored()).toEqual({ ...pointer, nativeSession: { ...session, terminalOnly: true } });
+      await clear("native-game");
+      expect(stored()).toEqual({ ...pointer, nativeSession: { ...session, terminalOnly: true } });
+      // Control: the same game's playable pointer is game cleanup's to remove.
+      saveActiveGame(pointer);
+      await clear("native-game");
+      expect(stored()).toBeNull();
+    });
+
+    it("marks and clears only the pointer holding the same game and session", () => {
+      const replacements = [
+        { ...pointer, id: "other-game" },
+        { ...pointer, nativeSession: { ...session, playerToken: "other-token" } },
+        { ...pointer, nativeSession: { ...session, fullKey: { game_code: "NATIVE", generation: 4 } } },
+        { id: "native-game", mode: "ai" as const, difficulty: "Medium" },
+      ];
+      for (const replacement of replacements) {
+        saveActiveGame(replacement);
+        markNativeSoloSessionTerminal("native-game", session);
+        expect(stored()).toEqual(replacement);
+        clearNativeSoloSession("native-game", session);
+        expect(stored()).toEqual(replacement);
+      }
+      saveActiveGame(pointer);
+      markNativeSoloSessionTerminal("native-game", session);
+      clearNativeSoloSession("native-game", session);
+      expect(stored()).toBeNull();
+    });
   });
 });
 

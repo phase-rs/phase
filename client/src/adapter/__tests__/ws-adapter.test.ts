@@ -1426,6 +1426,34 @@ describe("WebSocketAdapter", () => {
       nativeAdapter.dispose();
       expect(events).not.toContainEqual({ type: "sessionChanged", session: null });
     });
+
+    it.each([
+      ["an empty delivery", {}],
+      ["a delivery without a credential", { ...nativeDelivery, credential: "" }],
+      ["another generation's delivery", { ...nativeDelivery, key: { game_code: "NATIVE", generation: 2 } }],
+      ["another game's delivery", { ...nativeDelivery, key: { game_code: "OTHER", generation: 1 } }],
+    ])("leaves the live session's error and reconnect paths intact after %s", async (_case, delivery) => {
+      const { nativeAdapter, nativeSocket, socketFactory, events } = await liveNativeGame();
+
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({ type: "TerminalResult", data: { delivery } }));
+      await Promise.resolve();
+
+      // Nothing was retained, published or acknowledged.
+      expect(terminalStore.commit).not.toHaveBeenCalled();
+      const types = () => events.map((event) => event.type);
+      expect(types()).not.toContain("terminalDelivery");
+      expect(types()).not.toContain("terminalUnavailable");
+      expect(types()).not.toContain("sessionChanged");
+      expect(socketFactory).toHaveBeenCalledOnce();
+
+      // The same transport failures a matching delivery suppresses still reach
+      // their consumers: the error, then a reconnect attempt on close.
+      nativeSocket.dispatchSynthetic("error");
+      expect(events).toContainEqual({ type: "error", message: "WebSocket connection failed" });
+      nativeSocket.dispatchSynthetic("close", undefined, new CloseEvent("close", { code: 1006, wasClean: false }));
+      await vi.waitFor(() => expect(types()).toContain("reconnecting"));
+      nativeAdapter.dispose();
+    });
   });
 
   describe("native P2P pregame transport", () => {

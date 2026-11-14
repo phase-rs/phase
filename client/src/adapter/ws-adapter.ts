@@ -59,6 +59,7 @@ import { isValidWebSocketUrl, mixedContentBlockReason } from "../services/server
 import type { FullSessionKey, WsSessionData } from "../services/multiplayerSession";
 import {
   commitFullTerminalDelivery,
+  isValidFullTerminalDelivery,
   type FullTerminalDelivery,
 } from "../services/fullTerminalResult";
 import {
@@ -4715,8 +4716,11 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "TerminalResult": {
-        const delivery = (msg.data as { delivery?: FullTerminalDelivery }).delivery;
-        if (!delivery) break;
+        const delivery = (msg.data as { delivery?: unknown }).delivery;
+        // Only a well-formed delivery for this attachment's exact Full identity
+        // ends the game. Anything else is ignored before it can claim terminal
+        // ownership, so the live session keeps its error and reconnect paths.
+        if (!this.acceptsTerminalDelivery(delivery)) break;
         // Claim terminal ownership at frame acceptance, before any await. A
         // transport error or close that lands while the delivery is being
         // persisted must not surface as a session failure (whose consumers
@@ -4968,6 +4972,18 @@ export class WebSocketAdapter implements EngineAdapter {
       return new AdapterError("WS_ERROR", "Server changed the Full session identity", false);
     }
     return null;
+  }
+
+  /**
+   * A terminal delivery is accepted only once this attachment holds an exact
+   * Full identity and the delivery names that same game and generation.
+   * Unlike `acceptFullSessionKey`, a mismatch does not latch a session
+   * rejection: the foreign frame is dropped and the live session is untouched.
+   */
+  private acceptsTerminalDelivery(delivery: unknown): delivery is FullTerminalDelivery {
+    return isValidFullTerminalDelivery(delivery)
+      && this.fullSessionKey !== null
+      && sameFullSessionKey(this.fullSessionKey, delivery.key);
   }
 
   /** Allows legacy follow-up frames only until the server establishes an exact Full identity. */

@@ -428,6 +428,8 @@ describe("GameProvider join origin", () => {
       "wss://session.example/ws",
       "d1",
       "c1",
+      // A browser route has no socket factory; native routes supply one.
+      undefined,
     );
     expect(replaceFullTerminalDelivery.mock.invocationCallOrder[0])
       .toBeLessThan(acknowledgeFullTerminalDelivery.mock.invocationCallOrder[0]);

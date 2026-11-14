@@ -17,7 +17,6 @@ import {
   NativeEngineVersionMismatchError,
   WebSocketAdapter,
   acknowledgeFullTerminalDelivery,
-  bootstrapFullTerminalDelivery,
   readFullTerminalResult,
 } from "../adapter/ws-adapter";
 import { audioManager } from "../audio/AudioManager";
@@ -62,18 +61,16 @@ import { inspectActiveQuickDraftLifecycle, loadDraftRun } from "../services/quic
 import {
   clearFullTerminalCleanupStrict,
   clearGameStrict,
+  clearNativeSoloSession,
   loadFullTerminalCleanupStrict,
   loadGameStrict,
+  markNativeSoloSessionTerminal,
+  type NativeSoloSessionIdentity,
 } from "../services/gamePersistence";
 import type { DraftRunState } from "../services/quickDraftPersistence";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
-import {
-  commitFullTerminalDelivery,
-  loadFullTerminalDelivery,
-  replaceFullTerminalDelivery,
-  type FullTerminalDelivery,
-} from "../services/fullTerminalResult";
+import { recoverFullTerminal } from "../services/fullTerminalRecovery";
 import { detectServerUrl } from "../services/serverDetection";
 import {
   canAttemptNativeEngine,
@@ -381,6 +378,9 @@ function nativeFallbackReason(error: unknown): string {
     ? "server_version_mismatch"
     : "native_engine_unavailable";
 }
+
+// Server address of the shell-owned native engine; its sockets come from a factory.
+const NATIVE_ENGINE_SERVER_URL = "native-engine";
 
 // The empty decklist a seat submits when it has no deck to send.
 const EMPTY_PARSED_DECK: ParsedDeck = { main: [], sideboard: [] };
@@ -1455,108 +1455,24 @@ export function GameProvider({
           return;
         }
         if (reconnectSession) {
-          const terminalDelivery = await loadFullTerminalDelivery(reconnectSession.fullKey);
-          if (cancelled) return;
-          if (reconnectSession.terminalOnly && !terminalDelivery) {
-            onWsEventRef.current?.({
-              type: "terminalUnavailable",
-              message: tRef.current("gameProvider.toasts.retainedTerminalUnreadable"),
-            });
-            return;
-          }
-
-          if (terminalDelivery) {
-            // A retained terminal capability is read only through the small raw
-            // socket helper. This branch intentionally returns before any
-            // playable adapter, controller, deck, or reconnect setup exists.
-            saveWsSession({ ...reconnectSession, terminalOnly: true }, reconnectSession);
-            // Show the cached result summary immediately. A refreshed delivery
-            // must establish matching authority before reusing a private view.
-            onWsEventRef.current?.({
-              type: "terminalDelivery", delivery: { ...terminalDelivery, finalView: undefined },
-            });
-            try {
-              const refreshed = await readFullTerminalResult(
-                reconnectSession.serverUrl,
-                terminalDelivery.credential,
-              );
-              if (cancelled) return;
-              const retainsLocalFinalView = refreshed !== null
-                && refreshed.key.game_code === terminalDelivery.key.game_code
-                && refreshed.key.generation === terminalDelivery.key.generation
-                && refreshed.deliveryId === terminalDelivery.deliveryId
-                && refreshed.credential === terminalDelivery.credential
-                && refreshed.finalView === undefined
-                && terminalDelivery.finalView !== undefined;
-              const effectiveRefresh = retainsLocalFinalView
-                ? { ...refreshed, finalView: terminalDelivery.finalView }
-                : refreshed;
-              if (effectiveRefresh && !(await replaceFullTerminalDelivery(effectiveRefresh))) {
-                throw new Error("Failed to retain terminal delivery");
-              }
-              const display = effectiveRefresh ?? terminalDelivery;
-              void acknowledgeFullTerminalDelivery(
-                reconnectSession.serverUrl,
-                display.deliveryId,
-                display.credential,
-              ).then((acknowledged) => {
-                if (acknowledged && !cancelled) clearWsSession(reconnectSession);
-              }).catch(() => {});
-              onWsEventRef.current?.({
-                type: "terminalDelivery",
-                delivery: display,
-              });
-            } catch (error) {
-              if (!cancelled) {
-                useMultiplayerStore.getState().setConnectionStatus("disconnected");
-                onWsEventRef.current?.({
-                  type: "terminalUnavailable",
-                  message: error instanceof Error ? error.message : "Terminal result is unavailable",
-                });
-              }
-            }
-            return;
-          }
-
-          let bootstrap: FullTerminalDelivery | null;
-          try {
-            bootstrap = await bootstrapFullTerminalDelivery(
-              reconnectSession.serverUrl,
-              reconnectSession.fullKey,
-              reconnectSession.playerToken,
-              crypto.randomUUID(),
-            );
-          } catch (error) {
-            if (!cancelled) {
-              useMultiplayerStore.getState().setConnectionStatus("disconnected");
-              onWsEventRef.current?.({
-                type: "terminalUnavailable",
-                message: error instanceof Error ? error.message : "Terminal result is unavailable",
-              });
-            }
-            return;
-          }
-          if (cancelled) return;
-          if (bootstrap) {
-            if (!(await commitFullTerminalDelivery(bootstrap))) {
-              useMultiplayerStore.getState().setConnectionStatus("disconnected");
-              onWsEventRef.current?.({
-                type: "terminalUnavailable",
-                message: "Failed to retain terminal delivery",
-              });
-              return;
-            }
-            saveWsSession({ ...reconnectSession, terminalOnly: true }, reconnectSession);
-            void acknowledgeFullTerminalDelivery(
-              reconnectSession.serverUrl,
-              bootstrap.deliveryId,
-              bootstrap.credential,
-            ).then((acknowledged) => {
-              if (acknowledged && !cancelled) clearWsSession(reconnectSession);
-            }).catch(() => {});
-            onWsEventRef.current?.({ type: "terminalDelivery", delivery: bootstrap });
-            return;
-          }
+          const outcome = await recoverFullTerminal(
+            {
+              serverUrl: reconnectSession.serverUrl,
+              fullKey: reconnectSession.fullKey,
+              playerToken: reconnectSession.playerToken,
+              terminalOnly: reconnectSession.terminalOnly === true,
+            },
+            {
+              isCancelled: () => cancelled,
+              emit: (event) => onWsEventRef.current?.(event),
+              onFailure: () => useMultiplayerStore.getState().setConnectionStatus("disconnected"),
+              unreadableMessage: tRef.current("gameProvider.toasts.retainedTerminalUnreadable"),
+              retainTerminalRoute: () =>
+                saveWsSession({ ...reconnectSession, terminalOnly: true }, reconnectSession),
+              releaseTerminalRoute: () => clearWsSession(reconnectSession),
+            },
+          );
+          if (outcome === "settled") return;
         }
         // Origin precedence: an explicit build override wins; then the
         // server a resumable session was recorded on (that server holds the
@@ -2184,10 +2100,37 @@ export function GameProvider({
           await ensureNativeEngine(nativeEngineKey);
           if (cancelled) return;
 
+          // The pointer is this game's only link to a result the server has
+          // retained, and a finished game's key no longer reconnects. Recover
+          // that result through the same terminal-only flow as online seats;
+          // only a seat the server reports as live resumes play.
+          if (nativeResume) {
+            const outcome = await recoverFullTerminal(
+              {
+                serverUrl: NATIVE_ENGINE_SERVER_URL,
+                fullKey: nativeResume.fullKey,
+                playerToken: nativeResume.playerToken,
+                terminalOnly: nativeResume.terminalOnly === true,
+                socketFactory: () => new NativeEngineSocket(),
+              },
+              {
+                isCancelled: () => cancelled,
+                emit: (event) => onWsEventRef.current?.(event),
+                unreadableMessage: tRef.current("gameProvider.toasts.retainedTerminalUnreadable"),
+                retainTerminalRoute: () => markNativeSoloSessionTerminal(gameId, nativeResume),
+                releaseTerminalRoute: () => clearNativeSoloSession(gameId, nativeResume),
+              },
+            );
+            if (outcome === "settled") {
+              if (!cancelled) setEngineMode("native");
+              return;
+            }
+          }
+
           const expectedServerVersion =
             "release" in nativeEngineKey ? nativeEngineKey.release.version : undefined;
           nativeAdapter = new WebSocketAdapter(
-            "native-engine",
+            NATIVE_ENGINE_SERVER_URL,
             "host",
             deckList?.player ?? emptySeatDeck(),
             undefined,
@@ -2218,7 +2161,21 @@ export function GameProvider({
                 },
           );
 
+          // The identity this game's pointer holds. The adapter decides when
+          // the session becomes terminal-only and when it ends; the pointer is
+          // the durable copy of that decision, so a result whose ACK never
+          // completed is recovered on the next open.
+          let pointerSession: NativeSoloSessionIdentity | null = nativeResume ?? null;
           const handleNativeEvent = (event: WsAdapterEvent) => {
+            if (event.type === "sessionChanged") {
+              if (event.session) {
+                pointerSession = event.session;
+                if (event.session.terminalOnly) markNativeSoloSessionTerminal(gameId, event.session);
+              } else if (pointerSession) {
+                clearNativeSoloSession(gameId, pointerSession);
+                pointerSession = null;
+              }
+            }
             if (event.type === "stateDelivery") {
               useMultiplayerStore.getState().setStateWithheld(event.withheld);
             }

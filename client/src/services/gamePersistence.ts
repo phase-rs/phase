@@ -43,7 +43,14 @@ export interface NativeSoloSession {
   playerId: PlayerId;
   playerToken: string;
   fullKey: FullSessionKey;
+  /** Set once this game's terminal delivery is committed locally. The pointer
+   *  then recovers only that result (re-display and ACK retry) and never
+   *  reconnects to gameplay; it is removed when the server acknowledges. */
+  terminalOnly?: true;
 }
+
+/** The server-issued identity a native solo pointer was saved for. */
+export type NativeSoloSessionIdentity = Pick<NativeSoloSession, "gameCode" | "playerToken" | "fullKey">;
 
 export interface ActiveGameMeta {
   id: string;
@@ -435,10 +442,9 @@ export async function clearGame(gameId: string): Promise<void> {
       await del(P2P_HOST_KEY_PREFIX + gameId, getGameStore());
     });
   } catch { /* best effort */ }
-  const active = loadActiveGame();
-  if (active?.id === gameId && !(await hasTerminalCleanup(gameId).catch(() => true))) {
-    clearActiveGame();
-  }
+  if (loadActiveGame()?.id !== gameId) return;
+  if (await hasTerminalCleanup(gameId).catch(() => true)) return;
+  clearReleasedActiveGame(gameId);
 }
 
 /** Remove every game-scoped record before reusing a game ID for a fresh start. */
@@ -449,10 +455,9 @@ export async function clearGameStrict(gameId: string): Promise<void> {
     await del(P2P_HOST_KEY_PREFIX + gameId, store);
     await del(GAME_KEY_PREFIX + gameId, store);
   });
-  const active = loadActiveGame();
-  if (active?.id === gameId && !(await hasTerminalCleanup(gameId))) {
-    clearActiveGame();
-  }
+  if (loadActiveGame()?.id !== gameId) return;
+  if (await hasTerminalCleanup(gameId)) return;
+  clearReleasedActiveGame(gameId);
 }
 
 export async function saveFullTerminalCleanupStrict(
@@ -586,4 +591,46 @@ export function loadActiveGame(): ActiveGameMeta | null {
 
 export function clearActiveGame(): void {
   localStorage.removeItem(ACTIVE_GAME_KEY);
+}
+
+/**
+ * Game cleanup's pointer release. The pointer is read here, after the caller's
+ * awaits, so one saved meanwhile for another game survives. A native pointer
+ * still recovering its terminal result is owned by that recovery and is
+ * released only by `clearNativeSoloSession` once the server acknowledges.
+ */
+function clearReleasedActiveGame(gameId: string): void {
+  const active = loadActiveGame();
+  if (active?.id === gameId && active.nativeSession?.terminalOnly !== true) clearActiveGame();
+}
+
+function holdsNativeSoloSession(
+  meta: ActiveGameMeta | null,
+  gameId: string,
+  expected: NativeSoloSessionIdentity,
+): meta is ActiveGameMeta & { nativeSession: NativeSoloSession } {
+  const session = meta?.nativeSession;
+  return meta?.id === gameId
+    && session !== undefined
+    && session.gameCode === expected.gameCode
+    && session.playerToken === expected.playerToken
+    && session.fullKey.game_code === expected.fullKey.game_code
+    && session.fullKey.generation === expected.fullKey.generation;
+}
+
+/** Marks this game's native pointer terminal-only. A pointer for any other
+ *  game or session is a replacement and is left untouched. */
+export function markNativeSoloSessionTerminal(
+  gameId: string,
+  expected: NativeSoloSessionIdentity,
+): void {
+  const active = loadActiveGame();
+  if (!holdsNativeSoloSession(active, gameId, expected)) return;
+  saveActiveGame({ ...active, nativeSession: { ...active.nativeSession, terminalOnly: true } });
+}
+
+/** Removes this game's native pointer after its session has ended. A pointer
+ *  for any other game or session is a replacement and is kept. */
+export function clearNativeSoloSession(gameId: string, expected: NativeSoloSessionIdentity): void {
+  if (holdsNativeSoloSession(loadActiveGame(), gameId, expected)) clearActiveGame();
 }

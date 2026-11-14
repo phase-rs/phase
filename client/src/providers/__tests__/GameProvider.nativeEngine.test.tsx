@@ -352,6 +352,12 @@ vi.mock("../../services/quickDraftPersistence", () => ({
   inspectActiveQuickDraftLifecycle,
 }));
 
+// Routing tests resume a live seat. The terminal recovery a resume runs first
+// is exercised end to end in GameProvider.nativeTerminalRecovery.test.tsx.
+vi.mock("../../services/fullTerminalRecovery", () => ({
+  recoverFullTerminal: vi.fn(async () => "reconnect"),
+}));
+
 vi.mock("../../services/serverDetection", () => ({
   detectServerUrl: vi.fn(async () => "ws://test-server"),
 }));
