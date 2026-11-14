@@ -55,6 +55,13 @@
     "slotTraditional": "传统轮抽",
     "slotWinston": "Winston 轮抽"
   },
+  "deckSubmitConfirm": {
+    "title": "提交这副套牌？",
+    "confirm": "确认提交",
+    "competitive": "这是竞技牌桌：你提交的套牌在所有轮次中均为最终版本。在三局两胜比赛的各局之间仍可替换备牌。",
+    "casual": "你仍可在轮次之间修改套牌。",
+    "final": "你提交的套牌为最终版本。"
+  },
   "formatPicker": {
     "bo3": {
       "description": "进行一场三局两胜的对战，各局之间可更换备牌。",
@@ -341,7 +348,10 @@
     "pairing": "配对中"
   },
   "podPhaseView": {
+    "backToStandings": "返回积分榜",
     "connectingOpponent": "正在连接对手…",
+    "editDeck": "编辑套牌",
+    "editDeckHint": "休闲牌桌：你可以在下一轮开始前修改套牌。",
     "hidePool": "隐藏牌池",
     "matchesInProgress": "进行中的对局",
     "nextRoundShortly": "下一轮即将开始…",
@@ -405,9 +415,11 @@
     "podSize": "轮抽桌人数",
     "podSizeDesc": "共 {{count}} 个座位。轮抽开始前可在房间中用机器人补足空座位。",
     "policyCasual": "休闲",
-    "policyCasualDesc": "选牌不限时，手动推进轮次，主持人可介入处理问题。",
+    "policyCasualDesc": "选牌不限时，手动推进轮次，主持人可介入处理问题，并可在轮次之间修改套牌。",
+    "policyCasualNoRoundsDesc": "选牌不限时，主持人可介入处理问题。",
     "policyCompetitive": "竞技",
-    "policyCompetitiveDesc": "选牌限时，超时自动选牌，并自动推进轮次。",
+    "policyCompetitiveDesc": "选牌限时，超时自动选牌，并自动推进轮次。提交的套牌为最终版本；只能在一场比赛的各局之间替换备牌。",
+    "policyCompetitiveNoRoundsDesc": "选牌限时，超时自动选牌。",
     "roomCode": "房间代码",
     "roomCodePlaceholder": "输入房间代码…",
     "roomName": "房间名称",

@@ -466,6 +466,7 @@ fn paycost_arm_exiles_cards_via_apply_as_current() {
     {
         let state = runner.state_mut();
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: P0,
             cards: vec![bears_id, giant_id, angel_id],
             count: 2,
@@ -487,6 +488,7 @@ fn paycost_arm_exiles_cards_via_apply_as_current() {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: true,
             enters_modified_if: None,

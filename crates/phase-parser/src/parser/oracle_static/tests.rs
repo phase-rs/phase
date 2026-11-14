@@ -9,12 +9,13 @@ use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
     CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageKindFilter,
     Duration, Effect, FilterProp, ObjectProperty, ObjectScope, Parity, ParitySource, PlayerFilter,
-    PlayerRelation, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
-    SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    PlayerRelation, PlayerScope, ProtectionDoesNotRemove, PtStat, PtValueScope, QuantityExpr,
+    QuantityRef, SharedQuality, SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
-use crate::types::keywords::{Keyword, WardCost};
+use crate::types::keywords::{Keyword, ProtectionColorSet, ProtectionTarget, WardCost};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 use crate::types::zones::Zone;
@@ -87,6 +88,33 @@ fn color_conditional_keyword_grant_single_pair() {
         defs[0].modifications,
         vec![ContinuousModification::AddKeyword {
             keyword: Keyword::Vigilance
+        }]
+    );
+}
+
+/// CR 611.3a + CR 608.2c: Predator's Gambit's printed "as long as its controller
+/// controls no other creatures" stays an explicit `Unrecognized` coverage gap.
+/// A static ability has no resolving target to bind the referent against, so the
+/// shared target-controller recognizer must not be reachable from
+/// `parse_inner_condition` and read an unbound parent-target controller.
+#[test]
+fn predators_gambit_controller_clause_stays_an_explicit_gap() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature has intimidate as long as its controller controls no other creatures.",
+    );
+    assert_eq!(defs.len(), 1);
+    assert!(
+        matches!(
+            defs[0].condition,
+            Some(StaticCondition::Unrecognized { .. })
+        ),
+        "the controller clause must stay an explicit gap, got {:?}",
+        defs[0].condition
+    );
+    assert_eq!(
+        defs[0].modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Intimidate
         }]
     );
 }
@@ -42173,6 +42201,55 @@ fn commanders_plate_static_line_parses_to_each_color_protection_set() {
             },
         ]
     );
+}
+
+// SHAPE: full-document routing must retain the live set and the Aura's own-source rider.
+#[test]
+fn kannushi_pledge_full_oracle_live_color_set() {
+    for (name, text, types, subtypes, aura) in [
+        (
+            "Empty-Shrine Kannushi",
+            "This creature has protection from each color among permanents you control.",
+            vec!["Creature".to_string()],
+            vec!["Human".to_string(), "Cleric".to_string()],
+            false,
+        ),
+        (
+            "Pledge of Loyalty",
+            "Enchant creature\nEnchanted creature has protection from each color among permanents you control. This effect doesn't remove this Aura.",
+            vec!["Enchantment".to_string()],
+            vec!["Aura".to_string()],
+            true,
+        ),
+    ] {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            text, name, &[], &types, &subtypes,
+        );
+        let grant = ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::EachColor(
+                ProtectionColorSet::AmongPermanentsYouControl,
+            )),
+        };
+        let def = parsed.statics.iter().find(|def| def.modifications.contains(&grant))
+            .unwrap_or_else(|| panic!("{name}: missing live grant: {parsed:?}"));
+        assert_eq!(def.mode, StaticMode::Continuous);
+        if aura {
+            assert!(matches!(&def.affected, Some(TargetFilter::Typed(filter))
+                if filter.properties.contains(&FilterProp::EnchantedBy)));
+            assert_eq!(def.protection_does_not_remove, Some(ProtectionDoesNotRemove::Source));
+        } else {
+            assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+            assert_eq!(def.protection_does_not_remove, None);
+        }
+        assert!(!parsed.extracted_keywords.iter().any(|keyword|
+            matches!(keyword, Keyword::Protection(ProtectionTarget::EachColor(_)))));
+        assert_eq!(def.modifications, vec![grant]);
+        assert_eq!(parsed.statics.len(), 1);
+        assert!(parsed.abilities.is_empty(), "{name}: unexpected residual ability");
+        assert!(parsed.triggers.is_empty());
+        assert!(parsed.replacements.is_empty());
+        assert!(!parsed.extracted_keywords.iter().any(|keyword| matches!(keyword, Keyword::Unknown(_))));
+    }
 }
 
 // SHAPE: the full Oracle line and its canonical trailing forms must preserve

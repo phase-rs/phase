@@ -1624,6 +1624,86 @@ fn activated_ability_opponents_upkeep_restriction_composes_scope_and_step() {
     );
 }
 
+/// CR 602.5 + CR 122.1e: Jace, Reality Sculptor's [0] ability is gated on
+/// "there are twenty-five or more loyalty counters among Jaces you control".
+/// The clause is an ordinary quantity comparison over the loyalty counters
+/// summed across Jace planeswalkers, so it must lower to `RequiresCondition`
+/// rather than leave an `unrecognized_clause_head` gap on "Activate only".
+#[test]
+fn jace_reality_sculptor_zero_ability_gates_on_loyalty_counters_among_jaces() {
+    let r = parse(
+        "[+1]: Empower Jace X, where X is the number of Islands you control.\n\
+         [−3]: Until your next turn, whenever a creature attacks you or a planeswalker you control, it gets -5/-0 until end of turn.\n\
+         [0]: Exile all but the bottom card of each opponent's library. Activate only if there are twenty-five or more loyalty counters among Jaces you control.",
+        "Jace, Reality Sculptor",
+        &[],
+        &["Planeswalker"],
+        &["Jace"],
+    );
+
+    assert_eq!(r.abilities.len(), 3, "got {r:#?}");
+    let zero = &r.abilities[2];
+    assert!(
+        matches!(
+            zero.cost,
+            Some(crate::types::ability::AbilityCost::Loyalty { amount: 0 })
+        ),
+        "the third ability is the [0] loyalty ability, got {:?}: {zero:#?}",
+        zero.cost
+    );
+    assert!(
+        !matches!(zero.effect.as_ref(), Effect::Unimplemented { .. }),
+        "the exile must parse: {zero:#?}"
+    );
+
+    let (counter_type, comparator, value) = zero
+        .activation_restrictions
+        .iter()
+        .find_map(|restriction| match restriction {
+            ActivationRestriction::RequiresCondition {
+                condition:
+                    Some(ParsedCondition::QuantityComparison {
+                        lhs:
+                            QuantityExpr::Ref {
+                                qty:
+                                    QuantityRef::CountersOnObjects {
+                                        counter_type,
+                                        filter,
+                                    },
+                            },
+                        comparator,
+                        rhs: QuantityExpr::Fixed { value },
+                    }),
+            } => {
+                assert!(
+                    matches!(
+                        filter,
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters,
+                            controller: Some(ControllerRef::You),
+                            ..
+                        }) if type_filters.iter().any(|type_filter| matches!(
+                            type_filter,
+                            TypeFilter::Subtype(subtype) if subtype == "Jace"
+                        ))
+                    ),
+                    "the count is scoped to Jaces you control, got {filter:?}"
+                );
+                Some((counter_type, comparator, value))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a loyalty-counters-among-Jaces activation condition, got {:?}",
+                zero.activation_restrictions
+            )
+        });
+    assert_eq!(*counter_type, Some(CounterType::Loyalty));
+    assert_eq!(*comparator, Comparator::GE);
+    assert_eq!(*value, 25);
+}
+
 /// CR 602.5b: the `during <role> <window>` activation gate is composed from a
 /// turn-role axis and a turn-window axis, so every role×window pairing resolves
 /// without a whole-clause tag per phrase. Both opponent possessive spellings and
@@ -34944,6 +35024,7 @@ fn choice_of_fortunes_shuffles_the_sought_set_into_the_library() {
     assert_eq!(
         *optional.effect,
         Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Library,
             target: TargetFilter::TrackedSet {
@@ -34955,7 +35036,7 @@ fn choice_of_fortunes_shuffles_the_sought_set_into_the_library() {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
-            library_shuffle: crate::types::ability::MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::TerminalShuffle,
             random_order: false,
         }
     );
@@ -34991,14 +35072,24 @@ fn owner_subject_shuffle_them_into_their_libraries_moves_the_objects() {
     assert!(
         defs.iter().any(|d| matches!(
             &*d.effect,
-            Effect::ChangeZone {
+            Effect::ChangeZoneAll {
+                origin: None,
                 destination: Zone::Library,
                 target: TargetFilter::ParentTarget,
-                owner_library: true,
+                library_shuffle: crate::types::ability::LibraryShuffleMode::TerminalShuffle,
                 ..
             }
         )),
-        "expected an owner-library move, got {defs:?}"
+        "expected an owner-library population move, got {defs:?}"
+    );
+    assert!(
+        defs.iter().any(|d| matches!(
+            &*d.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            }
+        )),
+        "expected the terminal owner-scoped shuffle, got {defs:?}"
     );
     assert!(
         !defs
@@ -35830,4 +35921,47 @@ fn corpus_oracle_text(name: &str) -> String {
         other => panic!("no corpus oracle text recorded for {other}"),
     }
     .to_string()
+}
+
+/// CR 607.2a + CR 608.2c: promoting a linked LTB return to the return of every
+/// card this object exiled keeps the move's performer. Synthetic actor: no
+/// printed linked return names a subject today.
+#[test]
+fn ltb_return_promotion_keeps_the_actor() {
+    use crate::types::ability::LibraryInstructionActor;
+    use crate::types::identifiers::TrackedSetId;
+    let actor = LibraryInstructionActor::Player {
+        player: TargetFilter::ParentTargetController,
+    };
+    let unpromoted = Effect::ChangeZone {
+        actor: actor.clone(),
+        origin: Some(Zone::Exile),
+        destination: Zone::Battlefield,
+        target: TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        },
+        owner_library: false,
+        enter_transformed: false,
+        enters_under: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+        up_to: false,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
+        face_down_profile: None,
+        enters_modified_if: None,
+        library_shuffle: Default::default(),
+    };
+    let promoted = ltb_return_of_exiled_by_source(&unpromoted).expect("promoted");
+    let Effect::ChangeZoneAll {
+        actor: promoted_actor,
+        target,
+        ..
+    } = &promoted
+    else {
+        panic!("expected ChangeZoneAll, got {promoted:?}");
+    };
+    assert_eq!(promoted_actor, &actor);
+    assert_eq!(*target, TargetFilter::ExiledBySource);
+    assert!(ltb_return_of_exiled_by_source(&promoted).is_none());
 }

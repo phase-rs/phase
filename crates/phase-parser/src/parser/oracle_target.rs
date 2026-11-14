@@ -45,9 +45,9 @@ use super::oracle_util::{
     SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
 use crate::types::text_grammar::{
-    parse_color_prefix, parse_color_quality_prefix, parse_core_type, parse_leading_keyword_match,
-    parse_leading_pt_designation, parse_token_suffix, separator_continues_enclosing_list,
-    starts_with_type_phrase_lead, KeywordMatch,
+    parse_color_prefix, parse_color_quality_prefix, parse_core_type, parse_exile_visibility_prefix,
+    parse_leading_keyword_match, parse_leading_pt_designation, parse_token_suffix,
+    separator_continues_enclosing_list, starts_with_type_phrase_lead, KeywordMatch,
 };
 pub(crate) use crate::types::text_grammar::{
     parse_combat_status_prefix, parse_without_keyword_suffix, starts_with_type_word,
@@ -400,6 +400,62 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
         ))
         .parse(input)
     })
+}
+
+#[cfg(test)]
+mod r2_exile_modifier_tests {
+    use super::*;
+
+    #[test]
+    fn face_up_exiled_card_consumes_complete_target_and_retains_remainder() {
+        let (target, rest) = parse_target("target face-up exiled card");
+        assert!(rest.is_empty(), "{rest:?}");
+        let TargetFilter::Typed(filter) = target else {
+            panic!("expected typed card")
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Card));
+        assert!(filter
+            .properties
+            .contains(&FilterProp::InZone { zone: Zone::Exile }));
+        assert!(filter.properties.contains(&FilterProp::Not {
+            prop: Box::new(FilterProp::FaceDown)
+        }));
+        let (_, rest) = parse_target("target face-up exiled card frobnicate");
+        assert_eq!(rest.trim(), "frobnicate");
+    }
+
+    /// CR 406.3 + CR 108.3: the same modifier run must be reachable from an
+    /// ARTICLE-LED generic phrase. Before the shared `parse_exile_visibility_prefix`
+    /// was admitted by `starts_with_type_phrase_lead`, the indefinite article was
+    /// never stripped, so "a face-up exiled card they own" (Binding Negotiation)
+    /// collapsed to a match-anything filter.
+    #[test]
+    fn article_led_face_up_exiled_card_reaches_exile_modifiers() {
+        let (target, rest) = parse_target("a face-up exiled card they own");
+        assert!(rest.is_empty(), "{rest:?}");
+        let TargetFilter::Typed(filter) = target else {
+            panic!("expected typed card, got {target:?}")
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Card));
+        assert!(
+            filter
+                .properties
+                .contains(&FilterProp::InZone { zone: Zone::Exile }),
+            "{filter:?}"
+        );
+        assert!(
+            filter.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::FaceDown)
+            }),
+            "{filter:?}"
+        );
+        assert!(
+            filter.properties.contains(&FilterProp::Owned {
+                controller: ControllerRef::ScopedPlayer
+            }),
+            "{filter:?}"
+        );
+    }
 }
 
 /// Parse a target description from Oracle text, returning (filter, remaining_text).
@@ -1400,12 +1456,20 @@ pub fn parse_target_with_syntax<'a>(
         // separator compositionally, then delegate the complete object tail to
         // the shared type-phrase grammar so controller/type qualifiers retain
         // their ordinary semantics.
+        // CR 115.1 + CR 608.2c: the player noun is number-agnostic in this
+        // grammar — "target players" / "target opponents" name the same slot
+        // axis as their singular forms, with the clause's `MultiTargetSpec`
+        // carrying the printed count (CR 601.2c, CR 115.1d). The plural legs
+        // are matched FIRST and are word-bounded through `tag` + the caller's
+        // clause boundary check, so the leftover "s" of a half-consumed
+        // singular can no longer be mistaken for the rest of the clause
+        // (Officious Interrogation, Call the Coppercoats).
         if let Ok((after_player, player_filter)) = alt((
             value(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                tag::<_, _, OracleError<'_>>("opponent"),
+                alt((tag::<_, _, OracleError<'_>>("opponents"), tag("opponent"))),
             ),
-            value(TargetFilter::Player, tag("player")),
+            value(TargetFilter::Player, alt((tag("players"), tag("player")))),
         ))
         .parse(after_target)
         {
@@ -3649,6 +3713,16 @@ fn parse_type_phrase_folding_unbound<'a>(
         }
     }
 
+    // CR 406.3: face-up exiled cards retain both their zone and visibility
+    // restrictions. Compose these adjectives before the ordinary type reader.
+    // `parse_exile_visibility_prefix` is the same authority the article guard
+    // (`starts_with_type_phrase_lead`) uses, so admission and consumption can
+    // never disagree.
+    while let Ok((rest, property)) = parse_exile_visibility_prefix(&lower[pos..]) {
+        properties.push(property);
+        pos = lower.len() - rest.len();
+    }
+
     // Parse the core type, falling back to subtype recognition
     let (card_type, subtype, type_len) = parse_core_type(&lower[pos..]);
     pos += type_len;
@@ -3893,6 +3967,37 @@ fn parse_type_phrase_folding_unbound<'a>(
                     left_card_suffix = *is_card;
                     left_head_noun = true;
                     break;
+                }
+            }
+        }
+        if !consumed_suffix {
+            // CR 205.2a + CR 205.3a: a card-type LIST ends each leg with the same
+            // informational noun immediately before the list separator — "an
+            // Angel card, a Demon card, and/or a Dragon card" (Kaalia, Zenith
+            // Seeker). The table above only matches the noun when a SPACE
+            // follows it, so a comma-separated leg left " card," in the
+            // remainder and the `TYPE_SEPARATORS` fold below never saw its
+            // separator: it published only the leftmost leg (`Angel`) as the
+            // filter, silently narrowing "an Angel, a Demon, and/or a Dragon"
+            // to "an Angel" so every Demon and Dragon became unselectable
+            // (issue #8068).
+            //
+            // Only the NOUN is consumed, never the comma: the separator stays in
+            // the remainder for the fold, and a caller that splits sibling
+            // clauses still sees the clause boundary it expects.
+            static COMMA_LED_NOUNS: &[(&str, bool)] = &[("cards", true), ("card", true)];
+            for (noun, is_card) in COMMA_LED_NOUNS {
+                if let Ok((after_noun, _)) = tag::<_, _, OracleError<'_>>(*noun).parse(rest_trimmed)
+                {
+                    if peek(tag::<_, _, OracleError<'_>>(","))
+                        .parse(after_noun)
+                        .is_ok()
+                    {
+                        pos += ws_len + (rest_trimmed.len() - after_noun.len());
+                        left_card_suffix = *is_card;
+                        left_head_noun = true;
+                        break;
+                    }
                 }
             }
         }
@@ -18577,6 +18682,86 @@ mod tests {
         assert!(
             !matches!(non_type, TargetFilter::Or { .. }),
             "a non-type right conjunct must not union, got {non_type:?}"
+        );
+    }
+
+    /// CR 205.2a + CR 205.3a: a card-type LIST ends each leg with the
+    /// informational "card"/"cards" noun immediately before the list
+    /// separator, so the noun must be consumed there too. Issue #8068: the noun
+    /// scanner only recognized a SPACE after the noun, which left the leftmost
+    /// leg's " card," in the remainder; the comma was then invisible to the
+    /// `TYPE_SEPARATORS` fold below and only the first leg survived.
+    ///
+    /// Paired positive: the same union without the comma-noun form (no noun at
+    /// all) already folds, so the assertion below is about the noun and not
+    /// about unions in general.
+    #[test]
+    fn comma_separated_card_noun_legs_fold_into_one_union() {
+        let (nounless, nounless_rest) =
+            parse_type_phrase_folding("angel, a demon, and/or a dragon");
+        assert_eq!(
+            nounless_rest.trim(),
+            "",
+            "reach-guard: a noun-less list already folds"
+        );
+        assert!(
+            matches!(nounless, TargetFilter::Or { .. }),
+            "reach-guard: a noun-less list already folds, got {nounless:?}"
+        );
+
+        let (filter, rest) =
+            parse_type_phrase_folding("angel card, a demon card, and/or a dragon card");
+        assert_eq!(
+            rest.trim(),
+            "",
+            "the comma-led list must be consumed whole, got remainder {rest:?}"
+        );
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected a three-leg union, got {filter:?}");
+        };
+        let legs: Vec<&str> = filters
+            .iter()
+            .filter_map(|leg| match leg {
+                TargetFilter::Typed(tf) => match tf.type_filters.as_slice() {
+                    [TypeFilter::Subtype(subtype)] => Some(subtype.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(legs, vec!["Angel", "Demon", "Dragon"]);
+
+        // The same list with core types and the plural noun.
+        let (core, core_rest) =
+            parse_type_phrase_folding("creature cards, a land card, and/or an artifact card");
+        assert_eq!(core_rest.trim(), "");
+        let TargetFilter::Or { filters } = core else {
+            panic!("expected a three-leg union, got {core:?}");
+        };
+        assert_eq!(filters.len(), 3, "got {filters:?}");
+    }
+
+    /// Paired negative: consuming the comma-noun form must not eat the clause
+    /// separator. A card-type leg followed by a sibling instruction keeps its
+    /// comma in the remainder for the caller's own clause grammar.
+    ///
+    /// SYNTHETIC PROBE: no printed card pairs a "<type> card" leg with a
+    /// "then …" sibling, so the input is a grammar probe for the separator-
+    /// retention contract rather than a printed-card reading. The contract is
+    /// what the real card (Kaalia, Zenith Seeker) depends on: its legs are ALSO
+    /// followed by a comma (the next leg), and the clause splitter must still
+    /// see the boundary after the final leg.
+    #[test]
+    fn comma_led_card_noun_keeps_a_sibling_clause_separator() {
+        let (filter, rest) = parse_type_phrase_folding("creature card, then draw a card");
+        assert!(
+            matches!(filter, TargetFilter::Typed(_)),
+            "a sibling instruction is not a union leg, got {filter:?}"
+        );
+        assert_eq!(
+            rest.trim_start(),
+            ", then draw a card",
+            "the clause separator must stay in the remainder"
         );
     }
 

@@ -27,6 +27,8 @@ use crate::policies::effect_classify::{effect_polarity, EffectPolarity};
 
 fn change_zone(destination: Zone) -> Effect {
     Effect::ChangeZone {
+        actor: engine::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: None,
         destination,
         target: TargetFilter::Any,

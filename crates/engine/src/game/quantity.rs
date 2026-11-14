@@ -5810,18 +5810,20 @@ fn resolve_ref(
             scope,
         } => {
             let mut count = 0;
-            // Per-player zones (graveyard, library)
+            // Per-player zones (graveyard, library, hand)
             match zone {
                 ZoneRef::Graveyard | ZoneRef::Library | ZoneRef::Hand => {
                     for player in scoped_zone_holders(state, zone, scope, ctx, controller) {
                         for &obj_id in zone_container(state, zone, player) {
-                            if matches_zone_card_filter(
-                                state,
-                                obj_id,
-                                card_types,
-                                filter.as_ref(),
-                                &filter_ctx,
-                            ) {
+                            if state.objects.get(&obj_id).is_some_and(|obj| {
+                                matches_zone_card_filter(
+                                    state,
+                                    obj,
+                                    card_types,
+                                    filter.as_ref(),
+                                    &filter_ctx,
+                                )
+                            }) {
                                 count += 1;
                             }
                         }
@@ -5838,14 +5840,10 @@ fn resolve_ref(
                                 controller,
                                 obj.owner,
                             );
-                            // CR 108.2 + CR 109.1: count only cards in exile;
-                            // the CR 722.3c retained prepare copy is a copy of
-                            // a card, not a card.
-                            if obj.is_card_population_member()
-                                && owner_matches
+                            if owner_matches
                                 && matches_zone_card_filter(
                                     state,
-                                    obj_id,
+                                    obj,
                                     card_types,
                                     filter.as_ref(),
                                     &filter_ctx,
@@ -7079,37 +7077,39 @@ fn damage_source_controller_matches(
     }
 }
 
-/// Check if an object matches a set of type filters for zone card counting.
-/// Empty `card_types` means all cards match.
+/// CR 109.2a + CR 111.6: zoned card descriptions count cards, not tokens.
+/// Check card identity before optional type and target filters, even before
+/// non-card objects are removed by state-based actions.
+/// Empty `card_types` leaves only the optional target filter.
 fn matches_zone_card_filter(
     state: &GameState,
-    obj_id: ObjectId,
+    obj: &crate::game::game_object::GameObject,
     card_types: &[TypeFilter],
     filter: Option<&TargetFilter>,
     filter_ctx: &FilterContext<'_>,
 ) -> bool {
-    if !card_types.is_empty() {
-        let matches_type = state.objects.get(&obj_id).is_some_and(|obj| {
-            card_types
-                .iter()
-                .any(|tf| type_filter_matches(tf, obj, &state.all_creature_types))
-        });
-        if !matches_type {
-            return false;
-        }
+    if !obj.is_represented_by_a_card() {
+        return false;
     }
-    filter.is_none_or(|filter| matches_target_filter(state, obj_id, filter, filter_ctx))
+    if !card_types.is_empty()
+        && !card_types
+            .iter()
+            .any(|tf| type_filter_matches(tf, obj, &state.all_creature_types))
+    {
+        return false;
+    }
+    filter.is_none_or(|filter| matches_target_filter(state, obj.id, filter, filter_ctx))
 }
 
 /// CR 608.2 + CR 109.5: Resolve which player a `CountScope` variant binds to,
 /// then return an iterator over matching players.
 ///
-/// `Controller` always means the printed ability's controller (caster) — this
-/// is the "you" axis. `ScopedPlayer` (Issue #310) means the currently iterated
-/// player when a surrounding `player_scope` is active, falling back to
-/// `Controller` outside iteration. `Opponents` and `All` are computed
-/// relative to `Controller` (the caster), preserving CR 109.5's "you" semantics
-/// for unscoped opponent/all counts.
+/// `Controller` means the ability's controller — this is the "you" axis
+/// (the source object's current controller for a static ability, CR 109.5).
+/// `ScopedPlayer` (Issue #310) means the currently iterated player when a
+/// surrounding `player_scope` is active, falling back to `Controller` outside
+/// iteration. `Opponents` and `All` are computed relative to `Controller`,
+/// preserving CR 109.5's "you" semantics for unscoped opponent/all counts.
 fn scoped_players<'a>(
     state: &'a GameState,
     scope: &'a CountScope,
@@ -7131,10 +7131,10 @@ fn scoped_players<'a>(
         // CR 800.4a takes their owned objects out of the game with them. So
         // neither their player counters (CR 122.1) nor their zone and
         // spell-cast counts may contribute to an "each player" / "each
-        // opponent" total. Same population as the `PlayerScope` aggregate
-        // authority in `resolve_per_player_scalar`, which filters
-        // `!p.is_eliminated` on its `Opponent` and `AllPlayers` arms; these
-        // two scopes are the `CountScope` mirror of those and must agree.
+        // opponent" total. Match the live-player exclusion used by
+        // `resolve_per_player_scalar`; the opponent scope additionally uses
+        // the shared team-aware relationship below. This does not redefine
+        // the separate `PlayerScope` aggregation readers.
         //
         // The single-player scopes above deliberately keep no such filter: they
         // name ONE specific player rather than ranging over a population, and
@@ -7142,7 +7142,10 @@ fn scoped_players<'a>(
         // `SourceChosenPlayer` to the empty set would read 0 instead of that
         // player's actual value.
         CountScope::All => !p.is_eliminated,
-        CountScope::Opponents => p.id != controller && !p.is_eliminated,
+        // CR 102.3: teammates are not opponents; retain the live-population filter.
+        CountScope::Opponents => {
+            crate::game::players::is_opponent(state, controller, p.id) && !p.is_eliminated
+        }
     })
 }
 
@@ -7224,7 +7227,11 @@ fn count_scope_owner_matches(
         // Single-player scopes above keep no filter, for the same reason as in
         // `scoped_players`: they name one player rather than a population.
         CountScope::All => !player_has_left(state, owner),
-        CountScope::Opponents => owner != controller && !player_has_left(state, owner),
+        // CR 102.3: global-zone owners use the same team relation as live players.
+        CountScope::Opponents => {
+            crate::game::players::is_opponent(state, controller, owner)
+                && !player_has_left(state, owner)
+        }
     }
 }
 
@@ -13977,6 +13984,101 @@ mod tests {
             2,
             "an 'each opponent' poison total must read only the SURVIVING opponent (2): the \
              controller's 1 is not an opponent and the departed 40 is not in the game"
+        );
+    }
+
+    /// CR 102.3 + CR 109.5: live opponent counters exclude the current
+    /// controller's teammate, regardless of which team controls the ability.
+    #[test]
+    fn player_counter_opponents_scope_excludes_two_headed_giant_teammate() {
+        let mut state =
+            GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 0);
+        for (player, poison) in state.players.iter_mut().zip([1, 8, 2, 3]) {
+            player.poison_counters = poison;
+        }
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCounter {
+                kind: crate::types::player::PlayerCounterKind::Poison,
+                scope: CountScope::Opponents,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            5,
+            "P2 and P3 contribute; P0 and teammate P1 do not"
+        );
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(2), ObjectId(0)),
+            9,
+            "the current controller changes which team supplies the opponents"
+        );
+
+        let mut events = Vec::new();
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        assert!(state.players[2].is_eliminated && state.players[3].is_eliminated);
+        assert_eq!(state.players[2].poison_counters, 2);
+        assert_eq!(state.players[3].poison_counters, 3);
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            0,
+            "departed opponents' retained counters and the living teammate are excluded"
+        );
+    }
+
+    /// CR 102.3 + CR 800.4a: global exile counts use the owner's team and
+    /// exclude departed owners even when their cards remain in engine exile.
+    #[test]
+    fn exile_zone_count_opponents_scope_excludes_two_headed_giant_teammate() {
+        let mut state =
+            GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 0);
+        let mut opponent_cards = Vec::new();
+        for (seat, count) in [(0, 1), (1, 8), (2, 2), (3, 3)] {
+            for _ in 0..count {
+                let card = create_object(
+                    &mut state,
+                    CardId(1),
+                    PlayerId(seat),
+                    "Exiled Card".to_string(),
+                    Zone::Exile,
+                );
+                if seat >= 2 {
+                    opponent_cards.push(card);
+                }
+            }
+        }
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Exile,
+                card_types: Vec::new(),
+                filter: None,
+                scope: CountScope::Opponents,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            5,
+            "both opposing owners contribute, but the controller and teammate do not"
+        );
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(2), ObjectId(0)),
+            9,
+            "owner membership is relative to the current controller's team"
+        );
+
+        let mut events = Vec::new();
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        assert!(state.players[2].is_eliminated && state.players[3].is_eliminated);
+        for card in opponent_cards {
+            assert!(state.exile.contains(&card));
+            assert!(matches!(
+                state.objects.get(&card).map(|object| object.owner),
+                Some(PlayerId(2) | PlayerId(3))
+            ));
+        }
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            0,
+            "neither departed opposing owners nor the living teammate contribute"
         );
     }
 
@@ -28740,6 +28842,120 @@ mod dandan_scoped_zone_tests {
     }
 }
 
+/// CR 109.2a + CR 111.6: a zoned card count excludes tokens even before
+/// CR 111.7 removes them at the next state-based-action check.
+#[cfg(test)]
+mod graveyard_zone_card_population_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::card_type::Supertype;
+    use crate::types::identifiers::CardId;
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+
+    fn graveyard_land(state: &mut GameState, card: u64, name: &str) -> ObjectId {
+        let id = create_object(state, CardId(card), P1, name.to_string(), Zone::Graveyard);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types = vec![CoreType::Land];
+        obj.base_card_types = obj.card_types.clone();
+        id
+    }
+
+    fn board() -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Population Reader".to_string(),
+            Zone::Battlefield,
+        );
+        graveyard_land(&mut state, 2, "Nonbasic Land Card");
+        let basic = graveyard_land(&mut state, 3, "Basic Land Card");
+        let obj = state.objects.get_mut(&basic).unwrap();
+        obj.card_types.supertypes = vec![Supertype::Basic];
+        obj.base_card_types = obj.card_types.clone();
+
+        // Everywhere has all five basic land types but no Basic supertype.
+        // This fixture models its transient graveyard state before token cleanup.
+        let token = graveyard_land(&mut state, 4, "Everywhere");
+        let obj = state.objects.get_mut(&token).unwrap();
+        obj.is_token = true;
+        obj.card_types.subtypes = ["Plains", "Island", "Swamp", "Mountain", "Forest"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        obj.base_card_types = obj.card_types.clone();
+        let copy = graveyard_land(&mut state, 5, "Nonbasic Land Copy");
+        state.objects.get_mut(&copy).unwrap().is_copy = true;
+
+        for id in [token, copy] {
+            let obj = &state.objects[&id];
+            assert!(state.players[1].graveyard.contains(&id));
+            assert_eq!(obj.zone, Zone::Graveyard);
+            assert!(obj.card_types.core_types.contains(&CoreType::Land));
+            assert!(!obj.card_types.supertypes.contains(&Supertype::Basic));
+            assert!(!obj.is_represented_by_a_card());
+        }
+        (state, source)
+    }
+
+    fn read(state: &GameState, source: ObjectId, filter: Option<TargetFilter>) -> i32 {
+        resolve_quantity(
+            state,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: Vec::new(),
+                    filter,
+                    scope: CountScope::Opponents,
+                },
+            },
+            P0,
+            source,
+        )
+    }
+
+    #[test]
+    fn opponent_graveyard_nonbasic_land_card_count_excludes_transient_non_cards() {
+        let (mut state, source) = board();
+        let nonbasic =
+            TargetFilter::Typed(
+                TypedFilter::land().properties(vec![FilterProp::NotSupertype {
+                    value: Supertype::Basic,
+                }]),
+            );
+        assert_eq!(
+            read(&state, source, Some(nonbasic.clone())),
+            1,
+            "neither the nonbasic land token nor the copy is a land card"
+        );
+        graveyard_land(&mut state, 6, "Second Nonbasic Land Card");
+        assert_eq!(
+            read(&state, source, Some(nonbasic)),
+            2,
+            "another real nonbasic land card raises the count"
+        );
+    }
+
+    #[test]
+    fn opponent_graveyard_unfiltered_card_count_excludes_transient_non_cards() {
+        let (mut state, source) = board();
+        assert_eq!(
+            read(&state, source, None),
+            2,
+            "both real land cards count, but the token and copy do not"
+        );
+        graveyard_land(&mut state, 6, "Second Nonbasic Land Card");
+        assert_eq!(
+            read(&state, source, None),
+            3,
+            "an unfiltered count still includes another real card"
+        );
+    }
+}
+
 /// CR 108.2 + CR 109.1 + CR 722.3c: quantities over the CARDS in exile exclude
 /// non-card objects there. Building-block rows: each quantity arm is read
 /// against one real Sorcery card, one non-card copy of a card (the CR 722.3c
@@ -28865,6 +29081,25 @@ mod exile_card_population_tests {
                 zone: ZoneRef::Exile,
                 scope: ControllerRef::TargetPlayer,
                 binding: CountBinding::Anaphoric,
+            },
+            1,
+        );
+    }
+
+    /// Preserves the global-zone path while the card-identity check is shared
+    /// with per-player zones. All three fixture objects match the type list.
+    #[test]
+    fn exile_card_population_zone_card_count_with_type_filters() {
+        assert_counts(
+            QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Exile,
+                card_types: vec![
+                    TypeFilter::Sorcery,
+                    TypeFilter::Instant,
+                    TypeFilter::Artifact,
+                ],
+                filter: None,
+                scope: CountScope::Owner,
             },
             1,
         );

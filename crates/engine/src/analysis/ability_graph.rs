@@ -2975,6 +2975,8 @@ mod tests {
     }
     fn change_zone(origin: Option<Zone>, destination: Zone) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin,
             destination,
             target: default_target_filter_any(),

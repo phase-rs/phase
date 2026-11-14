@@ -1319,6 +1319,8 @@ fn token_power_src() -> Effect {
 }
 fn return_all_creatures_gy_to_bf() -> Effect {
     Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination: Zone::Battlefield,
         target: creature(),
@@ -1866,6 +1868,8 @@ fn search_own_creatures() -> Effect {
 /// no `enters_under`) that consumes the search's `You` move-owner fact.
 fn change_zone_lib_to_bf() -> Effect {
     Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Library),
         destination: Zone::Battlefield,
         target: TargetFilter::Any,
@@ -2281,6 +2285,8 @@ fn sacrifice_all_own_creatures() -> ResolvedAbility {
 /// A `ChangeZone{target → Battlefield, enters_under: You}` return (Exile → bf).
 fn change_zone_return(target: TargetFilter) -> Effect {
     Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Exile),
         destination: Zone::Battlefield,
         target,
@@ -2594,6 +2600,8 @@ fn b3_source_independent_and_persist_false() {
 
     let self_sac = || {
         sacrifice_all_own_creatures().sub_ability(ra(Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Battlefield),
             destination: Zone::Graveyard,
             target: TargetFilter::SelfRef,

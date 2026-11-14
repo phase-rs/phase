@@ -41,7 +41,7 @@
     "unCardActions": "Un-card actions",
     "unCardActionsToggle": "Play Un-card actions",
     "unCardActionsDescription": "Join in the silly parts of Unglued, Unhinged, Unstable and Unfinity cards: say-it prompts (Rod of Spanking), the Gotcha! button, and a menu of gestures. Off by default. Prompts and menu entries only appear when a card in the game uses them.",
-    "priorityAlertsDescription": "Du wirst benachrichtigt, wenn die Priorität nach einer Wartezeit zu dir zurückkehrt. Der Ton erklingt, wenn du in einem anderen Tab oder Fenster bist oder wenn ein Fenster im Zug eines Gegners {{seconds}} Sekunden lang unbeantwortet bleibt; dann leuchtet es auch stärker.",
+    "priorityAlertsDescription": "Du wirst benachrichtigt, wenn die Priorität nach einer Wartezeit zu dir zurückkehrt. Der Ton erklingt, wenn du in einem anderen Tab oder Fenster bist oder wenn ein Fenster im Zug eines Gegners {{seconds}} Sekunden lang unbeantwortet bleibt; dann leuchtet es auch stärker. Leuchten lässt außerdem den Rahmen des Felds „Du hast Priorität“ pulsieren, solange die Entscheidung bei dir liegt; ist Leuchten aus, bleibt der Rahmen ruhig.",
     "logDockSide": "Position des Spielprotokolls",
     "spellPayment": "Zauberspruch-Bezahlung",
     "manualManaPayment": "Manuelle Manabezahlung für Zaubersprüche",

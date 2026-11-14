@@ -707,8 +707,7 @@ mod tests {
     /// assertions. Stamping every input (as the transport does in production)
     /// keeps the timeline exact no matter how the test process is scheduled.
     fn start_active_contest(session: &mut GameSession) -> Instant {
-        let now = Instant::now();
-        session.contest.clock.epoch = now - std::time::Duration::from_secs(1);
+        let now = session.contest.clock.epoch + std::time::Duration::from_secs(1);
         session.tick_contest_at(now - std::time::Duration::from_millis(10));
         session.tick_contest_at(now);
         assert_eq!(phase(session), ContestPhase::Active, "countdown completed");
@@ -879,27 +878,25 @@ mod tests {
     fn clicks_resolve_the_sender_from_the_token_and_never_before_go() {
         let mut mgr = session_with_contest(fast_policy());
         let session = only_session(&mut mgr);
+        let pending_at = session.contest.clock.epoch;
         assert_eq!(
-            session.handle_contest_click("nobody", 1, 1),
+            session.handle_contest_click_at("nobody", 1, 1, pending_at),
             ContestClickReceipt::UnknownSeat
         );
         // Pending: not started, so not counted.
         assert_eq!(
-            session.handle_contest_click(HOST, 1, 1),
+            session.handle_contest_click_at(HOST, 1, 1, pending_at),
             ContestClickReceipt::Ignored
         );
 
-        session.tick_contest();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        session.tick_contest();
-        assert_eq!(phase(session), ContestPhase::Active);
+        let now = start_active_contest(session);
 
         assert_eq!(
-            session.handle_contest_click(HOST, 1, 1),
+            session.handle_contest_click_at(HOST, 1, 1, now),
             ContestClickReceipt::Counted
         );
         assert_eq!(
-            session.handle_contest_click(HOST, 1, 1),
+            session.handle_contest_click_at(HOST, 1, 1, now),
             ContestClickReceipt::Ignored,
             "a duplicate delivery is not counted twice"
         );
@@ -1564,18 +1561,15 @@ mod tests {
     fn a_click_addressed_to_another_contest_is_ignored() {
         let mut mgr = session_with_contest(fast_policy());
         let session = only_session(&mut mgr);
-        session.tick_contest();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        session.tick_contest();
-        assert_eq!(phase(session), ContestPhase::Active);
+        let now = start_active_contest(session);
 
         assert_eq!(
-            session.handle_contest_click(HOST, 99, 1),
+            session.handle_contest_click_at(HOST, 99, 1, now),
             ContestClickReceipt::Ignored,
             "a prior contest's frame is not activity in this one"
         );
         assert_eq!(
-            session.handle_contest_click(HOST, 1, 1),
+            session.handle_contest_click_at(HOST, 1, 1, now),
             ContestClickReceipt::Counted,
             "and it did not burn the sequence number the real click needs"
         );
@@ -1620,13 +1614,14 @@ mod tests {
         let session = only_session(&mut mgr);
         session.connected[1] = false;
 
-        session.tick_contest();
+        // The first tick records the absence. The second exceeds the 30 ms grace.
+        let now = session.contest.clock.epoch;
+        session.tick_contest_at(now);
         assert!(
             session.contest_active(),
             "within grace the contest only waits"
         );
-        std::thread::sleep(std::time::Duration::from_millis(60));
-        session.tick_contest();
+        session.tick_contest_at(now + std::time::Duration::from_millis(60));
 
         assert!(
             !session.contest_active(),
@@ -1689,9 +1684,7 @@ mod tests {
         assert!(session.claim_contest_driver());
         assert!(!session.claim_contest_driver(), "one driver per contest");
 
-        session.tick_contest();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        session.tick_contest();
+        start_active_contest(session);
 
         let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
             panic!("contest ended");
