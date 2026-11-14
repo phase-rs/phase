@@ -13446,8 +13446,9 @@ fn a_refused_shorten_submitted_again_performs_nothing() {
 }
 
 /// CR 732.2b + CR 732.2c: at P2's life 5 holding Gut Shot, the take refuses place 3 and admits
-/// place 4. A refused place submitted again costs nothing, and the admitted place submitted
-/// through the ingress costs what applying it directly costs: one take to decide, one to take it.
+/// place 4. The window performs the proposal once: a refused place submitted again costs nothing,
+/// and the refusal at 3 then the admitted 4 together cost what answering 4 directly costs, one
+/// run to decide it and one take to take it.
 #[test]
 fn an_admitted_shorten_takes_its_place_once() {
     use engine::types::interaction::InteractionReasonCode;
@@ -13465,21 +13466,81 @@ fn an_admitted_shorten_takes_its_place_once() {
     let (applied, direct_cost) = with_entries(|| apply(&mut direct, P2, shorten_at(4)));
     applied.expect("place 4 is admitted");
     assert!(direct_cost > 0);
-    assert_eq!(take_cost_snapshot().since(before).drive_snapshots, 2);
+    assert_eq!(take_cost_snapshot().since(before).drive_snapshots, 1);
 
     let mut state = window;
     bind(&mut state);
-    let (refused, cost) = with_entries(|| submit_shorten(&mut state, 3));
+    let (refused, refused_cost) = with_entries(|| submit_shorten(&mut state, 3));
     assert_eq!(refused, Err(InteractionReasonCode::ReducerRejected));
-    assert!(cost > 0, "reach: the refusal performs the take");
+    assert!(refused_cost > 0, "reach: the refusal performs the run");
     let (refused, cost) = with_entries(|| submit_shorten(&mut state, 3));
     assert_eq!(refused, Err(InteractionReasonCode::ReducerRejected));
     assert_eq!(cost, 0);
     let before = take_cost_snapshot();
     let (admitted, cost) = with_entries(|| submit_shorten(&mut state, 4));
     assert_eq!(admitted, Ok(()));
-    assert_eq!(cost, direct_cost);
-    assert_eq!(take_cost_snapshot().since(before).drive_snapshots, 2);
+    assert_eq!(refused_cost + cost, direct_cost);
+    assert_eq!(take_cost_snapshot().since(before).drive_snapshots, 1);
+}
+
+/// CR 732.2b + CR 732.2c: a take to a place is the first repetitions of the take to any later
+/// place, so every Shorten P2 names in one window reads one performance. Distinct refused places
+/// cost together what the furthest costs alone, one place probe per place reached; a place the run
+/// passed is decided before it is named; a place behind it and each retry cost nothing; and P2's
+/// Accept still takes the shortcut.
+#[test]
+fn distinct_refused_shortens_share_one_performance() {
+    let refused_shorten = |state: &mut GameState, place: u32| {
+        let builds = engine::game::perf_counters::snapshot().priority_cast_probe_builds;
+        let (refused, entries) = with_entries(|| apply(state, P2, shorten_at(place)));
+        assert!(
+            names_no_different_choice(&refused),
+            "place {place}: {refused:?}"
+        );
+        let builds = engine::game::perf_counters::snapshot().priority_cast_probe_builds - builds;
+        (entries, builds)
+    };
+    let window = cascade_at_p2_window().state().clone();
+    let furthest = 7;
+    let (alone_entries, alone_builds) = refused_shorten(&mut window.clone(), furthest);
+    assert_eq!(alone_builds, 8, "one probe per place 0..=7");
+
+    let mut state = window;
+    let before = take_cost_snapshot();
+    let mut costs: Vec<(u64, u64)> = [2, furthest]
+        .into_iter()
+        .map(|place| refused_shorten(&mut state, place))
+        .collect();
+    let WaitingFor::RespondToShortcut { proposal, .. } = state.waiting_for.clone() else {
+        panic!("P2 keeps the window: {:?}", state.waiting_for);
+    };
+    assert_eq!(
+        shorten_refusal(&state, &proposal, P2, 4, ShortcutEvidence::Measured),
+        Some(ShortenRefusal::NoDifferentChoice),
+        "the run passed place 4 on the way to 7"
+    );
+    costs.extend(
+        [4, 4, furthest]
+            .into_iter()
+            .map(|place| refused_shorten(&mut state, place)),
+    );
+    let (entries, builds): (Vec<u64>, Vec<u64>) = costs.into_iter().unzip();
+    assert!(entries[0] > 0, "reach: the first refusal performs the run");
+    assert_eq!(entries[0] + entries[1], alone_entries);
+    assert_eq!(entries[2..], [0, 0, 0]);
+    assert_eq!(builds[0] + builds[1], alone_builds);
+    assert_eq!(builds[2..], [0, 0, 0]);
+    assert_eq!(take_cost_snapshot().since(before).drive_snapshots, 0);
+
+    apply(
+        &mut state,
+        P2,
+        GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        },
+    )
+    .expect("P2 accepts");
+    assert_eq!(state.waiting_for, WaitingFor::GameOver { winner: Some(P0) });
 }
 
 /// CR 732.2a: the drain offer carries no performance to measure a declaration against, so neither

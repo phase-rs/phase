@@ -134,7 +134,7 @@ pub struct ConfirmedPeriod {
 }
 
 /// CR 732.2a + CR 732.2b: the performances submitted answers to one offer made.
-#[derive(Debug, Clone, Default, Eq)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct AnswerReceipts {
     /// The `state_revision` they were taken at, carried only to a revision of the same position.
     /// CR 104.3a: the board can change while the window is open, and at any other revision they
@@ -142,9 +142,62 @@ pub(crate) struct AnswerReceipts {
     revision: u64,
     /// Declarations the offer did not publish, each performed from the offer frame to its count.
     declared: Vec<PerformedReach>,
-    /// CR 732.2b: each place a responder named and the take's verdict there, true when it left
-    /// them no game choice other than passing.
-    shortened: Vec<(PlayerId, u32, bool)>,
+    /// CR 732.2b: per responder, the one forward performance every place they name is read from.
+    shortened: Vec<ShortenRun>,
+}
+
+/// CR 732.2b + CR 732.2c: a take to place `p` is the first `p` repetitions of a longer take, so one
+/// performance, extended only as far as the furthest place asked, decides every place `seat` names.
+#[derive(Debug, Clone)]
+pub(crate) struct ShortenRun {
+    pub(crate) seat: PlayerId,
+    /// Per place reached, in order from place 0: true when the take there left `seat` no game
+    /// choice other than passing.
+    pub(crate) refused: Vec<bool>,
+    pub(crate) next: RunNext,
+}
+
+/// Where a [`ShortenRun`] goes on from.
+#[derive(Debug, Clone)]
+pub(crate) enum RunNext {
+    /// Nothing performed yet.
+    Start,
+    /// The state after the last place reached, and the orders the run applied so far.
+    From(std::sync::Arc<RunFrontier>),
+    /// A repetition did not come round, so no later place is reached.
+    Stopped,
+}
+
+#[derive(Clone)]
+pub(crate) struct RunFrontier {
+    pub(crate) state: GameState,
+    pub(crate) related: Vec<Vec<OrderKey>>,
+}
+
+/// A frontier is a whole game state; printing it would bury every state that holds one.
+impl std::fmt::Debug for RunFrontier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RunFrontier")
+    }
+}
+
+impl ShortenRun {
+    pub(crate) fn new(seat: PlayerId) -> Self {
+        Self {
+            seat,
+            refused: Vec::new(),
+            next: RunNext::Start,
+        }
+    }
+
+    /// The verdict at `place`, once the run has decided it; a place past a stopped run is
+    /// never reached, so it is admitted.
+    pub(crate) fn refused_at(&self, place: u32) -> Option<bool> {
+        let index = usize::try_from(place).ok();
+        index
+            .and_then(|index| self.refused.get(index).copied())
+            .or_else(|| matches!(self.next, RunNext::Stopped).then_some(false))
+    }
 }
 
 /// CR 732.2a: a receipt memoises a take over the position it was taken on and is no part of that
@@ -187,27 +240,29 @@ impl AnswerReceipts {
         self.at_mut(revision).declared.push(record);
     }
 
+    /// `seat`'s run at `revision`, if one was performed there.
+    pub(crate) fn shorten_run(&self, revision: u64, seat: PlayerId) -> Option<&ShortenRun> {
+        self.at(revision)?
+            .shortened
+            .iter()
+            .find(|run| run.seat == seat)
+    }
+
     pub(crate) fn shorten_refused(
         &self,
         revision: u64,
         seat: PlayerId,
         place: u32,
     ) -> Option<bool> {
-        self.at(revision)?
-            .shortened
-            .iter()
-            .find(|&&(s, p, _)| (s, p) == (seat, place))
-            .map(|&(_, _, refused)| refused)
+        self.shorten_run(revision, seat)?.refused_at(place)
     }
 
-    pub(crate) fn record_shortened(
-        &mut self,
-        revision: u64,
-        seat: PlayerId,
-        place: u32,
-        refused: bool,
-    ) {
-        self.at_mut(revision).shortened.push((seat, place, refused));
+    pub(crate) fn record_shorten_run(&mut self, revision: u64, run: ShortenRun) {
+        let runs = &mut self.at_mut(revision).shortened;
+        match runs.iter_mut().find(|held| held.seat == run.seat) {
+            Some(held) => *held = run,
+            None => runs.push(run),
+        }
     }
 }
 
@@ -623,7 +678,7 @@ struct FrameEnd {
 
 /// CR 603.3b: a trigger an ordering prompt asks about, by its source and its ability with the
 /// trigger's own identity cleared, ranked among equal ones.
-type OrderKey = (
+pub(crate) type OrderKey = (
     (ObjectId, Box<crate::types::ability::ResolvedAbility>),
     usize,
 );
@@ -3753,6 +3808,22 @@ pub(crate) struct TakeRun(FrameEnd);
 impl TakeRun {
     pub(crate) fn of(state: &GameState, period: &ConfirmedPeriod, holder: PlayerId) -> Self {
         Self(FrameEnd::of(state, holder, period.reach))
+    }
+
+    /// The run `of` would be after applying `related`, the orders an earlier stretch of it applied.
+    pub(crate) fn resumed(
+        state: &GameState,
+        period: &ConfirmedPeriod,
+        holder: PlayerId,
+        related: Vec<Vec<OrderKey>>,
+    ) -> Self {
+        let run = Self::of(state, period, holder);
+        *run.0.related.borrow_mut() = related;
+        run
+    }
+
+    pub(crate) fn into_related(self) -> Vec<Vec<OrderKey>> {
+        self.0.related.into_inner()
     }
 }
 

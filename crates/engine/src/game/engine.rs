@@ -7107,14 +7107,7 @@ pub(crate) fn drive_persistent_axis_collapse(
     let snapshot = state.clone();
     #[cfg(feature = "test-support")]
     crate::game::perf_counters::record_drive_snapshot();
-    // The accept beat handed priority to the living seat; re-seed a Priority window for the loop
-    // CONTROLLER (not `active_player`: the loop may be an instant-speed period on an opponent's
-    // turn).
-    let reseed = |state: &mut GameState| {
-        priority::reset_priority(state);
-        state.priority_player = controller;
-        state.waiting_for = WaitingFor::Priority { player: controller };
-    };
+    let reseed = |state: &mut GameState| reseed_take(state, controller);
     let committed_events = events.len();
     let mut delivered = 0;
     reseed(state);
@@ -7201,6 +7194,15 @@ pub(crate) fn drive_persistent_axis_collapse(
     }
     // `_guard` drops HERE — before the caller hands back priority — so that beat is offer-eligible.
     Ok(delivered)
+}
+
+/// The accept beat handed priority to the living seat; a take re-seeds a Priority window for the
+/// loop CONTROLLER (not `active_player`: the loop may be an instant-speed period on an opponent's
+/// turn) before each repetition.
+fn reseed_take(state: &mut GameState, controller: PlayerId) {
+    priority::reset_priority(state);
+    state.priority_player = controller;
+    state.waiting_for = WaitingFor::Priority { player: controller };
 }
 
 /// Appends `<thread name> delivered=<d> digest=<hex>` to the file `PHASE_TAKE_END_DIGEST_FILE`
@@ -7337,7 +7339,8 @@ fn hand_back_shortcut(state: &mut GameState, result: &mut ActionResult, proposer
 /// What a refusal of a loop-shortcut answer may read (CR 732.2a/b). `Measured` reads the offer's
 /// recorded performances, the open window's receipts and the proposal, so it never performs a
 /// repetition; `Performed` also performs the answer when neither holds it, which
-/// `record_answer_receipt` pays for once per position.
+/// `record_answer_receipt` pays for once per position: a declaration once, and a Shorten by
+/// extending its responder's one run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShortcutEvidence {
     Measured,
@@ -7449,19 +7452,9 @@ pub(crate) fn record_answer_receipt(state: &mut GameState, action: &GameAction) 
                 player, proposal, ..
             },
         ) => {
-            let (seat, place) = (*player, *place);
-            let refused =
-                match shorten_refusal(state, proposal, seat, place, ShortcutEvidence::Performed) {
-                    None => false,
-                    Some(ShortenRefusal::NoDifferentChoice) => true,
-                    Some(
-                        ShortenRefusal::Unperformable(_)
-                        | ShortenRefusal::OutsideProposal
-                        | ShortenRefusal::Undrivable,
-                    ) => return,
-                };
+            let run = shorten_run_to(state, proposal, *player, *place);
             if let Some(receipts) = answer_receipts(&mut state.waiting_for) {
-                receipts.record_shortened(revision, seat, place, refused);
+                receipts.record_shorten_run(revision, run);
             }
         }
         _ => {}
@@ -7953,38 +7946,125 @@ pub fn shorten_refusal(
     }
     match evidence {
         ShortcutEvidence::Measured => None,
-        ShortcutEvidence::Performed => (shortened_place_choice(state, proposal, seat, place)
-            == Some(false))
-        .then_some(ShortenRefusal::NoDifferentChoice),
+        ShortcutEvidence::Performed => {
+            (shorten_run_to(state, proposal, seat, place).refused_at(place) == Some(true))
+                .then_some(ShortenRefusal::NoDifferentChoice)
+        }
     }
 }
 
-/// Performs the take to `place` on scratch: `None` unless it arms the CR 732.2c latch for `seat`
-/// (the latch is the take's own proof of reach), else whether `seat` has a meaningful priority
-/// action there.
-fn shortened_place_choice(
+/// `seat`'s run on the open window, from where its receipt left it, extended until it decides
+/// `place`.
+fn shorten_run_to(
     state: &GameState,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
     seat: PlayerId,
     place: u32,
-) -> Option<bool> {
-    let mut shortened = proposal.clone();
-    shortened.count = crate::analysis::decision_template::IterationCount::Fixed(place);
-    shortened.shortened_by = Some(seat);
-    let mut scratch = state.clone();
-    scratch.precast_shortcut_runtime.must_diverge = None;
-    let mut result = ActionResult::applied(Vec::new(), scratch.waiting_for.clone());
-    let _probe = SimulationProbeGuard::enter();
-    if materialize_fixed_shortcut(&mut scratch, &mut result, &shortened, place).is_err()
-        || scratch.precast_shortcut_runtime.must_diverge != Some(seat)
-    {
-        return None;
+) -> super::period_confirm::ShortenRun {
+    let mut run = proposal
+        .period
+        .receipts
+        .shorten_run(state.state_revision, seat)
+        .cloned()
+        .unwrap_or_else(|| super::period_confirm::ShortenRun::new(seat));
+    extend_shorten_run(&mut run, state, proposal, place);
+    run
+}
+
+/// CR 732.2b + CR 732.2c: extends `run` until it decides `place`. Each repetition is performed
+/// as the take to that place performs it (`drive_persistent_axis_collapse`, which every shortened
+/// take reaches since `take_route` replays a shortened count), so the state it reaches is the
+/// state that take reaches: a place is refused only when the take there arms CR 732.2c's latch
+/// for `run.seat` and they have no meaningful priority action; a place no take reaches is admitted.
+fn extend_shorten_run(
+    run: &mut super::period_confirm::ShortenRun,
+    state: &GameState,
+    proposal: &crate::analysis::loop_check::ShortcutProposal,
+    place: u32,
+) {
+    use super::period_confirm::{RunFrontier, RunNext};
+    if run.refused_at(place).is_some() {
+        return;
     }
-    let (probe, actions) = crate::ai_support::shortcut_probe(&scratch, seat);
-    Some(crate::ai_support::has_meaningful_priority_action(
-        probe.state(),
-        &actions,
-    ))
+    let _probe = SimulationProbeGuard::enter();
+    let controller = proposal.proposer;
+    let seat = run.seat;
+    let mut shortened = proposal.clone();
+    shortened.shortened_by = Some(seat);
+    let mut refused_here = |at: &GameState, k: u32| {
+        let mut at = at.clone();
+        if at.game_end.is_some() {
+            return false;
+        }
+        shortened.count = crate::analysis::decision_template::IterationCount::Fixed(k);
+        let mut result = ActionResult::applied(Vec::new(), at.waiting_for.clone());
+        end_shortcut_at_priority(&mut at, &mut result, &shortened, true);
+        if at.precast_shortcut_runtime.must_diverge != Some(seat) {
+            return false;
+        }
+        let (probe, actions) = crate::ai_support::shortcut_probe(&at, seat);
+        !crate::ai_support::has_meaningful_priority_action(probe.state(), &actions)
+    };
+    let (mut work, related) = match std::mem::replace(&mut run.next, RunNext::Stopped) {
+        RunNext::Stopped => return,
+        RunNext::Start => {
+            let mut work = state.clone();
+            work.precast_shortcut_runtime.must_diverge = None;
+            reseed_take(&mut work, controller);
+            run.refused.push(refused_here(&work, 0));
+            (work, Vec::new())
+        }
+        RunNext::From(frontier) => {
+            let frontier = std::sync::Arc::unwrap_or_clone(frontier);
+            (frontier.state, frontier.related)
+        }
+    };
+    let derivation = shortcut_consumption_bound(state, proposal, place);
+    let predicted = derivation.predicted();
+    let take =
+        super::period_confirm::TakeRun::resumed(state, &proposal.period, controller, related);
+    let declared = proposal.template.as_ref();
+    // `run.next` reads `Stopped` until the loop leaves a frontier, so it counts places reached.
+    while let Some(i) = u32::try_from(run.refused.len() - 1)
+        .ok()
+        .filter(|&reached| reached < place)
+    {
+        reseed_take(&mut work, controller);
+        let before = predicted.map(|_| work.clone());
+        let ended = {
+            let _take = super::engine_casting::ConfirmedTakeGuard::enter();
+            super::period_confirm::perform_cycle(
+                &mut work,
+                &proposal.period,
+                &take,
+                declared.map(|template| (template, i)),
+                &mut Vec::new(),
+            )
+        };
+        if matches!(
+            ended,
+            CycleEnd::Refused(OfferRefusal::LifeChangeUnrepresentable { .. })
+        ) {
+            return;
+        }
+        let departure = before
+            .as_ref()
+            .zip(predicted)
+            .map(|(before, entries)| departure_verdict(entries, before, &work, i + 1));
+        match repetition_verdict(&ended, departure) {
+            RepetitionVerdict::Continue => run.refused.push(refused_here(&work, i + 1)),
+            // CR 800.4a + CR 104.2a: a predicted departure is the take's last repetition.
+            RepetitionVerdict::Ended if predicted.is_some() => {
+                run.refused.push(refused_here(&work, i + 1));
+                return;
+            }
+            RepetitionVerdict::Ended | RepetitionVerdict::Stopped => return,
+        }
+    }
+    run.next = RunNext::From(std::sync::Arc::new(RunFrontier {
+        state: work,
+        related: take.into_related(),
+    }));
 }
 
 /// CR 732.2b/c: the step one opponent's answer takes when committed: refused when it shortens at
