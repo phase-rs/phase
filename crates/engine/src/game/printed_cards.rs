@@ -2593,10 +2593,12 @@ mod tests {
     }
 
     /// Production-restore pin for the Smackdown ref repair (PR #10861 R7-F1):
-    /// the predicate-level test above starts from a hand-built graveyard Event
-    /// and immediate rehydration, so a regression between the production
-    /// save-to-snapshot path and the repair would leave it green. This test
-    /// drives the whole production seam instead: normal Turtle Team-Up setup,
+    /// the predicate-level test above DOES assert the corrected ref (its Row 1
+    /// route+ref equalities), so repair-predicate coverage is its job; what it
+    /// cannot catch is a regression between the production save-to-snapshot
+    /// path and the repair, because it starts from a hand-built graveyard
+    /// Event and immediate rehydration. This test drives the whole production
+    /// seam instead: normal Turtle Team-Up setup,
     /// a normal wave reveal, the `TrustedGameStateEnvelope` save envelope with
     /// the historical typo'd ref and omitted display routes spliced in at the
     /// serialized boundary, then the shared restore chokepoint both production
