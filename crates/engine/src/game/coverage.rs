@@ -9998,6 +9998,14 @@ enum StructuralFeature {
     /// The card parses, and with no protection or competing replacement it works, so nothing
     /// else in coverage can see it.
     DamageSubstitutionChoiceIncomplete,
+    /// CR 614.9 + CR 616.1 + CR 702.16e: a capped redirect ("The next 1 damage that would be
+    /// dealt to this creature this turn is dealt to target creature you control instead." —
+    /// Nomads en-Kor) sends its part to a recipient where protection from the source prevents it
+    /// at the pre-replacement gate, ahead of any other prevention shield there (Test of Faith),
+    /// so the recipient's controller is not offered the order CR 616.1 gives them. The card
+    /// parses, and with no competing shield on the recipient it works, so nothing else in
+    /// coverage can see it.
+    CappedRedirectRecipientChoiceIncomplete,
 }
 
 impl StructuralFeature {
@@ -10027,6 +10035,9 @@ impl StructuralFeature {
             }
             DamageSubstitutionChoiceIncomplete => {
                 "structural:damage_substitution_choice_incomplete"
+            }
+            CappedRedirectRecipientChoiceIncomplete => {
+                "structural:capped_redirect_recipient_choice_incomplete"
             }
         }
     }
@@ -10069,6 +10080,11 @@ impl StructuralFeature {
             // `a_repeated_answer_puts_a_noncombat_batch_on_one_force_bubble`: two prompts for one
             // simultaneous event).
             DamageSubstitutionChoiceIncomplete => FeatureSupport::Unhandled,
+            // MEASURED UNHANDLED: `unpreventable_damage_prevention_effects`
+            // (`a_capped_redirects_part_meets_protection_before_a_competing_shield`: the pro-red
+            // Silver Knight's protection prevents the redirected point and Test of Faith is never
+            // offered, so no counter is placed).
+            CappedRedirectRecipientChoiceIncomplete => FeatureSupport::Unhandled,
         }
     }
 }
@@ -10833,6 +10849,20 @@ fn extract_ability_features_with_token_statics(
     }
     if counter_exile_rider_drops_its_tail(def) {
         emit_structural(features, StructuralFeature::CounterExileRiderTailDropped);
+    }
+    // CR 614.9: a shield that redirects only the next N damage.
+    if matches!(
+        &*def.effect,
+        Effect::CreateDamageReplacement {
+            redirect_to: Some(_),
+            redirect_amount: Some(crate::types::ability::PreventionAmount::Next(_)),
+            ..
+        }
+    ) {
+        emit_structural(
+            features,
+            StructuralFeature::CappedRedirectRecipientChoiceIncomplete,
+        );
     }
     if prevention_rider_asks_a_choice_in_combat(def) {
         emit_structural(

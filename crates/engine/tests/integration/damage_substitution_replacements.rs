@@ -1520,7 +1520,8 @@ fn a_player_who_wins_and_loses_in_one_batch_loses() {
 /// controller", P0 sends its Vampire of the Dire Moon's and Laboratory Maniac's damage to its Wall
 /// with Pariah, so the Vampire's lifelink becomes the Lich's draw and Laboratory Maniac's win;
 /// P1's Grizzly Bears meet P1's Nefarious Lich, which can't exile, so P1 loses. P1's loss is the
-/// team's, so P0 would both win and lose and loses: P0's team loses and P2's team wins.
+/// team's, so P0 would both win and lose and loses: P0's team loses and P2's team wins. The test
+/// first requires both outcomes (the draw-to-win and the Lich's loss), so neither alone passes it.
 #[test]
 fn a_two_headed_giant_team_that_wins_and_loses_in_one_batch_loses() {
     let mut scenario = GameScenario::new_with_format(
@@ -1534,22 +1535,28 @@ fn a_two_headed_giant_team_that_wins_and_loses_in_one_batch_loses() {
         &["Deathtouch", "Lifelink"],
         "Deathtouch (Any amount of damage this deals to a creature is enough to destroy it.)\nLifelink (Damage dealt by this creature also causes you to gain that much life.)",
     );
-    scenario.add_creature_from_oracle(
-        P0,
-        "Laboratory Maniac",
-        2,
-        2,
-        "If you would draw a card while your library has no cards in it, you win the game instead.",
-    );
+    let maniac = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Laboratory Maniac",
+            2,
+            2,
+            "If you would draw a card while your library has no cards in it, you win the game instead.",
+        )
+        .id();
     let wall = scenario.add_creature(P0, "Wall", 0, 20).id();
     let pariah = scenario
         .add_enchantment_from_oracle(P0, "Pariah", PARIAH)
         .with_subtypes(vec!["Aura"])
         .from_oracle_text_with_keywords(&["Enchant"], PARIAH)
         .id();
-    scenario.add_enchantment_from_oracle(P0, "Nefarious Lich", NEFARIOUS_LICH);
+    let p0_lich = scenario
+        .add_enchantment_from_oracle(P0, "Nefarious Lich", NEFARIOUS_LICH)
+        .id();
     scenario.add_creature(P1, "Grizzly Bears", 2, 2);
-    scenario.add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH);
+    let p1_lich = scenario
+        .add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH)
+        .id();
     let charm = instant(&mut scenario, "Rakdos Charm", RAKDOS_CHARM);
     let mut runner = scenario.build();
     attach_to(runner.state_mut(), pariah, wall);
@@ -1570,6 +1577,34 @@ fn a_two_headed_giant_team_that_wins_and_loses_in_one_batch_loses() {
         ),
         "reach: the Vampire's 1 is dealt to the Wall: {prompts:?}"
     );
+    // Both outcomes happened: P0's lifelink gain became the Lich's draw and Laboratory Maniac's
+    // win, and P1's Lich replaced the Bears' damage and its loss resolved.
+    let applied = |source: ObjectId, kind: &str| {
+        events.iter().any(|e| {
+            matches!(e, GameEvent::ReplacementApplied { source_id, event_type }
+                if *source_id == source && event_type == kind)
+        })
+    };
+    assert!(
+        applied(p0_lich, "GainLife"),
+        "reach: P0's gain becomes a draw"
+    );
+    assert!(
+        applied(maniac, "Draw"),
+        "reach: the draw becomes Laboratory Maniac's win"
+    );
+    assert!(
+        applied(p1_lich, "DamageDone"),
+        "reach: P1's Lich replaces the Bears' damage"
+    );
+    for kind in [EffectKind::WinTheGame, EffectKind::LoseTheGame] {
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::EffectResolved { kind: k, .. } if *k == kind)),
+            "reach: {kind:?} resolved"
+        );
+    }
     for loser in [P0, P1] {
         assert!(
             events.iter().any(
@@ -4347,6 +4382,76 @@ fn a_fight_parked_on_a_held_rider_ends_with_the_game() {
         0,
         "no damage batch is left to resume"
     );
+}
+
+const AWE_STRIKE: &str = "The next time target creature would deal damage this turn, prevent that damage. You gain life equal to the damage prevented this way.";
+
+/// CR 615.7 + CR 616.1: the player chooses which damage a shield prevents. Mending Hands ("Prevent
+/// the next 4 damage that would be dealt to any target this turn.") is on P1's Wall of Stone and
+/// Awe Strike on P0's Hill Giant; Allies at Last has the Giant and then Rumbling Baloth deal
+/// damage to the Wall. The Giant's 3 meets both shields, P1's choice; the Baloth's 4 meets only
+/// Mending Hands, and waits for that choice instead of spending the shield first. Mending Hands
+/// for the Giant leaves 1 of it for the Baloth: the Wall takes 3 and P0 gains nothing. Awe Strike
+/// for the Giant leaves all 4 for the Baloth: the Wall takes none and P0 gains 3.
+#[test]
+fn a_batch_keeps_a_shared_shield_for_the_players_choice() {
+    for pick_hands in [true, false] {
+        let mut scenario = scenario();
+        let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+        let baloth = scenario.add_creature(P0, "Rumbling Baloth", 4, 4).id();
+        let wall = scenario.add_creature(P1, "Wall of Stone", 0, 8).id();
+        let hands = instant(&mut scenario, "Mending Hands", MENDING_HANDS);
+        let awe = instant(&mut scenario, "Awe Strike", AWE_STRIKE);
+        let allies = sorcery(&mut scenario, "Allies at Last", ALLIES_AT_LAST);
+        let mut runner = scenario.build();
+        cast(&mut runner, hands, vec![object_target(wall)]);
+        cast(&mut runner, awe, vec![object_target(giant)]);
+        let mut events = cast(
+            &mut runner,
+            allies,
+            vec![
+                object_target(giant),
+                object_target(baloth),
+                object_target(wall),
+            ],
+        );
+
+        let mut prompts = 0;
+        while let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = runner.state().waiting_for.clone()
+        {
+            assert_eq!(player, P1, "the Wall's controller chooses");
+            assert_eq!(
+                candidates.len(),
+                2,
+                "both shields are still offered: {candidates:?}"
+            );
+            prompts += 1;
+            // Mending Hands was cast first, so it is the first candidate.
+            let index = if pick_hands { 0 } else { 1 };
+            answer(
+                &mut runner,
+                GameAction::ChooseReplacement { index },
+                &mut events,
+            );
+        }
+
+        assert_eq!(prompts, 1, "pick_hands {pick_hands}");
+        assert_at_rest(&runner);
+        if pick_hands {
+            assert_eq!(damage(&runner, wall), 3);
+            assert_eq!(life(&runner, P0), 20);
+        } else {
+            assert_eq!(damage(&runner, wall), 0);
+            assert_eq!(life(&runner, P0), 23);
+        }
+        assert_completes_once_after_its_damage(
+            &events,
+            EffectKind::EachDealsDamageEqualToPower,
+            allies,
+        );
+    }
 }
 
 /// CR 616.1 + CR 101.4: P2's outstanding order precedes a new P3 order after redirect.

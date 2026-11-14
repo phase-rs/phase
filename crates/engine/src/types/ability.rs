@@ -17,7 +17,7 @@ use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost, ManaType};
 use super::phase::Phase;
 use super::player::PlayerId;
-use super::proposed_event::AppliedReplacementKey;
+use super::proposed_event::{AppliedReplacementKey, ReplacementId};
 use super::zones::Zone;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::object_data::DisplayIdentity;
@@ -1840,6 +1840,10 @@ pub struct DeferredDamageChoice {
     pub excess_recipient: Option<ExcessRecipient>,
     #[serde(default)]
     pub lifelink_bonus: u32,
+    /// CR 615.7 + CR 616.1: the replacements the choice offers, so the batch can keep another
+    /// portion from spending a shield the choice could still pick.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<ReplacementId>,
 }
 
 /// CR 616.1 + CR 615.5: a parked two-phase damage batch's outstanding work besides its

@@ -6999,6 +6999,51 @@ pub fn replacement_registry() -> &'static IndexMap<ReplacementEvent, Replacement
 
 // --- Prevention gating ---
 
+/// CR 615.7 + CR 614.5: whether applying `rid` spends a limited capacity another damage event
+/// could have used: a one-shot shield, a "prevent the next N damage" shield, a capped or
+/// one-opportunity redirect, or a replacement consumed on use.
+pub(crate) fn replacement_spends_shared_capacity(state: &GameState, rid: ReplacementId) -> bool {
+    let repl = if rid.source == ObjectId(0) {
+        state.pending_damage_replacements.get(rid.index)
+    } else {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+    };
+    repl.is_some_and(|repl| {
+        repl.consume_on_apply
+            || match repl.shield_kind {
+                ShieldKind::Prevention {
+                    amount: PreventionAmount::Next(_),
+                }
+                | ShieldKind::PreventionOneShot
+                | ShieldKind::DamageReplacementOneShot => true,
+                ShieldKind::Redirection {
+                    amount, lifetime, ..
+                } => matches!(amount, PreventionAmount::Next(_)) || lifetime.is_one_opportunity(),
+                ShieldKind::None
+                | ShieldKind::Regeneration
+                | ShieldKind::Prevention { .. }
+                | ShieldKind::Substitution => false,
+            }
+    })
+}
+
+/// CR 615.7 + CR 616.1: whether this damage event would meet a replacement that spends a shared
+/// capacity and that one of `offered` (an outstanding choice's candidates) is. The batch keeps
+/// such a portion waiting until that choice is made, so the choice keeps the shield to pick.
+pub(crate) fn damage_event_shares_spendable_shield(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    offered: &[ReplacementId],
+) -> bool {
+    !offered.is_empty()
+        && find_applicable_replacements(state, proposed, replacement_registry())
+            .into_iter()
+            .any(|rid| offered.contains(&rid) && replacement_spends_shared_capacity(state, rid))
+}
+
 /// CR 615.12: whether this damage event can't be prevented ("Damage can't be prevented this
 /// turn."), for a prevention that runs outside the replacement pipeline (protection's, CR
 /// 702.16e, at the pre-replacement gate).

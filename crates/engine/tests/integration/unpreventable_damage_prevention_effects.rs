@@ -1151,6 +1151,52 @@ fn a_capped_redirects_part_meets_its_new_recipients_protection() {
     }
 }
 
+/// STRICT FAILURE (CR 616.1 + CR 702.16e, fenced by the
+/// `capped_redirect_recipient_choice_incomplete` coverage gap): the reviewer's board, with Test of
+/// Faith on the pro-red Silver Knight too. The redirected point meets two prevention effects, so
+/// the Knight's controller should choose which applies: Test of Faith (a +1/+1 counter, the
+/// shield spent) or protection (the shield kept). Today protection prevents the point at the
+/// pre-replacement gate and no choice is offered. This row records that reading.
+#[test]
+fn a_capped_redirects_part_meets_protection_before_a_competing_shield() {
+    use engine::types::keywords::{Keyword, ProtectionTarget};
+    use engine::types::mana::ManaColor;
+    let mut scenario = main_phase();
+    let giant = scenario
+        .add_creature(P0, "Hill Giant", 3, 3)
+        .with_color(vec![ManaColor::Red])
+        .id();
+    let nomads = nomads_shielding(&mut scenario, "Nomads en-Kor");
+    let knight = scenario
+        .add_creature(P0, "Silver Knight", 2, 2)
+        .with_keyword(Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)))
+        .id();
+    let faith = spell(&mut scenario, "Test of Faith", TEST_OF_FAITH, true);
+    let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
+    let mut runner = scenario.build();
+    activate_shields_at(&mut runner, &[nomads], knight);
+    cast(&mut runner, faith, vec![TargetRef::Object(knight)]);
+
+    let events = cast(
+        &mut runner,
+        pit_fight,
+        vec![TargetRef::Object(giant), TargetRef::Object(nomads)],
+    );
+
+    assert_settled(&runner);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        GameEvent::DamagePrevented { source_id, target: TargetRef::Object(id), amount: 1 }
+            if *source_id == giant && *id == knight
+    )));
+    assert_eq!(
+        plus_counters(&runner, knight),
+        0,
+        "STRICT FAILURE: Test of Faith is never offered"
+    );
+    assert_eq!(damage_dealt_to(&events, nomads), vec![2]);
+}
+
 /// CR 614.9 + CR 616.1 + CR 101.4d: a capped redirect chosen by an answer splits its 1 off to a
 /// creature the active player controls, while the remainder still needs the answering player's
 /// next choice. P0 active; Pit Fight between P0's Hill Giant and Nomads en-Kor, whose shield is

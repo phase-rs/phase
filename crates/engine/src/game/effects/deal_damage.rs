@@ -1476,6 +1476,10 @@ fn run_damage_batch_phases(
     let order = crate::game::players::apnap_order(state);
     let mut portions: std::collections::VecDeque<BatchPortion> =
         in_apnap_order(state, portions).into();
+    // CR 615.7 + CR 616.1: portions waiting for an outstanding choice whose shield they would
+    // otherwise spend first (`replacement::damage_event_shares_spendable_shield`).
+    let mut waiting: std::collections::VecDeque<(DamageContext, ProposedEvent)> =
+        std::collections::VecDeque::new();
     // Phase B: replacement (CR 120.4b + CR 614 + CR 615). CR 616.1 + CR 101.4: every portion
     // is first carried through its automatic replacements (a sole Pariah's redirect) up to the
     // choice it needs, which waits in `deferred`; only then is a choice asked, the outstanding
@@ -1497,20 +1501,22 @@ fn run_damage_batch_phases(
         };
         let (portion, asking) = match next {
             Some(portion) => (portion, false),
-            None => {
-                let Some(index) = deferred
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, choice)| player_rank(&order, choice.chooser))
-                    .map(|(index, _)| index)
-                else {
-                    break;
-                };
-                (
+            None => match deferred
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, choice)| player_rank(&order, choice.chooser))
+                .map(|(index, _)| index)
+            {
+                Some(index) => (
                     deferred_portion(state, ability, deferred.remove(index)),
                     true,
-                )
-            }
+                ),
+                // Every choice is made: what waited for one goes on.
+                None => match waiting.pop_front() {
+                    Some((ctx, event)) => (BatchPortion::Gated { ctx, event }, false),
+                    None => break,
+                },
+            },
         };
         // CR 800.4a: damage to a player who left the game, or to an object that is gone, is not
         // dealt; the batch goes on for the rest.
@@ -1537,6 +1543,21 @@ fn run_damage_batch_phases(
                 (ctx, proposed)
             }
         };
+        // CR 615.7 + CR 616.1: the player chooses which damage a shield prevents. While a choice
+        // that offers a limited shield (Mending Hands' "the next 4 damage") is outstanding, a
+        // portion that would spend that shield on its own waits for the choice to be made.
+        if !asking
+            && deferred.iter().any(|choice| {
+                replacement::damage_event_shares_spendable_shield(
+                    state,
+                    &proposed,
+                    &choice.candidates,
+                )
+            })
+        {
+            waiting.push_back((ctx, proposed));
+            continue;
+        }
         let result = replacement::replace_event(state, proposed, events);
         split.extend(take_split_portions(state));
         // CR 104.1: a replacement that ended the game (Nefarious Lich's "If you can't, you lose
@@ -1558,7 +1579,7 @@ fn run_damage_batch_phases(
                 // CR 608.2c + CR 616.1: a rider that left its prompt standing holds the rest of
                 // the batch behind its answer.
                 if replacement::damage_batch_has_paused_rider(state) {
-                    let remaining = portions.iter().filter_map(BatchPortion::raw).collect();
+                    let remaining = park_waiting(&portions, waiting, &mut split);
                     let held = take_held_riders(state);
                     park_damage_batch(
                         state,
@@ -1595,7 +1616,7 @@ fn run_damage_batch_phases(
                 // replaced event back to the parked batch (`return_answered_portion_to_batch`),
                 // which finishes the other portions' replacement before any delivery.
                 state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
-                let remaining = portions.iter().filter_map(BatchPortion::raw).collect();
+                let remaining = park_waiting(&portions, waiting, &mut split);
                 let held = take_held_riders(state);
                 park_damage_batch(
                     state,
@@ -1729,6 +1750,47 @@ fn settle_event_losses(state: &mut GameState, events: &mut Vec<GameEvent>) -> bo
     state.game_end.is_some()
 }
 
+/// CR 608.2c: the raw portions a pausing batch parks: its remaining portions, then those waiting
+/// for a choice (`waiting`), which meet that check again when the batch resumes. A waiting part a
+/// capped redirect split off keeps its applied replacements among the split parts (CR 614.5).
+fn park_waiting(
+    portions: &std::collections::VecDeque<BatchPortion>,
+    waiting: std::collections::VecDeque<(DamageContext, ProposedEvent)>,
+    split: &mut std::collections::VecDeque<SplitDamagePortion>,
+) -> Vec<RawDamagePortion> {
+    let mut remaining: Vec<RawDamagePortion> =
+        portions.iter().filter_map(BatchPortion::raw).collect();
+    for (_, event) in waiting {
+        if let ProposedEvent::Damage {
+            source_id,
+            target,
+            amount,
+            is_combat,
+            applied,
+        } = event
+        {
+            if applied.is_empty() {
+                remaining.push(RawDamagePortion {
+                    source: source_id,
+                    target,
+                    amount,
+                });
+            } else {
+                let mut applied: Vec<_> = applied.into_iter().collect();
+                applied.sort_unstable();
+                split.push_back(SplitDamagePortion {
+                    source: source_id,
+                    target,
+                    amount,
+                    is_combat,
+                    applied,
+                });
+            }
+        }
+    }
+    remaining
+}
+
 /// CR 614.9: the portions capped redirects split off into the batch's ledger since the last take.
 fn take_split_portions(state: &mut GameState) -> Vec<SplitDamagePortion> {
     state
@@ -1831,6 +1893,7 @@ fn take_pending_damage_choice(
         applied,
         excess_recipient: pending.excess_recipient,
         lifelink_bonus: pending.lifelink_bonus,
+        candidates: pending.candidates.clone(),
     };
     state.pending_replacement = None;
     Some(choice)
