@@ -5,12 +5,19 @@
 //! from a graveyard. If a card is put into exile this way, look at the top
 //! three cards of your library, then put one of those cards into your hand
 //! and the rest into your graveyard."
+//!
+//! Also covers Mysterious Limousine, the other card whose rider the shared
+//! "put into exile this way" grammar now conditions.
 
+use engine::game::combat::AttackTarget;
+use engine::game::scenario::GameRunner;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{AbilityCondition, Effect, QuantityExpr, TypeFilter};
+use engine::types::ability::{
+    AbilityCondition, Effect, QuantityExpr, TargetFilter, TargetRef, TypeFilter,
+};
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{ExileLink, ExileLinkKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -153,5 +160,206 @@ fn corpse_appraiser_etb_exile_surfaces_dig_choice() {
         state.objects[&mill_two].zone,
         Zone::Graveyard,
         "the rest of the looked-at cards go to the graveyard"
+    );
+}
+
+/// CR 608.2c: with no creature card in any graveyard the optional "up to one"
+/// target is left empty, nothing is put into exile, the parent event ledger is
+/// empty, and the "put into exile this way" Dig must neither prompt nor move a
+/// library card.
+#[test]
+fn corpse_appraiser_no_graveyard_creature_does_not_dig() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let appraiser = scenario
+        .add_creature_to_hand_from_oracle(P0, "Corpse Appraiser", 3, 3, CORPSE_APPRAISER)
+        .id();
+    let library = [
+        scenario.add_card_to_library_top(P0, "Library Three"),
+        scenario.add_card_to_library_top(P0, "Library Two"),
+        scenario.add_card_to_library_top(P0, "Library One"),
+    ];
+    scenario.with_mana_pool(P0, floating_ubr());
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(appraiser).resolve();
+
+    assert!(
+        !matches!(outcome.final_waiting_for(), WaitingFor::DigChoice { .. }),
+        "no card was put into exile, so no DigChoice, got {:?}",
+        outcome.final_waiting_for()
+    );
+    for id in library {
+        assert_eq!(
+            runner.state().objects[&id].zone,
+            Zone::Library,
+            "no library card may move"
+        );
+    }
+    assert_eq!(runner.state().players[0].graveyard.len(), 0);
+}
+
+const MYSTERIOUS_LIMOUSINE: &str = "Whenever this Vehicle enters or attacks, exile up to one other target creature until this Vehicle leaves the battlefield. If a creature is put into exile this way, return each other card exiled with this Vehicle to the battlefield under its owner's control.\nCrew 2";
+
+/// SHAPE: the same grammar conditions Mysterious Limousine's return-each-other
+/// continuation on "a creature put into exile this way" (it was unconditioned
+/// before the "put into exile" arm existed).
+#[test]
+fn mysterious_limousine_return_is_gated_by_creature_put_into_exile() {
+    let parsed = parse_oracle_text(
+        MYSTERIOUS_LIMOUSINE,
+        "Mysterious Limousine",
+        &[],
+        &["Artifact".to_string(), "Vehicle".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::EntersOrAttacks)
+        .expect("enters-or-attacks trigger");
+    let execute = trigger.execute.as_ref().expect("execute");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ),
+        "first instruction exiles the target creature, got {:?}",
+        execute.effect
+    );
+    let ret = execute.sub_ability.as_ref().expect("return sub_ability");
+    assert!(
+        matches!(
+            ret.effect.as_ref(),
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Battlefield,
+                ..
+            }
+        ),
+        "second instruction returns the other exiled cards, got {:?}",
+        ret.effect
+    );
+    let Some(AbilityCondition::ZoneChangedThisWay {
+        filter,
+        destination,
+    }) = &ret.condition
+    else {
+        panic!(
+            "return must be gated by ZoneChangedThisWay, got {:?}",
+            ret.condition
+        );
+    };
+    assert_eq!(*destination, Some(Zone::Exile));
+    match filter {
+        TargetFilter::Typed(typed) => {
+            assert_eq!(typed.type_filters, vec![TypeFilter::Creature]);
+        }
+        other => panic!("expected Typed Creature this-way filter, got {other:?}"),
+    }
+}
+
+/// Stage Mysterious Limousine on P0's battlefield with a card already exiled
+/// with it (SYNTHETIC: linked as a prior activation's exile would be,
+/// CR 607.2a; the link is added after build because a Vehicle that changed
+/// zones would lose it, CR 400.7), a crewer, and an opposing creature. Crew it,
+/// attack, and answer the attack trigger's optional target with `choice`.
+/// Returns (runner, prior exiled card, opposing creature).
+fn limousine_attack(choose_opposing: bool) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let limo = scenario
+        .add_creature(P0, "Mysterious Limousine", 4, 4)
+        .as_artifact()
+        .with_subtypes(vec!["Vehicle"])
+        .from_oracle_text(MYSTERIOUS_LIMOUSINE)
+        .id();
+    let crewer = scenario.add_creature(P0, "Crewer", 2, 2).id();
+    let prior = scenario
+        .add_creature_to_exile(P1, "Previously Exiled Bear", 2, 2)
+        .id();
+    let victim = scenario.add_creature(P1, "Doomed Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.state_mut().exile_links.push(ExileLink {
+        exiled_id: prior,
+        source_id: limo,
+        kind: ExileLinkKind::TrackedBySource,
+    });
+
+    // CR 702.122a: crew 2 with the 2/2.
+    runner
+        .act(GameAction::CrewVehicle {
+            vehicle_id: limo,
+            creature_ids: vec![],
+        })
+        .expect("enter crew selection");
+    runner
+        .act(GameAction::CrewVehicle {
+            vehicle_id: limo,
+            creature_ids: vec![crewer],
+        })
+        .expect("pay the crew cost");
+    runner.advance_until_stack_empty();
+    runner.advance_to_combat();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(limo, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("the Limousine attacks");
+
+    for _ in 0..40 {
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection {
+                target_slots,
+                selection,
+                ..
+            } => {
+                let legal = &target_slots[selection.current_slot].legal_targets;
+                assert!(legal.contains(&TargetRef::Object(victim)));
+                GameAction::ChooseTarget {
+                    target: choose_opposing.then_some(TargetRef::Object(victim)),
+                }
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            other => panic!("unexpected prompt {other:?}"),
+        };
+        runner.act(action).expect("the attack trigger resolves");
+    }
+    assert!(runner.state().stack.is_empty(), "reach: trigger resolved");
+    (runner, prior, victim)
+}
+
+/// CR 608.2c + CR 607.2a: a creature really is put into exile, so the
+/// continuation runs: the previously exiled card returns, the new victim stays.
+#[test]
+fn mysterious_limousine_exiling_a_creature_returns_the_other_exiled_card() {
+    let (runner, prior, victim) = limousine_attack(true);
+    let state = runner.state();
+    assert_eq!(state.objects[&victim].zone, Zone::Exile, "victim is exiled");
+    assert_eq!(
+        state.objects[&prior].zone,
+        Zone::Battlefield,
+        "the other card exiled with the Vehicle returns"
+    );
+}
+
+/// CR 608.2c: the optional target is declined, so no creature is put into
+/// exile, the gate is false and the previously exiled card must stay exiled.
+/// At the merge base this continuation was unconditioned and returned it
+/// anyway.
+#[test]
+fn mysterious_limousine_declined_target_returns_nothing() {
+    let (runner, prior, victim) = limousine_attack(false);
+    let state = runner.state();
+    assert_eq!(state.objects[&victim].zone, Zone::Battlefield);
+    assert_eq!(
+        state.objects[&prior].zone,
+        Zone::Exile,
+        "nothing was put into exile this way, so nothing returns"
     );
 }
