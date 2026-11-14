@@ -5575,11 +5575,40 @@ thread_local! {
         const { core::cell::Cell::new(0) };
 }
 
+/// CR 712.14 + CR 712.14a: the face a double-faced entrant has up as it is put onto the battlefield.
+/// Engine-internal: the entry event and `BattlefieldEntrantProjection::new` keep their
+/// `enter_transformed` flag, converted once here (`EntryFace::from_enter_transformed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryFace {
+    /// CR 712.14: front face up, the default.
+    Front,
+    /// CR 712.14a: put onto the battlefield "transformed": back face up.
+    Back,
+}
+
+impl EntryFace {
+    const fn from_enter_transformed(enter_transformed: bool) -> Self {
+        if enter_transformed {
+            Self::Back
+        } else {
+            Self::Front
+        }
+    }
+
+    /// The flag `zones::move_to_zone_with_entry_flags` takes (an existing boolean boundary).
+    const fn enters_transformed(self) -> bool {
+        match self {
+            Self::Front => false,
+            Self::Back => true,
+        }
+    }
+}
+
 /// What an entry event already gives its entrant as it is placed on the scratch
 /// battlefield: the event's own fields, borrowed.
 struct EntrantStaging<'a> {
     controller_override: Option<PlayerId>,
-    enter_transformed: bool,
+    face: EntryFace,
     face_down_profile: Option<&'a crate::types::ability::FaceDownProfile>,
     chain_referent: crate::types::zones::ChainReferentIntent,
     enter_with_choices: Option<&'a crate::types::proposed_event::EntryChoices>,
@@ -5610,7 +5639,7 @@ impl BattlefieldEntrantProjection {
             entrant,
             &EntrantStaging {
                 controller_override,
-                enter_transformed,
+                face: EntryFace::from_enter_transformed(enter_transformed),
                 face_down_profile: None,
                 chain_referent: crate::types::zones::ChainReferentIntent::Silent,
                 enter_with_choices: None,
@@ -5666,7 +5695,7 @@ impl BattlefieldEntrantProjection {
             *object_id,
             &EntrantStaging {
                 controller_override: *controller_override,
-                enter_transformed: *enter_transformed,
+                face: EntryFace::from_enter_transformed(*enter_transformed),
                 face_down_profile: face_down_profile.as_deref(),
                 chain_referent: *chain_referent,
                 enter_with_choices: enter_with_choices.as_deref(),
@@ -5792,7 +5821,7 @@ impl BattlefieldEntrantProjection {
             entrant,
             Zone::Battlefield,
             &mut events,
-            staging.enter_transformed,
+            staging.face.enters_transformed(),
             None,
         );
         if scratch.objects.get(&entrant)?.zone != Zone::Battlefield {
@@ -5810,11 +5839,14 @@ impl BattlefieldEntrantProjection {
             &mut events,
         );
         // CR 712.14a: a transformed entry is turned back face up after placement, as delivery does.
-        if staging.enter_transformed {
-            let placed = scratch.objects.get(&entrant)?;
-            if placed.back_face.is_some() && !placed.transformed {
-                let _ = crate::game::transform::enter_back_face_up(&mut scratch, entrant);
+        match staging.face {
+            EntryFace::Back => {
+                let placed = scratch.objects.get(&entrant)?;
+                if placed.back_face.is_some() && !placed.transformed {
+                    let _ = crate::game::transform::enter_back_face_up(&mut scratch, entrant);
+                }
             }
+            EntryFace::Front => {}
         }
         // CR 110.2a: the controller the real move installs.
         if let Some(controller) = staging.controller_override {
@@ -14799,7 +14831,7 @@ mod tests {
         let profile = FaceDownProfile::vanilla_2_2();
         let staging = |face_down_profile| EntrantStaging {
             controller_override: None,
-            enter_transformed: false,
+            face: EntryFace::Front,
             face_down_profile,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             enter_with_choices: None,

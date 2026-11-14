@@ -40,7 +40,13 @@
 //! CR 704.5i puts it into the graveyard), and an optional "enter as a copy" (R16, Bronzehide
 //! Lion's self-return of a Clone, CR 614.1c). Entry replacements that are not the entrant's own
 //! abilities still apply (R11 Deanna Troi, R13 Imposing Sovereign and Archelos). The carrier
-//! survives a CR 616.1 ordering pause (R13) and the `EffectZoneChoice` round-trip (R19).
+//! survives a CR 616.1 ordering pause (R13) and the `EffectZoneChoice` round-trip (R19). A
+//! granted as-enters keyword is an ability of the entrant too (CR 702.54a, CR 702.136a,
+//! CR 702.98a): the grant already exists, so the resolution's "has no abilities" effect is later
+//! in layer 6 and removes it with the entry (CR 613.1f + CR 613.7a + CR 613.7b). Twins of
+//! Discord's bloodthirst (R-N2a), Rhythm of the Wild's riot (R-N2c) and Tesak, Judith's
+//! Hellhound's unleash (R-N2e) do not apply to an entrant Xu-Ifit returns, and do apply to one
+//! Zombify returns (R-N2b, R-N2d, R-N2f).
 //!
 //! Consequence (c) — CR 614.12 + CR 611.2e: external entry replacements and
 //! `EntersWithAdditionalCounters` statics read the entrant with the resolution's simultaneous
@@ -54,7 +60,17 @@
 //! returned entrant still misses an event before its own entry (issue #8160, CR 603.10a), and its
 //! sacrifice trigger is live on the battlefield: R-8160m, R-8160p. A save taken while such a
 //! stamped entry is in a live carrier restores, because the entry's per-turn ledger row and every
-//! parked copy carry the stamp (CR 400.7 + CR 603.2c): R-P1, R-P2, R-P3.
+//! parked copy carry the stamp (CR 400.7 + CR 603.2c): R-P1, R-P2, R-P3. A newcomer exists only
+//! immediately after its own entry event (CR 603.10), so it sees that event's entries only through
+//! halves checked after the event. A look-back half (CR 603.10a: "a creature card leaves your
+//! graveyard") needs presence before the event, so a returned observer misses its own departure and
+//! its co-entrants', in either delivery order: Syr Konrad, the Grim (R-N3a, R-N3b, R-N3c, R-N3d,
+//! R-N3h), Tormod, the Desecrator (R-N3f), Skeleton Crew returning itself (R-N3g). An observer
+//! already on the battlefield still sees them (R-N3e). An enters half naming a graveyard origin is
+//! still seen by a newcomer, for its own entry and a co-entrant's (River Kelpie: R-N3i, R-N3j). A
+//! returned card whose look-back ability functioned in the graveyard it left (CR 113.6k: Oglor,
+//! Devoted Assistant's granted "When this card leaves your graveyard, create a tapped 2/2 black
+//! Zombie creature token.") still sees its own departure: R-N3k, R-N3l.
 //!
 //! REVERT DISCRIMINATORS:
 //! - Reverting the collection hand-off (making `change_zone::resolve` call the `Owner` delegate)
@@ -108,6 +124,33 @@
 //! - Deleting the ledger half of `mirror_logical_zone_change_entry_stamps` makes R-P1 and R-P2 fail
 //!   to restore with 'current-turn ZoneChanged record has no ledger occurrence'.
 //! - Deleting its parked-trigger half makes R-P3 fail to restore with the same error.
+//! - Removing the entrant-abilities guard on the granted as-enters keyword block in
+//!   `replacement::find_applicable_replacements` gives the Dreadnought 2 counters in R-N2a.
+//! - Removing the keyword-grant gate in `replacement::object_replacement_candidate_applies`
+//!   offers the riot choice in R-N2c and the unleash choice in R-N2e.
+//! - Checking `event_idx > own_span.end()` before the spans in
+//!   `triggers::EntryObservation::presence_at` leaves P1 at 19 in R-N3b, R-N3h and the
+//!   Konrad-first order of R-N3c, and gives Tormod a token in R-N3f.
+//! - Classifying the own entry span as `ImmediatelyBefore` in
+//!   `triggers::EntryObservation::presence_at` leaves P1 at 19 in R-N3a, R-N3b and R-N3d and below
+//!   20 in R-N3c and R-N3h, and gives a token in R-N3f and R-N3g. Dropping the own-span arm (the
+//!   own entry span then reads `None`) gives River Kelpie 1 draw in R-N3i and 0 in R-N3j, loses the
+//!   Dreadnought's own enters trigger in R4c (`zombify_returned_dreadnought_offers_unless_payment`)
+//!   and `rise_from_the_grave_returned_dreadnought_keeps_its_enters_trigger`, and gives 0 Zombie
+//!   tokens in R-N3k and R-N3l.
+//! - Removing the newcomer gate in `triggers::collect_matching_triggers_inner` fails R-N3a, R-N3b,
+//!   R-N3c, R-N3d, R-N3f, R-N3g and R-N3h.
+//! - Removing the own-zone-change admission in `triggers::observes_from_immediately_after` gives 0
+//!   Zombie tokens in R-N3k (both orders) and R-N3l, and fails
+//!   `perpetual_gains::oglor_repeated_grants_retain_multiplicity_across_zone_cycles` at its first
+//!   departure (0 for 1).
+//! - Admitting every own zone change (dropping the `trigger_definition_functions_in_zone`
+//!   conjunct) leaves P1 at 19 in R-N3a, R-N3b and R-N3d and below 20 in R-N3c and R-N3h, gives a
+//!   token in R-N3f and R-N3g, and stops R-N3k at a trigger-ordering prompt (Grizzly Bears' and
+//!   Syr Konrad's triggers).
+//! - Classifying a graveyard-origin half as looking back whatever its destination (dropping the
+//!   enters-half exemption in `trigger_matchers::zone_change_half_looks_back`) gives River Kelpie
+//!   0 draws in R-N3i and R-N3j.
 //!
 //! R-L1: Lorcan, Warlock Collector's trigger return carries its Warlock rider through a CR 616.1
 //! ordering pause; removing the triggering-object reading of `MovedObjectsSource::of` leaves the
@@ -120,7 +163,7 @@ use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     ChosenAttribute, ContinuousModification, EffectKind, ExileConcealment,
 };
-use engine::types::actions::GameAction;
+use engine::types::actions::{DebugAction, GameAction};
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -2334,6 +2377,7 @@ enum GraveyardCard {
     FamishedWorldsire,
     MetallicMimic,
     ContainmentPriest,
+    SyrKonrad,
 }
 
 impl GraveyardCard {
@@ -2358,6 +2402,7 @@ impl GraveyardCard {
                 .id(),
             GraveyardCard::MetallicMimic => metallic_mimic_in_graveyard(scenario, player),
             GraveyardCard::ContainmentPriest => containment_priest_in_graveyard(scenario, player),
+            GraveyardCard::SyrKonrad => syr_konrad_in_graveyard(scenario, player),
         }
     }
 }
@@ -3257,7 +3302,8 @@ fn answer_until_priority(
                     .act(GameAction::PassPriority)
                     .expect("priority passes while the stack is not empty");
             }
-            _ => break,
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected prompt while answering the resolution: {other:?}"),
         }
     }
     assert_priority_with_empty_stack(runner);
@@ -3936,4 +3982,719 @@ fn ever_after_second_mimic_choice_is_not_preceded_by_a_replacement_choice() {
             assert_eq!(plus_one_counters(&restored, mimic), 0, "trusted {trusted}");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Granted as-enters keywords under the "has no abilities" rider (R-N2a–f).
+// ---------------------------------------------------------------------------
+
+/// Twins of Discord {7} Creature — Eldrazi 8/6 — verbatim.
+const TWINS_OF_DISCORD: &str = "Whenever you attack, choose odd or even. Creatures with mana value of that quality can't block this turn. (Zero is even.)\nEach other colorless creature you control has bloodthirst 2. (If an opponent was dealt damage this turn, that creature enters with two additional +1/+1 counters on it.)";
+/// Ornithopter {0} Artifact Creature — Thopter 0/2 — verbatim.
+const ORNITHOPTER: &str = "Flying";
+/// Rhythm of the Wild {1}{R}{G} Enchantment — verbatim.
+const RHYTHM_OF_THE_WILD: &str = "Creature spells you control can't be countered.\nNontoken creatures you control have riot. (They enter with your choice of a +1/+1 counter or haste.)";
+/// Tesak, Judith's Hellhound {3}{R} Legendary Creature — Elemental Dog 3/3 — verbatim.
+const TESAK: &str = "Unleash (You may have this creature enter with a +1/+1 counter on it. It can't block as long as it has a +1/+1 counter on it.)\nOther Dogs you control have unleash.\nCreatures you control with counters on them have haste.\nWhenever Tesak attacks, add {R} for each attacking creature.";
+
+/// Twins of Discord on P0's battlefield and Lightning Bolt ("Lightning Bolt deals 3 damage to any
+/// target.") in P0's hand. Returns the scenario, the returner and the Bolt.
+fn twins_board(returner: Returner) -> (GameScenario, ObjectId, ObjectId) {
+    let (mut scenario, source) = returner_board(returner);
+    scenario
+        .add_creature_from_oracle(P0, "Twins of Discord", 8, 6, TWINS_OF_DISCORD)
+        .with_subtypes(vec!["Eldrazi"]);
+    let bolt = scenario.add_bolt_to_hand(P0);
+    (scenario, source, bolt)
+}
+
+/// Cast Lightning Bolt at P1 through the production pipeline, so the bloodthirst condition ("If an
+/// opponent was dealt damage this turn") holds.
+fn bolt_p1(runner: &mut GameRunner, bolt: ObjectId) {
+    let outcome = runner.cast(bolt).target_player(P1).resolve();
+    // Reach: an opponent was dealt damage this turn.
+    assert_eq!(
+        outcome.life_delta(P1),
+        -3,
+        "Lightning Bolt dealt P1 3 damage"
+    );
+    assert_priority_with_empty_stack(runner);
+}
+
+/// Whether `obj` has any instance of bloodthirst.
+fn has_bloodthirst(obj: &engine::game::game_object::GameObject) -> bool {
+    obj.keywords
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword::Bloodthirst(_)))
+}
+
+/// R-N2a — CR 702.54a + CR 613.1f + CR 613.7a + CR 613.7b + CR 611.2e + CR 614.12: Twins of
+/// Discord's "Each other colorless creature you control has bloodthirst 2." exists before the
+/// return, so its timestamp is earlier than the return's "has no abilities" effect, which applies
+/// with the entry. The colorless Phyrexian Dreadnought, as it would exist on the battlefield, has
+/// no bloodthirst, so it enters with no +1/+1 counters although P1 was dealt damage this turn.
+#[test]
+fn xu_ifit_returned_dreadnought_gets_no_twins_of_discord_bloodthirst_counters() {
+    let (mut scenario, xu, bolt) = twins_board(Returner::XuIfit);
+    let dreadnought = add_dreadnought(&mut scenario);
+    let mut runner = scenario.build();
+    bolt_p1(&mut runner, bolt);
+
+    return_card(&mut runner, Returner::XuIfit, xu, dreadnought);
+
+    assert_priority_with_empty_stack(&runner);
+    assert_eq!(runner.state().objects[&dreadnought].zone, Zone::Battlefield);
+    // Reach: the rider applied to the entrant.
+    assert!(subtypes(&runner, dreadnought)
+        .iter()
+        .any(|t| t == "Skeleton"));
+    assert_eq!(
+        plus_one_counters(&runner, dreadnought),
+        0,
+        "no bloodthirst counters"
+    );
+    let dreadnought_obj = &runner.state().objects[&dreadnought];
+    assert!(!has_bloodthirst(dreadnought_obj));
+    assert!(!dreadnought_obj.has_keyword(&Keyword::Trample));
+}
+
+/// R-N2b — positive control for R-N2a: Zombify has no rider, so Twins of Discord's bloodthirst 2
+/// reaches the colorless Ornithopter entering from the graveyard: two +1/+1 counters.
+#[test]
+fn zombify_returned_ornithopter_gets_twins_of_discord_bloodthirst_counters() {
+    let (mut scenario, zombify, bolt) = twins_board(Returner::Zombify);
+    let ornithopter = scenario
+        .add_creature_to_graveyard(P0, "Ornithopter", 0, 2)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Thopter"])
+        .from_oracle_text_with_keywords(&["Flying"], ORNITHOPTER)
+        .id();
+    let mut runner = scenario.build();
+    bolt_p1(&mut runner, bolt);
+
+    return_card(&mut runner, Returner::Zombify, zombify, ornithopter);
+
+    assert_priority_with_empty_stack(&runner);
+    assert_eq!(runner.state().objects[&ornithopter].zone, Zone::Battlefield);
+    assert_eq!(plus_one_counters(&runner, ornithopter), 2, "bloodthirst 2");
+    assert!(has_bloodthirst(&runner.state().objects[&ornithopter]));
+}
+
+/// The pending replacement choice names `keyword` among its candidates (CR 616.1).
+fn assert_keyword_replacement_choice(runner: &GameRunner, keyword: &str) {
+    let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+        panic!(
+            "expected the {keyword} replacement choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.description.contains(keyword)),
+        "{keyword}: {candidates:?}"
+    );
+}
+
+/// A board with Rhythm of the Wild on P0's battlefield and Hill Giant in P0's graveyard.
+fn rhythm_board(returner: Returner) -> (GameRunner, ObjectId, ObjectId) {
+    let (mut scenario, source) = returner_board(returner);
+    scenario
+        .add_creature_from_oracle(P0, "Rhythm of the Wild", 0, 0, RHYTHM_OF_THE_WILD)
+        .as_enchantment();
+    let giant = hill_giant_in_graveyard(&mut scenario, P0);
+    (scenario.build(), source, giant)
+}
+
+/// R-N2c — CR 702.136a + CR 613.1f + CR 613.7a + CR 613.7b + CR 611.2e + CR 614.12: Rhythm of the
+/// Wild's "Nontoken creatures you control have riot." gives the entrant riot, an ability of the
+/// entrant, which the return's later "has no abilities" removes with the entry (Rhythm of the
+/// Wild ruling: riot is judged on the creature as it enters the battlefield). No riot choice is
+/// offered; Hill Giant enters with no counter and no haste.
+#[test]
+fn xu_ifit_returned_giant_gets_no_riot_from_rhythm_of_the_wild() {
+    let (mut runner, xu, giant) = rhythm_board(Returner::XuIfit);
+
+    return_card(&mut runner, Returner::XuIfit, xu, giant);
+
+    assert_priority_with_empty_stack(&runner);
+    assert_eq!(runner.state().objects[&giant].zone, Zone::Battlefield);
+    assert!(subtypes(&runner, giant).iter().any(|t| t == "Skeleton"));
+    assert_eq!(plus_one_counters(&runner, giant), 0, "no riot counter");
+    assert!(
+        !has_keyword(&runner, giant, &Keyword::Haste),
+        "no riot haste"
+    );
+    assert!(!has_keyword(&runner, giant, &Keyword::Riot));
+}
+
+/// R-N2d — positive control for R-N2c: with Zombify, Rhythm of the Wild's riot is offered for the
+/// Giant entering from the graveyard; taking the counter gives it one +1/+1 counter.
+#[test]
+fn zombify_returned_giant_gets_riot_from_rhythm_of_the_wild() {
+    let (mut runner, zombify, giant) = rhythm_board(Returner::Zombify);
+
+    return_card(&mut runner, Returner::Zombify, zombify, giant);
+
+    assert_keyword_replacement_choice(&runner, "Riot");
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("take riot's counter");
+    assert_priority_with_empty_stack(&runner);
+    assert_eq!(runner.state().objects[&giant].zone, Zone::Battlefield);
+    assert_eq!(plus_one_counters(&runner, giant), 1, "riot counter");
+}
+
+/// A board with Tesak, Judith's Hellhound on P0's battlefield and Isamaru, Hound of Konda (a Dog
+/// with no Oracle text) in P0's graveyard.
+fn tesak_board(returner: Returner) -> (GameRunner, ObjectId, ObjectId) {
+    let (mut scenario, source) = returner_board(returner);
+    scenario
+        .add_creature(P0, "Tesak, Judith's Hellhound", 3, 3)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 3,
+        })
+        .with_subtypes(vec!["Elemental", "Dog"])
+        .as_legendary()
+        .from_oracle_text_with_keywords(&["Unleash"], TESAK);
+    let isamaru = scenario
+        .add_creature_to_graveyard(P0, "Isamaru, Hound of Konda", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        })
+        .with_subtypes(vec!["Dog"])
+        .as_legendary()
+        .id();
+    (scenario.build(), source, isamaru)
+}
+
+/// R-N2e — CR 702.98a + CR 613.1f + CR 613.7a + CR 613.7b + CR 611.2e + CR 614.12: Tesak's "Other
+/// Dogs you control have unleash." gives the returned Isamaru unleash, which the return's later
+/// "has no abilities" removes with the entry: no unleash choice, no counter.
+#[test]
+fn xu_ifit_returned_isamaru_gets_no_unleash_from_tesak() {
+    let (mut runner, xu, isamaru) = tesak_board(Returner::XuIfit);
+
+    return_card(&mut runner, Returner::XuIfit, xu, isamaru);
+
+    assert_priority_with_empty_stack(&runner);
+    assert_eq!(runner.state().objects[&isamaru].zone, Zone::Battlefield);
+    assert!(subtypes(&runner, isamaru).iter().any(|t| t == "Skeleton"));
+    assert_eq!(plus_one_counters(&runner, isamaru), 0, "no unleash counter");
+    assert!(!has_keyword(&runner, isamaru, &Keyword::Unleash));
+}
+
+/// R-N2f — positive control for R-N2e: with Zombify, Tesak's granted unleash is offered for
+/// Isamaru entering from the graveyard (Tesak ruling: "The unleash ability applies no matter where
+/// the creature is entering the battlefield from."); accepting gives it one +1/+1 counter.
+#[test]
+fn zombify_returned_isamaru_gets_tesaks_unleash() {
+    let (mut runner, zombify, isamaru) = tesak_board(Returner::Zombify);
+
+    return_card(&mut runner, Returner::Zombify, zombify, isamaru);
+
+    assert_keyword_replacement_choice(&runner, "Unleash");
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("take unleash's counter");
+    assert_priority_with_empty_stack(&runner);
+    assert_eq!(runner.state().objects[&isamaru].zone, Zone::Battlefield);
+    assert_eq!(plus_one_counters(&runner, isamaru), 1, "unleash counter");
+}
+
+// ---------------------------------------------------------------------------
+// Look-back (CR 603.10a) halves need presence before the event (R-N3a–l).
+// ---------------------------------------------------------------------------
+
+/// Syr Konrad, the Grim {3}{B}{B} Legendary Creature — Human Knight 5/4 — verbatim.
+const SYR_KONRAD: &str = "Whenever another creature dies, or a creature card is put into a graveyard from anywhere other than the battlefield, or a creature card leaves your graveyard, Syr Konrad deals 1 damage to each opponent.\n{1}{B}: Each player mills a card. (They each put the top card of their library into their graveyard.)";
+/// Skeleton Crew {3}{B} Creature — Skeleton Pirate 3/3 — verbatim.
+const SKELETON_CREW: &str = "Each other creature you control that's a Skeleton or Pirate gets +1/+1.\nWhenever one or more creature cards leave your graveyard, create a 2/2 black Skeleton Pirate creature token. (This ability triggers only from the battlefield.)\n{5}{B}: Return this card from your graveyard to the battlefield tapped.";
+/// Immortal Servitude {X}{W/B}{W/B}{W/B} Sorcery — verbatim.
+const IMMORTAL_SERVITUDE: &str =
+    "Return each creature card with mana value X from your graveyard to the battlefield.";
+/// River Kelpie {3}{U}{U} Creature — Beast 3/3 — verbatim.
+const RIVER_KELPIE: &str = "Whenever this creature or another permanent enters from a graveyard, draw a card.\nWhenever a player casts a spell from a graveyard, draw a card.\nPersist (When this creature dies, if it had no -1/-1 counters on it, return it to the battlefield under its owner's control with a -1/-1 counter on it.)";
+
+fn syr_konrad_in_zone(scenario: &mut GameScenario, player: PlayerId, zone: Zone) -> ObjectId {
+    let mut builder = match zone {
+        Zone::Graveyard => scenario.add_creature_to_graveyard(player, "Syr Konrad, the Grim", 5, 4),
+        Zone::Battlefield => scenario.add_creature(player, "Syr Konrad, the Grim", 5, 4),
+        other => panic!("Syr Konrad is staged on the battlefield or in a graveyard, not {other:?}"),
+    };
+    builder
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            generic: 3,
+        })
+        .with_subtypes(vec!["Human", "Knight"])
+        .as_legendary()
+        .from_oracle_text(SYR_KONRAD)
+        .id()
+}
+
+fn syr_konrad_in_graveyard(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    syr_konrad_in_zone(scenario, player, Zone::Graveyard)
+}
+
+/// Reach: Syr Konrad's trigger is parsed and supported.
+fn assert_konrad_trigger_parsed(state: &GameState, konrad: ObjectId) {
+    let konrad_obj = &state.objects[&konrad];
+    assert_eq!(
+        konrad_obj.trigger_definitions.iter_unchecked().count(),
+        1,
+        "Syr Konrad's trigger"
+    );
+    assert!(
+        !konrad_obj.has_unimplemented_mechanics(),
+        "{:?}",
+        unimplemented_mechanics(konrad_obj)
+    );
+}
+
+/// Ever After returns Hill Giant and Syr Konrad from P0's graveyard, delivered in target order;
+/// Syr Konrad, not on the battlefield before the event, deals no damage (CR 603.10a).
+fn assert_ever_after_konrad_deals_no_damage(giant_first: bool) {
+    let mut scenario = main_phase();
+    let konrad = syr_konrad_in_graveyard(&mut scenario, P0);
+    let giant = hill_giant_in_graveyard(&mut scenario, P0);
+    let ever_after = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ever After", false, EVER_AFTER)
+        .id();
+    let mut runner = scenario.build();
+    assert_konrad_trigger_parsed(runner.state(), konrad);
+    let targets = if giant_first {
+        [giant, konrad]
+    } else {
+        [konrad, giant]
+    };
+
+    let prompts = ever_after_returns(&mut runner, ever_after, &targets, "");
+
+    assert!(prompts.is_empty(), "{prompts:?}");
+    for id in targets {
+        assert_black_zombie_on_battlefield(&runner, id);
+    }
+    assert_entered_in_order(&runner, targets[0], targets[1]);
+    assert_eq!(runner.life(P1), 20, "Syr Konrad did not see a card leave");
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// R-N3a — CR 603.10 + CR 603.10a + CR 603.6a: Ever After returns Hill Giant and Syr Konrad in one
+/// event, the Giant delivered first. "A creature card leaves your graveyard" looks back in time:
+/// Konrad was in the graveyard, not on the battlefield, immediately before the event, so it sees
+/// neither departure, although it is a newcomer of the same entry event: P1 stays at 20.
+#[test]
+fn ever_after_returned_syr_konrad_misses_hill_giant_leaving_first() {
+    assert_ever_after_konrad_deals_no_damage(true);
+}
+
+/// R-N3b — the same, Syr Konrad delivered first: P1 stays at 20.
+#[test]
+fn ever_after_returned_syr_konrad_misses_hill_giant_leaving_second() {
+    assert_ever_after_konrad_deals_no_damage(false);
+}
+
+/// R-N3c — CR 603.10a, mass return: Storm of Souls returns Hill Giant and Syr Konrad in one event,
+/// in either delivery order; Konrad was not on the battlefield before it: P1 stays at 20.
+#[test]
+fn storm_of_souls_returned_syr_konrad_misses_hill_giant_in_either_order() {
+    for order in [
+        [GraveyardCard::HillGiant, GraveyardCard::SyrKonrad],
+        [GraveyardCard::SyrKonrad, GraveyardCard::HillGiant],
+    ] {
+        let (outcome, ids) = with_entry_order(order, storm_board);
+        let konrad = staged_id(order, ids, GraveyardCard::SyrKonrad);
+        assert_konrad_trigger_parsed(outcome.state(), konrad);
+
+        assert_storm_returned_in_order(&outcome, ids);
+        assert_eq!(outcome.life_delta(P1), 0, "{order:?}");
+        assert_outcome_priority_with_empty_stack(&outcome);
+    }
+}
+
+/// R-N3d — CR 603.10a: Zombify returns Syr Konrad alone. Its own departure from the graveyard is
+/// the event it would look back to, and it was not on the battlefield before it: P1 stays at 20.
+#[test]
+fn zombify_returned_syr_konrad_misses_its_own_departure() {
+    let (mut scenario, zombify) = returner_board(Returner::Zombify);
+    let konrad = syr_konrad_in_graveyard(&mut scenario, P0);
+    let mut runner = scenario.build();
+    assert_konrad_trigger_parsed(runner.state(), konrad);
+
+    return_card(&mut runner, Returner::Zombify, zombify, konrad);
+
+    assert_eq!(runner.state().objects[&konrad].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.life(P1),
+        20,
+        "Syr Konrad did not see its own departure"
+    );
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// R-N3e — positive control: Syr Konrad on the battlefield before the event sees Hill Giant and
+/// Grizzly Bears leave P0's graveyard together (CR 603.10a looks back to an observer that was
+/// present; CR 603.2c, one event with two occurrences): P1 20 → 18.
+#[test]
+fn syr_konrad_on_the_battlefield_sees_two_cards_leave_the_graveyard() {
+    let mut scenario = main_phase();
+    let konrad = syr_konrad_in_zone(&mut scenario, P0, Zone::Battlefield);
+    let giant = hill_giant_in_graveyard(&mut scenario, P0);
+    let bears = add_grizzly_bears_to_graveyard(&mut scenario, P0);
+    let ever_after = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ever After", false, EVER_AFTER)
+        .id();
+    let mut runner = scenario.build();
+    assert_konrad_trigger_parsed(runner.state(), konrad);
+
+    let prompts = ever_after_returns(&mut runner, ever_after, &[giant, bears], "");
+
+    assert!(prompts.is_empty(), "{prompts:?}");
+    for id in [giant, bears] {
+        assert_black_zombie_on_battlefield(&runner, id);
+    }
+    assert_eq!(runner.life(P1), 18, "one trigger per card that left");
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// R-N3f — CR 603.10a + CR 603.2c: Ever After returns Tormod, the Desecrator with Hill Giant, in
+/// either delivery order. "Whenever one or more cards leave your graveyard" looks back, and Tormod
+/// was in the graveyard before the event: no Zombie token.
+#[test]
+fn ever_after_returned_tormod_misses_cards_leaving_with_it() {
+    for tormod_first in [false, true] {
+        let mut scenario = main_phase();
+        let tormod = scenario
+            .add_creature_to_graveyard(P0, "Tormod, the Desecrator", 4, 2)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 3,
+            })
+            .with_subtypes(vec!["Zombie", "Wizard"])
+            .as_legendary()
+            .from_oracle_text(TORMOD_THE_DESECRATOR)
+            .id();
+        let giant = hill_giant_in_graveyard(&mut scenario, P0);
+        let ever_after = scenario
+            .add_spell_to_hand_from_oracle(P0, "Ever After", false, EVER_AFTER)
+            .id();
+        let mut runner = scenario.build();
+        assert_eq!(trigger_count(&runner, tormod), 1, "Tormod's trigger");
+        let targets = if tormod_first {
+            [tormod, giant]
+        } else {
+            [giant, tormod]
+        };
+
+        let prompts = ever_after_returns(&mut runner, ever_after, &targets, "");
+
+        assert!(prompts.is_empty(), "{prompts:?}");
+        for id in targets {
+            assert_black_zombie_on_battlefield(&runner, id);
+        }
+        assert_entered_in_order(&runner, targets[0], targets[1]);
+        assert_eq!(zombie_tokens(&runner), 0, "Tormod first: {tormod_first}");
+        assert_priority_with_empty_stack(&runner);
+    }
+}
+
+/// R-N3g — CR 603.10a: Skeleton Crew returns itself with "{5}{B}: Return this card from your
+/// graveyard to the battlefield tapped." Its "Whenever one or more creature cards leave your
+/// graveyard" looks back, and it was in the graveyard before the event (Skeleton Crew ruling:
+/// "Resolving Skeleton Crew's last ability won't cause its second ability to trigger."): no
+/// Skeleton Pirate token.
+#[test]
+fn skeleton_crew_returning_itself_creates_no_token() {
+    let mut scenario = main_phase();
+    let crew = scenario
+        .add_creature_to_graveyard(P0, "Skeleton Crew", 3, 3)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 3,
+        })
+        .with_subtypes(vec!["Skeleton", "Pirate"])
+        .from_oracle_text(SKELETON_CREW)
+        .id();
+    scenario.with_mana_pool(P0, mana(ManaType::Black, 6));
+    let mut runner = scenario.build();
+    assert_eq!(trigger_count(&runner, crew), 1, "Skeleton Crew's trigger");
+
+    let _ = runner.activate(crew, 0).resolve();
+    runner.advance_until_stack_empty();
+
+    let crew_obj = &runner.state().objects[&crew];
+    assert_eq!(crew_obj.zone, Zone::Battlefield);
+    assert!(crew_obj.tapped, "returned tapped");
+    let pirate_tokens = runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| {
+            object.is_token
+                && object.zone == Zone::Battlefield
+                && object.card_types.subtypes.iter().any(|s| s == "Pirate")
+        })
+        .count();
+    assert_eq!(pirate_tokens, 0, "no Skeleton Pirate token");
+    assert_priority_with_empty_stack(&runner);
+}
+
+fn gigantosaurus_in_graveyard(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_to_graveyard(P0, "Gigantosaurus", 10, 10)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green; 5],
+            generic: 0,
+        })
+        .with_subtypes(vec!["Dinosaur"])
+        .id()
+}
+
+/// R-N3h — CR 603.10a, Segment collection: Immortal Servitude with X = 5 returns Syr Konrad and
+/// Gigantosaurus (both mana value 5) in one event, in either delivery order. Konrad was not on the
+/// battlefield before the event: P1 stays at 20.
+#[test]
+fn immortal_servitude_returned_syr_konrad_misses_gigantosaurus_in_either_order() {
+    let mut konrad_delivered_first = Vec::new();
+    for konrad_created_first in [true, false] {
+        let mut scenario = main_phase();
+        let (konrad, gigantosaurus) = if konrad_created_first {
+            let konrad = syr_konrad_in_graveyard(&mut scenario, P0);
+            (konrad, gigantosaurus_in_graveyard(&mut scenario))
+        } else {
+            let gigantosaurus = gigantosaurus_in_graveyard(&mut scenario);
+            (syr_konrad_in_graveyard(&mut scenario, P0), gigantosaurus)
+        };
+        let servitude = scenario
+            .add_spell_to_hand_from_oracle(P0, "Immortal Servitude", false, IMMORTAL_SERVITUDE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::X,
+                    ManaCostShard::WhiteBlack,
+                    ManaCostShard::WhiteBlack,
+                    ManaCostShard::WhiteBlack,
+                ],
+                generic: 0,
+            })
+            .id();
+        scenario.with_mana_pool(P0, mana(ManaType::Black, 8));
+        let mut runner = scenario.build();
+        assert_konrad_trigger_parsed(runner.state(), konrad);
+
+        let outcome = runner.cast(servitude).x(5).resolve();
+
+        for id in [konrad, gigantosaurus] {
+            assert_eq!(outcome.state().objects[&id].zone, Zone::Battlefield);
+        }
+        konrad_delivered_first.push(
+            battlefield_entry_index(outcome.events(), konrad)
+                < battlefield_entry_index(outcome.events(), gigantosaurus),
+        );
+        assert_eq!(
+            outcome.life_delta(P1),
+            0,
+            "Konrad created first: {konrad_created_first}"
+        );
+        assert_outcome_priority_with_empty_stack(&outcome);
+    }
+    // Reach: the two creation orders delivered the two cards in both orders.
+    konrad_delivered_first.sort_unstable();
+    assert_eq!(konrad_delivered_first, vec![false, true]);
+}
+
+/// River Kelpie in P0's graveyard, built from its verbatim Oracle text.
+fn river_kelpie_in_graveyard(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_to_graveyard(P0, "River Kelpie", 3, 3)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            generic: 3,
+        })
+        .with_subtypes(vec!["Beast"])
+        .from_oracle_text_with_keywords(&["Persist"], RIVER_KELPIE)
+        .id()
+}
+
+fn p0_hand_size(runner: &GameRunner) -> usize {
+    runner.state().players[0].hand.len()
+}
+
+/// R-N3i — CR 603.6a: Ever After returns River Kelpie and Hill Giant in one event. "Whenever this
+/// creature or another permanent enters from a graveyard" is an enters-the-battlefield ability,
+/// checked on every permanent on the battlefield "including the newcomers", so River Kelpie sees
+/// its own entry and the Giant's, in either delivery order (River Kelpie ruling: "River Kelpie's
+/// first ability will trigger twice."): two draws, P0's hand 1 → 2 net of Ever After leaving it.
+#[test]
+fn ever_after_returned_river_kelpie_sees_hill_giant_in_either_order() {
+    for kelpie_first in [true, false] {
+        let mut scenario = main_phase();
+        scenario.with_library_top(P0, &["Island", "Island", "Island", "Island", "Island"]);
+        let kelpie = river_kelpie_in_graveyard(&mut scenario);
+        let giant = hill_giant_in_graveyard(&mut scenario, P0);
+        let ever_after = scenario
+            .add_spell_to_hand_from_oracle(P0, "Ever After", false, EVER_AFTER)
+            .id();
+        let mut runner = scenario.build();
+        assert_eq!(trigger_count(&runner, kelpie), 3, "River Kelpie's triggers");
+        assert_eq!(p0_hand_size(&runner), 1);
+        let targets = if kelpie_first {
+            [kelpie, giant]
+        } else {
+            [giant, kelpie]
+        };
+
+        let prompts = ever_after_returns(&mut runner, ever_after, &targets, "");
+
+        assert!(prompts.is_empty(), "{prompts:?}");
+        for id in targets {
+            assert_black_zombie_on_battlefield(&runner, id);
+        }
+        assert_entered_in_order(&runner, targets[0], targets[1]);
+        assert_eq!(p0_hand_size(&runner), 2, "Kelpie first: {kelpie_first}");
+        assert_priority_with_empty_stack(&runner);
+    }
+}
+
+/// R-N3j — CR 603.6a: Zombify returns River Kelpie alone; it sees its own entry from a graveyard:
+/// one draw, P0's hand 1 → 1 net of Zombify leaving it.
+#[test]
+fn zombify_returned_river_kelpie_sees_its_own_entry() {
+    let (mut scenario, zombify) = returner_board(Returner::Zombify);
+    scenario.with_library_top(P0, &["Island", "Island", "Island"]);
+    let kelpie = river_kelpie_in_graveyard(&mut scenario);
+    let mut runner = scenario.build();
+    assert_eq!(trigger_count(&runner, kelpie), 3, "River Kelpie's triggers");
+    assert_eq!(p0_hand_size(&runner), 1);
+
+    return_card(&mut runner, Returner::Zombify, zombify, kelpie);
+
+    assert_eq!(runner.state().objects[&kelpie].zone, Zone::Battlefield);
+    assert_eq!(p0_hand_size(&runner), 1, "one draw");
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// Oglor, Devoted Assistant {1}{U} Legendary Creature — Homunculus 1/1 — verbatim.
+const OGLOR: &str = "At the beginning of your upkeep, look at the top two cards of your library, then put one of them into your graveyard.\nWhenever a creature card is put into your graveyard from your library or hand, it perpetually gains \"When this card leaves your graveyard, create a tapped 2/2 black Zombie creature token.\"";
+/// The ability Oglor's trigger grants, as quoted in its Oracle text.
+const OGLOR_GRANT: &str =
+    "When this card leaves your graveyard, create a tapped 2/2 black Zombie creature token.";
+
+/// Oglor, Devoted Assistant on P0's battlefield and Grizzly Bears in P0's hand. Returns the
+/// Bears.
+fn oglor_on_battlefield_bears_in_hand(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_from_oracle(P0, "Oglor, Devoted Assistant", 1, 1, OGLOR)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 1,
+        })
+        .with_subtypes(vec!["Homunculus"])
+        .as_legendary();
+    scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        })
+        .with_subtypes(vec!["Bear"])
+        .id()
+}
+
+/// Put the Bears from P0's hand into P0's graveyard through the zone pipeline, so Oglor's real
+/// trigger ("Whenever a creature card is put into your graveyard from your library or hand, it
+/// perpetually gains …", CR 603.2) resolves and grants it the quoted ability.
+fn grant_oglors_zombie_trigger(runner: &mut GameRunner, bears: ObjectId) {
+    runner.state_mut().debug_mode = true;
+    runner
+        .act(GameAction::Debug(DebugAction::MoveToZone {
+            object_id: bears,
+            to_zone: Zone::Graveyard,
+            library_position: None,
+            simulate: true,
+        }))
+        .expect("simulated zone move must succeed");
+    runner.advance_until_stack_empty();
+
+    // Reach: the Bears is in the graveyard with exactly one granted trigger.
+    let bears_obj = &runner.state().objects[&bears];
+    assert_eq!(bears_obj.zone, Zone::Graveyard);
+    assert_eq!(bears_obj.base_trigger_definitions.len(), 1, "one grant");
+    let granted: Vec<_> = bears_obj
+        .trigger_definitions
+        .iter_unchecked()
+        .filter(|entry| entry.definition.description.as_deref() == Some(OGLOR_GRANT))
+        .collect();
+    assert_eq!(granted.len(), 1, "the granted trigger is live");
+}
+
+fn tapped_zombie_tokens(runner: &GameRunner) -> usize {
+    runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| {
+            object.is_token
+                && object.zone == Zone::Battlefield
+                && object.tapped
+                && object.card_types.subtypes.iter().any(|s| s == "Zombie")
+        })
+        .count()
+}
+
+/// R-N3k — CR 603.10 + CR 603.10a + CR 113.6k + CR 113.6: Ever After returns an Oglor-granted
+/// Grizzly Bears and Syr Konrad in one event, in either delivery order. "When this card leaves
+/// your graveyard" can't trigger from the battlefield, so it functioned in the graveyard, where
+/// the Bears was immediately before the event: one tapped Zombie. Syr Konrad's "a creature card
+/// leaves your graveyard" functions only on the battlefield, where Konrad was not before the
+/// event: P1 stays at 20, and no trigger-ordering prompt appears.
+#[test]
+fn ever_after_returned_oglor_granted_bears_sees_its_own_departure_beside_syr_konrad() {
+    for bears_first in [true, false] {
+        let mut scenario = main_phase();
+        let bears = oglor_on_battlefield_bears_in_hand(&mut scenario);
+        let konrad = syr_konrad_in_graveyard(&mut scenario, P0);
+        let ever_after = scenario
+            .add_spell_to_hand_from_oracle(P0, "Ever After", false, EVER_AFTER)
+            .id();
+        let mut runner = scenario.build();
+        grant_oglors_zombie_trigger(&mut runner, bears);
+        assert_konrad_trigger_parsed(runner.state(), konrad);
+        let targets = if bears_first {
+            [bears, konrad]
+        } else {
+            [konrad, bears]
+        };
+
+        let prompts = ever_after_returns(&mut runner, ever_after, &targets, "");
+
+        assert!(prompts.is_empty(), "{prompts:?}");
+        for id in targets {
+            assert_black_zombie_on_battlefield(&runner, id);
+        }
+        assert_entered_in_order(&runner, targets[0], targets[1]);
+        assert_eq!(zombie_tokens(&runner), 1, "Bears first: {bears_first}");
+        assert_eq!(tapped_zombie_tokens(&runner), 1, "the token is tapped");
+        assert_eq!(runner.life(P1), 20, "Bears first: {bears_first}");
+        assert_priority_with_empty_stack(&runner);
+    }
+}
+
+/// R-N3l — CR 603.10a + CR 113.6k: Zombify returns the Oglor-granted Grizzly Bears alone; it sees
+/// its own departure from the graveyard, where its ability functioned: one Zombie.
+#[test]
+fn zombify_returned_oglor_granted_bears_sees_its_own_departure() {
+    let (mut scenario, zombify) = returner_board(Returner::Zombify);
+    let bears = oglor_on_battlefield_bears_in_hand(&mut scenario);
+    let mut runner = scenario.build();
+    grant_oglors_zombie_trigger(&mut runner, bears);
+
+    return_card(&mut runner, Returner::Zombify, zombify, bears);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+    assert_eq!(zombie_tokens(&runner), 1, "one Zombie");
+    assert_priority_with_empty_stack(&runner);
 }

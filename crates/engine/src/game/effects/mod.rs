@@ -6805,10 +6805,11 @@ fn continuation_acts_on_moved_objects_after_entry(
 /// `install_transient`'s granter latch (CR 201.5a, an install-time binding, not a
 /// characteristic).
 ///
-/// Walks [`moved_objects_continuation`]. The walk also stops at a conditional or optional
-/// `WithEntry` node, whose execution is not guaranteed when the instruction resolves. A
-/// `WhenFollowed` node ("becomes", "gains", "loses") starts after the entry and is skipped
-/// (CR 611.2e).
+/// Walks [`moved_objects_continuation`]. The walk also stops at any conditional or optional
+/// node, whatever its onset: a skipped node takes the resolution steps after it with it
+/// (`starts_independent_instruction`), so no later rider's execution is guaranteed (CR 608.2c).
+/// An unguarded `WhenFollowed` node ("becomes", "gains", "loses") starts after the entry and is
+/// skipped (CR 611.2e).
 ///
 /// `None` for an instruction whose declared destination is not the battlefield (CR 611.2e).
 pub(crate) fn with_entry_effect(
@@ -6824,13 +6825,14 @@ pub(crate) fn with_entry_effect(
     let source = MovedObjectsSource::of(state, instruction);
     let mut modifications = Vec::new();
     for node in moved_objects_continuation(instruction) {
+        // CR 608.2c: the node's execution is not guaranteed at the instruction's resolution,
+        // whatever its onset; a skipped node takes the resolution steps after it with it.
+        if node.condition.is_some() || node.optional {
+            break;
+        }
         // CR 611.2e: a `WhenFollowed` instruction applies only after the entry.
         if !onset_applies_with_entry(node.entry_onset) {
             continue;
-        }
-        // The node's execution is not guaranteed at the instruction's resolution.
-        if node.condition.is_some() || node.optional {
-            break;
         }
         modifications.extend(node_with_entry_modifications(state, node, source));
     }
@@ -70160,6 +70162,54 @@ mod with_entry_effect_tests {
                 )),
             ]);
             assert_eq!(derive(&later_rider), None);
+        }
+    }
+
+    /// CR 608.2c + CR 611.2e: a conditional or optional node stops the walk whatever its onset.
+    /// A skipped `WhenFollowed` node ("gains haste") takes the resolution steps after it with it
+    /// (`starts_independent_instruction`), so the later `WithEntry` rider's execution is not
+    /// guaranteed and nothing is carried. Synthetic: no printed card has a guarded
+    /// non-`WithEntry` node together with a `WithEntry` node (card-data scan of the 51 with-entry
+    /// return chains); nearest printed card Lim-Dûl the Necromancer, whose guarded node is the
+    /// `WithEntry` rider itself. Positive control: the same `WhenFollowed` node unguarded is
+    /// skipped and the rider after it is carried.
+    #[test]
+    fn guarded_when_followed_node_stops_the_walk() {
+        let lim_dul_condition: AbilityCondition = serde_json::from_value(serde_json::json!({
+            "type": "RevealedHasCardType",
+            "card_types": ["Creature"]
+        }))
+        .expect("Lim-Dûl's rider condition deserializes");
+        let gains_haste = || {
+            node(generic(
+                TargetFilter::ParentTarget,
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }],
+            ))
+        };
+        let rider = || {
+            with_entry(generic(
+                TargetFilter::ParentTarget,
+                skeleton_with_no_abilities(),
+            ))
+        };
+        let unguarded = gains_haste();
+        assert_eq!(unguarded.entry_onset, ContinuousEffectOnset::WhenFollowed);
+        assert_eq!(
+            derive(&sequence(vec![targeted_return(), unguarded, rider()])),
+            carried(skeleton_with_no_abilities())
+        );
+
+        let mut conditional = gains_haste();
+        conditional.condition = Some(lim_dul_condition);
+        let mut optional = gains_haste();
+        optional.optional = true;
+        for guarded in [conditional, optional] {
+            assert_eq!(
+                derive(&sequence(vec![targeted_return(), guarded, rider()])),
+                None
+            );
         }
     }
 

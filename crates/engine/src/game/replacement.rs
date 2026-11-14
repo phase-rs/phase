@@ -8051,6 +8051,21 @@ fn object_replacement_candidate_applies(
     {
         return false;
     }
+    // CR 613.1f + CR 613.7a + CR 613.7b + CR 614.12 + CR 702.136a + CR 702.98a: a keyword grant's as-enters
+    // replacement is carried by the granting source but is an ability of the entrant ("Nontoken
+    // creatures you control have riot."). The same resolution's "has no abilities" effect removes the
+    // granted keyword with the entry, so it does not apply (Rhythm of the Wild ruling: riot is judged
+    // on the creature as it enters the battlefield).
+    if !is_entering
+        && entering_object_id.is_some()
+        && !event.entrant_abilities().own_abilities_apply()
+        && crate::database::synthesis::is_keyword_grant_entry_replacement(
+            obj.static_definitions.iter_all(),
+            repl_def,
+        )
+    {
+        return false;
+    }
     // CR 614.12: off-battlefield entering/discarded objects only apply their
     // own self-replacement effects.
     if is_entering
@@ -9072,27 +9087,32 @@ pub fn find_applicable_replacements(
         ..
     } = event
     {
-        // Hot path (`find_applicable_replacements` runs per proposed event, and
-        // AI search clones/replays states constantly): test the CHEAP term first.
-        // `already_applied` is a set lookup, whereas the granted-instance query
-        // resolves the object's live off-zone keyword list — a whole-game
-        // continuous-effect collect plus ordering and per-effect filter
-        // evaluation. That resolution is also hoisted out of the family loop and
-        // computed at most ONCE (lazily, so an all-applied event pays nothing),
-        // then shared by every family instead of being re-swept per family.
-        let mut live_keywords: Option<Vec<crate::types::keywords::Keyword>> = None;
-        for kw in [GrantedEtbKeyword::Sunburst, GrantedEtbKeyword::Bloodthirst] {
-            let rid = granted_etb_keyword_replacement_id(*object_id, kw);
-            if event.already_applied(&rid) {
-                continue;
-            }
-            let live = live_keywords.get_or_insert_with(|| {
-                crate::game::off_zone_characteristics::effective_off_zone_keywords(
-                    state, *object_id,
-                )
-            });
-            if granted_etb_keyword_candidate_applies(state, *object_id, kw, event, live) {
-                candidates.push(rid);
+        // CR 613.1f + CR 613.7a + CR 613.7b + CR 611.2e + CR 614.12: a granted as-enters keyword is an
+        // ability of the entrant; the same resolution's later "has no abilities" effect removes it with the
+        // entry (Xu-Ifit ruling 2025-07-25), so no granted family registers.
+        if event.entrant_abilities().own_abilities_apply() {
+            // Hot path (`find_applicable_replacements` runs per proposed event, and
+            // AI search clones/replays states constantly): test the CHEAP term first.
+            // `already_applied` is a set lookup, whereas the granted-instance query
+            // resolves the object's live off-zone keyword list — a whole-game
+            // continuous-effect collect plus ordering and per-effect filter
+            // evaluation. That resolution is also hoisted out of the family loop and
+            // computed at most ONCE (lazily, so an all-applied event pays nothing),
+            // then shared by every family instead of being re-swept per family.
+            let mut live_keywords: Option<Vec<crate::types::keywords::Keyword>> = None;
+            for kw in [GrantedEtbKeyword::Sunburst, GrantedEtbKeyword::Bloodthirst] {
+                let rid = granted_etb_keyword_replacement_id(*object_id, kw);
+                if event.already_applied(&rid) {
+                    continue;
+                }
+                let live = live_keywords.get_or_insert_with(|| {
+                    crate::game::off_zone_characteristics::effective_off_zone_keywords(
+                        state, *object_id,
+                    )
+                });
+                if granted_etb_keyword_candidate_applies(state, *object_id, kw, event, live) {
+                    candidates.push(rid);
+                }
             }
         }
     }

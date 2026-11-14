@@ -1355,6 +1355,90 @@ fn destination_matches_constraint(zone: Zone, constraint: &DestinationConstraint
     }
 }
 
+/// CR 603.6a + CR 603.10 + CR 603.10a: whether a zone-change half is an enters observer for a
+/// move from `from` to `to`: the destination is the battlefield, and the half either names no
+/// origin or names the battlefield as its destination. A half that names an origin without a
+/// named battlefield destination is a leaves-a-zone observer (CR 603.10a). The single authority
+/// for that split, read by the matcher (`zone_change_clause_matches`) and by the newcomer
+/// classifier (`zone_change_observed_after`).
+fn enters_observer_half(
+    origin: &OriginConstraint,
+    destination: Option<&Zone>,
+    destination_constraint: &DestinationConstraint,
+    from: Option<Zone>,
+    to: Zone,
+) -> bool {
+    to == Zone::Battlefield
+        && (named_origin_zone(origin, from).is_none()
+            || destination_constraint_names(destination, destination_constraint, to))
+}
+
+/// CR 603.10a: whether a zone-change half that matches a move from `from` to `to` looks back in
+/// time: it is not an enters half (`enters_observer_half`) and it names a battlefield or graveyard
+/// origin ("leaves the battlefield", "leaves your graveyard"), or it names a hand or library
+/// destination for an object moved from a zone all players can see.
+fn zone_change_half_looks_back(
+    origin: &OriginConstraint,
+    destination: Option<&Zone>,
+    destination_constraint: &DestinationConstraint,
+    from: Option<Zone>,
+    to: Zone,
+) -> bool {
+    if enters_observer_half(origin, destination, destination_constraint, from, to) {
+        return false;
+    }
+    let names_look_back_origin = matches!(
+        named_origin_zone(origin, from),
+        Some(Zone::Battlefield | Zone::Graveyard)
+    );
+    let names_visible_move_to_hidden_zone = matches!(to, Zone::Hand | Zone::Library)
+        && destination_constraint_names(destination, destination_constraint, to)
+        && from.is_some_and(super::triggers::zone_is_visible_to_all_players);
+    names_look_back_origin || names_visible_move_to_hidden_zone
+}
+
+/// CR 603.6a + CR 603.10 + CR 603.10a: whether an observer that exists only immediately after a
+/// move from `from` to `to` (a newcomer of its own entry event) observes it through `trigger`:
+/// some zone-change half of the definition matches the move's zones and does not look back. The
+/// halves are read exactly as `match_changes_zone` reads them (the `zone_change_clauses` when
+/// non-empty, else the scalar half). Subject filters (`valid_card`) are not read: no printed
+/// definition has both an enters half and a look-back half that can match the same move, so the
+/// zone-level half match decides.
+///
+/// Not the single CR 603.10a classifier: `triggers::trigger_observation_time`, which feeds the
+/// logical-group latches, keys look-back on the event's origin zone instead of on the matching
+/// half, so it classifies an enters half over a graveyard-origin move (Soul Warden over Storm of
+/// Souls' return) as looking back where this classifier admits it (known divergence, unchanged).
+pub(super) fn zone_change_observed_after(
+    trigger: &TriggerDefinition,
+    from: Option<Zone>,
+    to: Zone,
+) -> bool {
+    let observed_after = |origin: &OriginConstraint,
+                          destination: Option<&Zone>,
+                          destination_constraint: &DestinationConstraint| {
+        origin.matches_from(&from)
+            && destination.is_none_or(|dest| *dest == to)
+            && destination_matches_constraint(to, destination_constraint)
+            && !zone_change_half_looks_back(origin, destination, destination_constraint, from, to)
+    };
+    if trigger.zone_change_clauses.is_empty() {
+        observed_after(
+            &zone_change_origin(trigger, None),
+            trigger.destination.as_ref(),
+            &trigger.destination_constraint,
+        )
+    } else {
+        trigger.zone_change_clauses.iter().any(|clause| {
+            observed_after(
+                &clause.origin,
+                clause.destination.as_ref(),
+                &clause.destination_constraint,
+            )
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Core Trigger Matchers (~20 with real logic)
 // ---------------------------------------------------------------------------
@@ -1412,13 +1496,15 @@ fn zone_change_clause_matches(
     if let Some(filter) = valid_card {
         let ctx = super::filter::FilterContext::from_trigger_source(source_context);
         let departed = named_origin_zone(origin, record.from_zone);
-        // CR 603.6a + CR 603.10: an enters observer (destination battlefield, and either no named
-        // origin or a named battlefield destination) reads the entrant as it existed immediately
-        // after its entry event. A named-origin clause without a named battlefield destination is
-        // a leaves-a-zone observer (CR 603.10a) and keeps the departure reading.
-        let enters_observer = *to == Zone::Battlefield
-            && (departed.is_none()
-                || destination_constraint_names(destination, destination_constraint, *to));
+        // CR 603.6a + CR 603.10: an enters observer reads the entrant as it existed immediately
+        // after its entry event. A leaves-a-zone observer (CR 603.10a) keeps the departure reading.
+        let enters_observer = enters_observer_half(
+            origin,
+            destination,
+            destination_constraint,
+            record.from_zone,
+            *to,
+        );
         let matches = match (enters_observer, departed) {
             (true, _) => super::filter::matches_target_filter_on_entry_observation(
                 state, record, departed, filter, &ctx,
