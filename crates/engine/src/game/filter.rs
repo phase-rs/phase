@@ -25142,6 +25142,215 @@ mod tests {
             missing
         ));
     }
+
+    /// Verifies the full contract of `FilterProp::Another` as documented:
+    /// - Live object matching:
+    ///   - Excludes a bound recipient.
+    ///   - With no recipient, a captured trigger source excludes only its exact
+    ///     live incarnation in the expected zone.
+    ///   - Without trigger source context, excludes the source object ID.
+    /// - Zone-change record matching: excludes records whose `object_id` is the source.
+    /// - Spell-cost matching: excludes the spell that is the source; fails closed with
+    ///   no spell bound.
+    #[test]
+    fn filter_prop_another_contract_all_matching_contexts() {
+        let mut state = setup();
+        let source_id = add_creature(&mut state, PlayerId(0), "Source");
+        let recipient_id = add_creature(&mut state, PlayerId(0), "Recipient");
+        let other_id = add_creature(&mut state, PlayerId(0), "Other");
+
+        let another_creature =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Another]));
+
+        // 1. Live object matching:
+        // 1a. Bound recipient excludes the recipient; does NOT exclude source.
+        let recipient_ctx = FilterContext {
+            recipient_id: Some(recipient_id),
+            ..FilterContext::from_source(&state, source_id)
+        };
+        assert!(
+            !super::matches_target_filter(&state, recipient_id, &another_creature, &recipient_ctx),
+            "bound recipient must be excluded"
+        );
+        assert!(
+            super::matches_target_filter(&state, source_id, &another_creature, &recipient_ctx),
+            "source is not excluded when recipient is bound and differs from source"
+        );
+        assert!(
+            super::matches_target_filter(&state, other_id, &another_creature, &recipient_ctx),
+            "unrelated creature is not excluded"
+        );
+
+        // 1b. No recipient, but captured trigger source:
+        // Excludes exact live incarnation in expected zone.
+        let mut record = state.objects[&source_id].snapshot_for_zone_change(
+            source_id,
+            Some(Zone::Battlefield),
+            Zone::Battlefield,
+        );
+        record.sync_trigger_source_context();
+        let trigger_source_ctx = record
+            .trigger_source_context()
+            .cloned()
+            .expect("trigger source context");
+        let trigger_ctx = FilterContext {
+            trigger_source: Some(&trigger_source_ctx),
+            ..FilterContext::from_source(&state, source_id)
+        };
+        assert!(
+            !super::matches_target_filter(&state, source_id, &another_creature, &trigger_ctx),
+            "exact live trigger source incarnation must be excluded"
+        );
+        assert!(
+            super::matches_target_filter(&state, other_id, &another_creature, &trigger_ctx),
+            "other creature is not excluded by trigger source"
+        );
+        // If the object re-entered (incarnation changed), it is no longer the exact
+        // live incarnation captured in trigger_source_ctx, so it is NOT excluded.
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .bump_incarnation();
+        assert!(
+            super::matches_target_filter(&state, source_id, &another_creature, &trigger_ctx),
+            "object with different incarnation than captured trigger source is not excluded"
+        );
+        state.objects.get_mut(&source_id).unwrap().incarnation -= 1; // restore
+
+        // 1c. No recipient and no trigger source: excludes source object ID.
+        let plain_ctx = FilterContext::from_source(&state, source_id);
+        assert!(
+            !super::matches_target_filter(&state, source_id, &another_creature, &plain_ctx),
+            "source object ID must be excluded without trigger source context"
+        );
+        assert!(
+            super::matches_target_filter(&state, other_id, &another_creature, &plain_ctx),
+            "other creature is not excluded without trigger source context"
+        );
+
+        // 2. Zone-change record matching:
+        // Excludes records whose object_id is the source.
+        let mut source_record =
+            ZoneChangeRecord::test_minimal(source_id, Some(Zone::Battlefield), Zone::Graveyard);
+        source_record.core_types.push(CoreType::Creature);
+        let mut other_record =
+            ZoneChangeRecord::test_minimal(other_id, Some(Zone::Battlefield), Zone::Graveyard);
+        other_record.core_types.push(CoreType::Creature);
+
+        assert!(
+            !matches_target_filter_on_zone_change_record(
+                &state,
+                &source_record,
+                &another_creature,
+                &plain_ctx,
+            ),
+            "zone change record for source object_id must be excluded"
+        );
+        assert!(
+            matches_target_filter_on_zone_change_record(
+                &state,
+                &other_record,
+                &another_creature,
+                &plain_ctx,
+            ),
+            "zone change record for other object_id must not be excluded"
+        );
+        assert!(
+            !zone_change_record_matches_property(
+                &FilterProp::Another,
+                &state,
+                &source_record,
+                &source_context_from_filter(
+                    &state,
+                    source_id,
+                    Some(PlayerId(0)),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+            "zone_change_record_matches_property excludes source id directly"
+        );
+        assert!(
+            zone_change_record_matches_property(
+                &FilterProp::Another,
+                &state,
+                &other_record,
+                &source_context_from_filter(
+                    &state,
+                    source_id,
+                    Some(PlayerId(0)),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+            "zone_change_record_matches_property matches other id directly"
+        );
+
+        // 3. Spell-cost matching:
+        // Excludes the spell that is the source; with no spell bound it fails closed.
+        let source_obj = &state.objects[&source_id];
+        assert!(
+            !spell_object_matches_filter_from_state_for(
+                &state,
+                source_obj,
+                Zone::Stack,
+                PlayerId(0),
+                &another_creature,
+                source_id,
+                &[],
+                false,
+            ),
+            "spell that is the source must be excluded"
+        );
+        let other_obj = &state.objects[&other_id];
+        assert!(
+            spell_object_matches_filter_from_state_for(
+                &state,
+                other_obj,
+                Zone::Stack,
+                PlayerId(0),
+                &another_creature,
+                source_id,
+                &[],
+                false,
+            ),
+            "spell that is not the source must match"
+        );
+        // With no spell bound (spell_object_id: None or context: None): fails closed.
+        let spell_record = spell_cast_record_from_object(other_obj);
+        assert!(
+            !spell_object_matches_property(
+                &spell_record,
+                Zone::Stack,
+                &FilterProp::Another,
+                &[],
+                None,
+            ),
+            "spell matching with no context fails closed"
+        );
+        assert!(
+            !spell_object_matches_property(
+                &spell_record,
+                Zone::Stack,
+                &FilterProp::Another,
+                &[],
+                Some(SpellFilterContext {
+                    state: &state,
+                    source_id,
+                    source_controller: PlayerId(0),
+                    spell_object_id: None,
+                }),
+            ),
+            "spell matching with no spell bound fails closed"
+        );
+    }
 }
 
 /// Building-block coverage for the characteristic-dependence classifier
