@@ -10336,10 +10336,13 @@ impl GameState {
         owners
     }
 
-    /// The casting stage of the live announcement, read from its custody owner.
+    /// The casting stage of the live announcement, read from the prompt being answered when it
+    /// embeds the cast, since another owner may hold the same cast in custody meanwhile.
     pub(crate) fn pending_cast_stage(&self) -> Option<PendingCastStage> {
-        let owner = *self.live_pending_cast_owners().first()?;
-        Some(match owner {
+        if let Some((_, stage)) = self.waiting_for.pending_cast_with_stage() {
+            return Some(stage);
+        }
+        Some(match *self.live_pending_cast_owners().first()? {
             PendingCastOwner::Prompt => self.waiting_for.pending_cast_with_stage()?.1,
             // CR 601.2d: a division announced before costs keeps `distribute`; the X-deferred
             // division raised after mana payment holds a fresh cast without it.
@@ -10530,7 +10533,7 @@ impl GameState {
 /// Where an announced cast is, in the order the engine raises its prompts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PendingCastStage {
-    /// CR 601.2a–e: the proposal, before the total cost is determined.
+    /// CR 601.2a–d: the proposal, before the total cost is determined.
     Proposal,
     /// CR 601.2f–h: determining and paying the total cost.
     Costs,

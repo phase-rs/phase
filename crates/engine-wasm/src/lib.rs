@@ -4888,12 +4888,20 @@ Mana of any type can be spent to cast those spells.";
             .cast_timing_permission
     }
 
-    /// The persisted save with the pending cast's `route` written as the pre-route timing value.
+    /// The persisted save with every owner's copy of the pending cast's `route` written as the
+    /// pre-route timing value.
     fn legacy_save(state: &GameState, route: &str) -> String {
         let json = serde_json::to_string(&PersistedGameState::capture(state.clone()))
             .expect("persisted state serializes");
         let current = format!("\"cast_timing_permission\":\"{route}\"");
-        assert_eq!(json.matches(&current).count(), 1, "{current}");
+        let owners = [
+            state.waiting_for.pending_cast_ref(),
+            state.pending_cast.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .count();
+        assert_eq!(json.matches(&current).count(), owners, "{current}");
         json.replace(&current, "\"cast_timing_permission\":\"AsThoughHadFlash\"")
     }
 
@@ -5291,6 +5299,38 @@ spell, put a +1/+1 counter on each creature you control.";
 
         let restored = restore_without_leyline(runner, leyline);
         assert_reversed(&restored, arc, 3);
+    }
+
+    const BLAZE: &str = "Blaze deals X damage to any target.";
+
+    // CR 601.2b + CR 733.1: announcing Blaze's X is part of its proposal, so with Leyline gone the
+    // sorcery's cast is reversed.
+    #[test]
+    fn legacy_proposal_at_its_x_announcement_is_reversed() {
+        let (mut runner, leyline, blaze) = leyline_upkeep(mana(ManaType::Red, 3), |scenario| {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, "Blaze", false, BLAZE)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::X, ManaCostShard::Red],
+                    generic: 0,
+                })
+                .id()
+        });
+        cast(&mut runner, blaze, CastPaymentMode::Auto);
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![engine::types::ability::TargetRef::Player(P1)],
+            })
+            .expect("P0 targets P1");
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::ChooseXValue { .. }),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        assert!(runner.state().pending_cast.is_some());
+
+        let restored = restore_without_leyline(runner, leyline);
+        assert_reversed(&restored, blaze, 3);
     }
 
     // CR 601.2b + CR 733.1: Defiler of Vigor's optional life payment is announced in the
