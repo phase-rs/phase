@@ -226,6 +226,7 @@ mod coerced_attack_punisher;
 mod coin_flip_branch_targets;
 mod coin_flip_until_loss_loop;
 mod coin_of_fate;
+mod collect_evidence_effect_resolution;
 mod collect_evidence_self;
 mod collector_ouphe_mana_ability_prohibition;
 mod colorless_spell_cost_reduction;

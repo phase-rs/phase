@@ -2671,6 +2671,19 @@ function CollectEvidenceModal({
     return obj ? sum + manaValueOfObject(obj) : sum;
   }, 0);
   const isReady = total >= data.minimum_mana_value;
+  // CR 608.2d + CR 701.59b: evidence collected by a resolving ability is not a
+  // cost that can be backed out of; the engine rejects CancelCast for it.
+  const canCancel = data.resume.type !== "Resolution";
+  const confirm = (
+    <ConfirmButton
+      onClick={handleConfirm}
+      disabled={!isReady}
+      label={t("cardChoice.buttons.collectCount", {
+        total,
+        minimum: data.minimum_mana_value,
+      })}
+    />
+  );
 
   return (
     <ChoiceOverlay
@@ -2679,16 +2692,11 @@ function CollectEvidenceModal({
         minimum: data.minimum_mana_value,
       })}
       footer={
-        <CostActionFooter onCancel={handleCancel}>
-          <ConfirmButton
-            onClick={handleConfirm}
-            disabled={!isReady}
-            label={t("cardChoice.buttons.collectCount", {
-              total,
-              minimum: data.minimum_mana_value,
-            })}
-          />
-        </CostActionFooter>
+        canCancel ? (
+          <CostActionFooter onCancel={handleCancel}>{confirm}</CostActionFooter>
+        ) : (
+          confirm
+        )
       }
     >
       <ScrollableCardStrip>

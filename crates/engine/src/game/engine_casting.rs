@@ -1993,6 +1993,16 @@ pub(super) fn handle_collect_evidence_cancel(
             .unwrap_or_else(|| pending_cast.clone());
         return cancel_pending_cast(state, player, &pending_cast, events);
     }
+    // CR 608.2d + CR 701.59b + CR 117.2e: an effect's evidence prompt is a
+    // choice made while that ability resolves. The instruction is mandatory or
+    // was accepted as an option, which is offered only while it is payable, so
+    // there is no cast to back out of and no priority to return to: the prompt
+    // stays until evidence is chosen.
+    if matches!(resume, CollectEvidenceResume::Resolution { .. }) {
+        return Err(EngineError::ActionNotAllowed(
+            "Collect evidence was chosen while resolving; choose the evidence to exile".into(),
+        ));
+    }
     Ok(WaitingFor::Priority { player })
 }
 

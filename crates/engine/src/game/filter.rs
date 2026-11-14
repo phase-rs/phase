@@ -2446,9 +2446,16 @@ pub(crate) fn controller_ref_player(
         // controller sacrifices a noncreature, nonland permanent").
         ControllerRef::EventTargetController => event_target_controller_player(state, ability),
         ControllerRef::ParentTargetOwner => parent_target_owner_player(state, ability),
-        ControllerRef::DefendingPlayer => {
-            crate::game::combat::resolve_defending_player(state, source_id)
-        }
+        // CR 508.5 + CR 113.7a: route through the single defending-player
+        // authority with the ability's captured trigger context, so a source
+        // removed from combat (or from the battlefield) after its ability
+        // triggered still names the player it was attacking. With no trigger
+        // context the authority falls back to the live per-attacker lookup.
+        ControllerRef::DefendingPlayer => crate::game::combat::defending_player_cr508_5(
+            state,
+            source_id,
+            ability.and_then(|ability| ability.trigger_source.as_ref()),
+        ),
         // CR 608.2c + CR 109.4: The player chosen by the Nth `Choose(Player)`
         // in this resolution — read from the resolution-scoped list.
         ControllerRef::ChosenPlayer { index } => {

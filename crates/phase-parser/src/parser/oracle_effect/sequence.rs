@@ -3915,19 +3915,32 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
             )),
         ),
     ))
-    // CR 701.63: "<self-ref subject> endures N" as a conjunct ("you lose 1
-    // life and this creature endures 1" — Sinkhole Surveyor). The self-ref
-    // subject axis (it / this creature / ~) is composed with the "endures "
-    // verb as a single unit, not enumerated per permutation. A self-ref
-    // pronoun/phrase followed by the conjugated keyword-action verb is always
-    // a subject-predicate clause start, never a noun-phrase continuation.
+    // Self-ref subject (it / this creature / ~) + a conjugated predicate that
+    // the subject-clause path owns. The subject axis is composed once with the
+    // predicate axis, not enumerated per permutation. A self-ref pronoun/phrase
+    // followed by one of these predicates is always a subject-predicate clause
+    // start, never a noun-phrase continuation.
+    //
+    // - CR 701.63: "endures N" ("you lose 1 life and this creature endures 1"
+    //   — Sinkhole Surveyor).
+    // - CR 510.1a: "assigns no combat damage [this turn]" (Goblin Vandal:
+    //   "destroy target artifact defending player controls and this creature
+    //   assigns no combat damage this turn"; Rysorian Badger: "you gain 1 life
+    //   for each card exiled this way and this creature assigns no combat
+    //   damage this turn"). Without this split the conjunct stays glued to the
+    //   leading imperative, whose trailing-duration strip steals "this turn"
+    //   and whose imperative-only fallback has no subject-predicate path, so
+    //   the rider is lost (Vandal: `Unimplemented`; Badger: silently dropped,
+    //   the card reported as supported). Splitting routes it through
+    //   `parse_clause_ast` to the `assigns no combat damage` subject clause
+    //   (subject.rs).
     .or(preceded(
         alt((
             tag::<_, _, OracleError<'_>>("it "),
             tag("this creature "),
             tag("~ "),
         )),
-        value((), tag("endures ")),
+        value((), alt((tag("endures "), tag("assigns no combat damage")))),
     ))
     .or(alt((
         // CR 608.2c: Anaphoric back-reference subject + continuous-modification

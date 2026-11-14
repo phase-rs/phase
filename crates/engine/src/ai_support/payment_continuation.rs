@@ -194,9 +194,9 @@ pub fn classify_payment_continuation(state: &GameState) -> PaymentContinuationSt
             CollectEvidenceResume::ManaAbility {
                 pending_mana_ability,
             } => classify_pending_mana_ability(state, pending_mana_ability),
-            CollectEvidenceResume::Casting { .. } | CollectEvidenceResume::Effect { .. } => {
-                PaymentContinuationState::NotAffiliated
-            }
+            CollectEvidenceResume::Casting { .. }
+            | CollectEvidenceResume::Effect { .. }
+            | CollectEvidenceResume::Resolution { .. } => PaymentContinuationState::NotAffiliated,
         },
         _ => classify_parked_cost_move_root(state),
     }
@@ -996,7 +996,7 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
             CollectEvidenceResume::ManaAbility {
                 pending_mana_ability,
             } => classify_pending_mana_ability(state, pending_mana_ability),
-            CollectEvidenceResume::Casting { .. } | CollectEvidenceResume::Effect { .. } => {
+            CollectEvidenceResume::Casting { .. } | CollectEvidenceResume::Effect { .. } | CollectEvidenceResume::Resolution { .. } => {
                 PaymentContinuationState::NotAffiliated
             }
         },
@@ -1270,7 +1270,9 @@ fn waiting_for_contains_root(waiting_for: &WaitingFor, root: &PaymentContinuatio
             CollectEvidenceResume::ManaAbility {
                 pending_mana_ability,
             } => pending_mana_contains_root(pending_mana_ability, root),
-            CollectEvidenceResume::Effect { .. } => false,
+            CollectEvidenceResume::Effect { .. } | CollectEvidenceResume::Resolution { .. } => {
+                false
+            }
         },
         _ => false,
     }
@@ -1306,7 +1308,7 @@ fn pending_cost_move_contains_root(
             CollectEvidenceResume::ManaAbility {
                 pending_mana_ability,
             } => pending_mana_contains_root(pending_mana_ability, root),
-            CollectEvidenceResume::Effect { .. } => false,
+            CollectEvidenceResume::Effect { .. } | CollectEvidenceResume::Resolution { .. } => false,
         },
         Some(PendingCostMoveResume::Cast { pending: None, .. })
         | Some(PendingCostMoveResume::SacrificeForCost { pending: None, .. })

@@ -11347,18 +11347,20 @@ enum ZonePrep {
 /// Qualifier preceding the zone word. Distinguishes ownership-bearing qualifiers
 /// ("an opponent's", "your") from plain determiners ("a", "the") and bare forms.
 /// The `Bare` variant is a zero-width match, so `parse_zone_qual` always succeeds.
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum ZoneQual {
-    /// "an opponent's ", "each opponent's " — produces `Owned{Opponent}`.
-    Opponent,
+    /// A possessive that binds the zone's owner — produces `Owned{owner}`
+    /// (CR 108.3: cards in a player's zone are owned by that player):
+    /// - "an opponent's ", "each opponent's " → `Opponent`
+    /// - "target player's " → `TargetPlayer`
+    /// - "their " → `ScopedPlayer` (in an each-player iteration the
+    ///   third-person possessive binds to the iterated player)
+    /// - "defending player's " → `DefendingPlayer` (CR 508.5a: one specific
+    ///   defending player, never any player)
+    Owner(ControllerRef),
     /// "your " — sets `ControllerRef::You` on the parent filter.
     You,
-    /// "target player's " — produces `Owned{TargetPlayer}`.
-    TargetPlayer,
-    /// "their " — produces `Owned{ScopedPlayer}`; in an each-player iteration
-    /// the third-person possessive binds to the iterated player.
-    Their,
-    /// "its owner's ", "that player's ", "defending player's ", "each player's ".
+    /// "its owner's ", "that player's ", "each player's ", "a player's ".
     /// No ownership constraint emitted; referent is resolved by context upstream.
     OtherPoss,
     /// "the chosen player's " — the player persisted on the source via an earlier
@@ -11470,7 +11472,7 @@ pub(crate) fn parse_exile_graveyard_source(text: &str) -> Option<(Vec<FilterProp
         return None;
     }
     match qualifier {
-        ZoneQual::OtherPoss | ZoneQual::TargetPlayer => return None,
+        ZoneQual::OtherPoss | ZoneQual::Owner(ControllerRef::TargetPlayer) => return None,
         ZoneQual::Plain => {
             // This adapter admits only the singular unowned object form. The
             // shared grammar still owns adjective/plural/selection spellings.
@@ -11491,8 +11493,9 @@ pub(crate) fn parse_exile_graveyard_source(text: &str) -> Option<(Vec<FilterProp
                 controller: controller?,
             });
         }
-        // CR 108.3 + CR 404.1: retain the shared grammar's opponent/iteration owner.
-        ZoneQual::Opponent | ZoneQual::Their => {}
+        // CR 108.3 + CR 404.1 + CR 508.5a: retain the shared grammar's
+        // opponent/iteration/defending-player owner.
+        ZoneQual::Owner(_) => {}
     }
     Some((props, leading_ws + lower.len() - rest.len()))
 }
@@ -11585,84 +11588,27 @@ fn parse_zone_suffix_nom(
         (i, vec![zone])
     };
 
-    let out = if zones.len() > 1 {
-        // Multi-zone disjunction: use InAnyZone
-        match qual {
-            ZoneQual::Opponent => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::Opponent,
-                    },
-                    FilterProp::InAnyZone { zones },
-                ],
-                None,
-            ),
-            ZoneQual::You => (
-                vec![FilterProp::InAnyZone { zones }],
-                Some(ControllerRef::You),
-            ),
-            ZoneQual::ChosenPlayer => (
-                vec![FilterProp::InAnyZone { zones }],
-                Some(ControllerRef::SourceChosenPlayer),
-            ),
-            ZoneQual::TargetPlayer => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::TargetPlayer,
-                    },
-                    FilterProp::InAnyZone { zones },
-                ],
-                None,
-            ),
-            ZoneQual::Their => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::ScopedPlayer,
-                    },
-                    FilterProp::InAnyZone { zones },
-                ],
-                None,
-            ),
-            ZoneQual::OtherPoss | ZoneQual::Plain => (vec![FilterProp::InAnyZone { zones }], None),
-        }
+    // A disjunction ("from your graveyard or from your hand") names any
+    // of its zones; a single zone phrase names exactly that zone.
+    let zone_prop = if let [zone] = zones.as_slice() {
+        FilterProp::InZone { zone: *zone }
     } else {
-        // Single zone: use InZone
-        let zone = zones[0];
-        match qual {
-            ZoneQual::Opponent => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::Opponent,
-                    },
-                    FilterProp::InZone { zone },
-                ],
-                None,
-            ),
-            ZoneQual::You => (vec![FilterProp::InZone { zone }], Some(ControllerRef::You)),
-            ZoneQual::ChosenPlayer => (
-                vec![FilterProp::InZone { zone }],
-                Some(ControllerRef::SourceChosenPlayer),
-            ),
-            ZoneQual::TargetPlayer => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::TargetPlayer,
-                    },
-                    FilterProp::InZone { zone },
-                ],
-                None,
-            ),
-            ZoneQual::Their => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::ScopedPlayer,
-                    },
-                    FilterProp::InZone { zone },
-                ],
-                None,
-            ),
-            ZoneQual::OtherPoss | ZoneQual::Plain => (vec![FilterProp::InZone { zone }], None),
-        }
+        FilterProp::InAnyZone { zones }
+    };
+    let out = match &qual {
+        // CR 108.3: cards in a player's zone are owned by that player.
+        ZoneQual::Owner(owner) => (
+            vec![
+                FilterProp::Owned {
+                    controller: owner.clone(),
+                },
+                zone_prop,
+            ],
+            None,
+        ),
+        ZoneQual::You => (vec![zone_prop], Some(ControllerRef::You)),
+        ZoneQual::ChosenPlayer => (vec![zone_prop], Some(ControllerRef::SourceChosenPlayer)),
+        ZoneQual::OtherPoss | ZoneQual::Plain => (vec![zone_prop], None),
     };
 
     Ok((i, (out.0, out.1, qual)))
@@ -11671,21 +11617,28 @@ fn parse_zone_suffix_nom(
 fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQual> {
     alt((
         value(
-            ZoneQual::Opponent,
+            ZoneQual::Owner(ControllerRef::Opponent),
             alt((tag("an opponent's "), tag("each opponent's "))),
         ),
         value(ZoneQual::You, tag("your ")),
         // CR 613.1: must precede the `Plain` "the " arm so "the chosen player's "
         // isn't consumed as a bare "the " article.
         value(ZoneQual::ChosenPlayer, tag("the chosen player's ")),
-        value(ZoneQual::TargetPlayer, tag("target player's ")),
-        value(ZoneQual::Their, tag("their ")),
+        value(
+            ZoneQual::Owner(ControllerRef::TargetPlayer),
+            tag("target player's "),
+        ),
+        value(ZoneQual::Owner(ControllerRef::ScopedPlayer), tag("their ")),
+        // CR 508.5a: "defending player's" binds one specific defending player.
+        value(
+            ZoneQual::Owner(ControllerRef::DefendingPlayer),
+            tag("defending player's "),
+        ),
         value(
             ZoneQual::OtherPoss,
             alt((
                 tag("its owner's "),
                 tag("that player's "),
-                tag("defending player's "),
                 tag("each player's "),
                 // CR 404.1: "a player's graveyard" names a zone without binding an
                 // owner (Lodestone Bauble), so it contributes `InZone` alone.
@@ -23622,7 +23575,7 @@ mod tests {
     #[test]
     fn parse_target_bare_their_graveyard_scopes_to_owner() {
         // Part B bare-possessive path: bare "their graveyard" must match the
-        // owner-scoped shape produced by parse_zone_suffix_nom's ZoneQual::Their.
+        // owner-scoped shape produced by parse_zone_suffix_nom's ZoneQual::Owner(ScopedPlayer).
         let (f, _) = parse_target("their graveyard");
         let tf = typed_leg(&f).expect("typed filter");
         assert_eq!(tf.controller, None);
@@ -25457,6 +25410,11 @@ mod exile_graveyard_source_shape {
             ("from an opponent's graveyard", ControllerRef::Opponent),
             ("from each opponent's graveyard", ControllerRef::Opponent),
             ("from their graveyard", ControllerRef::ScopedPlayer),
+            // CR 508.5a: one specific defending player owns the named graveyard.
+            (
+                "from defending player's graveyard",
+                ControllerRef::DefendingPlayer,
+            ),
         ] {
             let (public, ctrl, count) = parse_zone_suffix(phrase).unwrap();
             assert_eq!(ctrl, None);
@@ -25497,6 +25455,42 @@ mod exile_graveyard_source_shape {
         assert_eq!(count, "from your graveyard or from your hand".len());
     }
 
+    /// CR 508.5a + CR 108.3: "defending player's <zone>" binds the zone's owner
+    /// to the one defending player, for every zone word and for disjunctions.
+    #[test]
+    fn defending_player_zone_qualifier_binds_the_defending_owner() {
+        let owner = FilterProp::Owned {
+            controller: ControllerRef::DefendingPlayer,
+        };
+        for (phrase, zone) in [
+            ("from defending player's graveyard", Zone::Graveyard),
+            ("in defending player's graveyard", Zone::Graveyard),
+            ("from defending player's hand", Zone::Hand),
+            ("in defending player's library", Zone::Library),
+        ] {
+            let (props, ctrl, count) = parse_zone_suffix(phrase).unwrap();
+            assert_eq!(ctrl, None, "{phrase}");
+            assert_eq!(
+                props,
+                vec![owner.clone(), FilterProp::InZone { zone }],
+                "{phrase}"
+            );
+            assert_eq!(count, phrase.len(), "{phrase}");
+        }
+        let phrase = "from defending player's graveyard or from defending player's hand";
+        let (props, ctrl, _) = parse_zone_suffix(phrase).unwrap();
+        assert_eq!(ctrl, None);
+        assert_eq!(
+            props,
+            vec![
+                owner,
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Graveyard, Zone::Hand]
+                }
+            ]
+        );
+    }
+
     #[test]
     fn shape_adapter_declines_other_zones_owners_prepositions_and_selections() {
         assert!(parse_exile_graveyard_source("from your graveyard").is_some());
@@ -25508,7 +25502,6 @@ mod exile_graveyard_source_shape {
             "from target player's graveyard",
             "from its owner's graveyard",
             "from that player's graveyard",
-            "from defending player's graveyard",
             "from each player's graveyard",
             "from a player's graveyard",
             "in your graveyard",

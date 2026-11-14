@@ -15314,15 +15314,31 @@ fn apply_non_priority_pass_action(
                 resume,
             },
             GameAction::SelectCards { cards: chosen },
-        ) => super::effects::collect_evidence::handle_choice(
-            state,
-            *player,
-            *minimum_mana_value,
-            legal_cards,
-            resume,
-            &chosen,
-            &mut events,
-        )?,
+        ) => {
+            let effect_resume = matches!(
+                resume.as_ref(),
+                crate::types::game_state::CollectEvidenceResume::Resolution { .. }
+            );
+            let next = super::effects::collect_evidence::handle_choice(
+                state,
+                *player,
+                *minimum_mana_value,
+                legal_cards,
+                resume,
+                &chosen,
+                &mut events,
+            )?;
+            // CR 608.2c + CR 701.59a: an effect-form collect evidence parked the
+            // rest of its ability behind this choice. Finish that resolution
+            // before any player receives priority, as the sibling resolution
+            // choices do; a "when you do" reflexive triggers here (CR 603.12).
+            if effect_resume && matches!(next, WaitingFor::Priority { .. }) {
+                resume_pending_continuation_if_priority(state, &mut events)?;
+                state.waiting_for.clone()
+            } else {
+                next
+            }
+        }
         (WaitingFor::CollectEvidenceChoice { player, resume, .. }, GameAction::CancelCast) => {
             engine_casting::handle_collect_evidence_cancel(state, *player, resume, &mut events)?
         }

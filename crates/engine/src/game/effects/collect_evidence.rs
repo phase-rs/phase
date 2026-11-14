@@ -147,26 +147,17 @@ pub(crate) fn resolve(
     };
 
     if can_collect_evidence(state, ability.controller, None, amount) {
-        let pending_ability = ability
-            .sub_ability
-            .as_ref()
-            .map(|sub| sub.as_ref().clone())
-            .unwrap_or_else(|| {
-                ResolvedAbility::new(
-                    Effect::TargetOnly {
-                        target: crate::types::ability::TargetFilter::Any,
-                    },
-                    vec![],
-                    ability.source_id,
-                    ability.controller,
-                )
-            });
+        // CR 701.59a + CR 603.12 + CR 608.2c: the evidence prompt is a
+        // resolution choice, so the chain walker parks this effect's tail and
+        // the engine drains that continuation once the choice is made. That
+        // drain is what lets a "when you do" reflexive trigger only after the
+        // evidence is actually exiled, so the resume carries no tail of its own.
         state.waiting_for = waiting_state(
             state,
             ability.controller,
             amount,
-            CollectEvidenceResume::Effect {
-                pending_ability: Box::new(pending_ability),
+            CollectEvidenceResume::Resolution {
+                source_id: ability.source_id,
             },
         );
     }
@@ -229,6 +220,7 @@ fn cost_source_id(resume: &CollectEvidenceResume) -> ObjectId {
     match resume {
         CollectEvidenceResume::Casting { pending_cast, .. } => pending_cast.object_id,
         CollectEvidenceResume::Effect { pending_ability } => pending_ability.source_id,
+        CollectEvidenceResume::Resolution { source_id } => *source_id,
         CollectEvidenceResume::ManaAbility {
             pending_mana_ability,
         } => pending_mana_ability.source_id,
@@ -345,6 +337,17 @@ fn complete_cost_payment(
                 events,
             )
         }
+        // CR 608.2c + CR 117.2e: the rest of the resolving ability is parked on
+        // the resolution stack behind this prompt. Hand back to that
+        // continuation (the engine drains it before anyone gets priority)
+        // instead of entering a fresh chain, which would reset the
+        // resolution-local tracked sets, chosen values and action facts the
+        // parked tail reads.
+        CollectEvidenceResume::Resolution { .. } => {
+            state.waiting_for = WaitingFor::Priority { player };
+            Ok(state.waiting_for.clone())
+        }
+        // A legacy prompt carries its own tail; finish it as it was created.
         CollectEvidenceResume::Effect { pending_ability } => {
             state.waiting_for = WaitingFor::Priority { player };
             super::resolve_ability_chain(state, &pending_ability, events, 0)
@@ -388,7 +391,6 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{AbilityCost, Effect, QuantityExpr, TargetFilter, TypedFilter};
-    use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
 
     fn add_graveyard_card(
@@ -585,75 +587,6 @@ mod tests {
         .expect_err("duplicate cards must be rejected");
 
         assert!(matches!(err, EngineError::InvalidAction(_)));
-    }
-
-    #[test]
-    fn collect_evidence_effect_resumes_sub_ability() {
-        let mut state = GameState::new_two_player(42);
-        let first = add_graveyard_card(&mut state, PlayerId(0), 1, "One", 2);
-        let second = add_graveyard_card(&mut state, PlayerId(0), 2, "Two", 2);
-        let land = create_object(
-            &mut state,
-            CardId(3),
-            PlayerId(0),
-            "Forest".to_string(),
-            Zone::Library,
-        );
-        state.objects.get_mut(&land).unwrap().card_types.core_types = vec![CoreType::Land];
-        let mut ability = ResolvedAbility::new(
-            Effect::CollectEvidence { amount: 4 },
-            vec![],
-            ObjectId(100),
-            PlayerId(0),
-        );
-        ability.sub_ability = Some(Box::new(ResolvedAbility::new(
-            Effect::SearchLibrary {
-                filter: TargetFilter::Typed(TypedFilter::land()),
-                count: QuantityExpr::Fixed { value: 1 },
-                reveal: true,
-                target_player: None,
-                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
-                split: None,
-                source_zones: vec![crate::types::zones::Zone::Library],
-            },
-            vec![],
-            ObjectId(100),
-            PlayerId(0),
-        )));
-
-        let mut events = Vec::new();
-        resolve(&mut state, &ability, &mut events).unwrap();
-
-        let (minimum_mana_value, cards, resume) = match state.waiting_for.clone() {
-            WaitingFor::CollectEvidenceChoice {
-                minimum_mana_value,
-                cards,
-                resume,
-                ..
-            } => (minimum_mana_value, cards, resume),
-            other => panic!("Expected CollectEvidenceChoice, got {:?}", other),
-        };
-
-        let mut resume_events = Vec::new();
-        let next = handle_choice(
-            &mut state,
-            PlayerId(0),
-            minimum_mana_value,
-            &cards,
-            &resume,
-            &[first, second],
-            &mut resume_events,
-        )
-        .unwrap();
-
-        assert!(matches!(next, WaitingFor::SearchChoice { .. }));
-        assert!(resume_events.iter().any(|event| matches!(
-            event,
-            GameEvent::PlayerPerformedAction {
-                action: PlayerActionKind::CollectEvidence,
-                ..
-            }
-        )));
     }
 
     fn mana_pending(source_id: ObjectId) -> PendingManaAbility {
