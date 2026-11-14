@@ -56,13 +56,16 @@ use engine::game::effects::player_counter::{
     preview_player_counter_addition, PlayerCounterAdditionPreview,
 };
 use engine::game::effects::preview_resolution;
+use engine::game::functioning_abilities::battlefield_active_triggers;
 use engine::game::players::{self, PoisonLossMeasure, PoisonLossScope};
 use engine::game::sba::check_state_based_actions;
 use engine::types::ability::{AbilityDefinition, Effect, QuantityExpr, ResolvedAbility, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::player::{PlayerCounterKind, PlayerId};
+use engine::types::triggers::TriggerMode;
 
 use crate::ability_chain::{collect_scoped_nodes, AbilityScope};
 use crate::features::poison::{
@@ -261,6 +264,12 @@ fn ability_delivery(
                     _ => slot.legal_targets.first().cloned(),
                 })
                 .collect::<Option<Vec<_>>>()?;
+            // CR 601.2c: "Any abilities that trigger when those objects and/or players become the
+            // target of a spell trigger at this point"; conservative: subjects and valid_source are
+            // not evaluated because the spell isn't staged on the preview.
+            if !targets.is_empty() && targeting_may_trigger(state, &targets) {
+                return None;
+            }
             if !targets.is_empty() {
                 assign_targets_in_chain(state, &mut resolved, &targets).ok()?;
             }
@@ -281,6 +290,22 @@ fn ability_delivery(
         }
         _ => None,
     })
+}
+
+/// CR 702.21a: Ward on a targeted object, or a live becomes-target trigger on any permanent.
+fn targeting_may_trigger(state: &GameState, targets: &[TargetRef]) -> bool {
+    let warded = |target: &TargetRef| {
+        matches!(target, TargetRef::Object(id) if state.objects.get(id).is_some_and(|obj| {
+            obj.keywords.iter().any(|k| matches!(k, Keyword::Ward(_)))
+        }))
+    };
+    targets.iter().any(warded)
+        || battlefield_active_triggers(state).any(|(_, active)| {
+            matches!(
+                active.definition.mode,
+                TriggerMode::BecomesTarget | TriggerMode::BecomesTargetOnce
+            )
+        })
 }
 
 /// CR 702.70a: a trigger whose instructions give poison counters (Poisonous).
