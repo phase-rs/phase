@@ -7076,7 +7076,14 @@ pub enum FilterProp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<ControllerRef>,
     },
-    /// Matches any object that is NOT the trigger source (for "another creature" triggers).
+    /// Excludes a reference object for predicates such as "another creature."
+    /// Live object matching excludes a bound recipient (for example, an
+    /// attachment's host). With no recipient, a captured trigger source excludes
+    /// only its exact live incarnation in the expected zone. Without a trigger
+    /// source context, matching excludes the source object ID.
+    /// Zone-change record matching excludes records whose `object_id` is the
+    /// source. Spell-cost matching excludes the spell that is the source; with no
+    /// spell bound it fails closed and never matches.
     Another,
     /// CR 702.95b: Matches objects that are not paired with another creature.
     Unpaired,
