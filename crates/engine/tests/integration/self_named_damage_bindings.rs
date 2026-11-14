@@ -25,6 +25,7 @@ fn sin_prodder_upkeep_acceptor_receives_source_damage_equal_to_top_mana_value() 
     let (mut runner, prodder, revealed) = sin_prodder_scenario();
     let p0_life = life(&runner, P0);
     let p1_life = life(&runner, P1);
+    let p2_life = life(&runner, PlayerId(2));
 
     runner.auto_advance_to_main_phase();
     reach_sin_prodder_choice(&mut runner);
@@ -48,7 +49,23 @@ fn sin_prodder_upkeep_acceptor_receives_source_damage_equal_to_top_mana_value() 
         p1_life - 3,
         "the accepting player takes the top card's mana value"
     );
+    assert_eq!(
+        life(&runner, PlayerId(2)),
+        p2_life,
+        "the other opponent is not damaged"
+    );
     assert_eq!(runner.state().objects[&revealed].zone, Zone::Graveyard);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::DamageDealt { source_id, .. } if *source_id == prodder
+            ))
+            .count(),
+        1,
+        "Sin Prodder deals damage to exactly the accepting player: {events:#?}"
+    );
     assert!(
         events.iter().any(|event| matches!(
             event,
