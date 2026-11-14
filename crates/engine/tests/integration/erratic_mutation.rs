@@ -952,6 +952,153 @@ fn goblin_machinist_activation_pump_and_owner_arranged_bottom() {
     assert_eq!(machinist_obj.toughness, Some(5));
 }
 
+const GRIPTIDE_ORACLE: &str = "Put target creature on top of its owner's library.";
+
+/// CR 701.20b + CR 701.20d + CR 903.9b: Goblin Machinist — in-library placement
+/// of a revealed tucked commander completes without offering an extra command-zone
+/// return choice, while Griptide still offers the actual cross-zone replacement choice.
+#[test]
+fn goblin_machinist_reordering_revealed_commander_offers_no_extra_command_zone_return() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let krenko = scenario
+        .add_creature(P0, "Krenko, Mob Boss", 3, 3)
+        .as_legendary()
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    scenario.with_commander(krenko);
+
+    let machinist = scenario
+        .add_creature_from_oracle(P0, "Goblin Machinist", 0, 5, GOBLIN_MACHINIST_ORACLE)
+        .id();
+
+    let griptide = scenario
+        .add_spell_to_hand_from_oracle(P1, "Griptide", true, GRIPTIDE_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let _deep = scenario.add_card_to_library_top(P0, "Deep Card");
+
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+    let mut setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        krenko,
+        Zone::Battlefield,
+        &mut setup_events,
+    );
+
+    // P0 passes priority so P1 can cast Griptide targeting P0's commander Krenko
+    runner.act(GameAction::PassPriority).unwrap();
+
+    let griptide_card_id = runner.state().objects[&griptide].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: griptide,
+            card_id: griptide_card_id,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("P1 casts Griptide targeting Krenko");
+
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(engine::types::ability::TargetRef::Object(krenko)),
+        })
+        .expect("select Krenko as target for Griptide");
+
+    // Pass priority to resolve Griptide
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.act(GameAction::PassPriority).unwrap();
+
+    // CR 903.9b: Griptide moving Krenko from Battlefield to Library MUST offer
+    // the command-zone return replacement choice.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "Griptide moving commander to library must offer CR 903.9b replacement, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Decline the replacement (index 1) so Krenko is tucked onto the top of the library.
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("decline commander replacement");
+
+    assert_eq!(
+        runner.state().objects[&krenko].zone,
+        Zone::Library,
+        "Krenko must be tucked in the library"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].library.front(),
+        Some(&krenko),
+        "Krenko is on top of P0's library"
+    );
+
+    // Both players pass priority to clear Griptide's resolution and return to P0 priority
+    while !matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ) {
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+
+    // P0 activates Goblin Machinist before drawing.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: machinist,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("activate Goblin Machinist ability");
+
+    // Pass priority from both players to resolve Machinist ability
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.act(GameAction::PassPriority).unwrap();
+
+    // CR 701.20b + CR 701.20d + CR 903.9b: Krenko is revealed as the first nonland card.
+    // Machinist puts the revealed cards on the bottom of the library. Because this is an
+    // in-library reorder (CR 701.20d), NO command-zone return choice is offered.
+    // The resolution completes immediately back to Priority without pausing on ChooseReplacement.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "in-library placement of tucked commander must not offer extra replacement choice, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Verify Krenko is now at the bottom of P0's library
+    assert_eq!(
+        runner.state().players[P0.0 as usize].library.back(),
+        Some(&krenko),
+        "Krenko was placed on the bottom of P0's library"
+    );
+    assert_eq!(
+        runner.state().objects[&krenko].zone,
+        Zone::Library,
+        "Krenko remains in the library"
+    );
+
+    // Verify pump applied from Krenko's MV (4): base 0/5 + 4 -> 4/5
+    evaluate_layers(runner.state_mut());
+    let machinist_obj = &runner.state().objects[&machinist];
+    assert_eq!(machinist_obj.power, Some(4));
+    assert_eq!(machinist_obj.toughness, Some(5));
+}
+
 /// CR 401.2 + CR 401.4 + CR 701.20d: after the owner arranges the revealed
 /// pile, the settled order is authoritative state only. The authorized owner
 /// receives the arrangement prompt; every viewer's projection — the owner's
@@ -1551,13 +1698,12 @@ fn proteus_staff_paused_owner_order_still_settles_reorder() {
     );
     assert!(state.active_batch_delivery().is_none());
     assert!(state.stack.is_empty());
-    // CR 701.20d: the two selected members that stayed in the library are
-    // reordered occurrences, so each becomes exactly one new object and stops
-    // being revealed before the continuation. In a bottom pile delivered one
-    // card at a time every member that stays is moved or shifted by a later
-    // delivery, so the per-card reorder retires these two; the terminal
-    // settlement is pinned separately by a member only it can retire
-    // (`zone_pipeline::library_reorder_carrier_tests`).
+    // CR 701.20d + CR 616.1: the two selected members that stayed in the library
+    // are reordered occurrences, so each becomes exactly one new object and stops
+    // being revealed before the continuation. While the batch is in flight across
+    // the replacement pause, intermediate per-card deliveries do not prematurely
+    // retire active reorder members; terminal settlement at the batch boundary
+    // retires the entire arrangement atomically.
     for (id, label, incarnation_before) in [
         (miss_a, "Miss A", incarnations_before[0]),
         (miss_b, "Miss B", incarnations_before[1]),

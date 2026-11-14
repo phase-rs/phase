@@ -2891,8 +2891,9 @@ pub(crate) fn settle_library_arrangement(
                 .first()
                 .copied()
                 .filter(|id| {
-                    old_positions.get(id).copied()
-                        != arrangement.iter().position(|candidate| candidate == id)
+                    !state.is_active_library_reorder_member(*id)
+                        && old_positions.get(id).copied()
+                            != arrangement.iter().position(|candidate| candidate == id)
                 })
                 .into_iter()
                 .collect()
@@ -2904,13 +2905,14 @@ pub(crate) fn settle_library_arrangement(
         // revealed. A stack-bound reveal lease (CR 701.20a) publishes only the
         // card's identity, never its library position, and lasts until its
         // trigger leaves the stack — an unrelated insertion does not end it.
-        // A member of a multi-card instruction delivered one card at a time is
-        // still owed that retirement: `LibraryReorderOperation::finish` settles it.
+        // Members of an in-flight whole-library reorder are settled by its terminal
+        // finish, not piecemeal during intermediate deliveries.
         for (position, &object_id) in arrangement.iter().enumerate() {
             let Some(old_position) = old_positions.get(&object_id).copied() else {
                 continue;
             };
             if old_position == position
+                || state.is_active_library_reorder_member(object_id)
                 || !(state.revealed_cards.contains(&object_id)
                     || state.public_revealed_cards.contains(&object_id))
             {

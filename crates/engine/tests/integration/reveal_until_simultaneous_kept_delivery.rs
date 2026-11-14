@@ -19,6 +19,9 @@ use engine::game::combat::{build_declare_attackers_waiting_for, AttackTarget};
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::game::visibility::{
+    filter_state_for_unseated_viewer, filter_state_for_viewer, HIDDEN_CARD_NAME,
+};
 use engine::types::ability::{TargetFilter, TargetRef, TypedFilter};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -918,6 +921,24 @@ fn mind_funeral_stops_at_four_lands_revealed() {
         10,
         "all 10 cards remain in P1's library because graveyard delivery is an honest gap"
     );
+
+    // CR 701.20a: Mind Funeral's partial resolution finishes when the reveal loop
+    // terminates. Both opponent (P0) and spectator (unseated) snapshots conceal the
+    // revealed cards and library positions before any additional action.
+    for (label, projected) in [
+        ("opponent P0", filter_state_for_viewer(runner.state(), P0)),
+        (
+            "spectator",
+            filter_state_for_unseated_viewer(runner.state()),
+        ),
+    ] {
+        for &id in &revealed_cards {
+            assert_eq!(
+                projected.objects[&id].name, HIDDEN_CARD_NAME,
+                "{label}: revealed card must be concealed in library after Mind Funeral finishes"
+            );
+        }
+    }
 }
 
 /// CR 701.20a + CR 609.3: When the library is exhausted before 4 lands are found, the loop
@@ -987,6 +1008,22 @@ fn mind_funeral_exhausts_library_when_fewer_than_four_lands() {
         4,
         "all 4 cards remain in P1's library because graveyard delivery is an honest gap"
     );
+
+    // CR 701.20a: Immediate opponent and spectator views conceal the exhausted library prefix.
+    for (label, projected) in [
+        ("opponent P0", filter_state_for_viewer(runner.state(), P0)),
+        (
+            "spectator",
+            filter_state_for_unseated_viewer(runner.state()),
+        ),
+    ] {
+        for &id in &revealed_cards {
+            assert_eq!(
+                projected.objects[&id].name, HIDDEN_CARD_NAME,
+                "{label}: revealed card must be concealed in library after Mind Funeral finishes"
+            );
+        }
+    }
 }
 
 /// No double collection (CR 603.2c): a batched "one or more" observer with no

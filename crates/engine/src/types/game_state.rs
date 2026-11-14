@@ -31492,6 +31492,30 @@ impl GameState {
         self.resolution_stack.take_active_batch_delivery()
     }
 
+    /// CR 701.20d + CR 701.20a: Whether `card_id` is tracked by an active
+    /// in-flight whole-library reorder operation whose terminal finish settles
+    /// reveal retirement at the batch completion boundary, so per-card reorder
+    /// moves do not prematurely retire it during intermediate deliveries.
+    pub fn is_active_library_reorder_member(&self, card_id: ObjectId) -> bool {
+        if let Some(pending) = self.active_batch_delivery() {
+            if let Some(reorder) = &pending.library_reorder {
+                if reorder.members.len() > 1 && reorder.members.contains(&card_id) {
+                    return true;
+                }
+            }
+        }
+        if let Some(frame) = self.active_change_zone_frame() {
+            if let Some(pending) = &frame.pending {
+                if let Some(reorder) = &pending.library_reorder {
+                    if reorder.members.len() > 1 && reorder.members.contains(&card_id) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Returns the CounterMoves queue only when its typed frame owns the stack
     /// top.
     pub fn active_counter_moves(&self) -> Option<&PendingCounterMoveQueue> {
