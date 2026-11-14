@@ -13694,9 +13694,10 @@ pub(super) fn pay_and_push_adventure(
     // `enter_payment_step` diverts to `ChooseXValue` when the cost has an unchosen X,
     // per CR 601.2f (X chosen before mana is paid).
     let has_x = cost_has_x(cost);
-    // CR 107.4d + CR 118.5 + CR 601.2g: {0} still has a manual mana-ability window.
-    let manual_payment =
-        payment_mode == CastPaymentMode::Manual && matches!(cost, ManaCost::Cost { .. });
+    // CR 601.2h + CR 118.5: a {0} cost leaves no mana to pay, so it opens no manual
+    // window (an alternative {0} such as Warped Space's completes the cast). A cast
+    // with a deferred commit-time cost opens its window through `enter_payment_step`.
+    let manual_payment = payment_mode == CastPaymentMode::Manual && cost.mana_value() > 0;
     let auto_payment_needs_input = payment_mode == CastPaymentMode::Auto
         && cost.mana_value() > 0
         && !super::casting::can_pay_cost_after_auto_tap(state, player, object_id, cost)

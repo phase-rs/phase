@@ -22,7 +22,7 @@ use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    CastOpponentChoicePurpose, CastPaymentMode, StackEntryKind, WaitingFor,
+    CastOpponentChoicePurpose, CastPaymentMode, DeferredLifeGainCost, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -1291,8 +1291,8 @@ const ASHNODS_ALTAR: &str = "Sacrifice a creature: Add {C}{C}.";
 
 /// P0 controls a Forest, Ashnod's Altar and Archfiend of Despair (P1 can't gain
 /// life); Sphere of Resistance makes Invigorate's total cost through the
-/// alternative cost {1}, reduced to {0} by Emerald Medallion. CR 118.5 +
-/// CR 601.2g: that concrete mana cost still permits mana abilities before payment.
+/// alternative cost {1}, reduced to {0} by Emerald Medallion. CR 601.2g: the
+/// deferred life-gain cost still leaves a mana-ability window before payment.
 fn taxed_archfiend_board() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
     let Setup {
         mut scenario,
@@ -1353,12 +1353,12 @@ fn to_manual_mana_window(runner: &mut GameRunner, inv: ObjectId, bear: ObjectId)
     panic!("mana-payment window never opened");
 }
 
-/// V19 — CR 118.5 + CR 601.2g + CR 601.2h + CR 119.7: a concrete {0} cost has a
-/// mana-ability window before the life-gain cost is paid, so Archfiend's lock on
+/// V19 — CR 601.2g + CR 601.2h + CR 119.7: a cast with a deferred life-gain cost has a
+/// mana-ability window (even with no mana to pay) before the life-gain cost is paid, so Archfiend's lock on
 /// P1 does not hide the alternative cost. Sacrificing Archfiend to Ashnod's Altar
-/// in that window removes the lock; the commit then pays {0} and P1 gains 3. The
-/// gain is not made before the window. Control on the same board: paying the
-/// {0} with Archfiend still out leaves P1 unable to gain life, so the commit is
+/// in that window removes the lock; the commit then pays the cost and P1 gains 3. The
+/// gain is not made before the window. Control on the same board: passing
+/// priority in the window with Archfiend still out leaves P1 unable to gain life, so the commit is
 /// refused and nothing is paid.
 #[test]
 fn v19_mana_ability_window_removes_the_lock_before_the_gain_is_paid() {
@@ -1366,9 +1366,19 @@ fn v19_mana_ability_window_removes_the_lock_before_the_gain_is_paid() {
     let p1_before = runner.life(P1);
 
     to_manual_mana_window(&mut runner, inv, bear);
+    // CR 601.2f + CR 601.2g: the alternative cost has no mana component, so the
+    // pending mana obligation is `NoCost`; the manual window opens because the
+    // life-gain cost is deferred to the payment commit, not because of a
+    // concrete {0}. The gain is still owed, unpaid.
+    let pending = runner
+        .state()
+        .pending_cast
+        .as_ref()
+        .expect("pending manual cast");
+    assert!(pending.cost.is_without_paying_mana());
     assert!(matches!(
-        &runner.state().pending_cast.as_ref().expect("pending manual cast").cost,
-        ManaCost::Cost { generic: 0, shards } if shards.is_empty()
+        pending.deferred_life_gain_cost,
+        Some(DeferredLifeGainCost::Unpaid { .. })
     ));
     assert_eq!(
         runner.life(P1),
@@ -1449,10 +1459,12 @@ fn v20_taxed_cast_pays_the_gain_at_the_commit() {
     assert_eq!(power(&runner, bear), Some(6));
 }
 
-/// CR 107.4d + CR 118.5 + CR 601.2g: an ordinary printed {0} spell also stops
-/// for manual payment; the window is not specific to a deferred life-gain cost.
+/// CR 601.2h + CR 118.5: a spell whose entire mana cost is {0} has nothing to pay,
+/// so even a manual cast completes without a `ManaPayment` window. The window the
+/// Invigorate cast opens comes from its deferred life-gain cost, not from a {0}
+/// mana component; this guards the shared {0} boundary the Warped Space casts rely on.
 #[test]
-fn manual_zero_mana_spell_requires_payment_acknowledgment() {
+fn manual_zero_mana_spell_completes_without_a_payment_window() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let memnite = scenario
@@ -1470,22 +1482,11 @@ fn manual_zero_mana_spell_requires_payment_acknowledgment() {
             payment_mode: CastPaymentMode::Manual,
         })
         .expect("a zero-mana spell can be cast manually");
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::ManaPayment { player, .. } if player == P0
-    ));
-    assert_eq!(
-        runner
-            .state()
-            .pending_cast
-            .as_ref()
-            .expect("pending manual cast")
-            .cost,
-        ManaCost::zero()
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "a {{0}} cost opens no payment window, found {:?}",
+        runner.state().waiting_for
     );
-    runner
-        .act(GameAction::PassPriority)
-        .expect("acknowledge payment");
     assert!(runner.state().pending_cast.is_none());
     assert_eq!(runner.state().stack.len(), 1);
     finish_resolution(&mut runner);
