@@ -4806,10 +4806,11 @@ mod production_restore_owner_regression_tests {
         state.horde_wave_remaining = 1;
         install_game_state(Some(state));
         match submit_action_inner(hero, GameAction::PassPriority) {
-            SubmittedAction::Applied { .. } => {}
-            SubmittedAction::Rejected { rejection } => {
+            Ok(SubmittedAction::Applied { .. }) => {}
+            Ok(SubmittedAction::Rejected { rejection }) => {
                 panic!("the survivor's pass must apply, got rejection {rejection:?}")
             }
+            Err(error) => panic!("the survivor's pass must apply, got error {error:?}"),
         }
 
         // Positive reach-guards on the live installed state: the reveal
@@ -4955,9 +4956,11 @@ mod production_restore_owner_regression_tests {
                     .unwrap_or(false),
                 "{what} visibility concealed"
             );
-            assert_eq!(
-                hidden["display_source"].as_str(),
-                Some("Card"),
+            // `Card` is the skip-serialized default: the concealed routing
+            // rides the wire as an absent key (the same shape as the
+            // pre-PR omission, which deserializes back to `Card`).
+            assert!(
+                hidden.get("display_source").is_none(),
                 "{what} routing concealed"
             );
             assert!(
