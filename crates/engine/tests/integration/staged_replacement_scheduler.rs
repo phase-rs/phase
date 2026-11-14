@@ -2689,3 +2689,116 @@ fn a_held_entry_payment_is_limited_by_the_payment_made_before_it() {
         }
     }
 }
+
+/// Find the staged batch owner's JSON object (the frame holding both `staged`
+/// and its own `logical_zone_change_group`).
+fn staged_owner_json(value: &mut serde_json::Value) -> Option<&mut serde_json::Value> {
+    let is_owner = value.as_object().is_some_and(|map| {
+        map.get("staged").is_some_and(|staged| !staged.is_null())
+            && map.contains_key("logical_zone_change_group")
+    });
+    if is_owner {
+        return Some(value);
+    }
+    match value {
+        serde_json::Value::Object(map) => map.values_mut().find_map(staged_owner_json),
+        serde_json::Value::Array(items) => items.iter_mut().find_map(staged_owner_json),
+        _ => None,
+    }
+}
+
+/// The saved staged member of `object`.
+fn staged_member_json(owner: &mut serde_json::Value, object: ObjectId) -> &mut serde_json::Value {
+    owner["staged"]["members"]
+        .as_array_mut()
+        .expect("the staged owner lists its members")
+        .iter_mut()
+        .find(|member| member["identity"]["object_id"] == serde_json::json!(object.0))
+        .expect("the staged owner holds the member")
+}
+
+/// CR 701.8a + CR 603.10a + CR 616.1: Wrath of God destroys P0's plain Grizzly
+/// Bears and P1's Runeclaw Bear wearing Hyena Umbra and Felidar Umbra. P1's
+/// choice is open, and the saved staged batch holds both members. Checked
+/// restore (the path the Debug Panel's import takes) must reject a staged member
+/// whose reported terminal the batch's logical zone-change group does not agree
+/// with: a reported move the group never retained would otherwise be skipped by
+/// the resumed delivery and panic when the batch settles. A prevented member
+/// whose slot is still pending is a legitimate state and restores.
+#[test]
+fn checked_restore_rejects_a_staged_terminal_the_logical_group_does_not_back() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let plain = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let armored = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+    let felidar = umbra(&mut scenario, P1, "Felidar Umbra", FELIDAR_UMBRA);
+    let wrath = zero_cost_spell(&mut scenario, "Wrath of God", WRATH_OF_GOD);
+    let mut runner = scenario.build();
+    attach(&mut runner, hyena, armored);
+    attach(&mut runner, felidar, armored);
+    engine::game::layers::flush_layers(runner.state_mut());
+    cast_until_decision(&mut runner, wrath);
+    assert_eq!(
+        asked_choice(&runner),
+        (P1, armored),
+        "reach guard: P1's armor choice is open with the plain Bear held in the batch"
+    );
+    let saved = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("the staged save serializes");
+    let restore = |wire: serde_json::Value| -> Result<GameRunner, String> {
+        let state = serde_json::from_value::<PersistedGameState>(wire)
+            .map_err(|error| error.to_string())?
+            .into_game_state()
+            .map_err(|error| error.to_string())?;
+        Ok(GameRunner::from_state(state))
+    };
+
+    // Control: the save as written restores and plays to completion.
+    let mut control = restore(saved.clone()).expect("the unmodified staged save restores");
+    choose_source(&mut control, hyena);
+    finish(&mut control);
+    assert_eq!(zone(&control, plain), Zone::Graveyard);
+    assert_eq!(zone(&control, armored), Zone::Battlefield);
+
+    // A member reported moved while the group's slot for it is still pending.
+    let mut falsely_moved = saved.clone();
+    let owner = staged_owner_json(&mut falsely_moved).expect("a staged owner is saved");
+    let member = staged_member_json(owner, plain);
+    member["state"] = serde_json::json!("Terminal");
+    member["terminal"] = serde_json::json!("Moved");
+    member["approved_event"] = serde_json::Value::Null;
+    let error = restore(falsely_moved)
+        .err()
+        .expect("a reported move the group never retained is rejected at the import boundary");
+    assert!(
+        error.contains("logical zone-change slot"),
+        "rejected for the disagreeing slot: {error}"
+    );
+
+    // A member reported prevented against a slot another outcome already filled.
+    let mut contradicted = saved.clone();
+    let owner = staged_owner_json(&mut contradicted).expect("a staged owner is saved");
+    let member = staged_member_json(owner, plain);
+    member["state"] = serde_json::json!("Terminal");
+    member["terminal"] = serde_json::json!("Prevented");
+    member["approved_event"] = serde_json::Value::Null;
+    let slot = owner["logical_zone_change_group"]["prospective_battlefield_members"]
+        .as_array()
+        .expect("the group lists its members")
+        .iter()
+        .position(|candidate| candidate["identity"]["object_id"] == serde_json::json!(plain.0))
+        .expect("the group announced the plain Bear");
+    owner["logical_zone_change_group"]["terminal_outcomes"][slot] =
+        serde_json::json!({ "type": "remained" });
+    let error = restore(contradicted.clone())
+        .err()
+        .expect("a prevented member against a remained slot is rejected");
+    assert!(error.contains("logical zone-change slot"), "{error}");
+
+    // Control: the same prevented member with its slot still pending restores.
+    let owner = staged_owner_json(&mut contradicted).expect("a staged owner is saved");
+    owner["logical_zone_change_group"]["terminal_outcomes"][slot] =
+        serde_json::json!({ "type": "pending" });
+    restore(contradicted).expect("a prevented member with a pending slot is a legitimate state");
+}

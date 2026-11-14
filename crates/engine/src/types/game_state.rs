@@ -7247,6 +7247,7 @@ impl PendingBatchDeliveries {
         }
 
         self.validate_staged_stage(staged)?;
+        self.validate_staged_terminals_match_group(staged)?;
         for arrangement in &staged.arrangements {
             self.validate_staged_arrangement(staged, arrangement)?;
         }
@@ -7316,6 +7317,59 @@ impl PendingBatchDeliveries {
                         );
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// CR 701.8a + CR 603.10a: a staged member that reports a terminal outcome
+    /// must agree with the batch's own logical zone-change group. A reported
+    /// move needs the occurrence the group retained for that incarnation
+    /// (`append_delivery_events` records `Moved` from the actual `ZoneChanged`
+    /// before a pause can save), so a record claiming a move the group never saw
+    /// would later be settled as a member the group still has pending. A
+    /// prevented or remained member has no occurrence: its slot is still
+    /// `Pending` until settlement records it, or already carries the same
+    /// outcome, and a slot another member's outcome already filled disagrees.
+    fn validate_staged_terminals_match_group(
+        &self,
+        staged: &StagedBatchDelivery,
+    ) -> Result<(), String> {
+        let group = &self.logical_zone_change_group;
+        for member in &staged.members {
+            let (StagedBatchMemberState::Terminal, Some(terminal)) =
+                (member.state, member.terminal)
+            else {
+                continue;
+            };
+            let Some(index) = group
+                .prospective_battlefield_members
+                .iter()
+                .position(|candidate| candidate.identity == member.identity)
+            else {
+                // A member with no battlefield slot has nothing to match.
+                continue;
+            };
+            let outcome = &group.terminal_outcomes[index];
+            let agrees = match terminal {
+                ZoneMoveCompletion::Moved => {
+                    matches!(outcome, LogicalZoneChangeTerminalOutcome::Moved { .. })
+                }
+                ZoneMoveCompletion::Prevented => matches!(
+                    outcome,
+                    LogicalZoneChangeTerminalOutcome::Pending
+                        | LogicalZoneChangeTerminalOutcome::Prevented
+                ),
+                ZoneMoveCompletion::Remained => matches!(
+                    outcome,
+                    LogicalZoneChangeTerminalOutcome::Pending
+                        | LogicalZoneChangeTerminalOutcome::Remained
+                ),
+            };
+            if !agrees {
+                return Err(format!(
+                    "a staged member reports {terminal:?} but its logical zone-change slot is {outcome:?}"
+                ));
             }
         }
         Ok(())
