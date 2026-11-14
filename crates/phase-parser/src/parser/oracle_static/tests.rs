@@ -42696,6 +42696,11 @@ fn edgar_graveyard_permission_enters_tapped_rider() {
         "no residual Unimplemented: {:?}",
         parsed.abilities
     );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "the rider is carried, not swallowed: {:?}",
+        parsed.parse_warnings
+    );
 }
 
 /// CR 614.1d (C2): the "enters the battlefield tapped" template is the same rider.
