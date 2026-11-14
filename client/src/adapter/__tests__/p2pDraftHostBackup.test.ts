@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../draft-adapter", () => ({
+vi.mock("../draft-adapter", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../draft-adapter")>()),
   DraftAdapter: vi.fn().mockImplementation(function () {
     return {};
   }),
@@ -14,6 +15,7 @@ vi.mock("../../services/draftPersistence", () => ({
 import { P2PDraftHost } from "../p2p-draft-host";
 import type { DraftPlayerView } from "../draft-adapter";
 import { saveDraftHostSession } from "../../services/draftPersistence";
+import { draftProcedureFixture } from "./draftProcedureFixture";
 
 describe("P2PDraftHost server backup", () => {
   const BACKUP_URL = "https://backup.example";
@@ -53,13 +55,15 @@ describe("P2PDraftHost server backup", () => {
       "Casual",
       undefined,
       "persist-backup-test",
-      "ROOM01",
+      "RMABC",
       BACKUP_URL,
     );
   }
 
   function wireAdapter(host: P2PDraftHost): void {
     const adapter = (host as unknown as { adapter: Record<string, unknown> }).adapter;
+    adapter.draftProcedure = vi.fn(async () => draftProcedureFixture({ pod_size: 2, human_seats: 1 }));
+    adapter.loadCardDatabase = vi.fn(async () => 0);
     adapter.createMultiplayerDraft = vi.fn().mockResolvedValue(undefined);
     adapter.getViewForSeat = vi.fn(async () => draftingView);
     adapter.exportSession = vi.fn().mockResolvedValue('{"status":"Drafting"}');
