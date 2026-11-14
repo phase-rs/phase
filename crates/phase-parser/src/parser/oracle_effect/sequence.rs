@@ -5434,6 +5434,7 @@ pub(super) fn apply_clause_continuation(
                 Some(Zone::Library)
             };
             let put_effect = Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: put_origin,
                 destination,
@@ -5863,6 +5864,7 @@ pub(super) fn apply_clause_continuation(
                 defs.push(AbilityDefinition::new(
                     kind,
                     Effect::ChangeZoneAll {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         origin: Some(Zone::Library),
                         destination,
                         target: TargetFilter::LastRevealed,
@@ -5910,6 +5912,7 @@ pub(super) fn apply_clause_continuation(
                     defs.push(AbilityDefinition::new(
                         kind,
                         Effect::ChangeZoneAll {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
                             origin: Some(Zone::Library),
                             destination,
                             target: TargetFilter::LastRevealed,
@@ -6025,6 +6028,7 @@ pub(super) fn apply_clause_continuation(
             defs.push(AbilityDefinition::new(
                 kind,
                 Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     origin: Some(Zone::Library),
                     destination,
                     target: TargetFilter::LastRevealed,
@@ -6356,6 +6360,7 @@ pub(super) fn apply_clause_continuation(
                         defs.push(AbilityDefinition::new(
                             kind,
                             Effect::ChangeZoneAll {
+                                actor: crate::types::ability::LibraryInstructionActor::Controller,
                                 origin: Some(mill_destination),
                                 destination: kept_dest.unwrap_or(Zone::Battlefield),
                                 target: TargetFilter::TrackedSetFiltered {
@@ -6386,6 +6391,7 @@ pub(super) fn apply_clause_continuation(
                         let mut def = AbilityDefinition::new(
                             kind,
                             Effect::ChangeZone {
+                                actor: crate::types::ability::LibraryInstructionActor::Controller,
                                 library_shuffle: Default::default(),
                                 // CR 400.3: a bounded "put up to N <filter> milled
                                 // this way onto the battlefield face down" form
@@ -6570,6 +6576,7 @@ pub(super) fn apply_clause_continuation(
                 let mut chosen_def = AbilityDefinition::new(
                     kind,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         origin: None,
                         destination: chosen_destination,
@@ -6589,6 +6596,7 @@ pub(super) fn apply_clause_continuation(
                 let mut rest_def = AbilityDefinition::new(
                     kind,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         origin: None,
                         destination: rest_destination,
@@ -6721,6 +6729,7 @@ pub(super) fn apply_clause_continuation(
                 AbilityDefinition::new(
                     kind,
                     Effect::ChangeZoneAll {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         origin: None,
                         destination: Zone::Exile,
                         target,
@@ -7064,6 +7073,7 @@ pub(super) fn apply_clause_continuation(
                         let mut placement = AbilityDefinition::new(
                             kind,
                             Effect::ChangeZoneAll {
+                                actor: crate::types::ability::LibraryInstructionActor::Controller,
                                 origin: Some(Zone::Library),
                                 destination,
                                 // The cards this reveal revealed — those still in the
@@ -12463,6 +12473,7 @@ mod tests {
     #[test]
     fn multi_zone_search_put_restatement_absorbed_after_origin_none_destination() {
         let previous = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
@@ -12489,6 +12500,7 @@ mod tests {
     #[test]
     fn search_exile_them_followup_is_absorbed_after_library_exile_destination() {
         let previous = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Exile,
@@ -12512,6 +12524,7 @@ mod tests {
     #[test]
     fn search_exile_face_down_followup_uses_compositional_reference_grammar() {
         let previous = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Exile,

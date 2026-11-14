@@ -1927,6 +1927,8 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
         // Upgrade ChangeZone → ChangeZoneAll: ChangeZone uses ability.targets (empty for
         // delayed triggers), so it would move nothing. ChangeZoneAll scans by filter.
         Effect::ChangeZone {
+            // CR 608.2c: the instruction's performer survives the upgrade.
+            actor,
             destination,
             origin,
             target,
@@ -1935,7 +1937,14 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
             enters_attacking,
             enter_with_counters,
             face_down_profile,
-            ..
+            // Named so a new field forces a decision here; these have no
+            // `ChangeZoneAll` counterpart and are dropped as before.
+            owner_library: _,
+            enter_transformed: _,
+            up_to: _,
+            conditional_enter_with_counters: _,
+            enters_modified_if: _,
+            library_shuffle: _,
         } => {
             let bound_target = match target {
                 TargetFilter::TrackedSet {
@@ -1959,6 +1968,7 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
                 _ => TargetFilter::TrackedSet { id: real_id },
             };
             *effect = Effect::ChangeZoneAll {
+                actor: actor.clone(),
                 origin: *origin,
                 destination: *destination,
                 target: bound_target,
@@ -3133,6 +3143,7 @@ mod tests {
         let effect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
@@ -3273,6 +3284,7 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -3376,6 +3388,7 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -3436,6 +3449,7 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -3515,6 +3529,7 @@ mod tests {
         effect_def.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -3586,6 +3601,7 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
@@ -4005,6 +4021,7 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Exile),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -4059,6 +4076,7 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,
                 target: TargetFilter::TrackedSetFiltered {
@@ -4120,6 +4138,7 @@ mod tests {
         effect_def.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
@@ -4143,6 +4162,7 @@ mod tests {
         effect_def.mode_abilities.push(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,
                 target: TargetFilter::TrackedSet {
@@ -4221,6 +4241,7 @@ mod tests {
         let mode = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,
                 target: TargetFilter::TrackedSetFiltered {
@@ -4297,6 +4318,7 @@ mod tests {
         let nested_payload = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,
                 target: TargetFilter::TrackedSetFiltered {
@@ -4365,6 +4387,7 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
@@ -4447,6 +4470,7 @@ mod tests {
         let effect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
@@ -5750,6 +5774,7 @@ mod tests {
         let delayed_inner = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -6046,6 +6071,7 @@ mod tests {
 
         let delayed = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::TrackedSet {
@@ -6081,6 +6107,52 @@ mod tests {
         );
     }
 
+    /// CR 603.7c + CR 608.2c: the tracked-set upgrade keeps the move's
+    /// performer. Synthetic actor: the delayed return is the shape below with a
+    /// non-controller subject ("that player returns those cards …").
+    #[test]
+    fn bind_tracked_set_change_zone_upgrade_keeps_the_actor() {
+        let actor = crate::types::ability::LibraryInstructionActor::Player {
+            player: TargetFilter::TriggeringPlayer,
+        };
+        let mut effect = Effect::ChangeZone {
+            actor: actor.clone(),
+            library_shuffle: Default::default(),
+            origin: Some(Zone::Exile),
+            destination: Zone::Battlefield,
+            target: TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        };
+        bind_tracked_set_to_effect(&mut effect, TrackedSetId(3));
+        match &effect {
+            Effect::ChangeZoneAll {
+                actor: upgraded,
+                target,
+                ..
+            } => {
+                assert_eq!(upgraded, &actor);
+                assert_eq!(
+                    *target,
+                    TargetFilter::TrackedSet {
+                        id: TrackedSetId(3)
+                    }
+                );
+            }
+            other => panic!("expected ChangeZoneAll, got {other:?}"),
+        }
+    }
+
     /// CR 603.7c (issue #5972): binding preserves an explicit Battlefield
     /// origin when upgrading `ChangeZone { TrackedSet }` → `ChangeZoneAll`.
     #[test]
@@ -6094,6 +6166,7 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,

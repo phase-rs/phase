@@ -237,6 +237,7 @@ pub fn resolve(
                 // (`engine_resolution_choices.rs`) which honors `destination`
                 // for the battlefield → hand move.
                 state.waiting_for = WaitingFor::EffectZoneChoice {
+                    performed_by: None,
                     player: ability.controller,
                     cards: eligible,
                     count: 1,
@@ -335,6 +336,7 @@ pub fn resolve(
                 // `EffectZoneChoice` intake (`engine_resolution_choices.rs`)
                 // which honors `destination` for the graveyard → hand move.
                 state.waiting_for = WaitingFor::EffectZoneChoice {
+                    performed_by: None,
                     player: selecting_player,
                     cards: matching,
                     count: 1,
@@ -548,6 +550,7 @@ pub fn resolve_all(
 
         if matching.len() > count {
             state.waiting_for = crate::types::game_state::WaitingFor::EffectZoneChoice {
+                performed_by: None,
                 player: ability.controller,
                 cards: matching,
                 count,
