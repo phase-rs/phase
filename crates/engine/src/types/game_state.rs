@@ -13299,9 +13299,8 @@ fn migrate_legacy_pending_cast_timing(value: &mut serde_json::Value) {
 
 /// Rewrites every granted `CastWithKeyword { Flash }` static to `CastWithFlash`.
 fn migrate_legacy_as_though_flash_grants(value: &mut serde_json::Value) {
-    // CR 609.4: only the old "as though they had flash" writer granted
-    // CastWithKeyword { Flash } as an ability; genuine Flash grants are
-    // statics or keywords.
+    // CR 609.4: "as though it had flash" doesn't give a spell flash, and only
+    // that permission's old writer granted CastWithKeyword { Flash } as an ability.
     if value.get("type").and_then(serde_json::Value::as_str) == Some("GrantStaticAbility") {
         if let Some(mode) = value
             .pointer_mut("/definition/mode")
