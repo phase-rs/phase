@@ -201,7 +201,9 @@ pub(crate) use crate::parser::oracle_ir::context::{
     HeadWindowProbe, ParseContext, PriorZoneChoicePartition, SpellAnaphorBinding, TokenPtFollowup,
     TriggerConditionScope,
 };
-use crate::parser::oracle_ir::context::{BodyScope, PendingTrackedSet, TrackedSetProducer};
+use crate::parser::oracle_ir::context::{
+    BodyScope, PendingTrackedSet, ResolvedChainRoot, TrackedSetProducer,
+};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseId,
     ClauseIr, ClauseIrBuilder, ClausePlacement, DieResultBranchIr, EffectChainIr,
@@ -44299,6 +44301,10 @@ fn parse_ability_ir_with_damage_context(
     ctx: &mut ParseContext,
     damage_context: Option<DamageTargetContext>,
 ) -> AbilityIr {
+    // CR 608.2c: the resolved-root proof belongs to this body's own effect
+    // chain. Hold it back from every recognizer below, which may parse a chain
+    // of its own, and hand it back only to the chain body at the end.
+    let resolved_chain_root = std::mem::take(&mut ctx.resolved_chain_root);
     // CR 608.2c + CR 109.4: a leading "During target opponent's next turn, …"
     // window DECLARES a player target, and that player is in scope for the whole
     // ability body — so a "that player" anaphor anywhere in it refers to the
@@ -44421,6 +44427,7 @@ fn parse_ability_ir_with_damage_context(
             modal: None,
         };
     }
+    ctx.resolved_chain_root = resolved_chain_root;
     AbilityIr {
         source_text: text.to_string(),
         body: parse_effect_chain_ir_with_damage_context(text, kind, ctx, 0, damage_context),
@@ -45979,6 +45986,9 @@ fn parse_effect_chain_ir_body(
     // CR 608.2c: the enclosing chain's player declaration, taken on entry so only
     // the one nested call that set it can read it.
     let enclosing_declared_player = ctx.enclosing_declared_player.take();
+    // CR 608.2c: whether this chain is its ability's resolved root, taken on
+    // entry so a chain nested inside it cannot inherit the proof.
+    let resolved_chain_root = std::mem::take(&mut ctx.resolved_chain_root);
     if let Some(ir) = parse_reciprocal_graveyard_choice_ir(text, kind) {
         return ir;
     }
@@ -46129,6 +46139,9 @@ fn parse_effect_chain_ir_body(
     // the leading duration a later coordinated chunk of the sentence cannot see.
     let sentence_leading_duration = compute_sentence_leading_duration(&chunks);
     let mut builder = ClauseIrBuilder::new(full_text);
+    // CR 608.2c: the gate a chain root took on its own target's controller,
+    // checked against the assembled chain by `keep_own_target_gate_readable`.
+    let mut own_target_gate: Option<AbilityCondition> = None;
 
     // CR 608.2c + CR 117.3a: "Anchor subject" for chain-level anaphoric
     // inheritance. When a clause in the chain declares an explicit player-scope
@@ -48032,7 +48045,27 @@ fn parse_effect_chain_ir_body(
             && turn_cond.is_none()
             && target_has_cond.is_none()
         {
-            strip_routed_suffix_conditional(&text, ctx)
+            // CR 608.2c + CR 700.2: the clause is the resolved root only when
+            // its entry point proved this chain is the ability's root, no
+            // earlier clause of the chain has been pushed, and the body is a
+            // whole ability. A mode is not: the engine appends each later chosen
+            // mode to the earlier one as a sub-ability (`build_chained_resolved`),
+            // and which mode comes first depends on the choice.
+            let position = match (
+                resolved_chain_root,
+                builder.clauses().is_empty(),
+                ctx.body_scope,
+            ) {
+                (ResolvedChainRoot::Proven, true, BodyScope::WholeAbility) => {
+                    conditions::GatedInstructionPosition::ChainRoot
+                }
+                (ResolvedChainRoot::Unproven, _, _)
+                | (_, false, _)
+                | (_, _, BodyScope::ModalMode) => {
+                    conditions::GatedInstructionPosition::AfterInstruction
+                }
+            };
+            strip_routed_suffix_conditional(&text, ctx, position)
         } else {
             (None, text)
         };
@@ -48043,7 +48076,23 @@ fn parse_effect_chain_ir_body(
             (Some(route), Some(suffix_route)) => Some(route.merge(suffix_route)),
             (route, suffix_route) => route.or(suffix_route),
         };
+        if let Some((gate, LeadingConditionRoute::OwnTargetController)) = &suffix_cond {
+            own_target_gate = Some(gate.clone());
+        }
         let suffix_cond = suffix_cond.map(|(condition, _)| condition);
+        // CR 608.2c: a target-controller condition the binder refused must
+        // not vanish. The instruction would otherwise lower without it, and
+        // the coverage detector can be satisfied by any other condition slot
+        // of the same ability (a hoisted unless-payment, a later gate).
+        if suffix_cond.is_none() && conditions::carries_unbound_target_controller_suffix(&text) {
+            unimplemented_clause(
+                &mut builder,
+                "target_controller_condition_unbound",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
         let guard_condition = condition
             .or(counter_cond)
             .or(mv_cond)
@@ -51850,7 +51899,7 @@ fn parse_effect_chain_ir_body(
     let mut clauses = builder.finish();
     try_fold_loses_other_sibling(&mut clauses);
 
-    EffectChainIr {
+    let mut ir = EffectChainIr {
         clauses,
         kind,
         continuation_kind: None,
@@ -51860,6 +51909,64 @@ fn parse_effect_chain_ir_body(
         in_trigger: ctx.in_trigger,
         repeat_until: pending_repeat_until,
         injected_color_choice: InjectedColorChoice::Permitted,
+    };
+    // CR 608.2c: on the assembled chain, so every node assembly adds above,
+    // below or around the gated instruction is known.
+    if let Some(gate) = &own_target_gate {
+        keep_own_target_gate_readable(&mut ir, gate);
+    }
+    ir
+}
+
+/// CR 608.2c: a chain root gated on its own target's controller
+/// ([`LeadingConditionRoute::OwnTargetController`]) is kept only when the
+/// ASSEMBLED chain still evaluates that gate where it can read the target and
+/// still reaches every later instruction "in the order written". Assembly can
+/// add nodes after the clause sequence is built (a chosen-color wrap puts a
+/// `Choose` root above the targeted grant), so the check lowers the finished
+/// chain with the production lowering and reads the result:
+/// - the first clause still carries the gate, and the gate is on the assembled
+///   root, which declares a target of its own (the engine evaluates a root's
+///   gate on the root, reading its targets);
+/// - the root has no else branch, and its direct sub, if any, is an
+///   independent instruction with no condition of its own: on a false gate
+///   the engine runs such a direct sub (engine `effects/mod.rs`, the
+///   condition-false path of `resolve_chain_body`), and the rest of the chain
+///   is reached through it. A sub the engine would also run for another reason
+///   (a released or replicated gate) is declined conservatively.
+/// - nothing below the root that the same ability announces for (including a
+///   coin flip's outcome branches, but not a token's or a granted ability's
+///   own text) announces a target of its own (CR 608.2b): were
+///   the root's target illegal while a later target stayed legal, the engine
+///   would not keep the illegal head slot and the gate would read no
+///   controller (`conditions::chain_announces_target_below`).
+///
+/// Otherwise the gated clause becomes an explicit gap.
+fn keep_own_target_gate_readable(ir: &mut EffectChainIr, gate: &AbilityCondition) {
+    // The gated clause is the chain's first clause (the strip binds only when no
+    // earlier clause was pushed). If something re-homed the gate since, the
+    // check cannot vouch for it, so it fails closed instead of returning.
+    let carries_gate = ir
+        .clauses
+        .first()
+        .is_some_and(|root| root.condition.as_ref() == Some(gate));
+    let readable = carries_gate && {
+        let assembled = lower::lower_effect_chain_ir(ir);
+        assembled.condition.as_ref() == Some(gate)
+            && assembled
+                .effect
+                .target_filter()
+                .is_some_and(|filter| !filter.is_context_ref())
+            && assembled.else_ability.is_none()
+            && assembled.sub_ability.as_deref().is_none_or(|next| {
+                next.sub_link == SubAbilityLink::SequentialSibling && next.condition.is_none()
+            })
+            && !conditions::chain_announces_target_below(&assembled)
+    };
+    if !readable {
+        if let Some(root) = ir.clauses.first_mut() {
+            root.replace_with_gap("target_controller_gate_unreadable");
+        }
     }
 }
 
