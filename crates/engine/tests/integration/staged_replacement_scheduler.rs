@@ -2802,3 +2802,125 @@ fn checked_restore_rejects_a_staged_terminal_the_logical_group_does_not_back() {
         serde_json::json!({ "type": "pending" });
     restore(contradicted).expect("a prevented member with a pending slot is a legitimate state");
 }
+
+/// Every saved staged member request of the owner.
+fn staged_member_requests_json(owner: &mut serde_json::Value) -> Vec<&mut serde_json::Value> {
+    owner["staged"]["members"]
+        .as_array_mut()
+        .expect("the staged owner lists its members")
+        .iter_mut()
+        .map(|member| &mut member["request"])
+        .collect()
+}
+
+fn restore_wire(wire: serde_json::Value) -> Result<GameRunner, String> {
+    let state = serde_json::from_value::<PersistedGameState>(wire)
+        .map_err(|error| error.to_string())?
+        .into_game_state()
+        .map_err(|error| error.to_string())?;
+    Ok(GameRunner::from_state(state))
+}
+
+/// CR 608.2c + CR 406.6: Open the Vaults is a ChangeZone population (a
+/// graveyard-to-battlefield move, no exile) performed by its controller, and
+/// its writer records that player on every member request. Checked restore
+/// refuses a current save whose member lost it: the save would otherwise
+/// restore and silently drop who performed the move. The unmodified save
+/// restores and plays to completion.
+#[test]
+fn checked_restore_refuses_a_change_zone_population_member_without_its_performer() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Root Maze", ROOT_MAZE);
+    scenario.add_creature_from_oracle(P1, "Archelos, Lagoon Mystic", 2, 4, ARCHELOS);
+    let mut thopter = |owner: PlayerId| {
+        scenario
+            .add_creature_to_graveyard(owner, "Ornithopter", 0, 2)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Thopter"])
+            .from_oracle_text("Flying")
+            .id()
+    };
+    let (p0_thopter, p1_thopter) = (thopter(P0), thopter(P1));
+    let vaults = zero_cost_spell(&mut scenario, "Open the Vaults", OPEN_THE_VAULTS);
+    let mut runner = scenario.build();
+    cast_until_decision(&mut runner, vaults);
+    assert_eq!(
+        asked_choice(&runner),
+        (P0, p0_thopter),
+        "reach guard: the staged ChangeZone population is parked on P0's entry choice"
+    );
+    let saved = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("the staged save serializes");
+
+    // Control: the save as written records the performer on each member and restores.
+    let mut written = saved.clone();
+    let owner = staged_owner_json(&mut written).expect("a staged owner is saved");
+    for request in staged_member_requests_json(owner) {
+        assert!(
+            request.get("performed_by").is_some(),
+            "reach guard: the writer records the performer on every member"
+        );
+    }
+    let mut control = restore_wire(saved.clone()).expect("the unmodified save restores");
+    let _ = answer_all(&mut control);
+    finish(&mut control);
+    assert_eq!(zone(&control, p0_thopter), Zone::Battlefield);
+    assert_eq!(zone(&control, p1_thopter), Zone::Battlefield);
+
+    // Every member, then just one member, with the performer removed.
+    for only_first in [false, true] {
+        let mut damaged = saved.clone();
+        let owner = staged_owner_json(&mut damaged).expect("a staged owner is saved");
+        for request in staged_member_requests_json(owner)
+            .into_iter()
+            .take(if only_first { 1 } else { usize::MAX })
+        {
+            request
+                .as_object_mut()
+                .expect("a member request is an object")
+                .remove("performed_by");
+        }
+        let error = restore_wire(damaged)
+            .err()
+            .expect("a population member without its performer is refused at import");
+        assert!(
+            error.contains("performed_by"),
+            "only_first={only_first}: {error}"
+        );
+    }
+}
+
+/// CR 701.8a: a Destroy population moves objects no player performs, so its
+/// members legitimately carry no performer, and the validation that requires
+/// one of a ChangeZone population's members leaves them alone. The same
+/// two-player Wrath of God save as above restores and plays to completion.
+#[test]
+fn a_destroy_population_member_without_a_performer_still_restores() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let plain = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let armored = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+    let felidar = umbra(&mut scenario, P1, "Felidar Umbra", FELIDAR_UMBRA);
+    let wrath = zero_cost_spell(&mut scenario, "Wrath of God", WRATH_OF_GOD);
+    let mut runner = scenario.build();
+    attach(&mut runner, hyena, armored);
+    attach(&mut runner, felidar, armored);
+    engine::game::layers::flush_layers(runner.state_mut());
+    cast_until_decision(&mut runner, wrath);
+    assert_eq!(asked_choice(&runner), (P1, armored));
+    let mut saved = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("the staged save serializes");
+    let owner = staged_owner_json(&mut saved).expect("a staged owner is saved");
+    for request in staged_member_requests_json(owner) {
+        assert!(
+            request.get("performed_by").is_none(),
+            "reach guard: a Destroy population's members record no performer"
+        );
+    }
+    let mut restored = restore_wire(saved).expect("a performer-less Destroy population restores");
+    choose_source(&mut restored, hyena);
+    finish(&mut restored);
+    assert_eq!(zone(&restored, plain), Zone::Graveyard);
+}

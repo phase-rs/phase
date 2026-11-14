@@ -7249,6 +7249,7 @@ impl PendingBatchDeliveries {
 
         self.validate_staged_stage(staged)?;
         self.validate_staged_terminals_match_group(staged)?;
+        self.validate_change_zone_population_performer(staged)?;
         for arrangement in &staged.arrangements {
             self.validate_staged_arrangement(staged, arrangement)?;
         }
@@ -7319,6 +7320,34 @@ impl PendingBatchDeliveries {
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// CR 608.2c + CR 406.6: a ChangeZone population is one instruction performed
+    /// by one player (`PendingChangeZoneIteration::performed_by`, a required
+    /// field), and the only writer of its member requests
+    /// (`change_zone_member_requests`) records that player on every request, so
+    /// each member of a population carrying the ChangeZone completion has a
+    /// performer. A current save that lacks it would restore and then silently
+    /// lose who exiled the card, so it is refused at the import boundary.
+    /// Other staged families (the Destroy population) move objects no player
+    /// performs and keep `performed_by: None`; they are not constrained.
+    fn validate_change_zone_population_performer(
+        &self,
+        staged: &StagedBatchDelivery,
+    ) -> Result<(), String> {
+        if !self.is_change_zone_population() {
+            return Ok(());
+        }
+        if staged
+            .members
+            .iter()
+            .any(|member| member.request.performed_by.is_none())
+        {
+            return Err(
+                "a ChangeZone population member records no performed_by player".to_string(),
+            );
         }
         Ok(())
     }
