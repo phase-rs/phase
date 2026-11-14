@@ -4449,7 +4449,7 @@ impl LogicalZoneChangeGroup {
             .retain_mut(retained_latch);
         self.immediately_before_suppress_triggers
             .retain_mut(|suppress| {
-                if !suppress.source_context.owned_or_controlled_by(player) {
+                if suppress.source_context.lki.owner != player {
                     return true;
                 }
                 if completed.is_empty() {
@@ -4462,7 +4462,7 @@ impl LogicalZoneChangeGroup {
             });
         self.immediately_after_suppress_triggers
             .retain_mut(|suppress| {
-                if !suppress.source_context.owned_or_controlled_by(player) {
+                if suppress.source_context.lki.owner != player {
                     return true;
                 }
                 if completed.is_empty() {
@@ -4521,6 +4521,44 @@ impl LogicalZoneChangeGroup {
             ZoneMoveCompletion::Prevented => self.record_prevented(member),
             ZoneMoveCompletion::Remained => self.record_remained(member),
         }
+    }
+
+    /// CR 800.4a: after the departure's sweep, a suppressor whose source the
+    /// leaver controlled but did not own, and which was actually exiled with
+    /// them (a source whose control reverted still suppresses), keeps its
+    /// authority for the occurrences already completed and for nothing later.
+    pub fn retire_suppressors_of_sources_that_left(
+        &mut self,
+        player: PlayerId,
+        held_by_child: &[CollectedZoneChange],
+        source_left: &dyn Fn(&TriggerSourceContext) -> bool,
+    ) {
+        let completed: Vec<CollectedZoneChange> = self
+            .all_origin_occurrences
+            .iter()
+            .filter_map(|occurrence| CollectedZoneChange::of(&occurrence.event))
+            .chain(held_by_child.iter().copied())
+            .collect();
+        let mut limit = |suppress: &mut LatchedSuppressTrigger| {
+            let context = &suppress.source_context;
+            if context.lki.controller != player
+                || context.lki.owner == player
+                || !source_left(context)
+            {
+                return true;
+            }
+            if completed.is_empty() {
+                return false;
+            }
+            suppress
+                .completed_occurrences_only
+                .get_or_insert_with(|| completed.clone());
+            true
+        };
+        self.immediately_before_suppress_triggers
+            .retain_mut(&mut limit);
+        self.immediately_after_suppress_triggers
+            .retain_mut(&mut limit);
     }
 
     fn record_terminal_for_member(

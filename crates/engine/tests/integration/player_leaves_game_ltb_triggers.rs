@@ -1473,6 +1473,11 @@ fn diviner_triggers_on_board(
             bears,
         )
     };
+    // An ordinary creature delivery after the Metamorph's copy pause: in the
+    // borrowed-suppressor board it enters through the owner's settlement.
+    if suppressor == RiseSuppressor::BorrowedByLeaver {
+        scenario.add_real_card(P0, "Runeclaw Bear", Zone::Graveyard, db);
+    }
     let turn_against = scenario.add_real_card(P0, "Turn Against", Zone::Hand, db);
     // P2's own Turn Against, cast on P0's Hushbringer during P0's turn.
     let p2_turn_against = scenario.add_real_card(P2, "Turn Against", Zone::Hand, db);
@@ -2265,8 +2270,8 @@ fn a_suppressor_exiled_under_the_leavers_control_still_applies_to_the_completed_
 /// (CR 800.4a: control effects end before anything still controlled is exiled),
 /// so it stays on the battlefield under P0. P0's Rise of the Dark Realms pauses
 /// at the Metamorph's copy choice before anything has entered, and P2 concedes;
-/// the Hushbringer still suppresses the Metamorph's later entry, so the Diviner
-/// does not trigger.
+/// the Hushbringer still suppresses the Metamorph's later entry and the Runeclaw
+/// Bear's, which enters after it, so the Diviner does not trigger.
 #[test]
 fn a_suppressor_whose_control_reverts_when_its_controller_concedes_keeps_suppressing() {
     assert_eq!(

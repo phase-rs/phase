@@ -495,6 +495,7 @@ pub(crate) fn eliminate_players(
     // — the owned-object exiles inside `do_eliminate` and the control-effect end
     // directly above — which is why this cannot live in `do_eliminate`.
     remove_stack_objects_controlled_by_leaving_players(state, &leave_nodes, events);
+    retire_suppressors_of_controlled_sources_that_left(state, &leaving_set);
 
     // CR 800.4a + CR 101.4: A player that leaves during an APNAP unless poll
     // neither answers nor remains an eligible future chooser. Preserve the
@@ -2134,9 +2135,25 @@ fn retire_pending_zone_change_contexts_owned_by(
     player: PlayerId,
     owned_after: &crate::types::game_state::DepartingOwnerAfterAuthority,
 ) {
-    // CR 730.3: a linked component child holds occurrences its announcing owner
-    // has completed but not yet been handed.
-    let held_by_child: Vec<crate::types::game_state::CollectedZoneChange> = state
+    let held_by_child = occurrences_held_by_component_child(state);
+    state
+        .resolution_stack
+        .visit_active_zone_change_owners_mut(|owner| match owner {
+            ZoneChangeOwnerMut::Batch(pending) => pending
+                .logical_zone_change_group
+                .retire_contexts_owned_by(player, &held_by_child, owned_after),
+            ZoneChangeOwnerMut::ChangeZone(pending) => pending
+                .logical_zone_change_group
+                .retire_contexts_owned_by(player, &held_by_child, owned_after),
+        });
+}
+
+/// CR 730.3: a linked component child holds occurrences its announcing owner
+/// has completed but not yet been handed.
+fn occurrences_held_by_component_child(
+    state: &GameState,
+) -> Vec<crate::types::game_state::CollectedZoneChange> {
+    state
         .active_batch_delivery()
         .filter(|child| child.component_delivery_parent.is_some())
         .map(|child| {
@@ -2149,17 +2166,39 @@ fn retire_pending_zone_change_contexts_owned_by(
                 })
                 .collect()
         })
-        .unwrap_or_default();
-    state
-        .resolution_stack
-        .visit_active_zone_change_owners_mut(|owner| match owner {
-            ZoneChangeOwnerMut::Batch(pending) => pending
-                .logical_zone_change_group
-                .retire_contexts_owned_by(player, &held_by_child, owned_after),
-            ZoneChangeOwnerMut::ChangeZone(pending) => pending
-                .logical_zone_change_group
-                .retire_contexts_owned_by(player, &held_by_child, owned_after),
-        });
+        .unwrap_or_default()
+}
+
+/// CR 800.4a: once the sweep has exiled what a leaving player still controlled,
+/// a paused owner's suppressor latch of such a source (one the leaver controlled
+/// but did not own) is limited to the occurrences already completed. A source
+/// whose control reverted survives and is left alone.
+fn retire_suppressors_of_controlled_sources_that_left(
+    state: &mut GameState,
+    leaving_set: &HashSet<PlayerId>,
+) {
+    let held_by_child = occurrences_held_by_component_child(state);
+    let objects = &state.objects;
+    let source_left = |context: &crate::types::game_state::TriggerSourceContext| {
+        objects
+            .get(&context.identity.reference.object_id)
+            .is_none_or(|object| {
+                ObjectIncarnationRef::from_object(object) != context.identity.reference
+                    || object.zone != Zone::Battlefield
+            })
+    };
+    for &player in leaving_set {
+        state
+            .resolution_stack
+            .visit_active_zone_change_owners_mut(|owner| match owner {
+                ZoneChangeOwnerMut::Batch(pending) => pending
+                    .logical_zone_change_group
+                    .retire_suppressors_of_sources_that_left(player, &held_by_child, &source_left),
+                ZoneChangeOwnerMut::ChangeZone(pending) => pending
+                    .logical_zone_change_group
+                    .retire_suppressors_of_sources_that_left(player, &held_by_child, &source_left),
+            });
+    }
 }
 
 /// CR 800.4a: A response prompt owned by a player who left cannot retain a
