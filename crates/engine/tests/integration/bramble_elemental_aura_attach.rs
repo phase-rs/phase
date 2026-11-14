@@ -11,6 +11,7 @@
 
 use engine::game::game_object::{AttachTarget, GameObject};
 use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, CopyTargetPurpose, Effect, EffectScope, ReplacementDefinition,
     ReplacementMode, TapStateChange, TargetFilter, TargetRef,
@@ -345,8 +346,6 @@ fn smoke_shroud_returns_onto_entering_ninja(
     ObjectId,
     Vec<engine::types::events::GameEvent>,
 ) {
-    use engine::game::scenario_db::GameScenarioDbExt;
-
     let db = crate::support::shared_card_db().expect("the committed integration fixture loads");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -396,7 +395,7 @@ fn attached_events(events: &[engine::types::events::GameEvent], attachment: Obje
 }
 
 /// Control: with no entry prohibition, Smoke Shroud returns attached to the
-/// entering Ninja (CR 303.4f + CR 701.3a), publishes exactly one `Attached`
+/// entering Ninja (CR 303.4 + CR 701.3a), publishes exactly one `Attached`
 /// event, and Bramble Elemental's observer triggers once (two Saprolings).
 #[test]
 fn smoke_shroud_return_attaches_once_and_triggers_bramble_once() {
