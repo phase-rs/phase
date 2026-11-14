@@ -14,6 +14,19 @@ vi.mock("../dispatch.ts", () => ({
   },
 }));
 
+vi.mock("../../components/animation/cardVfx/cardAnchors.ts", () => ({
+  measureSurface: vi.fn((el: HTMLElement) => ({
+    pose: {
+      x: el.offsetLeft + el.offsetWidth / 2,
+      y: el.offsetTop + el.offsetHeight / 2,
+      w: el.offsetWidth,
+      h: el.offsetHeight,
+      angleDeg: 0,
+    },
+    opacity: 1,
+  })),
+}));
+
 const { ATTACHMENT_CONTROL_ATTRIBUTE, retainTouchTracking, UN_TOUCH_ATTRIBUTE } = await import("../unTouch.ts");
 
 /** A refused dispatch that records whether anyone handles its rejection. */
@@ -112,12 +125,25 @@ describe("Un-card touch pointer boundary", () => {
     expect(dispatched).toEqual([touchAction, touchAction]);
   });
 
-  it("hit-tests zero-button hover moves across element coordinates", () => {
+  it("hit-tests zero-button hover moves across element coordinates", async () => {
     const badge = document.createElement("span");
     card.append(badge);
 
     const hostRect = { left: 100, top: 100, right: 300, bottom: 400, width: 200, height: 300, x: 100, y: 100, toJSON: () => {} };
     vi.spyOn(card, "getBoundingClientRect").mockReturnValue(hostRect as DOMRect);
+
+    // Mock measureSurface to return 0° upright pose at (200, 250) with 200x300 dimensions.
+    const { measureSurface } = await import("../../components/animation/cardVfx/cardAnchors.ts");
+    vi.mocked(measureSurface).mockReturnValue({
+      pose: {
+        x: 200,
+        y: 250,
+        w: 200,
+        h: 300,
+        angleDeg: 0,
+      },
+      opacity: 1,
+    });
 
     const under: Element = badge;
     Object.defineProperty(document, "elementFromPoint", { value: () => under, configurable: true });
@@ -147,7 +173,7 @@ describe("Un-card touch pointer boundary", () => {
     expect(dispatched).toEqual([touchAction, touchAction]);
   });
 
-  it("hit-tests pointer motion against a rotated card face", () => {
+  it("hit-tests pointer motion against a rotated card face", async () => {
     const badge = document.createElement("span");
     card.append(badge);
 
@@ -169,6 +195,19 @@ describe("Un-card touch pointer boundary", () => {
       toJSON: () => {},
     };
     vi.spyOn(card, "getBoundingClientRect").mockReturnValue(hostRect as DOMRect);
+
+    // Mock measureSurface to return the 17° rotated pose.
+    const { measureSurface } = await import("../../components/animation/cardVfx/cardAnchors.ts");
+    vi.mocked(measureSurface).mockReturnValue({
+      pose: {
+        x: 200,
+        y: 250,
+        w: 200,
+        h: 300,
+        angleDeg: 17,
+      },
+      opacity: 1,
+    });
 
     let under: Element = badge;
     Object.defineProperty(document, "elementFromPoint", { value: () => under, configurable: true });

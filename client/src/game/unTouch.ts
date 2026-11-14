@@ -58,15 +58,7 @@ export function cardFaceContainsPoint(
   const rect = card.getBoundingClientRect();
   const { pose } = measureSurface(card, new DOMRect(0, 0, 0, 0));
 
-  let angleDeg = pose.angleDeg;
-  if (Math.abs(angleDeg) < 0.001) {
-    const tapAttr = card.getAttribute("data-tap-angle");
-    if (tapAttr) {
-      const parsed = parseFloat(tapAttr);
-      if (!Number.isNaN(parsed)) angleDeg = parsed;
-    }
-  }
-
+  const angleDeg = pose.angleDeg;
   const angleRad = (angleDeg * Math.PI) / 180;
   const cos = Math.cos(angleRad);
   const sin = Math.sin(angleRad);

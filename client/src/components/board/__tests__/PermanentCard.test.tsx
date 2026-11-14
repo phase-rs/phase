@@ -31,6 +31,24 @@ vi.mock("../../../game/dispatch.ts", () => ({
   dispatchInteraction: vi.fn(),
 }));
 
+vi.mock("../../../components/animation/cardVfx/cardAnchors.ts", () => ({
+  measureSurface: vi.fn((el: HTMLElement) => {
+    const rect = el.getBoundingClientRect();
+    const w = rect.width || 200;
+    const h = rect.height || 300;
+    return {
+      pose: {
+        x: rect.left + w / 2,
+        y: rect.top + h / 2,
+        w,
+        h,
+        angleDeg: 0,
+      },
+      opacity: 1,
+    };
+  }),
+}));
+
 vi.mock("../../card/CardImage.tsx", () => ({
   CardImage: ({
     cardName,
@@ -1008,7 +1026,7 @@ describe("PermanentCard", () => {
       expect(touches()).toEqual([[touchAction], [touchAction], [touchAction], [touchAction]]);
     });
 
-    it("never touches the host through its keyword badges, on either pointer route", () => {
+    it("never touches the host through its keyword badges, on either pointer route", async () => {
       // Vile Bile (1) is touchable and has keyword badges (e.g. Trample from Rancor).
       // When tapped, the card rotates by 17° (default MTGA tap rotation) around its center.
       // The badge straddles the card's top-left edge; after rotation, the overhanging
@@ -1030,10 +1048,11 @@ describe("PermanentCard", () => {
       expect(host.contains(badge)).toBe(true);
       expect(host.getAttribute("data-tap-angle")).toBe("17");
 
-      // Mock the host's bounding rect for the card tapped at 17°:
+      // Mock measureSurface to return the 17° rotated pose.
       // Untransformed card is 200x300 centered at (200, 250).
       // Rotated by 17°, the axis-aligned bounding box spans [60.51, 339.49] x [77.31, 422.69].
       // A point at (110, 150) lies within this bounding box, but outside the rotated card face.
+      const { measureSurface } = await import("../../../components/animation/cardVfx/cardAnchors.ts");
       const hostRect = {
         left: 60.51,
         top: 77.31,
@@ -1046,6 +1065,16 @@ describe("PermanentCard", () => {
         toJSON: () => {},
       };
       vi.spyOn(host, "getBoundingClientRect").mockReturnValue(hostRect as DOMRect);
+      vi.mocked(measureSurface).mockReturnValue({
+        pose: {
+          x: 200,
+          y: 250,
+          w: 200,
+          h: 300,
+          angleDeg: 17,
+        },
+        opacity: 1,
+      });
 
       // Route 1: an uncaptured hovering mouse enters the badge's OVERHANG (outboard),
       // moves across the rotated card boundary into the INBOARD portion (zero-button moves:
@@ -1123,11 +1152,61 @@ describe("PermanentCard", () => {
       expect(touches()).toHaveLength(4);
     });
 
+    it("uses the live transform (0°) not the tap destination when animation starts", async () => {
+      // An upright card (0°) with a classic tap rotation (90° destination) has
+      // data-tap-angle="90" set as the spring begins. The hit test must use the
+      // actual rendered 0° angle, not the 90° destination. A badge point at
+      // (−51, −24) relative to center is 1px outside the upright 100×140 face.
+      // If the 90° destination were used, it would map to (−24, 51) — inside.
+      const gameState = makeState();
+      gameState.objects[1] = { ...gameState.objects[1], tapped: true };
+      gameState.un_actions = { enabled_players: [0], touchable: [1] };
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+      usePreferencesStore.setState({ tapRotation: "classic" });
+      const { container } = renderPermanent();
+      const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+      expect(host.getAttribute("data-tap-angle")).toBe("90");
+
+      // Mock measureSurface to return 0° (upright) with valid dimensions.
+      const { measureSurface } = await import("../../../components/animation/cardVfx/cardAnchors.ts");
+      vi.mocked(measureSurface).mockReturnValue({
+        pose: {
+          x: 200,
+          y: 250,
+          w: 100,
+          h: 140,
+          angleDeg: 0,
+        },
+        opacity: 1,
+      });
+      const hostRect = {
+        left: 150,
+        top: 180,
+        right: 250,
+        bottom: 320,
+        width: 100,
+        height: 140,
+        x: 150,
+        y: 180,
+        toJSON: () => {},
+      };
+      vi.spyOn(host, "getBoundingClientRect").mockReturnValue(hostRect as DOMRect);
+
+      // Point at (149, 226) = center + (−51, −24) — 1px outside upright face.
+      // With 0° this is outside; with 90° it would be inside.
+      fireEvent.pointerOver(host, { pointerId: 1, pointerType: "mouse", clientX: 149, clientY: 226 });
+      expect(touches()).toEqual([]);
+
+      // Moving 1px inboard to (150, 226) = center + (−50, −24) — inside upright face.
+      fireEvent.pointerMove(host, { pointerId: 1, pointerType: "mouse", clientX: 150, clientY: 226, buttons: 0 });
+      expect(touches()).toEqual([[touchAction]]);
+    });
+
     it("touches a touchable attachment itself, not its host", () => {
       setUnActions([0], [1, 2]);
       const { container } = renderPermanent();
       const attachment = container.querySelector('[data-object-id="2"]') as HTMLElement;
-      fireEvent.pointerOver(attachment, { pointerId: 1, pointerType: "mouse" });
+      fireEvent.pointerOver(attachment, { pointerId: 1, pointerType: "mouse", clientX: 200, clientY: 250 });
       expect(touches()).toEqual([[touchOf(2)]]);
     });
 
