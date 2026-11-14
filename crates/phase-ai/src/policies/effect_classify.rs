@@ -120,12 +120,22 @@ fn counter_sign_polarity(counter_type: &CounterType) -> EffectPolarity {
 ///
 /// Every other `Quantity` shape counts up from a non-negative game quantity, and
 /// a `Fixed` modifier carries its own sign.
-fn pt_value_is_non_negative(value: &PtValue) -> bool {
+pub(crate) fn pt_value_is_non_negative(value: &PtValue) -> bool {
     match value {
         PtValue::Fixed(v) => *v >= 0,
         PtValue::Variable(name) => !name.starts_with('-'),
-        PtValue::Quantity(QuantityExpr::Multiply { factor, .. }) => *factor >= 0,
-        PtValue::Quantity(_) => true,
+        PtValue::Quantity(quantity) => quantity_is_non_negative(quantity),
+    }
+}
+
+/// Whether a signed P/T quantity is non-negative: a negative-multiplier
+/// `Multiply` negates, and every other shape counts up from a non-negative
+/// game quantity. Shared by `Pump` values and static dynamic P/T
+/// modifications ("enchanted creature gets -X/-X, where X is ...").
+pub(crate) fn quantity_is_non_negative(quantity: &QuantityExpr) -> bool {
+    match quantity {
+        QuantityExpr::Multiply { factor, .. } => *factor >= 0,
+        _ => true,
     }
 }
 
