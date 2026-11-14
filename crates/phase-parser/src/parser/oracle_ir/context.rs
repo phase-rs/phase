@@ -7,11 +7,43 @@ use super::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_nom::target::{ControllerPhrase, ControllerSubject, PlayerAnaphor};
 use crate::types::ability::{
     ChosenGroupId, ControllerRef, CostCategory, Duration, MultiTargetSpec, ObjectScope,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetChoiceTiming, TargetFilter,
-    TargetSelectionMode, ZoneChoiceCandidateSource,
+    OpponentMayScope, PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetChoiceTiming,
+    TargetFilter, TargetSelectionMode, ZoneChoiceCandidateSource,
 };
 use crate::types::card_type::CoreType;
 use crate::types::zones::Zone;
+
+/// CR 608.2d + CR 115.10a: who makes the bare choices of the clause being
+/// lowered, when that is not proven to be the ability's controller. `TargetOnly`'s
+/// resolution-time chooser prompts only the controller, so a bare choice owned by
+/// any of these keeps the timing it had before the bare-choice producer existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClauseChooser {
+    /// A subject other than the controller or the source: printed on the
+    /// predicate ("an opponent chooses ..."), carried by a conjugated
+    /// continuation, or named by an earlier chunk of the same sentence (CR 608.2c).
+    Subject,
+    /// A player scope peeled from an earlier chunk of the same sentence that this
+    /// subjectless chunk continues ("each opponent may draw a card, then choose
+    /// ...").
+    Scope,
+    /// An accepting-player scope peeled from an earlier chunk of the same sentence
+    /// ("any opponent may ..., then choose ...").
+    AcceptingPlayers,
+    /// An earlier chunk of the same sentence names a subject the parser does not
+    /// recognize ("your opponents each draw a card, then choose ..."; "an opponent
+    /// does the same, then chooses ..."). It is not proven to be the controller, so
+    /// the choice fails closed.
+    UnrecognizedSubject,
+    /// A chunk that opens with a conjugated verb and no subject of its own, whose
+    /// subject neither the chain nor the earlier chunks of its sentence name ("each
+    /// opponent who does chooses ...", "an opponent who controls an artifact
+    /// chooses ...", whose relative-clause subject is lifted into a condition
+    /// before the clause is parsed). "You"
+    /// refers to the controller (CR 109.5) and never takes the conjugated verb, so
+    /// the chooser is some other player.
+    ElidedThirdPerson,
+}
 
 /// CR 611.2a + CR 608.2c: the window a chunk's clause printed at its head, read by
 /// the clause parser itself rather than re-derived from the chunk's source text.
@@ -626,6 +658,30 @@ pub struct ParseContext {
     /// parse; the coordinated writer declines to the unbound gap on a different
     /// value. Set and consumed within a single chunk parse; never serialized.
     pub pending_player_scope: Option<PlayerFilter>,
+    /// Player scope already peeled from this chunk's subject or optional prefix.
+    /// The chain loop supplies its composed scope before parsing the body so a
+    /// bare choose cannot mistake another player's choice for the controller's.
+    pub clause_player_scope: Option<PlayerFilter>,
+    /// First-accept-wins optional scope peeled from this chunk ("any ... may").
+    /// Like `clause_player_scope`, it prevents a controller-only bare-choice prompt.
+    pub clause_opponent_may_scope: Option<OpponentMayScope>,
+    /// CR 608.2d + CR 115.10a: The chooser, other than the ability's controller,
+    /// that owns the bare choices of the predicate being lowered (`ClauseChooser`).
+    /// `TargetOnly`'s resolution-time chooser prompts only the ability's
+    /// controller, so a bare choice owned by it cannot declare resolution timing.
+    /// Set by the subject-predicate lowering around a printed subject's
+    /// predicate, and seeded by the chain chunk loop for a chunk that names no
+    /// subject of its own: from the carried player subject that a conjugated
+    /// continuation inherits; else from the latest subject or peeled scope, other
+    /// than the controller or the source, that an earlier chunk of the same
+    /// sentence names, failing closed when that chunk's subject is not recognized;
+    /// else, for a chunk opening with a conjugated verb, as an elided third person
+    /// (CR 608.2c). Inherited by the compound continuations that predicate
+    /// splits into; a continuation with a controller subject of its own clears it
+    /// for that conjunct. `None` outside such a predicate. The chain loop assigns it
+    /// again before every chunk, so a value left by the last chunk is never read;
+    /// never serialized.
+    pub clause_subject_chooser: Option<ClauseChooser>,
     /// CR 608.2c + CR 701.16a: Transient per-chunk `repeat_for` lifted from a
     /// fieldless-effect subject-predicate that carries a "for each <filter> …
     /// this way" SUFFIX count (Declaration in Stone's "investigate for each
@@ -766,6 +822,39 @@ pub struct ParseContext {
     /// the scan is trying to guess, so it states it here and the statement
     /// outranks the scan. `None` (the default) leaves the ladder in charge, so
     /// every incumbent clause is unaffected.
+    ///
+    /// The legacy bare-choose producer declares `Resolution` for a singular
+    /// "a/an <object> you control" phrase fully consumed by the target parser,
+    /// with chosen selection and no peeled actor scope, printed target, context
+    /// reference, or player target. The chunk loop strips optional quantifiers;
+    /// those chunks and exact counts fail the a/an gate. The declaration applies
+    /// at any chain position (later chunks, compound continuations and modal
+    /// modes alike), since the choice is not a target at any of them; the
+    /// engine's `TargetOnly` exemption in `defers_conditional_target_selection`
+    /// keeps later announced targets.
+    /// Partial and quantified choices leave this unset.
+    /// A peeled opponent-may chunk's own bare choice declares nothing, so the
+    /// accepting-player timing fallback keeps the timing it always produced for
+    /// it; a compound continuation's sub-link in such a chunk is still re-timed by
+    /// `target_choice_timing_for_clause_sub`. A non-controller subject, printed or
+    /// inherited by a conjugated continuation (`clause_subject_chooser`), keeps
+    /// the bare-choice producer from declaring `Resolution` on its own clause and
+    /// on the compound continuations it owns, which is the timing those clauses had
+    /// before the producer existed. The object-and-player producer declares
+    /// `Resolution` for every subject, as it always did. The bare choice's
+    /// `Resolution` declaration is withdrawn after the chain is built, in four
+    /// passes that restore the timing the choice had before the producer existed:
+    /// when the choice is repeated per player or object
+    /// (`withhold_resolution_timing_from_repeated_choices`); when the chain holds
+    /// another cast-time bare choice, such as another player's
+    /// (`withhold_resolution_timing_beside_a_cast_time_choice`); when a later
+    /// clause's printed "target" was bound to the choice or left unimplemented
+    /// (`withhold_resolution_timing_from_choices_feeding_printed_targets`, which
+    /// withdraws only that clause's antecedent choice); and when a later clause
+    /// reads the announced slots or pick (`withhold_resolution_timing_before_root_slot_readers`).
+    /// While later chunks are still being lowered, the in-loop readers see the
+    /// stamp as `Stack` (`bare_choice_resolution_is_pending`), so later clauses
+    /// lower as they did before the producer existed.
     ///
     /// Set and consumed within a single chunk parse; never serialized. A
     /// speculative sub-parse that discards its cloned context discards this too.
