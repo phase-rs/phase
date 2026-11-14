@@ -299,6 +299,7 @@ mod counter_spell_zone_redirect;
 mod counter_target_spell_ignores_permanent_targeting_keywords;
 mod court_of_ambition;
 mod court_of_cunning_multi_target_mill;
+mod coverage_summary_determinism;
 mod coveted_falcon_control_gained_this_way;
 mod cr605_1a_library_criterion;
 mod cr733_resolved_attachment;
