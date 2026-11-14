@@ -1449,6 +1449,8 @@ pub(super) fn zone_change_observed_after(
 /// CR 603.10 + CR 611.3c: an enters observer's subject filter reads the entrant as it existed
 /// immediately after its entry event, continuous effects in force at that time applied
 /// (`filter::matches_target_filter_on_entry_observation`).
+/// A leaves-a-zone half (CR 603.10a) reads the subject's zone-change record, its appearance
+/// immediately before the event, whatever the destination.
 #[allow(clippy::too_many_arguments)]
 fn zone_change_clause_matches(
     origin: &OriginConstraint,
@@ -1496,8 +1498,6 @@ fn zone_change_clause_matches(
     if let Some(filter) = valid_card {
         let ctx = super::filter::FilterContext::from_trigger_source(source_context);
         let departed = named_origin_zone(origin, record.from_zone);
-        // CR 603.6a + CR 603.10: an enters observer reads the entrant as it existed immediately
-        // after its entry event. A leaves-a-zone observer (CR 603.10a) keeps the departure reading.
         let enters_observer = enters_observer_half(
             origin,
             destination,
@@ -1505,25 +1505,24 @@ fn zone_change_clause_matches(
             record.from_zone,
             *to,
         );
-        let matches = match (enters_observer, departed) {
-            (true, _) => super::filter::matches_target_filter_on_entry_observation(
+        // CR 603.6a + CR 603.10: an enters half reads the entrant as it existed immediately after
+        // its entry event. CR 603.10a: every other half is a leaves-a-zone half and looks back: it
+        // reads the subject as it appeared immediately before the event, which the zone-change
+        // record owns, for every destination; an "is/has" effect applied with a battlefield entry
+        // (CR 611.2e) is not part of that appearance. Syr Konrad, the Grim's "a creature card
+        // leaves your graveyard" sees Enduring Innocence ("It's an enchantment. (It's not a
+        // creature.)") leave as the enchantment creature card it was; Oglor, Devoted Assistant's
+        // granted "When this card leaves your graveyard" matches by `SelfRef` against the record's
+        // own pre-move identity, which only the entrant's pre-event card carries
+        // (`triggers::event_subject_observes`).
+        let matches = if enters_observer {
+            super::filter::matches_target_filter_on_entry_observation(
                 state, record, departed, filter, &ctx,
-            ),
-            (false, Some(from))
-                if *to == Zone::Battlefield && state.objects.contains_key(&record.object_id) =>
-            {
-                super::filter::matches_target_filter_on_departure(
-                    state,
-                    record.object_id,
-                    from,
-                    filter,
-                    &ctx,
-                    Some(record),
-                )
-            }
-            (false, _) => super::filter::matches_target_filter_on_zone_change_record_licensed(
+            )
+        } else {
+            super::filter::matches_target_filter_on_zone_change_record_licensed(
                 state, record, departed, filter, &ctx,
-            ),
+            )
         };
         if !matches {
             return false;

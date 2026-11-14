@@ -6806,8 +6806,11 @@ fn continuation_acts_on_moved_objects_after_entry(
 /// characteristic).
 ///
 /// Walks [`moved_objects_continuation`]. The walk also stops at any conditional or optional
-/// node, whatever its onset: a skipped node takes the resolution steps after it with it
-/// (`starts_independent_instruction`), so no later rider's execution is guaranteed (CR 608.2c).
+/// node, whatever its onset: the walk stops conservatively: a skipped node takes its
+/// `ContinuationStep` descendants with it (`starts_independent_instruction`), but a later
+/// `SequentialSibling` rider of a guarded node without an alternative still resolves and is not
+/// carried (known gap; no printed with-entry return chain has a guarded node before a later
+/// `WithEntry` node; nearest printed card Lim-Dûl the Necromancer).
 /// An unguarded `WhenFollowed` node ("becomes", "gains", "loses") starts after the entry and is
 /// skipped (CR 611.2e).
 ///

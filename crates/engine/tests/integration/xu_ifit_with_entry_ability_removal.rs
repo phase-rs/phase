@@ -70,7 +70,13 @@
 //! still seen by a newcomer, for its own entry and a co-entrant's (River Kelpie: R-N3i, R-N3j). A
 //! returned card whose look-back ability functioned in the graveyard it left (CR 113.6k: Oglor,
 //! Devoted Assistant's granted "When this card leaves your graveyard, create a tapped 2/2 black
-//! Zombie creature token.") still sees its own departure: R-N3k, R-N3l.
+//! Zombie creature token.") still sees its own departure, read from the card as it was immediately
+//! before the event (CR 603.10), also when Xu-Ifit's "has no abilities" removes the ability with
+//! the entry (CR 611.2e): R-N3k, R-N3l, R-N3m. A graveyard ability that triggers on entries does
+//! not see its own card's entry (CR 113.6m; Prized Amalgam: R-N3n). A look-back observer already on
+//! the battlefield reads the card that left, not the permanent it became: Syr Konrad, the Grim sees
+//! Enduring Innocence ("It's an enchantment. (It's not a creature.)") leave the graveyard as a
+//! creature card (CR 603.10a, CR 611.2e): R-N3o, R-N3o-b (Desecrated Tomb).
 //!
 //! REVERT DISCRIMINATORS:
 //! - Reverting the collection hand-off (making `change_zone::resolve` call the `Owner` delegate)
@@ -136,18 +142,30 @@
 //!   20 in R-N3c and R-N3h, and gives a token in R-N3f and R-N3g. Dropping the own-span arm (the
 //!   own entry span then reads `None`) gives River Kelpie 1 draw in R-N3i and 0 in R-N3j, loses the
 //!   Dreadnought's own enters trigger in R4c (`zombify_returned_dreadnought_offers_unless_payment`)
-//!   and `rise_from_the_grave_returned_dreadnought_keeps_its_enters_trigger`, and gives 0 Zombie
-//!   tokens in R-N3k and R-N3l.
+//!   and `rise_from_the_grave_returned_dreadnought_keeps_its_enters_trigger`.
 //! - Removing the newcomer gate in `triggers::collect_matching_triggers_inner` fails R-N3a, R-N3b,
 //!   R-N3c, R-N3d, R-N3f, R-N3g and R-N3h.
-//! - Removing the own-zone-change admission in `triggers::observes_from_immediately_after` gives 0
-//!   Zombie tokens in R-N3k (both orders) and R-N3l, and fails
+//! - Removing the own-entry arm in `triggers::collect_pending_triggers_with_collection` gives 0
+//!   Zombie tokens in R-N3m, R-N3k and R-N3l, and fails
 //!   `perpetual_gains::oglor_repeated_grants_retain_multiplicity_across_zone_cycles` at its first
 //!   departure (0 for 1).
-//! - Admitting every own zone change (dropping the `trigger_definition_functions_in_zone`
-//!   conjunct) leaves P1 at 19 in R-N3a, R-N3b and R-N3d and below 20 in R-N3c and R-N3h, gives a
-//!   token in R-N3f and R-N3g, and stops R-N3k at a trigger-ordering prompt (Grizzly Bears' and
-//!   Syr Konrad's triggers).
+//! - Dropping the functions-in-origin conjunct of `triggers::event_subject_observes` admits Syr
+//!   Konrad, Tormod and Skeleton Crew for their own entries: P1 19 in R-N3a, R-N3b and R-N3d, below
+//!   20 in R-N3c and R-N3h, a token in R-N3f and R-N3g, and R-N3k stops at a trigger-ordering
+//!   prompt, and the `triggers::tests::entrant_pre_event_card_observes_only_its_look_back_halves`
+//!   Syr Konrad assertion fails.
+//! - Dropping the complement conjunct (`!observes_from_immediately_after`) of
+//!   `triggers::event_subject_observes` makes Prized Amalgam trigger for its own entry in R-N3n
+//!   (a delayed return is created), and fails the Prized Amalgam assertion of that unit test.
+//! - Restoring the live-permanent arm of `trigger_matchers::zone_change_clause_matches` gives 0
+//!   Zombie tokens in R-N3m, R-N3k and R-N3l, fails the perpetual test at its first departure,
+//!   leaves P1 at 19 in R-N3o, and gives 0 Bats in R-N3o-b.
+//! - Keeping a newcomer's own-zone-change admission in `triggers::observes_from_immediately_after`
+//!   beside the own-entry arm collects nothing extra at runtime (the newcomer's `SelfRef` reads the
+//!   record's pre-move identity, which its post-entry context never equals); only the
+//!   `triggers::tests::newcomer_observes_only_post_event_halves` Oglor assertion catches it.
+//! - Sharing `registered_this_event` in the own-entry arm is not covered by a row (no tested board
+//!   registers a live definition of the entrant at a record index of a look-back definition).
 //! - Classifying a graveyard-origin half as looking back whatever its destination (dropping the
 //!   enters-half exemption in `trigger_matchers::zone_change_half_looks_back`) gives River Kelpie
 //!   0 draws in R-N3i and R-N3j.
@@ -4205,7 +4223,7 @@ fn zombify_returned_isamaru_gets_tesaks_unleash() {
 }
 
 // ---------------------------------------------------------------------------
-// Look-back (CR 603.10a) halves need presence before the event (R-N3a–l).
+// Look-back (CR 603.10a) halves need presence before the event (R-N3a–o).
 // ---------------------------------------------------------------------------
 
 /// Syr Konrad, the Grim {3}{B}{B} Legendary Creature — Human Knight 5/4 — verbatim.
@@ -4696,5 +4714,177 @@ fn zombify_returned_oglor_granted_bears_sees_its_own_departure() {
 
     assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
     assert_eq!(zombie_tokens(&runner), 1, "one Zombie");
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// R-N3m — CR 603.10 + CR 603.10a + CR 113.6k + CR 611.2e: Xu-Ifit, Osteoharmonist returns the
+/// Oglor-granted Grizzly Bears. "When this card leaves your graveyard" can't trigger from the
+/// battlefield, so it functioned in the graveyard (CR 113.6k), and it looks back (CR 603.10a): the
+/// game reads the ability's existence and the Bears' appearance immediately before the event
+/// (CR 603.10), when the Bears was a card in the graveyard with the ability. "It's a Skeleton in
+/// addition to its other types and has no abilities." applies simultaneously with the entry
+/// (CR 611.2e), after that moment: one tapped Zombie, and the Bears is a Skeleton with no
+/// abilities.
+#[test]
+fn xu_ifit_returned_oglor_granted_bears_sees_its_own_departure() {
+    let (mut scenario, xu) = returner_board(Returner::XuIfit);
+    let bears = oglor_on_battlefield_bears_in_hand(&mut scenario);
+    let mut runner = scenario.build();
+    grant_oglors_zombie_trigger(&mut runner, bears);
+
+    return_card(&mut runner, Returner::XuIfit, xu, bears);
+    runner.advance_until_stack_empty();
+
+    let bears_obj = &runner.state().objects[&bears];
+    assert_eq!(bears_obj.zone, Zone::Battlefield);
+    assert!(
+        subtypes(&runner, bears).iter().any(|s| s == "Skeleton"),
+        "{:?}",
+        subtypes(&runner, bears)
+    );
+    assert_eq!(trigger_count(&runner, bears), 0, "has no abilities");
+    // Reach: the perpetual grant persists under the rider, so only the entry's record carries it
+    // as a live ability.
+    assert_eq!(
+        bears_obj.base_trigger_definitions.len(),
+        1,
+        "the perpetual grant persists"
+    );
+    assert_eq!(zombie_tokens(&runner), 1, "one Zombie");
+    assert_eq!(tapped_zombie_tokens(&runner), 1, "the token is tapped");
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// Prized Amalgam {1}{U}{B} Creature — Zombie 3/3 — verbatim.
+const PRIZED_AMALGAM: &str = "Whenever a creature enters, if it entered from your graveyard or you cast it from your graveyard, return this card from your graveyard to the battlefield tapped at the beginning of the next end step.";
+
+/// Prized Amalgam in P0's graveyard. Returns it.
+fn prized_amalgam_in_graveyard(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_to_graveyard(P0, "Prized Amalgam", 3, 3)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Black],
+            generic: 1,
+        })
+        .with_subtypes(vec!["Zombie"])
+        .from_oracle_text(PRIZED_AMALGAM)
+        .id()
+}
+
+/// R-N3n — CR 113.6m + CR 603.10 + CR 603.4: Prized Amalgam's ability returns "this card from your
+/// graveyard", so it functions only in the graveyard (CR 113.6m), and "Whenever a creature enters"
+/// is checked immediately after the event (CR 603.10). Zombify returning Amalgam itself: then
+/// Amalgam is on the battlefield, where the ability does not function, so nothing triggers
+/// (ruling: it "triggers only if it's in your graveyard immediately after an appropriate creature
+/// enters the battlefield"). Positive board first: Zombify returning Grizzly Bears, a creature,
+/// from P0's graveyard while Amalgam is in it satisfies the condition (CR 603.4), and the trigger
+/// resolves into one delayed trigger.
+#[test]
+fn zombify_returned_prized_amalgam_does_not_see_its_own_entry() {
+    {
+        let (mut scenario, zombify) = returner_board(Returner::Zombify);
+        let amalgam = prized_amalgam_in_graveyard(&mut scenario);
+        let bears = add_grizzly_bears_to_graveyard(&mut scenario, P0);
+        let mut runner = scenario.build();
+        // Reach: Amalgam's one trigger functions in the graveyard.
+        let amalgam_zones: Vec<Vec<Zone>> = runner.state().objects[&amalgam]
+            .trigger_definitions
+            .iter_unchecked()
+            .map(|entry| entry.definition.trigger_zones.clone())
+            .collect();
+        assert_eq!(amalgam_zones, vec![vec![Zone::Graveyard]]);
+
+        // The cast driver resolves the stack, Amalgam's trigger included.
+        return_card(&mut runner, Returner::Zombify, zombify, bears);
+
+        assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+        assert_priority_with_empty_stack(&runner);
+        let delayed_sources: Vec<ObjectId> = runner
+            .state()
+            .delayed_triggers
+            .iter()
+            .map(|delayed| delayed.source_id)
+            .collect();
+        assert_eq!(delayed_sources, vec![amalgam], "one delayed return");
+    }
+
+    let (mut scenario, zombify) = returner_board(Returner::Zombify);
+    let amalgam = prized_amalgam_in_graveyard(&mut scenario);
+    let mut runner = scenario.build();
+
+    return_card(&mut runner, Returner::Zombify, zombify, amalgam);
+
+    assert_eq!(runner.state().objects[&amalgam].zone, Zone::Battlefield);
+    assert_priority_with_empty_stack(&runner);
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "{:?}",
+        runner.state().delayed_triggers
+    );
+}
+
+/// R-N3o — CR 603.10a + CR 603.10 + CR 611.2e + CR 205.1a: Syr Konrad, the Grim is on the
+/// battlefield when Murder destroys Enduring Innocence: "another creature dies" (1). Innocence's
+/// "When Enduring Innocence dies, if it was a creature, return it to the battlefield under its
+/// owner's control. It's an enchantment. (It's not a creature.)" returns it. "A creature card
+/// leaves your graveyard" looks back: the card that left P0's graveyard was an enchantment creature
+/// card immediately before the event (1). The rider applies with the entry (CR 611.2e), after the
+/// moment the look-back reads, so the noncreature permanent does not hide the departure: P1 18.
+#[test]
+fn syr_konrad_sees_enduring_innocence_leave_the_graveyard_as_a_creature_card() {
+    let mut scenario = main_phase();
+    let konrad = syr_konrad_in_zone(&mut scenario, P0, Zone::Battlefield);
+    let innocence = add_enduring_innocence(&mut scenario);
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = scenario.build();
+    assert_konrad_trigger_parsed(runner.state(), konrad);
+
+    murder_and_settle(&mut runner, murder, innocence);
+
+    // Reach: the rider applied, so a read of the live permanent would miss the creature card.
+    assert_returned_as_noncreature_enchantment(&runner, innocence);
+    assert_eq!(runner.life(P1), 18, "a death and a creature card leaving");
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// Desecrated Tomb {3} Artifact — verbatim.
+const DESECRATED_TOMB: &str = "Whenever one or more creature cards leave your graveyard, create a 1/1 black Bat creature token with flying.";
+
+/// R-N3o-b — the batched sibling of R-N3o (CR 603.10a + CR 603.10 + CR 611.2e + CR 603.2c):
+/// Desecrated Tomb's "Whenever one or more creature cards leave your graveyard" sees Enduring
+/// Innocence leave P0's graveyard as the enchantment creature card it was immediately before the
+/// event, although it returns "It's an enchantment. (It's not a creature.)": one Bat. P0 has a
+/// library because Innocence's "Whenever one or more other creatures you control with power 2 or
+/// less enter, draw a card." sees the Bat.
+#[test]
+fn desecrated_tomb_sees_enduring_innocence_leave_the_graveyard_as_a_creature_card() {
+    let mut scenario = main_phase();
+    scenario.with_library_top(P0, &["Island", "Island", "Island"]);
+    scenario
+        .add_artifact_from_oracle(P0, "Desecrated Tomb", DESECRATED_TOMB)
+        .with_mana_cost(ManaCost::generic(3));
+    let innocence = add_enduring_innocence(&mut scenario);
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = scenario.build();
+
+    murder_and_settle(&mut runner, murder, innocence);
+
+    // Reach: the rider applied, so a read of the live permanent would miss the creature card.
+    assert_returned_as_noncreature_enchantment(&runner, innocence);
+    let bats = runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| {
+            object.is_token
+                && object.zone == Zone::Battlefield
+                && object.card_types.subtypes.iter().any(|s| s == "Bat")
+        })
+        .count();
+    assert_eq!(bats, 1, "one creature card left the graveyard");
     assert_priority_with_empty_stack(&runner);
 }

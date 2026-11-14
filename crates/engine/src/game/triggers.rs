@@ -2461,6 +2461,8 @@ fn trigger_source_context_for_event(
     {
         // Enters-the-battlefield triggers observe the post-entry object; only
         // a source leaving its observed zone needs the record's pre-move view.
+        // A source entering the battlefield is seen as its pre-event card by the
+        // own-entry arm of `collect_pending_triggers_with_collection` (`event_subject_observes`).
         if *object_id == source.id && *to != Zone::Battlefield {
             if let Some(source_context) = record.trigger_source_context() {
                 return source_context.clone();
@@ -2756,7 +2758,10 @@ pub(crate) enum LogicalZoneTriggerCollection<'a> {
 
 #[derive(Clone, Copy)]
 enum TriggerSourceVisit {
-    /// The moved object reads its own record-owned immediately-before view.
+    /// The moved object reads its own record-owned immediately-before view: a
+    /// battlefield departure or a sacrifice (CR 603.10a), or the pre-event card of an object
+    /// entering the battlefield from another zone, which observes only its own look-back halves
+    /// (`event_subject_observes`).
     EventSubject,
     /// Every other source path: live index, off-zone cache, or co-departed LKI.
     ///
@@ -3275,16 +3280,26 @@ fn collect_matching_triggers_inner(
         }
         // CR 603.6a + CR 603.10 + CR 603.10a: an observer that exists only immediately after the
         // event (a newcomer of its own entry event) observes it only through a half that does not
-        // look back, unless the event is its own zone change and the definition functioned in the
-        // origin zone (CR 113.6k; `observes_from_immediately_after`). Before the batched /
+        // look back (`observes_from_immediately_after`); its own look-back halves are observed by
+        // its pre-event card (`event_subject_observes`). Before the batched /
         // registered-this-event bookkeeping, so a refused definition consumes no batch slot.
         if let TriggerSourceVisit::Observer {
             exists_from: TriggerObservationTime::ImmediatelyAfter,
         } = visit
         {
-            if !observes_from_immediately_after(trig_def, event, obj_id) {
+            if !observes_from_immediately_after(trig_def, event) {
                 continue;
             }
+        }
+        // CR 603.10 + CR 603.10a + CR 113.6k: the pre-event card of an object entering the
+        // battlefield observes only what its post-event permanent does not, and only where it was
+        // (`event_subject_observes`). Before the zone guard, whose event-subject destination
+        // fallback would otherwise admit a battlefield-only definition for an entry, and before the
+        // batched / registered-this-event bookkeeping.
+        if matches!(visit, TriggerSourceVisit::EventSubject)
+            && !event_subject_observes(trig_def, event)
+        {
+            continue;
         }
         // Synthesized granted-keyword companion triggers carry a keyword-keyed
         // `MayTriggerOrigin` — the synthetic `trig_idx` points past
@@ -3888,8 +3903,8 @@ pub(crate) fn departure_observer_provably_excludes(
 /// CR 603.10 + CR 603.10a: for the events of its own entry event (its own entry
 /// span and its co-entrants' spans) the entrant exists only immediately after the
 /// event, so it observes them only through halves that do not look back
-/// (`observes_from_immediately_after`), except its own zone change, where it
-/// stands in for its pre-event card in the origin zone; for every later event it
+/// (`observes_from_immediately_after`); the look-back halves of its own entry are observed by
+/// its pre-event card instead (`event_subject_observes`); for every later event it
 /// existed immediately before it.
 fn battlefield_source_presence_at_event(
     event_idx: usize,
@@ -3946,50 +3961,55 @@ impl EntryObservation {
 /// counters (CR 122.6). A future look-back trigger mode that can match an entry-span event must
 /// add an explicit `false` arm.
 ///
-/// CR 603.10 + CR 603.10a + CR 113.6 + CR 113.6b + CR 113.6k: the one admission of a look-back
-/// half is the source's own zone change (event subject == `source_id`). The newcomer stands in for
-/// its pre-event card in `from`, which existed immediately before the event (CR 400.7 makes the
-/// permanent a new object, but CR 603.10 reads the pre-event one), and the definition looks back
-/// from there iff it functioned there (`trigger_definition_functions_in_zone`): Oglor, Devoted
-/// Assistant's granted "When this card leaves your graveyard, create a tapped 2/2 black Zombie
-/// creature token." functions in the graveyard (CR 113.6k), while Syr Konrad, the Grim's "a
-/// creature card leaves your graveyard" functions only on the battlefield (CR 113.6). The event
-/// subject decides exactly: by CR 113.6k a look-back condition functions off the battlefield
-/// without stating a zone only when it can't trigger from the battlefield, and such a condition
-/// concerns the source leaving that zone itself, so only the source's own departure can match it.
-/// An ability that functions only in another zone, because it states that zone (CR 113.6b) or
-/// because its effect moves the card out of that zone (CR 113.6m; Erebos's Titan's "Whenever a
-/// creature card leaves an opponent's graveyard, you may discard a card. If you do, return this
-/// card from your graveyard to your hand."), never functions on the battlefield, so the
-/// battlefield candidate loop never visits it (zone gate in `collect_matching_triggers_inner`).
-fn observes_from_immediately_after(
-    trigger: &TriggerDefinition,
-    event: &GameEvent,
-    source_id: ObjectId,
-) -> bool {
+/// CR 603.10 + CR 603.10a + CR 400.7: a newcomer's own entry is no exception. The look-back halves
+/// of its own entry are observed by its pre-event card, which the entry's record owns
+/// (`event_subject_observes`): the permanent is a new object whose definitions after the entry need
+/// not be the card's (Xu-Ifit, Osteoharmonist's "has no abilities" applies with the entry, CR
+/// 611.2e).
+fn observes_from_immediately_after(trigger: &TriggerDefinition, event: &GameEvent) -> bool {
     match (&trigger.mode, event) {
         (
             TriggerMode::ChangesZone | TriggerMode::ChangesZoneAll,
-            GameEvent::ZoneChanged {
-                object_id,
-                from,
-                to,
-                ..
-            },
-        ) => {
-            // CR 603.10 + CR 603.10a + CR 113.6k: for its own zone change the newcomer stands in
-            // for its pre-event card in `from`, which existed immediately before the event; the
-            // definition looks back from there iff it functioned there (CR 113.6 + CR 113.6b).
-            (*object_id == source_id
-                && from.is_some_and(|origin| trigger_definition_functions_in_zone(trigger, origin)))
-                || super::trigger_matchers::zone_change_observed_after(trigger, *from, *to)
-        }
+            GameEvent::ZoneChanged { from, to, .. },
+        ) => super::trigger_matchers::zone_change_observed_after(trigger, *from, *to),
         // CR 603.10a: leaves-the-battlefield and sacrifice triggers look back in time.
         (TriggerMode::LeavesBattlefield, GameEvent::ZoneChanged { .. })
         | (
             TriggerMode::Sacrificed | TriggerMode::SacrificedOnce,
             GameEvent::PermanentSacrificed { .. },
         ) => false,
+        _ => true,
+    }
+}
+
+/// CR 603.10 + CR 603.10a: whether the record-owned immediately-before view of `event`'s subject
+/// (`TriggerSourceVisit::EventSubject`) observes `event` through `trigger`.
+///
+/// CR 603.6a + CR 603.10 + CR 400.7: for an object entering the battlefield from another zone, the
+/// view is its pre-event card, and the permanent that entered is a new object that observes the
+/// entry through every half checked after the event (`observes_from_immediately_after`). The card
+/// observes exactly the rest, the look-back halves (CR 603.10a), and only for a definition that
+/// functioned where the card was (CR 113.6 + CR 113.6b + CR 113.6k;
+/// `trigger_definition_functions_in_zone`): Oglor, Devoted Assistant's granted "When this card
+/// leaves your graveyard, create a tapped 2/2 black Zombie creature token." functioned in the
+/// graveyard, so it triggers even when Xu-Ifit, Osteoharmonist's "has no abilities" removes it with
+/// the entry (CR 611.2e). Syr Konrad, the Grim's "a creature card leaves your graveyard" functions
+/// only on the battlefield (CR 113.6). Prized Amalgam's "Whenever a creature enters, …" functions
+/// only in the graveyard (CR 113.6m) and is an enters half, checked after the event, when the card
+/// is on the battlefield. Being complementary, the two views never collect one definition twice.
+///
+/// Every other event-subject visit (a battlefield departure, a sacrifice) is the CR 603.10a
+/// look-back view itself and is unchanged.
+fn event_subject_observes(trigger: &TriggerDefinition, event: &GameEvent) -> bool {
+    match event {
+        GameEvent::ZoneChanged {
+            from,
+            to: Zone::Battlefield,
+            ..
+        } => {
+            from.is_some_and(|origin| trigger_definition_functions_in_zone(trigger, origin))
+                && !observes_from_immediately_after(trigger, event)
+        }
         _ => true,
     }
 }
@@ -4028,13 +4048,14 @@ struct BatchEntry {
 /// visible object put into a hand or library) needs the source to have existed
 /// immediately before the event, which a newcomer did not, whichever member was
 /// delivered first ([`EntryObservation::presence_at`],
-/// `observes_from_immediately_after`). The exception is the newcomer's own zone
-/// change: its pre-event card existed in the origin zone, so a definition that
-/// functions there (CR 113.6b + CR 113.6k) looks back from there.
+/// `observes_from_immediately_after`). The look-back halves of the newcomer's own entry are
+/// observed by its pre-event card, read from the entry's record, where a definition that
+/// functioned in the origin zone (CR 113.6b + CR 113.6k) looks back from there
+/// (`event_subject_observes`).
 ///
-/// Known gaps of that refusal: the logical-group settlement member pass
+/// Known gap of that refusal: the logical-group settlement member pass
 /// (`collect_logical_zone_trigger_settlement_for`) visits every member with
-/// `exists_from: ImmediatelyBefore`, and the event-subject visit is unchanged.
+/// `exists_from: ImmediatelyBefore`.
 ///
 /// CR 400.7 + issue #8160: every other event before an observer's own entry
 /// stays unseen, including one interleaved within the group's delivery before
@@ -6549,6 +6570,59 @@ fn collect_pending_triggers_with_collection(
             }
         }
 
+        // CR 603.10 + CR 603.10a + CR 113.6k: an object entering the battlefield from another zone
+        // sees the look-back halves of its own entry as the card it was immediately before the
+        // event. The entry's record owns that card's view (`GameObject::snapshot_for_zone_change`);
+        // the battlefield candidate loop visits only the permanent that entered, a new object (CR
+        // 400.7) whose definitions need not be the card's (Xu-Ifit, Osteoharmonist's "has no
+        // abilities", CR 611.2e).
+        if let GameEvent::ZoneChanged {
+            object_id: moved_id,
+            from: Some(origin),
+            to: Zone::Battlefield,
+            record,
+        } = event
+        {
+            let pre_event_card = record.trigger_source_context().filter(|context| {
+                context.identity.reference.object_id == *moved_id
+                    && context.identity.expected_zone == *origin
+                    && context
+                        .trigger_entries
+                        .iter()
+                        .any(|entry| event_subject_observes(entry.definition(), event))
+            });
+            if let Some(source_context) = pre_event_card {
+                // CR 400.7: the card is not the permanent the candidate loop visited, and its
+                // entries are indexed in a different list, so the card's per-event dedup is its
+                // own; no other path visits the card for its own entry.
+                let mut registered_by_card = HashSet::new();
+                let matched_triggers = collect_matching_triggers_from_context(
+                    state,
+                    event,
+                    events,
+                    source_context,
+                    Some(*origin),
+                    &mut batched_this_pass,
+                    &mut registered_by_card,
+                    &active_suppress_triggers,
+                    collection,
+                    TriggerSourceVisit::EventSubject,
+                );
+                for matched in matched_triggers {
+                    if !session.record_match(state, &matched, event) {
+                        continue;
+                    }
+                    if matched.batched {
+                        batched_this_pass.insert((*moved_id, matched.trig_idx));
+                    }
+                    pending.push(PendingTriggerContext::batched(
+                        matched.pending,
+                        matched.trigger_events,
+                    ));
+                }
+            }
+        }
+
         // CR 603.10a: "When you sacrifice ~" (Carrot Cake) is a look-back
         // trigger on the SACRIFICED permanent itself. The leaves-the-battlefield
         // scan above reads the departed object's triggers only against its
@@ -6664,8 +6738,9 @@ fn collect_pending_triggers_with_collection(
                             &mut registered_this_event,
                             &active_suppress_triggers,
                             collection,
-                            // CR 702.110b: the exploiter exploits as its own exploit ability
-                            // resolves, so it was on the battlefield before the event.
+                            // CR 603.10 + CR 702.110b: a `CreatureExploited` event is never inside
+                            // an entry span, so the exploiter is not a newcomer of it;
+                            // `ImmediatelyBefore` adds no newcomer refusal.
                             TriggerSourceVisit::Observer {
                                 exists_from: TriggerObservationTime::ImmediatelyBefore,
                             },
@@ -20582,25 +20657,9 @@ pub mod tests {
         }
     }
 
-    /// CR 603.6a + CR 603.10 + CR 603.10a: a newcomer of an entry event (an observer that exists
-    /// only immediately after it) observes it through every half checked after the event and
-    /// through no look-back half. River Kelpie's enters half and Syr Konrad's leaves-your-graveyard
-    /// half both name a graveyard origin over the same graveyard-to-battlefield move: the pair an
-    /// origin-keyed classifier cannot tell apart. The co-entrant assertions visit the Giant's
-    /// entry from another source (`OBSERVATION_WARDEN`).
-    ///
-    /// CR 113.6k + CR 603.10a: a definition that functions in the origin zone of the source's own
-    /// zone change looks back from there. Oglor, Devoted Assistant's granted "When this card
-    /// leaves your graveyard, …" is admitted for its own departure (true) and refused for a
-    /// co-entrant's (false); Syr Konrad's own departure (its ability functions only on the
-    /// battlefield, CR 113.6) is refused: the pairs that fail without the subject conjunct and
-    /// without the functions-in-zone conjunct.
-    #[test]
-    fn newcomer_observes_only_post_event_halves() {
-        let to_battlefield = observation_entry(OBSERVATION_GIANT, &[]);
-
-        // Soul Warden: "Whenever another creature enters, you gain 1 life." — an enters half.
-        let soul_warden = parsed_trigger(
+    /// Soul Warden: "Whenever another creature enters, you gain 1 life." — an enters half.
+    fn soul_warden_trigger() -> TriggerDefinition {
+        parsed_trigger(
             "Whenever another creature enters, you gain 1 life.",
             "Soul Warden",
             &[],
@@ -20608,17 +20667,14 @@ pub mod tests {
             &["Human", "Cleric"],
             TriggerMode::ChangesZone,
             |trigger| trigger.destination == Some(Zone::Battlefield),
-        );
-        assert!(observes_from_immediately_after(
-            &soul_warden,
-            &to_battlefield,
-            OBSERVATION_WARDEN
-        ));
+        )
+    }
 
-        // Syr Konrad, the Grim: its three-clause disjunction. The leaves-your-graveyard clause
-        // looks back (CR 603.10a); the put-into-a-graveyard-from-anywhere-but-the-battlefield
-        // clause does not.
-        let syr_konrad = parsed_trigger(
+    /// Syr Konrad, the Grim: its three-clause disjunction. The leaves-your-graveyard clause looks
+    /// back (CR 603.10a); the put-into-a-graveyard-from-anywhere-but-the-battlefield clause does
+    /// not. The ability functions only on the battlefield (CR 113.6).
+    fn syr_konrad_trigger() -> TriggerDefinition {
+        parsed_trigger(
             "Whenever another creature dies, or a creature card is put into a graveyard from anywhere other than the battlefield, or a creature card leaves your graveyard, Syr Konrad deals 1 damage to each opponent.\n{1}{B}: Each player mills a card. (They each put the top card of their library into their graveyard.)",
             "Syr Konrad, the Grim",
             &[],
@@ -20626,20 +20682,12 @@ pub mod tests {
             &["Human", "Knight"],
             TriggerMode::ChangesZone,
             |trigger| trigger.zone_change_clauses.len() == 3,
-        );
-        assert!(!observes_from_immediately_after(
-            &syr_konrad,
-            &to_battlefield,
-            OBSERVATION_WARDEN
-        ));
-        assert!(observes_from_immediately_after(
-            &syr_konrad,
-            &observation_move(OBSERVATION_GIANT, Zone::Hand, Zone::Graveyard),
-            OBSERVATION_WARDEN
-        ));
+        )
+    }
 
-        // Tormod, the Desecrator: "Whenever one or more cards leave your graveyard" (batched).
-        let tormod = parsed_trigger(
+    /// Tormod, the Desecrator: "Whenever one or more cards leave your graveyard" (batched).
+    fn tormod_trigger() -> TriggerDefinition {
+        parsed_trigger(
             "Whenever one or more cards leave your graveyard, create a tapped 2/2 black Zombie creature token.\nPartner (You can have two commanders if both have partner.)",
             "Tormod, the Desecrator",
             &["Partner"],
@@ -20647,16 +20695,13 @@ pub mod tests {
             &["Zombie", "Wizard"],
             TriggerMode::ChangesZoneAll,
             |trigger| trigger.batched && trigger.origin == Some(Zone::Graveyard),
-        );
-        assert!(!observes_from_immediately_after(
-            &tormod,
-            &to_battlefield,
-            OBSERVATION_WARDEN
-        ));
+        )
+    }
 
-        // River Kelpie: "Whenever this creature or another permanent enters from a graveyard" —
-        // an enters half that names a graveyard origin (CR 603.6a; River Kelpie ruling).
-        let river_kelpie = parsed_trigger(
+    /// River Kelpie: "Whenever this creature or another permanent enters from a graveyard" — an
+    /// enters half that names a graveyard origin (CR 603.6a; River Kelpie ruling).
+    fn river_kelpie_trigger() -> TriggerDefinition {
+        parsed_trigger(
             "Whenever this creature or another permanent enters from a graveyard, draw a card.\nWhenever a player casts a spell from a graveyard, draw a card.\nPersist (When this creature dies, if it had no -1/-1 counters on it, return it to the battlefield under its owner's control with a -1/-1 counter on it.)",
             "River Kelpie",
             &["Persist"],
@@ -20667,15 +20712,12 @@ pub mod tests {
                 trigger.origin == Some(Zone::Graveyard)
                     && trigger.destination == Some(Zone::Battlefield)
             },
-        );
-        assert!(observes_from_immediately_after(
-            &river_kelpie,
-            &to_battlefield,
-            OBSERVATION_WARDEN
-        ));
+        )
+    }
 
-        // Fiend Hunter: "When this creature leaves the battlefield, …" (CR 603.10a).
-        let fiend_hunter = parsed_trigger(
+    /// Fiend Hunter: "When this creature leaves the battlefield, …" (CR 603.10a).
+    fn fiend_hunter_trigger() -> TriggerDefinition {
+        parsed_trigger(
             "When this creature enters, you may exile another target creature.\nWhen this creature leaves the battlefield, return the exiled card to the battlefield under its owner's control.",
             "Fiend Hunter",
             &[],
@@ -20683,15 +20725,12 @@ pub mod tests {
             &["Human", "Cleric"],
             TriggerMode::LeavesBattlefield,
             |_| true,
-        );
-        assert!(!observes_from_immediately_after(
-            &fiend_hunter,
-            &observation_move(OBSERVATION_GIANT, Zone::Battlefield, Zone::Exile),
-            OBSERVATION_WARDEN
-        ));
+        )
+    }
 
-        // Carmen, Cruel Skymarcher: "Whenever a player sacrifices a permanent, …" (CR 603.10a).
-        let carmen = parsed_trigger(
+    /// Carmen, Cruel Skymarcher: "Whenever a player sacrifices a permanent, …" (CR 603.10a).
+    fn carmen_trigger() -> TriggerDefinition {
+        parsed_trigger(
             "Flying\nWhenever a player sacrifices a permanent, put a +1/+1 counter on Carmen and you gain 1 life.\nWhenever Carmen attacks, return up to one target permanent card with mana value less than or equal to Carmen's power from your graveyard to the battlefield.",
             "Carmen, Cruel Skymarcher",
             &["Flying"],
@@ -20699,32 +20738,14 @@ pub mod tests {
             &["Vampire", "Soldier"],
             TriggerMode::Sacrificed,
             |_| true,
-        );
-        assert!(!observes_from_immediately_after(
-            &carmen,
-            &observation_sacrifice(OBSERVATION_FOREST),
-            OBSERVATION_WARDEN
-        ));
+        )
+    }
 
-        // Simic Ascendancy: "Whenever one or more +1/+1 counters are put on a creature you
-        // control, …" over a co-entrant's entry counter (CR 603.10 + CR 122.6).
-        let simic_ascendancy = parsed_trigger(
-            "{1}{G}{U}: Put a +1/+1 counter on target creature you control.\nWhenever one or more +1/+1 counters are put on a creature you control, put that many growth counters on this enchantment.\nAt the beginning of your upkeep, if this enchantment has twenty or more growth counters on it, you win the game.",
-            "Simic Ascendancy",
-            &[],
-            &["Enchantment"],
-            &[],
-            TriggerMode::CounterAdded,
-            |_| true,
-        );
-        assert!(observes_from_immediately_after(
-            &simic_ascendancy,
-            &observation_counter(OBSERVATION_WORLDSIRE),
-            OBSERVATION_WARDEN
-        ));
-
-        // Own zone changes: the Giant's entry visited from the Giant itself.
-        let oglor_grant = parsed_trigger(
+    /// Oglor, Devoted Assistant's granted "When this card leaves your graveyard, create a tapped
+    /// 2/2 black Zombie creature token." — a look-back half that functions in the graveyard
+    /// (CR 113.6k).
+    fn oglor_grant_trigger() -> TriggerDefinition {
+        parsed_trigger(
             "When this card leaves your graveyard, create a tapped 2/2 black Zombie creature token.",
             "Grizzly Bears",
             &[],
@@ -20740,31 +20761,138 @@ pub mod tests {
                             && clause.valid_card == Some(TargetFilter::SelfRef)
                     )
             },
-        );
+        )
+    }
+
+    /// Prized Amalgam: "Whenever a creature enters, if it entered from your graveyard or you cast
+    /// it from your graveyard, return this card from your graveyard to the battlefield tapped at
+    /// the beginning of the next end step." — an enters half that functions only in the graveyard
+    /// (CR 113.6m).
+    fn prized_amalgam_trigger() -> TriggerDefinition {
+        parsed_trigger(
+            "Whenever a creature enters, if it entered from your graveyard or you cast it from your graveyard, return this card from your graveyard to the battlefield tapped at the beginning of the next end step.",
+            "Prized Amalgam",
+            &[],
+            &["Creature"],
+            &["Zombie"],
+            TriggerMode::ChangesZone,
+            |trigger| {
+                trigger.trigger_zones == [Zone::Graveyard]
+                    && trigger.destination == Some(Zone::Battlefield)
+            },
+        )
+    }
+
+    /// CR 603.6a + CR 603.10 + CR 603.10a: a newcomer of an entry event (an observer that exists
+    /// only immediately after it) observes it through every half checked after the event and
+    /// through no look-back half. River Kelpie's enters half and Syr Konrad's leaves-your-graveyard
+    /// half both name a graveyard origin over the same graveyard-to-battlefield move: the pair an
+    /// origin-keyed classifier cannot tell apart.
+    ///
+    /// CR 603.10a + CR 400.7: the newcomer refuses a look-back half of its own entry too; its
+    /// pre-event card observes those (`event_subject_observes`).
+    #[test]
+    fn newcomer_observes_only_post_event_halves() {
+        let to_battlefield = observation_entry(OBSERVATION_GIANT, &[]);
+
         assert!(observes_from_immediately_after(
-            &oglor_grant,
-            &to_battlefield,
-            OBSERVATION_GIANT
+            &soul_warden_trigger(),
+            &to_battlefield
         ));
-        assert!(!observes_from_immediately_after(
-            &oglor_grant,
-            &to_battlefield,
-            OBSERVATION_WARDEN
-        ));
+
+        let syr_konrad = syr_konrad_trigger();
         assert!(!observes_from_immediately_after(
             &syr_konrad,
-            &to_battlefield,
-            OBSERVATION_GIANT
-        ));
-        assert!(!observes_from_immediately_after(
-            &tormod,
-            &to_battlefield,
-            OBSERVATION_GIANT
+            &to_battlefield
         ));
         assert!(observes_from_immediately_after(
-            &river_kelpie,
-            &to_battlefield,
-            OBSERVATION_GIANT
+            &syr_konrad,
+            &observation_move(OBSERVATION_GIANT, Zone::Hand, Zone::Graveyard)
+        ));
+
+        assert!(!observes_from_immediately_after(
+            &tormod_trigger(),
+            &to_battlefield
+        ));
+
+        assert!(observes_from_immediately_after(
+            &river_kelpie_trigger(),
+            &to_battlefield
+        ));
+
+        assert!(!observes_from_immediately_after(
+            &fiend_hunter_trigger(),
+            &observation_move(OBSERVATION_GIANT, Zone::Battlefield, Zone::Exile)
+        ));
+
+        assert!(!observes_from_immediately_after(
+            &carmen_trigger(),
+            &observation_sacrifice(OBSERVATION_FOREST)
+        ));
+
+        // Simic Ascendancy: "Whenever one or more +1/+1 counters are put on a creature you
+        // control, …" over a co-entrant's entry counter (CR 603.10 + CR 122.6).
+        let simic_ascendancy = parsed_trigger(
+            "{1}{G}{U}: Put a +1/+1 counter on target creature you control.\nWhenever one or more +1/+1 counters are put on a creature you control, put that many growth counters on this enchantment.\nAt the beginning of your upkeep, if this enchantment has twenty or more growth counters on it, you win the game.",
+            "Simic Ascendancy",
+            &[],
+            &["Enchantment"],
+            &[],
+            TriggerMode::CounterAdded,
+            |_| true,
+        );
+        assert!(observes_from_immediately_after(
+            &simic_ascendancy,
+            &observation_counter(OBSERVATION_WORLDSIRE)
+        ));
+
+        // A newcomer never observes a look-back half, its own departure included.
+        assert!(!observes_from_immediately_after(
+            &oglor_grant_trigger(),
+            &to_battlefield
+        ));
+    }
+
+    /// CR 603.10 + CR 603.10a + CR 113.6k + CR 113.6m: the pre-event card of an object entering the
+    /// battlefield from another zone observes exactly the look-back halves of its own entry that
+    /// functioned where it was. Oglor, Devoted Assistant's granted leaves-your-graveyard half
+    /// against Syr Konrad, the Grim's (both look back; only Oglor's grant functions in the
+    /// graveyard): the pair that fails without the functions-in-origin conjunct. Oglor's grant
+    /// against Prized Amalgam's enters half (both function in the graveyard; only Oglor's grant
+    /// looks back): the pair that fails without the complement conjunct. A departure visit (a
+    /// battlefield departure, a sacrifice) is unchanged.
+    #[test]
+    fn entrant_pre_event_card_observes_only_its_look_back_halves() {
+        let to_battlefield = observation_entry(OBSERVATION_GIANT, &[]);
+
+        assert!(event_subject_observes(
+            &oglor_grant_trigger(),
+            &to_battlefield
+        ));
+        assert!(!event_subject_observes(
+            &syr_konrad_trigger(),
+            &to_battlefield
+        ));
+        assert!(!event_subject_observes(&tormod_trigger(), &to_battlefield));
+        assert!(!event_subject_observes(
+            &soul_warden_trigger(),
+            &to_battlefield
+        ));
+        assert!(!event_subject_observes(
+            &river_kelpie_trigger(),
+            &to_battlefield
+        ));
+        assert!(!event_subject_observes(
+            &prized_amalgam_trigger(),
+            &to_battlefield
+        ));
+        assert!(event_subject_observes(
+            &fiend_hunter_trigger(),
+            &observation_move(OBSERVATION_GIANT, Zone::Battlefield, Zone::Exile)
+        ));
+        assert!(event_subject_observes(
+            &carmen_trigger(),
+            &observation_sacrifice(OBSERVATION_FOREST)
         ));
     }
 

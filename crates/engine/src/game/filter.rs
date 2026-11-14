@@ -4643,49 +4643,13 @@ pub(crate) fn matches_target_filter_on_departure(
     from: Zone,
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
-    record: Option<&ZoneChangeRecord>,
 ) -> bool {
-    // CR 603.10a + CR 704.5n: by the time a leaves-the-battlefield trigger is
-    // matched, the CR 704.5m/n SBAs have already detached the object's Auras and
-    // Equipment, so the live object's `attachments` is empty. The departure
-    // record captured the relation at the instant before the zone change; read
-    // THAT snapshot for attachment predicates.
-    let Some(obj) = state.objects.get(&object_id) else {
-        return false;
-    };
-    let projected = record.filter(|record| !record.attachments.is_empty());
-    let Some(record) = projected else {
-        return filter_inner_with_lookup(
-            state,
-            object_id,
-            filter,
-            ctx,
-            ControllerLookup::Departed(from),
-        );
-    };
-    let mut departed = obj.clone();
-    departed.attachments = record
-        .attachments
-        .iter()
-        .map(|attachment| attachment.object_id)
-        .collect();
-    filter_inner_for_object(
+    filter_inner_with_lookup(
         state,
-        &departed,
         object_id,
         filter,
-        ctx.source_id,
-        ctx.source_controller,
-        ctx.ability,
-        ctx.trigger_source,
-        ctx.recipient_id,
-        ctx.scoped_iteration_player,
-        ctx.triggering_object,
-        ctx.declared_slot_view,
-        ctx.granting_object,
+        ctx,
         ControllerLookup::Departed(from),
-        ctx.ability_targets,
-        HeldObject::Live,
     )
 }
 
@@ -7016,7 +6980,7 @@ pub fn matches_zone_change_event_object_filter(
             // format modifies it).
             match origin {
                 Some(from) => {
-                    matches_target_filter_on_departure(state, *object_id, from, filter, ctx, None)
+                    matches_target_filter_on_departure(state, *object_id, from, filter, ctx)
                 }
                 None => matches_target_filter(state, *object_id, filter, ctx),
             }
@@ -27840,7 +27804,7 @@ mod dandan_axis_collapse_tests {
     ) -> [bool; 2] {
         [P0, P1].map(|seat| {
             let ctx = FilterContext::from_source_with_controller(SOURCE, seat);
-            matches_target_filter_on_departure(state, id, from, filter, &ctx, None)
+            matches_target_filter_on_departure(state, id, from, filter, &ctx)
         })
     }
 
