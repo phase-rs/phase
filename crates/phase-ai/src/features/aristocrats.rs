@@ -525,6 +525,7 @@ mod tests {
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
@@ -567,6 +568,7 @@ mod tests {
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
@@ -687,6 +689,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -712,6 +715,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,

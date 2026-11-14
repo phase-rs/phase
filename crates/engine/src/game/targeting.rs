@@ -8577,6 +8577,7 @@ mod tests {
         let second = TargetRef::Object(ObjectId(2));
         let body = ResolvedAbility::new(
             crate::types::ability::Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,

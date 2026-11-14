@@ -483,7 +483,15 @@ pub fn split_merged_permanent_on_leave(
 /// CR 903.9c: when an individual commander component accepts the CR 903.9b
 /// Hand/Library replacement, only that component's request changes to Command;
 /// noncommander components remain routed to their appropriate zones.
+///
+/// CR 701.24a + CR 730.3: a library position reaches the components only when
+/// the move is the move component of a terminal-shuffle operation, where the
+/// position is transient and the chained `Shuffle` randomizes the library
+/// once. Any other library placement leaves each component at the zone
+/// default; the owner's CR 730.3a arrangement of an ordered placement is not
+/// modeled here.
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn move_merged_permanent_on_leave(
     state: &mut GameState,
     merged_id: ObjectId,
@@ -491,6 +499,7 @@ pub(crate) fn move_merged_permanent_on_leave(
     library_placement: Option<&LibraryPosition>,
     library_shuffle: LibraryShuffleMode,
     applied: &HashSet<AppliedReplacementKey>,
+    performed_by: Option<crate::types::player::PlayerId>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
     move_merged_permanent_for_parent(
@@ -500,6 +509,7 @@ pub(crate) fn move_merged_permanent_on_leave(
         library_placement,
         library_shuffle,
         applied,
+        performed_by,
         None,
         events,
     )
@@ -513,6 +523,7 @@ pub(crate) fn move_merged_permanent_for_parent(
     library_placement: Option<&LibraryPosition>,
     library_shuffle: LibraryShuffleMode,
     applied: &HashSet<AppliedReplacementKey>,
+    performed_by: Option<crate::types::player::PlayerId>,
     parent: Option<crate::types::game_state::PendingComponentDeliveryParent>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
@@ -557,6 +568,15 @@ pub(crate) fn move_merged_permanent_for_parent(
             };
             ZoneMoveRequest::merged_component(component_id, dest, placement, library_shuffle)
                 .with_replacement_applied(applied.clone())
+                // CR 608.2c + CR 730.3: every component is moved by the
+                // player who performed the merged permanent's move, so each card
+                // that reaches exile records that player as its exiler. No
+                // ownership input is carried, as before: a component goes to its
+                // own owner's zone.
+                .actors(zone_pipeline::MoveActors {
+                    performed_by,
+                    ownership_actor: None,
+                })
         })
         .collect();
 

@@ -2087,6 +2087,7 @@ fn member_level_library_redirect(survivor: ObjectId) -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 destination: Zone::Exile,
                 origin: None,

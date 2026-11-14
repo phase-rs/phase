@@ -1878,6 +1878,7 @@ mod tests {
         );
         let root = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Graveyard,

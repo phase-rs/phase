@@ -496,6 +496,65 @@ fn resolution_zone_candidates(
         .collect()
 }
 
+/// CR 608.2c: the player who performs this zone move — the instruction's own
+/// subject, carried by the parser as the effect's `actor` ("that player exiles
+/// a card from their hand", "target player exiles all land cards from their
+/// graveyard"), else the controller of the spell or ability. The answer never
+/// depends on whose objects or zone the filter names: "exile a nonland card
+/// from their library at random" (Rahilda, Wanted Cutthroat) has no subject
+/// and is the controller's exile. A named subject that resolves to no player
+/// (an announced player slot that is authoritatively empty) leaves the
+/// controller as the performer of whatever the filter still moves.
+/// `LibraryPlayer` is the library owner's role; the zone move parsed with it
+/// (a SearchFound searcher's exile) is delivered by the found-card binder, and
+/// here it reads as `filter_controller`, the player whose zone the move reads.
+fn instruction_performer(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter_controller: PlayerId,
+) -> PlayerId {
+    use crate::types::ability::LibraryInstructionActor;
+    let actor = match &ability.effect {
+        Effect::ChangeZone { actor, .. } | Effect::ChangeZoneAll { actor, .. } => actor,
+        _ => return ability.controller,
+    };
+    match actor {
+        LibraryInstructionActor::Controller => ability.controller,
+        LibraryInstructionActor::LibraryPlayer => filter_controller,
+        LibraryInstructionActor::Player { player } => {
+            object_derived_performer(state, ability, player)
+                .or_else(|| super::resolve_player_for_context_ref(state, ability, player))
+                .unwrap_or(ability.controller)
+        }
+    }
+}
+
+/// CR 608.2c + CR 109.4: "its controller exiles it" names the controller of
+/// the parent OBJECT. When the instruction's targets hold an object, that
+/// object decides, wherever it sits in the list: a member-driven loop binds
+/// each iteration's member as an object occurrence beside any independently
+/// announced player target, and that player must not answer for the member's
+/// controller. `None` when no object is bound (the reference then names the
+/// announced player, as before), for an authoritatively empty announcement
+/// (CR 608.2b), and for every other reference.
+fn object_derived_performer(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    player: &TargetFilter,
+) -> Option<PlayerId> {
+    if !matches!(player, TargetFilter::ParentTargetController)
+        || ability.has_authoritative_empty_binding()
+    {
+        return None;
+    }
+    ability.targets.iter().find_map(|target| match target {
+        TargetRef::Object(id) => {
+            crate::game::ability_utils::last_known_permanent_controller(state, *id)
+        }
+        TargetRef::Player(_) => None,
+    })
+}
+
 /// CR 608.2d + CR 701.13a: report whether this exact optional-for-any-player
 /// graveyard-exile instruction lacks enough legal cards for its exact
 /// resolution-time selection. Adjacent ChangeZone shapes return `None` so the
@@ -1044,6 +1103,7 @@ pub fn resolve(
     let origin = expected_move_origin(state, origin, target_filter);
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(state, ability, target_filter);
+    let performer = instruction_performer(state, ability, filter_controller);
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
 
@@ -1320,9 +1380,15 @@ pub fn resolve(
                 library_placement.clone(),
                 library_shuffle,
                 None,
+                // CR 610.3: the return duration remains relative to the resolving
+                // controller, independently of the subject performing the move.
                 Some(ability.controller),
-                // CR 608.2c: the controller follows the instruction, so it performs the move.
-                Some(ability.controller),
+                // CR 608.2c: the instruction's subject performs the move; entry
+                // ownership keeps reading the controller.
+                crate::game::zone_pipeline::MoveActors {
+                    performed_by: Some(performer),
+                    ownership_actor: Some(ability.controller),
+                },
                 events,
             ) {
                 ZoneMoveResult::Done => {
@@ -1401,9 +1467,15 @@ pub fn resolve(
                 library_placement.clone(),
                 library_shuffle,
                 None,
+                // CR 610.3: the return duration remains relative to the resolving
+                // controller, independently of the subject performing the move.
                 Some(ability.controller),
-                // CR 608.2c: the controller follows the instruction, so it performs the move.
-                Some(ability.controller),
+                // CR 608.2c: the instruction's subject performs the move; entry
+                // ownership keeps reading the controller.
+                crate::game::zone_pipeline::MoveActors {
+                    performed_by: Some(performer),
+                    ownership_actor: Some(ability.controller),
+                },
                 events,
             ) {
                 ZoneMoveResult::Done => {
@@ -1489,6 +1561,9 @@ pub fn resolve(
             // same `UntilSourceLeaves` exile link the single-candidate
             // shortcut does (Cloak and Dagger, Entwined — issue #4235 review).
             duration: ability.duration.clone(),
+            // CR 608.2c: the selection credits the instruction's performer, as
+            // the single-candidate and random shortcuts above do.
+            performed_by: Some(performer),
         };
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses
         // (matching the DiscardChoice pattern — single authority for the event).
@@ -1498,6 +1573,7 @@ pub fn resolve(
     let ctx = ChangeZoneIterationCtx {
         source_id: ability.source_id,
         controller: ability.controller,
+        performed_by: performer,
         origin,
         destination: dest_zone,
         enter_transformed: effect_enter_transformed,
@@ -1620,6 +1696,7 @@ pub fn resolve(
                         remaining: members[i + 1..].to_vec(),
                         source_id: ctx.source_id,
                         controller: ctx.controller,
+                        performed_by: ctx.performed_by,
                         origin: ctx.origin,
                         destination: ctx.destination,
                         enter_transformed: ctx.enter_transformed,
@@ -1670,6 +1747,7 @@ pub fn resolve(
                         remaining: members[i + 1..].to_vec(),
                         source_id: ctx.source_id,
                         controller: ctx.controller,
+                        performed_by: ctx.performed_by,
                         origin: ctx.origin,
                         destination: ctx.destination,
                         enter_transformed: ctx.enter_transformed,
@@ -1986,7 +2064,16 @@ pub(crate) fn resolving_stack_ability_for_source(
 #[derive(Clone)]
 pub(crate) struct ChangeZoneIterationCtx {
     pub source_id: ObjectId,
+    /// Family controller, controller-relative duration anchor, and the
+    /// `EntryOwnership::ActorOwns` input (`MoveActors::ownership_actor`) on
+    /// direct, mass and search paths. The interactive `EffectZoneChoice` resume
+    /// supplies its chooser here.
     pub controller: PlayerId,
+    /// Instruction performer (CR 608.2c), independent of the family and
+    /// duration authority above: the effect's parsed `actor`, resolved once by
+    /// `instruction_performer` and carried across an interactive
+    /// `EffectZoneChoice` as its `performed_by`.
+    pub performed_by: PlayerId,
     pub origin: Option<Zone>,
     pub destination: Zone,
     pub enter_transformed: bool,
@@ -2126,8 +2213,13 @@ pub(crate) fn process_one_zone_move_with_terminal(
         ctx.library_shuffle,
         ctx.enter_attached_to,
         Some(ctx.controller),
-        // CR 608.2c: the controller follows the instruction, so it performs the move.
-        Some(ctx.controller),
+        // CR 608.2c: attribution follows the captured instruction performer,
+        // not the controller-relative duration anchor above; entry ownership
+        // keeps reading that controller.
+        crate::game::zone_pipeline::MoveActors {
+            performed_by: Some(ctx.performed_by),
+            ownership_actor: Some(ctx.controller),
+        },
         owner,
         events,
     );
@@ -2170,6 +2262,7 @@ fn mass_library_order_effect_zone_choice(
         .map(|member| member.identity.object_id)
         .collect();
     WaitingFor::EffectZoneChoice {
+        performed_by: None,
         // CR 401.4 + CR 101.1: the arranger the instruction names, else the owner.
         player: batch.chooser(),
         cards,
@@ -2919,6 +3012,7 @@ pub fn resolve_all(
         random_order,
     ) = match &ability.effect {
         Effect::ChangeZoneAll {
+            actor: _,
             origin,
             destination,
             target,
@@ -2981,6 +3075,7 @@ pub fn resolve_all(
 
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(state, ability, &target_filter);
+    let performer = instruction_performer(state, ability, filter_controller);
     let target_filter = owner_scoped_nonbattlefield_mass_filter(target_filter, &origin_zones);
 
     // Use a permissive default filter if the effect's target is None
@@ -3288,9 +3383,15 @@ pub fn resolve_all(
             member_library_placement.clone(),
             library_shuffle,
             None,
+            // CR 610.3: the return duration remains relative to the resolving
+            // controller, independently of the subject performing the exile.
             Some(ability.controller),
-            // CR 608.2c: the controller follows the instruction, so it performs the move.
-            Some(ability.controller),
+            // CR 608.2c: the instruction's subject performs the move; entry
+            // ownership keeps reading the controller.
+            crate::game::zone_pipeline::MoveActors {
+                performed_by: Some(performer),
+                ownership_actor: Some(ability.controller),
+            },
             owner,
             events,
         ) {
@@ -3365,6 +3466,7 @@ pub fn resolve_all(
                             .collect(),
                         source_id: ability.source_id,
                         controller: ability.controller,
+                        performed_by: performer,
                         origin: None,
                         destination: dest_zone,
                         enter_transformed: false,
@@ -3428,6 +3530,7 @@ pub fn resolve_all(
                             .collect(),
                         source_id: ability.source_id,
                         controller: ability.controller,
+                        performed_by: performer,
                         origin: None,
                         destination: dest_zone,
                         enter_transformed: false,
@@ -3603,9 +3706,10 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, AttachSelection, ControllerRef, FilterProp,
-        MultiTargetSpec, ParentTargetMissingReason, PlayerFilter, PtValue, QuantityExpr,
-        QuantityRef, ReplacementDefinition, ReplacementMode, StaticDefinition, TargetChoiceTiming,
-        TargetFilter, TargetReadOrigin, TargetRef, ThisWayCause, TypeFilter, TypedFilter,
+        LibraryInstructionActor, MultiTargetSpec, ParentTargetMissingReason, PlayerFilter, PtValue,
+        QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, StaticDefinition,
+        TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef, ThisWayCause, TypeFilter,
+        TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::PrintedLoyalty;
@@ -3622,6 +3726,7 @@ mod tests {
     fn make_hand_choice_ability(up_to: bool) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
@@ -3646,6 +3751,7 @@ mod tests {
     fn exact_scoped_graveyard_exile_ability() -> ResolvedAbility {
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
@@ -3847,6 +3953,7 @@ mod tests {
             });
             let ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Hand,
@@ -3886,6 +3993,7 @@ mod tests {
     fn optional_referent_move(target: TargetFilter, origin: Option<Zone>) -> ResolvedAbility {
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin,
                 destination: Zone::Battlefield,
@@ -4050,6 +4158,7 @@ mod tests {
         let ctx = ChangeZoneIterationCtx {
             source_id: ObjectId(100),
             controller: PlayerId(0),
+            performed_by: PlayerId(0),
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
             enter_transformed: false,
@@ -4091,6 +4200,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
@@ -4134,6 +4244,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
@@ -4179,6 +4290,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
@@ -4263,6 +4375,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
@@ -4336,6 +4449,7 @@ mod tests {
                 .push(core);
             let ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: Some(Zone::Hand),
                     destination: Zone::Battlefield,
@@ -4411,6 +4525,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
@@ -4482,6 +4597,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -4553,6 +4669,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -4627,6 +4744,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -4751,6 +4869,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -4888,6 +5007,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::None,
@@ -4971,6 +5091,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -5064,6 +5185,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
@@ -5150,6 +5272,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
@@ -5266,6 +5389,7 @@ mod tests {
         );
         let mut choice_ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Hand,
@@ -5320,6 +5444,7 @@ mod tests {
         );
         let all_ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter::default().properties(vec![
@@ -5471,6 +5596,7 @@ mod tests {
             });
             let mut ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: Some(Zone::Hand),
                     destination: Zone::Battlefield,
@@ -5576,6 +5702,7 @@ mod tests {
         )];
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination,
@@ -5706,6 +5833,7 @@ mod tests {
 
         let mut move_ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -5901,6 +6029,7 @@ mod tests {
         };
         ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -6037,6 +6166,7 @@ mod tests {
 
             let mut move_ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
@@ -7009,6 +7139,7 @@ mod tests {
                 }
                 let mut ability = ResolvedAbility::new(
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         origin: Some(Zone::Hand),
                         destination: Zone::Battlefield,
@@ -7350,6 +7481,7 @@ mod tests {
         });
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
@@ -7398,6 +7530,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
@@ -7448,6 +7581,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
@@ -7487,6 +7621,7 @@ mod tests {
         let source_id = ObjectId(100);
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
@@ -7535,6 +7670,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
@@ -7574,6 +7710,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
@@ -7657,6 +7794,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Library,
@@ -7705,6 +7843,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Library,
@@ -7753,6 +7892,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Library,
@@ -7899,6 +8039,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Hand,
                 target: TargetFilter::None,
@@ -7953,6 +8094,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Player,
@@ -8046,6 +8188,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
@@ -8119,6 +8262,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: None,
                 destination: Zone::Command,
                 target: TargetFilter::Typed(TypedFilter {
@@ -8192,6 +8336,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Player,
@@ -8263,6 +8408,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(
@@ -8305,6 +8451,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Player,
@@ -8378,6 +8525,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter {
@@ -8489,6 +8637,7 @@ mod tests {
         // CR 607.2a + CR 406.6: ChangeZoneAll with ExiledBySource moves linked cards to graveyard.
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Exile),
                 destination: Zone::Graveyard,
                 target: TargetFilter::ExiledBySource,
@@ -8542,6 +8691,7 @@ mod tests {
         let source_id = ObjectId(100);
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -8600,6 +8750,7 @@ mod tests {
         let source_id = ObjectId(100);
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -8654,6 +8805,7 @@ mod tests {
         // Try to exile from battlefield, but object is in graveyard
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
@@ -8714,6 +8866,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
@@ -8819,6 +8972,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Hand,
@@ -8895,6 +9049,7 @@ mod tests {
         .sub_ability(
             ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: Some(Zone::Battlefield),
                     destination: Zone::Exile,
@@ -8919,6 +9074,7 @@ mod tests {
             )
             .sub_ability(ResolvedAbility::new(
                 Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Exile,
                     target: TargetFilter::Typed(TypedFilter {
@@ -9012,6 +9168,7 @@ mod tests {
             )
             .sub_ability(ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
@@ -9066,6 +9223,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
@@ -9142,6 +9300,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
@@ -9210,6 +9369,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
@@ -9268,6 +9428,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
@@ -9337,6 +9498,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Library),
                 destination: Zone::Library,
                 target: TargetFilter::LastRevealed,
@@ -9398,6 +9560,7 @@ mod tests {
     fn library_bottom_change_zone_all(source_id: ObjectId) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Library),
                 destination: Zone::Library,
                 target: TargetFilter::LastRevealed,
@@ -10170,6 +10333,7 @@ mod tests {
     fn make_exhume_ability(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -10353,6 +10517,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -10492,6 +10657,7 @@ mod tests {
             ],
             source_id: ObjectId(100),
             controller: PlayerId(0),
+            performed_by: PlayerId(0),
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
             enter_transformed: false,
@@ -10618,6 +10784,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
@@ -10667,6 +10834,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
@@ -10719,6 +10887,7 @@ mod tests {
         trigger.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
@@ -10814,6 +10983,7 @@ mod tests {
     ) -> Vec<GameEvent> {
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
@@ -11069,6 +11239,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
@@ -11151,6 +11322,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Hand),
                 destination: Zone::Library,
                 target: TargetFilter::Controller,
@@ -11212,6 +11384,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -11292,6 +11465,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::creature()),
@@ -11347,6 +11521,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::creature()),
@@ -11449,6 +11624,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(
@@ -11551,6 +11727,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(
@@ -11692,6 +11869,7 @@ mod tests {
             //   Multi-zone same-name exile → Draw
             let multi_zone = ResolvedAbility::new(
                 Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::Typed(TypedFilter::default().properties(vec![
@@ -11717,6 +11895,7 @@ mod tests {
             //   Exile seed from opponent's graveyard → multi_zone
             let exile_seed = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Exile,
@@ -11831,6 +12010,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
@@ -11907,6 +12087,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Exile),
                 destination: Zone::Battlefield,
                 target: TargetFilter::TrackedSet {
@@ -11976,6 +12157,7 @@ mod tests {
         });
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::TrackedSetFiltered {
@@ -12061,6 +12243,7 @@ mod tests {
         });
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::TrackedSetFiltered {
@@ -12138,6 +12321,7 @@ mod tests {
         });
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::TrackedSetFiltered {
@@ -12224,6 +12408,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::TrackedSetFiltered {
@@ -12298,6 +12483,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::TrackedSetFiltered {
@@ -12336,6 +12522,7 @@ mod tests {
         state.tracked_object_sets.insert(set_id, vec![]);
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::TrackedSetFiltered {
@@ -12392,6 +12579,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -12458,6 +12646,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -12503,6 +12692,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
@@ -12556,6 +12746,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
@@ -12682,6 +12873,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
@@ -12818,6 +13010,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -12987,6 +13180,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
@@ -13105,6 +13299,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -13157,6 +13352,522 @@ mod tests {
         assert!(state.active_change_zone_frame().is_none());
     }
 
+    // ---------------------------------------------------------------------
+    // Instruction performer (issue #10414): the effect's parsed `actor` alone
+    // decides who performs a zone move. Nothing here is card-specific.
+    // ---------------------------------------------------------------------
+
+    // Latent typed contract, not a printed card: combine Mudhole's subject-form
+    // mass exile with Palace Jailer's monarch duration. The optional redirect
+    // below is synthetic too; declining it exposes the real delivery resume.
+    fn assert_subject_mass_monarch_duration(paused: bool) {
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let cards: Vec<_> = (0..2)
+            .map(|i| {
+                create_object(
+                    &mut state,
+                    CardId(9800 + i),
+                    PlayerId(1),
+                    format!("Typed duration subject {i}"),
+                    Zone::Graveyard,
+                )
+            })
+            .collect();
+        if paused {
+            let source = create_object(
+                &mut state,
+                CardId(9802),
+                PlayerId(0),
+                "Synthetic optional exile redirect".to_string(),
+                Zone::Battlefield,
+            );
+            let mut redirect = performer_test_pick_exile(
+                None,
+                TargetFilter::SelfRef,
+                PlayerId(0),
+                LibraryInstructionActor::Controller,
+            )
+            .effect;
+            if let Effect::ChangeZone { destination, .. } = &mut redirect {
+                *destination = Zone::Graveyard;
+            }
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .replacement_definitions
+                .push(
+                    ReplacementDefinition::new(ReplacementEvent::Moved)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .execute(AbilityDefinition::new(AbilityKind::Spell, redirect))
+                        .destination_zone(Zone::Exile),
+                );
+        }
+        let mut ability = performer_test_mass_exile(
+            scoped_subject(),
+            Some(Zone::Graveyard),
+            card_leg(
+                None,
+                vec![FilterProp::Owned {
+                    controller: ControllerRef::ScopedPlayer,
+                }],
+            ),
+            PlayerId(0),
+        );
+        ability.scoped_player = Some(PlayerId(1));
+        ability.duration = Some(Duration::UntilOpponentBecomesMonarch);
+        resolve_all(&mut state, &ability, &mut Vec::new()).expect("typed mass exile resolves");
+        if paused {
+            for _ in 0..2 {
+                assert!(matches!(
+                    state.waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ));
+                crate::game::engine::apply_as_current(
+                    &mut state,
+                    GameAction::ChooseReplacement { index: 1 },
+                )
+                .expect("decline the synthetic redirect");
+            }
+            assert!(state.active_change_zone_frame().is_none());
+        }
+        for id in &cards {
+            assert_eq!(state.objects[id].zone, Zone::Exile);
+            assert_eq!(state.objects[id].exiled_by, Some(PlayerId(1)));
+        }
+        // CR 610.3: the duration's opponent relation remains relative to P0,
+        // independently of P1 performing every exile, including resumed ones.
+        let mut events = vec![GameEvent::MonarchChanged {
+            player_id: PlayerId(0),
+        }];
+        crate::game::engine::check_exile_returns(&mut state, &mut events);
+        for id in &cards {
+            assert_eq!(
+                state.objects[id].zone,
+                Zone::Exile,
+                "P0 is not their own opponent"
+            );
+        }
+        let mut events = vec![GameEvent::MonarchChanged {
+            player_id: PlayerId(1),
+        }];
+        crate::game::engine::check_exile_returns(&mut state, &mut events);
+        for id in cards {
+            assert_eq!(
+                state.objects[&id].zone,
+                Zone::Graveyard,
+                "P1 is P0's opponent"
+            );
+        }
+        assert!(state.exile_links.is_empty());
+    }
+
+    #[test]
+    fn subject_mass_exile_duration_stays_controller_relative() {
+        assert_subject_mass_monarch_duration(false);
+    }
+
+    #[test]
+    fn paused_subject_mass_exile_duration_stays_controller_relative() {
+        assert_subject_mass_monarch_duration(true);
+    }
+
+    /// The actor the parser binds for a scoped or targeted player subject
+    /// ("that player exiles …", "target player exiles …").
+    fn scoped_subject() -> LibraryInstructionActor {
+        LibraryInstructionActor::Player {
+            player: TargetFilter::ScopedPlayer,
+        }
+    }
+
+    fn performer_test_mass_exile(
+        actor: LibraryInstructionActor,
+        origin: Option<Zone>,
+        target: TargetFilter,
+        controller: PlayerId,
+    ) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                actor,
+                origin,
+                destination: Zone::Exile,
+                target,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                library_shuffle: Default::default(),
+                random_order: false,
+            },
+            vec![],
+            ObjectId(9700),
+            controller,
+        )
+    }
+
+    fn performer_test_pick_exile(
+        origin: Option<Zone>,
+        target: TargetFilter,
+        controller: PlayerId,
+        actor: LibraryInstructionActor,
+    ) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::ChangeZone {
+                actor,
+                origin,
+                destination: Zone::Exile,
+                target,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+                library_shuffle: Default::default(),
+            },
+            vec![],
+            ObjectId(9700),
+            controller,
+        )
+    }
+
+    fn card_leg(controller: Option<ControllerRef>, properties: Vec<FilterProp>) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Card],
+            controller,
+            properties,
+        })
+    }
+
+    fn owned_by_scoped_player() -> FilterProp {
+        FilterProp::Owned {
+            controller: ControllerRef::ScopedPlayer,
+        }
+    }
+
+    /// Equivalent encodings of "the scoped player's library card" that earlier
+    /// reviews of this issue paired: a typed `controller` and its `Owned`
+    /// rewrite, an inline zone and an explicit origin, a split conjunction, a
+    /// negated graveyard leg, a double negation and a one-leg disjunction.
+    fn scoped_library_card_encodings() -> Vec<(&'static str, Option<Zone>, TargetFilter)> {
+        let library = FilterProp::InZone {
+            zone: Zone::Library,
+        };
+        let library_or_graveyard = FilterProp::InAnyZone {
+            zones: vec![Zone::Library, Zone::Graveyard],
+        };
+        let owned_library = card_leg(None, vec![owned_by_scoped_player(), library.clone()]);
+        let owned_library_or_graveyard =
+            card_leg(None, vec![owned_by_scoped_player(), library_or_graveyard]);
+        vec![
+            (
+                "typed controller, inline zone",
+                None,
+                card_leg(Some(ControllerRef::ScopedPlayer), vec![library.clone()]),
+            ),
+            ("owned, inline zone", None, owned_library.clone()),
+            (
+                "owned, explicit origin",
+                Some(Zone::Library),
+                card_leg(None, vec![owned_by_scoped_player()]),
+            ),
+            (
+                "split conjunction",
+                Some(Zone::Library),
+                TargetFilter::And {
+                    filters: vec![
+                        owned_library_or_graveyard.clone(),
+                        card_leg(None, vec![library]),
+                    ],
+                },
+            ),
+            (
+                "negated graveyard leg",
+                Some(Zone::Library),
+                TargetFilter::And {
+                    filters: vec![
+                        owned_library_or_graveyard,
+                        TargetFilter::Not {
+                            filter: Box::new(card_leg(
+                                None,
+                                vec![FilterProp::InZone {
+                                    zone: Zone::Graveyard,
+                                }],
+                            )),
+                        },
+                    ],
+                },
+            ),
+            (
+                "double negation",
+                Some(Zone::Library),
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::Not {
+                        filter: Box::new(owned_library.clone()),
+                    }),
+                },
+            ),
+            (
+                "one-leg disjunction",
+                Some(Zone::Library),
+                TargetFilter::Or {
+                    filters: vec![owned_library],
+                },
+            ),
+        ]
+    }
+
+    /// Exiles with one encoding through `resolve_all` (mass) or `resolve` (a
+    /// single-eligible pick) for controller P0 and scoped player P1, and
+    /// returns each exiled card's name and `exiled_by`. The board holds one
+    /// matching card and two near misses: P1's graveyard card and P0's
+    /// library card.
+    fn scoped_library_exile_outcome(
+        mass: bool,
+        actor: LibraryInstructionActor,
+        origin: Option<Zone>,
+        target: TargetFilter,
+    ) -> Vec<(String, Option<PlayerId>)> {
+        let mut state = GameState::new_two_player(42);
+        for (card, owner, name, zone) in [
+            (9710, 1, "P1 library card", Zone::Library),
+            (9711, 1, "P1 graveyard card", Zone::Graveyard),
+            (9712, 0, "P0 library card", Zone::Library),
+        ] {
+            create_object(
+                &mut state,
+                CardId(card),
+                PlayerId(owner),
+                name.to_string(),
+                zone,
+            );
+        }
+        let mut ability = if mass {
+            performer_test_mass_exile(actor, origin, target, PlayerId(0))
+        } else {
+            performer_test_pick_exile(origin, target, PlayerId(0), actor)
+        };
+        ability.scoped_player = Some(PlayerId(1));
+        let mut events = Vec::new();
+        if mass {
+            resolve_all(&mut state, &ability, &mut events).expect("mass exile resolves");
+        } else {
+            resolve(&mut state, &ability, &mut events).expect("pick resolves");
+        }
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "a single eligible card takes the prompt-free path"
+        );
+        let mut exiled: Vec<_> = state
+            .objects
+            .values()
+            .filter(|object| object.zone == Zone::Exile)
+            .map(|object| (object.name.clone(), object.exiled_by))
+            .collect();
+        exiled.sort();
+        exiled
+    }
+
+    /// CR 608.2c: who performs a zone move is the instruction's parsed actor,
+    /// so equivalent filter encodings select the same card and record the same
+    /// exiling player through both the mass (`ChangeZoneAll`) and pick
+    /// (`ChangeZone`) resolvers: the controller for a subjectless instruction
+    /// ("exile a nonland card from their library", Rahilda, Wanted Cutthroat),
+    /// the subject for a subject-form one ("that player exiles …").
+    ///
+    /// Revert sensitivity: crediting `ability.controller` regardless of the
+    /// actor (the pre-fix performer) records P0 on every subject row.
+    #[test]
+    fn performer_follows_the_actor_across_resolvers_and_equivalent_encodings() {
+        for (actor, performer) in [
+            (LibraryInstructionActor::Controller, PlayerId(0)),
+            (scoped_subject(), PlayerId(1)),
+        ] {
+            for (label, origin, filter) in scoped_library_card_encodings() {
+                let mass =
+                    scoped_library_exile_outcome(true, actor.clone(), origin, filter.clone());
+                let pick = scoped_library_exile_outcome(false, actor.clone(), origin, filter);
+                assert_eq!(
+                    mass,
+                    vec![("P1 library card".to_string(), Some(performer))],
+                    "{label} ({actor:?}): the mass move exiles exactly the scoped library card"
+                );
+                assert_eq!(
+                    pick, mass,
+                    "{label} ({actor:?}): the pick matches the mass move"
+                );
+            }
+        }
+    }
+
+    /// CR 608.2c: a random single pick with a subject ("that player exiles a
+    /// card at random from their hand") is that subject's exile. This reaches
+    /// the `TargetSelectionMode::Random` single-pick arm of `resolve`, which is
+    /// checked before the single-eligible shortcut, so two eligible cards make
+    /// the random draw observable (one is exiled, the other stays). Rona,
+    /// Tolarian Obliterator ("that source's controller exiles a card from their
+    /// hand at random") reaches the same arm with a parent-target subject.
+    ///
+    /// Revert sensitivity: reverting that arm's `Some(performer)` to
+    /// `Some(ability.controller)` records `Some(P0)` and fails the
+    /// `exiled_by == Some(P1)` assertion.
+    #[test]
+    fn random_single_pick_with_a_subject_records_that_player() {
+        let mut state = GameState::new_two_player(42);
+        let mk = |state: &mut GameState, card: u64, owner: u8, name: &str| {
+            create_object(
+                state,
+                CardId(card),
+                PlayerId(owner),
+                name.to_string(),
+                Zone::Hand,
+            )
+        };
+        let p1_a = mk(&mut state, 9740, 1, "P1 Hand A");
+        let p1_b = mk(&mut state, 9741, 1, "P1 Hand B");
+        let p0_card = mk(&mut state, 9742, 0, "P0 Hand Card");
+
+        let filter = card_leg(
+            None,
+            vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::ScopedPlayer,
+                },
+                FilterProp::InZone { zone: Zone::Hand },
+            ],
+        );
+        let mut ability =
+            performer_test_pick_exile(Some(Zone::Hand), filter, PlayerId(0), scoped_subject());
+        ability.target_selection_mode = TargetSelectionMode::Random;
+        ability.scoped_player = Some(PlayerId(1));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("random hand pick resolves");
+
+        // Reach-guards: exactly one of the two P1 cards was drawn at random,
+        // nothing prompted, and the controller's own card was untouched.
+        let exiled: Vec<ObjectId> = [p1_a, p1_b]
+            .into_iter()
+            .filter(|id| state.objects[id].zone == Zone::Exile)
+            .collect();
+        assert_eq!(exiled.len(), 1, "exactly one of the two P1 cards is exiled");
+        let kept = if exiled[0] == p1_a { p1_b } else { p1_a };
+        assert_eq!(state.objects[&kept].zone, Zone::Hand);
+        assert_eq!(state.objects[&p0_card].zone, Zone::Hand);
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::EffectZoneChoice { .. }
+        ));
+
+        assert_eq!(
+            state.objects[&exiled[0]].exiled_by,
+            Some(PlayerId(1)),
+            "the subject of a random pick is the exiling player"
+        );
+    }
+
+    /// CR 608.2c + CR 108.3: an `actor` naming the parent target's owner ("its
+    /// owner shuffles it into their library": Blink, Deglamer, Inferno
+    /// Hellion) credits that owner, not the controller of the moved object or
+    /// of the ability. Those cards move to a library, where nothing observes
+    /// the performer, so this synthetic row exiles to make the credit
+    /// observable; the printed owner-performed exile is Ashiok, Nightmare
+    /// Muse's -3, exercised through the public path in
+    /// `exile_attribution_10414.rs`.
+    ///
+    /// Revert sensitivity: crediting `ability.controller` records P0.
+    #[test]
+    fn parent_target_owner_actor_credits_the_owner() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(9750),
+            PlayerId(1),
+            "Borrowed permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&card).unwrap().controller = PlayerId(0);
+        let mut ability = performer_test_pick_exile(
+            None,
+            TargetFilter::ParentTarget,
+            PlayerId(0),
+            LibraryInstructionActor::Player {
+                player: TargetFilter::ParentTargetOwner,
+            },
+        );
+        ability.targets = vec![TargetRef::Object(card)];
+        resolve(&mut state, &ability, &mut Vec::new()).expect("the exile resolves");
+        assert_eq!(state.objects[&card].zone, Zone::Exile);
+        assert_eq!(
+            state.objects[&card].exiled_by,
+            Some(PlayerId(1)),
+            "the owner performs the move, not the controller of the moved permanent"
+        );
+    }
+
+    /// CR 614.6 + CR 608.2c: in a draw replacement ("that player exiles the top
+    /// card of one of their opponents' libraries face down instead", Shared
+    /// Fate) three players are told apart: the drawer, whose replaced draw it
+    /// is and who performs the exile; the owner of the library the card leaves;
+    /// and the controller of the replacement. The parser stamps the drawer as
+    /// `Player { PostReplacementDamageTarget }` (`subject_actor_tests`); this
+    /// row resolves that actor against a replaced draw. Synthetic: the
+    /// printed Shared Fate parses its target as the drawer too, so no printed
+    /// card reaches this shape end to end; the move is the resolver's own
+    /// exile of an announced card.
+    ///
+    /// Revert sensitivity: crediting `ability.controller` records P0; crediting
+    /// the library owner records P2.
+    #[test]
+    fn draw_replacement_drawer_performs_apart_from_library_owner_and_controller() {
+        let (controller, drawer, library_owner) = (PlayerId(0), PlayerId(1), PlayerId(2));
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let card = create_object(
+            &mut state,
+            CardId(9751),
+            library_owner,
+            "Opponent library card".to_string(),
+            Zone::Library,
+        );
+        let placeholder = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(9701), controller);
+        let mut drain = crate::types::game_state::PostReplacementDrain::ready(
+            crate::types::ability::PostReplacementContinuation::Resolved(Box::new(placeholder)),
+        );
+        drain.event_target = Some(TargetRef::Player(drawer));
+        let mut drains = crate::types::game_state::PostReplacementDrainStack::default();
+        assert!(drains.install(
+            drain,
+            crate::types::game_state::ResidentDrainPolicy::KeepResident,
+        ));
+        state.resolution_stack.push_post_replacement(drains);
+
+        let mut ability = performer_test_pick_exile(
+            None,
+            TargetFilter::ParentTarget,
+            controller,
+            LibraryInstructionActor::Player {
+                player: TargetFilter::PostReplacementDamageTarget,
+            },
+        );
+        ability.targets = vec![TargetRef::Object(card)];
+        resolve(&mut state, &ability, &mut Vec::new()).expect("the exile resolves");
+
+        assert_eq!(state.objects[&card].zone, Zone::Exile);
+        assert_eq!(state.objects[&card].owner, library_owner);
+        assert_eq!(
+            state.objects[&card].exiled_by,
+            Some(drawer),
+            "the drawing player performs the exile, not the controller or the library's owner"
+        );
+    }
+
     /// CR 614.12 + CR 701.24a + CR 701.24d: a parser-emitted mass “shuffle
     /// [set] into [library]” move that parks on per-member replacement choices
     /// retains its terminal-shuffle placement through every resume. The member
@@ -13203,6 +13914,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
                             library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
@@ -13236,6 +13948,7 @@ mod tests {
 
         let mass_move = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Library,
                 target: TargetFilter::Any,
@@ -13615,6 +14328,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
                             library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
@@ -13797,6 +14511,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
@@ -13859,6 +14574,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
@@ -13940,6 +14656,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
@@ -14042,6 +14759,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
@@ -14255,6 +14973,7 @@ mod tests {
         // canonical card that emits this exact prompt with both shocks
         // present, so the test drives the resume path directly.
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards: vec![shock_a, shock_b, graveyard_land],
             count: 3,
@@ -14344,6 +15063,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -14446,6 +15166,7 @@ mod tests {
 
         let put_sub = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Hand,
@@ -14577,6 +15298,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Exile),
                 destination: Zone::Battlefield,
@@ -14661,6 +15383,7 @@ mod tests {
         // must still flip control to the sole opponent, player 1.
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
@@ -14725,6 +15448,7 @@ mod tests {
         }
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
@@ -14813,6 +15537,7 @@ mod tests {
         });
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: None,
                 destination: Zone::Hand,
                 target: TargetFilter::TrackedSetFiltered {
@@ -14915,6 +15640,7 @@ mod exile_card_population_tests {
     fn change_zone_all(origin: Zone, destination: Zone, target: TargetFilter) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(origin),
                 destination,
                 target,
@@ -15010,6 +15736,7 @@ mod exile_card_population_tests {
         let (mut state, card, copy) = board();
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,

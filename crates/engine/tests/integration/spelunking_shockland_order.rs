@@ -373,6 +373,7 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
                 incarnation: runner.state().objects[&source].incarnation,
             },
             grant: None,
+            actor: Default::default(),
         },
         source_name: "Search Rider".to_string(),
         description: "Exile it instead".to_string(),
