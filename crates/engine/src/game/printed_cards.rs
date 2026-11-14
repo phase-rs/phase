@@ -1636,6 +1636,16 @@ pub fn install_card_db(state: &mut GameState, db: std::sync::Arc<CardDatabase>) 
 /// only: contributes no `changed_any`, so no revision bump, layer flush, or
 /// finalization follows. Hidden library and Boss-pile objects repair here too
 /// and are re-concealed per-projection by `redact_printed_identity`.
+/// Also recovers the corrected Horde token art ref through the existing preset
+/// identity (CR 111.3: characteristics define token game state, while art
+/// selection is a client presentation concern): an object whose stored
+/// `token_image_ref` resolves via `known_token_preset_by_id`, whose preset
+/// carries its own ref, and whose stored ref differs from the preset's has
+/// the whole `TokenImageRef` replaced with `horde_token_image_ref(preset)` —
+/// the creation stamp, reused verbatim, never field-merged. The ref predicate
+/// is deliberately decoupled from the routing predicate above, so objects that
+/// already route as `Token` but carry a stale ref (post-routing-repair saves,
+/// future overlay corrections) heal on the next restore too.
 fn repair_horde_token_display_routes(state: &mut GameState) {
     use crate::game::game_object::DisplaySource;
 
@@ -1656,6 +1666,34 @@ fn repair_horde_token_display_routes(state: &mut GameState) {
                 .get_mut(&object_id)
                 .expect("id from live keys")
                 .display_source = DisplaySource::Token;
+        }
+        // Ref recovery through the stored preset identity: whole-ref
+        // replacement with the creation stamp. Decoupled from `repair` above
+        // by design (see doc comment): already-`Token`-routed objects with a
+        // stale ref heal here too.
+        let healed_ref = state.objects.get(&object_id).and_then(|obj| {
+            if !(obj.is_horde_deck_token && obj.is_token) {
+                return None;
+            }
+            let stored = obj.token_image_ref.as_ref()?;
+            let preset = crate::game::token_presets::known_token_preset_by_id(&stored.preset_id)?;
+            // An imageless preset cannot supply a corrected ref; leave it alone.
+            if preset.token_image_ref.is_none() {
+                return None;
+            }
+            let expected = crate::game::deck_loading::horde_token_image_ref(preset);
+            if *stored != expected {
+                Some(expected)
+            } else {
+                None
+            }
+        });
+        if let Some(expected) = healed_ref {
+            state
+                .objects
+                .get_mut(&object_id)
+                .expect("id from live keys")
+                .token_image_ref = Some(expected);
         }
     }
 }
@@ -2149,23 +2187,98 @@ mod tests {
     /// The old-save shape is exact, not hand-waved: the state serializes,
     /// every `display_source` key is stripped (the pre-PR `skip_serializing_if`
     /// omission), and the stripped JSON deserializes before rehydration. The
-    /// pinned art ref is the ORIGINAL pre-PR value — including the typo'd
-    /// `scryfall_id` (`444` for `4a44`) the overlay fix later corrected —
-    /// because the repair retains the ref verbatim rather than correcting
-    /// it; the corrected image resolves client-side through the ref's
-    /// oracle-id fallback rung (see the stale-ref `useCardImage` test).
+    /// pinned art ref is the ORIGINAL pre-PR typo'd scryfall_id (444 for
+    /// 4a44); the restore repair replaces the whole TokenImageRef from the
+    /// stored preset_id via horde_token_image_ref, so the projected graveyard
+    /// Event exposes the corrected fac36345-b2fb-4a44-... ref through the
+    /// ordinary client exact-ref/graveyard image path with no live search.
+    ///
+    /// Row map (each row discriminates one guard): Row 1 (Smackdown, old-save
+    /// Card routing + typo'd ref) heals route AND ref; Row 2 (Bebop's Rampage,
+    /// already-Token routing + cross-wired Smackdown art bytes under its own
+    /// preset_id) heals ref only, proving the decoupled predicate and that
+    /// recovery keys on preset identity (A recovers A-ref, B recovers B-ref —
+    /// no swap); Row 3 (synthetic None / unknown-preset / already-correct
+    /// refs — no printed Horde Event exhibits these shapes; overlay survey:
+    /// 28 TTMC rows paired 28/28, plus the Cyberman/Dalek bodies the classic
+    /// decks resolve by name, 30/30 total; the only known historical
+    /// stored-vs-expected disagreement is Smackdown's 444/4a44 typo) pins
+    /// each defensive guard; Row 4 keeps the hidden-pile concealment and the
+    /// copy-like control; Row 5 pins the display-only boundary (no revision
+    /// bump) while the corrected ref is delivered live and projected.
+    /// Recovery is single-sourced: preset identity is the authority for Horde art at
+    /// restore, so future overlay corrections heal the same way.
     #[test]
     fn restore_repairs_horde_token_display_routes_but_keeps_hidden_piles_concealed() {
+        use crate::game::deck_loading::horde_token_image_ref;
         use crate::game::game_object::DisplaySource;
+        use crate::game::token_presets::known_token_preset_by_id;
         use crate::types::card::TokenImageRef;
         use crate::types::player::PlayerId;
 
         let mut state = GameState::new_two_player(42);
-        let original_smackdown_ref = || TokenImageRef {
+        // Row 1 real card: Event: Leatherhead's Smackdown, TTMC #20. Verbatim
+        // Oracle text (overlay rules_text): "As a team, the heroes choose a
+        // creature with the greatest power among creatures they control.
+        // Destroy it. The bosses lose life equal to that creature's power."
+        // (preset f13c9091-91b6-51b4-91d5-214180ff03ee, oracle
+        // 4e7833c7-e9ff-4550-b2fd-36afe6087e0f; CR 111.3
+        // characteristics-vs-art). The old save pins the ORIGINAL pre-PR
+        // typo'd scryfall_id (444 for 4a44) below.
+        let typo_smackdown_ref = || TokenImageRef {
             scryfall_id: "fac36345-b2fb-444-a499-f68bbe87e736".to_string(),
             scryfall_oracle_id: Some("4e7833c7-e9ff-4550-b2fd-36afe6087e0f".to_string()),
             face_name: None,
             preset_id: "f13c9091-91b6-51b4-91d5-214180ff03ee".to_string(),
+        };
+        // The corrected ref, computed through the preset identity the repair
+        // itself uses — never hand-typed, so the assertions pin the recovery
+        // path rather than a duplicate literal.
+        let expected_smackdown_ref = horde_token_image_ref(
+            known_token_preset_by_id("f13c9091-91b6-51b4-91d5-214180ff03ee")
+                .expect("Smackdown preset resolves"),
+        );
+        assert_eq!(
+            expected_smackdown_ref.scryfall_id, "fac36345-b2fb-4a44-a499-f68bbe87e736",
+            "the preset carries the corrected post-PR art ref"
+        );
+        // Row 2 real card: Event: Bebop's Rampage, TTMC #16. Verbatim Oracle
+        // text (overlay rules_text): "Bebop's Rampage deals 2 damage to each
+        // creature the heroes control." (preset
+        // 8fa1fc05-4093-5f4c-9fa1-2e7570f0640d, oracle
+        // 49ca922a-86bb-4173-8782-091b751efcd9; CR 111.3). Its stored ref is
+        // cross-wired to the Smackdown art bytes while keeping its OWN
+        // preset_id: recovery keys on preset identity, never the stored art.
+        let crosswired_bebop_ref = || TokenImageRef {
+            scryfall_id: expected_smackdown_ref.scryfall_id.clone(),
+            scryfall_oracle_id: expected_smackdown_ref.scryfall_oracle_id.clone(),
+            face_name: None,
+            preset_id: "8fa1fc05-4093-5f4c-9fa1-2e7570f0640d".to_string(),
+        };
+        let expected_bebop_ref = horde_token_image_ref(
+            known_token_preset_by_id("8fa1fc05-4093-5f4c-9fa1-2e7570f0640d")
+                .expect("Bebop's Rampage preset resolves"),
+        );
+        assert_eq!(
+            expected_bebop_ref.scryfall_id, "b05811b0-1856-4cf8-9910-44da1a994116",
+            "the Bebop preset carries its own art ref (no swap)"
+        );
+        assert_ne!(
+            expected_smackdown_ref, expected_bebop_ref,
+            "precondition: the two presets carry distinct refs, so the per-object assertions discriminate a swap"
+        );
+        // Row 3 is synthetic by necessity (see doc comment): a `None` ref, an
+        // unresolvable preset id, and an already-correct ref.
+        let unknown_preset_id = "00000000-0000-0000-0000-000000000000";
+        assert!(
+            known_token_preset_by_id(unknown_preset_id).is_none(),
+            "precondition: the synthetic preset id resolves nowhere"
+        );
+        let unknown_preset_ref = || TokenImageRef {
+            scryfall_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string(),
+            scryfall_oracle_id: None,
+            face_name: None,
+            preset_id: unknown_preset_id.to_string(),
         };
         // A revealed Event already in the public graveyard (old shape: token
         // flags + art ref, default Card routing, no printed identity).
@@ -2180,7 +2293,77 @@ mod tests {
             let obj = state.objects.get_mut(&event).expect("graveyard Event");
             obj.is_token = true;
             obj.is_horde_deck_token = true;
-            obj.token_image_ref = Some(original_smackdown_ref());
+            obj.token_image_ref = Some(typo_smackdown_ref());
+            obj.display_source = DisplaySource::Card;
+        }
+        // Row 2: the second Event. Same old-save shape; its already-Token
+        // routing is stamped post-deserialize below (a post-routing-repair
+        // save), so only the decoupled ref predicate can heal it.
+        let bebop = create_object(
+            &mut state,
+            CardId(105),
+            PlayerId(1),
+            "Event: Bebop's Rampage".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&bebop).expect("graveyard Bebop");
+            obj.is_token = true;
+            obj.is_horde_deck_token = true;
+            obj.token_image_ref = Some(crosswired_bebop_ref());
+            obj.display_source = DisplaySource::Card;
+        }
+        // Row 3 legs: a token-layout object with no stored ref, one whose
+        // preset id resolves nowhere, and one already carrying the corrected
+        // ref (the stored-differs guard's no-op side).
+        let none_ref_obj = create_object(
+            &mut state,
+            CardId(106),
+            PlayerId(1),
+            "Stale Route Only".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state
+                .objects
+                .get_mut(&none_ref_obj)
+                .expect("ref-less object");
+            obj.is_token = true;
+            obj.is_horde_deck_token = true;
+            obj.display_source = DisplaySource::Card;
+        }
+        let unknown_ref_obj = create_object(
+            &mut state,
+            CardId(107),
+            PlayerId(1),
+            "Unknown Preset".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state
+                .objects
+                .get_mut(&unknown_ref_obj)
+                .expect("unknown-preset object");
+            obj.is_token = true;
+            obj.is_horde_deck_token = true;
+            obj.token_image_ref = Some(unknown_preset_ref());
+            obj.display_source = DisplaySource::Card;
+        }
+        let already_correct_obj = create_object(
+            &mut state,
+            CardId(108),
+            PlayerId(1),
+            "Already Correct".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state
+                .objects
+                .get_mut(&already_correct_obj)
+                .expect("already-correct object");
+            obj.is_token = true;
+            obj.is_horde_deck_token = true;
+            obj.token_image_ref = Some(expected_smackdown_ref.clone());
             obj.display_source = DisplaySource::Card;
         }
         // A hidden Horde library card and a face-down Boss-pile card.
@@ -2198,7 +2381,7 @@ mod tests {
                 .expect("library card");
             obj.is_token = true;
             obj.is_horde_deck_token = true;
-            obj.token_image_ref = Some(original_smackdown_ref());
+            obj.token_image_ref = Some(typo_smackdown_ref());
             obj.display_source = DisplaySource::Card;
         }
         let pile_boss = create_object(
@@ -2213,7 +2396,7 @@ mod tests {
             let obj = state.objects.get_mut(&pile_boss).expect("pile Boss");
             obj.is_token = true;
             obj.is_horde_deck_token = true;
-            obj.token_image_ref = Some(original_smackdown_ref());
+            obj.token_image_ref = Some(typo_smackdown_ref());
             obj.display_source = DisplaySource::Card;
             obj.face_down = true;
         }
@@ -2265,27 +2448,99 @@ mod tests {
             DisplaySource::Card,
             "precondition: the omission deserializes to Card routing"
         );
+        // Post-routing-repair save shape for Row 2: a previous restore
+        // already stamped `Token` routing, but the ref stayed stale. Only the
+        // decoupled ref predicate heals this object; a coupled predicate
+        // (ref-heal gated on the routing repair firing) would leave it stale.
+        restored
+            .objects
+            .get_mut(&bebop)
+            .expect("restored Bebop")
+            .display_source = DisplaySource::Token;
 
+        // Row 5 display-only boundary: capture the publication gate before
+        // rehydration; the repair must not move it.
+        // Settle via the production path before capture: the deserialized
+        // construction shape carries a transient layer-dirty flag, and the
+        // rehydrate gate fires on it regardless of the repair. Flushing first
+        // models a save at rest, so the gate below depends only on what the
+        // rehydrate pass itself changes.
+        crate::game::layers::flush_layers(&mut restored);
+        let revision_before = restored.state_revision;
+        let layers_dirty_before = restored.layers_dirty.is_dirty();
+        // (flush marks public state dirty but never bumps the revision).
+
+        // Immediate finalization here vs Defer on the engine-wasm/server-core
+        // restore path is immaterial: acceptance reads live objects and the
+        // viewer projection, not the revision gate.
         rehydrate_game_from_card_db(&mut restored, &CardDatabase::default());
+        // Gate inputs settled above: changed_any stays false and layers stay clean,
+        // so no bump or finalize follows from this display-only pass.
 
+        // Row 1: the revealed Event heals route AND ref.
+        let event_obj = restored.objects.get(&event).expect("rehydrated Event");
         assert_eq!(
-            restored
-                .objects
-                .get(&event)
-                .expect("rehydrated Event")
-                .display_source,
+            event_obj.display_source,
             DisplaySource::Token,
             "the revealed Event routes as a token after restore"
         );
         assert_eq!(
-            restored
-                .objects
-                .get(&event)
-                .expect("rehydrated Event")
-                .token_image_ref,
-            Some(original_smackdown_ref()),
-            "the repair retains the original art ref verbatim for the client to resolve"
+            event_obj.token_image_ref,
+            Some(expected_smackdown_ref.clone()),
+            "the stale ref heals to the corrected preset ref"
         );
+        // Row 2: already-Token routing is retained and the cross-wired ref
+        // heals to the object's OWN preset ref (Bebop recovers Bebop's art,
+        // not the stored Smackdown bytes — no swap).
+        let bebop_obj = restored.objects.get(&bebop).expect("rehydrated Bebop");
+        assert_eq!(
+            bebop_obj.display_source,
+            DisplaySource::Token,
+            "already-Token routing is retained"
+        );
+        assert_eq!(
+            bebop_obj.token_image_ref,
+            Some(expected_bebop_ref.clone()),
+            "recovery keys on preset identity, not the stored art bytes"
+        );
+        // Row 3: routing still heals on every leg, while the ref guards hold.
+        let none_obj = restored
+            .objects
+            .get(&none_ref_obj)
+            .expect("rehydrated ref-less object");
+        assert_eq!(
+            none_obj.display_source,
+            DisplaySource::Token,
+            "routing heals without a stored ref"
+        );
+        assert!(
+            none_obj.token_image_ref.is_none(),
+            "a missing ref stays missing"
+        );
+        let unknown_obj = restored
+            .objects
+            .get(&unknown_ref_obj)
+            .expect("rehydrated unknown-preset object");
+        assert_eq!(
+            unknown_obj.display_source,
+            DisplaySource::Token,
+            "routing heals with an unresolvable preset id"
+        );
+        assert_eq!(
+            unknown_obj.token_image_ref,
+            Some(unknown_preset_ref()),
+            "an unresolvable preset id stays verbatim"
+        );
+        let already_obj = restored
+            .objects
+            .get(&already_correct_obj)
+            .expect("rehydrated already-correct object");
+        assert_eq!(
+            already_obj.token_image_ref,
+            Some(expected_smackdown_ref.clone()),
+            "an already-correct ref is untouched"
+        );
+        // Row 4: the copy-like control keeps Card routing.
         assert_eq!(
             restored
                 .objects
@@ -2297,14 +2552,21 @@ mod tests {
         );
 
         // Hidden piles stay concealed in the delivered viewer snapshot while
-        // the revealed Event keeps its exposed token art.
+        // the revealed Events keep their exposed token art.
         let filtered = crate::game::visibility::filter_state_for_viewer(&restored, PlayerId(0));
         let shown = filtered.objects.get(&event).expect("projected Event");
         assert_eq!(shown.display_source, DisplaySource::Token);
         assert_eq!(
             shown.token_image_ref,
-            Some(original_smackdown_ref()),
-            "the public Event exposes the original token art ref"
+            Some(expected_smackdown_ref.clone()),
+            "the public Event exposes the corrected token art ref"
+        );
+        let shown_bebop = filtered.objects.get(&bebop).expect("projected Bebop");
+        assert_eq!(shown_bebop.display_source, DisplaySource::Token);
+        assert_eq!(
+            shown_bebop.token_image_ref,
+            Some(expected_bebop_ref.clone()),
+            "the public Bebop exposes its own corrected token art ref"
         );
         for (id, what) in [(hidden_library, "library card"), (pile_boss, "pile Boss")] {
             let hidden = filtered.objects.get(&id).expect(what);
@@ -2317,6 +2579,19 @@ mod tests {
             assert!(hidden.token_image_ref.is_none(), "{what} art ref concealed");
             assert!(!hidden.is_horde_deck_token, "{what} Horde flag concealed");
         }
+
+        // Row 5: the display-only repair contributes no revision bump and no
+        // layer dirtying — a revert that adds changed_any/bump to the new step
+        // fails here — while the corrected refs ARE delivered above.
+        assert_eq!(
+            restored.state_revision, revision_before,
+            "display-only repair must not bump the state revision"
+        );
+        assert_eq!(
+            restored.layers_dirty.is_dirty(),
+            layers_dirty_before,
+            "display-only repair must not dirty the layer state"
+        );
     }
 
     /// CR 611.2c + CR 613.1 (issue #8485, round-5 HIGH-1): a transform ROUND TRIP
