@@ -1304,6 +1304,7 @@ fn redact_activation_records(filtered: &mut GameState) {
             // is in flight in any of these.
             PendingCostMoveResume::WardSacrificePayment { .. }
             | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
             | PendingCostMoveResume::Foretell { .. }
             | PendingCostMoveResume::UnlessBouncePayment { .. }
             | PendingCostMoveResume::ManaAbilityPayment { .. }
@@ -6512,6 +6513,7 @@ mod tests {
                     trigger_event: Some(event.clone()),
                     effect_description: None,
                     remaining: Vec::new(),
+                    repeat: None,
                 },
             ),
             (
@@ -7033,6 +7035,7 @@ mod tests {
             trigger_event: Some(fixture.event.clone()),
             effect_description: None,
             remaining: Vec::new(),
+            repeat: None,
         };
         pending.cost_move_resume = Some(ManaAbilityResume::EffectPayCost {
             payer: fixture.owner,
@@ -7098,6 +7101,7 @@ mod tests {
                     trigger_event: None,
                     effect_description: None,
                     remaining: Vec::new(),
+                    repeat: None,
                 }),
             ),
             (
@@ -8027,6 +8031,7 @@ mod tests {
             cost_reduction_election: None,
             activation_cost_snapshot: None,
             activation_cost: None,
+            activation_cost_paused_on_draw: false,
             deferred_hand_discard_cost: None,
             prepaid_finalization: None,
             activation_ability_index: None,
@@ -8091,6 +8096,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            repeat: None,
         };
 
         let filtered = filter_state_for_viewer(&state, PlayerId(1));

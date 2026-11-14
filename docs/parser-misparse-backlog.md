@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4504
-- **Total card appearances across root causes:** 4537 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4502
+- **Total card appearances across root causes:** 4535 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
@@ -39,7 +39,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
 | 1 | Relative-clause / filter restriction on target dropped | 724 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
-| 2 | Dropped intervening-if / gating condition (condition: null) | 570 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
+| 2 | Dropped intervening-if / gating condition (condition: null) | 568 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
 | 3 | Anaphor bound to wrong referent | 400 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 380 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 323 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
@@ -68,7 +68,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2397/4537 ≈ 52.8% of all misparse appearances; the top 10 cover 3378/4537 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped below row 8 as cards were fixed.
+> The top **5** root causes cover 2395/4535 ≈ 52.8% of all misparse appearances; the top 10 cover 3376/4535 ≈ 74.4%. Fix these first. Row order is the original ranking; row 7 has since dropped below row 8 as cards were fixed.
 
 ## Full card lists per root cause
 
@@ -807,7 +807,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 2. Dropped intervening-if / gating condition (condition: null)  (570 cards)
+### 2. Dropped intervening-if / gating condition (condition: null)  (568 cards)
 
 **Signature.** Trigger/static/replacement/spell condition left null though Oracle has an 'if/while/as long as/unless' game-state gate; the effect resolves unconditionally (CR 603.4 / 608.2c).
 
@@ -1256,7 +1256,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Sigil Captain
 - Silhouette
 - Silver Bolt
-- Skulking Killer
 - Slingbow Trap
 - Smart Ass
 - Smuggler's Share
@@ -1330,7 +1329,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Underdog Racer
 - Undersimplify
 - Unified Strike
-- Unified Will
 - Unnatural Summons
 - Unswerving Sloth
 - Unyaro

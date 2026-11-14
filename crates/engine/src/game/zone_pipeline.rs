@@ -2151,6 +2151,7 @@ mod paused_search_audience_tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
