@@ -18062,25 +18062,48 @@ mod tests {
         assert!(
             matches!(
                 &*execute.effect,
-                Effect::ChangeZone {
+                Effect::TargetOnly {
+                    target: TargetFilter::PostReplacementDamageTarget
+                }
+            ),
+            "the follow-up must declare the damaged creature as its target, got {:?}",
+            execute.effect
+        );
+        let movement = execute.sub_ability.as_ref().expect("owner-library move");
+        assert!(
+            matches!(
+                &*movement.effect,
+                Effect::ChangeZoneAll {
+                    destination: Zone::Library,
                     target: TargetFilter::PostReplacementDamageTarget,
-                    owner_library: true,
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::TerminalShuffle,
                     ..
                 }
             ),
-            "ChangeZone must move the damaged creature to its owner's library, got {:?}",
-            execute.effect
+            "the move must return the damaged creature to its owner's library, got {:?}",
+            movement.effect
         );
-        let shuffle = execute.sub_ability.as_ref().expect("shuffle sub-ability");
+        let shuffle = movement.sub_ability.as_ref().expect("shuffle sub-ability");
         assert!(
             matches!(
                 &*shuffle.effect,
                 Effect::Shuffle {
-                    target: TargetFilter::PostReplacementDamageTargetOwner
+                    target: TargetFilter::ScopedPlayer
                 }
             ),
-            "Shuffle must resolve to the recipient's owner, got {:?}",
+            "Shuffle must resolve through the tracked owner scope, got {:?}",
             shuffle.effect
+        );
+        assert!(
+            matches!(
+                shuffle.player_scope,
+                Some(PlayerFilter::TrackedSetPossessor {
+                    possession: crate::types::ability::PossessionAxis::Owner,
+                    ..
+                })
+            ),
+            "the terminal shuffle must carry the owner scope, got {:?}",
+            shuffle.player_scope
         );
     }
 

@@ -6821,6 +6821,7 @@ pub(super) fn handle_resolution_choice(
                 conditional_enter_with_counters,
                 count_param,
                 library_position,
+                library_shuffle,
                 mass_library_order,
                 is_cost_payment,
                 enters_modified_if,
@@ -7521,6 +7522,9 @@ pub(super) fn handle_resolution_choice(
                             // never re-derived here.
                             with_entry_effect: with_entry_effect.clone(),
                             library_placement: library_position.clone(),
+                            // CR 701.24a + CR 730.3: the parked choice carries
+                            // whether its position is a terminal shuffle's.
+                            library_shuffle,
                             enter_attached_to: None,
                         };
                         let anticipated_pause =
@@ -7610,6 +7614,7 @@ pub(super) fn handle_resolution_choice(
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         with_entry_effect: ctx.with_entry_effect.clone(),
                                         library_placement: ctx.library_placement.clone(),
+                                        library_shuffle: ctx.library_shuffle,
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
@@ -7688,6 +7693,7 @@ pub(super) fn handle_resolution_choice(
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         with_entry_effect: ctx.with_entry_effect.clone(),
                                         library_placement: ctx.library_placement.clone(),
+                                        library_shuffle: ctx.library_shuffle,
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
@@ -8018,6 +8024,7 @@ pub(super) fn handle_resolution_choice(
                         // CR 611.2e + CR 614.12: carried across the round-trip, never re-derived.
                         with_entry_effect: with_entry_effect.clone(),
                         library_placement: None,
+                        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                         enter_attached_to: None,
                     };
                     let events_before_effect = events.len();
@@ -8111,6 +8118,7 @@ pub(super) fn handle_resolution_choice(
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         with_entry_effect: ctx.with_entry_effect.clone(),
                                         library_placement: ctx.library_placement.clone(),
+                                        library_shuffle: ctx.library_shuffle,
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
@@ -8162,6 +8170,7 @@ pub(super) fn handle_resolution_choice(
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         with_entry_effect: ctx.with_entry_effect.clone(),
                                         library_placement: ctx.library_placement.clone(),
+                                        library_shuffle: ctx.library_shuffle,
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
@@ -15274,6 +15283,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
@@ -15386,6 +15396,7 @@ mod tests {
                     conditional_enter_with_counters: vec![],
                     count_param: 0,
                     library_position: None,
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     mass_library_order: None,
                     is_cost_payment: false,
                     enters_modified_if: None,

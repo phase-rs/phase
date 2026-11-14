@@ -2379,6 +2379,12 @@ pub fn auto_pass_recommended_for_viewer(
         && auto_pass_recommended(state, actions)
 }
 
+/// CR 702.24a: whether the open unless-payment prompt continues a repeated
+/// payment already begun, so paying is its only answer.
+pub fn unless_payment_only_continues(state: &GameState) -> bool {
+    crate::game::engine_payment_choices::awaits_payment_continuation(state)
+}
+
 /// Returns the legal actions for the current game state.
 ///
 /// Mana actions are omitted from the flat list returned by [`legal_actions`].
@@ -3184,6 +3190,14 @@ pub fn stuck_decision_diagnostic(state: &GameState) -> Option<StuckDecisionDiagn
 
 fn mana_action_player(state: &GameState) -> Option<PlayerId> {
     match &state.waiting_for {
+        // CR 605.3a: an unless payment of draws asks for no mana, at its offer
+        // and at its continuation; `refuse_mana_at_draw_only_payment` refuses
+        // the same actions.
+        WaitingFor::UnlessPayment { .. }
+            if crate::game::engine_payment_choices::unless_prompt_asks_for_no_mana(state) =>
+        {
+            None
+        }
         WaitingFor::Priority { player }
         | WaitingFor::ManaPayment { player, .. }
         | WaitingFor::ManaAbilityManaPayment { player, .. }
@@ -4371,6 +4385,7 @@ mod tests {
                     trigger_event: None,
                     effect_description: None,
                     remaining: Vec::new(),
+                    repeat: None,
                 },
                 false,
             ),
@@ -6532,6 +6547,7 @@ mod tests {
             trigger_event: None,
             effect_description: Some("counter target spell".to_string()),
             remaining: vec![],
+            repeat: None,
         };
 
         // Reach-guard: the waiting state is genuinely non-`Priority`.

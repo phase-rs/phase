@@ -904,6 +904,21 @@ pub(crate) fn can_pay_ward_cost(
     }
 }
 
+/// CR 702.21a + CR 102.3: The ward cost the AI's spell or ability faces when it
+/// targets `warded` — none unless an opponent controls it.
+pub(crate) fn ward_cost_against_ai<'a>(
+    ctx: &PolicyContext<'_>,
+    warded: &'a GameObject,
+) -> Option<&'a WardCost> {
+    if !players::is_opponent(ctx.state, warded.controller, ctx.ai_player) {
+        return None;
+    }
+    warded.keywords.iter().find_map(|keyword| match keyword {
+        Keyword::Ward(ward) => Some(ward),
+        _ => None,
+    })
+}
+
 fn keyword_pressure(object: &GameObject) -> f64 {
     object
         .keywords

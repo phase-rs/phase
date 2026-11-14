@@ -1800,13 +1800,12 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
     // passing; that is the narrowing, made visible.
     //
     // The predicate is `command_zone_holds_decklist_commander`, NOT
-    // `uses_commander`. `uses_commander` is `command_zone &&
-    // commander_damage_threshold.is_some()` — it answers "does CR 903.10a
-    // commander damage apply", not "does the command zone hold a decklist
-    // card". Tiny Leaders and Oathbreaker seat a real commander card in the
-    // command zone with no damage threshold, so `uses_commander` is `false`
-    // for both while `deck_validation.rs` nets them with
-    // `CommandZoneNetting::NetAgainstMainDeck`. Narrowing on `uses_commander`
+    // `uses_commander`. `uses_commander` marks a CR 903 Commander variant, not
+    // "does the command zone hold a decklist card". Tiny Leaders and
+    // Oathbreaker seat a real commander card in the command zone without
+    // being CR 903 formats, so `uses_commander` is `false` for both while
+    // `deck_validation.rs` nets them with `CommandZoneNetting::NetAgainstMainDeck`.
+    // Narrowing on `uses_commander`
     // instead WOULD leave a legal Oathbreaker or Tiny Leaders deck's commander
     // in the library AND unplaced in the command zone, while the validator had
     // already netted it out of the deck-size check — the two would disagree
@@ -1819,11 +1818,8 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
     //
     // Called on the RESOLVED config, not the bare `GameFormat`: a Custom
     // format is answered from its own `CommandZoneMode`. Deriving Custom from
-    // `uses_commander` would reopen exactly that trap for Custom, since
-    // `for_custom_rules` sets `uses_commander` from the declared
-    // commander-damage threshold alone — a custom format shaped like
-    // Oathbreaker (enabled command zone, an eligibility rule, no threshold)
-    // would strand its commander in the library.
+    // `uses_commander` would reopen exactly that trap for an
+    // Oathbreaker-shaped custom format.
     let place_commanders = state.format_config.command_zone_holds_decklist_commander();
     let oathbreaker = state.format_config.format == crate::types::format::GameFormat::Oathbreaker;
     let netted_main_deck = |deck: &PlayerDeckPayload| -> Vec<DeckEntry> {
@@ -3411,7 +3407,7 @@ mod tests {
     /// This PR narrows command-zone placement, which was unconditional before
     /// it, to formats whose zone holds a decklist commander. Oathbreaker is the
     /// case that makes the narrowing predicate load-bearing rather than
-    /// cosmetic: it declares no commander-damage threshold, so
+    /// cosmetic: it is not a CR 903 format, so
     /// `FormatConfig::uses_commander` is `false` for it, and gating on that
     /// field instead would leave a legal Oathbreaker in the library with no
     /// command-zone object while `deck_validation` had already netted it out of
@@ -3459,7 +3455,7 @@ mod tests {
     }
 
     /// Tiny Leaders has the same shape as Oathbreaker: a decklist card in the
-    /// command zone with no commander-damage threshold, so `uses_commander` is
+    /// command zone outside CR 903, so `uses_commander` is
     /// `false` while `deck_validation` nets with `NetAgainstMainDeck`.
     #[test]
     fn load_deck_places_the_tiny_leaders_commander_in_the_command_zone() {

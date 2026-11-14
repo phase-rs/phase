@@ -1434,6 +1434,7 @@ fn change_zone_choice(
         count_param: 0,
         library_position: None,
         mass_library_order: None,
+        library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,

@@ -539,6 +539,17 @@ pub enum ProposedEvent {
             deserialize_with = "CoEntrants::deserialize_nonempty"
         )]
         co_entrants: Option<Box<CoEntrants>>,
+        /// CR 701.24a + CR 730.3: whether this move is the move component of a
+        /// "shuffle [set] into [library]" operation whose chained `Shuffle`
+        /// randomizes the library. Its library position is then transient, so
+        /// a merged permanent's components share it instead of each taking the
+        /// zone default. Rides the event through replacement and CR 616.1
+        /// pause/resume, like `face_down_in_exile`.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+        )]
+        library_shuffle: crate::types::ability::LibraryShuffleMode,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -1126,6 +1137,7 @@ impl ProposedEvent {
             performed_by: None,
             with_entry_effect: None,
             co_entrants: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: HashSet::new(),
         }
     }

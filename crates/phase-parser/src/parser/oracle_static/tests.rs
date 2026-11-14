@@ -91,6 +91,33 @@ fn color_conditional_keyword_grant_single_pair() {
     );
 }
 
+/// CR 611.3a + CR 608.2c: Predator's Gambit's printed "as long as its controller
+/// controls no other creatures" stays an explicit `Unrecognized` coverage gap.
+/// A static ability has no resolving target to bind the referent against, so the
+/// shared target-controller recognizer must not be reachable from
+/// `parse_inner_condition` and read an unbound parent-target controller.
+#[test]
+fn predators_gambit_controller_clause_stays_an_explicit_gap() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature has intimidate as long as its controller controls no other creatures.",
+    );
+    assert_eq!(defs.len(), 1);
+    assert!(
+        matches!(
+            defs[0].condition,
+            Some(StaticCondition::Unrecognized { .. })
+        ),
+        "the controller clause must stay an explicit gap, got {:?}",
+        defs[0].condition
+    );
+    assert_eq!(
+        defs[0].modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Intimidate
+        }]
+    );
+}
+
 /// Regression: an unqualified keyword grant keeps its own path — the color-conditional
 /// branch declines, so no spurious `HasColor` is folded in.
 #[test]

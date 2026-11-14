@@ -2307,8 +2307,11 @@ pub(super) fn change_zone_target_choice_timing(
     has_multi_target: bool,
     fragment_lower: &str,
 ) -> TargetChoiceTiming {
+    // A zone union is a fresh choice even without count metadata. Scalar
+    // filter-only seeds retain their established declaration behavior.
     let off_battlefield_origin = origin.is_some_and(|zone| zone != Zone::Battlefield)
-        || has_multi_target
+        || (has_multi_target
+            || matches!(target, TargetFilter::Typed(_)) && target.extract_zones().len() > 1)
             && target
                 .extract_zones()
                 .iter()
@@ -2327,12 +2330,68 @@ pub(super) fn change_zone_target_choice_timing(
         // CR 115.1: battlefield non-targeted picks (Sothera / Strategic Betrayal
         // edict class) resolve via EffectZoneChoice after player_scope rebinding,
         // not stack targeting.
-        // Graveyard/hand/library seeds without "target" (Deadly Cover-Up) keep
-        // stack-time selection — their filters carry explicit InZone constraints
-        // and origin is None (not off_battlefield_origin above).
         TargetChoiceTiming::Resolution
     } else {
         TargetChoiceTiming::Stack
+    }
+}
+
+#[cfg(test)]
+mod r2_zone_union_timing_tests {
+    use super::*;
+
+    #[test]
+    fn implicit_union_is_resolution_but_explicit_targets_and_scalar_choices_keep_timing() {
+        let union = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Spacecraft".into())],
+            controller: Some(ControllerRef::You),
+            properties: vec![FilterProp::InAnyZone {
+                zones: vec![Zone::Hand, Zone::Graveyard],
+            }],
+        });
+        assert_eq!(union.extract_zones(), vec![Zone::Hand, Zone::Graveyard]);
+        assert_eq!(
+            change_zone_target_choice_timing(
+                None,
+                &union,
+                false,
+                "put a spacecraft card from your hand or graveyard onto the battlefield"
+            ),
+            TargetChoiceTiming::Resolution
+        );
+        assert_eq!(
+            change_zone_target_choice_timing(
+                None,
+                &union,
+                false,
+                "return target card from your hand or graveyard"
+            ),
+            TargetChoiceTiming::Stack
+        );
+        for zone in [Zone::Hand, Zone::Library, Zone::Graveyard] {
+            let scalar = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Card],
+                properties: vec![FilterProp::InZone { zone }],
+                ..Default::default()
+            });
+            assert_eq!(
+                change_zone_target_choice_timing(None, &scalar, false, "choose a card"),
+                TargetChoiceTiming::Stack
+            );
+            assert_eq!(
+                change_zone_target_choice_timing(None, &scalar, true, "choose cards"),
+                TargetChoiceTiming::Resolution
+            );
+        }
+        assert_eq!(
+            change_zone_target_choice_timing(
+                None,
+                &TargetFilter::ParentTarget,
+                false,
+                "put it onto the battlefield"
+            ),
+            TargetChoiceTiming::Stack
+        );
     }
 }
 
@@ -2385,20 +2444,38 @@ impl PrintedTargetWord {
 /// (`targeting::bind_resolution_attachment_hosts`).
 ///
 /// Applied to the card's own fully composed ability (after every document
-/// relation), and only when the host instruction is the whole ability — one
-/// node, nothing before or after it (a later sentence that only modifies it,
-/// "That creature can't be regenerated.", folds into the same node). Without a
-/// provable host it then does nothing, exactly as the targeted form did when its
-/// only target was illegal (CR 608.2b). Instructions that precede or follow it
-/// read or depend on that host in ways the targeted form settled by fizzling
-/// the whole ability, so such chains keep their stack-time target (the
-/// followers of a host reference are follow-up work). Donor shapes ("becomes a
-/// copy of", "gains all activated abilities of" the host) also keep theirs.
+/// relation). Ordinarily the host instruction must be the whole ability:
+/// arbitrary followers can depend on a binding this conversion cannot prove.
+/// The bounded owner-library move plus terminal owner shuffle is also admitted:
+/// the single-object move binds the host, and its owner is the shuffle subject.
+/// Donor shapes ("becomes a copy of", "gains all activated abilities of" the
+/// host) retain stack timing.
 pub(crate) fn convert_terminal_attachment_host_reference(
     def: &mut AbilityDefinition,
     printed: PrintedTargetWord,
 ) {
-    if def.sub_ability.is_some()
+    // The printed owner-shuffle class has one determined host followed only
+    // by its owner's shuffle. Do not admit arbitrary host-dependent chains.
+    let owner_shuffle = matches!(
+        def.effect.as_ref(),
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            owner_library: true,
+            target,
+            ..
+        } if target.contains_source_attachment_host()
+    ) && def.sub_ability.as_deref().is_some_and(|sub| {
+        matches!(
+            sub.effect.as_ref(),
+            Effect::Shuffle {
+                target: TargetFilter::ParentTargetOwner
+            }
+        ) && sub.sub_ability.is_none()
+            && sub.else_ability.is_none()
+            && sub.modal.is_none()
+            && sub.mode_abilities.is_empty()
+    });
+    if (def.sub_ability.is_some() && !owner_shuffle)
         || def.else_ability.is_some()
         || def.modal.is_some()
         || !def.mode_abilities.is_empty()
@@ -2744,7 +2821,7 @@ pub(super) fn target_choice_timing_for_parsed(
 
 /// CR 303.4f: Aura entering by non-spell means — controller chooses the enchanted object.
 /// CR 301.5b: Equipment entering attached via "put onto the battlefield attached to" wiring.
-/// CR 603.7d: A delayed trigger's source/controller is the parent ability's at creation time.
+/// CR 603.7d + CR 603.7e: a delayed trigger retains its creating source/controller.
 /// CR 608.2c: Bare "it" anaphor in a later clause binds to the typed referent of an earlier clause.
 ///
 /// Walk the chain and set `forward_result: true` on every `Dig`/`ChangeZone`
@@ -2755,14 +2832,12 @@ pub(super) fn target_choice_timing_for_parsed(
 ///    said "If a[n] [type] is/was put onto the battlefield this way,
 ///    [attach it]" (Armored Skyhunter, Stonehewer Giant). The just-moved
 ///    card becomes the attaching object.
-/// 2. A non-Attach sub whose own target slot (or a nested
-///    GenericEffect/CreateDelayedTrigger inside it) is `SelfRef` — the
-///    Oracle text used a bare-"it" anaphor for the just-moved card
-///    (Emperor of Bones: "put a creature card exiled with this creature
-///    onto the battlefield […]. It gains haste. Sacrifice it at the
-///    beginning of the next end step."). The runtime forward_result branch
-///    rewrites `sub.source_id` to the moved object, so `SelfRef` in the
-///    sub naturally resolves to it.
+/// 2. A non-Attach sub that needs a `ParentTarget` referent, or an embedded
+///    generic-grant/duplicate operand that names the just-moved card. Emperor
+///    of Bones' "It gains haste. Sacrifice it at the beginning of the next end
+///    step" keeps that returned-object context separate from the ability source.
+///    A primary `SelfRef` alone names the original source and does not enable
+///    this result forwarding.
 ///
 /// Recurses through nested sub-abilities so chains of arbitrary depth
 /// (e.g. Skyhunter's Dig → Attach → PutAtLibraryPosition) are covered.
@@ -3592,43 +3667,20 @@ pub(super) fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
     }
 }
 
-/// CR 400.7j + CR 608.2c + CR 701.3a: in "<move a card to the battlefield>, then
-/// attach it to <referent>", the bare-"it" attachment operand names the card the
-/// parent instruction just moved — CR 400.7j lets the rest of that effect find the
-/// object it put into a public zone. Encode it as `SelfRef`: the runtime
-/// `forward_result` branch rebinds the sub-ability's `source_id` to the moved
-/// object, and `change_zone::resolve_forward_result_search_attach_host` gates the
-/// pre-entry host stamp on exactly that `SelfRef` encoding.
+/// CR 400.7j + CR 608.2c + CR 701.3a: the attachment operand in
+/// "<move a card to the battlefield>, then attach it to <referent>" names
+/// the moved card. This legacy `SelfRef` attachment encoding is recognized
+/// by `change_zone::resolve_forward_result_search_attach_host` when stamping
+/// the entry's host; it does not turn a primary source-naming host into the
+/// returned object.
 ///
-/// Two recipient encodings prove the attachment anaphor is the moved card:
+/// `LastCreated` proves that the host is a separately created token. Equal
+/// attachment/host anaphors instead require disambiguation before entry:
+/// self-attachment is prohibited by CR 301.5c, CR 301.6, CR 303.4d and CR 701.3b.
 ///
-/// * `LastCreated` — the recipient is a token this chain created (Ratonhnhaké꞉ton,
-///   Forum Filibuster), so the attachment cannot be it.
-/// * the SAME filter node as the attachment — the sentence's two referents
-///   collapsed onto one anaphor (Sword of the Meek). Attaching an object to
-///   itself is a guaranteed no-op whatever the operand resolves to — CR 301.5c
-///   ("An Equipment can't equip itself"), CR 301.6 (the same for Fortifications),
-///   CR 303.4d ("An Aura can't enchant itself"), and CR 701.3b for anything else
-///   — so rebinding can only turn a dead node live; it can never take working
-///   behavior away.
-///
-/// Note the delivery this rebind selects: `SelfRef` also satisfies
-/// `change_zone::resolve_forward_result_search_attach_host`'s attachment gate, so
-/// the host is stamped as `enter_attached_to` and the card enters already
-/// attached. The trailing `Attach` sub still resolves and still emits its
-/// `EffectKind::Attach`, so `TriggerMode::Attached` observers are unaffected.
-/// It is a CR 301.5c self-attach — the sub's `ParentTarget` host falls back to
-/// the source — which `attach::attachment_illegality_projected` rejects before
-/// any edit: no state change, no timestamp bump.
-///
-/// Caller-gated on the parent moving a card to the battlefield. That gate is why
-/// this cannot live in `parse_attachment_anaphor` (`imperative.rs`): the parent
-/// effect is unknown at parse time, and rebinding there would regress Stonehewer
-/// Giant / Quest for the Holy Relic / Armored Skyhunter / Adaptive Armorer, whose
-/// "it" names a searched Equipment rather than the source. The same gate keeps the
-/// equal-operand pairs under `GainControl` (Ogre Geargrabber, Thieving Skydiver)
-/// and under `CopyTokenOf` untouched: no public-zone move, so no CR 400.7j
-/// referent to rebind to.
+/// Caller-gated on a public-zone battlefield entry. Applying this rewrite
+/// without that producer would misread searched Equipment and equal-operand
+/// `GainControl`/`CopyTokenOf` instructions that have no moved-card referent.
 pub(super) fn rebind_attach_attachment_to_forwarded_source_if_anaphor_names_moved_card(
     effect: &mut Effect,
 ) -> bool {
@@ -3654,32 +3706,19 @@ pub(super) fn rebind_attach_attachment_to_forwarded_source_if_anaphor_names_move
     false
 }
 
-/// CR 608.2c: True when a sub-ability anchors on the just-moved card via
-/// the bare-"it" anaphor. Two encodings are recognized:
+/// CR 400.7j + CR 608.2c: True when a sub-ability needs the just-moved
+/// object's forwarded referent, rather than the printed source's identity.
 ///
-/// - `TargetFilter::SelfRef` — encoded when the anaphor's antecedent is
-///   the source itself; the runtime `forward_result` branch rewrites
-///   `sub.source_id` to the moved object before resolution, so `SelfRef`
-///   resolves to it.
-/// - `TargetFilter::ParentTarget` — encoded when the upstream chunk-loop
-///   anaphor rewrite (`chain_has_prior_typed_referent` →
-///   `replace_target_with_parent`) already redirected the "it" to the
-///   parent's chosen-object slot. The parent for this pattern is a
-///   `ChangeZone` whose typed target is a compound filter
-///   (`And[Typed(<type>), ExiledBySource]`) — a description, not a
-///   targeting "target" keyword — so `ability.targets` is empty at
-///   resolution time. The runtime `forward_result` branch inserts the
-///   moved object into the sub's targets so `ParentTarget` resolves to
-///   it.
+/// `ParentTarget` reads the moved object even when its producer selected a
+/// described population without an announced target. A primary `SelfRef`
+/// names the original source and does not by itself request forwarding.
 ///
-/// Walks the sub's leaf target slot, `GenericEffect`'s grant list
-/// (each `StaticDefinition.affected`), `CreateDelayedTrigger`'s inner
-/// `AbilityDefinition`, and nested `sub_ability` / `else_ability`.
+/// Legacy immediate generic grants and duplicate operands still encode the
+/// moved-card anaphor with embedded `SelfRef`; their specific binding rules
+/// handle that role separately from a primary source filter. Walk those
+/// operands, delayed-trigger bodies, and nested continuation/else links.
 fn sub_targets_moved_card(sub: &AbilityDefinition) -> bool {
-    if matches!(
-        sub.effect.target_filter(),
-        Some(TargetFilter::SelfRef | TargetFilter::ParentTarget)
-    ) {
+    if matches!(sub.effect.target_filter(), Some(TargetFilter::ParentTarget)) {
         return true;
     }
     if let Effect::Conjure { cards, .. } = &*sub.effect {
@@ -8613,6 +8652,27 @@ pub(crate) fn extract_optional_target_multi_target(
     (lower.len() - rest.len() == first_target).then_some(spec)
 }
 
+/// CR 115.6 + CR 601.2c: whether the printed text carries an optional-count
+/// quantifier ("up to N", "any number of") in front of any target phrase,
+/// independent of the effect kind. `extract_optional_target_multi_target`
+/// declines the eight effects that cannot represent a declined optional target
+/// (`Counter`, `Attach`, …), so `ParsedEffectClause::multi_target` is `None`
+/// for them even though zero targets is legal; a caller that must know whether
+/// the target is optional reads this instead of the stamped field. Shares
+/// `strip_optional_target_prefix` with the stamping path, so the two cannot
+/// disagree about what counts as a quantifier.
+pub(crate) fn text_declares_optional_target_count(text: &str) -> bool {
+    let masked = nom_primitives::mask_double_quoted_spans_preserving_len(text);
+    let lower = masked.to_ascii_lowercase();
+    nom_primitives::scan_preceded(lower.as_str(), |input| {
+        match strip_optional_target_prefix(input) {
+            (rest, Some(spec)) => Ok((rest, spec)),
+            _ => Err(oracle_err(input)),
+        }
+    })
+    .is_some()
+}
+
 /// CR 115.1 + CR 115.6 + CR 601.2c + CR 602.2b + CR 603.3d: The single
 /// clause-level owner of the optional target-count fixup.
 ///
@@ -9074,20 +9134,30 @@ fn parse_required_target_count_verb(input: &str) -> OracleResult<'_, ()> {
 pub(crate) const BOUNDED_TARGET_CARDINALITIES: &[(&str, usize, usize)] =
     &[("one or two", 1, 2), ("one, two, or three", 1, 3)];
 
+/// CR 115.1c: true when `input` (already lowercase) opens with the article a
+/// declared-target phrase needs — bare, or qualified by "other"/"another",
+/// which belong to the qualifier's own filter rather than to the count. The
+/// single authority for that article axis: the exact-count, "any number of"
+/// and "up to N" quantifier arms all compose it instead of re-spelling the
+/// article list, so a future qualifier is added here once.
+fn followed_by_target_article(input: &str) -> bool {
+    alt((
+        tag::<_, _, OracleError<'_>>("target "),
+        tag("target,"),
+        tag("other target "),
+        tag("another target "),
+    ))
+    .parse(input)
+    .is_ok()
+}
+
 /// CR 115.1d + CR 601.2c: Strip exact target-count prefix before a targeted
 /// phrase. "two target creatures" and "X target creatures" both set the exact
 /// number of targets, unlike "up to X target creatures".
 pub(crate) fn strip_exact_target_prefix(lower: &str) -> Option<(QuantityExpr, &str)> {
     let (rest, count) = parse_exact_target_count_expr(lower).ok()?;
     let rest = rest.trim_start();
-    if alt((tag::<_, _, OracleError<'_>>("target "), tag("target,")))
-        .parse(rest)
-        .is_ok()
-    {
-        Some((count, rest))
-    } else {
-        None
-    }
+    followed_by_target_article(rest).then_some((count, rest))
 }
 
 fn parse_exact_target_count_expr(input: &str) -> OracleResult<'_, QuantityExpr> {
@@ -9175,15 +9245,6 @@ fn strip_distribute_among_target_quantifier<'a>(
 /// target set after they are put on the stack.
 pub(crate) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTargetSpec>) {
     let lower = text.to_ascii_lowercase();
-    fn followed_by_target_article(input: &str) -> bool {
-        alt((
-            tag::<_, _, OracleError<'_>>("target "),
-            tag("other target "),
-            tag("another target "),
-        ))
-        .parse(input)
-        .is_ok()
-    }
 
     // CR 107.1c + CR 115.6: "any number of [other|another] target …" includes
     // zero and is legal with no chosen targets. Prefix match without the
@@ -9195,6 +9256,23 @@ pub(crate) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTar
             return (&text[consumed..], Some(MultiTargetSpec::unlimited(0)));
         }
         return (text, None);
+    }
+
+    // CR 115.1c + CR 115.6: an exact count before the target article
+    // ("choose two target players") declares a fixed number of slots. The
+    // count and the article are read through the SHARED exact-prefix
+    // authority (`strip_exact_target_prefix`) and carried as
+    // `MultiTargetSpec::exact`, so this arm cannot drift from the other
+    // consumers of the same grammar. A variable count (X) stays out of this
+    // optional-prefix axis and keeps the handling owned by the paths that
+    // spell it (`oracle_target`'s filter-only X arm, the placement
+    // cardinality and the targeted-verb recovery sites).
+    if let Some((count @ QuantityExpr::Fixed { .. }, after_target)) =
+        strip_exact_target_prefix(lower.as_str())
+    {
+        let consumed = lower.len() - after_target.len();
+        let rest = text[consumed..].trim_start();
+        return (rest, Some(MultiTargetSpec::exact(count)));
     }
 
     let Ok((after_up_to, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(lower.as_str()) else {

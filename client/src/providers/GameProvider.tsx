@@ -2087,6 +2087,43 @@ export function GameProvider({
       }
     };
 
+    const resetLocalStore = () => {
+      // Clear store state but keep the shared WASM worker alive — its V8
+      // TurboFan-compiled code, card database, and AI pool persist for reuse.
+      const adapter = useGameStore.getState().adapter;
+      if (adapter instanceof WasmAdapter) {
+        // Not awaited (cleanup can't be async), but safe: resetGame is posted
+        // to the same worker's FIFO message queue, so it executes before any
+        // subsequent initializeGame call from the next game session.
+        adapter.resetGameState();
+        // Defer the store clear so a StrictMode remount or dep-change re-run
+        // can cancel it before it fires. On real unmount (user navigates
+        // away), the timeout fires on the next macrotask and clears the store.
+        scheduleStoreReset(() => {
+          useGameStore.setState({
+            gameId: null,
+            gameState: null,
+            events: [],
+            eventHistory: [],
+            logHistory: [],
+            nextLogSeq: 0,
+            adapter: null,
+            gameSessionGeneration: nextGameSessionGeneration(),
+            waitingFor: null,
+            legalActions: [],
+            autoPassRecommended: false,
+            endContinuousEffectOffers: [],
+            manaPaymentShortcutActions: [],
+            spellCosts: {},
+            stateHistory: [],
+            turnCheckpoints: [],
+          });
+        });
+      } else {
+        scheduleStoreReset(reset);
+      }
+    };
+
     if (shouldUseNativeAi && nativeEngineKey) {
       const setupNativeAi = async () => {
         // A native socket that dies before the session is live is not a lost
@@ -2340,7 +2377,7 @@ export function GameProvider({
         useMultiplayerStore.getState().setStateWithheld(null);
         audioManager.setContext("menu");
         clearPromptOverlayState();
-        scheduleStoreReset(reset);
+        resetLocalStore();
       };
     }
 
@@ -2353,40 +2390,7 @@ export function GameProvider({
       // Issue #2369: drop prompt overlays synchronously so the next mount's
       // `cancelPendingStoreReset` cannot resurrect convoke payment UI.
       clearPromptOverlayState();
-      // Clear store state but keep the shared WASM worker alive — its V8
-      // TurboFan-compiled code, card database, and AI pool persist for reuse.
-      const adapter = useGameStore.getState().adapter;
-      if (adapter instanceof WasmAdapter) {
-        // Not awaited (cleanup can't be async), but safe: resetGame is posted
-        // to the same worker's FIFO message queue, so it executes before any
-        // subsequent initializeGame call from the next game session.
-        adapter.resetGameState();
-        // Defer the store clear so a StrictMode remount or dep-change re-run
-        // can cancel it before it fires. On real unmount (user navigates
-        // away), the timeout fires on the next macrotask and clears the store.
-        scheduleStoreReset(() => {
-          useGameStore.setState({
-            gameId: null,
-            gameState: null,
-            events: [],
-            eventHistory: [],
-            logHistory: [],
-            nextLogSeq: 0,
-            adapter: null,
-            gameSessionGeneration: nextGameSessionGeneration(),
-            waitingFor: null,
-            legalActions: [],
-            autoPassRecommended: false,
-            endContinuousEffectOffers: [],
-            manaPaymentShortcutActions: [],
-            spellCosts: {},
-            stateHistory: [],
-            turnCheckpoints: [],
-          });
-        });
-      } else {
-        scheduleStoreReset(reset);
-      }
+      resetLocalStore();
     };
   }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName, source, draftId, originUrl, pile]);
 

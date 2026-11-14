@@ -1292,6 +1292,7 @@ fn ref_less_resolution_mana_cost_records_nothing() {
         trigger_event: None,
         effect_description: None,
         remaining: vec![],
+        repeat: None,
     };
 
     runner
