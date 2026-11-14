@@ -1817,8 +1817,8 @@ fn your_main_phase_is_your_teams() {
         let mut scenario = two_headed_giant(Phase::Upkeep);
         let siege = scenario.add_real_card(controller, "Frontier Siege", Zone::Battlefield, db);
         let mut runner = scenario.build();
-        // The Siege's as-enters choice is abandoned during setup, leaving its controller a
-        // priority prompt that is the representative's.
+        // The Siege's as-enters choice is abandoned during setup, handing priority to its
+        // controller; on the team's turn it is the representative's.
         priority_to(&mut runner, P0);
         runner
             .state_mut()
@@ -1899,7 +1899,7 @@ fn each_team_members_first_draw_in_its_draw_step_is_excepted() {
     assert_eq!(stacked_for(&stacked, "Orcish Bowmasters"), [None, None]);
 }
 
-/// CR 500.10a + CR 805.4d: Paradox Haze's "At the beginning of enchanted player's first upkeep each
+/// CR 500.10a + CR 805.4: Paradox Haze's "At the beginning of enchanted player's first upkeep each
 /// turn, that player gets an additional upkeep step after this step" adds the step to the team's
 /// turn whichever of its players is enchanted, so Bitterblossom's "your upkeep" triggers twice.
 #[test]
