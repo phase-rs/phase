@@ -48150,9 +48150,10 @@ mod tests {
     fn repeat_while_body_that_ends_the_game_stops_after_the_win() {
         // CR 104.1: an unbounded `WhileCondition` repeat whose body records the
         // game end must stop at the next loop head; without the guard the body
-        // no-ops and the condition stays true forever. Synthetic shape: no
-        // printed card has a winning repeat body (nearest repeat cards: Tainted
-        // Pact, Claim Jumper). The test returning is the no-spin assertion.
+        // no-ops and the condition stays true forever. This fixture exercises
+        // an explicit WinTheGame inside an unbounded WhileCondition. Cultivator
+        // Colossus is a printed repeat whose draw can win through Laboratory
+        // Maniac's replacement (CR 614.6 + CR 104.2b). Returning proves the loop stops.
         let mut state = GameState::new_two_player(42);
         let mut ability = ResolvedAbility::new(
             Effect::WinTheGame { target: None },
