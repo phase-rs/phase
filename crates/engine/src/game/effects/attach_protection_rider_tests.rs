@@ -1407,9 +1407,9 @@ fn earlier_grant_starting_keeps_a_late_grants_start_snapshot() {
 /// ridered statics, so layer 6 installs one copy. Each grant is its own effect
 /// with its own start: the second started after an Equipment turned white, so
 /// only the second exempts it. While the first applies, its instance still
-/// blocks that Equipment (CR 702.16n); once the first grant ends, the second's
-/// own snapshot keeps it. Constructed (synthetic): no printed card grants this
-/// static; the first grant ending is its static removed directly.
+/// blocks that Equipment (CR 702.16d + CR 702.16p). Once the first grant ends,
+/// the second's own snapshot keeps it. Constructed (synthetic): no printed card
+/// grants this static; the first grant ending is its static removed directly.
 #[test]
 fn identical_grants_from_different_sources_keep_separate_snapshots() {
     let (mut runner, board) = start_identity_board();
