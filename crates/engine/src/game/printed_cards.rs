@@ -1678,9 +1678,7 @@ fn repair_horde_token_display_routes(state: &mut GameState) {
             let stored = obj.token_image_ref.as_ref()?;
             let preset = crate::game::token_presets::known_token_preset_by_id(&stored.preset_id)?;
             // An imageless preset cannot supply a corrected ref; leave it alone.
-            if preset.token_image_ref.is_none() {
-                return None;
-            }
+            preset.token_image_ref.as_ref()?;
             let expected = crate::game::deck_loading::horde_token_image_ref(preset);
             if *stored != expected {
                 Some(expected)
