@@ -35591,9 +35591,10 @@ impl GameState {
     /// the CR 613.7b timestamp and the effect id, installs the effect, and
     /// journals the settled CR 611.2a creation through its owning family.
     ///
-    /// Returns `None` when a CR 611.2b "for as long as" duration never starts:
-    /// the effect does nothing, so nothing is allocated, installed or journaled
-    /// and callers must not emit the effect's side effects.
+    /// Returns `None` when a CR 611.2b "for as long as" duration never starts,
+    /// or when the effect would give control to a player who has left the game
+    /// (CR 800.4b): the effect does nothing, so nothing is allocated, installed
+    /// or journaled and callers must not emit the effect's side effects.
     pub fn add_transient_continuous_effect(
         &mut self,
         source_id: ObjectId,
@@ -35690,27 +35691,35 @@ impl GameState {
         creating_ability: Option<&ResolvedAbility>,
     ) -> Option<u64> {
         debug_assert!(creating_ability.is_none_or(|ability| ability.source_id == source_id));
-        self.transient_duration_begins(source_id, controller, &duration, &affected, bindings)
-            .then(|| {
-                self.install_started_transient_continuous_effect(
-                    source_id,
-                    controller,
-                    duration,
-                    affected,
-                    modifications,
-                    condition,
-                    end_permission,
-                    bindings,
-                    creating_ability,
-                )
-            })
+        self.transient_effect_begins(
+            source_id,
+            controller,
+            &duration,
+            &affected,
+            &modifications,
+            bindings,
+        )
+        .then(|| {
+            self.install_started_transient_continuous_effect(
+                source_id,
+                controller,
+                duration,
+                affected,
+                modifications,
+                condition,
+                end_permission,
+                bindings,
+                creating_ability,
+            )
+        })
     }
 
     /// CR 701.12a + CR 701.12b + CR 611.2b: register the effects one instruction
     /// creates simultaneously, such as each player gaining control of the
-    /// other's permanent in an exchange. Every member's duration is tested on
-    /// the same settled board before any member is installed, and if any never
-    /// starts, none is installed. Returns whether the members were installed.
+    /// other's permanent in an exchange. Every member is tested on the same
+    /// settled board before any member is installed (CR 611.2b duration,
+    /// CR 800.4b recipient), and if any fails, none is installed. Returns
+    /// whether the members were installed.
     pub fn add_simultaneous_transient_continuous_effects(
         &mut self,
         source_id: ObjectId,
@@ -35718,8 +35727,15 @@ impl GameState {
         members: Vec<(PlayerId, TargetFilter, Vec<ContinuousModification>)>,
     ) -> bool {
         let bindings = TransientContinuousEffectBindings::default();
-        let all_begin = members.iter().all(|(controller, affected, _)| {
-            self.transient_duration_begins(source_id, *controller, &duration, affected, bindings)
+        let all_begin = members.iter().all(|(controller, affected, modifications)| {
+            self.transient_effect_begins(
+                source_id,
+                *controller,
+                &duration,
+                affected,
+                modifications,
+                bindings,
+            )
         });
         if all_begin {
             for (controller, affected, modifications) in members {
@@ -35739,18 +35755,29 @@ impl GameState {
         all_begin
     }
 
-    /// CR 611.2b: "If the 'for as long as' duration never starts, the effect
-    /// does nothing." Tests a candidate on the settled board before any
+    /// CR 611.2b + CR 800.4b: whether an effect generated now does anything:
+    /// "If the 'for as long as' duration never starts, the effect does
+    /// nothing", and an object never changes to the control of a player who
+    /// has left the game. Tests a candidate on the settled board before any
     /// allocation, journaling or installation; replay installs verbatim
     /// through `apply_resolved_continuous_effect` and never reaches here.
-    fn transient_duration_begins(
+    fn transient_effect_begins(
         &mut self,
         source_id: ObjectId,
         controller: PlayerId,
         duration: &Duration,
         affected: &TargetFilter,
+        modifications: &[ContinuousModification],
         bindings: TransientContinuousEffectBindings,
     ) -> bool {
+        // CR 800.4b: an object never changes to the control of a player who has left the game.
+        if modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::ChangeController))
+            && !crate::game::players::is_alive(self, controller)
+        {
+            return false;
+        }
         if !duration.is_for_as_long_as() {
             return true;
         }

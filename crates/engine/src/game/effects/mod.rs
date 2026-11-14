@@ -9551,7 +9551,7 @@ fn effect_fields_read_filter_population(
 }
 
 /// CR 611.2b: a "for as long as" duration is tested when the effect would
-/// begin (`GameState::transient_duration_begins` →
+/// begin (`GameState::transient_effect_begins` →
 /// `layers::resolved_duration_begins`) and on each later settled board, so its
 /// condition is read. An `UntilEvent` deadline's trigger matchers are matched
 /// against the live ledger when a later event fires, so they are read too. The
@@ -14535,6 +14535,10 @@ fn affected_objects_with_causes(
 /// member that emitted `PermanentTapped` in `events` — this resolution's own
 /// tap — so a fallback member carries `None` and never becomes a
 /// "<type> tapped this way" source.
+///
+/// `Effect::GiveControl` is per-member on the same terms: only a member whose
+/// `ControllerChanged` this resolution emitted is stamped `ControlGained`; the
+/// declared targets remain the members (see `give_control_object_targets`).
 fn this_way_cause_for_resolved(
     state: &GameState,
     effect: &Effect,
@@ -14562,6 +14566,17 @@ fn this_way_cause_for_resolved(
             })
             .then(|| this_way_cause_for_effect(effect))
             .flatten(),
+        // CR 613.1b + CR 608.2c: only a member whose controller this resolution changed was
+        // "gained control of this way".
+        Effect::GiveControl { .. } => events
+            .iter()
+            .any(|event| {
+                matches!(
+                    event,
+                    GameEvent::ControllerChanged { object_id, .. } if *object_id == member
+                )
+            })
+            .then_some(ThisWayCause::ControlGained),
         other => this_way_cause_for_effect(other),
     }
 }
@@ -15428,18 +15443,15 @@ pub(crate) fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameE
                 }
             )
         }),
-        // CR 110.2 + CR 608.2c: "that player gains control of ~. If they do, …"
-        // gates the rider on whether control actually changed (Kain, Traitorous
-        // Dragoon). `resolve_give` emits `EffectResolved` and, when the
-        // recipient differs from the object's current controller,
-        // `ControllerChanged`.
+        // CR 118.12 + CR 613.1b: "If they do" holds once a control effect was installed, even for a recipient who already controls the object.
         Effect::GiveControl { .. } => events.iter().any(|event| {
             matches!(
                 event,
                 GameEvent::EffectResolved {
-                    kind: crate::types::ability::EffectKind::GiveControl,
+                    kind: EffectKind::GiveControl,
+                    subject: Some(_),
                     ..
-                } | GameEvent::ControllerChanged { .. }
+                }
             )
         }),
         // CR 701.12a + CR 701.12b + CR 608.2c: an exchange whose subjects can't both
@@ -35669,6 +35681,32 @@ mod tests {
             this_way_cause_for_resolved(&state, &with_rider.effect, &[], instant),
             None,
             "an empty ledger stamps nothing, whatever the rider's form"
+        );
+    }
+
+    /// CR 613.1b + CR 608.2c: `GiveControl` stamps `ControlGained` only on the
+    /// member whose `ControllerChanged` this resolution emitted.
+    #[test]
+    fn give_control_stamps_only_the_member_whose_controller_changed() {
+        let state = GameState::new_two_player(42);
+        let give = Effect::GiveControl {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            recipient: TargetFilter::TriggeringPlayer,
+        };
+        let (moved, unmoved) = (ObjectId(1), ObjectId(2));
+        let events = [GameEvent::ControllerChanged {
+            object_id: moved,
+            old_controller: PlayerId(0),
+            new_controller: PlayerId(1),
+            evidence: crate::types::events::ControlChangeEvidence::Unrecorded,
+        }];
+        assert_eq!(
+            this_way_cause_for_resolved(&state, &give, &events, moved),
+            Some(ThisWayCause::ControlGained)
+        );
+        assert_eq!(
+            this_way_cause_for_resolved(&state, &give, &events, unmoved),
+            None
         );
     }
 
@@ -61015,33 +61053,38 @@ mod tests {
         );
     }
 
-    /// CR 110.2 + CR 608.2c (issue #1335): Kain's "that player gains control of
-    /// Kain. If they do, …" gates the rider on whether control actually
-    /// transferred. `GiveControl` counts as performed only when
-    /// `ControllerChanged` or a `GiveControl` `EffectResolved` is emitted.
+    /// CR 118.12 + CR 613.1b (issue #1335): `GiveControl` counts as performed only when its resolver installed a control effect, which it reports as an `EffectResolved` subject.
     #[test]
-    fn give_control_performed_tracks_controller_changed_event() {
+    fn give_control_performed_tracks_installed_control_effect() {
         let give = Effect::GiveControl {
             target: TargetFilter::SelfRef,
             recipient: TargetFilter::TriggeringPlayer,
         };
 
-        let transferred = [GameEvent::ControllerChanged {
-            object_id: ObjectId(1),
-            old_controller: PlayerId(0),
-            new_controller: PlayerId(1),
-            // The rider gate reads only that control moved, never the evidence.
-            evidence: crate::types::events::ControlChangeEvidence::Unrecorded,
+        let mut scenario = GameScenario::new();
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let runner = scenario.build();
+        let snapshot = runner.state().capture_event_object_snapshot(bears);
+        assert!(snapshot.is_some(), "Grizzly Bears must yield a snapshot");
+
+        let installed = [GameEvent::EffectResolved {
+            kind: EffectKind::GiveControl,
+            source_id: bears,
+            subject: snapshot.map(Box::new),
         }];
         assert!(
-            mandatory_parent_effect_performed(&give, &transferred),
-            "GiveControl that changed controllers is 'performed'"
+            mandatory_parent_effect_performed(&give, &installed),
+            "GiveControl that installed a control effect is 'performed'"
         );
 
-        let not_transferred: [GameEvent; 0] = [];
+        let not_installed = [GameEvent::EffectResolved {
+            kind: EffectKind::GiveControl,
+            source_id: ObjectId(9),
+            subject: None,
+        }];
         assert!(
-            !mandatory_parent_effect_performed(&give, &not_transferred),
-            "GiveControl that failed must not seed the if-they-do rider"
+            !mandatory_parent_effect_performed(&give, &not_installed),
+            "GiveControl that installed nothing must not seed the if-they-do rider"
         );
     }
 
@@ -61108,9 +61151,8 @@ mod tests {
     ///
     /// NOTE the negative slice: it is the event trail the resolver ACTUALLY
     /// emits on a no-op (a lone `EffectResolved { ExchangeControl }`), not an
-    /// empty slice. An empty slice is never produced in production, and using
-    /// one would let a regression that keys on `EffectResolved` — the exact
-    /// defect that makes the `GiveControl` arm above vacuous — pass here.
+    /// empty slice. An empty slice is never produced in production, and using one would let a
+    /// regression that keys on `EffectResolved` pass here.
     #[test]
     fn exchange_control_performed_tracks_controller_changed_event() {
         let exchange = exchange_control_effect();
