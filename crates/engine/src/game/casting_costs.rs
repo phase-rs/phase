@@ -9246,7 +9246,7 @@ pub(super) fn committed_required_cast_cost(
 /// object-level permission in exile (ExileWithAltAbilityCost / PlayFromExile) or on
 /// the top of the library (Bolas's Citadel). Single-authority extraction for the
 /// additional-cost authority.
-fn elected_cast_alternative_ability_cost(
+pub(super) fn elected_cast_alternative_ability_cost(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,

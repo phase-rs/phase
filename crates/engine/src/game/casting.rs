@@ -4391,7 +4391,8 @@ fn next_spell_without_paying_applies(
 
 /// CR 118.9a + CR 601.2b: a named permission or a prepared next-spell
 /// free cast has already elected its alternative. Do not scan sibling grants
-/// or offer another alternative over that exact choice.
+/// or offer another alternative over that exact choice. A cast's elected
+/// permission is asked what it makes the player pay, never matched by shape.
 pub(super) fn cast_has_elected_alternative_cost(
     state: &GameState,
     player: PlayerId,
@@ -4401,6 +4402,14 @@ pub(super) fn cast_has_elected_alternative_cost(
 ) -> Result<bool, EngineError> {
     if variant.uses_alternative_cost()
         || next_spell_without_paying_applies(state, player, object_id, variant)
+        || super::casting_costs::elected_cast_alternative_ability_cost(
+            state,
+            player,
+            object_id,
+            variant,
+            permission_index,
+        )
+        .is_some()
         // CR 118.9a: a static exile permission that replaces the mana cost is the cast's
         // alternative cost.
         || elected_exile_permission_source(state, player, object_id, Some(variant), permission_index)
@@ -4430,12 +4439,12 @@ pub(super) fn cast_has_elected_alternative_cost(
             *cost_provenance == crate::types::ability::ExileGrantCostProvenance::Alternative
                 && !matches!(cost, ManaCost::SelfManaCost)
         }
-        CastingPermission::ExileWithAltAbilityCost { .. }
-        | CastingPermission::ExileWithEnergyCost
+        CastingPermission::ExileWithEnergyCost
         | CastingPermission::WarpExile { .. }
         | CastingPermission::Plotted { .. }
         | CastingPermission::Foretold { .. } => true,
-        CastingPermission::AdventureCreature => false,
+        CastingPermission::AdventureCreature
+        | CastingPermission::ExileWithAltAbilityCost { .. } => false,
         // CR 118.9: "You may cast [this object] without paying its mana cost" is an alternative
         // cost.
         CastingPermission::PlayFromExile {

@@ -1293,6 +1293,33 @@ fn fire_lord_ozai_free_cast_is_not_offered_tlincalli_hunters_cost() {
     assert_cast_from_exile_without_hunter(&mut runner, bears, hunter);
 }
 
+// CR 118.9a: Inside Information's "pay life equal to its mana value rather than pay its mana
+// cost" is the cast's one alternative cost, so Tlincalli Hunter's {0} isn't offered over it.
+#[test]
+fn inside_information_life_cast_is_not_offered_tlincalli_hunters_cost() {
+    let (mut runner, hunter, (inside, bears)) =
+        hunter_board(floating(ManaType::Black, 3), |scenario, db| {
+            (
+                scenario.add_real_card(P0, "Inside Information", Zone::Hand, db),
+                scenario.add_real_card(P1, "Grizzly Bears", Zone::Library, db),
+            )
+        });
+    assert!(cast(&mut runner, inside));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseXValue { .. }
+    ));
+    runner
+        .act(GameAction::ChooseX { value: 1 })
+        .expect("P0 chooses X = 1");
+    resolve_choosing_p1(&mut runner);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Exile);
+    assert_eq!(pool(&runner, P0), 0);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 20);
+    assert_cast_from_exile_without_hunter(&mut runner, bears, hunter);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 18);
+}
+
 /// P0's precombat main with `mana` floating and P1's Grizzly Bears on the battlefield above a
 /// three-card library; `setup` adds P0's cards.
 fn mastery_board<T>(
