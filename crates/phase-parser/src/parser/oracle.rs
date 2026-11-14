@@ -744,6 +744,7 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
         AbilityKind::BeginGame,
         // CR 103.6a: the card is put onto the battlefield from the opening hand.
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             destination: Zone::Battlefield,
             target: TargetFilter::SelfRef,
@@ -5170,33 +5171,9 @@ fn apply_etb_exile_ltb_return(
                     continue;
                 };
                 // Several ETB items can pair with one LTB; rewrite it only once.
-                if !matches!(
-                    execute.effect.as_ref(),
-                    Effect::ChangeZone {
-                        destination: Zone::Battlefield,
-                        target: TargetFilter::TrackedSet { .. },
-                        ..
-                    }
-                ) {
-                    continue;
+                if let Some(promoted) = ltb_return_of_exiled_by_source(&execute.effect) {
+                    *execute.effect = promoted;
                 }
-                // CR 607.2a + CR 607.3: the LTB returns every card in exile that this
-                // object's linked exile put there.
-                // CR 110.2a: the printed "under its/their owner's control" overrides the
-                // instructing-player default; enters_under: None resolves to the owner.
-                *execute.effect = Effect::ChangeZoneAll {
-                    origin: Some(Zone::Exile),
-                    destination: Zone::Battlefield,
-                    target: TargetFilter::ExiledBySource,
-                    enters_under: None,
-                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                    enters_attacking: false,
-                    enter_with_counters: Vec::new(),
-                    face_down_profile: None,
-                    library_position: None,
-                    library_shuffle: Default::default(),
-                    random_order: false,
-                };
             }
             LinkedReturnOutcome::ModifierUnsupported { fragment } => {
                 let Some(pos) = position_of(trigger_ids, *ltb_return) else {
@@ -5208,6 +5185,39 @@ fn apply_etb_exile_ltb_return(
             }
         }
     }
+}
+
+/// CR 607.2a + CR 607.3: the LTB return of a linked ETB exile ("return the
+/// exiled card to the battlefield") returns every card in exile that this
+/// object's linked exile put there. `None` for anything but the unpromoted
+/// tracked-set return, so a second pairing leaves the promoted move alone.
+fn ltb_return_of_exiled_by_source(effect: &Effect) -> Option<Effect> {
+    let Effect::ChangeZone {
+        actor,
+        destination: Zone::Battlefield,
+        target: TargetFilter::TrackedSet { .. },
+        ..
+    } = effect
+    else {
+        return None;
+    };
+    Some(Effect::ChangeZoneAll {
+        // CR 608.2c: the return's performer survives the promotion.
+        actor: actor.clone(),
+        origin: Some(Zone::Exile),
+        destination: Zone::Battlefield,
+        target: TargetFilter::ExiledBySource,
+        // CR 110.2a: the printed "under its/their owner's control" overrides the
+        // instructing-player default; enters_under: None resolves to the owner.
+        enters_under: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+        enter_with_counters: Vec::new(),
+        face_down_profile: None,
+        library_position: None,
+        library_shuffle: Default::default(),
+        random_order: false,
+    })
 }
 
 /// CR 607.2a: Append an `Effect::unimplemented` gap marker to the tail of a
