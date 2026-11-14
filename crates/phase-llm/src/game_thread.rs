@@ -348,7 +348,8 @@ impl LlmThreadMemory {
     /// not opt in, and every protocol but Anthropic Messages — and a seat whose
     /// decision may not use one ([`GameDecisionRequest::thread_game`]) get
     /// exactly [`build_chat_request`]'s request, and any thread the seat held
-    /// is forgotten (an endpoint's refusal of threads is kept). So do the
+    /// is forgotten (what the seat knows of each conversation, and an
+    /// endpoint's refusal of threads, are kept). So do the
     /// decisions of a refused endpoint and of a conversation the API could not
     /// store. Otherwise the request continues the seat's thread when it can
     /// and creates a new one when it cannot, and is remembered as pending until
@@ -381,13 +382,13 @@ impl LlmThreadMemory {
         let game_number = match decision.thread_game() {
             Some(game_number) if endpoint.uses_message_threads() => game_number,
             _ => {
-                // The seat's thread, and any recovery owed to it, is
-                // forgotten; an endpoint's refusal of threads is not, because
-                // it outlasts any one thread.
+                // The seat's thread is forgotten. What the seat knows of each
+                // conversation (a recovery it is owed, or that the API cannot
+                // store it) and an endpoint's refusal of threads are not,
+                // because they outlast any one thread.
                 if let Some(thread) = self.seats.get_mut(&seat) {
                     thread.open = None;
                     thread.pending = None;
-                    thread.lost.clear();
                 }
                 return build_chat_request(endpoint, &decision.prompt).map(full);
             }
@@ -1862,65 +1863,90 @@ mod tests {
 
     /// A recovery is owed to its conversation until that conversation has an
     /// answered turn again. Model A's thread is lost and the create replacing
-    /// it fails before the API stores anything; the seat then switches to
-    /// model B, whose thread is answered and then lost too. Back on A, the
-    /// create is still A's recovery, so losing it at its first continue right
-    /// away makes A self-contained, without one more create-and-fail cycle.
+    /// it fails before the API stores anything. The seat then turns to
+    /// something else: model B, whose thread is answered and then lost too,
+    /// or a decision sent without a thread (the setting turned off). Back on
+    /// A, the create is still A's recovery, so losing it at its first continue
+    /// right away makes A self-contained, without one more create-and-fail
+    /// cycle.
     #[test]
     fn a_conversation_still_owes_its_recovery_after_the_seat_switches_away_and_back() {
+        /// Where the seat turns between losing A's thread and coming back.
+        #[derive(Debug, Clone, Copy)]
+        enum Detour {
+            AnotherModel,
+            NoThread,
+        }
+
         let model_a = threaded();
         let mut model_b = threaded();
         model_b.model = "claude-other".to_string();
+        let unthreaded = endpoint(LlmProvider::Anthropic, DecisionContext::SelfContained);
         let medium = |revision| decision(revision, AiDifficulty::Medium);
+        for detour in [Detour::AnotherModel, Detour::NoThread] {
+            let mut memory = LlmThreadMemory::new();
+            answer(&mut memory, &model_a, &medium(1), &log(2), "msg_1");
+            memory
+                .decision_request(SEAT, &model_a, &medium(2), &log(3), NOW_MS)
+                .unwrap();
+            lose_thread(&mut memory, ThreadErrorCode::NotFound);
+            let failed_recovery = memory
+                .decision_request(SEAT, &model_a, &medium(2), &log(3), NOW_MS)
+                .unwrap()
+                .request;
+            assert!(is_create(&failed_recovery), "{detour:?}");
+            let unavailable = LlmReply {
+                provider: LlmProvider::Anthropic,
+                status: 503,
+                body: "{}",
+            };
+            let error = LlmError::Provider {
+                detail: "overloaded".to_string(),
+            };
+            memory.record_reply(
+                SEAT,
+                pending_turn(&memory),
+                unavailable,
+                Err(&error),
+                NOW_MS,
+            );
 
-        let mut memory = LlmThreadMemory::new();
-        answer(&mut memory, &model_a, &medium(1), &log(2), "msg_1");
-        memory
-            .decision_request(SEAT, &model_a, &medium(2), &log(3), NOW_MS)
-            .unwrap();
-        lose_thread(&mut memory, ThreadErrorCode::NotFound);
-        let failed_recovery = memory
-            .decision_request(SEAT, &model_a, &medium(2), &log(3), NOW_MS)
-            .unwrap()
-            .request;
-        assert!(is_create(&failed_recovery));
-        let unavailable = LlmReply {
-            provider: LlmProvider::Anthropic,
-            status: 503,
-            body: "{}",
-        };
-        let error = LlmError::Provider {
-            detail: "overloaded".to_string(),
-        };
-        memory.record_reply(
-            SEAT,
-            pending_turn(&memory),
-            unavailable,
-            Err(&error),
-            NOW_MS,
-        );
+            match detour {
+                Detour::AnotherModel => {
+                    answer(&mut memory, &model_b, &medium(3), &log(4), "msg_2");
+                    memory
+                        .decision_request(SEAT, &model_b, &medium(4), &log(5), NOW_MS)
+                        .unwrap();
+                    lose_thread(&mut memory, ThreadErrorCode::NotFound);
+                }
+                Detour::NoThread => {
+                    memory
+                        .decision_request(SEAT, &unthreaded, &medium(3), &log(4), NOW_MS)
+                        .unwrap();
+                }
+            }
 
-        answer(&mut memory, &model_b, &medium(3), &log(4), "msg_2");
-        memory
-            .decision_request(SEAT, &model_b, &medium(4), &log(5), NOW_MS)
-            .unwrap();
-        lose_thread(&mut memory, ThreadErrorCode::NotFound);
-
-        answer(&mut memory, &model_a, &medium(5), &log(6), "msg_3");
-        let first_continue = memory
-            .decision_request(SEAT, &model_a, &medium(6), &log(7), NOW_MS)
-            .unwrap()
-            .request;
-        assert_eq!(continued_from(&first_continue), Some("msg_3".to_string()));
-        lose_thread(&mut memory, ThreadErrorCode::NotFound);
-        let after = memory
-            .decision_request(SEAT, &model_a, &medium(6), &log(7), NOW_MS)
-            .unwrap()
-            .request;
-        assert_eq!(
-            after,
-            build_chat_request(&model_a, &medium(6).prompt).unwrap()
-        );
+            answer(&mut memory, &model_a, &medium(5), &log(6), "msg_3");
+            let first_continue = memory
+                .decision_request(SEAT, &model_a, &medium(6), &log(7), NOW_MS)
+                .unwrap()
+                .request;
+            assert_eq!(
+                continued_from(&first_continue),
+                Some("msg_3".to_string()),
+                "{detour:?}"
+            );
+            lose_thread(&mut memory, ThreadErrorCode::NotFound);
+            let after = memory
+                .decision_request(SEAT, &model_a, &medium(6), &log(7), NOW_MS)
+                .unwrap()
+                .request;
+            assert_eq!(
+                after,
+                build_chat_request(&model_a, &medium(6).prompt).unwrap(),
+                "{detour:?}"
+            );
+        }
     }
 
     /// Only a recovery thread's first continue counts: a thread that has been
