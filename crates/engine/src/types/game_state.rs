@@ -38638,6 +38638,9 @@ impl GameState {
             // `ZoneChanged` record inside it would hold unranked pins; but
             // `is_loop_comparable` requires both empty, so no sampled position holds one.
             deferred_entry_events: _,
+            // Likewise: held battlefield-entry events (`GameState::unsettled_entry_batch_events`),
+            // and `is_loop_comparable` requires them empty.
+            unsettled_entry_batch_events: _,
             pending_attack_trigger_events: _,
             // The hero-event batch is likewise excluded by `is_loop_comparable`.
             pending_hero_event: _,
@@ -39002,6 +39005,10 @@ impl GameState {
             sacrificed_permanents_this_turn: _,
             zone_changes_this_turn: _,
             battlefield_entry_observations: _,
+            // Ledger lengths (`GameState::instruction_boundary_marks`), one per entering
+            // instruction: they hold no incarnation id, grow with the ledger they index and
+            // are cleared with it by the loop projection.
+            instruction_boundary_marks: _,
             batched_zone_change_trigger_fired: _,
         } = s;
         if let Some(combat) = s.combat.as_ref() {
