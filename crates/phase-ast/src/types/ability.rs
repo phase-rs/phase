@@ -40478,6 +40478,9 @@ pub struct TriggerDefinition {
     pub damage_kind: DamageKindFilter,
     #[serde(default)]
     pub secondary: bool,
+    /// CR 805.4d: on a `TriggerMode::Phase` trigger, the per-player scope of its step ("each
+    /// player's", "each opponent's", an enchanted player's): per-player firing is decided by
+    /// the typed scope the parser records, never inferred from effect shape.
     #[serde(default)]
     pub valid_target: Option<TargetFilter>,
     /// CR 115.1: The player leaf of a becomes-target trigger's SUBJECT (e.g. the

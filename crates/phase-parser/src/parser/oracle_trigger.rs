@@ -20470,8 +20470,8 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     {
         def.valid_target = Some(TargetFilter::ParentTargetController);
     }
-    // CR 102.1 + CR 800.4j: "each [other] player's [step]" is a step of a player's turn, a
-    // scope the unscoped "each [step]" does not carry.
+    // CR 102.1 + CR 800.4j: "each [other] player's / each opponent's [step]" is a step of a
+    // player's turn, a scope the unscoped "each [step]" does not carry.
     if def.valid_target.is_none() {
         def.valid_target =
             nom_primitives::scan_at_word_boundaries(phase_text, parse_each_players_possessive);
@@ -24626,6 +24626,9 @@ fn parse_each_players_possessive(input: &str) -> OracleResult<'_, TargetFilter> 
                 },
                 tag("other player"),
             ),
+            // CR 805.4d: "each opponent's" step is each opponent's, unlike the collective
+            // "your opponents'", which keeps only its turn constraint.
+            value(TargetFilter::Opponent, tag("opponent")),
         )),
         alt((tag("'s "), tag("\u{2019}s "), tag("s "))),
     )

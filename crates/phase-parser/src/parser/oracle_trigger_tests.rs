@@ -23053,8 +23053,9 @@ fn a_phase_triggers_scope_is_whose_step_not_its_effects_target() {
     }
 }
 
-/// CR 102.1 + CR 102.3 + CR 303.4m: a phase trigger's turn-owner possessive decides whose step
-/// it is, as a turn constraint or a player scope.
+/// CR 102.1 + CR 102.3 + CR 303.4m + CR 805.4d: a phase trigger's turn-owner possessive decides
+/// whose step it is, as a turn constraint or a per-player scope; the collective "your opponents'"
+/// is a turn constraint without a per-player scope.
 #[test]
 fn a_phase_triggers_turn_owner_is_its_possessive() {
     let other_player = Some(TargetFilter::PlayerMatching {
@@ -23064,34 +23065,63 @@ fn a_phase_triggers_turn_owner_is_its_possessive() {
         }),
     });
     let opponents_turn = Some(TriggerConstraint::OnlyDuringOpponentsTurn);
+    let each_opponent = Some(TargetFilter::Opponent);
     for (name, line, phase, constraint, scope) in [
+        (
+            "Lavaborn Muse",
+            "At the beginning of each opponent's upkeep, if that player has two or fewer cards in hand, this creature deals 3 damage to that player.",
+            Phase::Upkeep,
+            opponents_turn.clone(),
+            each_opponent.clone(),
+        ),
+        (
+            "Luminarch Ascension",
+            "At the beginning of each opponent's end step, if you didn't lose life this turn, you may put a quest counter on this enchantment. (Damage causes loss of life.)",
+            Phase::End,
+            opponents_turn.clone(),
+            each_opponent.clone(),
+        ),
+        (
+            "Bow to My Command",
+            "At the beginning of your opponents' end step, they may tap any number of untapped creatures they control with total power 8 or greater. If they do, abandon this scheme.",
+            Phase::End,
+            opponents_turn.clone(),
+            None,
+        ),
+        (
+            "Because I Have Willed It",
+            "At the beginning of your opponents' end step, if they cast four or more spells this turn, abandon this scheme.",
+            Phase::End,
+            opponents_turn.clone(),
+            None,
+        ),
         (
             "Sentinel of the Eternal Watch",
             "At the beginning of combat on each opponent's turn, tap target creature that player controls.",
             Phase::BeginCombat,
             opponents_turn.clone(),
-            None,
+            each_opponent.clone(),
         ),
         (
             "Web of Inertia",
             "At the beginning of combat on each opponent's turn, that player may exile a card from their graveyard. If the player doesn't, creatures they control can't attack you this turn.",
             Phase::BeginCombat,
             opponents_turn.clone(),
-            None,
+            each_opponent.clone(),
         ),
         (
             "Fight or Flight",
             "At the beginning of combat on each opponent's turn, separate all creatures that player controls into two piles. Only creatures in the pile of their choice can attack this turn.",
             Phase::BeginCombat,
             opponents_turn.clone(),
-            None,
+            each_opponent.clone(),
         ),
         (
             "Champions of Minas Tirith",
             "At the beginning of combat on each opponent's turn, if you're the monarch, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat.",
             Phase::BeginCombat,
             opponents_turn.clone(),
-            None,
+            each_opponent.clone(),
         ),
         (
             "Overencumbered",
