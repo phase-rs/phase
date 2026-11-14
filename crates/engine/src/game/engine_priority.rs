@@ -710,7 +710,16 @@ fn run_post_action_pipeline_core(
     if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         // CR 603.2c + CR 603.7b: a further canonical prompt retains fresh
         // delayed occurrences now; its later answer has a different buffer.
-        if (delayed_event_start.is_some() || payment_owned) && state.game_end.is_none() {
+        // CR 603.2 + CR 603.7: so does a resolution paused on its untargeted
+        // object choice ("Destroy any number of target planeswalkers. Choose a
+        // planeswalker you control."): the instructions before the choice already
+        // happened, and a delayed trigger watching them ("When the permanent you
+        // don't control dies this turn") triggers now.
+        if (delayed_event_start.is_some()
+            || payment_owned
+            || super::effects::resolution_object_choice_is_open(state))
+            && state.game_end.is_none()
+        {
             let delayed_input = unclaimed_delayed_trigger_input(
                 state,
                 events,
