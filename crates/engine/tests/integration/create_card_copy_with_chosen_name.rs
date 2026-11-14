@@ -30,8 +30,10 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use engine::database::card_db::CardDatabase;
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::parser::oracle::parse_oracle_text;
+use engine::types::ability::TargetRef;
 use engine::types::ability::{
     CastFromZoneDriver, ChoiceType, Effect, NameDistinctness, TargetFilter,
 };
@@ -136,7 +138,7 @@ fn garth_parses_a_closed_distinct_name_domain_and_a_card_copy() {
     };
     assert_eq!(*name, None, "the name comes from the choice, not the text");
 
-    // CR 118.9b: "you may cast the copy" — a normal, PAID cast ("You still pay
+    // CR 601.2f: "you may cast the copy" — a normal, PAID cast ("You still pay
     // its costs"), bound to the copy this chain created. `ParentTarget` would
     // bind to the ability's declared targets, and it declares none.
     let cast = create
@@ -398,7 +400,10 @@ fn the_prompt_offers_exactly_the_printed_names_and_creates_the_chosen_copy() {
         .map(|(id, _)| *id)
         .expect("the copy was created");
     let copy_obj = &runner.state().objects[&copy];
-    assert!(copy_obj.is_copy, "CR 707.13: it is a copy, not a card");
+    assert!(
+        copy_obj.is_copy,
+        "CR 704.5e: it is a copy of a card, which the copy sweep reads"
+    );
     assert!(!copy_obj.is_token, "CR 704.5d is the wrong sweep for it");
     assert_eq!(
         runner.state().last_created_token_ids,
@@ -693,5 +698,680 @@ fn a_cast_copy_is_never_put_into_exile() {
         time_counters(&runner, doctor),
         0,
         "creating and casting the copy puts no card into exile"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CR 201.4 + CR 608.2c: the copy names what THIS resolution chose.
+// ---------------------------------------------------------------------------
+
+/// Choose `name` from the open prompt and decline the cast.
+fn choose_and_decline(runner: &mut GameRunner, garth: ObjectId, name: &str) {
+    activate_to_the_prompt(runner, garth);
+    runner
+        .act(GameAction::ChooseOption {
+            choice: name.to_string(),
+        })
+        .expect("a printed name is a legal answer");
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the optional cast is legal");
+    runner.advance_until_stack_empty();
+    runner.state_mut().objects.get_mut(&garth).unwrap().tapped = false;
+}
+
+/// CR 609.3: once every name has been chosen the choice is impossible and does
+/// nothing — so "the card with the chosen name" names NO card. The last name
+/// chosen in an EARLIER resolution must not be copied again.
+#[test]
+fn an_exhausted_domain_creates_no_copy_and_offers_no_cast() {
+    let (mut runner, garth) = garth_on_the_battlefield();
+    for name in FIXTURE_NAMES {
+        choose_and_decline(&mut runner, garth, name);
+    }
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: garth,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("the tap ability is still activatable");
+    runner.resolve_top();
+
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::NamedChoice { .. } | WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "no name is left to choose and no copy to cast: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().last_created_token_ids.is_empty(),
+        "no copy was created"
+    );
+    assert!(
+        !runner
+            .state()
+            .objects
+            .values()
+            .any(|o| o.is_copy && FIXTURE_NAMES.contains(&o.name.as_str())),
+        "the previous resolution's name was not copied again"
+    );
+}
+
+/// CR 113.7a: an ability whose source has left the battlefield still resolves.
+/// Garth destroyed in response still lets its controller choose a name and copy
+/// that card — the chosen name lives in the resolution, not on the gone source.
+#[test]
+fn garth_removed_in_response_still_copies_the_chosen_card() {
+    let (mut runner, garth, removal) = garth_scenario(0, |scenario| {
+        let mut card = scenario.add_spell_to_hand(P0, "Unmake", true);
+        card.from_oracle_text("Destroy target creature.");
+        Some(card.id())
+    });
+    let removal = removal.expect("the removal spell is in hand");
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: garth,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("the tap ability is activatable");
+    let card_id = runner.state().objects[&removal].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: removal,
+            card_id,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("the removal can be cast in response");
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(garth)),
+            })
+            .expect("Garth is a legal target");
+    }
+    // The removal resolves first, then Garth's ability.
+    runner.resolve_top();
+    assert!(
+        runner
+            .state()
+            .objects
+            .get(&garth)
+            .is_none_or(|o| o.zone != Zone::Battlefield),
+        "Garth left the battlefield before its ability resolved"
+    );
+    runner.resolve_top();
+
+    assert_eq!(
+        offered_names(&runner),
+        FIXTURE_NAMES.map(str::to_string).to_vec(),
+        "the ability still asks for a name"
+    );
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Lightning Bolt".to_string(),
+        })
+        .expect("a printed name is a legal answer");
+    let copy = runner
+        .state()
+        .last_created_token_ids
+        .first()
+        .copied()
+        .expect("the copy was created from the resolution's choice");
+    assert_eq!(runner.state().objects[&copy].name, "Lightning Bolt");
+}
+
+// ---------------------------------------------------------------------------
+// Real Garth One-Eye and Ersta, Friend to All faces through the production
+// loader (Oracle text from Scryfall), with the face registry seeded at game
+// start by `rehydrate_game_from_card_db` rather than by hand.
+// ---------------------------------------------------------------------------
+
+const REAL_GARTH: &str = "{T}: Choose a card name that hasn't been chosen from among \
+Disenchant, Braingeyser, Terror, Shivan Dragon, Regrowth, and Black Lotus. Create a copy of the \
+card with the chosen name. You may cast the copy. (You still pay its costs.)";
+
+/// Ersta's Oracle text with its JSON escapes already applied (newlines as `\n`,
+/// quotes as `\"`), since it is spliced into an MTGJSON fixture.
+const REAL_ERSTA_JSON: &str = "+1: Create a 1/1 Human Wizard creature token that's all colors.\\n\
+\u{2212}3: Choose a card name from among Enlightened Tutor, Mystical Tutor, Booster Tutor, \
+Imperial Recruiter, and Worldly Tutor. Create a copy of the card with the chosen name. You may \
+cast the copy without paying its mana cost.\\n\
+\u{2212}8: You get an emblem with \\\"At the beginning of your upkeep, if you control twenty or \
+more Wizards, you win the game.\\\"";
+
+fn atomic(name: &str, types: &str, mana_cost: &str, text: &str, extra: &str) -> String {
+    format!(
+        r#""{name}": [{{ "name": "{name}", "colors": [], "colorIdentity": [], "layout": "normal",
+            "types": [{types}], "subtypes": [], "supertypes": [], "manaCost": "{mana_cost}",
+            "manaValue": 1.0, "text": "{text}", {extra}
+            "identifiers": {{ "scryfallOracleId": "o-{name}" }} }}]"#
+    )
+}
+
+fn real_db() -> &'static CardDatabase {
+    static DB: OnceLock<CardDatabase> = OnceLock::new();
+    DB.get_or_init(|| {
+        let entries = [
+            atomic(
+                "Garth One-Eye",
+                r#""Creature""#,
+                "{W}{U}{B}{R}{G}",
+                REAL_GARTH,
+                r#""power": "5", "toughness": "5","#,
+            ),
+            atomic(
+                "Ersta, Friend to All",
+                r#""Planeswalker""#,
+                "{W}{U}{B}{R}{G}",
+                REAL_ERSTA_JSON,
+                r#""loyalty": "5","#,
+            ),
+            atomic(
+                "Disenchant",
+                r#""Instant""#,
+                "{1}{W}",
+                "Destroy target artifact or enchantment.",
+                "",
+            ),
+            atomic(
+                "Braingeyser",
+                r#""Sorcery""#,
+                "{X}{U}{U}",
+                "Target player draws X cards.",
+                "",
+            ),
+            atomic(
+                "Terror",
+                r#""Instant""#,
+                "{1}{B}",
+                "Destroy target nonartifact, nonblack creature. It can't be regenerated.",
+                "",
+            ),
+            atomic(
+                "Shivan Dragon",
+                r#""Creature""#,
+                "{4}{R}{R}",
+                "Flying\\n{R}: This creature gets +1/+0 until end of turn.",
+                r#""power": "5", "toughness": "5","#,
+            ),
+            atomic(
+                "Regrowth",
+                r#""Sorcery""#,
+                "{1}{G}",
+                "Return target card from your graveyard to your hand.",
+                "",
+            ),
+            atomic(
+                "Black Lotus",
+                r#""Artifact""#,
+                "{0}",
+                "{T}, Sacrifice this artifact: Add three mana of any one color.",
+                "",
+            ),
+            atomic(
+                "Enlightened Tutor",
+                r#""Instant""#,
+                "{W}",
+                "Search your library for an artifact or enchantment card, reveal it, then shuffle \
+                 and put that card on top.",
+                "",
+            ),
+            atomic(
+                "Mystical Tutor",
+                r#""Instant""#,
+                "{U}",
+                "Search your library for an instant or sorcery card, reveal it, then shuffle and \
+                 put that card on top.",
+                "",
+            ),
+            atomic(
+                "Booster Tutor",
+                r#""Instant""#,
+                "{B}",
+                "Open a sealed Magic booster pack, reveal the cards, and put one of them into \
+                 your hand. (Remove that card from your deck before beginning a new game.)",
+                "",
+            ),
+            atomic(
+                "Imperial Recruiter",
+                r#""Creature""#,
+                "{2}{R}",
+                "When this creature enters, search your library for a creature card with power 2 \
+                 or less, reveal it, put it into your hand, then shuffle.",
+                r#""power": "1", "toughness": "1","#,
+            ),
+            atomic(
+                "Worldly Tutor",
+                r#""Instant""#,
+                "{G}",
+                "Search your library for a creature card, reveal it, then shuffle and put the \
+                 card on top.",
+                "",
+            ),
+        ];
+        let json = format!(r#"{{ "data": {{ {} }} }}"#, entries.join(","));
+        let dir = std::env::temp_dir().join(format!("garth-real-db-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("AtomicCards.json");
+        std::fs::write(&path, json).expect("write AtomicCards fixture");
+        CardDatabase::from_mtgjson(&path).expect("real Garth/Ersta fixture loads")
+    })
+}
+
+/// Build a game around real faces, seeding the outside-the-game registry the
+/// way a real game does.
+fn real_game(
+    mana: Vec<ManaType>,
+    setup: impl FnOnce(&mut GameScenario, &CardDatabase) -> Vec<ObjectId>,
+) -> (GameRunner, Vec<ObjectId>) {
+    let db = real_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    if !mana.is_empty() {
+        scenario.with_mana_pool(
+            P0,
+            mana.into_iter()
+                .map(|kind| ManaUnit::new(kind, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+    }
+    let ids = setup(&mut scenario, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    (runner, ids)
+}
+
+/// Answer every prompt of an accepted copy cast: accept, take the offer,
+/// announce X, pick the target, pay from the pool.
+fn drive_copy_cast(runner: &mut GameRunner, x: u32, target: Option<TargetRef>) {
+    for _ in 0..24 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::OptionalEffectChoice { .. } => {
+                GameAction::DecideOptionalEffect { accept: true }
+            }
+            WaitingFor::CastOffer { .. } => GameAction::GraveyardPaidCastChoice {
+                choice: CastChoice::Cast,
+            },
+            WaitingFor::ChooseXValue { .. } => GameAction::ChooseX { value: x },
+            WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
+                target: target.clone(),
+            },
+            WaitingFor::ManaPayment { .. } => GameAction::PassPriority,
+            _ => return,
+        };
+        runner.act(action).expect("the copy cast proceeds");
+    }
+}
+
+fn garth_choose(runner: &mut GameRunner, garth: ObjectId, name: &str) {
+    activate_to_the_prompt(runner, garth);
+    runner
+        .act(GameAction::ChooseOption {
+            choice: name.to_string(),
+        })
+        .expect("a printed name is a legal answer");
+}
+
+#[test]
+fn real_garth_registry_is_seeded_at_game_start() {
+    let (runner, _) = real_game(Vec::new(), |scenario, db| {
+        vec![scenario.add_real_card(P0, "Garth One-Eye", Zone::Battlefield, db)]
+    });
+    for name in [
+        "disenchant",
+        "braingeyser",
+        "terror",
+        "shivan dragon",
+        "regrowth",
+        "black lotus",
+    ] {
+        assert!(
+            runner.state().card_face_registry.contains_key(name),
+            "{name} is preloaded from Garth's closed domain"
+        );
+    }
+}
+
+/// A targeted copy (Disenchant, {1}{W}) cast for its cost destroys its target.
+#[test]
+fn real_garth_casts_a_targeted_copy() {
+    let (mut runner, ids) = real_game(vec![ManaType::White, ManaType::White], |scenario, db| {
+        vec![
+            scenario.add_real_card(P0, "Garth One-Eye", Zone::Battlefield, db),
+            scenario.add_real_card(P1, "Black Lotus", Zone::Battlefield, db),
+        ]
+    });
+    let (garth, lotus) = (ids[0], ids[1]);
+    garth_choose(&mut runner, garth, "Disenchant");
+    drive_copy_cast(&mut runner, 0, Some(TargetRef::Object(lotus)));
+    assert!(
+        runner.stack_names().contains(&"Disenchant".to_string()),
+        "the Disenchant copy is on the stack: {:?} / {:?}",
+        runner.stack_names(),
+        runner.state().waiting_for
+    );
+    runner.advance_until_stack_empty();
+    assert!(
+        runner
+            .state()
+            .objects
+            .get(&lotus)
+            .is_none_or(|o| o.zone != Zone::Battlefield),
+        "Disenchant's copy destroyed the targeted artifact"
+    );
+}
+
+/// An X copy (Braingeyser, {X}{U}{U}) announces X and pays for it.
+#[test]
+fn real_garth_casts_an_x_copy() {
+    let (mut runner, ids) = real_game(
+        vec![
+            ManaType::Blue,
+            ManaType::Blue,
+            ManaType::Blue,
+            ManaType::Blue,
+        ],
+        |scenario, db| {
+            for _ in 0..3 {
+                scenario.add_real_card(P0, "Regrowth", Zone::Library, db);
+            }
+            vec![scenario.add_real_card(P0, "Garth One-Eye", Zone::Battlefield, db)]
+        },
+    );
+    let garth = ids[0];
+    let hand_before = runner.state().players[0].hand.len();
+    garth_choose(&mut runner, garth, "Braingeyser");
+    drive_copy_cast(&mut runner, 2, Some(TargetRef::Player(P0)));
+    assert!(
+        runner.stack_names().contains(&"Braingeyser".to_string()),
+        "the Braingeyser copy is on the stack: {:?} / {:?}",
+        runner.stack_names(),
+        runner.state().waiting_for
+    );
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        hand_before + 2,
+        "X = 2 drew two cards"
+    );
+}
+
+/// A {0} permanent copy (Black Lotus) is cast for nothing and resolves onto the
+/// battlefield.
+#[test]
+fn real_garth_casts_a_zero_cost_permanent_copy() {
+    let (mut runner, ids) = real_game(Vec::new(), |scenario, db| {
+        vec![scenario.add_real_card(P0, "Garth One-Eye", Zone::Battlefield, db)]
+    });
+    let garth = ids[0];
+    garth_choose(&mut runner, garth, "Black Lotus");
+    drive_copy_cast(&mut runner, 0, None);
+    runner.advance_until_stack_empty();
+    assert!(
+        runner.state().battlefield.iter().any(|id| {
+            let o = &runner.state().objects[id];
+            o.name == "Black Lotus" && o.controller == P0
+        }),
+        "the cast Black Lotus copy resolved onto the battlefield: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Ersta, Friend to All shares the effect with a FREE cast: "You may cast the
+/// copy without paying its mana cost." With no mana available the copy is still
+/// cast.
+#[test]
+fn real_ersta_casts_her_copy_for_free() {
+    let (mut runner, ids) = real_game(Vec::new(), |scenario, db| {
+        vec![scenario.add_real_card(P0, "Ersta, Friend to All", Zone::Battlefield, db)]
+    });
+    let ersta = ids[0];
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: ersta,
+            ability_index: 1,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("Ersta's -3 is activatable");
+    runner.resolve_top();
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Enlightened Tutor".to_string(),
+        })
+        .expect("a printed name is a legal answer");
+    drive_copy_cast(&mut runner, 0, None);
+    assert!(
+        runner
+            .stack_names()
+            .contains(&"Enlightened Tutor".to_string()),
+        "the free copy is on the stack: {:?} / {:?}",
+        runner.stack_names(),
+        runner.state().waiting_for
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CR 601.2a + CR 707.13 + CR 400.11: the copy is cast from OUTSIDE the game, so
+// no "cast from [zone]" reader may see the staging zone as its origin.
+// ---------------------------------------------------------------------------
+
+const EXILE_CAST_OBSERVER: &str = "Whenever you cast a spell from exile, you gain 1 life.";
+const NOT_HAND_CAST_OBSERVER: &str =
+    "Whenever you cast a spell from anywhere other than your hand, you gain 10 life.";
+
+fn life_of_p0(runner: &GameRunner) -> i32 {
+    runner.state().players[0].life
+}
+
+/// Real Garth casts its Black Lotus copy with a cast-origin observer for each
+/// polarity on the battlefield: "from exile" (Nalfeshnee's class) must stay
+/// silent, "from anywhere other than your hand" must fire — an outside-the-game
+/// cast is from no zone (CR 400.11), so it satisfies the negative constraint and
+/// fails every named zone. `clear_provenance` strips the outside-the-game marker
+/// first, as the reach guard: with the marker gone the SAME cast is recorded
+/// from the staging zone and the exile observer fires, proving the observer is
+/// live and that the marker alone is what silences it.
+fn cast_black_lotus_copy_with_observers(clear_provenance: bool) -> (i32, i32) {
+    let (mut runner, ids) = real_game(Vec::new(), |scenario, db| {
+        let garth = scenario.add_real_card(P0, "Garth One-Eye", Zone::Battlefield, db);
+        {
+            let mut card = scenario.add_creature(P0, "Exile Observer", 1, 1);
+            card.from_oracle_text(EXILE_CAST_OBSERVER);
+        }
+        {
+            let mut card = scenario.add_creature(P0, "Not Hand Observer", 1, 1);
+            card.from_oracle_text(NOT_HAND_CAST_OBSERVER);
+        }
+        vec![garth]
+    });
+    let garth = ids[0];
+    let life_before = life_of_p0(&runner);
+    garth_choose(&mut runner, garth, "Black Lotus");
+    if clear_provenance {
+        let copy = runner
+            .state()
+            .last_created_token_ids
+            .first()
+            .copied()
+            .expect("the copy was created");
+        let object = runner
+            .state_mut()
+            .objects
+            .get_mut(&copy)
+            .expect("the copy exists");
+        assert!(
+            object.created_outside_game,
+            "the copy is marked as created outside the game"
+        );
+        object.created_outside_game = false;
+    }
+    drive_copy_cast(&mut runner, 0, None);
+    // Both observers trigger on the SpellCast event; resolve them and the copy.
+    runner.advance_until_stack_empty();
+    assert!(
+        runner.state().battlefield.iter().any(|id| {
+            let o = &runner.state().objects[id];
+            o.name == "Black Lotus" && o.controller == P0
+        }),
+        "the Black Lotus copy was cast and resolved: {:?}",
+        runner.state().waiting_for
+    );
+    let gained = life_of_p0(&runner) - life_before;
+    // 1 from the exile observer, 10 from the not-hand observer.
+    (gained % 10, gained / 10)
+}
+
+#[test]
+fn a_cast_of_garths_copy_is_not_a_cast_from_exile() {
+    let (exile_triggers, not_hand_triggers) = cast_black_lotus_copy_with_observers(false);
+    assert_eq!(
+        exile_triggers, 0,
+        "CR 707.13 + CR 400.11: the copy is cast from outside the game, not from exile"
+    );
+    assert_eq!(
+        not_hand_triggers, 1,
+        "CR 601.2a: a cast from outside the game is a cast from anywhere other than the hand"
+    );
+}
+
+/// Reach guard for the test above: without the outside-the-game marker the very
+/// same cast IS observed as a cast from exile.
+#[test]
+fn the_exile_cast_observer_is_live_when_the_provenance_is_a_real_exile_cast() {
+    let (exile_triggers, not_hand_triggers) = cast_black_lotus_copy_with_observers(true);
+    assert_eq!(exile_triggers, 1, "a real exile cast fires the observer");
+    assert_eq!(not_hand_triggers, 1);
+}
+
+// ---------------------------------------------------------------------------
+// CR 113.7a + CR 400.7 + CR 608.2h: "that hasn't been chosen" reads the history
+// of the source incarnation the ability was activated for.
+// ---------------------------------------------------------------------------
+
+/// Garth chose Lightning Bolt, then is activated again and blinked before the
+/// ability resolves. The returned Garth is a NEW object with no history
+/// (CR 400.7), but the pending ability belongs to the old incarnation, whose
+/// last known information still has Lightning Bolt as chosen (CR 113.7a): the
+/// returned Garth's empty history must not re-offer it.
+#[test]
+fn a_blinked_garth_ability_reads_the_old_incarnations_chosen_names() {
+    let (mut runner, garth, flicker) = garth_scenario(0, |scenario| {
+        let mut card = scenario.add_spell_to_hand(P0, "Flicker", true);
+        card.from_oracle_text(
+            "Exile target creature you control, then return it to the battlefield under its \
+             owner's control.",
+        );
+        Some(card.id())
+    });
+    let flicker = flicker.expect("the blink spell is in hand");
+
+    // First activation commits Lightning Bolt to this incarnation's history.
+    choose_and_decline(&mut runner, garth, "Lightning Bolt");
+    let incarnation_before = runner.state().objects[&garth].incarnation;
+
+    // Second activation, blinked in response.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: garth,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("the tap ability is activatable again");
+    let card_id = runner.state().objects[&flicker].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: flicker,
+            card_id,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("the blink can be cast in response");
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(garth)),
+            })
+            .expect("Garth is a legal target");
+    }
+    runner.resolve_top();
+    let returned = &runner.state().objects[&garth];
+    assert_eq!(returned.zone, Zone::Battlefield, "Garth came back");
+    assert_ne!(
+        returned.incarnation, incarnation_before,
+        "the returned Garth is a new object (CR 400.7)"
+    );
+    assert!(
+        returned.chosen_attributes.is_empty(),
+        "the returned Garth carries no choice history"
+    );
+
+    runner.resolve_top();
+    assert_eq!(
+        offered_names(&runner),
+        vec!["Disenchant".to_string(), "Grizzly Bears".to_string()],
+        "the old incarnation's committed name stays illegal"
+    );
+}
+
+/// A cast clause that is NOT "the copy" keeps its own target and window: the
+/// rewrite that binds "you may cast the copy" to this chain's created copy and
+/// to cast-during-resolution applies only to the anaphor, never to an
+/// independent later permission (CR 608.2c: each instruction follows its own
+/// text).
+#[test]
+fn an_independent_later_cast_clause_keeps_its_own_target_and_window() {
+    let parsed = parse_oracle_text(
+        "{T}: Choose a card name that hasn't been chosen from among Disenchant, Braingeyser, \
+         and Terror. Create a copy of the card with the chosen name. You may cast the copy. \
+         You may cast target instant card from your graveyard this turn.",
+        "Test Card",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let mut node = parsed.abilities.first();
+    let mut casts = Vec::new();
+    while let Some(def) = node {
+        if let Effect::CastFromZone { target, driver, .. } = &*def.effect {
+            casts.push((target.clone(), *driver));
+        }
+        node = def.sub_ability.as_deref();
+    }
+    assert_eq!(
+        casts.first(),
+        Some(&(
+            TargetFilter::LastCreated,
+            CastFromZoneDriver::DuringResolution
+        )),
+        "the copy cast is bound to the created copy: {casts:?}"
+    );
+    for (target, driver) in casts.iter().skip(1) {
+        assert_ne!(
+            *target,
+            TargetFilter::LastCreated,
+            "an independent cast clause is not rebound to the created copy"
+        );
+        assert_eq!(
+            *driver,
+            CastFromZoneDriver::LingeringPermission,
+            "an independent cast clause keeps its window"
+        );
+    }
+    assert!(
+        casts.len() >= 2,
+        "the independent clause parsed as a second cast: {casts:?}"
     );
 }

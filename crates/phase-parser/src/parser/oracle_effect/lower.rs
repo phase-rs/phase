@@ -4131,12 +4131,14 @@ pub(super) fn bind_cast_of_created_card_copy(defs: &mut [AbilityDefinition]) {
     let mut creator_is_card_copy = false;
     for def in defs.iter_mut() {
         if creator_is_card_copy {
+            // Only a cast of "the copy" (the anaphor lowered to `ParentTarget`) is
+            // rebound; a cast clause naming anything else keeps its own shape.
             if let Effect::CastFromZone { target, driver, .. } = &mut *def.effect {
                 if matches!(target, TargetFilter::ParentTarget) {
                     *target = TargetFilter::LastCreated;
-                }
-                if matches!(driver, CastFromZoneDriver::LingeringPermission) {
-                    *driver = CastFromZoneDriver::DuringResolution;
+                    if matches!(driver, CastFromZoneDriver::LingeringPermission) {
+                        *driver = CastFromZoneDriver::DuringResolution;
+                    }
                 }
             }
         }

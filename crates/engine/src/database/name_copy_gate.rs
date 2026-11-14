@@ -19,84 +19,136 @@
 //! supported. Garth One-Eye and Ersta, Friend to All name only single-faced cards
 //! and are untouched.
 
-use crate::types::ability::{AbilityDefinition, ChoiceType, Effect};
+use std::ops::ControlFlow;
+
+use crate::types::ability::{AbilityDefinition, ChoiceType, Effect, TargetFilter};
+use crate::types::ability_visit::{nodes_mut, DefinitionNodeMut};
 use crate::types::card::CardFace;
 
-/// Gap name recorded for a copy clause the database cannot materialize.
-const GAP_NAME: &str = "CreateCardCopyByName";
+/// Gap name recorded for a copy clause (and its dependent cast) the database
+/// cannot materialize. Distinct from the effect's own coverage label.
+pub(crate) const GAP_NAME: &str = "copy_by_name_unmaterializable";
 
 /// Replace every `Effect::CreateCardCopyByName` on `face` whose name domain
-/// includes a name `is_single_faced_card` rejects with an honest gap. Returns
-/// whether anything was replaced.
+/// includes a name `is_single_faced_card` rejects — and the "you may cast the
+/// copy" clause that depends on it — with an honest gap. Returns whether
+/// anything was replaced.
 ///
 /// `is_single_faced_card` answers, for a printed card name, whether the database
 /// holds it as a single-faced card (and so can materialize a copy of the whole
 /// card from one face). The caller owns the lookup because the two database
 /// builders index faces differently (`oracle_gen`'s export map, the MTGJSON
 /// loader's layouts).
+///
+/// Every definition the face carries is walked — activated and spell abilities,
+/// trigger executes, static and replacement payloads, and every nested
+/// sub/else/mode ability — through the same exclusive walk
+/// (`ability_visit::nodes_mut`) that mirrors the shared walk
+/// `printed_cards::collect_conjure_names` seeds the registry with.
 pub fn gate_unmaterializable_name_copies(
     face: &mut CardFace,
     is_single_faced_card: &impl Fn(&str) -> bool,
 ) -> bool {
     let mut changed = false;
+    let mut on_node = |node: DefinitionNodeMut<'_>| {
+        if let DefinitionNodeMut::Ability(def) = node {
+            changed |= gate_from(def, is_single_faced_card);
+        }
+        ControlFlow::Continue(())
+    };
     for ability in &mut face.abilities {
-        changed |= gate_chain(ability, is_single_faced_card);
+        let _ = nodes_mut::visit_ability_def(ability, &mut on_node);
     }
     for trigger in &mut face.triggers {
-        if let Some(execute) = trigger.execute.as_deref_mut() {
-            changed |= gate_chain(execute, is_single_faced_card);
-        }
+        let _ = nodes_mut::visit_trigger(trigger, &mut on_node);
+    }
+    for static_def in &mut face.static_abilities {
+        let _ = nodes_mut::visit_static(static_def, &mut on_node);
+    }
+    for replacement in &mut face.replacements {
+        let _ = nodes_mut::visit_replacement(replacement, &mut on_node);
     }
     changed
 }
 
-/// Walk one ability chain in resolution order. The most recent card-name choice
-/// in the chain is the domain a following "the card with the chosen name" copy
-/// reads.
-fn gate_chain(head: &mut AbilityDefinition, is_single_faced_card: &impl Fn(&str) -> bool) -> bool {
-    let mut changed = false;
-    // `None` = no card-name choice yet in this chain.
-    let mut domain_materializable: Option<bool> = None;
-    let mut node = Some(head);
-    while let Some(def) = node {
-        let materializable = match &*def.effect {
-            Effect::Choose {
-                choice_type: ChoiceType::CardName { options, .. },
-                ..
-            } => {
-                // CR 201.4: an OPEN domain ranges over every name in the Oracle card
-                // reference, which the scoped face registry is never preloaded
-                // with — so it is not materializable either.
-                domain_materializable = Some(
-                    !options.is_empty() && options.iter().all(|name| is_single_faced_card(name)),
-                );
-                None
+/// Gate the copy clause a single node starts, if it starts one: a card-name
+/// choice whose domain is not materializable gaps the chosen-name copy that
+/// follows it in the chain; a literal-name copy of an unmaterializable name gaps
+/// itself. Either way the dependent "cast the copy" clause goes with it.
+fn gate_from(def: &mut AbilityDefinition, is_single_faced_card: &impl Fn(&str) -> bool) -> bool {
+    match &*def.effect {
+        Effect::Choose {
+            choice_type: ChoiceType::CardName { options, .. },
+            ..
+        } => {
+            // CR 201.4: an OPEN domain ranges over every name in the Oracle card
+            // reference, which the scoped face registry is never preloaded with —
+            // so it is not materializable either.
+            let materializable =
+                !options.is_empty() && options.iter().all(|name| is_single_faced_card(name));
+            if materializable {
+                return false;
             }
-            Effect::CreateCardCopyByName {
-                name: Some(name), ..
-            } => Some(is_single_faced_card(name)),
-            // The parser already gaps a chosen-name copy with no choice before it
-            // (`unimplement_card_copy_without_a_name_choice`); a missing choice
-            // here is that same unreadable name.
-            Effect::CreateCardCopyByName { name: None, .. } => {
-                Some(domain_materializable.unwrap_or(false))
-            }
-            _ => None,
-        };
-        if materializable == Some(false) {
-            let fragment = def
-                .description
-                .clone()
-                .unwrap_or_else(|| "create a copy of the card with the chosen name".to_string());
-            *def.effect = Effect::unimplemented(GAP_NAME, fragment);
-            changed = true;
+            gap_chosen_name_copy_chain(def.sub_ability.as_deref_mut())
         }
-        if let Some(else_branch) = def.else_ability.as_deref_mut() {
-            changed |= gate_chain(else_branch, is_single_faced_card);
+        Effect::CreateCardCopyByName {
+            name: Some(name), ..
+        } if !is_single_faced_card(name) => {
+            gap(def);
+            gap_dependent_casts(def.sub_ability.as_deref_mut());
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Walk the chain after an unmaterializable card-name choice: its chosen-name
+/// copy and every cast of that copy become gaps. A later card-name choice opens
+/// a new domain, which its own node decides.
+fn gap_chosen_name_copy_chain(mut node: Option<&mut AbilityDefinition>) -> bool {
+    let mut changed = false;
+    while let Some(def) = node {
+        match &*def.effect {
+            Effect::Choose {
+                choice_type: ChoiceType::CardName { .. },
+                ..
+            } => break,
+            Effect::CreateCardCopyByName { name: None, .. } => {
+                gap(def);
+                changed = true;
+                gap_dependent_casts(def.sub_ability.as_deref_mut());
+                break;
+            }
+            _ => {}
         }
         node = def.sub_ability.as_deref_mut();
     }
     changed
+}
+
+/// The "you may cast the copy" clause bound to the gapped copy
+/// (`CastFromZone { LastCreated }`) has nothing to cast; it is gapped with it.
+fn gap_dependent_casts(mut node: Option<&mut AbilityDefinition>) {
+    while let Some(def) = node {
+        if matches!(
+            &*def.effect,
+            Effect::CastFromZone {
+                target: TargetFilter::LastCreated,
+                ..
+            }
+        ) {
+            gap(def);
+        }
+        node = def.sub_ability.as_deref_mut();
+    }
+}
+
+fn gap(def: &mut AbilityDefinition) {
+    let fragment = def
+        .description
+        .clone()
+        .unwrap_or_else(|| "create a copy of the card with the chosen name".to_string());
+    *def.effect = Effect::unimplemented(GAP_NAME, fragment);
 }
 
 #[cfg(test)]
@@ -145,6 +197,7 @@ mod tests {
                      Braingeyser, Terror, Shivan Dragon, Regrowth, and Black Lotus. Create a copy \
                      of the card with the chosen name. You may cast the copy. (You still pay its \
                      costs.)";
+        let robot_echo = "When this creature enters, choose a card name from among Who, What,                           and When. Create a copy of the card with the chosen name. You may                           cast the copy.";
         let halves = [
             split_half("Who", "{X}{W}", "Target player gains X life."),
             split_half("What", "{2}{R}", "Destroy target artifact."),
@@ -160,6 +213,10 @@ mod tests {
                 robot,
             ),
             single("Garth One-Eye", r#""Creature""#, "{W}{U}{B}{R}{G}", garth),
+            // The same copy clause reached through a trigger's execute rather
+            // than an activated ability, so the gate's walk is exercised past the
+            // top-level ability list.
+            single("Robot Echo", r#""Artifact", "Creature""#, "{3}", robot_echo),
             single(
                 "Disenchant",
                 r#""Instant""#,
@@ -265,7 +322,11 @@ mod tests {
             closed_domain(robot),
             ["Who", "What", "When", "Where", "Why"]
         );
-        assert_eq!(copy_clauses(robot), (0, 1), "the copy clause is a gap");
+        assert_eq!(
+            copy_clauses(robot),
+            (0, 2),
+            "the copy clause and the cast that depends on it are gaps"
+        );
         assert!(
             card_face_has_unimplemented_parts(robot),
             "coverage reports Interrogation Robot as unsupported"
@@ -277,7 +338,39 @@ mod tests {
         let CardLayout::Single(rules_face) = &rules.layout else {
             panic!("Interrogation Robot is single-faced");
         };
-        assert_eq!(copy_clauses(rules_face), (0, 1));
+        assert_eq!(copy_clauses(rules_face), (0, 2));
+    }
+
+    /// The walk reaches a copy clause nested in a trigger's execute.
+    #[test]
+    fn a_triggered_copy_of_split_halves_is_gapped_too() {
+        let db = load_fixture();
+        let echo = db
+            .get_face_by_name("Robot Echo")
+            .expect("Robot Echo is indexed");
+        let effects: Vec<&Effect> = echo
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .flat_map(chain)
+            .collect();
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Choose { .. })),
+            "reach guard: the trigger parsed its card-name choice: {effects:?}"
+        );
+        assert!(
+            !effects.iter().any(|e| matches!(
+                e,
+                Effect::CreateCardCopyByName { .. } | Effect::CastFromZone { .. }
+            )),
+            "the triggered copy and its cast are gapped: {effects:?}"
+        );
+        assert!(
+            effects.iter().any(
+                |e| matches!(e, Effect::Unimplemented { name, .. } if name == super::GAP_NAME)
+            ),
+            "the gap is the gate's, not a parse failure: {effects:?}"
+        );
     }
 
     /// Garth One-Eye names six single-faced cards: every copy is materializable,

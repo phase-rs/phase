@@ -4649,6 +4649,7 @@ fn redact_spell_cast_record(record: &mut crate::types::game_state::SpellCastReco
         has_x_in_cost: _,
         has_adventure: _,
         from_zone: _,
+        from_outside_game: _,
         cast_variant: _,
         was_kicked: _,
         spell_object_id,

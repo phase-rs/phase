@@ -16654,6 +16654,15 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             {
                 return true;
             }
+            // CR 608.2d: the same for "cast the copy / the card it created" when
+            // the creating instruction created nothing (Garth One-Eye after its
+            // name domain is exhausted, CR 609.3): the created referent is empty,
+            // so there is nothing the option could cast.
+            if matches!(target, TargetFilter::LastCreated)
+                && state.last_created_token_ids.is_empty()
+            {
+                return true;
+            }
 
             // CR 202.3 + CR 305.1 + CR 601.2e + CR 608.2d: A CastFromZone
             // option with bound objects is feasible when at least one of those
@@ -21331,6 +21340,8 @@ fn reset_top_level_resolution_state(state: &mut GameState) {
     // recycled self-or-others scheme's fresh answer must not inherit the label
     // an earlier resolution named.
     state.named_label_this_resolution = None;
+    // CR 201.4 + CR 608.2c: nor a prior resolution's chosen card name.
+    state.named_card_name_this_resolution = None;
     // CR 608.2c: "that sticker" names a sticker this resolution's own PutSticker
     // instruction placed; a new top-level resolution cannot inherit a prior one's.
     state.placed_sticker_this_resolution = None;
@@ -27407,10 +27418,19 @@ pub(crate) fn evaluate_condition(
         // `cast_from_zone == None` → false (CR 707.10: a copy of a spell isn't
         // cast; CR 400.7: a new object has no cast provenance). Mirrors the
         // `StaticCondition::WasCast` evaluator at layers.rs.
-        AbilityCondition::WasCast { zone } => ability
-            .context
-            .cast_from_zone
-            .is_some_and(|cz| zone.is_none_or(|z| cz == z)),
+        // CR 601.2a + CR 707.13: a cast from outside the game (the source object
+        // is the resolving spell or its permanent) satisfies a bare "was cast" but
+        // no named origin zone.
+        AbilityCondition::WasCast { zone } => {
+            let from_outside_game = state
+                .objects
+                .get(&ability.source_id)
+                .is_some_and(|source| source.created_outside_game);
+            ability
+                .context
+                .cast_from_zone
+                .is_some_and(|cz| zone.is_none_or(|z| !from_outside_game && cz == z))
+        }
         // CR 608.2c: "If it's a [type] card" — check the revealed card's type.
         // CR 205.3m: Optional additional_filter checks extra properties like
         // "of the chosen type" (IsChosenCreatureType).

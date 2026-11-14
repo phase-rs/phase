@@ -7117,7 +7117,8 @@ fn evaluate_replacement_condition(
         ReplacementCondition::CastFromZone { zone } => state
             .objects
             .get(&source_id)
-            .is_some_and(|o| o.cast_from_zone == Some(*zone)),
+            // CR 601.2a + CR 707.13: an outside-the-game cast is from no zone.
+            .is_some_and(|o| o.cast_origin_zone() == Some(*zone)),
         // CR 614.1d + CR 601: entry-origin gate on the ENTERING object
         // (`affected_object_id`), NOT the replacement source. The physical half
         // delegates to the shared `OriginConstraint::matches_from` predicate.
@@ -7147,7 +7148,7 @@ fn evaluate_replacement_condition(
             let cast = cast_origin.is_some_and(|cz| {
                 affected_object_id
                     .and_then(|oid| state.objects.get(&oid))
-                    .is_some_and(|o| o.cast_from_zone == Some(cz))
+                    .is_some_and(|o| o.cast_origin_zone() == Some(cz))
             });
             physical || cast
         }

@@ -12,8 +12,7 @@ use crate::types::zones::Zone;
 /// CR 707.13 creates this copy *outside the game* (CR 400.11: outside the game
 /// is not a zone). Every `GameObject` carries a `Zone` and the casting pipeline's
 /// CR 601.2a origin is keyed on it, so the copy is staged in exile for the rest
-/// of this resolution — and that staging is observationally equivalent to
-/// "outside the game":
+/// of this resolution. While it sits there the staging cannot be observed:
 ///
 /// - The copy is CREATED in the staging zone (`zones::create_object`), never
 ///   moved there, so no zone-change event is emitted and no "whenever a card is
@@ -26,7 +25,19 @@ use crate::types::zones::Zone;
 ///   first state-based check, before any player gets priority, so no later
 ///   effect can count or interact with it.
 ///
-/// Pinned by The War Doctor tests in
+/// The cast's provenance (CR 601.2a: the caster moves the copy "from where it
+/// is" to the stack): a cast of this copy is from OUTSIDE the game, not from the
+/// staging zone. Every `Zone`-typed provenance carrier (`cast_from_zone`, the
+/// per-turn spell-cast record's `from_zone`) still holds the staging zone, so the
+/// copy is marked `GameObject::created_outside_game` and every "cast from
+/// [zone]" reader — the spell-cast origin matcher (Nalfeshnee's "whenever you
+/// cast a spell from exile"), `TriggerCondition`/`StaticCondition`/
+/// `ReplacementCondition`/`AbilityCondition::WasCast`, the spell-cast record's
+/// `InZone`/`InAnyZone` predicates (which also feed Wild-Magic Sorcerer-style
+/// keyword grants and spells-cast-from-zone counts) — answers through that marker
+/// instead. The staging zone itself is therefore never a cast origin.
+///
+/// The unobservable-while-staged half is pinned by The War Doctor tests in
 /// `tests/integration/create_card_copy_with_chosen_name.rs`.
 const STAGING_ZONE: Zone = Zone::Exile;
 
@@ -61,15 +72,13 @@ pub fn resolve(
         }
     };
 
-    // CR 201.4: an absent literal name means "the card with the chosen name" —
-    // the name this source committed through a preceding `Effect::Choose`.
-    let card_name = name.or_else(|| {
-        state
-            .objects
-            .get(&ability.source_id)
-            .and_then(|source| source.chosen_card_name())
-            .map(str::to_string)
-    });
+    // CR 201.4 + CR 608.2c: an absent literal name means "the card with the
+    // chosen name" — the name THIS resolution's preceding `Effect::Choose`
+    // named. Not the source's stored history: an impossible choice (an exhausted
+    // closed domain, CR 609.3) names nothing, so no earlier name may be reused,
+    // and a source that has left the battlefield (CR 113.7a: the ability still
+    // resolves) stores nothing, yet its choice still names a card.
+    let card_name = name.or_else(|| state.named_card_name_this_resolution.clone());
 
     // The registry is keyed by lowercase name (see `conjure.rs`). A name that is
     // not in it is one the engine has no characteristics for.
@@ -80,6 +89,9 @@ pub fn resolve(
             .cloned()
     });
     let Some(face) = face else {
+        // Nothing was created: a following "cast the copy" must bind nothing,
+        // never a referent left over from an earlier clause.
+        state.last_created_token_ids = Vec::new();
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CreateCardCopyByName,
             source_id: ability.source_id,
@@ -101,11 +113,15 @@ pub fn resolve(
         );
         if let Some(obj) = state.objects.get_mut(&obj_id) {
             apply_card_face_to_object(obj, &face);
-            // CR 707.10a: a copy of a card is not a card. `is_token` stays false
-            // (CR 704.5d and CR 704.5e are different sweeps with different legal
-            // zones), and `is_copy` is what CR 704.5e reads.
+            // CR 704.5e: a copy of a card ceases to exist outside the stack and
+            // the battlefield; `is_copy` is what that state-based action reads.
+            // It is not a token (CR 111.1), so `is_token` stays false — CR 704.5d
+            // is a different sweep with different legal zones.
             obj.is_token = false;
             obj.is_copy = true;
+            // CR 707.13 + CR 400.11: created outside the game; the staging zone
+            // is bookkeeping, never a cast origin (see `STAGING_ZONE`).
+            obj.created_outside_game = true;
         }
         created_ids.push(obj_id);
         events.push(GameEvent::CardCopyCreated {

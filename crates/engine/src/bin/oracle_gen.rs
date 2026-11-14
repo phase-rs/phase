@@ -2391,6 +2391,94 @@ mod tests {
         }
     }
 
+    /// CR 707.13 + CR 709.4a: the export-side gate. A copy-by-name domain that
+    /// names split halves (`layout: Some("split")`) or names the export does
+    /// not hold is gapped, copy clause and cast clause alike; one naming only
+    /// single-faced entries (`layout: None`) is left supported.
+    #[test]
+    fn export_gate_gaps_copy_by_name_of_split_halves_only() {
+        use engine::types::ability::Effect;
+
+        fn face_with(text: &str, name: &str) -> CardFace {
+            let parsed = engine::parser::oracle::parse_oracle_text(
+                text,
+                name,
+                &[],
+                &["Creature".to_string()],
+                &[],
+            );
+            CardFace {
+                name: name.to_string(),
+                abilities: parsed.abilities,
+                ..Default::default()
+            }
+        }
+        fn chain_effects(face: &CardFace) -> Vec<Effect> {
+            let mut out = Vec::new();
+            for ability in &face.abilities {
+                let mut node = Some(ability);
+                while let Some(def) = node {
+                    out.push((*def.effect).clone());
+                    node = def.sub_ability.as_deref();
+                }
+            }
+            out
+        }
+
+        let mut robot = make_entry("o-robot", &["TST"], None);
+        robot.face = face_with(
+            "{T}: Choose a card name that hasn't been chosen among Who, What, When, Where, and              Why. Create a copy of the card with the chosen name. You may cast the copy.",
+            "Interrogation Robot",
+        );
+        let mut garth = make_entry("o-garth", &["TST"], None);
+        garth.face = face_with(
+            "{T}: Choose a card name that hasn't been chosen from among Disenchant, Terror, and              Regrowth. Create a copy of the card with the chosen name. You may cast the copy.",
+            "Garth One-Eye",
+        );
+        let mut face_index = BTreeMap::from([
+            ("interrogation robot".to_string(), robot),
+            ("garth one-eye".to_string(), garth),
+            (
+                "who".to_string(),
+                make_entry("o-who", &["TST"], Some("split")),
+            ),
+            (
+                "what".to_string(),
+                make_entry("o-who", &["TST"], Some("split")),
+            ),
+            (
+                "disenchant".to_string(),
+                make_entry("o-dis", &["TST"], None),
+            ),
+            ("terror".to_string(), make_entry("o-ter", &["TST"], None)),
+            ("regrowth".to_string(), make_entry("o-reg", &["TST"], None)),
+        ]);
+
+        gate_unmaterializable_name_copies_in_export(&mut face_index);
+
+        let robot = chain_effects(&face_index["interrogation robot"].face);
+        assert!(
+            !robot.iter().any(|e| matches!(
+                e,
+                Effect::CreateCardCopyByName { .. } | Effect::CastFromZone { .. }
+            )),
+            "the copy and its cast are gapped: {robot:?}"
+        );
+        let garth = chain_effects(&face_index["garth one-eye"].face);
+        assert!(
+            garth
+                .iter()
+                .any(|e| matches!(e, Effect::CreateCardCopyByName { .. })),
+            "a single-faced domain keeps its copy clause: {garth:?}"
+        );
+        assert!(
+            garth
+                .iter()
+                .any(|e| matches!(e, Effect::CastFromZone { .. })),
+            "and its cast clause: {garth:?}"
+        );
+    }
+
     #[test]
     fn card_export_entry_serializes_multiface_face_index() {
         let mut entry = make_entry("ordered-oracle", &["TST"], Some("transform"));

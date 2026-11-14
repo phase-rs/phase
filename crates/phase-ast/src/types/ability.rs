@@ -25721,8 +25721,8 @@ pub enum Effect {
     /// Distinct from `CastCopyOfCard` (and every other copy producer) on the axis
     /// that matters: those copy an OBJECT in the game and read its copiable
     /// values. `Conjure` is the wrong home too: that is a digital-only keyword
-    /// action whose product is a real card, and this product is a COPY (CR
-    /// 707.10a / CR 704.5e).
+    /// action whose product is a real card, and this product is a COPY, which
+    /// CR 704.5e removes from any zone but the stack and the battlefield.
     ///
     /// The created objects are published to `state.last_created_token_ids`, the
     /// same-chain "it" referent every object producer uses, so a following
@@ -33574,6 +33574,8 @@ impl Effect {
             | Effect::Dig { count, .. }
             | Effect::Surveil { count, .. }
             | Effect::CopyTokenOf { count, .. }
+            // CR 707.13: how many copies of the named card to create.
+            | Effect::CreateCardCopyByName { count, .. }
             | Effect::CreateTokenCopyFromPool { count, .. }
             | Effect::PutCounter { count, .. }
             | Effect::PutCounterAll { count, .. }
@@ -33754,7 +33756,6 @@ impl Effect {
             | Effect::Cleanup { .. }
             | Effect::CollectEvidence { .. }
             | Effect::Conjure { .. }
-            | Effect::CreateCardCopyByName { .. }
             | Effect::CreateDamageReplacement { .. }
             | Effect::CreateDelayedTrigger { .. }
             | Effect::CreateDrawReplacement { .. }
@@ -33846,6 +33847,8 @@ impl Effect {
             | Effect::Dig { count, .. }
             | Effect::Surveil { count, .. }
             | Effect::CopyTokenOf { count, .. }
+            // CR 707.13: how many copies of the named card to create.
+            | Effect::CreateCardCopyByName { count, .. }
             | Effect::CreateTokenCopyFromPool { count, .. }
             | Effect::PutCounter { count, .. }
             | Effect::PutCounterAll { count, .. }
@@ -34026,7 +34029,6 @@ impl Effect {
             | Effect::Cleanup { .. }
             | Effect::CollectEvidence { .. }
             | Effect::Conjure { .. }
-            | Effect::CreateCardCopyByName { .. }
             | Effect::CreateDamageReplacement { .. }
             | Effect::CreateDelayedTrigger { .. }
             | Effect::CreateDrawReplacement { .. }
@@ -39250,6 +39252,23 @@ impl OriginConstraint {
             OriginConstraint::Equals(z) => from == &Some(*z),
             OriginConstraint::NotEquals(z) => matches!(from, Some(f) if f != z),
             OriginConstraint::OneOf(zs) => matches!(from, Some(f) if zs.contains(f)),
+        }
+    }
+
+    /// CR 601.2a + CR 400.11: Does a spell cast from `origin` satisfy this
+    /// cast-origin constraint? `origin = None` is a cast from OUTSIDE the game
+    /// (CR 707.13: the copy Garth One-Eye creates), where "outside the game is not
+    /// a zone" (CR 400.11). Unlike [`Self::matches_from`], where `None` is "no
+    /// prior zone" and fails every negative constraint, an outside-the-game cast
+    /// IS a cast from somewhere other than any named zone: it satisfies
+    /// `NotEquals(z)` ("from anywhere other than your hand") for every `z`, and
+    /// fails `Equals` and `OneOf`.
+    pub fn matches_cast_origin(&self, origin: Option<Zone>) -> bool {
+        match self {
+            OriginConstraint::Any => true,
+            OriginConstraint::Equals(z) => origin == Some(*z),
+            OriginConstraint::NotEquals(z) => origin != Some(*z),
+            OriginConstraint::OneOf(zs) => origin.is_some_and(|o| zs.contains(&o)),
         }
     }
 }

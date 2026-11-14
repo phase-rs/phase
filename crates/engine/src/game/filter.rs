@@ -8648,8 +8648,10 @@ fn spell_object_matches_property(
     context: Option<SpellFilterContext<'_>>,
 ) -> bool {
     match prop {
-        FilterProp::InZone { zone: required } => zone == *required,
-        FilterProp::InAnyZone { zones } => zones.contains(&zone),
+        // CR 601.2a + CR 400.11: a cast from outside the game (CR 707.13) is from no
+        // zone, so no zone constraint holds — and its negation does.
+        FilterProp::InZone { zone: required } => !record.from_outside_game && zone == *required,
+        FilterProp::InAnyZone { zones } => !record.from_outside_game && zones.contains(&zone),
         FilterProp::Cmc { comparator, value } => {
             let threshold = match value {
                 QuantityExpr::Fixed { value } => *value,
@@ -8913,13 +8915,18 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // closed rather than treating every cast spell as card-represented.
         FilterProp::RepresentedByCard => false,
         FilterProp::WasPlayed => true,
-        FilterProp::InZone { zone: required } => record.from_zone == *required,
+        // CR 601.2a + CR 400.11: see the live-spell arm; outside the game is no zone.
+        FilterProp::InZone { zone: required } => {
+            !record.from_outside_game && record.from_zone == *required
+        }
         // CR 400.1 + CR 601.2a: cast-origin membership — the record's captured
         // from_zone (populated when the spell was put on the stack from where it
         // was, CR 601.2a) is one of the listed cast-capable zones. Mirrors the
         // InZone arm; used by "spell you've cast this turn from anywhere other
         // than your hand" (the Paradox cycle).
-        FilterProp::InAnyZone { zones } => zones.contains(&record.from_zone),
+        FilterProp::InAnyZone { zones } => {
+            !record.from_outside_game && zones.contains(&record.from_zone)
+        }
         // CR 201.2: Exact name match against the cast-time snapshot — case-
         // insensitive per the same convention used by the live-object path.
         // Approach of the Second Sun's "you've cast another spell named
@@ -15907,6 +15914,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         };
         let filter = TargetFilter::Typed(
@@ -16024,6 +16032,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         };
         let non_x_record = SpellCastRecord {
@@ -16202,6 +16211,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         };
         let exile_record = SpellCastRecord {
@@ -23152,6 +23162,7 @@ mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                from_outside_game: false,
                 prepared_copy_source: None,
             }
         };
@@ -23712,6 +23723,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         };
         let dragon_filter = make_subtype_filter("Dragon");
