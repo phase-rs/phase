@@ -2272,6 +2272,15 @@ fn protection_blocks_attachment(
 
 /// CR 702.16p: Capture attachment IDs matching `resolved_pt` that are already
 /// on `host_id` and controlled by `grant_controller` at protection-start time.
+///
+/// Not claimed: an attachment that becomes attached in the same attach
+/// operation as the protection source (Ardenn, Intrepid Archaeologist moving
+/// Benevolent Blessing and another Aura to one permanent). The attach resolver
+/// moves its members one at a time and flushes layers after each, so the
+/// protection starts, and is captured here, once the source has moved and
+/// before the next member is checked; a member moved after it is not in the
+/// snapshot. The per-member resolver and its per-member flush predate this
+/// PR's snapshot, which keeps the same timing.
 fn capture_protection_start_attachment_snapshot(
     state: &GameState,
     host_id: ObjectId,
@@ -2306,7 +2315,9 @@ fn capture_protection_start_attachment_snapshot(
 
 /// CR 702.16p: When a continuous protection grant with the already-attached
 /// rider starts applying to a host, snapshot the matching controlled
-/// attachments once; consult that snapshot in
+/// attachments once (those already attached when the layer pass that starts
+/// the grant runs; see [`capture_protection_start_attachment_snapshot`] for
+/// the same-operation case that is not covered); consult that snapshot in
 /// [`protection_grant_exempts_attachment`]. The grants come from the layer pass
 /// that just ran (`GameObject::protection_start_grants`), each keyed by its
 /// grant occurrence and host incarnation, so a grant keeps its snapshot while it
