@@ -1788,6 +1788,25 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                         &logical_zone_change_group,
                     );
                     let _ = run_batch_completion(state, completion, events);
+                } else {
+                    // CR 608.2c + CR 400.7j: For batch deliveries with NO completion
+                    // (bottom-edge moves like Grenzo, Dungeon Warden; Cellar Door),
+                    // populate last_zone_changed_ids from the completed delivery so
+                    // continuations (riders) resolved after a replacement choice can
+                    // find the moved card. Effects with a completion (e.g., Mill's
+                    // MilledDeliveryComplete) handle this in their completion or in
+                    // the effect resolver before returning.
+                    let zone_changed_ids: Vec<ObjectId> = logical_zone_change_group
+                        .all_origin_occurrences
+                        .iter()
+                        .filter_map(|occ| match &occ.event {
+                            GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                            _ => None,
+                        })
+                        .collect();
+                    if !zone_changed_ids.is_empty() {
+                        state.last_zone_changed_ids = zone_changed_ids;
+                    }
                 }
             }
             BatchDeliveryResult::NeedsChoice => {

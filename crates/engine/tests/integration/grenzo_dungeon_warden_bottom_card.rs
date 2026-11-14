@@ -8,7 +8,7 @@
 //! activation pipeline with the printed Oracle text and assert that the bottom
 //! card is taken without an interactive choice, in each branch of the rider.
 
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -21,6 +21,9 @@ use engine::types::zones::Zone;
 /// Verbatim printed Oracle text (Scryfall). A paraphrase can reach a different
 /// parser branch and go green while the real card stays broken.
 const GRENZO: &str = "Grenzo enters with X +1/+1 counters on it.\n{2}: Put the bottom card of your library into your graveyard. If it's a creature card with power less than or equal to Grenzo's power, put it onto the battlefield.";
+
+const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
+const LEYLINE_OF_THE_VOID: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.";
 
 /// A plain removal spell: Grenzo must be put into the graveyard in response to
 /// its own activation. Murder is "Destroy target creature." for {1}{B}{B}.
@@ -322,5 +325,130 @@ fn grenzo_uses_last_known_power_after_dying_in_response() {
         runner.state().objects[&top].zone,
         Zone::Library,
         "the top card must stay in the library"
+    );
+}
+
+/// CR 616.1 + CR 400.7j (issue #8989 F1): When the bottom card's graveyard move
+/// is redirected to Exile by Rest in Peace and Leyline of the Void (requiring a
+/// replacement choice under CR 616.1), answering the choice must not lose the
+/// moved object. Grenzo's rider must find the creature in exile and put it onto
+/// the battlefield, emitting no `Milled` event.
+#[test]
+fn grenzo_puts_eligible_creature_onto_battlefield_after_replacement_choice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let grenzo = scenario
+        .add_creature_from_oracle(P0, "Grenzo, Dungeon Warden", 2, 2, GRENZO)
+        .id();
+
+    // P1 controls both Rest in Peace and Leyline of the Void.
+    scenario.add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE);
+    scenario.add_enchantment_from_oracle(P1, "Leyline of the Void", LEYLINE_OF_THE_VOID);
+
+    let bottom = scenario
+        .add_spell_to_library_top(P0, "Grizzly Bears", false)
+        .as_creature()
+        .id();
+    let mut top = bottom;
+    for i in 0..2 {
+        top = scenario.add_card_to_library_top(P0, &format!("Filler {i}"));
+    }
+
+    let mut runner = scenario.build();
+
+    let obj = runner
+        .state_mut()
+        .objects
+        .get_mut(&bottom)
+        .expect("staged bottom card");
+    obj.power = Some(2);
+    obj.toughness = Some(2);
+    obj.base_power = Some(2);
+    obj.base_toughness = Some(2);
+
+    // Drain any opening triggers (such as Rest in Peace's ETB)
+    runner.advance_until_stack_empty();
+
+    let mut events = activate_onto_stack(&mut runner, grenzo);
+
+    // Pass priority to begin resolving Grenzo's ability
+    let mut saw_replacement_choice = false;
+    for _ in 0..64 {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                events.extend(
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("pass priority")
+                        .events,
+                );
+            }
+            WaitingFor::ManaPayment { .. } => {
+                events.extend(
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("pay mana")
+                        .events,
+                );
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                saw_replacement_choice = true;
+                events.extend(
+                    runner
+                        .act(GameAction::ChooseReplacement { index: 0 })
+                        .expect("choose replacement")
+                        .events,
+                );
+            }
+            other => panic!("unexpected waiting_for {other:?}"),
+        }
+    }
+
+    assert!(
+        saw_replacement_choice,
+        "the two graveyard replacements must trigger a replacement choice"
+    );
+
+    // CR 400.7j: Grizzly Bears was exiled by the replacement, but Grenzo's rider
+    // finds it in exile and puts it onto the battlefield.
+    assert_eq!(
+        runner.state().objects[&bottom].zone,
+        Zone::Battlefield,
+        "the eligible creature must enter the battlefield from exile"
+    );
+    assert_eq!(
+        runner.state().objects[&bottom].controller,
+        P0,
+        "the creature must enter under Grenzo controller's control"
+    );
+    assert!(
+        runner.state().players[0].graveyard.is_empty(),
+        "P0's graveyard must be empty"
+    );
+    assert_eq!(
+        runner.state().objects[&top].zone,
+        Zone::Library,
+        "the top filler card must remain in the library"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the resolution must finish back at priority"
+    );
+    // CR 701.17a: bottom card move is not a mill, so no Milled event may be emitted.
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, GameEvent::Milled { .. })),
+        "a bottom-edge move must not publish Milled"
     );
 }

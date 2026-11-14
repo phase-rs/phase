@@ -7674,6 +7674,13 @@ pub enum BatchCompletion {
         /// actually departed the library, so the set is a candidate list rather
         /// than a result.
         cards: Vec<ObjectId>,
+        /// CR 401.2 + CR 701.17a: Which edge of the library the cards were taken
+        /// from. Only top-edge moves publish `Milled` events.
+        #[serde(default)]
+        position: LibraryPosition,
+        /// CR 701.17a: Destination zone for the cards. Only Graveyard counts as mill.
+        #[serde(default = "default_zone_graveyard")]
+        destination: Zone,
     },
     /// Horde advanced legendary rule
     /// ([`crate::types::format::HordeLegendaryDeath::EtbThenPhaseOut`]) + CR
@@ -7692,6 +7699,10 @@ pub enum BatchCompletion {
         /// battlefield phases out synchronously (CR 702.26).
         legendary_cohort: Vec<ObjectId>,
     },
+}
+
+const fn default_zone_graveyard() -> Zone {
+    Zone::Graveyard
 }
 
 /// CR 608.2c + CR 608.2n: an instant or sorcery whose instructions paused for a

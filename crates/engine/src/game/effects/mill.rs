@@ -221,19 +221,23 @@ fn apply_library_edge_move(
     // nothing. `effects::this_way_cause_for_effect` is the sibling authority on
     // the same predicate and is kept in step with this conjunct.
     //
-    // CR 603.2c + CR 616.1: the `Milled` events ride the batch completion rather
-    // than a synchronous event window. A per-card ordering choice (two graveyard
-    // redirects colliding) parks the undelivered tail, and the resume path drains
-    // it with a FRESH event vector — so a window read here would omit every card
-    // delivered after the pause, and those cards leave the library without ever
-    // firing a milled trigger. The completion runs exactly once after the whole
-    // batch settles, on the synchronous and the resumed path alike.
-    let completion = is_mill_move(destination, &position).then(|| {
+    // CR 603.2c + CR 616.1 + CR 400.7j: the delivery completion rides the batch
+    // rather than a synchronous event window. A per-card ordering choice (two
+    // graveyard redirects colliding) parks the undelivered tail, and the resume
+    // path drains it with a FRESH event vector — so a window read here would omit
+    // every card delivered after the pause. The completion runs exactly once
+    // after the whole batch settles (synchronous and resumed paths alike) to emit
+    // Milled events for top-edge mill moves (CR 701.17a) and bind the settled
+    // moved cards into state.last_zone_changed_ids so follow-up riders can find
+    // them (CR 400.7j).
+    let completion = Some(
         crate::types::game_state::BatchCompletion::MilledDeliveryComplete {
             player_id,
             cards: cards_to_mill.clone(),
-        }
-    });
+            position,
+            destination,
+        },
+    );
     let delivered = matches!(
         zone_pipeline::move_objects_simultaneously_then(state, reqs, completion, events),
         BatchMoveResult::Done
@@ -242,8 +246,9 @@ fn apply_library_edge_move(
     Ok(delivered)
 }
 
-/// CR 701.17a + CR 603.2c: emit one `Milled` per card that actually left the
-/// library, once the whole mill batch has settled.
+/// CR 701.17a + CR 603.2c + CR 400.7j: emit one `Milled` per card that actually left the
+/// library (for top-edge graveyard mill moves), and bind the settled moved cards into
+/// `state.last_zone_changed_ids` once the whole batch has settled.
 ///
 /// CR 614.6 makes the modified event the one that occurred, so a graveyard-diverting
 /// replacement that redirects a card back into its library moved no card out of it and
@@ -255,8 +260,12 @@ pub(crate) fn complete_mill_delivery(
     state: &mut GameState,
     player_id: crate::types::player::PlayerId,
     cards: Vec<ObjectId>,
+    position: LibraryPosition,
+    destination: Zone,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
+    let is_mill = is_mill_move(destination, &position);
+    let mut moved = Vec::new();
     for object_id in cards {
         let Some(zone) = state.objects.get(&object_id).map(|object| object.zone) else {
             continue;
@@ -264,11 +273,20 @@ pub(crate) fn complete_mill_delivery(
         if zone == Zone::Library {
             continue;
         }
-        events.push(GameEvent::Milled {
-            player_id,
-            object_id,
-            to: zone,
-        });
+        moved.push(object_id);
+        if is_mill {
+            events.push(GameEvent::Milled {
+                player_id,
+                object_id,
+                to: zone,
+            });
+        }
+    }
+    // CR 608.2c + CR 400.7j: Bind the settled moved cards so subsequent riders
+    // (such as Grenzo, Dungeon Warden; Cellar Door) can find them on both the
+    // synchronous and resumed-after-replacement paths.
+    if !moved.is_empty() {
+        state.last_zone_changed_ids = moved;
     }
     BatchMoveResult::Done
 }

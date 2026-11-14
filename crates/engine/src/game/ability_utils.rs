@@ -14108,8 +14108,8 @@ mod tests {
                 position: crate::types::ability::LibraryPosition::Top,
                 arranger: None,
             }),
-            true,
-            &[TargetFilter::LastRevealed],
+            false,
+            &[],
         );
         let cast: Effect = serde_json::from_str(
             r#"{"type":"CastFromZone","target":{"type":"LastRevealed"},"without_paying_mana_cost":true,"mode":"Cast"}"#,

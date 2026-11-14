@@ -10618,9 +10618,19 @@ pub(crate) fn run_batch_completion(
                 .expect("zone result completion publishes once into a live occurrence");
             crate::game::zone_pipeline::BatchMoveResult::Done
         }
-        BatchCompletion::MilledDeliveryComplete { player_id, cards } => {
-            effects::mill::complete_mill_delivery(state, player_id, cards, events)
-        }
+        BatchCompletion::MilledDeliveryComplete {
+            player_id,
+            cards,
+            position,
+            destination,
+        } => effects::mill::complete_mill_delivery(
+            state,
+            player_id,
+            cards,
+            position,
+            destination,
+            events,
+        ),
         BatchCompletion::HordeMillFromLossDeliveryComplete {
             player_id,
             milled,

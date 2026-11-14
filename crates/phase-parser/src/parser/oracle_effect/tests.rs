@@ -86148,19 +86148,100 @@ fn cellar_door_bottom_card_mill() {
     );
     let ability = parsed.abilities.first().expect("Cellar Door activates");
     let Effect::Mill {
-        count, position, ..
+        count,
+        position,
+        target,
+        ..
     } = &*ability.effect
     else {
         panic!("expected Mill, got {:?}", ability.effect);
     };
     assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
     assert_eq!(*position, LibraryPosition::Bottom);
+    // Check that the target is the declared player target (TargetFilter::Player)
+    // not TriggeringPlayer (which would be a context ref and not create a target slot)
+    assert_eq!(
+        *target,
+        TargetFilter::Player,
+        "Mill target should be TargetFilter::Player, got {:?}",
+        target
+    );
     let sub = ability.sub_ability.as_ref().expect("token rider");
     assert!(matches!(
         sub.condition,
         Some(AbilityCondition::RevealedHasCardType { .. })
     ));
     assert!(matches!(&*sub.effect, Effect::Token { .. }));
+}
+
+/// CR 208.1 + CR 608.2c: "If it's a creature card with power 5 or greater"
+/// (Mayael the Anima Avatar) carries the PtComparison property on the revealed
+/// card gate and routes the card to Hand or to the bottom of the library.
+#[test]
+fn mayael_the_anima_avatar_revealed_creature_power_gate() {
+    const MAYAEL: &str = "At the beginning of your upkeep, reveal the top card of your library. If it's a creature card with power 5 or greater, put it into your hand. Otherwise, you may put it on the bottom of your library.";
+    let parsed = parse_oracle_text(
+        MAYAEL,
+        "Mayael the Anima Avatar",
+        &[],
+        &["Vanguard".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .first()
+        .expect("Mayael has an upkeep trigger");
+    let execute = trigger.execute.as_deref().expect("trigger execute");
+    let Effect::RevealTop { count, player } = &*execute.effect else {
+        panic!("expected RevealTop, got {:?}", execute.effect);
+    };
+    assert_eq!(*count, 1);
+    assert_eq!(*player, TargetFilter::Controller);
+
+    let sub = execute.sub_ability.as_ref().expect("revealed rider");
+    let Some(AbilityCondition::RevealedHasCardType {
+        card_types,
+        additional_filter,
+        ..
+    }) = &sub.condition
+    else {
+        panic!("expected RevealedHasCardType, got {:?}", sub.condition);
+    };
+    assert_eq!(card_types.as_slice(), &[CoreType::Creature]);
+    assert_eq!(
+        additional_filter,
+        &Some(FilterProp::PtComparison {
+            stat: crate::types::ability::PtStat::Power,
+            scope: crate::types::ability::PtValueScope::Current,
+            comparator: Comparator::GE,
+            value: QuantityExpr::Fixed { value: 5 },
+        })
+    );
+
+    let Effect::ChangeZone {
+        destination,
+        target,
+        ..
+    } = &*sub.effect
+    else {
+        panic!("expected ChangeZone, got {:?}", sub.effect);
+    };
+    assert_eq!(*destination, Zone::Hand);
+    assert_eq!(*target, TargetFilter::ParentTarget);
+
+    let otherwise = sub.else_ability.as_ref().expect("Otherwise branch");
+    assert!(
+        otherwise.optional,
+        "Otherwise branch should be optional ('you may')"
+    );
+    let Effect::PutAtLibraryPosition {
+        position, target, ..
+    } = &*otherwise.effect
+    else {
+        panic!("expected PutAtLibraryPosition, got {:?}", otherwise.effect);
+    };
+    assert_eq!(*position, LibraryPosition::Bottom);
+    assert_eq!(*target, TargetFilter::ParentTarget);
 }
 
 /// CR 401.1: the bottom-edge recognizer does not claim a distributive library

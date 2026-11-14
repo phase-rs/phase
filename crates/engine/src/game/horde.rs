@@ -347,8 +347,14 @@ pub(crate) fn complete_advanced_mill_from_loss(
 ) -> crate::game::zone_pipeline::BatchMoveResult {
     // Ordinary mill event publication: the same per-card `Milled` events an
     // ordinary mill emits, so milled triggers (Zellix class) fire.
-    let result =
-        crate::game::effects::mill::complete_mill_delivery(state, player_id, milled, events);
+    let result = crate::game::effects::mill::complete_mill_delivery(
+        state,
+        player_id,
+        milled,
+        crate::types::ability::LibraryPosition::Top,
+        Zone::Graveyard,
+        events,
+    );
     // Synchronous cohort phase-out (CR 702.26). A `Moved` replacement (Rest
     // in Peace class) could still have diverted a cohort member, so only
     // phase out what actually entered.
