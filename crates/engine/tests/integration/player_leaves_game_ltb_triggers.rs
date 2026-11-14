@@ -4,8 +4,10 @@
 //! names where an object went never sees it. An object a leaving player
 //! controls but doesn't own is exiled, and both kinds of observer see that.
 
-use engine::game::game_object::{PhaseOutCause, PhaseStatus};
+use engine::game::combat::AttackTarget;
+use engine::game::game_object::{AttachTarget, PhaseOutCause, PhaseStatus};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::game::zones::apply_resolved_zone_change;
 use engine::types::ability::{
@@ -14,10 +16,13 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::game_state::{DelayedTrigger, WaitingFor, ZoneDeparture};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::resolved_commands::{ResolvedRulesCommand, ResolvedZoneChangeCommand};
 use engine::types::zones::Zone;
+
+use crate::support::shared_card_db;
 
 const P2: PlayerId = PlayerId(2);
 
@@ -808,16 +813,17 @@ const GRAFTED_WARGEAR_ORACLE: &str = "Equipped creature gets +3/+2.\n\
      Equip {0}";
 
 /// CR 603.10c + CR 603.3a + CR 800.4a + CR 800.4d: on P2's turn, P2 steals P0's
-/// Grafted Wargear with Word of Seizing, equips it to P2's bear, and concedes.
-/// The bear leaves the game and the Wargear becomes unattached in the same
-/// event that ends P2's control effects. "Becomes unattached" looks back in
-/// time, so the ability is P2's, the Wargear's controller immediately before,
-/// and it isn't put on the stack; the Wargear then reverts to P0.
+/// Grafted Wargear with Word of Seizing, equips it to P2's bear, and leaves the
+/// game by `loss`. The bear leaves the game and the Wargear becomes unattached
+/// in the same event that ends P2's control effects. "Becomes unattached" looks
+/// back in time, so the ability is P2's, the Wargear's controller immediately
+/// before, and it isn't put on the stack; the Wargear then reverts to P0. The
+/// `Unattached` event is not a zone change, so only the occurrence claim keeps
+/// the caller's later scan from collecting it again under P0.
 ///
 /// REVERT-FAILING: reading the departure's `Unattached` event against the
 /// post-revert board gives the Wargear's trigger to P0.
-#[test]
-fn concession_after_stealing_equipment_retires_its_unattach_trigger() {
+fn assert_stolen_equipment_unattach_retired(loss: Loss) {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
     for player in [P0, P1, P2] {
@@ -864,9 +870,7 @@ fn concession_after_stealing_equipment_retires_its_unattach_trigger() {
     );
     assert!(runner.state().stack.is_empty());
 
-    runner
-        .act(GameAction::Concede { player_id: P2 })
-        .expect("P2 concedes");
+    lose_the_game(&mut runner, &[P2], loss);
     assert_eq!(zone(&runner, bear), Zone::Exile);
     assert_eq!(
         runner.state().objects[&wargear].attached_to,
@@ -886,4 +890,1172 @@ fn concession_after_stealing_equipment_retires_its_unattach_trigger() {
         "CR 603.10c + CR 800.4d: the unattach trigger was P2's, and P2 left"
     );
     assert!(runner.state().deferred_triggers.is_empty());
+}
+
+#[test]
+fn concession_after_stealing_equipment_retires_its_unattach_trigger() {
+    assert_stolen_equipment_unattach_retired(Loss::Concede);
+}
+
+#[test]
+fn zero_life_after_stealing_equipment_retires_its_unattach_trigger() {
+    assert_stolen_equipment_unattach_retired(Loss::ZeroLife);
+}
+
+/// How the losing players leave the game in a stolen-observer test.
+#[derive(Clone, Copy, Debug)]
+enum Loss {
+    /// CR 104.3a: the player concedes.
+    Concede,
+    /// CR 704.5a: the player is at 0 life and loses to the state-based action
+    /// at the next priority boundary.
+    ZeroLife,
+}
+
+/// A board with `players` seats where P0 controls two Extractor Demons (the
+/// "unstolen" observer and the one P2 steals) and the `leavers` own one bear each.
+/// P2 steals P0's Demon with a real control-changing spell, so the stolen Demon
+/// is controlled by P2 at the moment P2 leaves.
+struct StolenObserverBoard {
+    runner: GameRunner,
+    stolen_demon: ObjectId,
+    unstolen_demon: ObjectId,
+    bears: Vec<ObjectId>,
+}
+
+fn red_mana(amount: usize) -> Vec<ManaUnit> {
+    (0..amount)
+        .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+        .collect()
+}
+
+fn stolen_observer_board(players: u8, leavers: &[PlayerId]) -> StolenObserverBoard {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(players, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let stolen_demon = scenario.add_real_card(P0, "Extractor Demon", Zone::Battlefield, db);
+    let unstolen_demon = scenario.add_real_card(P0, "Extractor Demon", Zone::Battlefield, db);
+    // SYNTHETIC: a vanilla 2/2 per leaver, the permanent each leaver owns.
+    let bears = leavers
+        .iter()
+        .map(|player| {
+            scenario
+                .add_creature(*player, &format!("{player:?} Bear"), 2, 2)
+                .id()
+        })
+        .collect();
+    let aggression = scenario.add_real_card(P2, "Turn Against", Zone::Hand, db);
+    scenario.with_mana_pool(P2, red_mana(5));
+    let mut runner = scenario.build();
+    // P0 and P1 pass; P2 receives priority and steals the Demon.
+    for _ in 0..2 {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes to P2");
+    }
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P2 }
+    );
+    runner
+        .cast(aggression)
+        .target_object(stolen_demon)
+        .resolve();
+    // Reach guard: the control effect is live and P2 has priority again.
+    assert_eq!(runner.state().objects[&stolen_demon].controller, P2);
+    assert!(runner.state().stack.is_empty());
+    StolenObserverBoard {
+        runner,
+        stolen_demon,
+        unstolen_demon,
+        bears,
+    }
+}
+
+/// Make every player in `leavers` leave the game by `loss`, through the public
+/// actions, with P2 holding priority.
+fn lose_the_game(runner: &mut GameRunner, leavers: &[PlayerId], loss: Loss) {
+    match loss {
+        Loss::Concede => {
+            for player in leavers {
+                runner
+                    .act(GameAction::Concede { player_id: *player })
+                    .expect("the player concedes");
+            }
+        }
+        Loss::ZeroLife => {
+            for player in leavers {
+                runner
+                    .state_mut()
+                    .players
+                    .iter_mut()
+                    .find(|candidate| candidate.id == *player)
+                    .expect("seat exists")
+                    .life = 0;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("the pass reaches the state-based-action check");
+        }
+    }
+}
+
+/// CR 603.10a + CR 603.3a + CR 800.4a + CR 800.4d: P2 steals P0's Extractor
+/// Demon and then leaves the game owning a bear, by each route a player can
+/// leave. The bear leaves in the same event that ends P2's control effects, so
+/// the stolen Demon's leaves-the-battlefield ability looks back to a source P2
+/// controlled: P2 controls that trigger, and it isn't put on the stack. P0's
+/// other Demon is the reach guard and triggers exactly once for the bear.
+fn assert_stolen_observer_retired(loss: Loss) {
+    let mut board = stolen_observer_board(3, &[P2]);
+    lose_the_game(&mut board.runner, &[P2], loss);
+    let runner = &mut board.runner;
+    assert!(runner.state().players[2].is_eliminated, "{loss:?}");
+    assert_eq!(zone(runner, board.bears[0]), Zone::Exile, "{loss:?}");
+    assert_eq!(
+        runner.state().objects[&board.stolen_demon].controller,
+        P0,
+        "{loss:?}: the control effect ended"
+    );
+    drive_trigger_prompts(runner);
+    assert_eq!(
+        triggers_from(runner, board.unstolen_demon),
+        1,
+        "{loss:?}: CR 603.6c: P0's own Demon sees the bear leave the game once"
+    );
+    assert_eq!(
+        triggers_from(runner, board.stolen_demon),
+        0,
+        "{loss:?}: CR 603.3a + CR 800.4d: the stolen Demon's trigger was P2's, and P2 left"
+    );
+}
+
+/// REVERT-FAILING (zero-life loss): collecting the departure against the board
+/// after the control effects ended gives the stolen Demon's trigger to P0.
+#[test]
+fn zero_life_after_stealing_an_observer_retires_the_stolen_observers_trigger() {
+    assert_stolen_observer_retired(Loss::ZeroLife);
+}
+
+/// The concession twin of the zero-life row above, through the same helper.
+#[test]
+fn concession_after_stealing_an_observer_retires_the_stolen_observers_trigger_by_the_same_helper() {
+    assert_stolen_observer_retired(Loss::Concede);
+}
+
+/// CR 704.3 + CR 603.10a: P1 and P2 lose at once in a four-player game, each
+/// owning a bear; P2 holds the stolen Demon. One state-based-action event takes
+/// both players out, so both bears leave together: P0's Demon sees each bear
+/// once, and the stolen Demon triggers for neither.
+#[test]
+fn two_players_losing_at_zero_life_at_once_each_trigger_the_survivors_observer_once() {
+    let mut board = stolen_observer_board(4, &[P1, P2]);
+    lose_the_game(&mut board.runner, &[P1, P2], Loss::ZeroLife);
+    let runner = &mut board.runner;
+    assert!(runner.state().players[1].is_eliminated);
+    assert!(runner.state().players[2].is_eliminated);
+    assert!(!runner.state().players[0].is_eliminated);
+    drive_trigger_prompts(runner);
+    assert_eq!(
+        triggers_from(runner, board.unstolen_demon),
+        2,
+        "CR 603.6c: P0's Demon sees each of the two bears leave once"
+    );
+    assert_eq!(
+        triggers_from(runner, board.stolen_demon),
+        0,
+        "CR 800.4d: the stolen Demon's triggers were P2's"
+    );
+}
+
+/// CR 510.2 + CR 704.5a + CR 603.10a: the combat-damage route. P1 steals one of
+/// P0's two Extractor Demons, owns a bear, and loses to P0's unblocked attacker
+/// at the combat-damage state-based-action check. The bear leaves in the same
+/// event that ends P1's control effects, so P0's other Demon triggers once and
+/// the stolen Demon triggers for nothing.
+#[test]
+fn combat_damage_loss_after_stealing_an_observer_retires_the_stolen_observers_trigger() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let stolen_demon = scenario.add_real_card(P0, "Extractor Demon", Zone::Battlefield, db);
+    let unstolen_demon = scenario.add_real_card(P0, "Extractor Demon", Zone::Battlefield, db);
+    // SYNTHETIC: a vanilla 2/2 P1 owns, and a vanilla 3/3 attacker.
+    let bear = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    let raider = scenario.add_creature(P0, "Raider", 3, 3).id();
+    let turn_against = scenario.add_real_card(P1, "Turn Against", Zone::Hand, db);
+    scenario.with_mana_pool(P1, red_mana(5));
+    scenario.with_life(P1, 3);
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("priority passes to P1");
+    runner
+        .cast(turn_against)
+        .target_object(stolen_demon)
+        .resolve();
+    assert_eq!(runner.state().objects[&stolen_demon].controller, P1);
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes toward combat");
+    }
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(raider, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("P0 attacks P1");
+    for _ in 0..12 {
+        if runner.state().players[1].is_eliminated {
+            break;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .act(GameAction::DeclareBlockers {
+                        assignments: vec![],
+                    })
+                    .expect("no blocks");
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority passes toward combat damage");
+            }
+            other => panic!("unexpected prompt in combat: {other:?}"),
+        }
+    }
+    assert!(runner.state().players[1].is_eliminated);
+    assert_eq!(zone(&runner, bear), Zone::Exile);
+    assert_eq!(runner.state().objects[&stolen_demon].controller, P0);
+    drive_trigger_prompts(&mut runner);
+    assert_eq!(
+        triggers_from(&runner, unstolen_demon),
+        1,
+        "CR 603.6c: P0's Demon sees the bear leave once"
+    );
+    assert_eq!(
+        triggers_from(&runner, stolen_demon),
+        0,
+        "CR 603.10a + CR 800.4d: the stolen Demon's trigger was P1's"
+    );
+}
+
+/// CR 603.3 + CR 117.5: a loss applied at a prompt that leaves no resolution to
+/// resume. The engine's #962 safety net applies P1's CR 704.5a loss at the prompt
+/// rather than at the next priority check (CR 704.3), a deliberate divergence.
+/// P1 is at 1 life, owns a Grizzly Bears, and casts Ad
+/// Nauseam; the revealed card costs P1 2 life and Ad Nauseam asks whether to
+/// repeat. P1 has lost, so the loss is applied at that prompt, and the spell
+/// leaves with its controller. The ability the departure triggered, P0's Super
+/// Shredder seeing the Bears leave the game, is on the stack before any player
+/// has priority, and nothing is left waiting.
+#[test]
+fn losing_at_a_prompt_with_nothing_to_resume_puts_the_departure_triggers_on_the_stack() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let shredder = scenario.add_real_card(P0, "Super Shredder", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Grizzly Bears", Zone::Library, db);
+    let nauseam = scenario.add_real_card(P1, "Ad Nauseam", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P1,
+        (0..5)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    scenario.with_life(P1, 1);
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("priority passes to P1");
+    runner.cast(nauseam).commit();
+    for _ in 0..3 {
+        if runner.state().players[1].is_eliminated {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Ad Nauseam resolves");
+    }
+    assert!(
+        runner.state().players[1].is_eliminated,
+        "#962 safety net: P1's CR 704.5a loss applied at Ad Nauseam's repeat prompt: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(zone(&runner, bears), Zone::Exile);
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "the departure's triggers are not left waiting"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(
+        triggers_from(&runner, shredder),
+        1,
+        "CR 603.6c: Super Shredder saw the Bears leave the game, once, and its ability is on \
+         the stack"
+    );
+}
+
+/// CR 704.5a + CR 603.2c + CR 603.10a: the sandbox's state-based-action check.
+/// P2 steals one of P0's two Extractor Demons, owns a bear, and is at 0 life when
+/// the debug action runs the check and the trigger scan that follows it. The
+/// departure is collected once: P0's other Demon triggers once and the stolen
+/// Demon triggers for nothing; the follow-up scan does not collect it again.
+#[test]
+fn debug_state_based_actions_collect_a_departure_once_and_retire_the_stolen_observers_trigger() {
+    let mut board = stolen_observer_board(3, &[P2]);
+    let runner = &mut board.runner;
+    runner.state_mut().debug_mode = true;
+    runner.state_mut().players[2].life = 0;
+    runner
+        .act(GameAction::Debug(
+            engine::types::actions::DebugAction::RunStateBasedActions,
+        ))
+        .expect("the debug state-based-action check runs");
+    assert!(runner.state().players[2].is_eliminated);
+    assert_eq!(zone(runner, board.bears[0]), Zone::Exile);
+    drive_trigger_prompts(runner);
+    assert_eq!(
+        triggers_from(runner, board.unstolen_demon),
+        1,
+        "CR 603.2c: P0's Demon sees the bear leave once"
+    );
+    assert_eq!(
+        triggers_from(runner, board.stolen_demon),
+        0,
+        "CR 603.10a + CR 800.4d: the stolen Demon's trigger was P2's"
+    );
+    assert!(runner.state().deferred_triggers.is_empty());
+}
+
+/// CR 704.3 + CR 603.2c + CR 603.10a: one state-based-action event, one "one or
+/// more" trigger. P0 controls Nefarious Imp ("Whenever one or more permanents
+/// you control leave the battlefield, scry 1."), their own Grizzly Bears, and
+/// P1's Colossal Dreadmaw, taken with Turn Against. P0's Earthquake for 2
+/// ("Earthquake deals X damage to each creature without flying and each
+/// player.") leaves P1 at 0 life and the Bears with lethal damage; the flying
+/// Imp and the 6/6 survive the damage. The next state-based-action check makes
+/// P1 lose, so the Dreadmaw leaves the game with its owner, and destroys the
+/// Bears. The check is one event (the engine stamps it as one, CR 704.3): both
+/// are permanents P0 controlled leaving in it, so the Imp triggers once.
+#[test]
+fn a_loss_and_a_death_in_one_state_based_action_event_trigger_one_or_more_once() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let imp = scenario.add_real_card(P0, "Nefarious Imp", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let dreadmaw = scenario.add_real_card(P1, "Colossal Dreadmaw", Zone::Battlefield, db);
+    let turn_against = scenario.add_real_card(P0, "Turn Against", Zone::Hand, db);
+    let earthquake = scenario.add_real_card(P0, "Earthquake", Zone::Hand, db);
+    scenario.with_mana_pool(P0, red_mana(8));
+    scenario.with_life(P1, 2);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    let mut runner = scenario.build();
+    runner.cast(turn_against).target_object(dreadmaw).resolve();
+    assert_eq!(runner.state().objects[&dreadmaw].controller, P0);
+    runner.cast(earthquake).x(2).commit();
+    for _ in 0..4 {
+        if runner.state().players[1].is_eliminated {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Earthquake resolves");
+    }
+    assert!(runner.state().players[1].is_eliminated);
+    assert_eq!(zone(&runner, dreadmaw), Zone::Exile);
+    assert_eq!(zone(&runner, bears), Zone::Graveyard);
+    assert_eq!(zone(&runner, imp), Zone::Battlefield);
+    let imp_triggers = |runner: &GameRunner| {
+        let queued = runner
+            .state()
+            .pending_trigger_order
+            .iter()
+            .flat_map(|order| order.groups.iter())
+            .flat_map(|group| group.triggers.iter())
+            .filter(|context| context.pending.source_id == imp)
+            .count();
+        queued + triggers_from(runner, imp)
+    };
+    assert_eq!(
+        imp_triggers(&runner),
+        1,
+        "one event, one Imp trigger: {:?}",
+        runner.state().waiting_for
+    );
+    drive_trigger_prompts(&mut runner);
+    assert_eq!(triggers_from(&runner, imp), 1);
+    assert!(runner.state().deferred_triggers.is_empty());
+}
+
+/// Profane Memento ("Whenever a creature card is put into an opponent's
+/// graveyard from anywhere, you gain 1 life.") and Steal Artifact ("Enchant
+/// artifact", "You control enchanted artifact.") on a three-player board where
+/// `memento_owner` owns the Memento and the other of P0 and P1 owns the Aura
+/// on it. P2 controls a Grizzly Bears. P0's Earthquake for 2 ("Earthquake deals
+/// X damage to each creature without flying and each player.") leaves only P1
+/// at lethal life, so one state-based-action check has P1 lose and the Bears
+/// die. Returns how many Memento triggers wait or are on the stack, and who
+/// controls them.
+fn memento_triggers_when_the_aura_owner_leaves(memento_owner: PlayerId) -> Vec<PlayerId> {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let aura_owner = if memento_owner == P0 { P1 } else { P0 };
+    let memento = scenario.add_real_card(memento_owner, "Profane Memento", Zone::Battlefield, db);
+    let steal = scenario.add_real_card(aura_owner, "Steal Artifact", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P2, "Grizzly Bears", Zone::Battlefield, db);
+    let earthquake = scenario.add_real_card(P0, "Earthquake", Zone::Hand, db);
+    scenario.with_mana_pool(P0, red_mana(8));
+    scenario.with_life(P1, 2);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    let mut runner = scenario.build();
+    // Fixture: the Aura on the artifact (CR 303.4), its control effect applied.
+    {
+        let state = runner.state_mut();
+        state.objects.get_mut(&steal).unwrap().attached_to = Some(AttachTarget::Object(memento));
+        state
+            .objects
+            .get_mut(&memento)
+            .unwrap()
+            .attachments
+            .push(steal);
+        state.layers_dirty.mark_full();
+        engine::game::layers::flush_layers(state);
+    }
+    assert_eq!(
+        runner.state().objects[&memento].controller,
+        aura_owner,
+        "reach guard: Steal Artifact gives its owner the Memento"
+    );
+    runner.cast(earthquake).x(2).commit();
+    for _ in 0..4 {
+        if runner.state().players[1].is_eliminated {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Earthquake resolves");
+    }
+    assert!(runner.state().players[1].is_eliminated);
+    assert_eq!(zone(&runner, bears), Zone::Graveyard);
+    let state = runner.state();
+    let mut controllers: Vec<PlayerId> = state
+        .pending_trigger_order
+        .iter()
+        .flat_map(|order| order.groups.iter())
+        .flat_map(|group| group.triggers.iter())
+        .chain(state.deferred_triggers.iter())
+        .filter(|context| context.pending.source_id == memento)
+        .map(|context| context.pending.controller)
+        .collect();
+    controllers.extend(
+        state
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == memento)
+            .map(|entry| entry.controller),
+    );
+    controllers
+}
+
+/// CR 603.6c + CR 603.10 + CR 603.3a: an ability that triggers when a card is
+/// put into a zone "from anywhere" is never a leaves-the-battlefield ability,
+/// even for a card put there from the battlefield: it looks at the game after
+/// the event, and its controller is the one it has then. P1's Steal Artifact
+/// leaves with them in the state-based-action check that kills the Bears, so P0
+/// controls their own Memento again and gains the life, once.
+#[test]
+fn a_from_anywhere_observer_reverted_by_a_departure_triggers_once_for_its_owner() {
+    assert_eq!(memento_triggers_when_the_aura_owner_leaves(P0), vec![P0]);
+}
+
+/// CR 603.6c + CR 603.10: the same board with the Memento owned by the player
+/// who leaves. A "from anywhere" ability reads the game immediately after the
+/// event, where the Memento is gone with its owner (CR 800.4a), so it triggers
+/// for nobody.
+#[test]
+fn a_from_anywhere_observer_that_left_with_its_owner_does_not_trigger() {
+    assert_eq!(
+        memento_triggers_when_the_aura_owner_leaves(P1),
+        Vec::<PlayerId>::new()
+    );
+}
+
+/// The board of the two Rise of the Dark Realms rows: P0 controls P2's Twilight
+/// Diviner ("Whenever one or more other creatures you control enter, if they
+/// entered or were cast from a graveyard, create a token that's a copy of one
+/// of them.") through Turn Against and casts Rise of the Dark Realms ("Put all
+/// creature cards from all graveyards onto the battlefield under your
+/// control."). Phyrexian Metamorph is in P0's graveyard; its optional copy
+/// replacement pauses the move. `entered_first` puts a Grizzly Bears card in
+/// the graveyard too, which enters before the pause; otherwise a Bears is
+/// already on the battlefield for the Metamorph to copy. `suppressor` gives P2
+/// Hushbringer ("Creatures entering or dying don't cause abilities to
+/// trigger."). P2 concedes at the Metamorph's prompt, so the Diviner (and
+/// Hushbringer) leave the game, and P0 then has the Metamorph enter as a copy
+/// of the Bears. Returns how many Diviner triggers wait or are on the stack.
+fn diviner_triggers_after_its_owner_leaves_mid_rise(
+    entered_first: bool,
+    suppressor: bool,
+) -> usize {
+    // The members of the simultaneous return are delivered in the engine's
+    // order; use the board on which the Bears is on the battlefield when the
+    // Metamorph's prompt opens.
+    [false, true]
+        .into_iter()
+        .find_map(|metamorph_added_first| {
+            diviner_triggers_on_board(entered_first, suppressor, metamorph_added_first)
+        })
+        .expect("reach guard: one board has the Bears on the battlefield at the pause")
+}
+
+fn diviner_triggers_on_board(
+    entered_first: bool,
+    suppressor: bool,
+    metamorph_added_first: bool,
+) -> Option<usize> {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let diviner = scenario.add_real_card(P2, "Twilight Diviner", Zone::Battlefield, db);
+    if suppressor {
+        scenario.add_real_card(P2, "Hushbringer", Zone::Battlefield, db);
+    }
+    let bears_zone = if entered_first {
+        Zone::Graveyard
+    } else {
+        Zone::Battlefield
+    };
+    let (metamorph, bears) = if metamorph_added_first {
+        let metamorph = scenario.add_real_card(P0, "Phyrexian Metamorph", Zone::Graveyard, db);
+        (
+            metamorph,
+            scenario.add_real_card(P0, "Grizzly Bears", bears_zone, db),
+        )
+    } else {
+        let bears = scenario.add_real_card(P0, "Grizzly Bears", bears_zone, db);
+        (
+            scenario.add_real_card(P0, "Phyrexian Metamorph", Zone::Graveyard, db),
+            bears,
+        )
+    };
+    let turn_against = scenario.add_real_card(P0, "Turn Against", Zone::Hand, db);
+    let rise = scenario.add_real_card(P0, "Rise of the Dark Realms", Zone::Hand, db);
+    let mut pool = red_mana(5);
+    pool.extend((0..9).map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])));
+    scenario.with_mana_pool(P0, pool);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    let mut runner = scenario.build();
+    runner.cast(turn_against).target_object(diviner).resolve();
+    assert_eq!(runner.state().objects[&diviner].controller, P0);
+
+    runner.cast(rise).commit();
+    for _ in 0..4 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Rise of the Dark Realms resolves");
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ),
+        "reach guard: the Metamorph's copy replacement pauses the move: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(zone(&runner, metamorph), Zone::Graveyard);
+    if zone(&runner, bears) != Zone::Battlefield {
+        return None;
+    }
+
+    runner
+        .act(GameAction::Concede { player_id: P2 })
+        .expect("P2 concedes");
+    assert_eq!(zone(&runner, diviner), Zone::Exile);
+
+    for _ in 0..6 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("P0 has the Metamorph enter as a copy");
+            }
+            WaitingFor::CopyTargetChoice { valid_targets, .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(engine::types::ability::TargetRef::Object(valid_targets[0])),
+                    })
+                    .expect("P0 copies the Bears");
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(zone(&runner, metamorph), Zone::Battlefield);
+    let queued = runner
+        .state()
+        .pending_trigger_order
+        .iter()
+        .flat_map(|order| order.groups.iter())
+        .flat_map(|group| group.triggers.iter())
+        .chain(runner.state().deferred_triggers.iter())
+        .filter(|context| context.pending.source_id == diviner)
+        .count();
+    let announcing = runner
+        .state()
+        .pending_trigger
+        .iter()
+        .filter(|pending| pending.source_id == diviner)
+        .count();
+    // An ability being announced is already a stack entry; count it once.
+    Some(queued + triggers_from(&runner, diviner).max(announcing))
+}
+
+/// CR 603.6c + CR 603.10: a "from anywhere" ability is read in the game after
+/// the event, so a permanent that left the battlefield in it, the moving
+/// source included, does not trigger. P1 owns a Profane Memento that P0
+/// controls through their Steal Artifact; March of the Machines ("Each
+/// noncreature artifact is an artifact creature with power and toughness each
+/// equal to its mana value.") makes it a 1/1 creature. P0's Earthquake for 2
+/// leaves only P2 at lethal life, so in one state-based-action check P2 loses
+/// and the Memento dies into P1's graveyard, an opponent's. It is not on the
+/// battlefield after that, so it does not trigger for itself.
+#[test]
+fn a_from_anywhere_source_that_died_in_the_event_does_not_trigger_for_itself() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let memento = scenario.add_real_card(P1, "Profane Memento", Zone::Battlefield, db);
+    let steal = scenario.add_real_card(P0, "Steal Artifact", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "March of the Machines", Zone::Battlefield, db);
+    let earthquake = scenario.add_real_card(P0, "Earthquake", Zone::Hand, db);
+    scenario.with_mana_pool(P0, red_mana(8));
+    scenario.with_life(P2, 2);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.objects.get_mut(&steal).unwrap().attached_to = Some(AttachTarget::Object(memento));
+        state
+            .objects
+            .get_mut(&memento)
+            .unwrap()
+            .attachments
+            .push(steal);
+        state.layers_dirty.mark_full();
+        engine::game::layers::flush_layers(state);
+    }
+    assert_eq!(
+        runner.state().objects[&memento].controller,
+        P0,
+        "reach guard: Steal Artifact gives P0 the Memento"
+    );
+    assert!(
+        runner.state().objects[&memento]
+            .card_types
+            .core_types
+            .contains(&engine::types::card_type::CoreType::Creature),
+        "reach guard: March of the Machines makes the Memento a creature"
+    );
+    runner.cast(earthquake).x(2).commit();
+    for _ in 0..4 {
+        if runner.state().players[2].is_eliminated {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Earthquake resolves");
+    }
+    assert!(runner.state().players[2].is_eliminated);
+    assert_eq!(zone(&runner, memento), Zone::Graveyard);
+    let state = runner.state();
+    let queued = state
+        .pending_trigger_order
+        .iter()
+        .flat_map(|order| order.groups.iter())
+        .flat_map(|group| group.triggers.iter())
+        .chain(state.deferred_triggers.iter())
+        .filter(|context| context.pending.source_id == memento)
+        .count();
+    assert_eq!(queued + triggers_from(&runner, memento), 0);
+}
+
+/// CR 603.6c + CR 603.10 + CR 400.7: a "from anywhere" ability that functions
+/// in the graveyard belongs to the object that is there. P0 controls Dread
+/// ("When Dread is put into a graveyard from anywhere, shuffle it into its
+/// owner's library.") and has cast Clone as a copy of it; P0's
+/// Earthquake for 6 leaves only P2 at lethal life, so in one state-based-action
+/// check P2 loses and both 6/6 creatures die. The Dread card has the ability in
+/// the graveyard and triggers once; the Clone card there does not.
+#[test]
+fn a_copy_of_a_from_anywhere_ability_does_not_trigger_from_the_graveyard() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let dread = scenario.add_real_card(P0, "Dread", Zone::Battlefield, db);
+    let clone = scenario.add_real_card(P0, "Clone", Zone::Hand, db);
+    let earthquake = scenario.add_real_card(P0, "Earthquake", Zone::Hand, db);
+    let mut pool = red_mana(9);
+    pool.extend((0..4).map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![])));
+    pool.extend((0..4).map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![])));
+    scenario.with_mana_pool(P0, pool);
+    scenario.with_life(P2, 6);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    let mut runner = scenario.build();
+    runner.cast(clone).commit();
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("P0 has the Clone enter as a copy");
+            }
+            WaitingFor::CopyTargetChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(engine::types::ability::TargetRef::Object(dread)),
+                    })
+                    .expect("P0 copies Dread");
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority passes while the Clone resolves");
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(zone(&runner, clone), Zone::Battlefield);
+    assert_eq!(runner.state().objects[&clone].name, "Dread");
+    runner.cast(earthquake).x(6).commit();
+    for _ in 0..4 {
+        if runner.state().players[2].is_eliminated {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Earthquake resolves");
+    }
+    assert!(runner.state().players[2].is_eliminated);
+    assert_eq!(zone(&runner, dread), Zone::Graveyard);
+    assert_eq!(zone(&runner, clone), Zone::Graveyard);
+    let state = runner.state();
+    let from = |source: ObjectId| {
+        state
+            .pending_trigger_order
+            .iter()
+            .flat_map(|order| order.groups.iter())
+            .flat_map(|group| group.triggers.iter())
+            .chain(state.deferred_triggers.iter())
+            .filter(|context| context.pending.source_id == source)
+            .count()
+            + triggers_from(&runner, source)
+    };
+    assert_eq!(
+        from(dread),
+        1,
+        "the Dread card has the ability in the graveyard"
+    );
+    assert_eq!(from(clone), 0, "the Clone card there does not");
+}
+
+/// CR 704.3 + CR 603.6c + CR 603.10 + CR 603.3a: each state-based-action check
+/// is its own event, and a "from anywhere" ability reads the game after the
+/// check that triggered it, not after later ones. P1's Platinum Angel ("You
+/// can't lose the game and your opponents can't win the game.") keeps P1 in
+/// the game while P2, also at 4 life, loses to P0's Hurricane for 4 ("Hurricane
+/// deals X damage to each creature with flying and each player."), which also
+/// destroys the Angel. P1 then loses in the next check, and their Profane
+/// Memento, which P0 controls through their own Steal Artifact, leaves with
+/// them. The Angel went to an opponent's graveyard in the first check, with
+/// the Memento still there under P0, so P0's trigger stays.
+#[test]
+fn a_from_anywhere_trigger_of_an_earlier_check_survives_its_source_leaving_in_the_next() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let memento = scenario.add_real_card(P1, "Profane Memento", Zone::Battlefield, db);
+    let steal = scenario.add_real_card(P0, "Steal Artifact", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Platinum Angel", Zone::Battlefield, db);
+    let hurricane = scenario.add_real_card(P0, "Hurricane", Zone::Hand, db);
+    let mut pool = (0..5)
+        .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+        .collect::<Vec<_>>();
+    pool.extend((0..2).map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![])));
+    scenario.with_mana_pool(P0, pool);
+    scenario.with_life(P1, 4);
+    scenario.with_life(P2, 4);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.objects.get_mut(&steal).unwrap().attached_to = Some(AttachTarget::Object(memento));
+        state
+            .objects
+            .get_mut(&memento)
+            .unwrap()
+            .attachments
+            .push(steal);
+        state.layers_dirty.mark_full();
+        engine::game::layers::flush_layers(state);
+    }
+    assert_eq!(
+        runner.state().objects[&memento].controller,
+        P0,
+        "reach guard: Steal Artifact gives P0 the Memento"
+    );
+    runner.cast(hurricane).x(4).commit();
+    for _ in 0..8 {
+        if runner.state().players[1].is_eliminated {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Hurricane resolves");
+    }
+    assert!(runner.state().players[2].is_eliminated);
+    assert!(
+        runner.state().players[1].is_eliminated,
+        "reach guard: P1 loses in the check after the Angel is destroyed"
+    );
+    assert!(!runner.state().players[0].is_eliminated);
+    assert!(!runner.state().players[3].is_eliminated);
+    let state = runner.state();
+    let mut controllers: Vec<PlayerId> = state
+        .pending_trigger_order
+        .iter()
+        .flat_map(|order| order.groups.iter())
+        .flat_map(|group| group.triggers.iter())
+        .chain(state.deferred_triggers.iter())
+        .filter(|context| context.pending.source_id == memento)
+        .map(|context| context.pending.controller)
+        .collect();
+    controllers.extend(
+        state
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == memento)
+            .map(|entry| entry.controller),
+    );
+    assert_eq!(controllers, vec![P0]);
+}
+
+/// CR 111.7 + CR 603.6c + CR 603.10: a token's ability triggers before it ceases
+/// to exist. P0 controls Dread and a token copy of it (Cackling Counterpart:
+/// "Create a token that's a copy of target creature you control."); P0's
+/// Earthquake for 6 leaves only P2 at lethal life, so in one state-based-action
+/// check P2 loses and both 6/6 creatures die. The token is gone when the
+/// abilities are collected, and still triggers, like the Dread card.
+#[test]
+fn a_token_copy_of_a_from_anywhere_ability_triggers_though_it_has_ceased_to_exist() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let dread = scenario.add_real_card(P0, "Dread", Zone::Battlefield, db);
+    let counterpart = scenario.add_real_card(P0, "Cackling Counterpart", Zone::Hand, db);
+    let earthquake = scenario.add_real_card(P0, "Earthquake", Zone::Hand, db);
+    let mut pool = red_mana(9);
+    pool.extend((0..4).map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![])));
+    pool.extend((0..4).map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![])));
+    scenario.with_mana_pool(P0, pool);
+    scenario.with_life(P2, 6);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    let mut runner = scenario.build();
+    runner.cast(counterpart).target_object(dread).resolve();
+    let token = runner
+        .state()
+        .objects
+        .iter()
+        .find(|(id, object)| **id != dread && object.name == "Dread" && object.is_token)
+        .map(|(id, _)| *id)
+        .expect("reach guard: Cackling Counterpart made a token copy of Dread");
+    runner.cast(earthquake).x(6).commit();
+    for _ in 0..4 {
+        if runner.state().players[2].is_eliminated {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Earthquake resolves");
+    }
+    assert!(runner.state().players[2].is_eliminated);
+    assert_eq!(zone(&runner, dread), Zone::Graveyard);
+    let state = runner.state();
+    let from = |source: ObjectId| {
+        state
+            .pending_trigger_order
+            .iter()
+            .flat_map(|order| order.groups.iter())
+            .flat_map(|group| group.triggers.iter())
+            .chain(state.deferred_triggers.iter())
+            .filter(|context| context.pending.source_id == source)
+            .count()
+            + triggers_from(&runner, source)
+    };
+    assert_eq!(from(dread), 1, "the Dread card triggers");
+    assert_eq!(
+        from(token),
+        1,
+        "so does its token, which has ceased to exist"
+    );
+}
+
+/// CR 603.3b + CR 510.3a + CR 704.3: what a player's departure in an earlier
+/// state-based-action check triggered is put on the stack in the same batch as
+/// the combat-damage triggers, so its controller orders all of them together.
+/// P0 controls Profane Memento, Bident of Thassa ("Whenever a creature you
+/// control deals combat damage to a player, you may draw a card.") and three
+/// Air Elementals (4/4 fliers); P1 controls Platinum Angel; P1 and P2 are at 4
+/// life. P0 attacks P1 with two Elementals and P2 with the third; the Angel
+/// blocks one of those at P1. In the first check P2 loses and the Angel and the
+/// blocked Elemental die, while P1 is protected; P1 loses in the second. The
+/// Angel went to an opponent's graveyard, so the Memento triggers; it and the
+/// two Bident triggers are P0's, ordered in one prompt.
+#[test]
+fn an_earlier_checks_departure_trigger_is_ordered_with_the_combat_damage_triggers() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let memento = scenario.add_real_card(P0, "Profane Memento", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Bident of Thassa", Zone::Battlefield, db);
+    let angel = scenario.add_real_card(P1, "Platinum Angel", Zone::Battlefield, db);
+    let blocked = scenario.add_real_card(P0, "Air Elemental", Zone::Battlefield, db);
+    let at_p2 = scenario.add_real_card(P0, "Air Elemental", Zone::Battlefield, db);
+    let at_p1 = scenario.add_real_card(P0, "Air Elemental", Zone::Battlefield, db);
+    scenario.with_life(P1, 4);
+    scenario.with_life(P2, 4);
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[
+            (blocked, AttackTarget::Player(P1)),
+            (at_p2, AttackTarget::Player(P2)),
+            (at_p1, AttackTarget::Player(P1)),
+        ])
+        .expect("the attack is legal");
+    let mut ordered = None;
+    for _ in 0..12 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareBlockers { player, .. } => {
+                let blocks: Vec<(ObjectId, ObjectId)> = if player == P1 {
+                    vec![(angel, blocked)]
+                } else {
+                    vec![]
+                };
+                runner
+                    .declare_blockers(&blocks)
+                    .expect("the blockers are legal");
+            }
+            WaitingFor::OrderTriggers { player, triggers } => {
+                ordered = Some((player, triggers.len()));
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority passes through combat");
+            }
+            other => panic!("unexpected prompt in combat: {other:?}"),
+        }
+    }
+    assert!(runner.state().players[2].is_eliminated);
+    assert!(runner.state().players[1].is_eliminated);
+    assert_eq!(
+        ordered,
+        Some((P0, 3)),
+        "the Memento trigger and both damage triggers are ordered together (Memento {memento:?})"
+    );
+}
+
+/// Welcoming Vampire ("Whenever one or more other creatures you control with
+/// power 2 or less enter, draw a card. This ability triggers only once each
+/// turn.") and Sol Ring on P0's side; with `suppressor`, Hushbringer
+/// ("Creatures entering or dying don't cause abilities to trigger.") is P2's.
+/// P0 casts Tooth and Nail for its hand mode ("Put up to two creature cards
+/// from your hand onto the battlefield."), choosing Grizzly Bears and then
+/// Phyrexian Metamorph, whose optional copy replacement pauses the move. P2
+/// concedes there, and P0 has the Metamorph enter as a copy of Sol Ring.
+/// Returns how many Vampire triggers wait or are on the stack.
+fn vampire_triggers_after_a_concession_mid_tooth_and_nail(
+    suppressor: bool,
+    vampire_owner: PlayerId,
+) -> usize {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let vampire = scenario.add_real_card(vampire_owner, "Welcoming Vampire", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Sol Ring", Zone::Battlefield, db);
+    if suppressor {
+        scenario.add_real_card(P2, "Hushbringer", Zone::Battlefield, db);
+    }
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
+    let metamorph = scenario.add_real_card(P0, "Phyrexian Metamorph", Zone::Hand, db);
+    let tooth_and_nail = scenario.add_real_card(P0, "Tooth and Nail", Zone::Hand, db);
+    let turn_against = scenario.add_real_card(P0, "Turn Against", Zone::Hand, db);
+    let mut pool = red_mana(8);
+    pool.extend((0..8).map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![])));
+    pool.extend((0..4).map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![])));
+    scenario.with_mana_pool(P0, pool);
+    let mut runner = scenario.build();
+    if vampire_owner != P0 {
+        runner.cast(turn_against).target_object(vampire).resolve();
+        assert_eq!(runner.state().objects[&vampire].controller, P0);
+    }
+    runner.cast(tooth_and_nail).modes(&[1]).commit();
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::EffectZoneChoice { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Tooth and Nail resolves");
+    }
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![bears, metamorph],
+        })
+        .expect("P0 puts the Bears and then the Metamorph onto the battlefield");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ),
+        "reach guard: the Metamorph's copy replacement pauses the move: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(zone(&runner, bears), Zone::Battlefield);
+    assert_eq!(zone(&runner, metamorph), Zone::Hand);
+
+    runner
+        .act(GameAction::Concede { player_id: P2 })
+        .expect("P2 concedes");
+    for _ in 0..6 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("P0 has the Metamorph enter as a copy");
+            }
+            WaitingFor::CopyTargetChoice { valid_targets, .. } => {
+                let sol_ring = valid_targets
+                    .iter()
+                    .copied()
+                    .find(|id| runner.state().objects[id].name == "Sol Ring")
+                    .expect("Sol Ring is a legal copy choice");
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(engine::types::ability::TargetRef::Object(sol_ring)),
+                    })
+                    .expect("P0 copies Sol Ring");
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(zone(&runner, metamorph), Zone::Battlefield);
+    let queued = runner
+        .state()
+        .pending_trigger_order
+        .iter()
+        .flat_map(|order| order.groups.iter())
+        .flat_map(|group| group.triggers.iter())
+        .chain(runner.state().deferred_triggers.iter())
+        .filter(|context| context.pending.source_id == vampire)
+        .count();
+    let announcing = runner
+        .state()
+        .pending_trigger
+        .iter()
+        .filter(|pending| pending.source_id == vampire)
+        .count();
+    // An ability being announced is already a stack entry; count it once.
+    queued + triggers_from(&runner, vampire).max(announcing)
+}
+
+/// CR 603.6a + CR 603.10 + CR 603.2g: a suppressor that applied when an entry
+/// happened still applies to it after its owner leaves, on the hand-to-
+/// battlefield path too, where the game after the entry is read at final
+/// settlement. The Bears entered under Hushbringer, so Welcoming Vampire does
+/// not trigger for it.
+#[test]
+fn a_departed_suppressor_still_applies_to_the_hand_entry_completed_before_its_owner_left() {
+    assert_eq!(
+        vampire_triggers_after_a_concession_mid_tooth_and_nail(true, P0),
+        0
+    );
+}
+
+/// CR 603.6a + CR 603.3a: the positive control of the row above, with the same
+/// concession and the same noncreature copy: without Hushbringer the Bears'
+/// entry triggers Welcoming Vampire, once.
+#[test]
+fn a_hand_entry_completed_before_a_concession_triggers_the_survivors_observer_once() {
+    assert_eq!(
+        vampire_triggers_after_a_concession_mid_tooth_and_nail(false, P0),
+        1
+    );
+}
+
+/// CR 603.6a + CR 603.10 + CR 603.3a: a survivor-controlled observer whose
+/// source leaves with its owner keeps the trigger for the entry completed
+/// before it left, on the hand-to-battlefield path. P0 controls P2's Welcoming
+/// Vampire (Turn Against); the Bears enters, P2 concedes at the Metamorph's
+/// copy choice, and the Vampire triggers for P0 once.
+#[test]
+fn a_stolen_observer_keeps_its_trigger_for_the_hand_entry_completed_before_its_owner_left() {
+    assert_eq!(
+        vampire_triggers_after_a_concession_mid_tooth_and_nail(false, P2),
+        1
+    );
+}
+
+/// CR 603.10a + CR 800.4a: a departed observer cannot trigger for an event that
+/// happens after it left. Nothing had entered when P2 conceded, so the Diviner
+/// does not trigger for the Metamorph's later entry.
+#[test]
+fn a_departed_observer_does_not_trigger_for_an_entry_after_it_left() {
+    assert_eq!(
+        diviner_triggers_after_its_owner_leaves_mid_rise(false, false),
+        0
+    );
+}
+
+/// CR 603.3a: the positive control of the two rows around it. The Bears entered
+/// from the graveyard while P0 controlled the Diviner, before P2 conceded, so
+/// that ability triggered for P0 and is kept, once.
+#[test]
+fn a_departed_observer_keeps_its_trigger_for_an_entry_completed_before_it_left() {
+    assert_eq!(
+        diviner_triggers_after_its_owner_leaves_mid_rise(true, false),
+        1
+    );
+}
+
+/// CR 603.10a + CR 603.2g: a suppressor that applied when an occurrence
+/// happened still applies to it after its owner leaves. The Bears entered under
+/// Hushbringer, so the Diviner's retained trigger does not fire for it.
+#[test]
+fn a_departed_suppressor_still_applies_to_the_entry_completed_before_its_owner_left() {
+    assert_eq!(
+        diviner_triggers_after_its_owner_leaves_mid_rise(true, true),
+        0
+    );
 }

@@ -19,15 +19,16 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     BatchCompletion, EnteringAuraAuthority, ExileLinkKind, GameState, LiminalEntryKind,
-    LogicalZoneChangeGroup, MergedCardComponentRoute, PendingBatchDeliveries,
-    PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest, PendingCounterPostAction,
-    PendingLiminalEntryResume, PendingZoneChangeDelivery, PostReplacementDrainOwner, WaitingFor,
-    ZoneDeliveryExileTracking, ZoneMoveCompletion,
+    LogicalZoneChangeGroup, LogicalZoneChangeTerminalOutcome, MergedCardComponentRoute,
+    PendingBatchDeliveries, PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest,
+    PendingComponentDeliveryParent, PendingCounterPostAction, PendingLiminalEntryResume,
+    PendingZoneChangeDelivery, PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
+    ZoneMoveCompletion,
 };
 use std::collections::HashSet;
 
 use crate::types::format::EntryOwnership;
-use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::identifiers::{LogicalZoneChangeGroupId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
@@ -705,12 +706,6 @@ pub(crate) struct DeliveryCtx {
     /// CR 614.12a: who drains `post_replacement_continuation` after this
     /// delivery (see [`PostReplacementDrainOwner`]).
     pub drain: PostReplacementDrainOwner,
-    /// CR 701.24a: the library placement to honor when the delivered destination
-    /// is the library. Threaded by the W3 resume path
-    /// (`handle_replacement_choice`) from the parked `PendingReplacement`;
-    /// `None` for every other `deliver` caller (a placement is not a shuffle, so
-    /// `None` means the tail's auto-shuffle convention applies).
-    pub library_placement: Option<LibraryPosition>,
 }
 
 /// CR 400.7d + CR 608.3: the cast-link family — information about the spell
@@ -848,6 +843,25 @@ pub(crate) fn move_object_with_terminal(
     req: ZoneMoveRequest,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveTerminalResult {
+    move_batch_member_with_terminal(state, req, None, events)
+}
+
+/// CR 730.3 + CR 603.10a: the logical owner that announced one member's move —
+/// a `BatchDelivery` or a `ChangeZone` iteration, named by its group. A merged
+/// permanent's component batch links to this owner, which alone collects and
+/// records that departure.
+pub(crate) struct MemberDeliveryOwner {
+    pub group: LogicalZoneChangeGroupId,
+    pub member: ObjectIncarnationRef,
+    pub expected_event: Option<ProposedEvent>,
+}
+
+fn move_batch_member_with_terminal(
+    state: &mut GameState,
+    req: ZoneMoveRequest,
+    owner: Option<MemberDeliveryOwner>,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveTerminalResult {
     let Some(object) = state.objects.get(&req.object_id) else {
         // The object no longer exists (already moved / ceased to exist); nothing
         // to do. The unconditional guards in `zones.rs` would no-op anyway.
@@ -945,12 +959,14 @@ pub(crate) fn move_object_with_terminal(
             if let ProposedEvent::ZoneChange {
                 applied,
                 face_down_in_exile: conceal_in_exile,
+                library_placement,
                 chain_referent,
                 performed_by,
                 library_shuffle,
                 ..
             } = &mut proposed
             {
+                *library_placement = Some(position.clone());
                 *chain_referent = req.mods.chain_referent;
                 *performed_by = req.mods.performed_by;
                 *applied = req.replacement_applied.clone();
@@ -960,7 +976,7 @@ pub(crate) fn move_object_with_terminal(
             return match replacement::replace_event(state, proposed, events) {
                 ReplacementResult::Execute(event) => {
                     let delivery_start = events.len();
-                    match deliver_replaced_zone_change(
+                    match deliver_replaced_batch_member(
                         state,
                         event,
                         source_id,
@@ -971,7 +987,7 @@ pub(crate) fn move_object_with_terminal(
                             ZoneDeliveryExileTracking::TrackBySource
                         ),
                         PostReplacementDrainOwner::DeliveryTail,
-                        Some(position),
+                        owner,
                         events,
                     ) {
                         ZoneDeliveryResult::Done => ZoneMoveTerminalResult::Completed(
@@ -989,19 +1005,6 @@ pub(crate) fn move_object_with_terminal(
                     // CR 616.1: park at the single unparked origin (mirrors
                     // `execute_zone_move`'s NeedsChoice arm) so the prompt surfaces.
                     state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
-                    // CR 701.24a: stash the requested library placement on the
-                    // parked record so the resume path
-                    // (`engine_replacement::handle_replacement_choice`) threads it
-                    // back into the delivery. Without this the resume hardcodes
-                    // `library_placement: None` and the delivery tail auto-shuffles,
-                    // randomizing the requested position away. Unreachable today (no
-                    // pool `Moved` def targets the library, so a placement consult
-                    // never reaches a choice), but threaded for correctness — see
-                    // the `library_placement_parked_resume_honors_position` unit
-                    // test for the synthetic-redirect coverage.
-                    if let Some(pending) = state.pending_replacement.as_mut() {
-                        pending.library_placement = Some(position);
-                    }
                     ZoneMoveTerminalResult::NeedsChoice(player)
                 }
             };
@@ -1047,7 +1050,7 @@ pub(crate) fn move_object_with_terminal(
         return match replacement::replace_event(state, proposed, events) {
             ReplacementResult::Execute(event) => {
                 let delivery_start = events.len();
-                match deliver_replaced_zone_change(
+                match deliver_replaced_batch_member(
                     state,
                     event,
                     source_id,
@@ -1055,7 +1058,7 @@ pub(crate) fn move_object_with_terminal(
                     exile_links.controller,
                     track_exiled_by_source,
                     PostReplacementDrainOwner::DeliveryTail,
-                    None,
+                    owner,
                     events,
                 ) {
                     ZoneDeliveryResult::Done => ZoneMoveTerminalResult::Completed(
@@ -1176,18 +1179,15 @@ pub(crate) fn move_object_with_terminal(
         }
         let approved = ApprovedZoneChange::seal(proposed);
         let delivery_start = events.len();
-        return match deliver(
+        return match deliver_batch_member(
             state,
             approved,
             DeliveryCtx {
                 source_id,
                 exile_links,
                 drain: PostReplacementDrainOwner::DeliveryTail,
-                // CR 701.24a: exempt LIBRARY placements were already delivered and
-                // returned by the placement arm above; any exempt cause reaching
-                // this generic delivery has no library placement to honor.
-                library_placement: None,
             },
+            owner,
             events,
         ) {
             ZoneDeliveryResult::Done => ZoneMoveTerminalResult::Completed(
@@ -1222,6 +1222,7 @@ pub(crate) fn move_object_with_terminal(
         exile_links.controller,
         req.mods.performed_by,
         req.replacement_applied,
+        owner,
         events,
     )
 }
@@ -1335,31 +1336,48 @@ pub(crate) fn move_objects_simultaneously_then(
     completion: Option<BatchCompletion>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
+    move_component_batch_then(state, reqs, completion, None, events)
+}
+
+pub(crate) fn move_component_batch_then(
+    state: &mut GameState,
+    reqs: Vec<ZoneMoveRequest>,
+    completion: Option<BatchCompletion>,
+    component_delivery_parent: Option<PendingComponentDeliveryParent>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
     let event_start = events.len();
     let zone_change_record_start = state.zone_changes_this_turn.len();
     let ids: Vec<ObjectId> = reqs.iter().map(|r| r.object_id).collect();
     let logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &ids);
-    let destination = reqs.first().map(|r| r.to);
+    let group_id = logical_zone_change_group.logical_group_id;
     match deliver_batch(
         state,
         reqs,
         logical_zone_change_group,
         BatchDeliveryParking::NewChild,
+        component_delivery_parent.as_ref(),
         events,
     ) {
         BatchDeliveryResult::Done(mut logical_zone_change_group) => {
-            crate::game::triggers::complete_logical_zone_trigger_collection(
-                state,
-                &mut logical_zone_change_group,
-                &mut events[event_start..],
-            )
-            .expect("completed batch owns every terminal zone-change outcome");
-            crate::game::triggers::mark_logical_zone_events_consumed_before_priority(
-                state,
-                &logical_zone_change_group,
-                &events[event_start..],
-            );
+            // CR 730.3 + CR 603.2c: a component batch that delivers for an
+            // announcing owner leaves its events in that owner's slice; the
+            // owner collects the one departure once. Only an unowned move's
+            // component batch is its own collector.
+            if component_delivery_parent.is_none() {
+                crate::game::triggers::complete_logical_zone_trigger_collection(
+                    state,
+                    &mut logical_zone_change_group,
+                    &mut events[event_start..],
+                )
+                .expect("completed batch owns every terminal zone-change outcome");
+                crate::game::triggers::mark_logical_zone_events_consumed_before_priority(
+                    state,
+                    &logical_zone_change_group,
+                    &events[event_start..],
+                );
+            }
             // Synchronous completion (the common single-redirect path): run the
             // cleanup now, and surface a pause it raises to the enclosing caller.
             completion.map_or(BatchMoveResult::Done, |mut completion| {
@@ -1376,7 +1394,11 @@ pub(crate) fn move_objects_simultaneously_then(
             // paused object was the last member and the undelivered tail is empty.
             // Attach the completion to that same owner so its drain can run it
             // once, after logical settlement.
-            let pending = ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard));
+            let pending = state
+                .resolution_stack
+                .batch_delivery_owner_mut(group_id)
+                .expect("new batch retains its exact owner");
+            pending.component_delivery_parent = component_delivery_parent;
             pending.completion = completion;
             pending.attempted = ids;
             pending.zone_change_record_start = zone_change_record_start;
@@ -1424,6 +1446,7 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
         let logical_zone_change_group =
             crate::game::triggers::allocate_logical_zone_change_group(state, &announced_members);
         state.push_batch_delivery(PendingBatchDeliveries {
+            component_delivery_parent: None,
             logical_zone_change_group,
             paused_current,
             remaining: Vec::new(),
@@ -1445,16 +1468,66 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
         .expect("pending batch record was just initialized")
 }
 
+/// CR 603.2c + CR 730.3: retain one delivered segment on its logical owner and
+/// collect its triggers there. A component batch that delivers for an
+/// announcing owner (`handback`) retains the segment only to classify its
+/// members; the announcing owner collects the departure once, from the events
+/// handed back to it.
+fn retain_batch_segment(
+    state: &mut GameState,
+    group: &mut LogicalZoneChangeGroup,
+    events: &[GameEvent],
+    handback: Option<&PendingComponentDeliveryParent>,
+) -> Result<(), String> {
+    match handback {
+        None => crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+            state, group, events,
+        ),
+        Some(_) => group.append_delivery_events(events),
+    }
+}
+
+/// CR 730.3 + CR 616.1: the boundary a paused member leaves on the logical owner
+/// that announced it. A merged member whose component batch parked is named by
+/// that child's link to this owner, so the owner parks the original member's
+/// boundary, never the component's. Otherwise the replacement record's boundary
+/// is authoritative, else the request-derived boundary with its delivered slice.
+pub(crate) fn parked_member_boundary(
+    state: &GameState,
+    owner: LogicalZoneChangeGroupId,
+    anticipated: Option<PendingZoneChangeDelivery>,
+    delivery_events: &[GameEvent],
+) -> Option<PendingZoneChangeDelivery> {
+    state
+        .active_batch_delivery()
+        .and_then(|child| child.component_delivery_parent.as_ref())
+        .filter(|link| link.parent_group_id == owner)
+        .map(|link| PendingZoneChangeDelivery::new(link.member, link.expected_event.clone()))
+        .or_else(|| state.pending_zone_change_delivery_from_replacement())
+        .or_else(|| {
+            anticipated.map(|mut boundary| {
+                boundary.append_delivery_events(delivery_events);
+                boundary
+            })
+        })
+}
+
 /// CR 603.10a + CR 616.1: shared batch delivery loop. Runs each request through
 /// `move_object_with_terminal`; on a pause, parks the prompt and stashes the
 /// undelivered tail with each request's exact heterogeneous context. The exact
 /// same logical owner flows into the parked record, which settles only after
 /// every requested move has a terminal result.
+///
+/// CR 730.3 + CR 603.2c: `handback` names the logical owner a merged
+/// permanent's component batch delivers for. That owner alone collects the
+/// departure's triggers, so a handed-back batch retains its segments without
+/// collecting them.
 fn deliver_batch(
     state: &mut GameState,
     reqs: Vec<ZoneMoveRequest>,
     mut logical_zone_change_group: LogicalZoneChangeGroup,
     parking: BatchDeliveryParking,
+    handback: Option<&PendingComponentDeliveryParent>,
     events: &mut Vec<GameEvent>,
 ) -> BatchDeliveryResult {
     let segment_start = events.len();
@@ -1465,7 +1538,14 @@ fn deliver_batch(
         let anticipated_pause = anticipated_zone_change_delivery(state, &req);
         let delivery_start = events.len();
         let object_id = req.object_id;
-        match move_object_with_terminal(state, req, events) {
+        let owner = anticipated_pause
+            .as_ref()
+            .map(|paused| MemberDeliveryOwner {
+                group: logical_zone_change_group.logical_group_id,
+                member: paused.member,
+                expected_event: None,
+            });
+        match move_batch_member_with_terminal(state, req, owner, events) {
             ZoneMoveTerminalResult::Completed(completion) => {
                 logical_zone_change_group
                     .record_delivery_completion(object_id, completion)
@@ -1477,20 +1557,19 @@ fn deliver_batch(
                 // stash the rest of the batch so no object strands. The paused
                 // object rides in `state.pending_replacement` and is delivered
                 // by the resume path.
-                let mut paused_current = state
-                    .pending_zone_change_delivery_from_replacement()
-                    .or_else(|| {
-                        anticipated_pause.map(|mut boundary| {
-                            boundary.append_delivery_events(&events[delivery_start..]);
-                            boundary
-                        })
-                    })
-                    .expect("parked batch zone change must retain an exact boundary");
+                let mut paused_current = parked_member_boundary(
+                    state,
+                    logical_zone_change_group.logical_group_id,
+                    anticipated_pause,
+                    &events[delivery_start..],
+                )
+                .expect("parked batch zone change must retain an exact boundary");
                 paused_current.face_down_in_exile = face_down_in_exile;
-                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                retain_batch_segment(
                     state,
                     &mut logical_zone_change_group,
                     &events[segment_start..delivery_start],
+                    handback,
                 )
                 .expect("paused batch retains its exact delivered segment");
                 stash_batch_tail(
@@ -1527,10 +1606,11 @@ fn deliver_batch(
                     boundary.face_down_in_exile = face_down_in_exile;
                     boundary
                 });
-                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                retain_batch_segment(
                     state,
                     &mut logical_zone_change_group,
                     &events[segment_start..delivery_start],
+                    handback,
                 )
                 .expect("paused Aura batch retains its exact delivered segment");
                 stash_batch_tail(
@@ -1581,6 +1661,7 @@ fn stash_batch_tail(
         .map(ZoneMoveRequest::into_pending)
         .collect();
     let pending = PendingBatchDeliveries {
+        component_delivery_parent: None,
         logical_zone_change_group,
         paused_current,
         remaining,
@@ -1600,9 +1681,13 @@ fn stash_batch_tail(
         deferred_events: Vec::new(),
     };
     match parking {
-        BatchDeliveryParking::NewChild => state.push_batch_delivery(pending),
+        BatchDeliveryParking::NewChild => state
+            .resolution_stack
+            .park_batch_owner(pending)
+            .expect("new batch parks below its explicitly delegated child"),
         BatchDeliveryParking::ReparkActive => state
-            .replace_active_batch_delivery(pending)
+            .resolution_stack
+            .park_batch_owner(pending)
             .expect("re-paused batch delivery must own the active frame"),
     }
 }
@@ -1692,6 +1777,7 @@ fn anticipated_zone_change_delivery(
 pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if let Some(pending) = state.active_batch_delivery().cloned() {
         let PendingBatchDeliveries {
+            component_delivery_parent,
             mut logical_zone_change_group,
             paused_current,
             remaining,
@@ -1735,10 +1821,11 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 .collect()
         };
         if let Some(ref paused_current) = paused_current {
-            crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+            retain_batch_segment(
                 state,
                 &mut logical_zone_change_group,
                 &paused_current.delivery_events,
+                component_delivery_parent.as_ref(),
             )
             .expect("resumed batch retains its exact paused delivery");
             // CR 616.1 + CR 603.10a: a resumed batch member must be classified
@@ -1763,40 +1850,53 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 .record_delivery_completion(paused_current.member.object_id, terminal_completion)
                 .expect("resumed batch member records its exact terminal outcome");
         }
+        let group_id = logical_zone_change_group.logical_group_id;
         match deliver_batch(
             state,
             reqs,
             logical_zone_change_group,
             BatchDeliveryParking::ReparkActive,
+            component_delivery_parent.as_ref(),
             events,
         ) {
             BatchDeliveryResult::Done(mut logical_zone_change_group) => {
-                crate::game::triggers::complete_logical_zone_trigger_collection(
-                    state,
-                    &mut logical_zone_change_group,
-                    events,
-                )
-                .expect("completed batch drain owns every terminal zone-change outcome");
-                crate::game::triggers::sync_logical_zone_change_departure_stamps(
-                    &logical_zone_change_group,
-                    &mut deferred_events,
-                );
+                if component_delivery_parent.is_none() {
+                    crate::game::triggers::complete_logical_zone_trigger_collection(
+                        state,
+                        &mut logical_zone_change_group,
+                        events,
+                    )
+                    .expect("completed batch drain owns every terminal zone-change outcome");
+                    crate::game::triggers::sync_logical_zone_change_departure_stamps(
+                        &logical_zone_change_group,
+                        &mut deferred_events,
+                    );
+                } else {
+                    logical_zone_change_group
+                        .append_delivery_events(events)
+                        .expect("handed-back component batch retains its final segment");
+                }
                 deferred_events.append(events);
                 events.append(&mut deferred_events);
-                // This completed owner has already collected every one of its
-                // retained ZoneChanged occurrences.  The replacement-resume
-                // action still reaches the generic priority scan, so claim the
-                // exact occurrences now rather than collecting them a second
-                // time through that scan.
-                crate::game::triggers::mark_logical_zone_events_consumed_before_priority(
-                    state,
-                    &logical_zone_change_group,
-                    events,
-                );
+                if component_delivery_parent.is_none() {
+                    // This completed owner has already collected every one of
+                    // its retained ZoneChanged occurrences. The
+                    // replacement-resume action still reaches the generic
+                    // priority scan, so claim the exact occurrences now rather
+                    // than collecting them a second time through that scan.
+                    crate::game::triggers::mark_logical_zone_events_consumed_before_priority(
+                        state,
+                        &logical_zone_change_group,
+                        events,
+                    );
+                }
                 state
                     .take_active_batch_delivery()
                     .expect("settled batch delivery must own the active frame")
                     .expect("settled batch delivery frame must exist");
+                if let Some(link) = component_delivery_parent.as_ref() {
+                    hand_back_component_departure(state, link, &logical_zone_change_group);
+                }
                 // CR 603.10a + CR 616.1: logical settlement has completed before
                 // the one post-batch cleanup can run.
                 if let (Some(_), Some(audiences)) = (
@@ -1828,18 +1928,107 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                     );
                     let _ = run_batch_completion(state, completion, events);
                 }
+                // CR 730.3 + CR 608.2c: the announcing owner resumes its own
+                // tail in this same drain — a batch's remaining members, or a
+                // ChangeZone iteration and the instructions after it.
+                if component_delivery_parent.is_some()
+                    && matches!(state.waiting_for, WaitingFor::Priority { .. })
+                {
+                    crate::game::effects::resume_resolution_frames(state, events);
+                }
             }
             BatchDeliveryResult::NeedsChoice => {
                 // `deliver_batch` already re-parked the exact same owner,
                 // including a pause on its final member. Re-attach only the
                 // completion and external output; never replace that owner.
-                let reparking = ensure_batch_record(state, destination);
+                let reparking = state
+                    .resolution_stack
+                    .batch_delivery_owner_mut(group_id)
+                    .expect("repark retains the exact original batch owner");
+                reparking.component_delivery_parent = component_delivery_parent;
                 reparking.completion = completion;
                 reparking.attempted = attempted;
                 reparking.zone_change_record_start = zone_change_record_start;
                 deferred_events.append(events);
                 reparking.deferred_events = deferred_events;
             }
+        }
+    }
+}
+
+/// CR 730.3 + CR 603.2c + CR 616.1: hand a merged permanent's departure back to
+/// the logical owner that announced it, now the top frame (a `BatchDelivery` or
+/// a `ChangeZone` iteration). The handed-back slice is exactly the component
+/// batch's retained delivery occurrences, so the owner collects the one
+/// departure once and nothing else from the action. While the owner's group
+/// still awaits the member, the slice and the member's single terminal outcome
+/// settle its paused boundary, which its own drain collects. A member the owner
+/// already retired because its player left the game (CR 800.4a) is not
+/// reclassified: the owner collects the slice now and still resumes its tail.
+fn hand_back_component_departure(
+    state: &mut GameState,
+    link: &PendingComponentDeliveryParent,
+    component_group: &LogicalZoneChangeGroup,
+) {
+    let departure: Vec<GameEvent> = component_group
+        .all_origin_occurrences
+        .iter()
+        .map(|occurrence| occurrence.event.clone())
+        .collect();
+    let owner_outcome = state
+        .resolution_stack
+        .component_owner_group_mut(link)
+        .expect("component child reveals its original owner")
+        .member_outcome(link.member)
+        .cloned()
+        .expect("the announcing owner announced the delegated member");
+    match owner_outcome {
+        LogicalZoneChangeTerminalOutcome::Pending => {
+            let terminal = match component_group.member_outcome(link.member) {
+                Some(LogicalZoneChangeTerminalOutcome::Moved { .. }) => ZoneMoveCompletion::Moved,
+                Some(LogicalZoneChangeTerminalOutcome::Prevented) => ZoneMoveCompletion::Prevented,
+                Some(LogicalZoneChangeTerminalOutcome::Remained) => ZoneMoveCompletion::Remained,
+                Some(
+                    LogicalZoneChangeTerminalOutcome::Pending
+                    | LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft,
+                )
+                | None => {
+                    panic!("settled component handback requires a terminal original delivery")
+                }
+            };
+            assert!(state.capture_paused_zone_change_delivery(
+                link.member,
+                &link.expected_event,
+                &departure,
+                terminal
+            ));
+            crate::game::effects::settle_replaced_forwarded_zone_delivery(
+                state,
+                link.member,
+                &departure,
+            );
+        }
+        LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => {
+            let mut owner_group = state
+                .resolution_stack
+                .component_owner_group_mut(link)
+                .expect("component child reveals its original owner")
+                .clone();
+            crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                state,
+                &mut owner_group,
+                &departure,
+            )
+            .expect("the announcing owner retains the handed-back slice");
+            *state
+                .resolution_stack
+                .component_owner_group_mut(link)
+                .expect("component child reveals its original owner") = owner_group;
+        }
+        LogicalZoneChangeTerminalOutcome::Moved { .. }
+        | LogicalZoneChangeTerminalOutcome::Prevented
+        | LogicalZoneChangeTerminalOutcome::Remained => {
+            panic!("an announcing owner records a delegated member only through its handback")
         }
     }
 }
@@ -1898,6 +2087,7 @@ mod paused_search_audience_tests {
         let logical_zone_change_group =
             crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[]);
         state.push_batch_delivery(PendingBatchDeliveries {
+            component_delivery_parent: None,
             logical_zone_change_group,
             paused_current: Some(paused),
             remaining: Vec::new(),
@@ -1965,7 +2155,6 @@ mod paused_search_audience_tests {
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: ZoneDeliveryExileTracking::None,
@@ -1984,6 +2173,7 @@ mod paused_search_audience_tests {
         let logical_zone_change_group =
             crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[entrant]);
         state.push_batch_delivery(PendingBatchDeliveries {
+            component_delivery_parent: None,
             logical_zone_change_group,
             paused_current: Some(paused_current),
             remaining: Vec::new(),
@@ -2058,11 +2248,21 @@ pub(crate) fn deliver(
     ctx: DeliveryCtx,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
+    deliver_batch_member(state, approved, ctx, None, events)
+}
+
+pub(crate) fn deliver_batch_member(
+    state: &mut GameState,
+    approved: ApprovedZoneChange,
+    ctx: DeliveryCtx,
+    owner: Option<MemberDeliveryOwner>,
+    events: &mut Vec<GameEvent>,
+) -> ZoneDeliveryResult {
     let track_exiled_by_source = matches!(
         ctx.exile_links.tracking,
         ZoneDeliveryExileTracking::TrackBySource
     );
-    deliver_replaced_zone_change(
+    deliver_replaced_batch_member(
         state,
         approved.event,
         ctx.source_id,
@@ -2070,12 +2270,7 @@ pub(crate) fn deliver(
         ctx.exile_links.controller,
         track_exiled_by_source,
         ctx.drain,
-        // CR 701.24a: most `deliver` callers (bucket-A destroy / sacrifice / SBA /
-        // land play) carry no library placement — those are graveyard /
-        // battlefield destinations. The W3 resume path is the lone caller that
-        // threads a `Some(..)` here, so a parked Library-targeting redirect lands
-        // at the requested index instead of the tail auto-shuffling it away.
-        ctx.library_placement,
+        owner,
         events,
     )
 }
@@ -3787,7 +3982,7 @@ fn entry_receiver(
 
 /// Deliver a zone-change event that has already passed through replacement.
 ///
-/// `library_placement` (CR 701.24a): when the event's delivered destination is
+/// The event's `library_placement` (CR 701.24a): when its delivered destination is
 /// the library AND a specific position was requested, the object is placed at
 /// that index and the library is NOT shuffled — a placement instruction is not a
 /// shuffle instruction (CR 701.24a defines shuffling). `None` = the zone-default
@@ -3804,13 +3999,58 @@ pub(crate) fn deliver_replaced_zone_change(
     exile_controller: Option<PlayerId>,
     track_exiled_by_source: bool,
     drain: PostReplacementDrainOwner,
-    library_placement: Option<LibraryPosition>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
+    deliver_replaced_batch_member(
+        state,
+        event,
+        source_id,
+        duration,
+        exile_controller,
+        track_exiled_by_source,
+        drain,
+        None,
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deliver_replaced_batch_member(
+    state: &mut GameState,
+    event: ProposedEvent,
+    source_id: Option<ObjectId>,
+    duration: Option<&Duration>,
+    exile_controller: Option<PlayerId>,
+    track_exiled_by_source: bool,
+    drain: PostReplacementDrainOwner,
+    owner: Option<MemberDeliveryOwner>,
+    events: &mut Vec<GameEvent>,
+) -> ZoneDeliveryResult {
+    // A merged permanent's departure is the only path that consumes the
+    // component-delivery parent, so ordinary batch members never clone the
+    // proposed event for it.
+    let merged_permanent_leave = matches!(
+        &event,
+        ProposedEvent::ZoneChange { object_id, from, .. }
+            if *from == Zone::Battlefield
+                && state
+                    .objects
+                    .get(object_id)
+                    .is_some_and(|object| !object.merged_components.is_empty())
+    );
+    let component_parent =
+        owner
+            .filter(|_| merged_permanent_leave)
+            .map(|owner| PendingComponentDeliveryParent {
+                parent_group_id: owner.group,
+                member: owner.member,
+                expected_event: owner.expected_event.unwrap_or_else(|| event.clone()),
+            });
     if let ProposedEvent::ZoneChange {
         object_id,
         from,
         to,
+        library_placement,
         cause,
         attach_to,
         enter_transformed: should_transform,
@@ -3853,11 +4093,6 @@ pub(crate) fn deliver_replaced_zone_change(
                 .flatten()
         });
 
-        let merged_permanent_leave = from == Zone::Battlefield
-            && state
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| !object.merged_components.is_empty());
         if merged_permanent_leave {
             // CR 730.3d + CR 903.9c: the merged permanent's already-approved
             // event is expanded into a single pausable batch. Each component
@@ -3865,13 +4100,14 @@ pub(crate) fn deliver_replaced_zone_change(
             // event is not consulted again; the batch nevertheless consults
             // component-specific replacements, including CR 903.9b.
             state.merged_card_component_route = None;
-            return match crate::game::merge::move_merged_permanent_on_leave(
+            return match crate::game::merge::move_merged_permanent_for_parent(
                 state,
                 object_id,
                 to,
                 library_placement.as_ref(),
                 library_shuffle,
                 &applied,
+                component_parent,
                 events,
             ) {
                 BatchMoveResult::Done => apply_zone_delivery_tail(
@@ -4019,71 +4255,46 @@ pub(crate) fn deliver_replaced_zone_change(
         // library-placement branch and the merge-survivor branch, neither of
         // which is analyzed by that carve-out.
         let took_plain_zone_transfer;
-        match (to, library_placement.as_ref()) {
-            (Zone::Library, Some(position)) => {
+        match (split_component_survivor, to, library_placement.as_ref()) {
+            (Some(_), _, position) => {
+                // CR 730.3 + CR 730.3c: an absorbed component arrives without
+                // independently leaving the battlefield; retain its successor
+                // link and sole incarnation bump in the existing component mover.
                 took_plain_zone_transfer = false;
-                let index = match position {
-                    LibraryPosition::Top => Some(0),
-                    LibraryPosition::Bottom => None,
-                    // CR: `NthFromTop { n }` is 1-based ("second from the top"
-                    // => n=2, index 1); `move_to_library_at_index` is 0-based.
-                    LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
-                    // CR 401.7: "beneath the top N cards" only flows from the
-                    // `PutAtLibraryPosition` resolver (direct move), never this
-                    // path. Exhaustiveness arm: honor a literal depth; a
-                    // runtime-resolved depth needs the originating ability.
-                    LibraryPosition::BeneathTop { depth } => match depth {
-                        crate::types::ability::QuantityExpr::Fixed { value } => {
-                            Some((*value).max(0) as usize)
-                        }
-                        _ => None,
-                    },
-                    // Digital-only Alchemy: `RandomWithinTop` only flows from the
-                    // Conjure resolver (`conjure.rs`), which places the card
-                    // directly and never routes through this path. Exhaustiveness
-                    // arm: default placement.
-                    LibraryPosition::RandomWithinTop { .. } => None,
-                };
-                if split_component_survivor.is_some() {
-                    // CR 730.3 + CR 400.7: retain the component delivery's origin
-                    // and continuity; placement is not another battlefield exit.
-                    crate::game::merge::put_component_into_zone(state, object_id, to, events);
-                    // Component routing already appends at the bottom.
-                    if let Some(index) = index {
-                        let owner = state.objects[&object_id].owner;
-                        zones::reorder_within_library(state, owner, &[object_id], Some(index));
-                    }
-                } else {
-                    zones::move_to_library_at_index(state, object_id, index, events);
-                }
-            }
-            _ => {
-                if split_component_survivor.is_some() {
-                    // CR 903.9b + CR 903.9c: this component has completed its
-                    // replacement consult. Deliver the resulting destination
-                    // with the CR 730.3 `from: None` event shape rather than
-                    // pretending it independently left the battlefield.
-                    took_plain_zone_transfer = false;
-                    crate::game::merge::put_component_into_zone(state, object_id, to, events);
-                } else {
-                    took_plain_zone_transfer = true;
-                    // CR 712.14a: carry the effect-driven "enters transformed"
-                    // intent into the battlefield-entry guard so a non-permanent
-                    // FRONT face (e.g. instant/sorcery) may enter as its PERMANENT
-                    // back face. `should_transform` is destructured from
-                    // `ProposedEvent::ZoneChange.enter_transformed` above; the
-                    // flag is inert for any non-battlefield destination (the guard
-                    // gates on `to == Battlefield`).
-                    let receiver = entry_receiver(state, object_id, to, performed_by, cause);
-                    zones::move_to_zone_with_entry_flags(
+                crate::game::merge::put_component_into_zone(state, object_id, to, events);
+                if let (Zone::Library, Some(position)) = (to, position) {
+                    let owner = state.objects[&object_id].owner;
+                    zones::reorder_within_library(
                         state,
-                        object_id,
-                        to,
-                        events,
-                        should_transform,
-                        receiver,
+                        owner,
+                        &[object_id],
+                        library_position_index(position),
                     );
                 }
+            }
+            (None, Zone::Library, Some(position)) => {
+                took_plain_zone_transfer = false;
+                let index = library_position_index(position);
+                zones::move_to_library_at_index(state, object_id, index, events);
+            }
+            (None, _, _) => {
+                took_plain_zone_transfer = true;
+                // CR 712.14a: carry the effect-driven "enters transformed"
+                // intent into the battlefield-entry guard so a non-permanent
+                // FRONT face (e.g. instant/sorcery) may enter as its PERMANENT
+                // back face. `should_transform` is destructured from
+                // `ProposedEvent::ZoneChange.enter_transformed` above; the
+                // flag is inert for any non-battlefield destination (the guard
+                // gates on `to == Battlefield`).
+                let receiver = entry_receiver(state, object_id, to, performed_by, cause);
+                zones::move_to_zone_with_entry_flags(
+                    state,
+                    object_id,
+                    to,
+                    events,
+                    should_transform,
+                    receiver,
+                );
             }
         }
         if face_down_in_exile.is_face_down() && to == Zone::Exile {
@@ -4542,6 +4753,22 @@ pub(crate) fn deliver_replaced_zone_change(
     ZoneDeliveryResult::Done
 }
 
+/// CR 401.7: a stated library depth is bounded by the insertion/reorder authority.
+fn library_position_index(position: &LibraryPosition) -> Option<usize> {
+    match position {
+        LibraryPosition::Top => Some(0),
+        LibraryPosition::Bottom => None,
+        LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
+        // Evaluated depths arrive from the originating resolver. Preserve the
+        // existing fallback for forms that never use this terminal path.
+        LibraryPosition::BeneathTop { depth } => match depth {
+            crate::types::ability::QuantityExpr::Fixed { value } => Some((*value).max(0) as usize),
+            _ => None,
+        },
+        LibraryPosition::RandomWithinTop { .. } => None,
+    }
+}
+
 fn replacement_pause_delivery_result(state: &GameState) -> ZoneDeliveryResult {
     match &state.waiting_for {
         WaitingFor::ReplacementChoice { player, .. }
@@ -4648,6 +4875,7 @@ pub(crate) fn execute_zone_move_with_controller(
         enter_attached_to,
         exile_controller,
         performed_by,
+        None,
         events,
     )
     .into_zone_move_result()
@@ -4692,6 +4920,7 @@ pub(crate) fn execute_zone_move_with_terminal(
         enter_attached_to,
         None,
         None,
+        None,
         events,
     )
 }
@@ -4717,6 +4946,8 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
     enter_attached_to: Option<AttachTarget>,
     exile_controller: Option<PlayerId>,
     performed_by: Option<PlayerId>,
+    // CR 730.3: the logical owner that announced this member's move, if any.
+    owner: Option<MemberDeliveryOwner>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveTerminalResult {
     execute_zone_move_with_applied_terminal(
@@ -4741,6 +4972,7 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
         exile_controller,
         performed_by,
         HashSet::new(),
+        owner,
         events,
     )
 }
@@ -4845,6 +5077,7 @@ fn execute_zone_move_with_applied_terminal(
     // CR 608.2c + CR 406.6: the player performing this move, if any.
     performed_by: Option<PlayerId>,
     replacement_applied: HashSet<AppliedReplacementKey>,
+    owner: Option<MemberDeliveryOwner>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveTerminalResult {
     let Some(object) = state.objects.get(&obj_id) else {
@@ -4903,6 +5136,7 @@ fn execute_zone_move_with_applied_terminal(
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
     if let ProposedEvent::ZoneChange {
         applied,
+        library_placement: placement,
         face_down_in_exile: ref mut conceal_in_exile,
         chain_referent: ref mut intent,
         performed_by: ref mut performer,
@@ -4910,6 +5144,7 @@ fn execute_zone_move_with_applied_terminal(
         ..
     } = &mut proposed
     {
+        *placement = library_placement;
         *applied = replacement_applied;
         *conceal_in_exile = face_down_in_exile;
         *intent = chain_referent;
@@ -5146,16 +5381,17 @@ fn execute_zone_move_with_applied_terminal(
                 // replacement cannot re-match it either way — carrying `applied`
                 // makes that structural fact explicit instead of implicit.
                 let applied = event.applied_set().clone();
-                return move_object_with_terminal(
+                return move_batch_member_with_terminal(
                     state,
                     ZoneMoveRequest::effect(obj_id, Zone::Graveyard, source_id)
                         .with_replacement_applied(applied),
+                    owner,
                     events,
                 );
             }
             if let Some((controller, aura_id, legal_targets)) = pending_aura_choice {
                 let delivery_start = events.len();
-                match deliver_replaced_zone_change(
+                match deliver_replaced_batch_member(
                     state,
                     event,
                     Some(source_id),
@@ -5163,7 +5399,7 @@ fn execute_zone_move_with_applied_terminal(
                     exile_controller,
                     track_exiled_by_source,
                     PostReplacementDrainOwner::DeliveryTail,
-                    library_placement,
+                    owner,
                     events,
                 ) {
                     ZoneDeliveryResult::Done => {
@@ -5200,7 +5436,7 @@ fn execute_zone_move_with_applied_terminal(
                 return ZoneMoveTerminalResult::NeedsAuraAttachmentChoice;
             }
             let delivery_start = events.len();
-            match deliver_replaced_zone_change(
+            match deliver_replaced_batch_member(
                 state,
                 event,
                 Some(source_id),
@@ -5208,7 +5444,7 @@ fn execute_zone_move_with_applied_terminal(
                 exile_controller,
                 track_exiled_by_source,
                 PostReplacementDrainOwner::DeliveryTail,
-                library_placement,
+                owner,
                 events,
             ) {
                 ZoneDeliveryResult::Done => {}
@@ -5243,11 +5479,6 @@ fn execute_zone_move_with_applied_terminal(
             // wait state is already set by the counter-pause / devour machinery
             // (`replacement_pause_delivery_result` reads it).
             if let Some(pending) = state.pending_replacement.as_mut() {
-                // CR 701.24a: this generic effect-driven entry also accepts an
-                // explicit library placement. Preserve it across the replacement
-                // pause so its resumed delivery does not fall back to the tail's
-                // placement-less auto-shuffle behavior.
-                pending.library_placement = library_placement;
                 pending.exile_controller = exile_controller;
                 pending.exile_duration = duration.cloned();
                 pending.exile_tracking = if track_exiled_by_source {
@@ -5321,14 +5552,840 @@ mod announced_spell_residency_tests {
 #[cfg(test)]
 mod w3_library_placement_tests {
     use super::*;
+    use crate::game::engine::apply_as_current;
+    use crate::game::scenario::{GameScenario, P0};
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, QuantityExpr, ReplacementDefinition, ReplacementMode,
-        SearchSelectionConstraint, TargetFilter,
+        SearchSelectionConstraint, TargetFilter, TypeFilter, TypedFilter,
     };
+    use crate::types::actions::{AlternativeCastDecision, GameAction};
+    use crate::types::game_state::{CastingVariant, PersistedGameState};
     use crate::types::identifiers::CardId;
+    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::phase::Phase;
     use crate::types::replacements::ReplacementEvent;
-    use crate::types::resolution::ResolutionFrame;
+    use crate::types::resolution::{ResolutionFrame, ResolutionStateWire};
+
+    fn event_placement(event: &ProposedEvent) -> Option<LibraryPosition> {
+        let ProposedEvent::ZoneChange {
+            library_placement, ..
+        } = event
+        else {
+            panic!("expected a zone-change proposal");
+        };
+        library_placement.clone()
+    }
+
+    fn assert_finished(state: &GameState) {
+        assert!(state.pending_replacement.is_none());
+        assert!(state.active_batch_delivery().is_none());
+        assert!(state.stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    fn assert_no_shuffle(events: &[GameEvent]) {
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                ..
+            }
+        )));
+    }
+
+    fn library_fixture(count: usize) -> (GameState, ObjectId, Vec<ObjectId>) {
+        let mut state = GameState::new_two_player(42);
+        let sentinels: Vec<_> = (0..count)
+            .map(|n| {
+                create_object(
+                    &mut state,
+                    CardId(n as u64 + 1),
+                    PlayerId(0),
+                    format!("Sentinel {n}"),
+                    Zone::Library,
+                )
+            })
+            .collect();
+        state.players[0].library = sentinels.iter().copied().collect();
+        let card = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Placed".into(),
+            Zone::Graveyard,
+        );
+        (state, card, sentinels)
+    }
+
+    fn install_optional_library_redirect(state: &mut GameState) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(101),
+            PlayerId(0),
+            "Synthetic positional consult".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions
+            .push(optional_zone_redirect(Zone::Library, Zone::Exile));
+        source
+    }
+
+    fn assert_parked_position(
+        state: &GameState,
+        card: ObjectId,
+        position: Option<LibraryPosition>,
+    ) {
+        let pending = state
+            .pending_replacement
+            .as_ref()
+            .expect("required replacement pause");
+        assert!(
+            matches!(&pending.proposed, ProposedEvent::ZoneChange { object_id, to: Zone::Library, .. } if *object_id == card)
+        );
+        assert_eq!(event_placement(&pending.proposed), position);
+        assert!(!pending.candidates.is_empty());
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+    }
+
+    /// Verify the active component child exposes its exact original parent,
+    /// then prove the same relation survives a full save/restore.
+    fn check_and_restore_component_parent(state: &mut GameState, survivor: ObjectIncarnationRef) {
+        let relation = state
+            .active_batch_delivery()
+            .and_then(|batch| batch.component_delivery_parent.clone())
+            .expect("component child retains its original parent relation");
+        assert_eq!(relation.member, survivor);
+        assert!(matches!(
+            &relation.expected_event,
+            ProposedEvent::ZoneChange { object_id, .. } if *object_id == survivor.object_id
+        ));
+        let parent = state
+            .resolution_stack
+            .batch_delivery_owner_mut(relation.parent_group_id)
+            .expect("child exposes its identified original parent");
+        assert!(parent.paused_current.as_ref().is_some_and(|paused| paused
+            .captures(relation.member, &relation.expected_event)
+            && paused.terminal_completion.is_none()));
+        let wire = serde_json::to_value(&*state).expect("component pause serializes");
+        let mut restored: GameState =
+            serde_json::from_value(wire).expect("component pause restores");
+        let restored_relation = restored
+            .active_batch_delivery()
+            .and_then(|batch| batch.component_delivery_parent.clone())
+            .expect("restored component child retains its relation");
+        assert_eq!(restored_relation, relation);
+        restored
+            .resolution_stack
+            .batch_delivery_owner_mut(relation.parent_group_id)
+            .expect("restored child exposes its identified original parent");
+        *state = restored;
+    }
+
+    #[test]
+    fn canonical_placement_is_seeded_by_both_producers_before_consultation() {
+        for position in [
+            LibraryPosition::Top,
+            LibraryPosition::Bottom,
+            LibraryPosition::NthFromTop { n: 2 },
+        ] {
+            let (mut state, card, sentinels) = library_fixture(3);
+            let source = install_optional_library_redirect(&mut state);
+            let mut other = state.clone();
+            assert!(matches!(
+                move_object(
+                    &mut state,
+                    ZoneMoveRequest::effect(card, Zone::Library, source)
+                        .at_library_position(position.clone()),
+                    &mut Vec::new()
+                ),
+                ZoneMoveResult::NeedsChoice(PlayerId(0))
+            ));
+            assert!(matches!(
+                execute_zone_move_with_terminal_and_controller(
+                    &mut other,
+                    card,
+                    Zone::Graveyard,
+                    Zone::Library,
+                    source,
+                    None,
+                    false,
+                    EtbTapState::Unspecified,
+                    false,
+                    None,
+                    &[],
+                    None,
+                    ExileConcealment::Public,
+                    false,
+                    Some(position.clone()),
+                    LibraryShuffleMode::PerObject,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &mut Vec::new(),
+                ),
+                ZoneMoveTerminalResult::NeedsChoice(PlayerId(0))
+            ));
+            for state in [&mut state, &mut other] {
+                assert_parked_position(state, card, Some(position.clone()));
+                assert_eq!(state.objects[&card].zone, Zone::Graveyard);
+                assert_eq!(
+                    state.players[0].library.iter().copied().collect::<Vec<_>>(),
+                    sentinels
+                );
+                let result =
+                    apply_as_current(state, GameAction::ChooseReplacement { index: 1 }).unwrap();
+                let mut expected = sentinels.clone();
+                expected.insert(
+                    library_position_index(&position)
+                        .unwrap_or(expected.len())
+                        .min(expected.len()),
+                    card,
+                );
+                assert_eq!(
+                    state.players[0].library.iter().copied().collect::<Vec<_>>(),
+                    expected
+                );
+                assert_no_shuffle(&result.events);
+                assert_finished(state);
+            }
+        }
+        let (mut state, card, _) = library_fixture(0);
+        assert!(matches!(
+            move_object_with_terminal(
+                &mut state,
+                ZoneMoveRequest::effect(ObjectId(u64::MAX), Zone::Library, card)
+                    .at_library_position(LibraryPosition::Top),
+                &mut Vec::new()
+            ),
+            ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained)
+        ));
+        assert!(matches!(
+            move_object(
+                &mut state,
+                ZoneMoveRequest::effect(card, Zone::Library, card)
+                    .at_library_position(LibraryPosition::Top),
+                &mut Vec::new()
+            ),
+            ZoneMoveResult::Done
+        ));
+        assert_eq!(state.players[0].library.front(), Some(&card));
+    }
+
+    #[test]
+    fn approved_event_is_the_only_terminal_placement_authority() {
+        for count in [0, 1, 3] {
+            for position in [
+                Some(LibraryPosition::Top),
+                Some(LibraryPosition::Bottom),
+                Some(LibraryPosition::NthFromTop { n: 2 }),
+                None,
+            ] {
+                let (mut state, card, sentinels) = library_fixture(count);
+                let mut event =
+                    ProposedEvent::zone_change(card, Zone::Graveyard, Zone::Library, Some(card));
+                if let ProposedEvent::ZoneChange {
+                    library_placement, ..
+                } = &mut event
+                {
+                    *library_placement = position.clone();
+                }
+                assert_eq!(event_placement(&event), position);
+                let mut events = Vec::new();
+                let approved = ApprovedZoneChange::approve_post_replacement(event).unwrap();
+                assert!(matches!(
+                    deliver(
+                        &mut state,
+                        approved,
+                        DeliveryCtx {
+                            source_id: Some(card),
+                            exile_links: ExileLinkSpec::default(),
+                            drain: PostReplacementDrainOwner::DeliveryTail,
+                        },
+                        &mut events
+                    ),
+                    ZoneDeliveryResult::Done
+                ));
+                assert_eq!(state.objects[&card].zone, Zone::Library);
+                assert_eq!(events.iter().filter(|e| matches!(e, GameEvent::ZoneChanged { object_id, .. } if *object_id == card)).count(), 1);
+                if let Some(position) = position {
+                    let mut expected = sentinels;
+                    expected.insert(
+                        library_position_index(&position)
+                            .unwrap_or(expected.len())
+                            .min(expected.len()),
+                        card,
+                    );
+                    assert_eq!(
+                        state.players[0].library.iter().copied().collect::<Vec<_>>(),
+                        expected
+                    );
+                    assert_no_shuffle(&events);
+                } else {
+                    // A null event placement selects the placement-less delivery
+                    // convention: the tail's auto-shuffle (CR 701.24a).
+                    assert!(events.iter().any(|e| matches!(
+                        e,
+                        GameEvent::PlayerPerformedAction {
+                            action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                            ..
+                        }
+                    )));
+                }
+            }
+        }
+        let (mut state, card, sentinels) = library_fixture(3);
+        let event = ProposedEvent::zone_change(card, Zone::Graveyard, Zone::Exile, Some(card));
+        assert_eq!(event_placement(&event), None);
+        let mut events = Vec::new();
+        deliver_replaced_zone_change(
+            &mut state,
+            event,
+            Some(card),
+            None,
+            None,
+            false,
+            PostReplacementDrainOwner::DeliveryTail,
+            &mut events,
+        );
+        assert_eq!(state.objects[&card].zone, Zone::Exile);
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            sentinels
+        );
+        assert_no_shuffle(&events);
+    }
+
+    #[test]
+    fn paused_producer_restoration_distinguishes_absent_null_and_current_position() {
+        let (mut state, card, sentinels) = library_fixture(3);
+        let source = install_optional_library_redirect(&mut state);
+        move_object(
+            &mut state,
+            ZoneMoveRequest::effect(card, Zone::Library, source)
+                .at_library_position(LibraryPosition::Top),
+            &mut Vec::new(),
+        );
+        assert_parked_position(&state, card, Some(LibraryPosition::Top));
+        for current in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::to_value(LibraryPosition::Bottom).unwrap()),
+        ] {
+            let expected = match &current {
+                None => Some(LibraryPosition::Top),
+                Some(serde_json::Value::Null) => None,
+                Some(_) => Some(LibraryPosition::Bottom),
+            };
+            let mut wire = serde_json::to_value(&state).unwrap();
+            // The legacy carrier mirror an authentic old save carried; the
+            // current engine no longer writes it.
+            wire["pending_replacement"]["library_placement"] =
+                serde_json::to_value(LibraryPosition::Top).unwrap();
+            let proposed = wire["pending_replacement"]["proposed"]["ZoneChange"]
+                .as_object_mut()
+                .expect("paused proposal wire");
+            match current {
+                None => {
+                    proposed.remove("library_placement");
+                }
+                Some(value) => {
+                    proposed.insert("library_placement".into(), value);
+                }
+            }
+            let mut restored: GameState = serde_json::from_value(wire).unwrap();
+            assert_parked_position(&restored, card, expected.clone());
+            let saved = serde_json::to_value(&restored).unwrap();
+            assert!(saved["pending_replacement"]["proposed"]["ZoneChange"]
+                .get("library_placement")
+                .is_some());
+            let twice: GameState = serde_json::from_value(saved.clone()).unwrap();
+            assert_eq!(serde_json::to_value(twice).unwrap(), saved);
+            let result =
+                apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 1 })
+                    .unwrap();
+            assert_eq!(restored.objects[&card].zone, Zone::Library);
+            if let Some(position) = expected {
+                let mut order = sentinels.clone();
+                order.insert(
+                    library_position_index(&position).unwrap_or(order.len()),
+                    card,
+                );
+                assert_eq!(
+                    restored.players[0]
+                        .library
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    order
+                );
+                assert_no_shuffle(&result.events);
+            } else {
+                assert!(result.events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                        ..
+                    }
+                )));
+            }
+            assert_finished(&restored);
+        }
+    }
+
+    /// Infrastructure choices only: two distinct optional redirects are present
+    /// before consultation; no board mutation occurs between answers.
+    #[test]
+    fn canonical_placement_survives_public_repeated_choices() {
+        let (mut state, card, sentinels) = library_fixture(3);
+        let first = install_optional_library_redirect(&mut state);
+        let second = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Other synthetic redirect".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&second)
+            .unwrap()
+            .replacement_definitions
+            .push(optional_zone_redirect(Zone::Library, Zone::Hand));
+        move_object(
+            &mut state,
+            ZoneMoveRequest::effect(card, Zone::Library, first)
+                .at_library_position(LibraryPosition::Bottom),
+            &mut Vec::new(),
+        );
+        assert_parked_position(&state, card, Some(LibraryPosition::Bottom));
+        let pending = state.pending_replacement.as_ref().unwrap();
+        assert_eq!(pending.candidates.len(), 2);
+        assert!(!pending.is_optional);
+        let index = pending
+            .candidates
+            .iter()
+            .position(|rid| rid.source == first)
+            .unwrap();
+        let first_id = pending.candidates[index];
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index }).unwrap();
+        assert_eq!(
+            state.pending_replacement.as_ref().unwrap().candidates,
+            vec![first_id]
+        );
+        assert!(state.pending_replacement.as_ref().unwrap().is_optional);
+        assert_parked_position(&state, card, Some(LibraryPosition::Bottom));
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 }).unwrap();
+        assert_parked_position(&state, card, Some(LibraryPosition::Bottom));
+        let pending = state.pending_replacement.as_ref().unwrap();
+        assert_eq!(pending.candidates.len(), 1);
+        assert_eq!(pending.candidates[0].source, second);
+        assert!(pending
+            .proposed
+            .applied_set()
+            .contains(&AppliedReplacementKey::Object {
+                source: first,
+                index: first_id.index
+            }));
+        assert_eq!(state.objects[&card].zone, Zone::Graveyard);
+        let result =
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 }).unwrap();
+        let mut expected = sentinels;
+        expected.push(card);
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(
+                    |e| matches!(e, GameEvent::ZoneChanged { object_id, .. } if *object_id == card)
+                )
+                .count(),
+            1
+        );
+        assert_no_shuffle(&result.events);
+        assert_finished(&state);
+    }
+
+    fn totally_lost_mutate_fixture() -> (
+        crate::game::scenario::GameRunner,
+        ObjectId,
+        ObjectId,
+        ObjectId,
+        Vec<ObjectId>,
+    ) {
+        // Verbatim AtomicCards Oracle, including the complete mutate reminder.
+        const OCTOPUS: &str = "Mutate {1}{U} (If you cast this spell for its mutate cost, put it over or under target non-Human creature you own. They mutate into the creature on top plus all abilities from under it.)\nFlash\nWhenever this creature deals combat damage to a player, draw a card.";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let bears = scenario
+            .add_creature(P0, "Grizzly Bears", 2, 2)
+            .with_subtypes(vec!["Bear"])
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        let octopus = scenario
+            .add_creature_to_hand(P0, "Sea-Dasher Octopus", 2, 2)
+            .with_subtypes(vec!["Octopus"])
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            })
+            .from_oracle_text_with_keywords(&["Mutate", "Flash"], OCTOPUS)
+            .id();
+        let lost = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Totally Lost",
+                true,
+                "Put target nonland permanent on top of its owner's library.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                generic: 4,
+                shards: vec![ManaCostShard::Blue],
+            })
+            .id();
+        scenario.with_library_top(P0, &["Forest", "Island", "Mountain"]);
+        scenario.with_mana_pool(
+            P0,
+            (0..7)
+                .map(|_| ManaUnit::new(ManaType::Blue, bears, false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        let sentinels = runner.state().players[0].library.iter().copied().collect();
+        let outcome = runner
+            .cast(octopus)
+            .alternative_cast(AlternativeCastDecision::Alternative)
+            .casting_variant(CastingVariant::Mutate)
+            .target_object(bears)
+            .resolve();
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::MutateMergeChoice { .. }
+        ));
+        runner
+            .act(GameAction::ChooseMutateMergeSide {
+                side: crate::game::merge::MergeSide::Bottom,
+            })
+            .unwrap();
+        // CR 702.140c + CR 730.2c: the legal cast merged into the original host.
+        assert_eq!(
+            runner.state().objects[&bears].merged_components,
+            vec![bears, octopus]
+        );
+        assert!(!runner.state().battlefield.contains(&octopus));
+        assert_finished(runner.state());
+        (runner, bears, octopus, lost, sentinels)
+    }
+
+    fn assert_split_provenance(
+        state: &GameState,
+        events: &[GameEvent],
+        survivor: ObjectIncarnationRef,
+        component: ObjectIncarnationRef,
+        record_start: usize,
+        component_destination: Zone,
+    ) {
+        // CR 730.3: only one permanent leaves; the absorbed card has no separate
+        // battlefield departure, in both the emitted events and stored ledger.
+        for (id, origin, destination) in [
+            (survivor.object_id, Some(Zone::Battlefield), Zone::Library),
+            (component.object_id, None, component_destination),
+        ] {
+            let movements: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        from,
+                        to,
+                        ..
+                    } if *object_id == id => Some((*from, *to)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(movements, vec![(origin, destination)]);
+            let records: Vec<_> = state
+                .zone_changes_this_turn
+                .iter()
+                .skip(record_start)
+                .filter(|record| record.object_id == id)
+                .collect();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].from_zone, origin);
+            assert_eq!(records[0].to_zone, destination);
+        }
+        // CR 400.7 + CR 730.3c: one new incarnation per component and a link to
+        // the survivor's resulting object, including when destinations diverge.
+        assert_eq!(
+            state.objects[&survivor.object_id].incarnation,
+            survivor.incarnation + 1
+        );
+        assert_eq!(
+            state.objects[&component.object_id].incarnation,
+            component.incarnation + 1
+        );
+        assert_eq!(
+            state.objects[&component.object_id].split_from_merge_survivor,
+            Some(ObjectIncarnationRef::from_object(
+                &state.objects[&survivor.object_id]
+            ))
+        );
+        assert_no_shuffle(events);
+        assert_finished(state);
+    }
+
+    fn assert_component_top_set(
+        state: &GameState,
+        components: &[ObjectId],
+        sentinels: &[ObjectId],
+    ) {
+        // CR 730.3a: do not assert a fixed internal permutation. The owner's
+        // private arrangement consumer is deferred to R4c (#10637).
+        let library: Vec<_> = state.players[0].library.iter().copied().collect();
+        assert_eq!(&library[components.len()..], sentinels);
+        assert_eq!(
+            library[..components.len()]
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>(),
+            components.iter().copied().collect::<HashSet<_>>()
+        );
+    }
+
+    #[test]
+    fn totally_lost_places_both_mutate_components_without_extra_departure_or_shuffle() {
+        let (mut runner, bears, octopus, lost, sentinels) = totally_lost_mutate_fixture();
+        let survivor = ObjectIncarnationRef::from_object(&runner.state().objects[&bears]);
+        let component = ObjectIncarnationRef::from_object(&runner.state().objects[&octopus]);
+        let start = runner.state().zone_changes_this_turn.len();
+        let outcome = runner.cast(lost).target_object(bears).resolve();
+        assert_component_top_set(outcome.state(), &[bears, octopus], &sentinels);
+        assert_split_provenance(
+            outcome.state(),
+            outcome.events(),
+            survivor,
+            component,
+            start,
+            Zone::Library,
+        );
+        assert_eq!(
+            crate::game::merge::co_split_components(outcome.state(), bears, &[bears]),
+            vec![octopus]
+        );
+    }
+
+    #[test]
+    fn positioned_mutate_component_pause_preserves_applied_identity_and_split_provenance() {
+        let (mut runner, bears, octopus, lost, sentinels) = totally_lost_mutate_fixture();
+        let inherited_source = install_optional_library_redirect(runner.state_mut());
+        let component_source = create_object(
+            runner.state_mut(),
+            CardId(103),
+            PlayerId(0),
+            "Synthetic Octopus consult".into(),
+            Zone::Battlefield,
+        );
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&component_source)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                optional_zone_redirect(Zone::Library, Zone::Exile).valid_card(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Creature).subtype("Octopus".into()),
+                )),
+            );
+        let survivor = ObjectIncarnationRef::from_object(&runner.state().objects[&bears]);
+        let component = ObjectIncarnationRef::from_object(&runner.state().objects[&octopus]);
+        let start = runner.state().zone_changes_this_turn.len();
+        let outcome = runner.cast(lost).target_object(bears).resolve();
+        assert_parked_position(outcome.state(), bears, Some(LibraryPosition::Top));
+        let first_id = outcome
+            .state()
+            .pending_replacement
+            .as_ref()
+            .unwrap()
+            .candidates[0];
+        assert_eq!(first_id.source, inherited_source);
+        let mut events = outcome.events().to_vec();
+        *runner.state_mut() =
+            serde_json::from_value(serde_json::to_value(runner.state()).unwrap()).unwrap();
+        events.extend(
+            runner
+                .act(GameAction::ChooseReplacement { index: 1 })
+                .unwrap()
+                .events,
+        );
+        assert_parked_position(runner.state(), octopus, Some(LibraryPosition::Top));
+        let pending = runner.state().pending_replacement.as_ref().unwrap();
+        assert_eq!(pending.candidates.len(), 1);
+        assert_eq!(pending.candidates[0].source, component_source);
+        assert!(pending
+            .proposed
+            .applied_set()
+            .contains(&AppliedReplacementKey::Object {
+                source: inherited_source,
+                index: first_id.index
+            }));
+        assert_eq!(
+            runner.state().objects[&octopus].incarnation,
+            component.incarnation
+        );
+        check_and_restore_component_parent(runner.state_mut(), survivor);
+        // The relation and its approved event are internal continuation
+        // authority; neither public seat projection may expose or repair them.
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let projected =
+                crate::game::visibility::filter_state_for_viewer(runner.state(), viewer);
+            assert!(projected.active_batch_delivery().is_none());
+            assert!(
+                !serde_json::to_string(&projected)
+                    .expect("projection serializes")
+                    .contains("component_delivery_parent"),
+                "the executable relation must not reach a public projection"
+            );
+        }
+        assert!(runner
+            .state()
+            .active_batch_delivery()
+            .and_then(|batch| batch.component_delivery_parent.as_ref())
+            .is_some());
+        events.extend(
+            runner
+                .act(GameAction::ChooseReplacement { index: 1 })
+                .unwrap()
+                .events,
+        );
+        assert_component_top_set(runner.state(), &[bears, octopus], &sentinels);
+        assert_split_provenance(
+            runner.state(),
+            &events,
+            survivor,
+            component,
+            start,
+            Zone::Library,
+        );
+    }
+
+    #[test]
+    fn positioned_commander_component_redirect_keeps_ordinary_sibling_position() {
+        // Infrastructure sibling: commander designation is fixture metadata,
+        // not a claim that Sea-Dasher Octopus is a legal printed commander.
+        let (mut runner, bears, octopus, lost, sentinels) = totally_lost_mutate_fixture();
+        // A built-in format fixes command-zone usage by CR; use Commander so the
+        // fixture's real save/restore roundtrip does not deserialize an illegal
+        // Standard-plus-command-zone configuration.
+        runner.state_mut().format_config = crate::types::format::FormatConfig::commander();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&octopus)
+            .unwrap()
+            .is_commander = true;
+        let survivor = ObjectIncarnationRef::from_object(&runner.state().objects[&bears]);
+        let component = ObjectIncarnationRef::from_object(&runner.state().objects[&octopus]);
+        let start = runner.state().zone_changes_this_turn.len();
+        let outcome = runner.cast(lost).target_object(bears).resolve();
+        assert_parked_position(outcome.state(), octopus, Some(LibraryPosition::Top));
+        let mut events = outcome.events().to_vec();
+        check_and_restore_component_parent(runner.state_mut(), survivor);
+        events.extend(
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .unwrap()
+                .events,
+        );
+        assert_eq!(runner.state().objects[&octopus].zone, Zone::Command);
+        assert_component_top_set(runner.state(), &[bears], &sentinels);
+        assert_split_provenance(
+            runner.state(),
+            &events,
+            survivor,
+            component,
+            start,
+            Zone::Command,
+        );
+    }
+
+    #[test]
+    fn merged_component_carry_ignores_position_for_nonlibrary_destination_and_empty_merge() {
+        let (mut runner, bears, octopus, _, _) = totally_lost_mutate_fixture();
+        let redirect = create_object(
+            runner.state_mut(),
+            CardId(104),
+            PlayerId(0),
+            "Synthetic exile consult".into(),
+            Zone::Battlefield,
+        );
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&redirect)
+            .unwrap()
+            .replacement_definitions
+            .push(optional_zone_redirect(Zone::Exile, Zone::Hand));
+        let applied = HashSet::from([AppliedReplacementKey::Object {
+            source: ObjectId(999),
+            index: 0,
+        }]);
+        assert!(matches!(
+            crate::game::merge::move_merged_permanent_on_leave(
+                runner.state_mut(),
+                bears,
+                Zone::Exile,
+                Some(&LibraryPosition::Top),
+                LibraryShuffleMode::PerObject,
+                &applied,
+                &mut Vec::new(),
+            ),
+            BatchMoveResult::NeedsChoice
+        ));
+        let pending = runner.state().pending_replacement.as_ref().unwrap();
+        assert!(
+            matches!(&pending.proposed, ProposedEvent::ZoneChange { object_id, to: Zone::Exile, .. } if [bears, octopus].contains(object_id))
+        );
+        assert_eq!(event_placement(&pending.proposed), None);
+        assert_eq!(pending.proposed.applied_set(), &applied);
+
+        let (mut empty, card, _) = library_fixture(1);
+        let before = empty.clone();
+        let mut events = Vec::new();
+        for id in [card, ObjectId(u64::MAX)] {
+            assert!(matches!(
+                crate::game::merge::move_merged_permanent_on_leave(
+                    &mut empty,
+                    id,
+                    Zone::Library,
+                    Some(&LibraryPosition::Top),
+                    LibraryShuffleMode::PerObject,
+                    &HashSet::new(),
+                    &mut events,
+                ),
+                BatchMoveResult::Done
+            ));
+        }
+        assert_eq!(empty, before);
+        assert!(events.is_empty());
+    }
 
     /// CR 701.24a + CR 730.3 + CR 616.1: a terminal-shuffle library delivery
     /// keeps its mode through the parked batch request and onto the proposed
@@ -5944,6 +7001,10 @@ mod w3_library_placement_tests {
             &mut events,
         );
         assert_eq!(library(&state), vec![c, a, b]);
+        assert!(
+            events.is_empty(),
+            "same-library reorder emits no zone change"
+        );
     }
 
     /// F1 (CR 701.24a): a library placement whose replacement consult PARKS on a
@@ -6042,6 +7103,8 @@ mod w3_library_placement_tests {
         let ZoneMoveResult::NeedsChoice(chooser) = result else {
             panic!("expected the optional redirect to park, got a non-pausing result");
         };
+        assert_parked_position(&state, placed, Some(LibraryPosition::Top));
+        assert_eq!(state.objects[&placed].zone, Zone::Graveyard);
         assert!(
             state.pending_replacement.is_some(),
             "the parked record must carry the placement for the resume to thread back"
@@ -6050,7 +7113,7 @@ mod w3_library_placement_tests {
             state
                 .pending_replacement
                 .as_ref()
-                .and_then(|p| p.library_placement.clone()),
+                .and_then(|p| event_placement(&p.proposed)),
             Some(LibraryPosition::Top),
             "the parked record must stash the requested library placement"
         );
@@ -6068,20 +7131,46 @@ mod w3_library_placement_tests {
             vec![placed, a, b],
             "the resumed delivery must honor LibraryPosition::Top, not shuffle the position away"
         );
+        assert_finished(&state);
     }
 
-    /// F-B (CR 616.1 + CR 701.24a): a batch tail must preserve explicit library
-    /// placement across a pause. The first card parks on an optional
-    /// Library→Exile redirect; the undelivered tail is stashed in
-    /// `PendingBatchDeliveries`. Declining the first redirect drains the tail,
-    /// which parks again on the second card. Both the stashed tail and the second
-    /// parked replacement must carry `LibraryPosition::Bottom`; otherwise the
-    /// second final delivery becomes a plain Library move and auto-shuffles.
-    #[test]
-    fn batch_library_placement_tail_survives_pause() {
-        use crate::game::engine::apply_as_current;
+    /// First wire key occurrence, depth-first across objects and arrays.
+    fn find_key<'a>(node: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+        match node {
+            serde_json::Value::Object(object) => object
+                .get(key)
+                .or_else(|| object.values().find_map(|value| find_key(value, key))),
+            serde_json::Value::Array(items) => items.iter().find_map(|value| find_key(value, key)),
+            _ => None,
+        }
+    }
+
+    /// Mutable counterpart of [`find_key`].
+    fn find_key_mut<'a>(
+        node: &'a mut serde_json::Value,
+        key: &str,
+    ) -> Option<&'a mut serde_json::Value> {
+        match node {
+            serde_json::Value::Object(object) => {
+                if object.contains_key(key) {
+                    return object.get_mut(key);
+                }
+                object
+                    .values_mut()
+                    .find_map(|value| find_key_mut(value, key))
+            }
+            serde_json::Value::Array(items) => {
+                items.iter_mut().find_map(|value| find_key_mut(value, key))
+            }
+            _ => None,
+        }
+    }
+
+    /// F-B fixture: a two-member positioned batch whose first move parks on an
+    /// optional Library→Exile redirect. Returns the untouched library sentinels
+    /// so callers can assert the final bottom order.
+    fn positioned_batch_fixture() -> (GameState, ObjectId, ObjectId, Vec<ObjectId>) {
         use crate::types::ability::ReplacementMode;
-        use crate::types::actions::GameAction;
 
         let mut state = GameState::new_two_player(42);
         let a = create_object(
@@ -6151,6 +7240,19 @@ mod w3_library_placement_tests {
             "Second".to_string(),
             Zone::Graveyard,
         );
+        (state, first, second, vec![a, b])
+    }
+
+    /// F-B (CR 616.1 + CR 701.24a): a batch tail must preserve explicit library
+    /// placement across a pause. The first card parks on an optional
+    /// Library→Exile redirect; the undelivered tail is stashed in
+    /// `PendingBatchDeliveries`. Declining the first redirect drains the tail,
+    /// which parks again on the second card. Both the stashed tail and the second
+    /// parked replacement must carry `LibraryPosition::Bottom`; otherwise the
+    /// second final delivery becomes a plain Library move and auto-shuffles.
+    #[test]
+    fn batch_library_placement_tail_survives_pause() {
+        let (mut state, first, second, sentinels) = positioned_batch_fixture();
         let reqs = vec![
             ZoneMoveRequest::effect(first, Zone::Library, first)
                 .at_library_position(LibraryPosition::Bottom),
@@ -6163,6 +7265,7 @@ mod w3_library_placement_tests {
             move_objects_simultaneously(&mut state, reqs, &mut events),
             BatchMoveResult::NeedsChoice
         ));
+        assert_parked_position(&state, first, Some(LibraryPosition::Bottom));
         assert_eq!(
             state
                 .active_batch_delivery()
@@ -6183,8 +7286,9 @@ mod w3_library_placement_tests {
             .logical_zone_change_group
             .logical_group_id;
 
-        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+        let first_resume = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
             .expect("decline first optional redirect");
+        assert_parked_position(&state, second, Some(LibraryPosition::Bottom));
         let final_member_pause = state
             .active_batch_delivery()
             .expect("a pause on the final member still retains the batch owner");
@@ -6203,7 +7307,7 @@ mod w3_library_placement_tests {
             state
                 .pending_replacement
                 .as_ref()
-                .and_then(|pending| pending.library_placement.clone()),
+                .and_then(|pending| event_placement(&pending.proposed)),
             Some(LibraryPosition::Bottom),
             "the second card's re-parked replacement must preserve bottom placement"
         );
@@ -6223,26 +7327,511 @@ mod w3_library_placement_tests {
         );
         assert_eq!(
             state.players[0].library.iter().copied().collect::<Vec<_>>(),
-            vec![a, b, first, second],
+            sentinels
+                .iter()
+                .copied()
+                .chain([first, second])
+                .collect::<Vec<_>>(),
             "both declined batch moves must land on the bottom in request order"
+        );
+        for card in [first, second] {
+            assert_eq!(first_resume.events.iter().chain(&second_resume.events)
+                .filter(|event| matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == card)).count(), 1);
+        }
+        assert_finished(&state);
+    }
+
+    /// CR 616.1 + save compatibility: an authentic old positioned batch save
+    /// loses the canonical placement from the replacement proposal, its pinned
+    /// boundary (when present) and the exact paused owner's expected event. All
+    /// three copies must be normalized from the effective boundary before typed
+    /// decoding, for raw, trusted and versioned ingress, and the resumed public
+    /// choices must still place both members exactly once.
+    #[test]
+    fn legacy_positioned_batch_migration_normalizes_every_exact_owner_copy() {
+        fn strip_event_placement(event: &mut serde_json::Value) {
+            if let Some(zone) = event
+                .get_mut("ZoneChange")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                zone.remove("library_placement");
+            }
+        }
+
+        fn strip_wire_placement(node: &mut serde_json::Value) {
+            match node {
+                serde_json::Value::Array(items) => {
+                    items.iter_mut().for_each(strip_wire_placement);
+                }
+                serde_json::Value::Object(object) => {
+                    for key in ["pending_replacement", "pending_entry", "outer_replacement"] {
+                        if let Some(carrier) = object
+                            .get_mut(key)
+                            .and_then(serde_json::Value::as_object_mut)
+                        {
+                            if let Some(proposed) = carrier.get_mut("proposed") {
+                                strip_event_placement(proposed);
+                            }
+                            if let Some(boundary) = carrier.get_mut("delivery_boundary") {
+                                strip_event_placement(boundary);
+                            }
+                            // An authentic old save carried the placement on the
+                            // carrier itself; the current engine no longer writes it.
+                            carrier.insert(
+                                "library_placement".into(),
+                                serde_json::json!({"type": "Bottom"}),
+                            );
+                        }
+                    }
+                    if let Some(expected) = object
+                        .get_mut("paused_current")
+                        .and_then(|paused| paused.get_mut("expected_event"))
+                    {
+                        strip_event_placement(expected);
+                    }
+                    for child in object.values_mut() {
+                        strip_wire_placement(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let bottom = serde_json::json!({"type": "Bottom"});
+        let (mut state, first, second, sentinels) = positioned_batch_fixture();
+        let reqs = vec![
+            ZoneMoveRequest::effect(first, Zone::Library, first)
+                .at_library_position(LibraryPosition::Bottom),
+            ZoneMoveRequest::effect(second, Zone::Library, second)
+                .at_library_position(LibraryPosition::Bottom),
+        ];
+        let mut parked_events = Vec::new();
+        assert!(matches!(
+            move_objects_simultaneously(&mut state, reqs, &mut parked_events),
+            BatchMoveResult::NeedsChoice
+        ));
+        assert_parked_position(&state, first, Some(LibraryPosition::Bottom));
+
+        let raw = serde_json::to_value(&state).expect("positioned batch serializes");
+        let trusted = serde_json::to_value(PersistedGameState::capture(state.clone()))
+            .expect("trusted positioned batch serializes");
+        let versioned = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+            .expect("versioned positioned batch serializes");
+
+        for (ingress, wire) in [("raw", raw), ("trusted", trusted), ("versioned", versioned)] {
+            let mut wire = wire;
+            strip_wire_placement(&mut wire);
+            let carrier = find_key(&wire, "pending_replacement")
+                .and_then(serde_json::Value::as_object)
+                .expect("the authentic pause retains its replacement carrier");
+            assert!(carrier["proposed"]["ZoneChange"]
+                .get("library_placement")
+                .is_none());
+            let owner = find_key(&wire, "paused_current")
+                .and_then(serde_json::Value::as_object)
+                .expect("the authentic pause retains its exact owner");
+            assert!(owner["expected_event"]["ZoneChange"]
+                .get("library_placement")
+                .is_none());
+
+            let mut restored = match ingress {
+                "raw" => serde_json::from_value::<GameState>(wire)
+                    .expect("legacy raw positioned batch restores"),
+                "trusted" => serde_json::from_value::<PersistedGameState>(wire)
+                    .expect("legacy trusted positioned batch restores")
+                    .into_game_state()
+                    .expect("legacy trusted positioned batch materializes"),
+                _ => serde_json::from_value::<ResolutionStateWire>(wire)
+                    .expect("legacy versioned positioned batch restores")
+                    .into_game_state(),
+            };
+            assert_parked_position(&restored, first, Some(LibraryPosition::Bottom));
+
+            let rewritten = serde_json::to_value(&restored).expect("restored pause serializes");
+            let carrier = find_key(&rewritten, "pending_replacement")
+                .and_then(serde_json::Value::as_object)
+                .expect("restored pause retains its replacement carrier");
+            assert_eq!(
+                carrier["proposed"]["ZoneChange"]["library_placement"], bottom,
+                "{ingress}: the proposal imports the boundary placement"
+            );
+            let owner = find_key(&rewritten, "paused_current")
+                .and_then(serde_json::Value::as_object)
+                .expect("restored pause retains its exact owner");
+            assert_eq!(
+                owner["expected_event"]["ZoneChange"]["library_placement"], bottom,
+                "{ingress}: the exact owner copy imports the same placement"
+            );
+
+            let mut resumed_events = Vec::new();
+            resumed_events.extend(
+                apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 1 })
+                    .expect("decline the first legacy-resumed redirect")
+                    .events,
+            );
+            assert_parked_position(&restored, second, Some(LibraryPosition::Bottom));
+            resumed_events.extend(
+                apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 1 })
+                    .expect("decline the second legacy-resumed redirect")
+                    .events,
+            );
+            assert_eq!(
+                restored.players[0]
+                    .library
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                sentinels
+                    .iter()
+                    .copied()
+                    .chain([first, second])
+                    .collect::<Vec<_>>(),
+                "{ingress}: both restored members land on the bottom in request order"
+            );
+            for card in [first, second] {
+                assert_eq!(
+                    resumed_events
+                        .iter()
+                        .filter(|event| matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == card))
+                        .count(),
+                    1,
+                    "{ingress}: each original member has one terminal occurrence"
+                );
+            }
+            assert_no_shuffle(&resumed_events);
+            assert_finished(&restored);
+        }
+    }
+
+    /// CR 616.1 (parked replacement choice) + save compatibility: an explicit
+    /// current placement is authoritative over the legacy carrier mirror, and the
+    /// exact owner copy is filled from the boundary the proposal itself records,
+    /// not from that mirror.
+    #[test]
+    fn legacy_positioned_batch_current_placement_wins_over_mirror() {
+        let (state, first, _, _) = positioned_batch_fixture();
+        // Build the pause from the same production route, then inspect its
+        // carrier without mutating the proposal's explicit Bottom.
+        let mut parked = state;
+        let mut events = Vec::new();
+        assert!(matches!(
+            move_objects_simultaneously(
+                &mut parked,
+                vec![ZoneMoveRequest::effect(first, Zone::Library, first)
+                    .at_library_position(LibraryPosition::Bottom)],
+                &mut events
+            ),
+            BatchMoveResult::NeedsChoice
+        ));
+        let mut wire = serde_json::to_value(&parked).expect("positioned pause serializes");
+        let top = serde_json::json!({"type": "Top"});
+        let bottom = serde_json::json!({"type": "Bottom"});
+        let carrier = find_key_mut(&mut wire, "pending_replacement")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("the pause retains its replacement carrier");
+        assert_eq!(
+            carrier["proposed"]["ZoneChange"]["library_placement"],
+            bottom
+        );
+        carrier.insert("library_placement".into(), top.clone());
+        let owner = find_key_mut(&mut wire, "paused_current")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("the pause retains its exact owner");
+        owner["expected_event"]["ZoneChange"]
+            .as_object_mut()
+            .expect("owner expected event is a ZoneChange")
+            .remove("library_placement");
+
+        let restored: GameState =
+            serde_json::from_value(wire).expect("mirror is not authoritative");
+        assert_parked_position(&restored, first, Some(LibraryPosition::Bottom));
+        let rewritten = serde_json::to_value(&restored).expect("restored pause serializes");
+        let carrier = find_key(&rewritten, "pending_replacement").expect("carrier");
+        assert!(
+            carrier.get("library_placement").is_none(),
+            "the typed carrier no longer holds the legacy mirror, so it is not re-encoded"
+        );
+        assert_eq!(
+            carrier["proposed"]["ZoneChange"]["library_placement"], bottom,
+            "the explicit proposal value survives"
+        );
+        let owner = find_key(&rewritten, "paused_current").expect("owner");
+        assert_eq!(
+            owner["expected_event"]["ZoneChange"]["library_placement"], bottom,
+            "an absent owner copy follows the boundary's explicit value, not the mirror"
         );
     }
 
+    /// CR 616.1 (parked replacement choice) + save compatibility: one identified
+    /// owner cannot be normalized from two different exact copies; the save
+    /// boundary rejects instead of silently choosing.
+    #[test]
+    fn legacy_positioned_batch_rejects_conflicting_owner_copies() {
+        let (state, first, _, _) = positioned_batch_fixture();
+        let mut parked = state;
+        let mut events = Vec::new();
+        assert!(matches!(
+            move_objects_simultaneously(
+                &mut parked,
+                vec![ZoneMoveRequest::effect(first, Zone::Library, first)
+                    .at_library_position(LibraryPosition::Bottom)],
+                &mut events
+            ),
+            BatchMoveResult::NeedsChoice
+        ));
+        let mut wire = serde_json::to_value(&parked).expect("positioned pause serializes");
+        {
+            let carrier = find_key_mut(&mut wire, "pending_replacement")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("the pause retains its replacement carrier");
+            carrier["proposed"]["ZoneChange"]
+                .as_object_mut()
+                .expect("proposal is a ZoneChange")
+                .remove("library_placement");
+            carrier.insert(
+                "library_placement".into(),
+                serde_json::json!({"type": "Bottom"}),
+            );
+        }
+        {
+            let owner = find_key_mut(&mut wire, "paused_current")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("the pause retains its exact owner");
+            owner["expected_event"]["ZoneChange"]
+                .as_object_mut()
+                .expect("owner expected event is a ZoneChange")
+                .remove("library_placement");
+        }
+        // A second exact carrier copy identifies the same owner but carries a
+        // different legacy mirror, so the missing owner key is ambiguous.
+        let mut other = find_key(&wire, "pending_replacement")
+            .expect("the pause retains its replacement carrier")
+            .clone();
+        other["library_placement"] = serde_json::json!({"type": "Top"});
+        wire["pending_entry"] = other;
+        assert!(
+            serde_json::from_value::<GameState>(wire).is_err(),
+            "two exact owner copies with different placements must be rejected"
+        );
+    }
+
+    /// CR 616.1 + save compatibility: a real pinned delivery boundary can be
+    /// older than a redirected proposal. The migration follows the boundary copy
+    /// and never transplants the proposal's new destination or placement onto it.
+    #[test]
+    fn legacy_positioned_batch_pinned_boundary_survives_redirected_proposal() {
+        let (state, first, _, _) = positioned_batch_fixture();
+        let mut parked = state;
+        let mut events = Vec::new();
+        assert!(matches!(
+            move_objects_simultaneously(
+                &mut parked,
+                vec![ZoneMoveRequest::effect(first, Zone::Library, first)
+                    .at_library_position(LibraryPosition::Bottom)],
+                &mut events
+            ),
+            BatchMoveResult::NeedsChoice
+        ));
+        parked
+            .pending_replacement
+            .as_mut()
+            .expect("authentic positioned pause")
+            .pin_delivery_boundary();
+        let pinned = parked
+            .pending_replacement
+            .as_ref()
+            .expect("authentic positioned pause")
+            .delivery_boundary_event()
+            .clone();
+        assert!(
+            matches!(
+                &pinned,
+                ProposedEvent::ZoneChange {
+                    to: Zone::Library,
+                    library_placement: Some(LibraryPosition::Bottom),
+                    ..
+                }
+            ),
+            "the production pin retains the original positioned boundary"
+        );
+
+        let bottom = serde_json::json!({"type": "Bottom"});
+        let mut wire = serde_json::to_value(&parked).expect("positioned pause serializes");
+        // A redirect applied after the pin leaves the proposal at a different
+        // destination, while the owner still parked on the original boundary.
+        {
+            let carrier = find_key_mut(&mut wire, "pending_replacement")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("the pause retains its replacement carrier");
+            carrier["proposed"]["ZoneChange"]["to"] = serde_json::json!("Exile");
+            carrier["proposed"]["ZoneChange"]
+                .as_object_mut()
+                .expect("proposal is a ZoneChange")
+                .remove("library_placement");
+            carrier["delivery_boundary"]["ZoneChange"]
+                .as_object_mut()
+                .expect("the pinned boundary is a ZoneChange")
+                .remove("library_placement");
+            // The authentic old save carried the mirror on the carrier.
+            carrier.insert("library_placement".into(), bottom.clone());
+        }
+        {
+            let owner = find_key_mut(&mut wire, "paused_current")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("the pause retains its exact owner");
+            owner["expected_event"]["ZoneChange"]
+                .as_object_mut()
+                .expect("owner expected event is a ZoneChange")
+                .remove("library_placement");
+        }
+        let carrier = find_key(&wire, "pending_replacement").expect("carrier");
+        assert_ne!(
+            carrier["proposed"], carrier["delivery_boundary"],
+            "the legacy shape has a redirected proposal older than its pinned boundary"
+        );
+
+        let restored: GameState =
+            serde_json::from_value(wire).expect("pinned-boundary save restores");
+        let pending = restored
+            .pending_replacement
+            .as_ref()
+            .expect("pause restores");
+        assert!(matches!(
+            &pending.proposed,
+            ProposedEvent::ZoneChange {
+                to: Zone::Exile,
+                library_placement: None,
+                ..
+            }
+        ));
+        assert_eq!(
+            pending.delivery_boundary_event(),
+            &pinned,
+            "the typed pinned boundary is unchanged by normalization"
+        );
+
+        let rewritten = serde_json::to_value(&restored).expect("restored pause serializes");
+        let carrier = find_key(&rewritten, "pending_replacement").expect("carrier");
+        assert_eq!(
+            carrier["proposed"]["ZoneChange"]["library_placement"],
+            serde_json::Value::Null,
+            "the exiling proposal keeps an explicit null placement"
+        );
+        assert_eq!(
+            carrier["delivery_boundary"]["ZoneChange"]["library_placement"], bottom,
+            "the older library boundary imports the mirror placement"
+        );
+        let owner = find_key(&rewritten, "paused_current").expect("owner");
+        assert_eq!(
+            owner["expected_event"]["ZoneChange"]["library_placement"], bottom,
+            "the exact owner copy follows the pinned boundary, not the proposal"
+        );
+
+        let again: GameState =
+            serde_json::from_value(serde_json::to_value(&restored).expect("state serializes"))
+                .expect("pinned-boundary save restores idempotently");
+        assert_eq!(again, restored);
+    }
+
+    /// CR 616.1 + CR 701.24a + save compatibility: a v1 resolution wire parks its
+    /// batch delivery owner under the top-level `pending_batch_deliveries` key,
+    /// not in a typed frame. Only the v1 reader names that root, so it must pass
+    /// it to the library-placement migration; otherwise the owner copy of the
+    /// positioned boundary is never associated and loses its `Bottom` placement.
+    #[test]
+    fn legacy_v1_batch_delivery_owner_imports_library_placement() {
+        let (mut parked, first, _, _) = positioned_batch_fixture();
+        let mut events = Vec::new();
+        assert!(matches!(
+            move_objects_simultaneously(
+                &mut parked,
+                vec![ZoneMoveRequest::effect(first, Zone::Library, first)
+                    .at_library_position(LibraryPosition::Bottom)],
+                &mut events
+            ),
+            BatchMoveResult::NeedsChoice
+        ));
+
+        // Reshape the authentic parked state into a v1 wire: the delivery owner
+        // moves from its typed frame to the legacy root key.
+        let pending = parked
+            .active_batch_delivery()
+            .cloned()
+            .expect("authentic positioned pause parks a batch delivery owner");
+        let mut wire = serde_json::to_value(&parked).expect("positioned pause serializes");
+        {
+            let object = wire.as_object_mut().expect("state serializes as an object");
+            object.remove("resolution_stack");
+            object.insert(
+                "pending_batch_deliveries".to_string(),
+                serde_json::to_value(&pending).expect("batch delivery owner serializes"),
+            );
+            object.insert(
+                "resolution_state_version".to_string(),
+                serde_json::Value::from(1),
+            );
+        }
+        // The legacy event copies carry no placement; only the carrier mirror
+        // retains `Bottom`.
+        {
+            let carrier = find_key_mut(&mut wire, "pending_replacement")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("the pause retains its replacement carrier");
+            carrier["proposed"]["ZoneChange"]
+                .as_object_mut()
+                .expect("proposal is a ZoneChange")
+                .remove("library_placement");
+            carrier.insert(
+                "library_placement".into(),
+                serde_json::json!({"type": "Bottom"}),
+            );
+        }
+        let owner = wire["pending_batch_deliveries"]["paused_current"]
+            .as_object_mut()
+            .expect("the v1 delivery owner retains its paused member");
+        owner["expected_event"]["ZoneChange"]
+            .as_object_mut()
+            .expect("owner expected event is a ZoneChange")
+            .remove("library_placement");
+        // Reach guard: the owner copy really is placement-less going in, so a
+        // `Bottom` coming out can only be the migration's import.
+        assert!(
+            wire["pending_batch_deliveries"]["paused_current"]["expected_event"]["ZoneChange"]
+                .get("library_placement")
+                .is_none()
+        );
+
+        let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+            .expect("v1 positioned batch restores")
+            .into_game_state();
+        let owner = restored
+            .active_batch_delivery()
+            .and_then(|batch| batch.paused_current.as_ref())
+            .expect("the v1 delivery owner restores as the active batch delivery");
+        assert_eq!(
+            event_placement(&owner.expected_event),
+            Some(LibraryPosition::Bottom),
+            "the v1 owner copy follows the carrier mirror through the v1 owner root"
+        );
+        assert_parked_position(&restored, first, Some(LibraryPosition::Bottom));
+    }
+
     /// F-A (CR 616.1 + CR 701.24a): the library placement must survive a SECOND
-    /// sequential park on the same event. The first optional redirect parks (the
-    /// placement is stashed onto `PendingReplacement` by the W3 arm); declining
-    /// it re-enters `pipeline_loop`, which finds a SECOND optional redirect that
-    /// became applicable in the interim and re-parks a fresh `PendingReplacement`
-    /// — created with `library_placement: None`. `handle_replacement_choice` must
-    /// thread the captured placement onto that re-park so the FINAL delivery
-    /// (after declining both) still places the card at the requested index
-    /// instead of the tail auto-shuffling it away.
+    /// sequential park on the same event. The placement rides on the proposed
+    /// `ZoneChange` event through each park (no `PendingReplacement` mirror): the
+    /// first optional redirect parks, declining it re-enters `pipeline_loop`, which
+    /// finds a SECOND optional redirect that became applicable in the interim and
+    /// re-parks the same proposed event. The FINAL delivery (after declining both)
+    /// must still place the card at the requested index instead of the tail
+    /// auto-shuffling it away.
     ///
-    /// The second redirect is gated by `UnlessControlsMatching` on a sentinel
+    /// Supplemental synthetic defensive fixture, not a legal public sequence:
+    /// the second redirect is gated by `UnlessControlsMatching` on a sentinel
     /// creature so it is suppressed on the first scan and becomes applicable once
-    /// the sentinel is removed between the two choices (a realistic board change
-    /// across a paused replacement). Before the fix the re-park reset the
-    /// placement to `None`, so the final delivery shuffled — the order assertion
+    /// the sentinel is manually removed between the two choices. The separate
+    /// `canonical_placement_survives_public_repeated_choices` regression covers
+    /// the public sequence without post-prompt edits. A re-park that lost the
+    /// placement would let the final delivery shuffle — the order assertion
     /// below fails (and the `ShuffledLibrary` absence assertion guards against a
     /// seed-identity permutation false-pass).
     #[test]
@@ -6378,7 +7967,7 @@ mod w3_library_placement_tests {
             state
                 .pending_replacement
                 .as_ref()
-                .and_then(|p| p.library_placement.clone()),
+                .and_then(|p| event_placement(&p.proposed)),
             Some(LibraryPosition::Top),
             "the first parked record must stash the requested library placement"
         );
@@ -6402,7 +7991,7 @@ mod w3_library_placement_tests {
             state
                 .pending_replacement
                 .as_ref()
-                .and_then(|p| p.library_placement.clone()),
+                .and_then(|p| event_placement(&p.proposed)),
             Some(LibraryPosition::Top),
             "the re-parked record must still carry the placement threaded from the first park",
         );
@@ -6422,6 +8011,7 @@ mod w3_library_placement_tests {
             vec![placed, a, b],
             "after two declined parks the placement must still honor LibraryPosition::Top"
         );
+        assert_finished(&state);
     }
 
     /// A newly produced simultaneous move must park as a child of an existing
@@ -6437,6 +8027,7 @@ mod w3_library_placement_tests {
             .expect("parent batch retains its pre-delivery latch");
         let parent_group_id = parent_group.logical_group_id;
         state.push_batch_delivery(PendingBatchDeliveries {
+            component_delivery_parent: None,
             logical_zone_change_group: parent_group,
             paused_current: None,
             remaining: Vec::new(),

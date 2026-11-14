@@ -18,7 +18,7 @@ use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
-use super::elimination::DepartureTriggers;
+use super::elimination::{DepartureResume, DepartureTriggers, LookedBackDeparture};
 use super::filter::{matches_target_filter, FilterContext};
 use super::players::PoisonLossMeasure;
 use super::speed::{controls_start_your_engines_in, set_speed};
@@ -99,16 +99,30 @@ fn mid_resolution_entry_pauses_sba(state: &GameState) -> bool {
 /// CR 704.3: Run state-based actions in a fixpoint loop until no more actions are performed,
 /// capped at MAX_SBA_ITERATIONS.
 pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller);
+    let _ = run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller);
+}
+
+/// CR 704.3 + CR 117.2e: [`check_state_based_actions`] for the player-loss
+/// safety net, which can run while a resolution is paused on a player's
+/// replacement choice. Reports a departure that canceled that pause, so the
+/// caller finishes the resolution before any player receives priority.
+pub(crate) fn check_state_based_actions_reporting_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> DepartureResume {
+    run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller).0
 }
 
 /// CR 704.3 + CR 117.5: [`check_state_based_actions`] inside a post-action pass, which places
 /// what is waiting to be put on the stack at its own settle.
+///
+/// Returns how many triggered abilities a player's departure in it queued: the last that
+/// many contexts of `deferred_triggers`.
 pub(crate) fn check_state_based_actions_in_pass(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
-) {
-    run_state_based_actions(state, events, &[], DepartureTriggers::PlacedByPass);
+) -> usize {
+    run_state_based_actions(state, events, &[], DepartureTriggers::PlacedByPass).1
 }
 
 /// CR 704.3 + CR 704.5v + CR 510.3a: run state-based actions in a fixpoint loop
@@ -121,8 +135,8 @@ pub(crate) fn check_state_based_actions_with_waiting_triggers(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     waiting: &[crate::game::triggers::PendingTriggerContext],
-) {
-    run_state_based_actions(state, events, waiting, DepartureTriggers::ScannedByCaller);
+) -> usize {
+    run_state_based_actions(state, events, waiting, DepartureTriggers::ScannedByCaller).1
 }
 
 fn run_state_based_actions(
@@ -130,7 +144,52 @@ fn run_state_based_actions(
     events: &mut Vec<GameEvent>,
     waiting: &[crate::game::triggers::PendingTriggerContext],
     departures: DepartureTriggers,
-) {
+) -> (DepartureResume, usize) {
+    let mut departed = Vec::new();
+    let mut iteration_starts = Vec::new();
+    let mut held_by_earlier_checks = Vec::new();
+    let resume = run_state_based_action_iterations(
+        state,
+        events,
+        waiting,
+        departures,
+        &mut departed,
+        &mut iteration_starts,
+        &mut held_by_earlier_checks,
+    );
+    // CR 603.3b: what the earlier checks' departures triggered joins the queue
+    // now, ahead of the last check's, as one batch with the caller's own.
+    let queued_by_earlier_iterations = held_by_earlier_checks.len();
+    state.deferred_triggers.extend(held_by_earlier_checks);
+    // CR 704.3 + CR 603.10a: the state-based-action event is complete and stamped
+    // as one simultaneous event, so the abilities a player's departure in it
+    // triggered are collected now, once, against the observers latched before
+    // that departure. A game that ended triggers nothing (`collect`, CR 104.1).
+    // CR 704.3: a departure's simultaneous event ends where the next iteration
+    // of the check began, or with the check.
+    let queued: usize = departed
+        .into_iter()
+        .map(|departure| {
+            let batch_end = iteration_starts
+                .iter()
+                .copied()
+                .find(|start| *start >= departure.departure_end())
+                .unwrap_or(events.len());
+            departure.collect(state, events, batch_end)
+        })
+        .sum();
+    (resume, queued + queued_by_earlier_iterations)
+}
+
+fn run_state_based_action_iterations(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    waiting: &[crate::game::triggers::PendingTriggerContext],
+    departures: DepartureTriggers,
+    departed: &mut Vec<LookedBackDeparture>,
+    iteration_starts: &mut Vec<usize>,
+    held_by_earlier_checks: &mut Vec<crate::game::triggers::PendingTriggerContext>,
+) -> DepartureResume {
     // CR 604.2: Re-evaluate layers so computed P/T reflects current static abilities.
     if state.layers_dirty.is_dirty() {
         // Snapshot P/T before layer re-evaluation for delta logging.
@@ -167,6 +226,19 @@ fn run_state_based_actions(
     for _ in 0..MAX_SBA_ITERATIONS {
         let mut any_performed = false;
         let iteration_events_start = events.len();
+        // CR 704.3 + CR 603.10: each check is its own event, and what a
+        // departure in an earlier check triggered is read in the game
+        // immediately after that check, before this one changes it (a player
+        // this check removes takes their permanents with them).
+        // The collected abilities are held out of the queue until the checks
+        // are over: a later check's elimination drains the queue, and these
+        // belong to the batch of the caller that runs the checks.
+        let first_collected = state.deferred_triggers.len();
+        for departure in std::mem::take(departed) {
+            departure.collect(state, events, iteration_events_start);
+        }
+        held_by_earlier_checks.extend(state.deferred_triggers.split_off(first_collected));
+        iteration_starts.push(iteration_events_start);
 
         // CR 704.3 + CR 104.4a + CR 704.5a-c + CR 704.6c: Every player-loss
         // condition met in this single SBA check forms ONE simultaneous event.
@@ -199,11 +271,19 @@ fn run_state_based_actions(
             for &loser in &losers {
                 events.push(GameEvent::PlayerLost { player_id: loser });
             }
-            super::elimination::eliminate_players(state, &losers, departures, events);
+            let outcome = super::elimination::eliminate_players(state, &losers, departures, events);
+            let resume = outcome.resume;
+            departed.extend(outcome.looked_back);
 
             // If the game ended (a sole winner or a CR 104.4a draw), stop now.
             if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-                return;
+                return DepartureResume::Settled;
+            }
+            // CR 704.4 + CR 117.2e: the departure canceled the current pause of a
+            // resolution that is still under way. Its remaining state-based
+            // actions wait for that resolution to finish; the caller resumes it.
+            if resume == DepartureResume::ParkedZoneChangeTail {
+                return resume;
             }
         }
 
@@ -226,7 +306,7 @@ fn run_state_based_actions(
         // `pending_replacement` guard (after lethal-damage) still handles
         // regeneration replacements created *within* this loop.
         if mid_resolution_entry_pauses_sba(state) {
-            return;
+            return DepartureResume::Settled;
         }
 
         // CR 903.9a: A commander in graveyard or exile (since last SBA check) may
@@ -234,7 +314,7 @@ fn run_state_based_actions(
         // ask the player, similar to the legend rule.
         check_commander_zone_return(state);
         if matches!(state.waiting_for, WaitingFor::CommanderZoneChoice { .. }) {
-            return;
+            return DepartureResume::Settled;
         }
 
         let battlefield_snapshot = state.battlefield_phased_in_ids();
@@ -252,7 +332,7 @@ fn run_state_based_actions(
 
         // CR 614.3 / CR 701.19b: If a regeneration replacement choice is pending, pause SBA evaluation.
         if mid_resolution_entry_pauses_sba(state) {
-            return;
+            return DepartureResume::Settled;
         }
 
         if has_battlefield_sbas {
@@ -269,14 +349,14 @@ fn run_state_based_actions(
             if check_legend_rule(state, events, &mut any_performed, &battlefield_snapshot)
                 == SbaPassControl::Stop
             {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5m: If an Aura is attached to an illegal object or player, it is put into
             // its owner's graveyard.
             check_unattached_auras(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5n: If an Equipment or Fortification is attached to an illegal
@@ -289,7 +369,7 @@ fn run_state_based_actions(
             // gone — only attached Roles compete for the per-(host, controller) slot.
             check_role_uniqueness(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5k: If two or more permanents have the world supertype, all but the one
@@ -298,13 +378,13 @@ fn run_state_based_actions(
             // choiceless — modeled on check_role_uniqueness.
             check_world_rule(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5i + CR 306.9: If a planeswalker has loyalty 0, it is put into its owner's graveyard.
             check_zero_loyalty(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5v + CR 310.7: a Siege with defense 0 that isn't the source of an
@@ -319,7 +399,7 @@ fn run_state_based_actions(
                 waiting,
             );
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5p: If a battle or creature is attached to an object or player — or
@@ -338,7 +418,7 @@ fn run_state_based_actions(
             // controller chooses an appropriate protector; graveyard if none can be chosen.
             check_battle_protector(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5s + CR 714.4: If a Saga has lore counters >= its final chapter number,
@@ -351,7 +431,7 @@ fn run_state_based_actions(
                 waiting,
             );
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5q: +1/+1 and -1/-1 counters on the same permanent cancel in pairs.
@@ -371,7 +451,7 @@ fn run_state_based_actions(
                 &battlefield_snapshot,
             );
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5z: A player controlling Start your engines! gets speed 1 if they had none.
@@ -403,7 +483,7 @@ fn run_state_based_actions(
                 Some(crate::game::planechase::PlaneswalkResolution::Deferred)
             )
         {
-            return;
+            return DepartureResume::Settled;
         }
 
         // CR 904.10 / CR 314.6: A face-up non-ongoing scheme with no scheme
@@ -433,6 +513,7 @@ fn run_state_based_actions(
             break;
         }
     }
+    DepartureResume::Settled
 }
 
 /// CR 704.5z + CR 702.179a: If a player controls a permanent with start your engines!
@@ -1103,7 +1184,6 @@ fn perform_creature_deaths(
                         source_id: source,
                         exile_links: ExileLinkSpec::default(),
                         drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                        library_placement: None,
                     };
                     if let ZoneDeliveryResult::NeedsChoice(_) =
                         zone_pipeline::deliver(state, approved, ctx, events)
@@ -1190,9 +1270,6 @@ fn perform_creature_deaths(
                                     source_id: source,
                                     exile_links: ExileLinkSpec::default(),
                                     drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                                    // SBA destroy/sacrifice deliveries target the
-                                    // graveyard — never a library placement.
-                                    library_placement: None,
                                 };
                                 // CR 704.3: completing all SBAs may require a
                                 // replacement choice surfaced by the delivery tail
@@ -4713,7 +4790,6 @@ mod tests {
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -4893,7 +4969,6 @@ mod tests {
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,

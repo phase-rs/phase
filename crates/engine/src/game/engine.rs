@@ -2913,6 +2913,51 @@ fn settle_finished_game(state: &mut GameState, result: &mut ActionResult) {
     }
 }
 
+/// CR 117.2e + CR 608.2c + CR 117.5: finish a resolution whose current pause a
+/// player's departure canceled (`elimination::DepartureResume`), then settle it
+/// as any action that completed one: the owed final part (CR 608.2n),
+/// state-based actions (CR 704.3), then the queued triggered abilities. The
+/// pipeline scans `events[scan_from..]` and skips every occurrence the departure
+/// already claimed (the departure collects its own triggers once, against the
+/// observers as they were before it: CR 603.10a, CR 603.2c), so the player-loss
+/// safety net starts at the departure's events and a concession at the resumed
+/// ones. The resume runs in its own buffer, because a drain that stops on another prompt takes
+/// the buffer it is handed into its parked carrier. A departure is never
+/// undone, so a failure is reported rather than returned.
+fn settle_resolution_resumed_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    scan_from: usize,
+) {
+    let mut resumed = Vec::new();
+    if let Err(error) = resume_pending_continuation_if_priority(state, &mut resumed) {
+        tracing::error!(%error, "a resolution resumed after a departure did not finish");
+        debug_assert!(
+            false,
+            "a resolution resumed after a departure did not finish: {error}"
+        );
+    }
+    events.append(&mut resumed);
+    let provisional = state.waiting_for.clone();
+    match super::engine_priority::run_post_action_pipeline_from(
+        state,
+        events,
+        scan_from,
+        &provisional,
+        false,
+        false,
+    ) {
+        Ok(settled) => sync_waiting_for(state, &settled),
+        Err(error) => {
+            tracing::error!(%error, "a resolution resumed after a departure did not settle");
+            debug_assert!(
+                false,
+                "a resolution resumed after a departure did not settle: {error}"
+            );
+        }
+    }
+}
+
 /// CR 704.3: the terminal half of [`reconcile_terminal_result`] — the player-loss SBA safety net
 /// and the game-over check, without the loop-shortcut evaluation.
 fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
@@ -2939,7 +2984,34 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
         && !state.withholds_priority()
         && !engine_payment_choices::draw_payment_is_parked(state)
     {
-        sba::check_state_based_actions(state, &mut result.events);
+        // CR 117.2e: the loss may cancel the current pause of a resolution
+        // that is still under way (its chooser left). This net applies the
+        // loss at the prompt (#962) rather than at the next priority
+        // (CR 104.3b); the resolution is then finished before any player
+        // receives priority. The departure collected its own triggers and claimed
+        // its events (CR 603.10a, CR 603.2c), so the settlement's scan from
+        // `departure_start` takes only what happened after it.
+        let departure_start = result.events.len();
+        match sba::check_state_based_actions_reporting_departure(state, &mut result.events) {
+            super::elimination::DepartureResume::ParkedZoneChangeTail => {
+                settle_resolution_resumed_after_departure(
+                    state,
+                    &mut result.events,
+                    departure_start,
+                );
+            }
+            // CR 603.3 + CR 117.5: nothing was resumed, so no pipeline follows the
+            // loss on this route; the abilities the departure triggered and queued
+            // go on the stack before the next player has priority, as after a
+            // concession.
+            super::elimination::DepartureResume::Settled => {
+                super::elimination::drain_or_clear_deferred_triggers_after_elimination(
+                    state,
+                    super::elimination::DepartureTriggers::ScannedByCaller,
+                    &mut result.events,
+                );
+            }
+        }
         // SBA may have advanced waiting_for (e.g., GameOver, or Priority for
         // the next living player). Sync the result.
         result.waiting_for = state.waiting_for.clone();
@@ -13121,7 +13193,10 @@ fn apply_action(
     // dispatch entirely — there is no priority/state check. Eliminating the player
     // performs CR 800.4a object cleanup and advances `waiting_for` if the conceder
     // owned it (see `elimination::concede`), and queues what the departure triggered
-    // (CR 603.6c), since no pipeline scans this action's events.
+    // (CR 603.6c), since no pipeline scans the departure's own events. When the
+    // departure canceled the current pause of a resolution still under way, the
+    // resolution is finished and the action settled through the post-action
+    // pipeline (`settle_resolution_resumed_after_departure`).
     if let GameAction::Concede { player_id } = action {
         // CR 614.17a + CR 118.12: keep the pre-departure base so a staged
         // payment's already-accepted prefix (including a synchronous leg that
@@ -13129,7 +13204,17 @@ fn apply_action(
         // departure's new prohibitions (`settle_after_outside_action`).
         let pre_action = state.payment_transaction.as_ref().map(|_| state.clone());
         let mut events = Vec::new();
-        super::elimination::concede(state, player_id, &mut events);
+        let departure = super::elimination::concede(state, player_id, &mut events);
+        // CR 117.2e + CR 608.2c + CR 117.5: the concession canceled the
+        // current pause of a parked zone-change owner while its resolution
+        // still owes a surviving tail. Finish that resolution, then settle
+        // the action as any action that completed one: the owed final part
+        // (CR 608.2n), state-based actions (CR 704.3), then the triggered
+        // abilities the departure queued together with the resumed ones.
+        if departure.resume == super::elimination::DepartureResume::ParkedZoneChangeTail {
+            let scan_from = events.len();
+            settle_resolution_resumed_after_departure(state, &mut events, scan_from);
+        }
         // CR 800.4a + CR 118.12: a surviving staged payment re-materializes on
         // the base the departure changed (`settle_after_outside_action`). CR
         // 104.3a: the departure itself must survive a fallible payment recovery,
@@ -20401,8 +20486,6 @@ fn commit_land_play(
                         source_id: None,
                         exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
                         drain: crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
-                        // This resume delivery is not a library placement.
-                        library_placement: None,
                     },
                     events,
                 ) {

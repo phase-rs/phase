@@ -483,13 +483,7 @@ pub fn split_merged_permanent_on_leave(
 /// CR 903.9c: when an individual commander component accepts the CR 903.9b
 /// Hand/Library replacement, only that component's request changes to Command;
 /// noncommander components remain routed to their appropriate zones.
-///
-/// CR 701.24a + CR 730.3: a library position reaches the components only when
-/// the move is the move component of a terminal-shuffle operation, where the
-/// position is transient and the chained `Shuffle` randomizes the library
-/// once. Any other library placement leaves each component at the zone
-/// default; the owner's CR 730.3a arrangement of an ordered placement is not
-/// modeled here.
+#[cfg(test)]
 pub(crate) fn move_merged_permanent_on_leave(
     state: &mut GameState,
     merged_id: ObjectId,
@@ -497,6 +491,29 @@ pub(crate) fn move_merged_permanent_on_leave(
     library_placement: Option<&LibraryPosition>,
     library_shuffle: LibraryShuffleMode,
     applied: &HashSet<AppliedReplacementKey>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    move_merged_permanent_for_parent(
+        state,
+        merged_id,
+        dest,
+        library_placement,
+        library_shuffle,
+        applied,
+        None,
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // main's placement pair plus the announcing owner link.
+pub(crate) fn move_merged_permanent_for_parent(
+    state: &mut GameState,
+    merged_id: ObjectId,
+    dest: Zone,
+    library_placement: Option<&LibraryPosition>,
+    library_shuffle: LibraryShuffleMode,
+    applied: &HashSet<AppliedReplacementKey>,
+    parent: Option<crate::types::game_state::PendingComponentDeliveryParent>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
     let Some(survivor) = state.objects.get(&merged_id) else {
@@ -532,16 +549,18 @@ pub(crate) fn move_merged_permanent_on_leave(
                     .expect("merged component exists")
                     .split_from_merge_survivor = Some(survivor_successor);
             }
-            let placement = match library_shuffle {
-                LibraryShuffleMode::TerminalShuffle => library_placement.cloned(),
-                LibraryShuffleMode::PerObject => None,
+            // CR 730.3: every component inherits the final approved destination
+            // and position; its own replacement consult may redirect it again.
+            let placement = match (dest, library_placement) {
+                (Zone::Library, Some(position)) => Some(position.clone()),
+                _ => None,
             };
             ZoneMoveRequest::merged_component(component_id, dest, placement, library_shuffle)
                 .with_replacement_applied(applied.clone())
         })
         .collect();
 
-    zone_pipeline::move_objects_simultaneously_then(state, requests, None, events)
+    zone_pipeline::move_component_batch_then(state, requests, None, parent, events)
 }
 
 /// CR 730.2d + CR 400.7 + CR 111.7: restore the survivor's intrinsic token-ness

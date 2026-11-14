@@ -77,12 +77,35 @@ fn process_combat_damage_triggers(
         // on the stack, but its abilities have already triggered — a Siege
         // whose CR 310.12b victory trigger waits here is not put into its
         // owner's graveyard.
-        sba::check_state_based_actions_with_waiting_triggers(state, all_events, &pending);
+        let departure_queued =
+            sba::check_state_based_actions_with_waiting_triggers(state, all_events, &pending);
 
         // If SBAs generated new events, process triggers for those events.
         if all_events.len() > events_before {
-            let new_events: Vec<_> = all_events[events_before..].to_vec();
-            before_priority_events.extend_from_slice(&new_events);
+            // CR 603.10a + CR 603.2c: a player's departure in that SBA event was
+            // collected, once, against the observers as they were immediately
+            // before it, and its occurrences claimed: its triggers join this
+            // batch and the scans below skip the claimed events.
+            let departure_triggers = state.deferred_triggers.split_off(
+                state
+                    .deferred_triggers
+                    .len()
+                    .saturating_sub(departure_queued),
+            );
+            pending.extend(departure_triggers);
+            let consumed = state.consumed_before_priority_trigger_events.clone();
+            let new_events = triggers::filter_already_collected_trigger_events_from(
+                state,
+                all_events,
+                events_before,
+                &consumed,
+            );
+            before_priority_events.extend(triggers::filter_consumed_trigger_events_from(
+                all_events,
+                events_before,
+                triggers::TriggerCollectionRequester::Delayed,
+                &consumed,
+            ));
             pending.extend(triggers::collect_triggers_for_batch(state, &new_events));
         } else {
             break;

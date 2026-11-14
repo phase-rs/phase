@@ -41,6 +41,25 @@ use super::zones;
 use crate::database::CardDatabase;
 use crate::game::token_presets::TokenPtProvenance;
 
+/// CR 704.3 + CR 603.2c: the sandbox's state-based-action check and the
+/// trigger scan that follows it. A player who leaves in that check has the
+/// departure's triggers collected and its occurrences claimed
+/// (CR 603.10a), so the scan takes only what is unclaimed, and the queued
+/// departure triggers are then placed.
+fn run_state_based_actions_and_triggers(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    super::sba::check_state_based_actions(state, events);
+    let consumed = state.consumed_before_priority_trigger_events.clone();
+    let unclaimed =
+        super::triggers::filter_already_collected_trigger_events_from(state, events, 0, &consumed);
+    super::triggers::process_triggers(state, &unclaimed);
+    // CR 603.3 + CR 117.5: what a departure queued goes on the stack with them.
+    super::elimination::drain_or_clear_deferred_triggers_after_elimination(
+        state,
+        super::elimination::DepartureTriggers::ScannedByCaller,
+        events,
+    );
+}
+
 pub fn apply_debug_action(
     state: &mut GameState,
     actor: PlayerId,
@@ -80,8 +99,7 @@ pub fn apply_debug_action(
                 }
                 crate::game::zone_pipeline::move_object(state, req, events);
                 if simulate {
-                    super::sba::check_state_based_actions(state, events);
-                    super::triggers::process_triggers(state, events);
+                    run_state_based_actions_and_triggers(state, events);
                 }
             }
             crate::game::layers::mark_layers_full(state);
@@ -610,8 +628,7 @@ pub fn apply_debug_action(
         }
 
         DebugAction::RunStateBasedActions => {
-            super::sba::check_state_based_actions(state, events);
-            super::triggers::process_triggers(state, events);
+            run_state_based_actions_and_triggers(state, events);
         }
 
         DebugAction::CreateToken {
@@ -1126,6 +1143,7 @@ fn enter_battlefield_with_etb(
     }
 
     let mut proposed = ProposedEvent::ZoneChange {
+        library_placement: None,
         object_id,
         from,
         to: Zone::Battlefield,
@@ -1166,7 +1184,6 @@ fn enter_battlefield_with_etb(
                 None,
                 false,
                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                None,
                 events,
             ) {
                 super::effects::change_zone::ZoneDeliveryResult::Done => {}
