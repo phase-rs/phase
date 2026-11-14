@@ -27130,7 +27130,7 @@ pub fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilte
     // proceeds. They are never announced as targets, and the ledger is empty at
     // announcement time, so a slot built from one always finds zero legal
     // candidates and drops the whole ability before it resolves (Grenzo,
-    // Dungeon Warden's milled-card rider). `is_context_ref` deliberately
+    // Dungeon Warden's moved-card rider). `is_context_ref` deliberately
     // excludes these two because it also drives
     // `ability_with_event_context_targets`; exclude them at this seam instead,
     // mirroring `attach_host_filter_needs_target_slot`.

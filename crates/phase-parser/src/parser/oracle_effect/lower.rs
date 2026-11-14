@@ -3198,16 +3198,16 @@ fn rebind_parent_target_to_moved_card(def: &mut AbilityDefinition) {
     }
 }
 
-/// CR 608.2c: A leading "If it's a [type] card, …" rider on a single-card mill
-/// names the card that mill just moved. The clause parser lowers the body's bare
+/// CR 608.2c: A leading "If it's a [type] card, …" rider on a single-card
+/// library-edge move names the card that move just took. The clause parser lowers the body's bare
 /// "it" to the generic `TargetFilter::ParentTarget` fallback, but `Mill`
 /// declares no object target, so `ParentTarget` names nothing and the body
 /// silently no-ops. Rebind it to `TargetFilter::LastZoneChanged` — the same
 /// referent `RevealedHasCardType` itself reads after a move — so "…, put it onto
-/// the battlefield" (Grenzo, Dungeon Warden) acts on the milled card.
+/// the battlefield" (Grenzo, Dungeon Warden) acts on the moved card.
 ///
 /// Gated on `Fixed(1)`: with any other count the condition still checks the
-/// first moved card while "it" would name a population, so a multi-card mill
+/// first moved card while "it" would name a population, so a multi-card move
 /// remains an honest gap instead of moving an arbitrary member.
 pub(super) fn rebind_revealed_card_type_pronoun_to_moved_object(def: &mut AbilityDefinition) {
     let parent_mills_one_card = matches!(

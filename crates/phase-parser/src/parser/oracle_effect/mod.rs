@@ -34015,12 +34015,12 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
         {
             *target = subject_filter;
         }
-        // CR 701.17a + CR 115.1: "Target player puts the bottom card of their
+        // CR 401.2 + CR 115.1: "Target player puts the bottom card of their
         // library into their graveyard" (Cellar Door) — the Mill effect's target
         // is resolved from the possessive pronoun "their library" to
         // `TriggeringPlayer` or `ParentTarget` (via `that_player_library_filter`),
         // but the clause's subject ("Target player") is a declared player target
-        // that must be the mill recipient. Inject the subject filter when the
+        // whose library supplies the card. Inject the subject filter when the
         // target is a context-dependent `TriggeringPlayer` or `ParentTarget` and
         // the subject has a declared player target.
         Effect::Mill { target, .. }

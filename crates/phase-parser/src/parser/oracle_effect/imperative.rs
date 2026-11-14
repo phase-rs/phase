@@ -9810,7 +9810,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             position,
         } => Effect::Mill {
             count,
-            // CR 701.17a: the library owner named by the clause is the milled player.
+            // The target names the player whose library supplies the cards.
             target,
             destination: Zone::Graveyard,
             position,

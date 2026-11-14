@@ -4719,8 +4719,8 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // moved object instead, and do so before `oracle_trigger::lower_trigger_ir`
     // can otherwise blindly lift that same `ParentTarget` to `TriggeringSource`.
     rebind_zone_changed_this_way_pronoun_to_moved_object(&mut result);
-    // CR 608.2c: a leading "If it's a [type] card" rider on a single-card mill
-    // names the milled card; the bare-"it" body lowered to `ParentTarget`,
+    // CR 608.2c: a leading "If it's a [type] card" rider on a single-card
+    // library-edge move names the moved card. Bare "it" lowers to `ParentTarget`,
     // which a `Mill` head cannot resolve. Rebind it before trigger lowering can
     // lift that sentinel to `TriggeringSource` (Grenzo, Dungeon Warden).
     rebind_revealed_card_type_pronoun_to_moved_object(&mut result);
