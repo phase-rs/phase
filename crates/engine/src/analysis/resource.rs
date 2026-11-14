@@ -11374,6 +11374,7 @@ mod tests {
             provenance: None,
             description: None,
             fingerprint: "test".to_string(),
+            grant_chain: Vec::new(),
         };
         assert!(!ability_has_per_turn_activation_gate(&state, &absent));
         assert!(!ability_has_per_game_activation_gate(&state, &absent));

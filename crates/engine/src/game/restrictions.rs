@@ -962,19 +962,38 @@ pub fn ability_usage_key(
 /// definition body: identical at load synthesis, runtime synthesis, layer
 /// recompute, and index shift — cost concretization runs inside
 /// `activation_ability_definition` before this is computed, so Brawl-style
-/// placeholders never fingerprint as `{0}`. The `Effect` arm prints as its
-/// canonical JSON (`impl fmt::Debug for Effect`), and the triple carries no
-/// maps, so the encoding is deterministic within a save-compatible binary
-/// (saves already fail closed across binaries).
+/// placeholders never fingerprint as `{0}`.
+///
+/// CR 612.1 + CR 612.2: the triple is deworded through the engine's own
+/// carrier classifier before fingerprinting — every serialized string leaf
+/// sitting at a `Word`-classified carrier position (the exact positions a
+/// text-changing effect may rewrite) is blanked, in BOTH word domains. A
+/// Magical Hack rewrite moves only those leaves, so the post-rewrite live
+/// re-derivation equals the announced key and the acquisition budget follows
+/// the ability through the rewrite (CR 602.5c). Non-carrier leaves are
+/// touched by neither rewrite nor dewording, so distinct bodies (two equip
+/// costs, reconfigure's attach vs unattach modes) still fingerprint apart.
+/// The normalized triple prints as its canonical JSON `Value`
+/// (`serde_json::Map` is key-sorted, so the encoding is deterministic within
+/// a save-compatible binary — saves already fail closed across binaries).
 pub fn ability_fingerprint(definition: &AbilityDefinition) -> String {
-    format!(
-        "{:?}",
-        (
-            &definition.cost,
-            &definition.effect,
-            &definition.ability_tag
-        )
-    )
+    use crate::types::ability::TextWordDomain;
+    use crate::types::text_word_carriers::{carrier_class, walk_strings, WordClass};
+    let mut value = serde_json::to_value((
+        &definition.cost,
+        &definition.effect,
+        &definition.ability_tag,
+    ))
+    .expect("ability triple serializes");
+    walk_strings(&mut value, None, "", &mut |tag, key, leaf| {
+        let is_word = [TextWordDomain::ColorWord, TextWordDomain::BasicLandType]
+            .iter()
+            .any(|domain| carrier_class(tag, key, *domain) == Some(WordClass::Word));
+        if is_word {
+            leaf.clear();
+        }
+    });
+    format!("{value:?}")
 }
 
 /// CR 602.2a: pure constructor for the per-instance usage key from an
@@ -990,6 +1009,7 @@ pub fn ability_usage_key_for_definition(
         provenance: definition.granting_object,
         description: definition.description.clone(),
         fingerprint: ability_fingerprint(definition),
+        grant_chain: definition.grant_chain.clone(),
     }
 }
 

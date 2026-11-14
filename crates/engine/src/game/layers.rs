@@ -9119,13 +9119,18 @@ fn expand_granted_activated_abilities(
                 // each acquisition is a distinct instance that functions
                 // independently — even a re-donated copy acquired from an
                 // intermediate carrier (the carrier's hop OVERWRITES the
-                // original stamp; the restriction on an acquired ability
-                // applies only to that ability as acquired from that
-                // object). Repeat expansion from the same provider
-                // re-emits a byte-identical def, which Tier-2 dedup still
-                // collapses.
+                // original stamp, pushing it onto `grant_chain` lineage so
+                // the re-donated copy stays distinct from a direct grant;
+                // the restriction on an acquired ability applies only to
+                // that ability as acquired from that object). Repeat
+                // expansion from the same provider re-emits a byte-identical
+                // def, which Tier-2 dedup still collapses.
                 let provider_stamp = ObjectIncarnationRef::from_object(provider);
-                donated.granting_object = Some(provider_stamp);
+                if let Some(prior) = donated.granting_object.replace(provider_stamp) {
+                    if !donated.grant_chain.contains(&prior) {
+                        donated.grant_chain.push(prior);
+                    }
+                }
                 // CR 201.5a: bind ONLY unbound granter symbols to the
                 // provider incarnation. Printed donors can carry unbound
                 // `GrantingObject` symbols (e.g. by-name self costs); those
@@ -11644,9 +11649,9 @@ fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zo
 
 /// CR 113.2c + CR 201.5a + CR 614.1c + CR 611.2c + CR 602.5c: Tier-2-only
 /// `GrantAbility` dedup. Collapse iff FULL derived `AbilityDefinition ==`
-/// (head `granting_object` stamp PARTICIPATING, plus sub-symbol stamps and
-/// injected `cap` restrictions) with an already-pushed grant at index `>=
-/// base_end`. A printed base ability and a stamped grant of the same body are
+/// (head `granting_object` stamp PARTICIPATING plus `grant_chain` re-donation
+/// lineage, plus sub-symbol stamps and injected `cap` restrictions) with an
+/// already-pushed grant at index `>= base_end`. A printed base ability and a stamped grant of the same body are
 /// distinct instances (CR 113.2c + CR 602.5c "other, identically worded
 /// abilities") and coexist; only a byte-identical re-expansion from the same
 /// provider incarnation (same stamp, same body) collapses. The `[..base_end]`

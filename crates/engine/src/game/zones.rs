@@ -5072,6 +5072,7 @@ mod tests {
             provenance: None,
             description: None,
             fingerprint: "test".to_string(),
+            grant_chain: Vec::new(),
         };
         let acquired = crate::types::game_state::AbilityUsageKey {
             source: id,
@@ -5080,12 +5081,14 @@ mod tests {
             )),
             description: Some("acquired".to_string()),
             fingerprint: "test".to_string(),
+            grant_chain: Vec::new(),
         };
         let other_key = crate::types::game_state::AbilityUsageKey {
             source: other,
             provenance: None,
             description: None,
             fingerprint: "test".to_string(),
+            grant_chain: Vec::new(),
         };
         state
             .activated_abilities_this_turn

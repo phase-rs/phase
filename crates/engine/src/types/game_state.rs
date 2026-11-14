@@ -475,21 +475,40 @@ mod ability_usage_key_map {
             Some(stamp) => format!("{}.{}", stamp.object_id.0, stamp.incarnation),
         };
         let fingerprint = escape_component(&key.fingerprint);
+        // CR 602.5c + CR 113.2c: re-donation lineage rides its own segment
+        // (never escaped: stamps are `object_id.incarnation` pairs, which
+        // carry no `#`); the `#`-bearing description stays the unbounded
+        // tail. A pre-chain five-segment encoding no longer decodes — the
+        // chain is total, so a key without one names no live budget.
+        let chain = key
+            .grant_chain
+            .iter()
+            .map(|stamp| format!("{}.{}", stamp.object_id.0, stamp.incarnation))
+            .collect::<Vec<_>>()
+            .join(",");
         match &key.description {
-            None => format!("{}#{}#0#{}#", key.source.0, provenance, fingerprint),
-            Some(text) => format!("{}#{}#1#{}#{}", key.source.0, provenance, fingerprint, text),
+            None => format!(
+                "{}#{}#0#{}#{}#",
+                key.source.0, provenance, fingerprint, chain
+            ),
+            Some(text) => format!(
+                "{}#{}#1#{}#{}#{}",
+                key.source.0, provenance, fingerprint, chain, text
+            ),
         }
     }
 
     pub(super) fn decode_key(raw: &str) -> Result<AbilityUsageKey, String> {
-        let mut parts = raw.splitn(5, '#');
+        let mut parts = raw.splitn(6, '#');
         let (
             Some(source),
             Some(provenance),
             Some(has_description),
             Some(fingerprint),
+            Some(chain),
             Some(description),
         ) = (
+            parts.next(),
             parts.next(),
             parts.next(),
             parts.next(),
@@ -526,11 +545,32 @@ mod ability_usage_key_map {
             "1" => Some(description.to_string()),
             _ => return Err(format!("invalid ability usage key: {raw}")),
         };
+        let grant_chain = if chain.is_empty() {
+            Vec::new()
+        } else {
+            chain
+                .split(',')
+                .map(|segment| {
+                    let (oid, incarnation) = segment
+                        .split_once('.')
+                        .ok_or_else(|| format!("invalid ability usage key: {raw}"))?;
+                    let oid = oid
+                        .parse::<u64>()
+                        .map(ObjectId)
+                        .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+                    let incarnation = incarnation
+                        .parse::<u64>()
+                        .map_err(|_| format!("invalid ability usage key: {raw}"))?;
+                    Ok(ObjectIncarnationRef::of(oid, incarnation))
+                })
+                .collect::<Result<Vec<_>, String>>()?
+        };
         Ok(AbilityUsageKey {
             source,
             provenance,
             description,
             fingerprint,
+            grant_chain,
         })
     }
 
@@ -613,15 +653,40 @@ mod ability_usage_key_map_tests {
             "unexpected error: {err}"
         );
 
+        // CR 602.5c + CR 113.2c: the pre-chain five-segment encoding is
+        // refused too — the chain is total, so a key without one names no
+        // live budget.
+        let err = serde_json::from_str::<Probe>(r#"{"map":{"42#-#0#fp#":1}}"#)
+            .expect_err("chain-less key must fail closed");
+        assert!(
+            err.to_string().contains("invalid ability usage key"),
+            "unexpected error: {err}"
+        );
+
         let ok: Probe =
-            serde_json::from_str(r#"{"map":{"42#-#0#fp#":1}}"#).expect("new encoding decodes");
+            serde_json::from_str(r#"{"map":{"42#-#0#fp##":1}}"#).expect("new encoding decodes");
         assert_eq!(ok.map.len(), 1);
         let (key, count) = ok.map.into_iter().next().expect("one entry");
         assert_eq!(key.source, ObjectId(42));
         assert_eq!(key.provenance, None);
         assert_eq!(key.description, None);
         assert_eq!(key.fingerprint, "fp");
+        assert_eq!(key.grant_chain, Vec::new());
         assert_eq!(count, 1);
+
+        // A chained key round-trips its lineage oldest-first.
+        let chained: Probe = serde_json::from_str(r#"{"map":{"7#9.3#1#fp#11.1,13.2#{T}: Tap":1}}"#)
+            .expect("chained encoding decodes");
+        let (key, _) = chained.map.into_iter().next().expect("one entry");
+        assert_eq!(
+            key.grant_chain,
+            vec![
+                ObjectIncarnationRef::of(ObjectId(11), 1),
+                ObjectIncarnationRef::of(ObjectId(13), 2),
+            ],
+            "chain order is oldest-first"
+        );
+        assert_eq!(key.description.as_deref(), Some("{T}: Tap"));
     }
 
     /// The fingerprint rides escaped between two `#` separators while a
@@ -634,9 +699,10 @@ mod ability_usage_key_map_tests {
             provenance: Some(ObjectIncarnationRef::of(ObjectId(9), 3)),
             description: Some("{T}: Add #1.".to_string()),
             fingerprint: "a#b%{c}".to_string(),
+            grant_chain: vec![ObjectIncarnationRef::of(ObjectId(11), 1)],
         };
         let encoded = super::ability_usage_key_map::encode_key(&key);
-        assert_eq!(encoded, "7#9.3#1#a%23b%25{c}#{T}: Add #1.");
+        assert_eq!(encoded, "7#9.3#1#a%23b%25{c}#11.1#{T}: Add #1.");
         let decoded =
             super::ability_usage_key_map::decode_key(&encoded).expect("escaped key decodes");
         assert_eq!(decoded, key);
@@ -1682,6 +1748,12 @@ pub struct AbilityUsageKey {
     pub description: Option<String>,
     /// Stable encoding of the announced def's `(cost, effect, ability_tag)`.
     pub fingerprint: String,
+    /// CR 602.5c + CR 113.2c: re-donation lineage, oldest-first; empty for
+    /// direct/printed abilities. Carried from the announced definition's
+    /// `grant_chain` so twins re-donated through one carrier hold distinct
+    /// budgets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grant_chain: Vec<ObjectIncarnationRef>,
 }
 
 fn battlefield_zone() -> Zone {

@@ -4874,6 +4874,15 @@ pub(crate) fn apply_parent_chain_context(
     if child.ability_index.is_none() {
         child.ability_index = parent.ability_index;
     }
+    // CR 608.2c: a sub-ability is part of the same printed ability instance
+    // as its parent — the announced usage key is their shared identity, so a
+    // resolution-time tally on a chained sub-node (e.g. a Dragon Whelp rider)
+    // reads the same acquisition budget as the root. Mirrors the index block
+    // above, including its no-clobber guard: an explicitly keyed node keeps
+    // its own.
+    if child.announced_usage_key.is_none() {
+        child.announced_usage_key = parent.announced_usage_key.clone();
+    }
     // CR 608.2c + CR 109.4: Carry the resolution-scoped chosen-players list
     // down the chain so `ControllerRef::ChosenPlayer { index }` and later
     // `Choose(Player)` instructions resolve against players chosen by earlier
@@ -28420,14 +28429,26 @@ pub(crate) fn evaluate_condition(
                         .get(&(ability.source_id, idx))
                         .copied()
                         .unwrap_or(0),
-                    // CR 602.5c: the activation budget is per acquisition, so
-                    // the tally re-derives the usage key; an unresolvable slot
-                    // reads a missing entry as count 0.
-                    AbilityUseTally::Activated => {
-                        crate::game::restrictions::ability_usage_key(state, ability.source_id, idx)
-                            .and_then(|key| state.activated_abilities_this_turn.get(&key).copied())
-                            .unwrap_or(0)
-                    }
+                    // CR 602.5c + CR 608.2b: the activation budget is per
+                    // acquisition, read off the ANNOUNCED carrier — the live
+                    // board may have moved since (a cost exiled the source,
+                    // Dress Down removed the text) while resolution proceeds
+                    // on the announced identity. Falls back to a live
+                    // re-derivation for carriers that predate announcement
+                    // capture; an unresolvable slot reads a missing entry
+                    // as count 0.
+                    AbilityUseTally::Activated => ability
+                        .announced_usage_key
+                        .clone()
+                        .or_else(|| {
+                            crate::game::restrictions::ability_usage_key(
+                                state,
+                                ability.source_id,
+                                idx,
+                            )
+                        })
+                        .and_then(|key| state.activated_abilities_this_turn.get(&key).copied())
+                        .unwrap_or(0),
                 };
                 comparator.evaluate(
                     crate::game::arithmetic::u32_to_i32_saturating(count),

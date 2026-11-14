@@ -1129,6 +1129,9 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         unlowered_guard: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // quantity — cannot make a definition cast-unstable.
+        grant_chain: _,
     } = definition;
 
     declares_return_result.is_none()
@@ -1264,6 +1267,9 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
         unlowered_guard: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // quantity payload.
+        grant_chain: _,
     } = definition
     else {
         return false;

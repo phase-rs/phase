@@ -31,7 +31,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction,
-    AttachCardinality, AttachSelection, ControllerRef, Effect, TargetFilter, TypedFilter,
+    AttachCardinality, AttachSelection, BasicLandType, ControllerRef, Effect, TargetFilter,
+    TextSubstitution, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -764,4 +765,199 @@ fn printed_self_cost_activations_still_record() {
             "the printed activation must be counted once"
         );
     }
+}
+
+/// T2 (B2): a Magical Hack rewrite preserves the spent activation budget
+/// (CR 612.1 + CR 602.5c).
+///
+/// Board: two Quirion Rangers (one spent, one fresh), a Plains and
+/// Forests for the rewritten and printed bounce costs, and Magical Hacks.
+/// Refusals are probed through the raw announcement action (the fluent
+/// driver's announcement step panics instead of returning `Err`).
+/// Ranger A activates once (spent). Hack rewrites Forest→Plains on Ranger A;
+/// the text changes but the ability persists (CR 612.1), so the spent
+/// budget follows it and the second activation is still refused — the
+/// post-rewrite live derivation equals the announced key because the
+/// fingerprint is deworded through the engine's own carrier classifier.
+/// Ranger B is hacked while unspent and still activates once afterwards (no
+/// phantom spend), then refuses its own second activation.
+///
+/// Verbatim Oracle texts (Scryfall): Quirion Ranger — "Return a Forest you
+/// control to its owner's hand: Untap target creature. Activate only once
+/// each turn." Magical Hack — "Change the text of target spell or permanent
+/// by replacing all instances of one basic land type with another. (For
+/// example, you may change "swampwalk" to "plainswalk." This effect lasts
+/// indefinitely.)"
+///
+/// Revert detector: with today's word-sensitive fingerprint the post-rewrite
+/// re-derivation misses the journal and Ranger A's second activation
+/// succeeds.
+#[test]
+fn rewrite_preserves_spent_activation_budget() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ranger_a = scenario.add_real_card(P0, "Quirion Ranger", Zone::Battlefield, db);
+    let ranger_b = scenario.add_real_card(P0, "Quirion Ranger", Zone::Battlefield, db);
+    let bear = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let plains = scenario.add_real_card(P0, "Plains", Zone::Battlefield, db);
+    let forest1 = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    let hack = scenario.add_real_card(P0, "Magical Hack", Zone::Hand, db);
+    let hack_b = scenario.add_real_card(P0, "Magical Hack", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+
+    let index_a = untap_indices(&runner, ranger_a)
+        .into_iter()
+        .next()
+        .expect("Ranger A must carry its printed Untap");
+    tap_for_untap(&mut runner, bear);
+
+    // Unit stability (no board): the fingerprint is invariant under the
+    // engine's own rewrite on a Forest-cost definition.
+    let def_a = activated_ability_definitions(runner.state(), ranger_a)
+        .into_iter()
+        .find(|(index, _)| *index == index_a)
+        .map(|(_, def)| def.clone())
+        .expect("Ranger A's definition resolves");
+    let substitution = TextSubstitution::BasicLandType {
+        from: BasicLandType::Forest,
+        to: BasicLandType::Plains,
+    };
+    let (rewritten_a, count) = substitution
+        .rewrite_counted(&def_a)
+        .expect("the Forest cost sits at a classified carrier");
+    assert!(
+        count > 0,
+        "the rewrite must move at least one word, got {count}"
+    );
+    assert_eq!(
+        ability_fingerprint(&def_a),
+        ability_fingerprint(&rewritten_a),
+        "CR 612.1: dewording erases exactly what a text change may move"
+    );
+
+    // Ranger A activates once (spent).
+    runner
+        .activate(ranger_a, index_a)
+        .target_object(bear)
+        .pay_with(&[forest1])
+        .resolve();
+    assert!(
+        !runner.state().objects[&bear].tapped,
+        "the bear must be untapped by Ranger A's activation"
+    );
+    let spent_key =
+        ability_usage_key(runner.state(), ranger_a, index_a).expect("the slot resolves");
+    assert_eq!(
+        runner
+            .state()
+            .activated_abilities_this_turn
+            .get(&spent_key)
+            .copied(),
+        Some(1),
+        "Ranger A's budget is spent before any rewrite"
+    );
+
+    // Reach-guard: the pre-rewrite second activation is refused (the budget
+    // existed before the Hack, so a post-rewrite refusal is gate-caused).
+    // The refusal is announced through the raw production action: the
+    // fluent driver's announcement step panics instead of returning `Err`.
+    tap_for_untap(&mut runner, bear);
+    let gate_err = match runner.act(GameAction::ActivateAbility {
+        source_id: ranger_a,
+        ability_index: index_a,
+        payment_mode: CastPaymentMode::Auto,
+    }) {
+        Err(err) => err,
+        Ok(_) => panic!("the spent budget must refuse before any rewrite"),
+    };
+    let gate_msg = format!("{gate_err:?}");
+
+    // Hack Ranger A: Forest becomes Plains in its cost.
+    runner
+        .cast(hack)
+        .target_objects(&[ranger_a])
+        .choose_option("Forest -> Plains")
+        .resolve();
+    assert_settled(&runner);
+
+    // The rewritten cost is payable (the Plains is on the battlefield), yet
+    // the activation is refused with the SAME gate verdict as pre-rewrite —
+    // gate-caused, not cost-caused. Revert detector: this succeeds pre-fix.
+    assert_eq!(
+        runner.state().objects[&plains].zone,
+        Zone::Battlefield,
+        "the Plains must be on the battlefield to pay the rewritten cost"
+    );
+    let index_now = untap_indices(&runner, ranger_a)
+        .into_iter()
+        .next()
+        .expect("the rewrite keeps the ability on its slot");
+    let err_now = match runner.act(GameAction::ActivateAbility {
+        source_id: ranger_a,
+        ability_index: index_now,
+        payment_mode: CastPaymentMode::Auto,
+    }) {
+        Err(err) => err,
+        Ok(_) => panic!("the spent budget must survive the rewrite"),
+    };
+    assert_eq!(
+        format!("{err_now:?}"),
+        gate_msg,
+        "CR 602.5c: post-rewrite refusal is the same gate verdict, not a cost failure"
+    );
+
+    // Hostile: hacking the UNSPENT Ranger B fabricates no count — it
+    // activates once under its rewritten (Plains) cost, then refuses its
+    // own second activation.
+    runner
+        .cast(hack_b)
+        .target_objects(&[ranger_b])
+        .choose_option("Forest -> Plains")
+        .resolve();
+    assert_settled(&runner);
+    let index_b = untap_indices(&runner, ranger_b)
+        .into_iter()
+        .next()
+        .expect("the rewrite keeps Ranger B on its slot");
+    runner
+        .activate(ranger_b, index_b)
+        .target_object(bear)
+        .pay_with(&[plains])
+        .resolve();
+    assert!(
+        !runner.state().objects[&bear].tapped,
+        "the bear must be untapped by Ranger B's first activation"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .activated_abilities_this_turn
+            .get(
+                &ability_usage_key(runner.state(), ranger_b, index_b)
+                    .expect("Ranger B's slot resolves")
+            )
+            .copied(),
+        Some(1),
+        "Ranger B's first activation counts exactly once (no phantom spend)"
+    );
+    tap_for_untap(&mut runner, bear);
+    assert!(
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: ranger_b,
+                ability_index: index_b,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .is_err(),
+        "Ranger B's own second activation must be refused"
+    );
 }
