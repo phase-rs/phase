@@ -43264,7 +43264,7 @@ fn that_player_cant_attack_bare_scope_fails_closed() {
         &["Enchantment".to_string()],
         &[],
     );
-    fn chain_nodes<'a>(root: &'a AbilityDefinition) -> Vec<&'a AbilityDefinition> {
+    fn chain_nodes(root: &AbilityDefinition) -> Vec<&AbilityDefinition> {
         let mut out = Vec::new();
         let mut node = Some(root);
         while let Some(d) = node {
