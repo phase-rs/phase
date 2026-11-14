@@ -991,4 +991,96 @@ mod tests {
         assert_eq!(directory_normalize_url("ws://host.example/ws"), None);
         assert_eq!(directory_normalize_url("wss://127.0.0.1/ws"), None);
     }
+
+    /// The persistence boundary seen through the shim the DO calls. A broker
+    /// whose persisted value is already at its ceiling refuses a metadata-growing
+    /// write (a registration, no deck involved) with a plain error outbound:
+    /// the snapshot and the connection attachment come back exactly as sent, and
+    /// no success outbound exists for the shell to deliver ahead of its `put`.
+    #[test]
+    fn a_registration_at_the_ceiling_is_refused_through_the_shim_without_changing_state() {
+        use lobby_broker::{CreateTournamentRequest, MAX_SNAPSHOT_ENCODED_BYTES};
+
+        const T0: f64 = 1_000_000.0;
+        let env = WorkerEnv { now_ms: T0 as u64 };
+        let mut broker = Broker::new();
+        // Admitted state is not required to build the fixture: it only has to put
+        // the persisted value at/over its ceiling, so write the registry directly
+        // with big decks (each within the per-deck cap) across enough events.
+        let big_deck = |chars: usize| {
+            serde_json::from_value(serde_json::json!({ "main_deck": ["x".repeat(chars)] }))
+                .expect("deck parses")
+        };
+        let mut first_code = String::new();
+        for event in 0..14 {
+            let code = format!("PAD{event:03}");
+            broker
+                .tournaments_mut()
+                .create_tournament(
+                    &code,
+                    CreateTournamentRequest {
+                        name: "Pad".into(),
+                        arity: MatchArity::HEAD_TO_HEAD,
+                        scoring: ScoringPolicy::default(),
+                        bracket: BracketShape::Swiss,
+                        total_rounds: None,
+                        plus_rounds: None,
+                        format: None,
+                        match_type: None,
+                    },
+                    &env,
+                )
+                .expect("fixture event");
+            for seat in 0..8 {
+                let key = format!("k{seat}");
+                let tournaments = broker.tournaments_mut();
+                tournaments
+                    .join_tournament(&code, &key, &key, &env)
+                    .expect("fixture join");
+                tournaments
+                    .submit_deck(&code, &key, big_deck(60_000), &env)
+                    .expect("fixture deck");
+            }
+            if first_code.is_empty() {
+                first_code = code;
+            }
+        }
+        let mut b = WasmBroker { inner: broker };
+        let persisted = b.snapshot();
+        assert!(
+            persisted.len() > MAX_SNAPSHOT_ENCODED_BYTES,
+            "reach guard: the fixture sits past the ceiling ({} bytes)",
+            persisted.len()
+        );
+
+        let join = serde_json::to_string(&LobbyClientMessage::JoinTournament {
+            code: first_code,
+            player_key: "late".into(),
+            display_name: "Late".into(),
+        })
+        .expect("join serializes");
+        let conn = serde_json::to_string(&ConnState::default()).expect("conn serializes");
+        let result: serde_json::Value =
+            serde_json::from_str(&b.handle(&conn, &join, T0)).expect("call result is JSON");
+
+        let outbounds = result["outbounds"].to_string();
+        assert!(
+            outbounds.contains("at capacity"),
+            "the refusal names the capacity: {outbounds}"
+        );
+        assert!(
+            !outbounds.contains("TournamentJoined"),
+            "no success outbound may exist for a write that was not kept: {outbounds}"
+        );
+        assert_eq!(
+            result["conn"],
+            serde_json::from_str::<serde_json::Value>(&conn).expect("conn is JSON"),
+            "the attachment is returned untouched"
+        );
+        assert_eq!(
+            b.snapshot(),
+            persisted,
+            "the broker the shell would snapshot is byte-identical to before the frame"
+        );
+    }
 }

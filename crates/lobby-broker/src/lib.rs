@@ -30,7 +30,7 @@ pub mod validation;
 pub use broker::{
     check_build_commit, lobby_frame_for_viewer, lobby_frame_json_for_viewer, lobby_row_visible_to,
     row_delivery, Broker, BuildCommitCheck, ClientHelloInfo, ConnState, Outbound, ReapOutcome,
-    RowDelivery, RowDelta, MAX_LOBBY_ENTRIES,
+    RowDelivery, RowDelta, MAX_LOBBY_ENTRIES, MAX_SNAPSHOT_ENCODED_BYTES,
 };
 pub use directory::{
     compare_announcement_to_info, info_url, normalize_announced_url, score, validate_announcement,

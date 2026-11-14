@@ -2769,7 +2769,7 @@ impl TournamentManager {
         // one live event's footprint never counts against another's. The bound on
         // the *total* persisted value (decks + unbounded entrant/pairing metadata +
         // lobby) is enforced once, on the complete snapshot, by the caller
-        // ([`crate::broker::Broker::handle_submit_tournament_deck`] against
+        // ([`crate::broker::Broker::handle`] against
         // [`crate::broker::MAX_SNAPSHOT_ENCODED_BYTES`]).
         let retained_event_bytes: usize = self
             .tournaments

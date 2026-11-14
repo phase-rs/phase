@@ -348,12 +348,19 @@ export class LobbyDO {
     }
 
     ws.serializeAttachment(result.conn);
-    this.interpret(ws, result.outbounds);
 
+    // Persist BEFORE replying. The broker admits a write only if its result fits
+    // the persisted value (`Broker::handle`'s capacity boundary), so a success it
+    // reports is a state this `put` can store; sending that reply first would
+    // acknowledge a write whose snapshot had not yet been attempted. A refused
+    // write leaves the state unchanged, and its refusal is delivered below by the
+    // same path.
     if (result.dirty) {
       await this.ctx.storage.put(SNAPSHOT_KEY, broker.snapshot());
       await this.ensureAlarm();
     }
+
+    this.interpret(ws, result.outbounds);
 
     // Best-effort usage counters — recorded AFTER the authoritative broker
     // snapshot so a storage fault here can never preempt persisting the lobby
