@@ -19,7 +19,7 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::types::ability::{PtValue, QuantityExpr, QuantityRef};
-use crate::types::card_type::{CoreType, Supertype};
+use crate::types::card_type::{noncreature_subtype_set, CoreType, Supertype};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 
@@ -556,6 +556,10 @@ fn parse_animation_supertype(input: &str) -> OracleResult<'_, AnimationTypeToken
 /// tokens (`X` in "X/X"), lowercase connectives (`and`, `gets`, `gains`,
 /// `until`), and mid-word positions (if followed by `/`, `:`, digits, etc.).
 fn parse_animation_subtype(input: &str) -> OracleResult<'_, AnimationTypeToken> {
+    peek(satisfy(|c: char| c.is_ascii_uppercase())).parse(input)?;
+    if let Ok(parsed) = parse_registered_animation_subtype(input) {
+        return Ok(parsed);
+    }
     let (rest, word) = recognize(pair(
         // First char: capital letter.
         satisfy(|c: char| c.is_ascii_uppercase()),
@@ -602,6 +606,9 @@ fn parse_animation_type_sequence(input: &str) -> OracleResult<'_, Vec<AnimationT
 /// expression (e.g., trigger-effect text that has been pre-lowercased by the
 /// oracle_trigger pipeline).
 fn parse_animation_subtype_loose(input: &str) -> OracleResult<'_, AnimationTypeToken> {
+    if let Ok(parsed) = parse_registered_animation_subtype(input) {
+        return Ok(parsed);
+    }
     let (rest, word) = recognize(pair(
         satisfy(|c: char| c.is_ascii_alphabetic()),
         pair(
@@ -618,6 +625,25 @@ fn parse_animation_subtype_loose(input: &str) -> OracleResult<'_, AnimationTypeT
     )))
     .parse(rest)?;
     Ok((rest, AnimationTypeToken::Subtype(word.to_string())))
+}
+
+/// CR 205.3: registered subtype words identify subtypes.
+/// Plural canonicalization is a parser convention, not a rules equivalence.
+/// Retain this grammar's punctuation boundary even when the registry accepts
+/// a broader word boundary, and consume multiword subtypes as one token.
+fn parse_registered_animation_subtype(input: &str) -> OracleResult<'_, AnimationTypeToken> {
+    let Some((canonical, consumed)) = super::super::oracle_util::parse_subtype(input) else {
+        return Err(oracle_err(input));
+    };
+    let rest = &input[consumed..];
+    let (rest, _) = peek(alt((
+        eof,
+        recognize(satisfy(|c: char| {
+            c.is_whitespace() || matches!(c, ',' | '.' | ';' | ')' | '!' | '?')
+        })),
+    )))
+    .parse(rest)?;
+    Ok((rest, AnimationTypeToken::Subtype(canonical)))
 }
 
 /// Case-insensitive type-token parser: core type / supertype / subtype,
@@ -867,7 +893,16 @@ fn parse_animation_type_parts(text: &str, infer_creature: bool) -> (Vec<Supertyp
     if core_types.is_empty() && subtypes.is_empty() {
         return (supertypes, Vec::new());
     }
-    if core_types.is_empty() && infer_creature {
+    // CR 205.3 + CR 301.7: a P/T with no stated card type makes the object a
+    // creature only when its subtypes are creature types. A subtype that the
+    // card-type rules assign to another type (Vehicle, Treasure, Equipment)
+    // keeps that type's object noncreature: a Vehicle is a creature only while
+    // crewed.
+    let only_noncreature_subtypes = !subtypes.is_empty()
+        && subtypes
+            .iter()
+            .all(|subtype| noncreature_subtype_set(subtype).is_some());
+    if core_types.is_empty() && infer_creature && !only_noncreature_subtypes {
         push_unique_string(&mut core_types, "Creature");
     }
 
@@ -1044,6 +1079,123 @@ mod test_den_bugbear {
     use crate::types::ability::{
         ContinuousModification, ControllerRef, Duration, Effect, TargetFilter, TypeFilter,
     };
+
+    /// CR 205.3 + CR 301.7: a stated P/T with only a noncreature subtype does
+    /// not make the object a creature; a creature subtype still does. New New
+    /// York's printed line gives noncreature artifacts the Vehicle subtype and
+    /// a 3/3 P/T, and they become creatures only when crewed.
+    #[test]
+    fn animation_pt_with_a_noncreature_subtype_does_not_infer_creature() {
+        assert_eq!(
+            parse_animation_type_parts("Vehicles in addition to their other types", true).1,
+            vec!["Vehicle".to_string()]
+        );
+        assert_eq!(
+            parse_animation_type_parts("Treasure", true).1,
+            vec!["Treasure".to_string()]
+        );
+        assert_eq!(
+            parse_animation_type_parts("Dragon", true).1,
+            vec!["Creature".to_string(), "Dragon".to_string()],
+            "a creature subtype still implies a creature"
+        );
+
+        // The plural form (New New York) and the singular form with a Vehicle
+        // exclusion in the subject (Ghirapur) are different grammar branches.
+        for (name, line, power, toughness, crew) in [
+            (
+                "New New York",
+                "At the beginning of combat on your turn, until end of turn, noncreature artifacts you control become 3/3 Vehicles in addition to their other types and gain flying, haste, and crew 1.",
+                3,
+                3,
+                1,
+            ),
+            (
+                "Ghirapur",
+                "At the beginning of combat on your turn, until end of turn, each noncreature, non-Vehicle artifact you control becomes a 5/3 Vehicle in addition to its other types and gains trample, haste, and crew 2.",
+                5,
+                3,
+                2,
+            ),
+        ] {
+            let parsed = parse_oracle_text(line, name, &[], &["Plane".into()], &[]);
+            let trigger = parsed.triggers.first().expect("the combat trigger");
+            let Some(execute) = trigger.execute.as_ref() else {
+                panic!("{name}: the trigger carries its animation");
+            };
+            let Effect::GenericEffect {
+                static_abilities, ..
+            } = execute.effect.as_ref()
+            else {
+                panic!("{name}: expected an animation effect, got {:?}", execute.effect);
+            };
+            let modifications: Vec<_> = static_abilities
+                .iter()
+                .flat_map(|s| &s.modifications)
+                .collect();
+            assert!(
+                modifications.contains(&&ContinuousModification::AddSubtype {
+                    subtype: "Vehicle".into()
+                }),
+                "{name}: the objects become Vehicles: {modifications:?}"
+            );
+            assert!(
+                !modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddType {
+                        core_type: CoreType::Creature
+                    }
+                )),
+                "{name}: a Vehicle is not a creature until crewed: {modifications:?}"
+            );
+            assert!(
+                modifications.contains(&&ContinuousModification::SetPower { value: power }),
+                "{name}: {modifications:?}"
+            );
+            assert!(
+                modifications.contains(&&ContinuousModification::SetToughness { value: toughness }),
+                "{name}: {modifications:?}"
+            );
+            assert!(
+                modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Crew { power: got, .. }
+                    } if *got == crew
+                )),
+                "{name}: crew {crew}: {modifications:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn animation_registered_subtypes_are_canonical_and_word_bounded() {
+        for (printed, canonical) in [
+            ("Warriors", "Warrior"),
+            ("Elves", "Elf"),
+            ("Time Lords", "Time Lord"),
+        ] {
+            let (_, token) = parse_animation_subtype(printed).expect("registered subtype");
+            assert!(matches!(token, AnimationTypeToken::Subtype(ref name) if name == canonical));
+            let descriptor = format!("{printed} in addition to their other types");
+            assert_eq!(
+                parse_becomes_type_modifications(&descriptor),
+                vec![ContinuousModification::AddSubtype {
+                    subtype: canonical.into()
+                }]
+            );
+            assert_eq!(
+                parse_becomes_type_modifications(&descriptor.to_lowercase()),
+                vec![ContinuousModification::AddSubtype {
+                    subtype: canonical.into()
+                }]
+            );
+        }
+        assert!(parse_animation_subtype("warriors").is_err());
+        assert!(parse_animation_subtype("Warriors3/3").is_err());
+        assert!(parse_animation_subtype("Warriors:").is_err());
+        assert!(parse_animation_subtype("Noveltype").is_ok());
+    }
 
     /// #2917 (CR 305.7 / 613.1d): a trailing "that's still a land" rider must
     /// not truncate the keyword list. Nissa, Who Shakes the World grants the

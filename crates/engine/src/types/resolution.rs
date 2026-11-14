@@ -5658,15 +5658,20 @@ impl ResolutionStateWire {
                 Err("invalid resolution-state wire decode mode".to_string())
             }
         })();
-        decoded.map_err(|error: String| {
-            if version <= LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
-                && error.contains("INVALID_COIN_BRANCH_BINDINGS:")
-            {
-                LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string()
-            } else {
-                error
-            }
-        })
+        decoded
+            .and_then(|wire: Self| {
+                crate::types::game_state::validate_restored_event_context_pins(&wire.state)?;
+                Ok(wire)
+            })
+            .map_err(|error: String| {
+                if version <= LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
+                    && error.contains("INVALID_COIN_BRANCH_BINDINGS:")
+                {
+                    LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string()
+                } else {
+                    error
+                }
+            })
     }
 }
 
@@ -7284,6 +7289,7 @@ mod tests {
                 moved_count: None,
                 face_down_profile: None,
                 library_placement: None,
+                library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                 enter_attached_to: None,
                 effect_kind: EffectKind::ChangeZone,
             }),
@@ -10017,6 +10023,7 @@ mod tests {
                 index: 0,
             }],
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
