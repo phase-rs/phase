@@ -3254,6 +3254,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::HiddenSearchViewed { .. }
         | GameEvent::TurnStarted { .. }
         | GameEvent::PhaseChanged { .. }
+        | GameEvent::PhaseChangedFor { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::SpellCast { .. }
         | GameEvent::Mutated { .. }
@@ -3470,6 +3471,7 @@ pub(crate) fn extract_player_from_event(
         // creature") would have no player anchor and the sacrifice filter
         // would match across all players.
         GameEvent::PhaseChanged { .. } => Some(state.active_player),
+        GameEvent::PhaseChangedFor { player, .. } => Some(*player),
         // CR 603.6 + CR 109.4: For zone-change triggers ("whenever a creature
         // enters", "whenever an opponent's creature enters", "whenever a card
         // is put into a graveyard from anywhere"), the `TriggeringPlayer` /

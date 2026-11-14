@@ -3922,6 +3922,7 @@ export type GameEvent =
   | { type: "TurnStarted"; data: { player_id: PlayerId; turn_number: number } }
   | { type: "ExtraTurnCreated"; data: { player_id: PlayerId; anchor: PlayerId } }
   | { type: "PhaseChanged"; data: { phase: Phase } }
+  | { type: "PhaseChangedFor"; data: { phase: Phase; player: PlayerId } }
   | { type: "PriorityPassed"; data: { player_id: PlayerId } }
   | { type: "SpellCast"; data: { card_id: CardId; controller: PlayerId; object_id: ObjectId; cast_mana_value?: number } }
   | { type: "XValueChosen"; data: { player: PlayerId; object_id: ObjectId; value: number } }

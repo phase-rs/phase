@@ -513,6 +513,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // display field depends on the mill itself.
             | GameEvent::Milled { .. }
             | GameEvent::PhaseChanged { .. }
+            | GameEvent::PhaseChangedFor { .. }
             | GameEvent::PriorityPassed { .. }
             | GameEvent::SpellCast { .. }
             | GameEvent::SpellCopied { .. }

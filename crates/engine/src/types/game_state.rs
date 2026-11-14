@@ -36535,6 +36535,7 @@ impl GameState {
                 | GameEvent::TurnStarted { .. }
                 | GameEvent::ExtraTurnCreated { .. }
                 | GameEvent::PhaseChanged { .. }
+                | GameEvent::PhaseChangedFor { .. }
                 | GameEvent::PriorityPassed { .. }
                 | GameEvent::SpellCast { .. }
                 | GameEvent::Mutated { .. }
@@ -36896,6 +36897,7 @@ impl GameState {
                 | GameEvent::TurnStarted { .. }
                 | GameEvent::ExtraTurnCreated { .. }
                 | GameEvent::PhaseChanged { .. }
+                | GameEvent::PhaseChangedFor { .. }
                 | GameEvent::PriorityPassed { .. }
                 | GameEvent::SpellCast { .. }
                 | GameEvent::Mutated { .. }
@@ -37073,6 +37075,7 @@ impl GameState {
                 | GameEvent::TurnStarted { .. }
                 | GameEvent::ExtraTurnCreated { .. }
                 | GameEvent::PhaseChanged { .. }
+                | GameEvent::PhaseChangedFor { .. }
                 | GameEvent::PriorityPassed { .. }
                 | GameEvent::SpellCast { .. }
                 | GameEvent::Mutated { .. }

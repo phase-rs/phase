@@ -35,10 +35,11 @@
 //! …) that can transitively express a read are classified **conservatively**
 //! (`Axes::CONSERVATIVE` — reads on every axis), the fail-safe direction for all
 //! three consumers (over-prompt / over-reject, never a false auto-resolve or
-//! false win). `RestrictionPlayerScope` and `CastManaObjectScope` are also in the
-//! conservative set: their only carriers (`Effect::AddRestriction` /
-//! `AddTargetReplacement`, `QuantityRef::ManaSpentToCast`) already return
-//! `Axes::CONSERVATIVE`, so the scopes themselves are never traversed.
+//! false win). `CastManaObjectScope` is also in the conservative set: its only
+//! carrier (`QuantityRef::ManaSpentToCast`) already returns `Axes::CONSERVATIVE`, so
+//! the scope itself is never traversed. CR 805.4d's `that_player` axis is never
+//! blanketed: a fail-closed site reads it exactly where a field it scans does
+//! (`RestrictionPlayerScope` is walked for that axis alone).
 //!
 //! # Traversal closure
 //!
@@ -95,20 +96,27 @@ use crate::analysis::resource::{HistoryMember, HistoryReads};
 use crate::game::filter::{shared_quality_characteristic_reads, CharacteristicKinds};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AttachCardinality, AttachSelection,
-    AttachmentReferent, AttackSubject, CardTypeSetSource, CastingPermission,
-    ContinuousModification, ControllerRef, CountScope, DelayedTriggerCondition, Duration,
-    EachDamageRecipient, Effect, EffectScope, FilterProp, ForEachCategoryAction, GuessSubject,
-    KeeperConstraint, LibraryInstructionActor, ManaProduction, ModalChoice,
-    ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, NameStickerSet,
-    ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    AttachmentReferent, AttackSubject, AttackersDeclaredCountSubject, CardTypeSetSource,
+    CastManaSpentMetric, CastPermissionConstraint, CastingPermission, ChoiceType, CoinFlipRun,
+    ConjureSource, ContinuousModification, ControllerRef, CopyRecipient, CountScope,
+    CounterSourceRider, DelayedTriggerCondition, DieRollModifier, Duration, EachDamageRecipient,
+    Effect, EffectScope, FilterProp, ForEachCategoryAction, GuessSubject, KeeperConstraint,
+    LibraryInstructionActor, LibraryPosition, ManaProduction, ModalChoice, ModalSelectionCondition,
+    ModalSelectionConstraint, MultiTargetSpec, NameStickerSet, ObjectScope, ParsedCondition,
+    PendingEntersModifications, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
     ReciprocalZoneChoiceRole, RepeatContinuation, ReplacementCondition, ResolvedAbility,
-    StaticCondition, TargetFilter, TokenAttackDestination, TrackedAnaphorSource, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, TriggerLimitSpend, TypedFilter, UnlessPayModifier,
-    UnlessPayScaling, ZoneChangeClause, ZoneChoiceCandidateSource,
+    SearchSelectionConstraint, SpellStackToGraveyardReplacement, StaticCondition, TargetFilter,
+    TokenAttackDestination, TrackedAnaphorSource, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TriggerLimitSpend, TypedFilter, UnlessPayModifier, UnlessPayScaling,
+    UntilCondition, VoteSubject, ZoneChangeClause, ZoneChoiceCandidateSource, ZoneOwner,
 };
+use crate::types::ability::{GameRestriction, ProhibitedActivity, RestrictionPlayerScope};
 use crate::types::game_state::TargetSelectionConstraint;
-use crate::types::keywords::{DisguiseCost, Keyword};
-use crate::types::statics::CastFrequency;
+use crate::types::keywords::{
+    BestowCost, BuybackCost, CyclingCost, DisguiseCost, EchoCost, EmbalmCost, EscapeCost,
+    EternalizeCost, EvokeCost, FlashbackCost, Keyword, ProtectionTarget, WardCost,
+};
+use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::triggers::AttackTargetFilter;
 
 /// The three independent classification axes, accumulated over one AST walk.
@@ -129,6 +137,9 @@ struct Axes<'a> {
     /// The per-turn and per-game history members a resolution or legality gate reads
     /// (CR 732.2a: the history cover equalizes only members no live surface reads).
     history: HistoryReads,
+    /// CR 805.4d: reads "that player" of a per-player instance — the scoped player or the
+    /// triggering event's player.
+    that_player: bool,
 }
 
 impl<'a> Axes<'a> {
@@ -138,14 +149,23 @@ impl<'a> Axes<'a> {
         sibling: SiblingReads::None,
         projected: false,
         history: HistoryReads::NONE,
+        that_player: false,
+    };
+    /// A read of "that player" and nothing else.
+    const THAT_PLAYER: Self = Axes {
+        that_player: true,
+        ..Axes::NONE
     };
     /// A subtree the walk does not descend into but which can transitively express
-    /// a read — classified as reading everything (fail-closed / fail-safe).
+    /// a read — classified as reading every axis (fail-closed / fail-safe) except
+    /// `that_player`, which a fail-closed site reads exactly where a field it scans does
+    /// (`Axes::CONSERVATIVE.or(..)`), so the blanket neither invents nor hides "that player".
     const CONSERVATIVE: Self = Axes {
         event: true,
         sibling: SiblingReads::Any,
         projected: true,
         history: HistoryReads::ALL,
+        that_player: false,
     };
 
     /// CR 732.2a: a shortcut proposal is legal only on outcomes the loop's own progress cannot
@@ -168,6 +188,7 @@ impl<'a> Axes<'a> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::of(member),
+            that_player: false,
         }
     }
 
@@ -186,6 +207,7 @@ impl<'a> Axes<'a> {
             sibling: self.sibling.or(other.sibling),
             projected: self.projected || other.projected,
             history: self.history.or(other.history),
+            that_player: self.that_player || other.that_player,
         }
     }
 
@@ -196,6 +218,7 @@ impl<'a> Axes<'a> {
             sibling,
             projected,
             history,
+            that_player,
         } = self;
         let sibling = match sibling {
             SiblingReads::None => SiblingReads::None,
@@ -206,6 +229,7 @@ impl<'a> Axes<'a> {
             sibling,
             projected,
             history,
+            that_player,
         }
     }
 }
@@ -277,17 +301,17 @@ impl<'a> SiblingReads<'a> {
 /// `Conservative` is the pre-existing shared answer that the CR 603.3b
 /// trigger-ordering gate (`game::triggers`) and every non-firewall caller
 /// require, and it keeps the `LoopDetectionMode::Off` game byte-identical
-///. `LoopFirewall` is used ONLY by the CR 732.2a object-growth
+///. `LoopFirewall` is used by the CR 732.2a object-growth
 /// firewall (`analysis::resource`), which needs a mode-divergent arm to
-/// DESCEND rather than fail closed. `Off` cannot observe `LoopFirewall`:
-/// this value is constructed nowhere outside this module, inside the
-/// `pub(crate)` entry points whose only production consumer is that
-/// firewall, itself reachable only under `loop_detection.samples()`.
+/// DESCEND rather than fail closed. `Off` observes `LoopFirewall` only through
+/// the CR 805.4d `that_player` projection (`trigger_refers_to_its_player`); every
+/// other entry point constructing it is consumed by that firewall, itself reachable
+/// only under `loop_detection.samples()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScanMode {
     /// Fail-closed on every mode-divergent arm (the shared CR 603.3b + default answer).
     Conservative,
-    /// Descend a mode-divergent arm's payload (CR 732.2a firewall only).
+    /// Descend a mode-divergent arm's payload (the CR 732.2a firewall; CR 805.4d's `that_player`).
     LoopFirewall,
 }
 
@@ -428,8 +452,8 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes<'_> {
     } = a;
 
     let mut acc = scan_effect(effect, mode);
-    if reads_return_result.is_some() {
-        acc = acc.or(Axes::CONSERVATIVE);
+    if let Some((_, spec)) = reads_return_result {
+        acc = acc.or(return_result_read_axes(spec, mode));
     }
     if let Some(branches) = coin_branches {
         for child in [branches.won.as_ref(), branches.lost.as_ref()]
@@ -631,6 +655,7 @@ fn scan_zone_choice_candidate_source(
                     sibling: SiblingReads::Any,
                     projected: false,
                     history: HistoryReads::NONE,
+                    that_player: false,
                 }
             } else {
                 Axes::NONE
@@ -646,6 +671,66 @@ fn scan_zone_choice_candidate_source(
         // CR 608.2c: the pool is the ability's handed-over targets, narrowed by
         // live zone membership; fail closed like the cost-paid record.
         ZoneChoiceCandidateSource::ParentTargets => Axes::CONSERVATIVE,
+    }
+}
+
+/// CR 805.4d: a temporary restriction reads "that player" through its affected players and its
+/// filters; its carrier holds every other axis fail-closed.
+fn scan_game_restriction(r: &GameRestriction, mode: ScanMode) -> Axes<'_> {
+    let ctx = FilterReadContext::SnapshotOrEvent;
+    match r {
+        GameRestriction::DamagePreventionDisabled {
+            source: _,
+            expiry: _,
+            scope: _,
+        } => Axes::NONE,
+        GameRestriction::ProhibitActivity {
+            source: _,
+            affected_players,
+            expiry: _,
+            activity,
+        } => {
+            let mut acc = match affected_players {
+                RestrictionPlayerScope::ScopedPlayer => Axes::THAT_PLAYER,
+                RestrictionPlayerScope::AllPlayers
+                | RestrictionPlayerScope::SpecificPlayer(_)
+                | RestrictionPlayerScope::TargetedPlayer
+                | RestrictionPlayerScope::ParentTargetedPlayer
+                | RestrictionPlayerScope::ParentObjectTargetController
+                | RestrictionPlayerScope::OpponentsOfSourceController
+                | RestrictionPlayerScope::DefendingPlayer
+                | RestrictionPlayerScope::SourceController => Axes::NONE,
+            };
+            let filter = match activity {
+                ProhibitedActivity::CastSpells { spell_filter, .. } => spell_filter.as_ref(),
+                ProhibitedActivity::PlayLands { land_filter, .. } => land_filter.as_ref(),
+                ProhibitedActivity::CastOnlyFromZones { .. }
+                | ProhibitedActivity::ActivateAbilities { .. }
+                | ProhibitedActivity::Attack { .. }
+                | ProhibitedActivity::ProhibitPlayFromZone { .. } => None,
+            };
+            if let Some(f) = filter {
+                acc = acc.or(scan_target_filter(f, ctx, mode));
+            }
+            acc
+        }
+        GameRestriction::CantEnterBattlefieldFrom {
+            source: _,
+            expiry: _,
+            filter,
+        } => scan_target_filter(filter, ctx, mode),
+    }
+}
+
+/// CR 805.4d: whose zone supplies a direct zone choice; only the scoped player is a read.
+fn scan_zone_owner(owner: ZoneOwner) -> Axes<'static> {
+    match owner {
+        ZoneOwner::ScopedPlayer => Axes::THAT_PLAYER,
+        ZoneOwner::Controller
+        | ZoneOwner::TargetedPlayer
+        | ZoneOwner::Opponent
+        | ZoneOwner::Each(_)
+        | ZoneOwner::AllOwners => Axes::NONE,
     }
 }
 
@@ -823,7 +908,32 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::Counter { .. } => Axes::CONSERVATIVE,
+        Effect::Counter {
+            target,
+            source_rider,
+            countered_spell_zone,
+        } => {
+            let mut acc = Axes::CONSERVATIVE.or(scan_target_filter(target, target_ctx, mode));
+            match source_rider {
+                Some(CounterSourceRider::LosesAbilities {
+                    static_def,
+                    source_filter,
+                    duration,
+                }) => {
+                    acc = acc
+                        .or(scan_resolved_continuous_static(static_def, mode))
+                        .or(scan_duration(duration, mode));
+                    if let Some(filter) = source_filter {
+                        acc = acc.or(scan_target_filter(filter, target_ctx, mode));
+                    }
+                }
+                Some(CounterSourceRider::Destroy) | None => {}
+            }
+            if let Some(zone) = countered_spell_zone {
+                acc = acc.or(scan_spell_graveyard_replacement(zone, mode));
+            }
+            acc
+        }
         Effect::CounterAll { target } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
@@ -972,7 +1082,14 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::PumpAll { .. } => Axes::CONSERVATIVE,
+        Effect::PumpAll {
+            power,
+            toughness,
+            target,
+        } => Axes::CONSERVATIVE
+            .or(scan_pt_value(power, mode))
+            .or(scan_pt_value(toughness, mode))
+            .or(scan_target_filter(target, target_ctx, mode)),
         Effect::DamageAll {
             amount,
             target,
@@ -1035,13 +1152,6 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             library_shuffle: _,
         } => match mode {
             ScanMode::Conservative => Axes::CONSERVATIVE,
-            ScanMode::LoopFirewall
-                if !conditional_enter_with_counters.is_empty()
-                    || face_down_profile.is_some()
-                    || enters_modified_if.is_some() =>
-            {
-                Axes::CONSERVATIVE
-            }
             ScanMode::LoopFirewall => {
                 let mut acc = scan_target_filter(target, target_ctx, mode);
                 if let Some(controller) = enters_under {
@@ -1049,6 +1159,12 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
                 }
                 for (_counter_type, qty) in enter_with_counters {
                     acc = acc.or(scan_quantity_expr(qty, mode));
+                }
+                if !conditional_enter_with_counters.is_empty()
+                    || face_down_profile.is_some()
+                    || enters_modified_if.is_some()
+                {
+                    acc = Axes::CONSERVATIVE.or(acc);
                 }
                 acc
             }
@@ -1068,7 +1184,6 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             random_order: _,
         } => match mode {
             ScanMode::Conservative => Axes::CONSERVATIVE,
-            ScanMode::LoopFirewall if face_down_profile.is_some() => Axes::CONSERVATIVE,
             ScanMode::LoopFirewall => {
                 let mut acc = scan_target_filter(target, target_ctx, mode);
                 if let Some(controller) = enters_under {
@@ -1076,6 +1191,9 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
                 }
                 for (_counter_type, qty) in enter_with_counters {
                     acc = acc.or(scan_quantity_expr(qty, mode));
+                }
+                if face_down_profile.is_some() {
+                    acc = Axes::CONSERVATIVE.or(acc);
                 }
                 acc
             }
@@ -1220,15 +1338,70 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
         Effect::Behold { .. } => Axes::NONE,
         Effect::EndTheTurn => Axes::NONE,
         Effect::EndCombatPhase => Axes::NONE,
-        Effect::Vote { .. } => Axes::CONSERVATIVE,
-        Effect::ExileTopCardContest { .. } => Axes::CONSERVATIVE,
-        Effect::SeparateIntoPiles { .. } => Axes::CONSERVATIVE,
+        Effect::Vote {
+            choices: _,
+            per_choice_effect,
+            starting_with,
+            voter_scope: _,
+            tally_mode: _,
+            subject,
+            visibility: _,
+        } => {
+            let subject = match subject {
+                VoteSubject::Named => Axes::NONE,
+                VoteSubject::Objects {
+                    candidate_filter,
+                    outcome_template,
+                } => scan_target_filter(candidate_filter, target_ctx, mode)
+                    .or(ability_definition_axes(outcome_template, mode)),
+            };
+            per_choice_effect.iter().fold(
+                Axes::CONSERVATIVE
+                    .or(scan_controller_ref(starting_with))
+                    .or(subject),
+                |acc, e| acc.or(ability_definition_axes(e, mode)),
+            )
+        }
+        Effect::ExileTopCardContest { winner_effect } => {
+            Axes::CONSERVATIVE.or(ability_definition_axes(winner_effect, mode))
+        }
+        Effect::SeparateIntoPiles {
+            partition_subject: _,
+            object_filter,
+            chooser,
+            chosen_pile_effect,
+            pile_source: _,
+            unchosen_pile_effect,
+        } => {
+            let mut acc = Axes::CONSERVATIVE
+                .or(scan_target_filter(object_filter, target_ctx, mode))
+                .or(scan_player_scope(chooser))
+                .or(ability_definition_axes(chosen_pile_effect, mode));
+            if let Some(e) = unchosen_pile_effect {
+                acc = acc.or(ability_definition_axes(e, mode));
+            }
+            acc
+        }
         Effect::SwitchPT { target } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::CopySpell { .. } => Axes::CONSERVATIVE,
+        Effect::CopySpell {
+            target,
+            retarget: _,
+            copier,
+            additional_modifications,
+            starting_loyalty_from_casualty_sacrifice: _,
+        } => {
+            let mut acc = Axes::CONSERVATIVE.or(scan_target_filter(target, target_ctx, mode));
+            if let Some(c) = copier {
+                acc = acc.or(scan_controller_ref(c));
+            }
+            additional_modifications
+                .iter()
+                .fold(acc, |acc, m| acc.or(scan_continuous_modification(m, mode)))
+        }
         Effect::ModifyAnnouncedX { .. } => Axes::CONSERVATIVE,
         Effect::EpicCopy { .. } => Axes::CONSERVATIVE,
         Effect::CastCopyOfCard {
@@ -1347,7 +1520,27 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             acc = acc.or(scan_target_filter(owner, target_ctx, mode));
             acc
         }
-        Effect::BecomeCopy { .. } => Axes::CONSERVATIVE,
+        Effect::BecomeCopy {
+            target,
+            recipient,
+            duration,
+            mana_value_limit: _,
+            additional_modifications,
+        } => {
+            let mut acc = Axes::CONSERVATIVE.or(scan_target_filter(target, target_ctx, mode));
+            match recipient {
+                CopyRecipient::Target(filter) | CopyRecipient::Untargeted(filter) => {
+                    acc = acc.or(scan_target_filter(filter, target_ctx, mode));
+                }
+                CopyRecipient::Source => {}
+            }
+            if let Some(d) = duration {
+                acc = acc.or(scan_duration(d, mode));
+            }
+            additional_modifications
+                .iter()
+                .fold(acc, |acc, m| acc.or(scan_continuous_modification(m, mode)))
+        }
         // CR 707.2c: the chosen creature's copiable values are latched onto the
         // Aura's host at the answer — a copy-family continuous effect, same
         // conservative classification as `BecomeCopy`. `filter` scans no
@@ -1451,8 +1644,29 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::Animate { .. } => Axes::CONSERVATIVE,
-        Effect::ReturnAsAura { .. } => Axes::CONSERVATIVE,
+        Effect::Animate {
+            power,
+            toughness,
+            types: _,
+            remove_types: _,
+            target,
+            keywords,
+        } => {
+            let mut acc = Axes::CONSERVATIVE.or(scan_target_filter(target, target_ctx, mode));
+            for pt in [power, toughness].into_iter().flatten() {
+                acc = acc.or(scan_pt_value(pt, mode));
+            }
+            keywords
+                .iter()
+                .fold(acc, |acc, k| acc.or(scan_keyword(k, mode)))
+        }
+        Effect::ReturnAsAura {
+            enchant_filter,
+            grants,
+        } => grants.iter().fold(
+            Axes::CONSERVATIVE.or(scan_target_filter(enchant_filter, target_ctx, mode)),
+            |acc, m| acc.or(scan_continuous_modification(m, mode)),
+        ),
         Effect::RegisterBending { kind: _ } => Axes::NONE,
         Effect::GenericEffect {
             static_abilities,
@@ -1550,7 +1764,33 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::SearchLibrary { .. } => Axes::CONSERVATIVE,
+        Effect::SearchLibrary {
+            source_zones: _,
+            filter,
+            count,
+            reveal: _,
+            target_player,
+            selection_constraint,
+            split: _,
+        } => {
+            let mut acc = Axes::CONSERVATIVE
+                .or(scan_target_filter(filter, target_ctx, mode))
+                .or(scan_quantity_expr(count, mode));
+            match selection_constraint {
+                SearchSelectionConstraint::MatchEachFilter { filters } => {
+                    for f in filters {
+                        acc = acc.or(scan_target_filter(f, target_ctx, mode));
+                    }
+                }
+                SearchSelectionConstraint::None
+                | SearchSelectionConstraint::SharesQualities { .. }
+                | SearchSelectionConstraint::TotalManaValue { .. } => {}
+            }
+            if let Some(p) = target_player {
+                acc = acc.or(scan_target_filter(p, target_ctx, mode));
+            }
+            acc
+        }
         Effect::SearchOutsideGame {
             filter,
             count,
@@ -1593,7 +1833,13 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             }
             acc
         }
-        Effect::RevealFromHand { .. } => Axes::CONSERVATIVE,
+        Effect::RevealFromHand { filter, on_decline } => {
+            let mut acc = Axes::CONSERVATIVE.or(scan_target_filter(filter, target_ctx, mode));
+            if let Some(e) = on_decline {
+                acc = acc.or(ability_definition_axes(e, mode));
+            }
+            acc
+        }
         Effect::Reveal { target } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
@@ -1632,7 +1878,14 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
         // CR 608.2d: `chooser` (controller / declared-target read) is subsumed
         // by CONSERVATIVE on every axis; a future refinement of this arm must
         // destructure the field and classify it per-axis.
-        Effect::Choose { .. } => Axes::CONSERVATIVE,
+        Effect::Choose {
+            choice_type,
+            chooser,
+            persist: _,
+            selection: _,
+        } => Axes::CONSERVATIVE
+            .or(scan_controller_ref(chooser))
+            .or(scan_choice_type(choice_type, mode)),
         Effect::ChooseDamageSource { source_filter } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(source_filter, target_ctx, mode));
@@ -1742,13 +1995,12 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
         } => match mode {
             ScanMode::Conservative => Axes::CONSERVATIVE,
             ScanMode::LoopFirewall => {
+                let mut acc = scan_delayed_trigger_condition(condition, mode);
+                acc = acc.or(ability_definition_axes(effect, mode));
                 if *uses_tracked_set {
-                    Axes::CONSERVATIVE
-                } else {
-                    let mut acc = scan_delayed_trigger_condition(condition, mode);
-                    acc = acc.or(ability_definition_axes(effect, mode));
-                    acc
+                    acc = Axes::CONSERVATIVE.or(acc);
                 }
+                acc
             }
         },
         // Digital-only Alchemy (no CR entry): a boon installs a delayed
@@ -1770,8 +2022,20 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             }
         },
         Effect::NoteNumber { value } => scan_quantity_expr(value, mode),
-        Effect::AddTargetReplacement { .. } => Axes::CONSERVATIVE,
-        Effect::AddRestriction { .. } => Axes::CONSERVATIVE,
+        Effect::AddTargetReplacement {
+            replacement,
+            target,
+        } => Axes::CONSERVATIVE
+            .or(scan_target_filter(target, target_ctx, mode))
+            .or(replacement_definition_axes(
+                replacement,
+                None,
+                mode,
+                DefinitionPart::Whole,
+            )),
+        Effect::AddRestriction { restriction } => {
+            Axes::CONSERVATIVE.or(scan_game_restriction(restriction, mode))
+        }
         Effect::ReduceNextSpellCost {
             spell_filter,
             amount: _,
@@ -1806,8 +2070,17 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
         // so classify CONSERVATIVE — the fail-closed default for undescended subtrees,
         // exactly as the sibling continuous-modification effects. Over-read is inert —
         // this effect never resolves standalone (lifted as CastFromZone permission metadata).
-        Effect::AddPendingEntersModifications { .. } => Axes::CONSERVATIVE,
-        Effect::CreateEmblem { .. } => Axes::CONSERVATIVE,
+        Effect::AddPendingEntersModifications { rider } => {
+            Axes::CONSERVATIVE.or(scan_pending_enters(rider, mode))
+        }
+        Effect::CreateEmblem { statics, triggers } => {
+            let acc = statics.iter().fold(Axes::CONSERVATIVE, |acc, sd| {
+                acc.or(scan_resolved_continuous_static(sd, mode))
+            });
+            triggers.iter().fold(acc, |acc, t| {
+                acc.or(scan_trigger_definition(t, mode, DefinitionPart::Whole))
+            })
+        }
         // CR 118.12: paying a resolution-time cost reads the cost's own payload, not the turn's
         // history.
         Effect::PayCost { cost, scale, payer } => {
@@ -1827,11 +2100,36 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
                 },
                 _ => Axes {
                     history: payload.history,
+                    that_player: payload.that_player,
                     ..Axes::CONSERVATIVE
                 },
             }
         }
-        Effect::CastFromZone { .. } => Axes::CONSERVATIVE,
+        Effect::CastFromZone {
+            target,
+            without_paying_mana_cost: _,
+            mode: _,
+            cast_transformed: _,
+            alt_ability_cost,
+            constraint,
+            duration,
+            driver: _,
+            mana_spend_permission: _,
+            additional_cost: _,
+            cast_cost_modifier: _,
+        } => {
+            let mut acc = Axes::CONSERVATIVE.or(scan_target_filter(target, target_ctx, mode));
+            if let Some(c) = constraint {
+                acc = acc.or(scan_cast_permission_constraint(c, mode));
+            }
+            if let Some(c) = alt_ability_cost {
+                acc = acc.or(scan_ability_cost(c, mode));
+            }
+            if let Some(d) = duration {
+                acc = acc.or(scan_duration(d, mode));
+            }
+            acc
+        }
         Effect::FreeCastFromZones {
             filter,
             count: _,
@@ -1873,7 +2171,29 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             }
             acc
         }
-        Effect::CreateDamageReplacement { .. } => Axes::CONSERVATIVE,
+        Effect::CreateDamageReplacement {
+            source_filter,
+            combat_scope: _,
+            target_filter: _,
+            modification,
+            redirect_to: _,
+            redirect_amount: _,
+            redirect_object_filter,
+            recipient_object_filter,
+            redirect_lifetime: _,
+        } => [
+            source_filter,
+            redirect_object_filter,
+            recipient_object_filter,
+        ]
+        .into_iter()
+        .flatten()
+        .fold(
+            modification.as_ref().map_or(Axes::CONSERVATIVE, |m| {
+                Axes::CONSERVATIVE.or(scan_damage_modification(m, mode))
+            }),
+            |acc, f| acc.or(scan_target_filter(f, target_ctx, mode)),
+        ),
         Effect::CreateDrawReplacement { replacement_effect } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_effect(replacement_effect, mode));
@@ -1893,8 +2213,42 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             }
             acc
         }
-        Effect::RollDie { .. } => Axes::CONSERVATIVE,
-        Effect::FlipCoins { .. } => Axes::CONSERVATIVE,
+        Effect::RollDie {
+            count,
+            sides: _,
+            results,
+            modifier,
+        } => {
+            let modifier = match modifier {
+                Some(DieRollModifier::Add { value } | DieRollModifier::Subtract { value }) => {
+                    scan_quantity_expr(value, mode)
+                }
+                None => Axes::NONE,
+            };
+            results.iter().fold(
+                Axes::CONSERVATIVE
+                    .or(scan_quantity_expr(count, mode))
+                    .or(modifier),
+                |acc, b| acc.or(ability_definition_axes(&b.effect, mode)),
+            )
+        }
+        Effect::FlipCoins {
+            flips,
+            win_effect,
+            lose_effect,
+            flipper,
+        } => {
+            let flips = match flips {
+                CoinFlipRun::Exactly { count } => scan_quantity_expr(count, mode),
+                CoinFlipRun::UntilLoss => Axes::NONE,
+            };
+            [win_effect, lose_effect].into_iter().flatten().fold(
+                Axes::CONSERVATIVE
+                    .or(scan_target_filter(flipper, target_ctx, mode))
+                    .or(flips),
+                |acc, e| acc.or(ability_definition_axes(e, mode)),
+            )
+        }
         Effect::RingTemptsYou => Axes::NONE,
         Effect::VentureIntoDungeon => Axes::NONE,
         Effect::VentureInto { dungeon: _ } => Axes::NONE,
@@ -1971,14 +2325,18 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             permission,
             target,
             grantee: _,
-        } => Axes {
-            history: scan_target_filter(target, target_ctx, mode)
-                .history
-                .or(casting_permission_history(permission, mode)),
-            ..Axes::CONSERVATIVE
-        },
+        } => {
+            let target = scan_target_filter(target, target_ctx, mode);
+            let permission = casting_permission_axes(permission, mode);
+            Axes {
+                history: target.history.or(permission.history),
+                that_player: target.that_player || permission.that_player,
+                ..Axes::CONSERVATIVE
+            }
+        }
         Effect::ChooseFromZone {
             zone,
+            zone_owner,
             filter,
             candidate_source,
             reciprocal_role,
@@ -1991,6 +2349,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             if let Some(x) = filter {
                 acc = acc.or(scan_target_filter(x, target_ctx, mode));
             }
+            acc = acc.or(scan_zone_owner(*zone_owner));
             acc = acc.or(scan_zone_choice_candidate_source(*candidate_source, *zone));
             acc = acc.or(scan_reciprocal_zone_choice_role(*reciprocal_role));
             acc
@@ -2090,7 +2449,21 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::ExileFromTopUntil { .. } => Axes::CONSERVATIVE,
+        Effect::ExileFromTopUntil { player, until } => {
+            let until = match until {
+                UntilCondition::NextMatches { filter, count } => {
+                    scan_target_filter(filter, target_ctx, mode).or(scan_quantity_expr(count, mode))
+                }
+                UntilCondition::CumulativeThreshold {
+                    property: _,
+                    comparator: _,
+                    threshold,
+                } => scan_quantity_expr(threshold, mode),
+            };
+            Axes::CONSERVATIVE
+                .or(scan_target_filter(player, target_ctx, mode))
+                .or(until)
+        }
         Effect::RevealUntil {
             player,
             filter,
@@ -2141,7 +2514,21 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
         Effect::Ripple { count: _ } => Axes::NONE,
         Effect::MiracleCast { cost: _ } => Axes::NONE,
         Effect::MadnessCast { cost: _ } => Axes::NONE,
-        Effect::PutAtLibraryPosition { .. } => Axes::CONSERVATIVE,
+        Effect::PutAtLibraryPosition {
+            target,
+            count,
+            position,
+            arranger,
+        } => {
+            let mut acc = Axes::CONSERVATIVE
+                .or(scan_target_filter(target, target_ctx, mode))
+                .or(scan_quantity_expr(count, mode))
+                .or(scan_library_position(position, mode));
+            if let Some(a) = arranger {
+                acc = acc.or(scan_target_filter(a, target_ctx, mode));
+            }
+            acc
+        }
         Effect::ChooseDrawnThisTurnPayOrTopdeck {
             count,
             life_payment,
@@ -2406,7 +2793,30 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::Conjure { .. } => Axes::CONSERVATIVE,
+        Effect::Conjure {
+            cards,
+            destination: _,
+            tapped: _,
+            library_position,
+            library_players,
+        } => {
+            let mut acc = cards.iter().fold(Axes::CONSERVATIVE, |acc, card| {
+                let source = match &card.source {
+                    ConjureSource::Named { name: _ } => Axes::NONE,
+                    ConjureSource::Duplicate { duplicate_of } => {
+                        scan_target_filter(duplicate_of, target_ctx, mode)
+                    }
+                };
+                acc.or(source).or(scan_quantity_expr(&card.count, mode))
+            });
+            if let Some(position) = library_position {
+                acc = acc.or(scan_library_position(position, mode));
+            }
+            if let Some(p) = library_players {
+                acc = acc.or(scan_player_filter(p, mode));
+            }
+            acc
+        }
         Effect::ApplyPerpetual {
             target,
             modification: _,
@@ -2454,14 +2864,12 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
     }
 }
 
-/// CR 601.3: the history a casting permission reads when it allows a card to be cast or played:
-/// its duration, filter and cost, the ledgers a frequency consults, and the turn a turn-stamped
-/// permission is compared with.
-fn casting_permission_history(permission: &CastingPermission, mode: ScanMode) -> HistoryReads {
+/// CR 601.3: what a casting permission reads when it allows a card to be cast or played: its
+/// duration, filter and cost, the ledgers a frequency consults, and the turn a turn-stamped
+/// permission is compared with. Its caller consults only `history` and `that_player`.
+fn casting_permission_axes(permission: &CastingPermission, mode: ScanMode) -> Axes<'_> {
     match permission {
-        CastingPermission::AdventureCreature | CastingPermission::ExileWithEnergyCost => {
-            HistoryReads::NONE
-        }
+        CastingPermission::AdventureCreature | CastingPermission::ExileWithEnergyCost => Axes::NONE,
         CastingPermission::WarpExile {
             castable_after_turn: _,
         }
@@ -2469,10 +2877,71 @@ fn casting_permission_history(permission: &CastingPermission, mode: ScanMode) ->
         | CastingPermission::Foretold {
             cost: _,
             turn_foretold: _,
-        } => HistoryReads::of(HistoryMember::TurnNumber),
-        // Not descended: a constraint, a cost and entry modifications can each express a read.
-        CastingPermission::ExileWithAltCost { .. }
-        | CastingPermission::ExileWithAltAbilityCost { .. } => HistoryReads::ALL,
+        } => Axes::history_of(HistoryMember::TurnNumber),
+        // History not descended: a constraint, a cost and entry modifications can each express a read.
+        CastingPermission::ExileWithAltCost {
+            cost: _,
+            cost_provenance: _,
+            cast_transformed: _,
+            constraint,
+            granted_to: _,
+            resolution_cleanup,
+            duration,
+            source_id: _,
+            graveyard_replacement,
+            enters_with_counter: _,
+            enters_with_modifications,
+            mana_spend_permission: _,
+            cast_cost_modifier: _,
+        } => {
+            let mut acc = Axes {
+                history: HistoryReads::ALL,
+                ..Axes::NONE
+            }
+            .or(scan_pending_enters(enters_with_modifications, mode));
+            if let Some(constraint) = constraint {
+                acc = acc.or(scan_cast_permission_constraint(constraint, mode));
+            }
+            if let Some(cleanup) = resolution_cleanup {
+                let policy = &cleanup.face_policy;
+                acc = acc.or(scan_target_filter(
+                    &policy.filter,
+                    FilterReadContext::LiveBoardCensus,
+                    mode,
+                ));
+                if let Some(constraint) = &policy.constraint {
+                    acc = acc.or(scan_cast_permission_constraint(constraint, mode));
+                }
+            }
+            if let Some(duration) = duration {
+                acc = acc.or(scan_duration(duration, mode));
+            }
+            if let Some(zone) = graveyard_replacement {
+                acc = acc.or(scan_spell_graveyard_replacement(zone, mode));
+            }
+            acc
+        }
+        CastingPermission::ExileWithAltAbilityCost {
+            cost,
+            constraint,
+            granted_to: _,
+            duration,
+            source_id: _,
+            cast_cost_modifier: _,
+        } => {
+            let mut acc = Axes {
+                history: HistoryReads::ALL,
+                ..Axes::NONE
+            }
+            .or(scan_ability_cost(cost, mode));
+            if let Some(constraint) = constraint {
+                acc = acc.or(scan_cast_permission_constraint(constraint, mode));
+            }
+            if let Some(duration) = duration {
+                acc = acc.or(scan_duration(duration, mode));
+            }
+            acc
+        }
         CastingPermission::PlayFromExile {
             duration,
             granted_to: _,
@@ -2491,23 +2960,115 @@ fn casting_permission_history(permission: &CastingPermission, mode: ScanMode) ->
             invalidation: _,
             provenance: _,
         } => {
-            let mut reads = scan_duration(duration, mode).history;
-            reads = reads.or(match frequency {
-                CastFrequency::Unlimited => HistoryReads::NONE,
-                CastFrequency::OncePerTurn | CastFrequency::OncePerTurnPerPermanentType => {
-                    HistoryReads::of(HistoryMember::ExilePlayPermissionsUsed)
-                        .or(HistoryReads::of(HistoryMember::ExileCastPermissionsUsed))
-                }
+            let mut acc = scan_duration(duration, mode).or(Axes {
+                history: match frequency {
+                    CastFrequency::Unlimited => HistoryReads::NONE,
+                    CastFrequency::OncePerTurn | CastFrequency::OncePerTurnPerPermanentType => {
+                        HistoryReads::of(HistoryMember::ExilePlayPermissionsUsed)
+                            .or(HistoryReads::of(HistoryMember::ExileCastPermissionsUsed))
+                    }
+                },
+                ..Axes::NONE
             });
             if let Some(filter) = card_filter {
-                let census = FilterReadContext::LiveBoardCensus;
-                reads = reads.or(scan_target_filter(filter, census, mode).history);
+                acc = acc.or(scan_target_filter(
+                    filter,
+                    FilterReadContext::LiveBoardCensus,
+                    mode,
+                ));
             }
             if let Some(cost) = alt_ability_cost {
-                reads = reads.or(scan_ability_cost(cost, mode).history);
+                acc = acc.or(scan_ability_cost(cost, mode));
             }
-            reads
+            acc
         }
+    }
+}
+
+fn scan_cast_permission_constraint(
+    constraint: &CastPermissionConstraint,
+    mode: ScanMode,
+) -> Axes<'_> {
+    match constraint {
+        CastPermissionConstraint::ManaValue {
+            comparator: _,
+            value,
+        } => scan_quantity_expr(value, mode),
+    }
+}
+
+fn scan_library_position(position: &LibraryPosition, mode: ScanMode) -> Axes<'_> {
+    match position {
+        LibraryPosition::Top | LibraryPosition::Bottom | LibraryPosition::NthFromTop { n: _ } => {
+            Axes::NONE
+        }
+        LibraryPosition::BeneathTop { depth: n } | LibraryPosition::RandomWithinTop { n } => {
+            scan_quantity_expr(n, mode)
+        }
+    }
+}
+
+fn scan_spell_graveyard_replacement(
+    zone: &SpellStackToGraveyardReplacement,
+    mode: ScanMode,
+) -> Axes<'_> {
+    match zone {
+        SpellStackToGraveyardReplacement::Library { position } => {
+            scan_library_position(position, mode)
+        }
+        SpellStackToGraveyardReplacement::Exile | SpellStackToGraveyardReplacement::Hand => {
+            Axes::NONE
+        }
+    }
+}
+
+fn scan_pending_enters(rider: &PendingEntersModifications, mode: ScanMode) -> Axes<'_> {
+    let PendingEntersModifications {
+        modifications,
+        cast_filter,
+    } = rider;
+    let mut acc = modifications.iter().fold(Axes::NONE, |acc, m| {
+        acc.or(scan_continuous_modification(m, mode))
+    });
+    if let Some(filter) = cast_filter {
+        acc = acc.or(scan_target_filter(
+            filter,
+            FilterReadContext::SnapshotOrEvent,
+            mode,
+        ));
+    }
+    acc
+}
+
+fn scan_choice_type(choice: &ChoiceType, mode: ScanMode) -> Axes<'_> {
+    match choice {
+        ChoiceType::Opponent {
+            restriction,
+            distinctness: _,
+        } => restriction
+            .as_deref()
+            .map_or(Axes::NONE, |player| scan_player_filter(player, mode)),
+        ChoiceType::Keyword { options, count: _ } => {
+            options.iter().fold(Axes::NONE, |acc, keyword| {
+                acc.or(scan_keyword(keyword, mode))
+            })
+        }
+        ChoiceType::CreatureType { options: _ }
+        | ChoiceType::Color { excluded: _ }
+        | ChoiceType::OddOrEven
+        | ChoiceType::BasicLandType
+        | ChoiceType::CardType { options: _ }
+        | ChoiceType::CardName
+        | ChoiceType::NumberRange { .. }
+        | ChoiceType::Labeled { options: _ }
+        | ChoiceType::LandType
+        | ChoiceType::CardPredicate { options: _ }
+        | ChoiceType::CardPredicateGuess { options: _ }
+        | ChoiceType::Player { distinctness: _ }
+        | ChoiceType::TwoColors
+        | ChoiceType::Word
+        | ChoiceType::Artist
+        | ChoiceType::CounterKind { options: _ } => Axes::NONE,
     }
 }
 
@@ -2522,6 +3083,7 @@ fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) ->
                     sibling: SiblingReads::Any,
                     projected: false,
                     history: HistoryReads::NONE,
+                    that_player: false,
                 }
                 .or(scan_target_filter(
                     filter,
@@ -2543,6 +3105,7 @@ fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) ->
                     sibling: SiblingReads::None,
                     projected: false,
                     history: HistoryReads::NONE,
+                    that_player: false,
                 },
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
@@ -2554,12 +3117,18 @@ fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) ->
                 // CR 603.3b: the journal population is projected turn state,
                 // while an optional event-relative filter still reads the
                 // triggering event and must participate in trigger ordering.
-                CardTypeSetSource::TurnJournal { filter, .. } => Axes {
+                CardTypeSetSource::TurnJournal {
+                    journal: _,
+                    scope,
+                    filter,
+                } => Axes {
                     event: false,
                     sibling: SiblingReads::None,
                     projected: true,
                     history: HistoryReads::NONE,
+                    that_player: false,
                 }
+                .or(scan_count_scope(scope))
                 .or(filter.as_ref().map_or(Axes::NONE, |filter| {
                     scan_target_filter(filter, FilterReadContext::SnapshotOrEvent, mode)
                 })),
@@ -2574,6 +3143,7 @@ fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) ->
                     sibling: SiblingReads::Any,
                     projected: false,
                     history: HistoryReads::NONE,
+                    that_player: false,
                 }
                 .or(scan_target_filter(
                     &CardTypeSetSource::targeted_objects_filter(slot),
@@ -2581,9 +3151,10 @@ fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) ->
                     mode,
                 )
                 .detached()),
-                CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => {
-                    Axes::CONSERVATIVE
+                CardTypeSetSource::Zone { zone: _, scope } => {
+                    Axes::CONSERVATIVE.or(scan_count_scope(scope))
                 }
+                CardTypeSetSource::ExiledBySource => Axes::CONSERVATIVE,
                 CardTypeSetSource::AnyOf { .. } => Axes::NONE,
             }
             .detached());
@@ -2591,7 +3162,7 @@ fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) ->
     if complete {
         axes
     } else {
-        Axes::CONSERVATIVE
+        Axes::CONSERVATIVE.or(axes)
     }
 }
 
@@ -2608,6 +3179,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_player_scope(player));
             acc
@@ -2622,6 +3194,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         QuantityRef::StartingLifeTotal { player } => scan_player_scope(player),
         // CR 701.57a: reads a transient game-state scalar (the last discover's
@@ -2636,6 +3209,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         QuantityRef::ObjectCount { filter } => {
             let mut acc = Axes {
@@ -2643,6 +3217,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::filtered(filter, CharacteristicKinds::EMPTY, mode),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -2663,6 +3238,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 ),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -2685,6 +3261,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 ),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -2704,6 +3281,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_player_filter(filter, mode));
             acc
@@ -2714,6 +3292,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::scoped(scope, CharacteristicKinds::EMPTY, mode),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_object_scope(scope));
             acc
@@ -2727,6 +3306,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::filtered(filter, CharacteristicKinds::EMPTY, mode),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -2741,6 +3321,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_count_scope(scope));
             acc
@@ -2757,6 +3338,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::scoped(scope, CharacteristicKinds::POWER_TOUGHNESS, mode),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_object_scope(scope));
             acc
@@ -2767,6 +3349,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::scoped(scope, CharacteristicKinds::EMPTY, mode),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_object_scope(scope));
             acc
@@ -2777,6 +3360,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::scoped(scope, CharacteristicKinds::POWER_TOUGHNESS, mode),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_object_scope(scope));
             acc
@@ -2787,6 +3371,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::scoped(scope, CharacteristicKinds::MANA_COST, mode),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_object_scope(scope));
             acc
@@ -2797,6 +3382,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::filtered(filter, CharacteristicKinds::MANA_COST, mode),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -2811,6 +3397,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::scoped(scope, CharacteristicKinds::COLOR, mode),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_object_scope(scope));
             acc
@@ -2821,6 +3408,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::scoped(scope, CharacteristicKinds::NAME_TEXT, mode),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_object_scope(scope));
             acc
@@ -2836,6 +3424,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::scoped(scope, CharacteristicKinds::EMPTY, mode),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_object_scope(scope));
             acc
@@ -2846,6 +3435,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::scoped(scope, CharacteristicKinds::CARD_TYPES, mode),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_object_scope(scope));
             acc
@@ -2856,6 +3446,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::scoped(scope, CharacteristicKinds::MANA_COST, mode),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_object_scope(scope));
             acc
@@ -2874,6 +3465,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::filtered(filter, CharacteristicKinds::CONTROLLER, mode),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -2894,23 +3486,25 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         // Deliberately coarse: `Axes::CONSERVATIVE` is FAIL-CLOSED, so a new
         // `CardTypeSetSource` variant reached through this compiler-blind `{ .. }`
         // pattern can only over-report, never under-report. The population axis is
         // not decomposed here because no caller needs a narrower answer.
-        QuantityRef::DistinctCardTypes { .. } => Axes::CONSERVATIVE,
-        QuantityRef::SharedCardTypes { .. } => Axes::CONSERVATIVE,
+        QuantityRef::DistinctCardTypes { source } | QuantityRef::SharedCardTypes { source } => {
+            Axes::CONSERVATIVE.or(scan_property_aggregate_source(source, mode))
+        }
         // `restrict` narrows which subtype VALUES tally within the same
         // population scan (a value filter, not a new state axis — the
         // population read is unchanged), so the verdict stays `CONSERVATIVE`.
         // Explicit destructure (not `{ .. }`) so the next field addition is
         // compiler-visible.
         QuantityRef::DistinctSubtypes {
-            source: _,
+            source,
             exclude: _,
             restrict: _,
-        } => Axes::CONSERVATIVE,
+        } => Axes::CONSERVATIVE.or(scan_property_aggregate_source(source, mode)),
         QuantityRef::CardsExiledBySource => Axes::NONE,
         // Turtle Team-Up: a live command-zone pile census (sibling read like
         // ObjectCount, but filterless — no filter to scan, no history/event).
@@ -2919,6 +3513,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         QuantityRef::ExiledCardPower { index: _ } => Axes::NONE,
         QuantityRef::ZoneCardCount {
@@ -2986,6 +3581,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_player_scope(player));
             acc
@@ -3000,6 +3596,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         QuantityRef::Speed { player, .. } => {
             let mut acc = Axes::NONE;
@@ -3011,6 +3608,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         QuantityRef::AttachmentsOnLeavingObject { controller, .. } => {
             let mut acc = Axes::NONE;
@@ -3024,6 +3622,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         // CR 700.2: reads the triggering-spell object (same event axis as
         // EventContextSourceCostX and TimesCostPaidThisResolution).
@@ -3032,6 +3631,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         QuantityRef::SpellsCastThisTurn { scope, filter } => {
             let mut acc = Axes {
@@ -3039,6 +3639,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_count_scope(scope));
             if let Some(x) = filter {
@@ -3056,6 +3657,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_count_scope(scope));
             if let Some(x) = filter {
@@ -3073,6 +3675,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::filtered(filter, CharacteristicKinds::EMPTY, mode),
                 projected: true,
                 history: HistoryReads::of(HistoryMember::TurnNumber),
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -3087,6 +3690,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_player_scope(player));
             acc = acc.or(scan_target_filter(
@@ -3104,6 +3708,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         // Controller turn-accumulator: no event/sibling/projected axis (mirrors
         // CrimesCommittedThisTurn / DescendedThisTurn).
@@ -3116,6 +3721,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_player_scope(player));
             acc
@@ -3126,6 +3732,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::of(HistoryMember::CardsDrawnThisTurn),
+                that_player: false,
             };
             acc = acc.or(scan_player_scope(player));
             acc
@@ -3136,6 +3743,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_player_scope(player));
             acc
@@ -3146,6 +3754,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_player_scope(player));
             acc
@@ -3170,6 +3779,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::Any,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_player_scope(player));
             acc = acc.or(scan_target_filter(
@@ -3199,6 +3809,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -3219,6 +3830,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -3240,6 +3852,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 source,
@@ -3280,6 +3893,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_player_scope(player));
             acc
@@ -3289,6 +3903,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         QuantityRef::SpellsCastThisGame { scope, filter } => {
             let mut acc = Axes {
@@ -3296,6 +3911,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_count_scope(scope));
             if let Some(x) = filter {
@@ -3317,6 +3933,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_count_scope(actor));
             acc = acc.or(scan_target_filter(
@@ -3337,6 +3954,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_player_scope(player));
             acc = acc.or(scan_target_filter(
@@ -3352,6 +3970,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_player_scope(player));
             acc
@@ -3370,8 +3989,16 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
-        QuantityRef::ManaSpentToCast { .. } => Axes::CONSERVATIVE,
+        QuantityRef::ManaSpentToCast { scope: _, metric } => match metric {
+            CastManaSpentMetric::FromSource { source_filter } => Axes::CONSERVATIVE.or(
+                scan_target_filter(source_filter, FilterReadContext::SnapshotOrEvent, mode),
+            ),
+            CastManaSpentMetric::Total
+            | CastManaSpentMetric::DistinctColors
+            | CastManaSpentMetric::OfColor { color: _ } => Axes::CONSERVATIVE,
+        },
         QuantityRef::ColorsInCommandersColorIdentity => Axes::NONE,
         QuantityRef::CommanderCastFromCommandZoneCount => Axes::NONE,
         QuantityRef::CommanderManaValue { owner, .. } => {
@@ -3389,6 +4016,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                     sibling: SiblingReads::filtered(filter, CharacteristicKinds::COLOR, mode),
                     projected: false,
                     history: HistoryReads::NONE,
+                    that_player: false,
                 };
                 acc = acc.or(scan_target_filter(
                     filter,
@@ -3401,11 +4029,13 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             // populations are classified like their card-type and subtype peers
             // above: `Axes::CONSERVATIVE`, which is fail-closed. A member
             // filter cannot narrow a conservative verdict.
-            crate::types::ability::CardTypeSetSource::Zone { .. }
+            population @ (crate::types::ability::CardTypeSetSource::Zone { .. }
             | crate::types::ability::CardTypeSetSource::ExiledBySource
             | crate::types::ability::CardTypeSetSource::TrackedSet { .. }
             | crate::types::ability::CardTypeSetSource::TurnJournal { .. }
-            | crate::types::ability::CardTypeSetSource::AnyOf { .. } => Axes::CONSERVATIVE,
+            | crate::types::ability::CardTypeSetSource::AnyOf { .. }) => {
+                Axes::CONSERVATIVE.or(scan_property_aggregate_source(population, mode))
+            }
             // CR 608.2c + CR 115.1: the distinct-colors head composes the
             // SAME census base + filter scan as the `Objects` arm above, with
             // the canonical slot filter via the single
@@ -3417,6 +4047,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                     sibling: SiblingReads::Any,
                     projected: false,
                     history: HistoryReads::NONE,
+                    that_player: false,
                 };
                 acc = acc.or(scan_target_filter(
                     &crate::types::ability::CardTypeSetSource::targeted_objects_filter(slot),
@@ -3433,6 +4064,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::filtered(filter, CharacteristicKinds::EMPTY, mode),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -3518,6 +4150,7 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         AbilityCondition::AdditionalCostPaid { subject, .. } => {
             let mut acc = Axes::NONE;
@@ -3541,7 +4174,24 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes<'_> {
             color: _,
             minimum: _,
         } => Axes::NONE,
-        AbilityCondition::RevealedHasCardType { .. } => Axes::CONSERVATIVE,
+        AbilityCondition::RevealedHasCardType {
+            card_types: _,
+            additional_filter,
+            subtype_filter,
+        } => {
+            let mut acc = Axes::CONSERVATIVE;
+            if let Some(prop) = additional_filter {
+                acc = acc.or(scan_filter_prop(prop, mode));
+            }
+            if let Some(filter) = subtype_filter {
+                acc = acc.or(scan_target_filter(
+                    filter,
+                    FilterReadContext::SnapshotOrEvent,
+                    mode,
+                ));
+            }
+            acc
+        }
         AbilityCondition::ObjectsShareQuality {
             subject,
             reference,
@@ -3574,6 +4224,7 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::of(HistoryMember::TurnNumber),
+            that_player: false,
         },
         AbilityCondition::CastVariantPaid { subject, .. } => {
             let mut acc = Axes::history_of(HistoryMember::TurnNumber);
@@ -3623,6 +4274,7 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         // CR 309.7: controller-state predicate — touches no scan axis.
         AbilityCondition::CompletedDungeon { .. } => Axes::NONE,
@@ -3661,6 +4313,7 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -3685,6 +4338,7 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -3703,6 +4357,7 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -3740,18 +4395,21 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         AbilityCondition::FirstCombatPhaseOfTurn => Axes {
             event: false,
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         AbilityCondition::FirstEndStepOfTurn => Axes {
             event: false,
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         // `destination` refines the same event-ledger read (the moved object's
         // current zone) — no new axis beyond the `event: true` already set.
@@ -3764,6 +4422,7 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -3823,10 +4482,11 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         AbilityCondition::SourceLacksKeyword { keyword: _ } => Axes::NONE,
         AbilityCondition::ScopedPlayerMatches { filter } => {
-            let mut acc = Axes::NONE;
+            let mut acc = Axes::THAT_PLAYER;
             acc = acc.or(scan_player_filter(filter, mode));
             acc
         }
@@ -3844,6 +4504,7 @@ fn scan_parsed_condition(x: &ParsedCondition, mode: ScanMode) -> Axes<'_> {
         sibling: SiblingReads::Any,
         projected: false,
         history: HistoryReads::NONE,
+        that_player: false,
     };
     // A per-turn or per-game journal `project_out_resources` clears.
     const JOURNAL: Axes = Axes {
@@ -3851,6 +4512,7 @@ fn scan_parsed_condition(x: &ParsedCondition, mode: ScanMode) -> Axes<'_> {
         sibling: SiblingReads::None,
         projected: true,
         history: HistoryReads::NONE,
+        that_player: false,
     };
     // The source's own characteristics.
     let source_read = |aggregate| {
@@ -4067,6 +4729,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             sibling: SiblingReads::filtered(x, CharacteristicKinds::EMPTY, mode),
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         }
         .or(x
             .extract_zones()
@@ -4124,6 +4787,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
                 },
                 projected: props.projected,
                 history: props.history,
+                that_player: props.that_player,
             }
         }
         TargetFilter::Not { filter } => {
@@ -4156,7 +4820,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         TargetFilter::SpecificObject { id: _ } => Axes::NONE,
         TargetFilter::SpecificPlayer { id: _ } => Axes::NONE,
         TargetFilter::Neighbor { direction: _ } => Axes::NONE,
-        TargetFilter::ScopedPlayer => Axes::NONE,
+        TargetFilter::ScopedPlayer => Axes::THAT_PLAYER,
         TargetFilter::AttachedTo => Axes::NONE,
         TargetFilter::LastCreated => Axes::NONE,
         TargetFilter::LastRevealed | TargetFilter::LastZoneChanged => Axes::NONE,
@@ -4168,6 +4832,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TargetFilter::ChosenCard => Axes::NONE,
         TargetFilter::TrackedSet { id: _ } => Axes::NONE,
@@ -4187,36 +4852,42 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TargetFilter::TriggeringSpellOwner => Axes {
             event: true,
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TargetFilter::TriggeringPlayer => Axes {
             event: true,
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: true,
         },
         TargetFilter::TriggeringSource | TargetFilter::CastingSpell => Axes {
             event: true,
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TargetFilter::EventTarget => Axes {
             event: true,
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TargetFilter::TriggeringSourceController => Axes {
             event: true,
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         // Engine classification: reads `DamageDealt.target` off the firing
         // event, so it carries the same `event` walker axis as `EventTarget`
@@ -4226,30 +4897,35 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TargetFilter::ParentTarget => Axes {
             event: true,
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TargetFilter::ParentTargetSlot { .. } | TargetFilter::DeclaredPlayer { .. } => Axes {
             event: true,
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TargetFilter::ParentTargetController => Axes {
             event: true,
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TargetFilter::ParentTargetOwner => Axes {
             event: true,
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TargetFilter::SourceChosenPlayer => Axes::NONE,
         TargetFilter::PlayerWhoChoseLabel { label: _ } => Axes::NONE,
@@ -4264,6 +4940,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         // CR 615.5: resolves the prevented event's damage source — an event read.
         TargetFilter::PostReplacementDamageSource => Axes {
@@ -4271,18 +4948,21 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TargetFilter::PostReplacementDamageTarget => Axes {
             event: true,
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TargetFilter::PostReplacementDamageTargetOwner => Axes {
             event: true,
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TargetFilter::DefendingPlayer => Axes::NONE,
         // CR 506.3: reads the bound attack event (event) and live combat and
@@ -4293,6 +4973,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TargetFilter::HasChosenName => Axes::NONE,
         TargetFilter::ChosenDamageSource { filter } => {
@@ -4301,6 +4982,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
                 sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             if let Some(f) = filter {
                 acc = acc.or(scan_target_filter(f, ctx, mode));
@@ -4331,12 +5013,14 @@ fn scan_object_scope(x: &ObjectScope) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         ObjectScope::CostPaidObject => Axes {
             event: true,
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         ObjectScope::Anaphoric => Axes::NONE,
         ObjectScope::Demonstrative => Axes::NONE,
@@ -4363,6 +5047,7 @@ fn scan_object_scope(x: &ObjectScope) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
     }
 }
@@ -4562,6 +5247,7 @@ fn scan_trigger_definition(
     // only. Those two DO propagate: they are the reads this descent exists to catch.
     acc = acc.or(Axes {
         event: false,
+        that_player: false,
         ..matcher
     });
     acc
@@ -4638,12 +5324,14 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TriggerCondition::LostLife => Axes {
             event: false,
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TriggerCondition::Descended => Axes::history_of(HistoryMember::PlayerDescendedThisTurn),
         TriggerCondition::ControlsType { filter } => {
@@ -4652,6 +5340,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::filtered(filter, CharacteristicKinds::EMPTY, mode),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -4665,12 +5354,14 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TriggerCondition::TwoOrMoreSpellsCastLastTurn => Axes {
             event: false,
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TriggerCondition::DuringPlayersTurn { player } => {
             let mut acc = Axes::NONE;
@@ -4682,12 +5373,14 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::of(HistoryMember::TurnNumber),
+            that_player: false,
         },
         TriggerCondition::SourceAttackedThisCombat => Axes {
             event: false,
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TriggerCondition::EchoDue => Axes::NONE,
         TriggerCondition::MinCoAttackers { filter, minimum: _ } => {
@@ -4737,6 +5430,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TriggerCondition::DealtDamageThisTurnBySource { source } => {
             let mut acc = Axes {
@@ -4744,6 +5438,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 source,
@@ -4759,6 +5454,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TriggerCondition::ControlCount { filter, minimum: _ } => {
             let mut acc = Axes {
@@ -4766,6 +5462,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::filtered(filter, CharacteristicKinds::EMPTY, mode),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -4793,6 +5490,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         // Same event-bound read as `ChoseOtherRingBearer`: the chooser and
         // the chosen bearer live on the triggering temptation event.
@@ -4801,12 +5499,14 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TriggerCondition::FirstCombatPhaseOfTurn => Axes {
             event: false,
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TriggerCondition::CastSpellThisTurn { filter } => {
             let mut acc = Axes {
@@ -4814,6 +5514,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             if let Some(x) = filter {
                 acc = acc.or(scan_target_filter(
@@ -4859,6 +5560,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TriggerCondition::HasCityBlessing => Axes::NONE,
         TriggerCondition::HasEnduringStory => Axes::NONE,
@@ -4873,6 +5575,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         // CR 603.3b: Mirrors `CounterAddedThisTurn` (same `counter_added_this_turn`
         // board ledger) — `projected: true`. NOT the tapped sibling's `Axes::NONE`;
@@ -4883,12 +5586,14 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TriggerCondition::LostLifeLastTurn => Axes {
             event: false,
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::of(HistoryMember::PlayerLifeLostLastTurn),
+            that_player: false,
         },
         TriggerCondition::DefendingPlayerControlsNone { filter } => {
             let mut acc = Axes::NONE;
@@ -4913,18 +5618,21 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TriggerCondition::ManaSpentCondition { text: _ } => Axes {
             event: false,
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TriggerCondition::HadCounters { .. } => Axes {
             event: false,
             sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         // CR 903.3d: live battlefield census — same self-asserted board read as the
         // `AbilityCondition` / `StaticCondition` mirrors of this printed clause.
@@ -4933,6 +5641,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TriggerCondition::IsRenowned { subject: _ } => Axes::NONE,
         TriggerCondition::HasCounters { .. } => Axes {
@@ -4940,6 +5649,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TriggerCondition::ZoneChangeObjectMatchesFilter {
             filter,
@@ -4951,6 +5661,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -4964,6 +5675,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TriggerCondition::SourceMatchesFilter { filter } => {
             let mut acc = Axes::NONE;
@@ -4980,6 +5692,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -4994,6 +5707,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -5007,9 +5721,32 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TriggerCondition::ChosenLabelIs { label: _ } => Axes::NONE,
-        TriggerCondition::AttackersDeclaredCount { .. } => Axes::CONSERVATIVE,
+        TriggerCondition::AttackersDeclaredCount {
+            subject,
+            comparator: _,
+            count: _,
+        } => {
+            let (player, filter) = match subject {
+                AttackersDeclaredCountSubject::Controller { scope, filter } => (scope, filter),
+                AttackersDeclaredCountSubject::AttackTarget {
+                    controller,
+                    attacked: _,
+                    filter,
+                } => (controller, filter),
+            };
+            let mut acc = Axes::CONSERVATIVE.or(scan_controller_ref(player));
+            if let Some(filter) = filter {
+                acc = acc.or(scan_target_filter(
+                    filter,
+                    FilterReadContext::LiveBoardCensus,
+                    mode,
+                ));
+            }
+            acc
+        }
         TriggerCondition::ExceptFirstDrawInDrawStep => Axes::NONE,
         TriggerCondition::PlacedByAbilitySource => Axes::NONE,
         // A per-turn per-ability ledger keyed by this occurrence's own identity,
@@ -5023,6 +5760,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         TriggerCondition::TriggeringSpellTargetsFilter { filter } => {
             let mut acc = Axes {
@@ -5030,6 +5768,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -5044,6 +5783,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -5193,6 +5933,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         StaticCondition::IsPresent { filter } => {
             let mut acc = Axes::NONE;
@@ -5248,6 +5989,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         StaticCondition::CastVariantPaid { variant: _ } => Axes::NONE,
         StaticCondition::RecipientHasCounters { .. } => Axes {
@@ -5255,6 +5997,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         StaticCondition::ClassLevelGE { level: _ } => Axes::NONE,
         StaticCondition::DefendingPlayerControls { filter } => {
@@ -5289,6 +6032,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         // CR 508.6: turn-history projection over the cleanup-time attack snapshot;
         // mirrors `SpellCastWithVariantThisTurn` (projected, not event/sibling).
@@ -5297,12 +6041,14 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         StaticCondition::OpponentPoisonAtLeast { count: _ } => Axes {
             event: false,
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         // CR 508.1h: a flat or per-attacker tax counts the declared attackers, no history.
         StaticCondition::UnlessPay {
@@ -5313,7 +6059,14 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes<'_> {
             history: attack_defended_history(defended.as_ref()),
             ..Axes::CONSERVATIVE
         },
-        StaticCondition::UnlessPay { .. } => Axes::CONSERVATIVE,
+        StaticCondition::UnlessPay {
+            cost: _,
+            scaling:
+                UnlessPayScaling::PerQuantityRef { quantity }
+                | UnlessPayScaling::PerAffectedAndQuantityRef { quantity }
+                | UnlessPayScaling::PerAffectedWithRef { quantity },
+            defended: _,
+        } => Axes::CONSERVATIVE.or(scan_quantity_ref(quantity, mode)),
         StaticCondition::Unrecognized { text: _ } => Axes::NONE,
         StaticCondition::DuringYourTurn => Axes::NONE,
         StaticCondition::DuringOpponentsTurn => Axes::NONE,
@@ -5323,6 +6076,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::of(HistoryMember::TurnNumber),
+            that_player: false,
         },
         StaticCondition::SourceExertedThisTurn => Axes::CONSERVATIVE,
         StaticCondition::SourceHasDealtDamage => Axes {
@@ -5330,6 +6084,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         StaticCondition::WasCast { zone: _ } => Axes::NONE,
         StaticCondition::IsRingBearer => Axes::NONE,
@@ -5341,6 +6096,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         StaticCondition::SourceIsTapped => Axes::NONE,
         StaticCondition::IsTapped { scope, .. } => {
@@ -5394,6 +6150,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         StaticCondition::None => Axes::NONE,
     }
@@ -5584,7 +6341,12 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes<'_> {
         // --- fail-closed CONSERVATIVE (projected:true):
         // CR 122.1: reads `counter_added_this_turn`, cleared by
         // `project_out_resources` — PROVEN projected.
-        FilterProp::CountersPutOnThisTurn { .. } => Axes::CONSERVATIVE,
+        FilterProp::CountersPutOnThisTurn {
+            actor,
+            counters: _,
+            comparator: _,
+            count: _,
+        } => Axes::CONSERVATIVE.or(scan_count_scope(actor)),
         // CR 120: runtime eval reads `state.damage_dealt_this_turn`, not
         // `damage_marked`. Projection discards full history, retaining only
         // recipient-identity witnesses for pending damage events. Those do not
@@ -5595,7 +6357,11 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes<'_> {
         // CR 120.1: the same full per-turn damage history is not preserved by
         // projection's minimal recipient witnesses. This remains a projected
         // resource read, fail closed, like `WasDealtDamageThisTurn` above.
-        FilterProp::DealtDamageThisTurn { .. } => Axes::CONSERVATIVE,
+        FilterProp::DealtDamageThisTurn { kind: _, recipient } => recipient
+            .as_ref()
+            .map_or(Axes::CONSERVATIVE, |player| {
+                Axes::CONSERVATIVE.or(scan_player_filter(player, mode))
+            }),
         // CR 400 / CR 603.6a: runtime eval reads `state.zone_changes_this_turn`, an
         // append-only event journal a loop pumps, cleared by `project_out_resources`
         // and strict-compared by nothing in gate (1). A flicker/blink loop keeps the
@@ -5618,12 +6384,14 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         PlayerFilter::OpponentGainedLife => Axes {
             event: false,
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         PlayerFilter::HasLostTheGame => Axes::NONE,
         // `kind` is a static damage-kind selector (combat/noncombat/any) — not an
@@ -5641,6 +6409,7 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             if let Some(x) = source {
                 acc = acc.or(scan_target_filter(
@@ -5660,6 +6429,7 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             },
         },
         // CR 508.6: inverse combat relation of `OpponentAttacked` — reads the
@@ -5694,24 +6464,28 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: true,
         },
         PlayerFilter::OpponentOtherThanTriggering => Axes {
             event: true,
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: true,
         },
         PlayerFilter::OpponentOfTriggeringPlayer => Axes {
             event: true,
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: true,
         },
         PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => Axes {
             event: true,
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: true,
         },
         PlayerFilter::VotedFor { choice_index: _ } => Axes::NONE,
         PlayerFilter::ParentObjectTargetController => Axes {
@@ -5719,6 +6493,7 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         PlayerFilter::ControlsCount {
             filter,
@@ -5731,6 +6506,7 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::filtered(filter, CharacteristicKinds::CONTROLLER, mode),
                 projected: false,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 filter,
@@ -5751,6 +6527,7 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes<'_> {
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_quantity_ref(attr, mode));
             acc = acc.or(scan_quantity_expr(value, mode));
@@ -5762,6 +6539,7 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         // CR 603.3b + CR 608.2c: the membership set is published by a PRECEDING
         // SIBLING effect in the same chain, and the per-member filter reads live
@@ -5778,6 +6556,7 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::filtered(filter, CharacteristicKinds::CONTROLLER, mode),
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         }
         .or(scan_target_filter(
             filter,
@@ -5804,6 +6583,7 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes<
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         // CR 614.1d: an "enters tapped unless you control a [subtype]" self-entry
         // replacement. Its evaluator censuses the live battlefield — other permanents
@@ -5822,8 +6602,11 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes<
             sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
-        ReplacementCondition::UnlessControlsOtherLeq { .. } => Axes::CONSERVATIVE,
+        ReplacementCondition::UnlessControlsOtherLeq { count: _, filter } => {
+            Axes::CONSERVATIVE.or(typed_filter_axes(filter, mode))
+        }
         ReplacementCondition::UnlessControlsMatching { filter } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(
@@ -5847,6 +6630,7 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes<
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         ReplacementCondition::UnlessMultipleOpponents => Axes::NONE,
         ReplacementCondition::UnlessYourTurn => Axes::NONE,
@@ -5893,12 +6677,14 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes<
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         ReplacementCondition::OpponentDamagedThisTurn => Axes {
             event: false,
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         ReplacementCondition::CastViaKicker {
             variant: _,
@@ -5911,6 +6697,7 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes<
                 sibling: SiblingReads::None,
                 projected: true,
                 history: HistoryReads::NONE,
+                that_player: false,
             };
             acc = acc.or(scan_target_filter(
                 source,
@@ -5959,7 +6746,7 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes<
 fn scan_player_scope(x: &PlayerScope) -> Axes<'_> {
     match x {
         PlayerScope::Controller => Axes::NONE,
-        PlayerScope::ScopedPlayer => Axes::NONE,
+        PlayerScope::ScopedPlayer => Axes::THAT_PLAYER,
         PlayerScope::Target => Axes::NONE,
         PlayerScope::Opponent { aggregate: _ } => Axes::NONE,
         PlayerScope::AllPlayers { exclude, .. } => {
@@ -5976,6 +6763,7 @@ fn scan_player_scope(x: &PlayerScope) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         PlayerScope::SourceChosenPlayer => Axes::NONE,
         // CR 513.1: turn-agnostic end-step deadline reached via the
@@ -6023,7 +6811,7 @@ fn scan_controller_ref(x: &ControllerRef) -> Axes<'_> {
     match x {
         ControllerRef::You => Axes::NONE,
         ControllerRef::Opponent => Axes::NONE,
-        ControllerRef::ScopedPlayer => Axes::NONE,
+        ControllerRef::ScopedPlayer => Axes::THAT_PLAYER,
         ControllerRef::TargetPlayer => Axes::NONE,
         // CR 109.4: TargetOpponent is a target-player slot with opponent-only
         // legality; it is runtime-read-identical to TargetPlayer (the scope
@@ -6034,6 +6822,7 @@ fn scan_controller_ref(x: &ControllerRef) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         // Engine classification: event-axis read, same as the sibling above.
         ControllerRef::EventTargetController => Axes {
@@ -6041,12 +6830,14 @@ fn scan_controller_ref(x: &ControllerRef) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         ControllerRef::ParentTargetOwner => Axes {
             event: true,
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         ControllerRef::DefendingPlayer => Axes::NONE,
         ControllerRef::ChosenPlayer { index: _ } => Axes::NONE,
@@ -6056,6 +6847,7 @@ fn scan_controller_ref(x: &ControllerRef) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: true,
         },
         ControllerRef::EnchantedPlayer => Axes::NONE,
         // CR 102.1: a live read of `state.active_player` — no event/sibling axis.
@@ -6070,7 +6862,7 @@ fn scan_count_scope(x: &CountScope) -> Axes<'_> {
     match x {
         CountScope::Controller => Axes::NONE,
         CountScope::Owner => Axes::NONE,
-        CountScope::ScopedPlayer => Axes::NONE,
+        CountScope::ScopedPlayer => Axes::THAT_PLAYER,
         CountScope::SourceChosenPlayer => Axes::NONE,
         CountScope::All => Axes::NONE,
         CountScope::Opponents => Axes::NONE,
@@ -6407,6 +7199,13 @@ pub(crate) fn ability_reads_event_target(ability: &ResolvedAbility) -> bool {
     reads || ability.unless_pay.is_some()
 }
 
+/// CR 805.4d: whether a trigger's condition, effect, or intervening "if" refers to "that player" —
+/// a read of the scoped player or of the triggering event's player, over the walk that descends
+/// every payload it can.
+pub(crate) fn trigger_refers_to_its_player(def: &TriggerDefinition) -> bool {
+    scan_trigger_definition(def, ScanMode::LoopFirewall, DefinitionPart::Whole).that_player
+}
+
 /// Axis 3 on a bare trigger fire-time `condition` (CR 603.4 intervening-if) —
 /// the off-stack scan surface (`analysis::resource` item 5).
 pub(crate) fn trigger_condition_reads_projected_resource(condition: &TriggerCondition) -> bool {
@@ -6531,8 +7330,8 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes<'_> 
     } = def;
 
     let mut acc = scan_effect(effect, mode);
-    if reads_return_result.is_some() {
-        acc = acc.or(Axes::CONSERVATIVE);
+    if let Some((_, spec)) = reads_return_result {
+        acc = acc.or(return_result_read_axes(spec, mode));
     }
     if let Some(sub) = sub_ability {
         acc = acc.or(ability_definition_axes(sub, mode));
@@ -6595,7 +7394,16 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes<'_> 
     // Conservative fail-closed for present-but-undescended cost/filter payloads:
     // an `unless pay {1} for each artifact` or a divide/distribute filter can each
     // express a board-scoped read.
-    if unless_pay.is_some() || distribute.is_some() {
+    if let Some(UnlessPayModifier { cost, payer }) = unless_pay {
+        acc = acc.or(Axes::CONSERVATIVE
+            .or(scan_ability_cost(cost, mode))
+            .or(scan_target_filter(
+                payer,
+                FilterReadContext::SnapshotOrEvent,
+                mode,
+            )));
+    }
+    if distribute.is_some() {
         acc = acc.or(Axes::CONSERVATIVE);
     }
     // CR 601.2f + CR 602.2b: a cost reduction reads its count and its gate when the cost is
@@ -7038,6 +7846,47 @@ fn scan_pt_value(pt: &PtValue, mode: ScanMode) -> Axes<'_> {
 /// `.or()` a descent of the few keyword PAYLOADS that carry a scannable
 /// `QuantityExpr` / `TargetFilter` / `AbilityCost`. EXHAUSTIVE, NO `_` wildcard —
 /// a new payload-bearing keyword fails to compile until classified.
+fn scan_protection_target(target: &ProtectionTarget, mode: ScanMode) -> Axes<'_> {
+    match target {
+        ProtectionTarget::Filter(filter) => {
+            scan_target_filter(filter, FilterReadContext::SnapshotOrEvent, mode)
+        }
+        ProtectionTarget::FromPlayer(player) => scan_controller_ref(player),
+        ProtectionTarget::Color(_)
+        | ProtectionTarget::CardType(_)
+        | ProtectionTarget::Quality(_)
+        | ProtectionTarget::Multicolored
+        | ProtectionTarget::ChosenColor
+        | ProtectionTarget::ChosenCardType
+        | ProtectionTarget::ChosenCardName
+        | ProtectionTarget::ChosenPlayer
+        | ProtectionTarget::Everything
+        | ProtectionTarget::EachColor(_) => Axes::NONE,
+    }
+}
+
+fn scan_ward_cost(cost: &WardCost, mode: ScanMode) -> Axes<'_> {
+    match cost {
+        WardCost::Discard {
+            count: _,
+            filter: Some(filter),
+            selection: _,
+        }
+        | WardCost::Sacrifice { count: _, filter } => {
+            scan_target_filter(filter, FilterReadContext::LiveBoardCensus, mode)
+        }
+        WardCost::Compound(costs) => costs
+            .iter()
+            .fold(Axes::NONE, |acc, cost| acc.or(scan_ward_cost(cost, mode))),
+        WardCost::Mana(_)
+        | WardCost::PayLife(_)
+        | WardCost::PayLifeEqualToPower
+        | WardCost::Discard { filter: None, .. }
+        | WardCost::Waterbend(_)
+        | WardCost::GetPlayerCounters { .. } => Axes::NONE,
+    }
+}
+
 fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes<'_> {
     // Axis-2 cost surface: fully exhaustive & fail-closed on new variants.
     let cost_read = if keyword_cost_reads_growing_class(kw) {
@@ -7046,6 +7895,7 @@ fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         }
     } else {
         Axes::NONE
@@ -7056,24 +7906,48 @@ fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes<'_> {
         Keyword::Enchant(tf) => scan_target_filter(tf, FilterReadContext::SnapshotOrEvent, mode),
         Keyword::CumulativeUpkeep(c) | Keyword::Escalate(c) => scan_ability_cost(c, mode),
         // payload types with no scanner that can transitively express a board read
-        // ⇒ fail-closed CONSERVATIVE (a filter / cost-wrapper we do not descend).
+        // ⇒ fail-closed CONSERVATIVE (a filter / cost-wrapper we do not descend), reading
+        // "that player" where a field it scans does.
         Keyword::HexproofFrom(_)
-        | Keyword::Affinity(_)
-        | Keyword::Craft { .. }
-        | Keyword::Protection(_)
         | Keyword::Companion(_)
         | Keyword::Gift(_)
-        | Keyword::Ward(_)
-        | Keyword::Bestow(_)
-        | Keyword::Embalm(_)
-        | Keyword::Eternalize(_)
-        | Keyword::Escape(_)
-        | Keyword::Evoke(_)
-        | Keyword::Echo(_)
-        | Keyword::Buyback(_)
-        | Keyword::Cycling(_)
-        | Keyword::Flashback(_)
-        | Keyword::Emerge(_) => Axes::CONSERVATIVE,
+        | Keyword::Bestow(BestowCost::Mana(_))
+        | Keyword::Embalm(EmbalmCost::Mana(_))
+        | Keyword::Eternalize(EternalizeCost::Mana(_))
+        | Keyword::Escape(EscapeCost::Mana(_))
+        | Keyword::Evoke(EvokeCost::Mana(_))
+        | Keyword::Echo(EchoCost::Mana(_))
+        | Keyword::Buyback(BuybackCost::Mana(_))
+        | Keyword::Cycling(CyclingCost::Mana(_))
+        | Keyword::Flashback(FlashbackCost::Mana(_)) => Axes::CONSERVATIVE,
+        Keyword::Bestow(BestowCost::NonMana(cost))
+        | Keyword::Embalm(EmbalmCost::NonMana(cost))
+        | Keyword::Eternalize(EternalizeCost::NonMana(cost))
+        | Keyword::Escape(EscapeCost::NonMana(cost))
+        | Keyword::Evoke(EvokeCost::NonMana(cost))
+        | Keyword::Echo(EchoCost::NonMana(cost))
+        | Keyword::Buyback(BuybackCost::NonMana(cost))
+        | Keyword::Cycling(CyclingCost::NonMana(cost))
+        | Keyword::Flashback(FlashbackCost::NonMana(cost)) => {
+            Axes::CONSERVATIVE.or(scan_ability_cost(cost, mode))
+        }
+        Keyword::Affinity(filter) => Axes::CONSERVATIVE.or(typed_filter_axes(filter, mode)),
+        Keyword::Craft {
+            cost: _,
+            materials,
+            count: _,
+        } => Axes::CONSERVATIVE.or(scan_target_filter(
+            materials,
+            FilterReadContext::LiveBoardCensus,
+            mode,
+        )),
+        Keyword::Protection(target) => Axes::CONSERVATIVE.or(scan_protection_target(target, mode)),
+        Keyword::Ward(cost) => Axes::CONSERVATIVE.or(scan_ward_cost(cost, mode)),
+        Keyword::Emerge(cost) => Axes::CONSERVATIVE.or(scan_target_filter(
+            &cost.sacrifice_filter,
+            FilterReadContext::LiveBoardCensus,
+            mode,
+        )),
         // Every other keyword carries a read-free payload (unit / u32 / String /
         // ManaCost / value tag): it reads nothing on any axis here. Its cost-read,
         // if any, is already captured by `cost_read` above.
@@ -7285,6 +8159,7 @@ fn scan_mana_production(p: &ManaProduction, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::Any,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         }
         .or(scan_quantity_expr(count, mode)),
         // SCOPED-OBJECT (Omnath, Locus of All): a SINGLE scoped object's colors,
@@ -7301,6 +8176,7 @@ fn scan_mana_production(p: &ManaProduction, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::filtered(filter, CharacteristicKinds::COLOR, mode),
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         }
         .or(scan_target_filter(
             filter,
@@ -7312,6 +8188,7 @@ fn scan_mana_production(p: &ManaProduction, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::filtered(filter, CharacteristicKinds::COLOR, mode),
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         }
         .or(scan_quantity_expr(count, mode))
         .or(scan_target_filter(
@@ -7324,6 +8201,7 @@ fn scan_mana_production(p: &ManaProduction, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::filtered(land_filter, CharacteristicKinds::ABILITIES, mode),
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         }
         .or(scan_quantity_expr(count, mode))
         .or(scan_target_filter(
@@ -7337,6 +8215,7 @@ fn scan_mana_production(p: &ManaProduction, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: false,
             history: HistoryReads::NONE,
+            that_player: false,
         },
         // read-free: fixed colors / fixed pre-specified combinations read nothing.
         ManaProduction::Fixed { .. }
@@ -7380,21 +8259,42 @@ fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> A
         // same reason, as the `GrantAbility` arm directly above. See
         // `scan_trigger_definition` for the per-field scanned/read-free split.
         ContinuousModification::GrantTrigger { trigger } => scan_trigger_definition(trigger, mode, DefinitionPart::Whole),
-        // fail-closed CONSERVATIVE: inner payloads with no walker.
+        // Fail-closed, but each reads "that player" where its payload's walker does.
+        ContinuousModification::GrantReplacement { replacement } => Axes::CONSERVATIVE.or(
+            replacement_definition_axes(replacement, None, mode, DefinitionPart::Whole),
+        ),
+        ContinuousModification::GrantStaticAbility { definition } => {
+            Axes::CONSERVATIVE.or(scan_resolved_continuous_static(definition, mode))
+        }
+        ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source,
+            cap: Some(cap),
+            kind: _,
+        } => Axes::CONSERVATIVE
+            .or(scan_target_filter(
+                source,
+                FilterReadContext::SnapshotOrEvent,
+                mode,
+            ))
+            .or(scan_activation_restriction(cap, mode)),
+        ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source,
+            cap: None,
+            kind: _,
+        }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => Axes::CONSERVATIVE.or(
+            scan_target_filter(source, FilterReadContext::SnapshotOrEvent, mode),
+        ),
+        ContinuousModification::AddStaticMode { mode: static_mode } => {
+            Axes::CONSERVATIVE.or(static_mode_axes(static_mode, mode))
+        }
+        // fail-closed CONSERVATIVE: inner payloads with no walker. `CopyValues` is parse-unreachable
+        // (`types::ability_visit`), so no definition walk meets its copiable values.
         ContinuousModification::CopyValues { .. }
         // CR 707.2c (Metamorphic Alteration): the copy-marker stands in for a
         // copy that grants the donor's whole ability set — fail-closed alongside
         // its `CopyValues` sibling (the real grant is the installed TCE).
         | ContinuousModification::CopyChosen
-        // A granted object-hosted replacement's `ReplacementDefinition` execute
-        // is outside the scanner's traversal closure — fail-closed CONSERVATIVE,
-        // same class as GrantStaticAbility (`GrantTrigger` left this group when
-        // `scan_trigger_definition` gave its payload a walker).
-        | ContinuousModification::GrantReplacement { .. }
-        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
-        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
-        | ContinuousModification::AddStaticMode { .. }
-        | ContinuousModification::GrantStaticAbility { .. }
         | ContinuousModification::AddKeywordWithDerivedCost { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
@@ -7492,9 +8392,8 @@ fn scan_resolved_continuous_static(
         crate::types::statics::StaticMode::CantAttack
             | crate::types::statics::StaticMode::CantAttackOrBlock
     );
-    if per_player_condition.is_some() || (attack_defended.is_some() && !attack_restriction) {
-        return Axes::CONSERVATIVE;
-    }
+    let fail_closed =
+        per_player_condition.is_some() || (attack_defended.is_some() && !attack_restriction);
     let mut acc = match static_mode {
         crate::types::statics::StaticMode::Continuous => Axes::NONE,
         // CR 508.1c: an attack restriction reads history only through its defended filter.
@@ -7537,7 +8436,7 @@ fn scan_resolved_continuous_static(
         | crate::types::statics::StaticMode::Deathtouch
         | crate::types::statics::StaticMode::Lifelink
         | crate::types::statics::StaticMode::Indestructible => Axes::NONE,
-        _ => return Axes::CONSERVATIVE,
+        _ => Axes::CONSERVATIVE.or(static_mode_axes(static_mode, mode)),
     };
     if let Some(affected) = affected {
         acc = acc.or(scan_target_filter(
@@ -7554,6 +8453,9 @@ fn scan_resolved_continuous_static(
     }
     if let Some(beneficiary) = bypass_beneficiary {
         acc = acc.or(scan_controller_ref(beneficiary));
+    }
+    if fail_closed {
+        acc = Axes::CONSERVATIVE.or(acc);
     }
     acc
 }
@@ -7665,6 +8567,204 @@ pub(crate) fn ability_definition_history(def: &AbilityDefinition) -> HistoryRead
     acc.history
 }
 
+/// CR 611.3a: the filters, players, costs, keywords and quantities a static mode names; a mode
+/// with none reads nothing here. Exhaustive, so a new mode is classified before it compiles.
+fn static_mode_axes(static_mode: &StaticMode, mode: ScanMode) -> Axes<'_> {
+    use crate::types::statics::{
+        BlockExceptionKind, CostPaymentProhibition, HandSizeModification, RequiredDefender,
+    };
+    fn census(filter: &TargetFilter, mode: ScanMode) -> Axes<'_> {
+        scan_target_filter(filter, FilterReadContext::LiveBoardCensus, mode)
+    }
+    fn census_opt(filter: &Option<TargetFilter>, mode: ScanMode) -> Axes<'_> {
+        filter
+            .as_ref()
+            .map_or(Axes::NONE, |filter| census(filter, mode))
+    }
+    fn cost_opt(cost: Option<&AbilityCost>, mode: ScanMode) -> Axes<'_> {
+        cost.map_or(Axes::NONE, |cost| scan_ability_cost(cost, mode))
+    }
+    fn count_opt(count: &Option<QuantityRef>, mode: ScanMode) -> Axes<'_> {
+        count
+            .as_ref()
+            .map_or(Axes::NONE, |count| scan_quantity_ref(count, mode))
+    }
+    match static_mode {
+        StaticMode::CantBeActivated { source_filter, .. } => census(source_filter, mode),
+        StaticMode::CastWithKeyword { keyword } | StaticMode::CantHaveKeyword { keyword } => {
+            scan_keyword(keyword, mode)
+        }
+        StaticMode::CastWithAlternativeCost { cost, .. }
+        | StaticMode::AlternativeKeywordCost { cost, .. } => scan_ability_cost(cost, mode),
+        StaticMode::ModifyCost {
+            spell_filter,
+            dynamic_count,
+            ..
+        } => census_opt(spell_filter, mode).or(count_opt(dynamic_count, mode)),
+        StaticMode::ImposeAdditionalCost {
+            cost, spell_filter, ..
+        } => scan_ability_cost(cost, mode).or(census_opt(spell_filter, mode)),
+        StaticMode::ReduceAbilityCost {
+            dynamic_count,
+            activator,
+            targets,
+            ..
+        } => {
+            let activator = activator
+                .as_ref()
+                .map_or(Axes::NONE, |player| scan_player_filter(player, mode));
+            count_opt(dynamic_count, mode)
+                .or(activator)
+                .or(census_opt(targets, mode))
+        }
+        StaticMode::CantPayCost { cost, .. } => match cost {
+            CostPaymentProhibition::Sacrifice { filter } => census(filter, mode),
+            CostPaymentProhibition::PayLife => Axes::NONE,
+        },
+        StaticMode::PlayerProtection(target) => scan_protection_target(target, mode),
+        StaticMode::MustAttackDefender { defender } => match defender {
+            RequiredDefender::Matching { filter } => scan_player_filter(filter, mode),
+            RequiredDefender::Fixed { .. } | RequiredDefender::Permanent { .. } => Axes::NONE,
+        },
+        StaticMode::GraveyardCastPermission {
+            extra_cost,
+            enters_modifications,
+            ..
+        } => cost_opt(extra_cost.as_ref().map(|extra| &extra.cost), mode)
+            .or(scan_pending_enters(enters_modifications, mode)),
+        StaticMode::TopOfLibraryCastPermission { alt_cost, .. } => {
+            cost_opt(alt_cost.as_ref(), mode)
+        }
+        StaticMode::ExileCastPermission { extra_cost, .. } => {
+            cost_opt(extra_cost.as_ref().map(|extra| &extra.cost), mode)
+        }
+        StaticMode::PerTurnCastLimit { spell_filter, .. } => census_opt(spell_filter, mode),
+        StaticMode::SuppressTriggers {
+            source_filter,
+            trigger_source_filter,
+            ..
+        } => census(source_filter, mode).or(census_opt(trigger_source_filter, mode)),
+        StaticMode::CantBeBlockedExceptBy { kind } => match kind {
+            BlockExceptionKind::Quality(filter) => census(filter, mode),
+            BlockExceptionKind::MinBlockers { .. } => Axes::NONE,
+        },
+        StaticMode::CantBeBlockedBy { filter }
+        | StaticMode::AttachmentRestriction { filter }
+        | StaticMode::BlockRestriction { filter }
+        | StaticMode::MaxUntapPerType { filter, .. } => census(filter, mode),
+        StaticMode::MustBeBlocked { by: filter }
+        | StaticMode::MustBeBlockedByAll { blockers: filter } => census_opt(filter, mode),
+        StaticMode::MaximumHandSize { modification } => match modification {
+            HandSizeModification::EqualTo(quantity) => scan_quantity_expr(quantity, mode),
+            HandSizeModification::SetTo(_) | HandSizeModification::AdjustedBy(_) => Axes::NONE,
+        },
+        StaticMode::SpendManaAsAnyColor {
+            spell_filter,
+            activation_source_filter,
+            ..
+        } => census_opt(spell_filter, mode).or(census_opt(activation_source_filter, mode)),
+        StaticMode::Continuous
+        | StaticMode::DamageNotRemovedDuringCleanup
+        | StaticMode::CantAttack
+        | StaticMode::CantBlock
+        | StaticMode::CantAttackOrBlock
+        | StaticMode::AttackOnlyNeighbor
+        | StaticMode::CantBecomeSuspected
+        | StaticMode::MaxAttackersEachCombat { .. }
+        | StaticMode::MaxBlockersEachCombat { .. }
+        | StaticMode::CantBeTargeted
+        | StaticMode::CantBeCast { .. }
+        | StaticMode::CantSearchLibrary { .. }
+        | StaticMode::RestrictLibrarySearchToTop { .. }
+        | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
+        | StaticMode::CantCauseSacrificeOrExile { .. }
+        | StaticMode::CantCauseForcedAction { .. }
+        | StaticMode::CastWithFlash
+        | StaticMode::GrantsExtraVote
+        | StaticMode::GrantsExtraVillainousChoice
+        | StaticMode::ReduceActionCost { .. }
+        | StaticMode::ModifyActivationLimit { .. }
+        | StaticMode::ActivateAsInstant { .. }
+        | StaticMode::CantGainLife
+        | StaticMode::CantLoseLife
+        | StaticMode::MustAttack
+        | StaticMode::MustBlock
+        | StaticMode::MustBlockAttacker { .. }
+        | StaticMode::CantDraw { .. }
+        | StaticMode::DrawFromBottom { .. }
+        | StaticMode::DoubleTriggers { .. }
+        | StaticMode::IgnoreHexproof
+        | StaticMode::ExtraBlockers { .. }
+        | StaticMode::RevealTopOfLibrary { .. }
+        | StaticMode::RevealHand { .. }
+        | StaticMode::TopOfLibraryHasPlot
+        | StaticMode::TopOfLibraryPlotPermission
+        | StaticMode::CastFromHandFree { .. }
+        | StaticMode::LinkedCollectionCounterPlayPermission
+        | StaticMode::CountersPersistAcrossZones { .. }
+        | StaticMode::CantBeCountered
+        | StaticMode::CantBeCopied
+        | StaticMode::CantEnterBattlefieldFrom
+        | StaticMode::CantCastFrom { .. }
+        | StaticMode::CantCastDuring { .. }
+        | StaticMode::CantActivateDuring { .. }
+        | StaticMode::PerTurnDrawLimit { .. }
+        | StaticMode::CantBeBlocked
+        | StaticMode::CantBeBlockedByMoreThan { .. }
+        | StaticMode::CantBeBlockedUnlessAllBlock
+        | StaticMode::Protection
+        | StaticMode::Indestructible
+        | StaticMode::CantBeDestroyed
+        | StaticMode::CantBeRegenerated
+        | StaticMode::FlashBack
+        | StaticMode::Shroud
+        | StaticMode::Hexproof
+        | StaticMode::Vigilance
+        | StaticMode::Menace
+        | StaticMode::Reach
+        | StaticMode::Flying
+        | StaticMode::Trample
+        | StaticMode::Deathtouch
+        | StaticMode::Lifelink
+        | StaticMode::CantTap
+        | StaticMode::CantUntap
+        | StaticMode::Goaded
+        | StaticMode::MustAttackAwayFromSource
+        | StaticMode::CombatAlone { .. }
+        | StaticMode::CantCrew
+        | StaticMode::CantPhaseIn
+        | StaticMode::CrewContribution { .. }
+        | StaticMode::MayLookAtTopOfLibrary
+        | StaticMode::MayLookAtFaceDown
+        | StaticMode::CantBeTurnedFaceUp
+        | StaticMode::MayChooseNotToUntap
+        | StaticMode::AdditionalLandDrop { .. }
+        | StaticMode::EmblemStatic
+        | StaticMode::NoMaximumHandSize
+        | StaticMode::MayPlayAdditionalLand
+        | StaticMode::CantWinTheGame
+        | StaticMode::CantLoseTheGame
+        | StaticMode::LegendRuleDoesntApply
+        | StaticMode::SpeedCanIncreaseBeyondFour
+        | StaticMode::DefilerCostReduction { .. }
+        | StaticMode::SkipStep { .. }
+        | StaticMode::PayLifeAsColoredMana { .. }
+        | StaticMode::StepEndUnspentMana { .. }
+        | StaticMode::UnspentManaLossCausesLifeLoss
+        | StaticMode::WinFirstCoinFlipSetEachTurn
+        | StaticMode::CanAttackWithDefender
+        | StaticMode::IgnoreLandwalkForBlocking { .. }
+        | StaticMode::CanActivateAbilitiesAsThoughHaste
+        | StaticMode::CanBlockShadow
+        | StaticMode::AssignNoCombatDamage
+        | StaticMode::UntapsDuringEachOtherPlayersUntapStep
+        | StaticMode::EntersWithAdditionalCounters { .. }
+        | StaticMode::CountersCantBeRemoved { .. }
+        | StaticMode::CountsAsNamed { .. }
+        | StaticMode::Other(..) => Axes::NONE,
+    }
+}
+
 /// CR 602.5b: an activation restriction's read when the ability is activated.
 fn scan_activation_restriction(
     r: &crate::types::ability::ActivationRestriction,
@@ -7757,7 +8857,7 @@ fn replacement_definition_axes<'a>(
     mode: ScanMode,
     part: DefinitionPart,
 ) -> Axes<'a> {
-    use crate::types::ability::{DamageModification, PreventionFormula, ReplacementMode};
+    use crate::types::ability::ReplacementMode;
     let crate::types::ability::ReplacementDefinition {
         execute,
         mode: replacement_mode,
@@ -7853,25 +8953,52 @@ fn replacement_definition_axes<'a>(
     if let Some(max) = entry_payment_max {
         acc = acc.or(scan_quantity_expr(max, mode));
     }
-    match damage_modification {
-        Some(DamageModification::Plus { value })
-        | Some(DamageModification::PreventionMinus {
-            value: PreventionFormula::Quantity { quantity: value },
-        }) => acc = acc.or(scan_quantity_expr(value, mode)),
-        Some(
-            DamageModification::Double
-            | DamageModification::Triple
-            | DamageModification::Minus { value: _ }
-            | DamageModification::PreventionMinus {
-                value: PreventionFormula::Fixed(_) | PreventionFormula::Fraction { .. },
-            }
-            | DamageModification::SetToSourcePower
-            | DamageModification::SetTo { value: _ }
-            | DamageModification::LifeFloor { minimum: _ },
-        )
-        | None => {}
+    if let Some(modification) = damage_modification {
+        acc = acc.or(scan_damage_modification(modification, mode));
     }
     acc
+}
+
+/// The prior object's predicate and its recipient are the read; the read itself
+/// stays fail-closed on every other axis.
+fn return_result_read_axes(
+    spec: &crate::types::ability::ReturnResultReadSpec,
+    mode: ScanMode,
+) -> Axes<'_> {
+    let crate::types::ability::ReturnResultReadSpec {
+        noun,
+        destination: _,
+        recipient,
+    } = spec;
+    Axes::CONSERVATIVE
+        .or(scan_target_filter(
+            noun,
+            FilterReadContext::SnapshotOrEvent,
+            mode,
+        ))
+        .or(scan_controller_ref(recipient))
+}
+
+fn scan_damage_modification(
+    modification: &crate::types::ability::DamageModification,
+    mode: ScanMode,
+) -> Axes<'_> {
+    use crate::types::ability::{DamageModification, PreventionFormula};
+    match modification {
+        DamageModification::Plus { value }
+        | DamageModification::PreventionMinus {
+            value: PreventionFormula::Quantity { quantity: value },
+        } => scan_quantity_expr(value, mode),
+        DamageModification::Double
+        | DamageModification::Triple
+        | DamageModification::Minus { value: _ }
+        | DamageModification::PreventionMinus {
+            value: PreventionFormula::Fixed(_) | PreventionFormula::Fraction { .. },
+        }
+        | DamageModification::SetToSourcePower
+        | DamageModification::SetTo { value: _ }
+        | DamageModification::LifeFloor { minimum: _ } => Axes::NONE,
+    }
 }
 
 /// The history a delayed trigger's firing condition and body read (CR 603.7).
@@ -9648,6 +10775,7 @@ mod tests {
                     sibling: SiblingReads::Any,
                     projected: false,
                     history: HistoryReads::NONE,
+                    that_player: false,
                 },
             ),
             (
@@ -9661,6 +10789,7 @@ mod tests {
                     sibling: SiblingReads::None,
                     projected: false,
                     history: HistoryReads::NONE,
+                    that_player: false,
                 },
             ),
             (chain.clone(), Axes::NONE),
@@ -9671,6 +10800,7 @@ mod tests {
                     sibling: SiblingReads::None,
                     projected: true,
                     history: HistoryReads::NONE,
+                    that_player: false,
                 },
             ),
             (
@@ -9680,6 +10810,7 @@ mod tests {
                     sibling: SiblingReads::None,
                     projected: true,
                     history: HistoryReads::NONE,
+                    that_player: false,
                 },
             ),
             // CR 603.3b: a chain set is effect-visible (NONE) until a member
@@ -9693,6 +10824,7 @@ mod tests {
                     sibling: SiblingReads::Any,
                     projected: false,
                     history: HistoryReads::NONE,
+                    that_player: false,
                 },
             ),
             (
@@ -9710,6 +10842,7 @@ mod tests {
                     sibling: SiblingReads::None,
                     projected: true,
                     history: HistoryReads::NONE,
+                    that_player: false,
                 },
             ),
         ];
@@ -13807,6 +14940,159 @@ mod tests {
                 .or(HistoryReads::of(HistoryMember::ExileCastPermissionsUsed))
         );
         assert_eq!(history("Aang, Swift Savior", 0), HistoryReads::ALL);
+    }
+
+    /// The phase trigger of a printed card with a player scope, and its built ability.
+    fn scoped_phase_trigger(
+        name: &str,
+        types: &[&str],
+        subtypes: &[&str],
+        oracle: &str,
+    ) -> TriggerDefinition {
+        let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+        let subtypes: Vec<String> = subtypes.iter().map(|t| t.to_string()).collect();
+        crate::parser::parse_oracle_text(oracle, name, &[], &types, &subtypes)
+            .triggers
+            .into_iter()
+            .find(|t| t.mode == TriggerMode::Phase && t.valid_target.is_some())
+            .unwrap_or_else(|| panic!("{name} has a phase trigger with a per-player scope"))
+    }
+
+    /// CR 805.4d: a phase trigger refers to "that player" through its effect (a scoped-player
+    /// or triggering-player read) or its intervening "if"; Luminarch Ascension's does neither.
+    #[test]
+    fn a_phase_trigger_refers_to_its_player_when_it_reads_that_player() {
+        let archive = scoped_phase_trigger(
+            "Walking Archive",
+            &["Artifact", "Creature"],
+            &["Golem"],
+            "Defender (This creature can't attack.)\nThis creature enters with a +1/+1 counter on \
+             it.\nAt the beginning of each player's upkeep, that player draws a card for each \
+             +1/+1 counter on this creature.\n{2}{W}{U}: Put a +1/+1 counter on this creature.",
+        );
+        let well = scoped_phase_trigger(
+            "Well of Ideas",
+            &["Enchantment"],
+            &[],
+            "When this enchantment enters, draw two cards.\nAt the beginning of each other \
+             player's draw step, that player draws an additional card.\nAt the beginning of your \
+             draw step, draw two additional cards.",
+        );
+        let orrery = scoped_phase_trigger(
+            "Ghirapur Orrery",
+            &["Artifact"],
+            &[],
+            "Each player may play an additional land on each of their turns.\nAt the beginning of \
+             each player's upkeep, if that player has no cards in hand, that player draws three \
+             cards.",
+        );
+        let truce = scoped_phase_trigger(
+            "Tenuous Truce",
+            &["Enchantment"],
+            &["Aura"],
+            "Enchant opponent\nAt the beginning of enchanted opponent's end step, you and that \
+             player each draw a card.\nWhen you attack enchanted opponent or a planeswalker they \
+             control or when they attack you or a planeswalker you control, sacrifice this Aura.",
+        );
+        let luminarch = scoped_phase_trigger(
+            "Luminarch Ascension",
+            &["Enchantment"],
+            &[],
+            "At the beginning of each opponent's end step, if you didn't lose life this turn, you \
+             may put a quest counter on this enchantment. (Damage causes loss of life.)\n{1}{W}: \
+             Create a 4/4 white Angel creature token with flying. Activate only if this \
+             enchantment has four or more quest counters on it.",
+        );
+        let kraken = scoped_phase_trigger(
+            "Verdant Kraken",
+            &["Creature"],
+            &["Kraken"],
+            "At the beginning of each player's upkeep, you create a 3/3 green Forest Tentacle land \
+             creature token. (It has \"{T}: Add {G}.\" It's affected by summoning sickness until \
+             your next turn.)",
+        );
+        let cobra = scoped_phase_trigger(
+            "The Cobra King",
+            &["Creature"],
+            &["Snake", "Serpent"],
+            "At the beginning of each player's upkeep, create a 1/1 blue Serpent creature token \
+             named Cobra Coil. When you do, if you control five or more Snakes and/or Serpents, \
+             choose one —\n• Strike first — Target Snake or Serpent you control fights target \
+             creature an opponent controls.\n• Strike hard — Put a +1/+1 counter on each Snake \
+             and Serpent you control.",
+        );
+        let skinner = scoped_phase_trigger(
+            "Obsessive Skinner",
+            &["Creature"],
+            &["Human", "Rogue"],
+            "When this creature enters, put a +1/+1 counter on target creature.\nDelirium — At \
+             the beginning of each opponent's upkeep, if there are four or more card types among \
+             cards in your graveyard, put a +1/+1 counter on target creature.",
+        );
+        let spymaster = scoped_phase_trigger(
+            "Goblin Spymaster",
+            &["Creature"],
+            &["Goblin", "Rogue"],
+            "First strike\nAt the beginning of each opponent's end step, that player creates a 1/1 \
+             red Goblin creature token with \"Creatures you control attack each combat if able.\"",
+        );
+        let erosion = scoped_phase_trigger(
+            "Erosion",
+            &["Enchantment"],
+            &["Aura"],
+            "Enchant land\nAt the beginning of the upkeep of enchanted land's controller, destroy \
+             that land unless that player pays {1} or 1 life.",
+        );
+        let maralen = scoped_phase_trigger(
+            "Maralen of the Mornsong",
+            &["Creature"],
+            &["Elf", "Wizard"],
+            "Players can't draw cards.\nAt the beginning of each player's draw step, that player \
+             loses 3 life, searches their library for a card, puts it into their hand, then \
+             shuffles.",
+        );
+        for (name, def) in [
+            ("Walking Archive", &archive),
+            ("Well of Ideas", &well),
+            ("Ghirapur Orrery", &orrery),
+            ("Tenuous Truce", &truce),
+            ("Goblin Spymaster", &spymaster),
+            ("Erosion", &erosion),
+            ("Maralen of the Mornsong", &maralen),
+        ] {
+            assert!(trigger_refers_to_its_player(def), "{name}");
+        }
+        for (name, def) in [
+            ("Luminarch Ascension", &luminarch),
+            ("Verdant Kraken", &kraken),
+            ("The Cobra King", &cobra),
+            ("Obsessive Skinner", &skinner),
+        ] {
+            assert!(!trigger_refers_to_its_player(def), "{name}");
+        }
+        // Orrery's intervening "if" alone refers to its player.
+        let mut condition_only = luminarch.clone();
+        condition_only.condition = orrery.condition.clone();
+        assert!(trigger_refers_to_its_player(&condition_only));
+        // Maralen's "searches their library" alone refers to its player through the fail-closed
+        // search site.
+        let mut search_only = maralen.clone();
+        let mut link = search_only.execute.as_deref().cloned();
+        while let Some(def) = link.take() {
+            if matches!(*def.effect, Effect::SearchLibrary { .. }) {
+                search_only.execute = Some(Box::new(AbilityDefinition {
+                    sub_ability: None,
+                    ..def
+                }));
+                break;
+            }
+            link = def.sub_ability.as_deref().cloned();
+        }
+        assert!(matches!(
+            search_only.execute.as_deref().map(|d| &*d.effect),
+            Some(Effect::SearchLibrary { .. })
+        ));
+        assert!(trigger_refers_to_its_player(&search_only));
     }
 }
 

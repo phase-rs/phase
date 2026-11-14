@@ -273,6 +273,25 @@ pub fn active_player(state: &GameState) -> Option<PlayerId> {
     is_alive(state, state.active_player).then_some(state.active_player)
 }
 
+/// CR 102.1 + CR 805.4a: the players whose turn it is — every living member of the active
+/// player's side on a shared team turn, else the active player; nobody without one (CR 800.4j).
+pub fn turn_players(state: &GameState) -> Vec<PlayerId> {
+    let Some(active) = active_player(state) else {
+        return Vec::new();
+    };
+    if super::topology::side_takes_shared_turn(state, active) {
+        super::topology::team_members(state, active)
+    } else {
+        vec![active]
+    }
+}
+
+/// CR 805.4 + CR 805.9: whether it is `player`'s turn — on a shared team turn every member of
+/// the active team is an active player, so "your turn" holds for each of them.
+pub fn is_turn_player(state: &GameState, player: PlayerId) -> bool {
+    turn_players(state).contains(&player)
+}
+
 /// CR 102.3 + CR 800.4j: whether it is an opponent's turn for `player`; a turn without an active
 /// player is no player's turn.
 pub fn is_opponents_turn(state: &GameState, player: PlayerId) -> bool {

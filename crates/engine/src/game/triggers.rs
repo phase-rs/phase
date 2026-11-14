@@ -1971,11 +1971,14 @@ fn trigger_firing_groups(
     conditions: FiringConditions<'_>,
     ability: &ResolvedAbility,
 ) -> Vec<FiringGroup> {
+    let step_players = phase_firing_players(state, event, trig_def, source_context);
     // CR 508.5 + CR 603.4: Attacks triggers with intervening-if clauses read
     // the defending player from each expanded attack event; the batch-level
     // event is the wrong context, so their check waits for the narrowed firing.
+    // CR 805.4d: so does a per-player phase firing, whose "that player" is its own.
     if !trig_def.batched
         && !matches!(trig_def.mode, TriggerMode::Attacks)
+        && step_players.is_none()
         && !conditions.hold(state, controller, source_context, event)
     {
         return Vec::new();
@@ -2057,6 +2060,13 @@ fn trigger_firing_groups(
         } else {
             vec![FiringGroup::from_indexed(members)]
         }
+    } else if let Some((phase, players)) = step_players {
+        players
+            .into_iter()
+            .map(|player| {
+                FiringGroup::single(admitted, GameEvent::PhaseChangedFor { phase, player })
+            })
+            .collect()
     } else if let Some(occurrences) =
         occurrence_trigger_events(event, trig_def, source_context, state, ability)
     {
@@ -2093,6 +2103,24 @@ fn trigger_firing_groups(
                 .is_some_and(|first| conditions.hold(state, controller, source_context, first))
         })
         .collect()
+}
+
+/// CR 805.4d: a phase trigger with a per-player scope that refers to "that player" fires once
+/// for each appropriate player; `None` for any other trigger, which fires as one.
+fn phase_firing_players(
+    state: &GameState,
+    event: &GameEvent,
+    trig_def: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+) -> Option<(Phase, Vec<PlayerId>)> {
+    let GameEvent::PhaseChanged { phase } = event else {
+        return None;
+    };
+    if !matches!(trig_def.mode, TriggerMode::Phase) {
+        return None;
+    }
+    let players = super::trigger_matchers::phase_trigger_players(trig_def, state, source_context)?;
+    super::ability_scan::trigger_refers_to_its_player(trig_def).then_some((*phase, players))
 }
 
 fn split_attack_event_into_singletons(event: &GameEvent) -> Option<Vec<GameEvent>> {
@@ -3536,6 +3564,10 @@ fn collect_matching_triggers_inner(
                     None
                 };
                 let mut pending_ability = ability.clone();
+                // CR 805.4d: a per-player phase firing's "that player" is its own player.
+                if let GameEvent::PhaseChangedFor { player, .. } = &trigger_event {
+                    pending_ability.set_scoped_player_recursive(*player);
+                }
                 if let GameEvent::CreatureEnlisted {
                     tapped_snapshot, ..
                 } = &trigger_event
@@ -7091,7 +7123,7 @@ fn collect_pending_triggers_with_collection(
         // Synthetic game-rule trigger — not attached to any permanent.
         if let GameEvent::PhaseChanged { phase: Phase::End } = event {
             if let Some(monarch_id) = state.monarch {
-                if monarch_id == state.active_player {
+                if super::players::is_turn_player(state, monarch_id) {
                     let draw_effect = Effect::Draw {
                         count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                         target: TargetFilter::Controller,
@@ -7129,7 +7161,7 @@ fn collect_pending_triggers_with_collection(
         } = event
         {
             if let Some(init_holder) = state.initiative {
-                if init_holder == state.active_player {
+                if super::players::is_turn_player(state, init_holder) {
                     let venture_effect = Effect::VentureInto {
                         dungeon: crate::game::dungeon::DungeonId::Undercity,
                     };
@@ -7303,52 +7335,52 @@ fn collect_pending_triggers_with_collection(
             }
         }
 
-        // CR 702.179d: The player with speed has an inherent no-source trigger that
-        // increases their speed once each turn when one or more opponents lose life
-        // during that player's turn, if their speed is less than 4.
+        // CR 702.179d + CR 805.4: each turn player with speed has its own trigger, raised only
+        // by an opponent's life loss.
         if let GameEvent::LifeChanged {
             player_id, amount, ..
         } = event
         {
-            let trigger_controller = state.active_player;
-            if *amount < 0
-                && *player_id != trigger_controller
-                && effective_speed(state, trigger_controller) > 0
-                && speed_trigger_available(state, trigger_controller)
-                && !has_max_speed(state, trigger_controller)
-            {
-                let increase_ability = ResolvedAbility::new(
-                    Effect::ChangeSpeed {
-                        player_scope: PlayerFilter::Controller,
-                        amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
-                        direction: crate::types::ability::SpeedDelta::Increase,
-                        floor: None,
-                    },
-                    Vec::new(),
-                    speed_key_source(),
-                    trigger_controller,
-                );
-                let trig_def = TriggerDefinition::new(TriggerMode::LifeLost)
-                    // CR 702.179d: the label a viewer sees for this sourceless ability.
-                    .description("Start your engines!".to_string());
-                pending.push(PendingTriggerContext::single(PendingTrigger {
-                    source_id: speed_key_source(),
-                    controller: trigger_controller,
-                    condition: trig_def.condition,
-                    ability: Box::new(increase_ability),
-                    timestamp: 0,
-                    target_constraints: Vec::new(),
-                    distribute: None,
-                    trigger_event: Some(event.clone()),
-                    modal: None,
-                    mode_abilities: vec![],
-                    description: trig_def.description,
-                    may_trigger_origin: None,
-                    subject_match_count: None,
-                    die_result: None,
-                    provenance: None,
-                }));
-                session.mark_speed_trigger_used(state, trigger_controller);
+            for trigger_controller in super::players::turn_players(state) {
+                if *amount < 0
+                    && super::players::is_opponent(state, trigger_controller, *player_id)
+                    && effective_speed(state, trigger_controller) > 0
+                    && speed_trigger_available(state, trigger_controller)
+                    && !has_max_speed(state, trigger_controller)
+                {
+                    let increase_ability = ResolvedAbility::new(
+                        Effect::ChangeSpeed {
+                            player_scope: PlayerFilter::Controller,
+                            amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                            direction: crate::types::ability::SpeedDelta::Increase,
+                            floor: None,
+                        },
+                        Vec::new(),
+                        speed_key_source(),
+                        trigger_controller,
+                    );
+                    let trig_def = TriggerDefinition::new(TriggerMode::LifeLost)
+                        // CR 702.179d: the label a viewer sees for this sourceless ability.
+                        .description("Start your engines!".to_string());
+                    pending.push(PendingTriggerContext::single(PendingTrigger {
+                        source_id: speed_key_source(),
+                        controller: trigger_controller,
+                        condition: trig_def.condition,
+                        ability: Box::new(increase_ability),
+                        timestamp: 0,
+                        target_constraints: Vec::new(),
+                        distribute: None,
+                        trigger_event: Some(event.clone()),
+                        modal: None,
+                        mode_abilities: vec![],
+                        description: trig_def.description,
+                        may_trigger_origin: None,
+                        subject_match_count: None,
+                        die_result: None,
+                        provenance: None,
+                    }));
+                    session.mark_speed_trigger_used(state, trigger_controller);
+                }
             }
         }
 
@@ -7356,47 +7388,50 @@ fn collect_pending_triggers_with_collection(
         // if that player has one or more rad counters, that player mills cards
         // equal to their rad counter count. For each nonland card milled,
         // that player loses 1 life and removes one rad counter.
-        // Note: "each player's precombat main phase" — since only the active
-        // player's precombat main phase fires at any given time, checking
-        // state.active_player is equivalent. Same pattern as monarch (CR 725.2).
+        // CR 728.1 + CR 805.4d + CR 805.9: one instance for each turn player, controlled by that
+        // player, one of the active players.
         if let GameEvent::PhaseChanged {
             phase: Phase::PreCombatMain,
         } = event
         {
-            let active = state.active_player;
-            let rad_count = state
-                .players
-                .iter()
-                .find(|p| p.id == active)
-                .map(|p| p.player_counter(&PlayerCounterKind::Rad))
-                .unwrap_or(0);
-            if rad_count > 0 {
-                let rad_ability = ResolvedAbility::new(
-                    Effect::ProcessRadCounters,
-                    Vec::new(),
-                    ObjectId(0),
-                    active,
-                );
-                let trig_def = TriggerDefinition::new(TriggerMode::Phase)
-                    // CR 728.1: the label a viewer sees for this sourceless ability.
-                    .description("Rad counters".to_string());
-                pending.push(PendingTriggerContext::single(PendingTrigger {
-                    source_id: ObjectId(0),
-                    controller: active,
-                    condition: trig_def.condition,
-                    ability: Box::new(rad_ability),
-                    timestamp: 0,
-                    target_constraints: Vec::new(),
-                    distribute: None,
-                    trigger_event: Some(event.clone()),
-                    modal: None,
-                    mode_abilities: vec![],
-                    description: trig_def.description,
-                    may_trigger_origin: None,
-                    subject_match_count: None,
-                    die_result: None,
-                    provenance: None,
-                }));
+            for active in crate::game::players::turn_players(state) {
+                let rad_count = state
+                    .players
+                    .iter()
+                    .find(|p| p.id == active)
+                    .map(|p| p.player_counter(&PlayerCounterKind::Rad))
+                    .unwrap_or(0);
+                if rad_count > 0 {
+                    let rad_ability = ResolvedAbility::new(
+                        Effect::ProcessRadCounters,
+                        Vec::new(),
+                        ObjectId(0),
+                        active,
+                    );
+                    let trig_def = TriggerDefinition::new(TriggerMode::Phase)
+                        // CR 728.1: the label a viewer sees for this sourceless ability.
+                        .description("Rad counters".to_string());
+                    pending.push(PendingTriggerContext::single(PendingTrigger {
+                        source_id: ObjectId(0),
+                        controller: active,
+                        condition: trig_def.condition,
+                        ability: Box::new(rad_ability),
+                        timestamp: 0,
+                        target_constraints: Vec::new(),
+                        distribute: None,
+                        trigger_event: Some(GameEvent::PhaseChangedFor {
+                            phase: Phase::PreCombatMain,
+                            player: active,
+                        }),
+                        modal: None,
+                        mode_abilities: vec![],
+                        description: trig_def.description,
+                        may_trigger_origin: None,
+                        subject_match_count: None,
+                        die_result: None,
+                        provenance: None,
+                    }));
+                }
             }
         }
     }
@@ -16481,7 +16516,7 @@ fn delayed_trigger_event_with_index(
             // runs each phase change — nothing left here to read it for.
             binding: _,
         } => {
-            if state.active_player != *player {
+            if !super::players::is_turn_player(state, *player) {
                 return None;
             }
             // CR 513.2: honor the "on your next turn" turn-floor. The parser's
@@ -16862,7 +16897,7 @@ fn check_trigger_constraint_with_ref(
         TriggerConstraint::OncePerGame => {
             ledger_ref.is_none_or(|key| !state.triggers_fired_this_game.contains(key))
         }
-        TriggerConstraint::OnlyDuringYourTurn => state.active_player == controller,
+        TriggerConstraint::OnlyDuringYourTurn => super::players::is_turn_player(state, controller),
         // CR 102.3 / CR 805.4a: team-aware — under shared team turns a turn
         // where a teammate holds `active_player` still belongs to the
         // controller's own team, so the weaker `active_player != controller`
@@ -16878,7 +16913,7 @@ fn check_trigger_constraint_with_ref(
                 Some(GameEvent::LifeChanged { player_id, .. }) => *player_id,
                 _ => return false,
             };
-            if opponent_id == controller || state.active_player != opponent_id {
+            if opponent_id == controller || !super::players::is_turn_player(state, opponent_id) {
                 return false;
             }
             let Some(key) = ledger_ref else {
@@ -16891,7 +16926,7 @@ fn check_trigger_constraint_with_ref(
         }
         // CR 505.1: Main phases are precombat and postcombat.
         TriggerConstraint::OnlyDuringYourMainPhase => {
-            state.active_player == controller
+            super::players::is_turn_player(state, controller)
                 && matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
         }
         // CR 109.5 + CR 603.2: Fires only when the triggering discard was caused
@@ -17020,7 +17055,7 @@ fn matched_trigger_constraint_allows_admission(
                 return false;
             };
             *player_id != matched.pending.controller
-                && state.active_player == *player_id
+                && super::players::is_turn_player(state, *player_id)
                 && matched.ledger_ref.as_ref().is_none_or(|key| {
                     !state
                         .triggers_fired_this_turn_per_opponent
@@ -18061,7 +18096,7 @@ fn evaluate_trigger_condition_with_source(
         // semantic (set-valued predicates, action-result predicates) fail-closed.
         TriggerCondition::DuringPlayersTurn { player } => match player {
             // CR 102.1: "your turn" — controller is active.
-            PlayerFilter::Controller => state.active_player == controller,
+            PlayerFilter::Controller => super::players::is_turn_player(state, controller),
             // CR 102.3 + CR 805.4a: "an opponent's turn" is team-aware. Under
             // shared team turns, a teammate holding `active_player` remains on
             // the controller's active team and is not an opponent.
@@ -18073,7 +18108,7 @@ fn evaluate_trigger_condition_with_source(
             // currently the active player.
             PlayerFilter::TriggeringPlayer => trigger_event
                 .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
-                .is_some_and(|p| state.active_player == p),
+                .is_some_and(|p| super::players::is_turn_player(state, p)),
             // Set-valued / action-result / no-turn-binding variants: no natural
             // "whose turn" semantic. Fail-closed.
             PlayerFilter::DefendingPlayer
@@ -18502,7 +18537,7 @@ fn evaluate_trigger_condition_with_source(
                 ..
             }) => {
                 let in_draw_step = state.phase == crate::types::phase::Phase::Draw;
-                let drawer_is_active = *player_id == state.active_player;
+                let drawer_is_active = super::players::is_turn_player(state, *player_id);
                 !(in_draw_step && drawer_is_active && *nth_in_step == 1)
             }
             // Defensive: a non-CardDrawn event reaching this condition is a
@@ -19282,7 +19317,7 @@ fn record_trigger_fired_with_ref(
             else {
                 return;
             };
-            if opponent_id == controller || state.active_player != opponent_id {
+            if opponent_id == controller || !super::players::is_turn_player(state, opponent_id) {
                 return;
             }
             crate::game::ledger::record_trigger_fired(

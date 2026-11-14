@@ -1025,6 +1025,12 @@ pub enum GameEvent {
     PhaseChanged {
         phase: Phase,
     },
+    /// CR 603.2b + CR 805.4d: the beginning of `phase` as one appropriate player's step — the
+    /// context of a phase trigger's firing for that player. Never emitted into the event stream.
+    PhaseChangedFor {
+        phase: Phase,
+        player: PlayerId,
+    },
     /// `player_id` is the player who now receives priority, not the passer.
     PriorityPassed {
         player_id: PlayerId,

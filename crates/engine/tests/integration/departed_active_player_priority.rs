@@ -4,20 +4,26 @@
 //! active player.
 
 use engine::game::combat::AttackTarget;
+use engine::game::deck_loading::create_scheme_deck_card;
+use engine::game::effects::attach::attach_to_player;
 use engine::game::engine::EngineError;
+use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::game::trigger_index::reindex_object_triggers;
 use engine::types::ability::{Duration, TargetRef};
 use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
 use engine::types::format::{ChallengeDeck, FormatConfig};
 use engine::types::game_state::{
-    CombatDamageAssignmentMode, GameState, PendingCombatPhaseSkip, WaitingFor,
+    CombatDamageAssignmentMode, GameState, PendingCombatPhaseSkip, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
-use engine::types::player::PlayerId;
+use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::zones::Zone;
+use engine::types::CounterType;
 
 use crate::support::shared_card_db;
 
@@ -29,6 +35,7 @@ const RELENTLESS_ASSAULT: &str = "Untap all creatures that attacked this turn. A
 const MOMENT_OF_SILENCE: &str = "Target player skips their next combat phase this turn.";
 const REVENANT_PATRIARCH: &str = "When this creature enters, if {W} was spent to cast it, target player skips their next combat phase.\nThis creature can't block.";
 const DOOR_TO_NOTHINGNESS: &str = "This artifact enters tapped.\n{W}{W}{U}{U}{B}{B}{R}{R}{G}{G}, {T}, Sacrifice this artifact: Target player loses the game.";
+const TENUOUS_TRUCE: &str = "Enchant opponent\nAt the beginning of enchanted opponent's end step, you and that player each draw a card.\nWhen you attack enchanted opponent or a planeswalker they control or when they attack you or a planeswalker you control, sacrifice this Aura.";
 
 fn mana(types: &[ManaType]) -> Vec<ManaUnit> {
     types
@@ -1280,4 +1287,440 @@ fn a_trigger_on_another_players_turn_does_not_fire_on_its_controllers() {
     );
     let tapped = |ids: &[ObjectId]| ids.iter().filter(|id| state.objects[id].tapped).count();
     assert_eq!((tapped(&creatures[0]), tapped(&creatures[1])), (1, 0));
+}
+
+/// A Two-Headed Giant game (team P0+P1, whose representative is P0, against P2+P3) at `phase` of
+/// team P0+P1's turn, every seat holding eight library fillers.
+fn two_headed_giant(phase: Phase) -> GameScenario {
+    let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+    scenario.at_phase(phase);
+    for seat in 0..4u8 {
+        scenario.with_library_top(
+            PlayerId(seat),
+            &["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8"],
+        );
+    }
+    scenario
+}
+
+/// One triggered ability put on the stack: its step, its source's name (`None` for a rule
+/// trigger), its description, and the player of its per-player step context.
+#[derive(Debug, PartialEq)]
+struct Stacked {
+    phase: Phase,
+    source: Option<String>,
+    description: Option<String>,
+    player: Option<PlayerId>,
+}
+
+/// Answers every prompt while `keep_going` holds and records each triggered ability stacked.
+fn answer_while(runner: &mut GameRunner, keep_going: impl Fn(&GameState) -> bool) -> Vec<Stacked> {
+    let mut seen = Vec::new();
+    let mut stacked = Vec::new();
+    for _ in 0..400 {
+        let state = runner.state();
+        if !keep_going(state) {
+            break;
+        }
+        for entry in &state.stack {
+            let StackEntryKind::TriggeredAbility {
+                trigger_event,
+                description,
+                ..
+            } = &entry.kind
+            else {
+                continue;
+            };
+            if seen.contains(&entry.id) {
+                continue;
+            }
+            seen.push(entry.id);
+            stacked.push(Stacked {
+                phase: state.phase,
+                source: state.objects.get(&entry.source_id).map(|o| o.name.clone()),
+                description: description.clone(),
+                player: match trigger_event {
+                    Some(GameEvent::PhaseChangedFor { player, .. }) => Some(*player),
+                    _ => None,
+                },
+            });
+        }
+        match &state.waiting_for {
+            WaitingFor::Priority { .. } => pass(runner),
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    })
+                    .expect("declare no attackers");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("CR 603.3b: order the triggers");
+            }
+            WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .choose_first_legal_target()
+                    .expect("choose a trigger target");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept the optional effect");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    stacked
+}
+
+/// The players each instance of `source` stacked was for, in seat order.
+fn stacked_for(stacked: &[Stacked], source: &str) -> Vec<Option<PlayerId>> {
+    let mut players: Vec<Option<PlayerId>> = stacked
+        .iter()
+        .filter(|s| s.source.as_deref() == Some(source))
+        .map(|s| s.player)
+        .collect();
+    players.sort();
+    players
+}
+
+fn library(runner: &GameRunner, player: PlayerId) -> usize {
+    runner.state().players[player.0 as usize].library.len()
+}
+
+/// How many cards each of `players` has drawn (or milled) since `before`.
+fn drawn(runner: &GameRunner, before: &[(PlayerId, usize)]) -> Vec<usize> {
+    before
+        .iter()
+        .map(|&(player, count)| count - library(runner, player))
+        .collect()
+}
+
+fn libraries(runner: &GameRunner, players: &[PlayerId]) -> Vec<(PlayerId, usize)> {
+    players.iter().map(|&p| (p, library(runner, p))).collect()
+}
+
+/// Makes P2 the active player at the current step, so passing runs into team P0+P1's turn.
+fn opposing_teams_turn(runner: &mut GameRunner) {
+    let state = runner.state_mut();
+    state.active_player = P2;
+    state.priority_player = P2;
+    state.waiting_for = WaitingFor::Priority { player: P2 };
+}
+
+/// CR 805.4d + CR 102.3: Well of Ideas' "each other player's draw step, that player draws an
+/// additional card" triggers for the representative's teammate, and "your draw step" for its
+/// controller.
+#[test]
+fn each_other_player_of_the_active_team_has_its_own_draw_step() {
+    let db = shared_card_db().expect("card db");
+    let mut scenario = two_headed_giant(Phase::Upkeep);
+    scenario.add_real_card(P0, "Well of Ideas", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    let before = libraries(&runner, &[P0, P1]);
+    let stacked = answer_while(&mut runner, |s| s.phase != Phase::PreCombatMain);
+    assert_eq!(drawn(&runner, &before), [3, 2]);
+    assert_eq!(stacked_for(&stacked, "Well of Ideas"), [None, Some(P1)]);
+}
+
+/// CR 805.4d: Walking Archive's "each player's upkeep, that player draws a card for each +1/+1
+/// counter" triggers once for each player of the active team, each instance drawing for its own.
+#[test]
+fn each_players_upkeep_triggers_once_for_each_player_of_the_active_team() {
+    let db = shared_card_db().expect("card db");
+    let mut scenario = two_headed_giant(Phase::End);
+    let archive = scenario.add_real_card(P2, "Walking Archive", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    opposing_teams_turn(&mut runner);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&archive)
+        .unwrap()
+        .counters
+        .insert(CounterType::Plus1Plus1, 1);
+    let before = libraries(&runner, &[P0, P1]);
+    let stacked = answer_while(&mut runner, |s| {
+        !(s.active_player == P0 && s.phase == Phase::Draw)
+    });
+    assert_eq!(drawn(&runner, &before), [2, 2]);
+    assert_eq!(
+        stacked_for(&stacked, "Walking Archive"),
+        [Some(P0), Some(P1)]
+    );
+}
+
+fn battlefield_named(state: &GameState, name: &str) -> usize {
+    state
+        .battlefield
+        .iter()
+        .filter(|id| state.objects[id].name == name)
+        .count()
+}
+
+/// CR 805.4d: Verdant Kraken's "you create a 3/3 … token" and The Cobra King's "create a 1/1 …
+/// token named Cobra Coil" never refer to that player, so each triggers once on the team's
+/// upkeep, while Walking Archive's "that player draws" triggers for each player.
+#[test]
+fn each_players_upkeep_triggers_once_when_it_does_not_refer_to_that_player() {
+    let db = shared_card_db().expect("card db");
+    let mut scenario = two_headed_giant(Phase::End);
+    let archive = scenario.add_real_card(P2, "Walking Archive", Zone::Battlefield, db);
+    scenario.add_real_card(P2, "Verdant Kraken", Zone::Battlefield, db);
+    scenario.add_real_card(P3, "The Cobra King", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    opposing_teams_turn(&mut runner);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&archive)
+        .unwrap()
+        .counters
+        .insert(CounterType::Plus1Plus1, 1);
+    let stacked = answer_while(&mut runner, |s| {
+        !(s.active_player == P0 && s.phase == Phase::Draw)
+    });
+    let state = runner.state();
+    assert_eq!(
+        stacked_for(&stacked, "Walking Archive"),
+        [Some(P0), Some(P1)]
+    );
+    assert_eq!(stacked_for(&stacked, "Verdant Kraken"), [None]);
+    assert_eq!(stacked_for(&stacked, "The Cobra King"), [None]);
+    assert_eq!(battlefield_named(state, "Forest Tentacle"), 1);
+    assert_eq!(battlefield_named(state, "Cobra Coil"), 1);
+}
+
+/// CR 805.4d + CR 603.4: Obsessive Skinner's "each opponent's upkeep, if there are four or more
+/// card types among cards in your graveyard, put a +1/+1 counter on target creature" reads only
+/// its controller's graveyard, so it triggers once on the team's upkeep.
+#[test]
+fn each_opponents_upkeep_triggers_once_when_only_your_graveyard_is_read() {
+    let db = shared_card_db().expect("card db");
+    let mut scenario = two_headed_giant(Phase::End);
+    scenario.add_real_card(P2, "Obsessive Skinner", Zone::Battlefield, db);
+    for card in ["Grizzly Bears", "Forest", "Lightning Bolt", "Divination"] {
+        scenario.add_real_card(P2, card, Zone::Graveyard, db);
+    }
+    let mut runner = scenario.build();
+    opposing_teams_turn(&mut runner);
+    let stacked = answer_while(&mut runner, |s| {
+        !(s.active_player == P0 && s.phase == Phase::Draw)
+    });
+    let state = runner.state();
+    assert_eq!(stacked_for(&stacked, "Obsessive Skinner"), [None]);
+    let placed: u32 = state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects[id].counters.get(&CounterType::Plus1Plus1))
+        .sum();
+    assert_eq!(placed, 1);
+}
+
+/// CR 603.4 + CR 805.4d: Ghirapur Orrery's "if that player has no cards in hand" is checked for
+/// each player of the active team when it triggers, whichever of them is the representative.
+#[test]
+fn each_players_intervening_if_is_checked_for_that_player() {
+    let db = shared_card_db().expect("card db");
+    for (empty_handed, holding) in [(P1, P0), (P0, P1)] {
+        let mut scenario = two_headed_giant(Phase::End);
+        scenario.add_real_card(P2, "Ghirapur Orrery", Zone::Battlefield, db);
+        for _ in 0..3 {
+            scenario.add_card_to_hand(holding, "Held");
+        }
+        let mut runner = scenario.build();
+        opposing_teams_turn(&mut runner);
+        let before = libraries(&runner, &[empty_handed, holding]);
+        let stacked = answer_while(&mut runner, |s| {
+            !(s.active_player == P0 && s.phase == Phase::Draw)
+        });
+        assert_eq!(drawn(&runner, &before), [4, 1], "{empty_handed:?}");
+        assert_eq!(
+            stacked_for(&stacked, "Ghirapur Orrery"),
+            [Some(empty_handed)]
+        );
+    }
+}
+
+/// CR 805.4d: Sentinel of the Eternal Watch's "combat on each opponent's turn, tap target creature
+/// that player controls" triggers for each opponent on the active team, each choosing among its
+/// own player's creatures; Luminarch Ascension's "each opponent's end step", which never refers to
+/// that player, triggers once.
+#[test]
+fn each_opponents_step_triggers_per_player_only_when_it_refers_to_that_player() {
+    let db = shared_card_db().expect("card db");
+    let mut scenario = two_headed_giant(Phase::PreCombatMain);
+    let luminarch = scenario.add_real_card(P2, "Luminarch Ascension", Zone::Battlefield, db);
+    scenario.add_real_card(P2, "Sentinel of the Eternal Watch", Zone::Battlefield, db);
+    let bears = [
+        scenario.add_vanilla(P0, 2, 2),
+        scenario.add_vanilla(P1, 2, 2),
+    ];
+    let mut runner = scenario.build();
+    let stacked = answer_while(&mut runner, |s| {
+        s.active_player == P0 && s.phase != Phase::Cleanup
+    });
+    let state = runner.state();
+    assert_eq!(
+        stacked_for(&stacked, "Sentinel of the Eternal Watch"),
+        [Some(P0), Some(P1)]
+    );
+    assert!(bears.iter().all(|bear| state.objects[bear].tapped));
+    assert_eq!(stacked_for(&stacked, "Luminarch Ascension"), [None]);
+    assert_eq!(counters(state, luminarch), 1);
+}
+
+/// CR 904.2 + CR 805.4d: Bow to My Command's "your opponents' end step" names no player's step,
+/// so it triggers once in the heroes' shared end step, not once for each hero.
+#[test]
+fn your_opponents_end_step_triggers_once_on_the_heroes_shared_turn() {
+    let db = shared_card_db().expect("card db");
+    let mut format = FormatConfig::archenemy();
+    format.archenemy_player = Some(P0);
+    let mut scenario = GameScenario::new_with_format(format, 4, 42);
+    scenario.at_phase(Phase::Draw);
+    for seat in 0..4u8 {
+        for i in 0..7 {
+            scenario.add_card_to_library_top(PlayerId(seat), &format!("Filler {i}"));
+        }
+    }
+    let mut runner = scenario.build();
+    let bow = db
+        .get_face_by_name("Bow to My Command")
+        .expect("Bow to My Command")
+        .clone();
+    create_scheme_deck_card(runner.state_mut(), &bow, P0);
+    runner.state_mut().archenemy = Some(P0);
+    runner.state_mut().active_player = P0;
+    runner.advance_to_phase(Phase::PreCombatMain);
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "1".to_string(),
+        })
+        .expect("choose the opponent");
+    runner.advance_to_priority_window();
+    let state = runner.state_mut();
+    state.active_player = P1;
+    state.priority_player = P1;
+    state.waiting_for = WaitingFor::Priority { player: P1 };
+    let stacked = answer_while(&mut runner, |s| {
+        s.active_player == P1 && s.phase != Phase::Cleanup
+    });
+    assert_eq!(stacked_for(&stacked, "Bow to My Command"), [None]);
+}
+
+/// CR 805.4d: Tenuous Truce's "enchanted opponent's end step, you and that player each draw a
+/// card" triggers for the enchanted player of the active team, representative or not.
+#[test]
+fn an_enchanted_players_step_is_that_players_on_a_team_turn() {
+    for (enchanted, other) in [(P1, P0), (P0, P1)] {
+        let mut scenario = two_headed_giant(Phase::PreCombatMain);
+        let truce = {
+            let mut aura =
+                scenario.add_creature_from_oracle(P2, "Tenuous Truce", 0, 0, TENUOUS_TRUCE);
+            aura.as_enchantment();
+            aura.with_subtypes(vec!["Aura"]);
+            aura.id()
+        };
+        let mut runner = scenario.build();
+        attach_to_player(runner.state_mut(), truce, enchanted);
+        evaluate_layers(runner.state_mut());
+        reindex_object_triggers(runner.state_mut(), truce);
+        let before = libraries(&runner, &[enchanted, P2, other]);
+        let stacked = answer_while(&mut runner, |s| {
+            s.active_player == P0 && s.phase != Phase::Cleanup
+        });
+        assert_eq!(drawn(&runner, &before), [1, 1, 0], "{enchanted:?}");
+        assert_eq!(stacked_for(&stacked, "Tenuous Truce"), [Some(enchanted)]);
+    }
+}
+
+/// CR 728.1 + CR 805.4d: the rad-counter rule trigger of "each player's precombat main phase"
+/// triggers for each player of the active team with rad counters.
+#[test]
+fn each_player_of_the_active_team_processes_its_rad_counters() {
+    let mut runner = two_headed_giant(Phase::Draw).build();
+    runner.state_mut().players[0].add_player_counters(&PlayerCounterKind::Rad, 2);
+    runner.state_mut().players[1].add_player_counters(&PlayerCounterKind::Rad, 3);
+    let stacked = answer_while(&mut runner, |s| {
+        s.active_player == P0 && s.phase != Phase::Cleanup
+    });
+    let rad =
+        |p: PlayerId| runner.state().players[p.0 as usize].player_counter(&PlayerCounterKind::Rad);
+    assert_eq!((rad(P0), rad(P1)), (0, 0));
+    let mut rad_triggers: Vec<Option<PlayerId>> = stacked
+        .iter()
+        .filter(|s| s.description.as_deref() == Some("Rad counters"))
+        .map(|s| s.player)
+        .collect();
+    rad_triggers.sort();
+    assert_eq!(rad_triggers, [Some(P0), Some(P1)]);
+}
+
+/// CR 805.4 + CR 805.9: Well of Ideas' "your draw step" is the draw step of its controller when a
+/// teammate is the representative.
+#[test]
+fn your_draw_step_is_each_team_members() {
+    let db = shared_card_db().expect("card db");
+    let mut scenario = two_headed_giant(Phase::Upkeep);
+    scenario.add_real_card(P1, "Well of Ideas", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    let before = libraries(&runner, &[P0, P1]);
+    answer_while(&mut runner, |s| s.phase != Phase::PreCombatMain);
+    assert_eq!(drawn(&runner, &before), [2, 3]);
+}
+
+/// CR 725.2 + CR 805.4: "At the beginning of the monarch's end step, that player draws a card"
+/// triggers in the team's end step whichever of its players is the monarch.
+#[test]
+fn the_monarchs_end_step_is_its_teams() {
+    for monarch in [P1, P0] {
+        let mut runner = two_headed_giant(Phase::Draw).build();
+        runner.state_mut().monarch = Some(monarch);
+        let before = libraries(&runner, &[P0, P1]);
+        answer_while(&mut runner, |s| {
+            s.active_player == P0 && s.phase != Phase::Cleanup
+        });
+        let expected = if monarch == P0 { [1, 0] } else { [0, 1] };
+        assert_eq!(drawn(&runner, &before), expected, "{monarch:?}");
+    }
+}
+
+/// CR 702.179d + CR 805.4 + CR 102.3: the speed holder's "whenever one or more opponents lose life
+/// during your turn" holds for each player of the active team, and a teammate's life loss is not
+/// an opponent's.
+#[test]
+fn the_speed_holders_turn_is_its_teams_and_only_opponents_raise_it() {
+    let db = shared_card_db().expect("card db");
+    for (engines, upkeep, speed, triggers) in [
+        (P1, "Consuming Sepulcher", 2, 1),
+        (P0, "Consuming Sepulcher", 2, 1),
+        (P1, "Bitterblossom", 1, 0),
+    ] {
+        let mut scenario = two_headed_giant(Phase::Untap);
+        scenario.add_real_card(engines, "Burnout Bashtronaut", Zone::Battlefield, db);
+        scenario.add_real_card(P0, upkeep, Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        let life = runner.state().players[0].life;
+        let stacked = answer_while(&mut runner, |s| s.phase != Phase::Draw);
+        let state = runner.state();
+        let label = format!("{engines:?} {upkeep}");
+        assert_eq!(
+            state.players[engines.0 as usize].speed,
+            Some(speed),
+            "{label}"
+        );
+        let speed_triggers = stacked
+            .iter()
+            .filter(|s| s.description.as_deref() == Some("Start your engines!"))
+            .count();
+        assert_eq!(speed_triggers, triggers, "{label}");
+        if upkeep == "Bitterblossom" {
+            assert_eq!(state.players[0].life, life - 1, "{label}");
+        }
+    }
 }

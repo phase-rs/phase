@@ -1175,6 +1175,7 @@ fn count_matching_trigger_event_subjects(
         GameEvent::GameStarted
         | GameEvent::TurnStarted { .. }
         | GameEvent::PhaseChanged { .. }
+        | GameEvent::PhaseChangedFor { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::SpellCopied { .. }
         | GameEvent::XValueChosen { .. }
@@ -3240,13 +3241,27 @@ pub(super) fn match_phase(
         // CR 102.1 + CR 800.4j: a step scoped to a player's turn belongs to no player while the
         // turn continues without an active player; an unscoped step ("each end step") still begins.
         phase_matches
-            && (trigger.valid_target.is_none()
-                || crate::game::players::active_player(state).is_some_and(|active| {
-                    valid_player_matches(trigger, state, active, source_context)
-                }))
+            && phase_trigger_players(trigger, state, source_context)
+                .is_none_or(|players| !players.is_empty())
     } else {
         false
     }
+}
+
+/// CR 603.2b + CR 805.4d: the turn players whose step a phase trigger with a per-player scope
+/// (its `valid_target`) observes; `None` for one without, such as "your opponents' end step".
+pub(crate) fn phase_trigger_players(
+    trigger: &TriggerDefinition,
+    state: &GameState,
+    source_context: &TriggerSourceContext,
+) -> Option<Vec<PlayerId>> {
+    trigger.valid_target.as_ref()?;
+    Some(
+        crate::game::players::turn_players(state)
+            .into_iter()
+            .filter(|&player| valid_player_matches(trigger, state, player, source_context))
+            .collect(),
+    )
 }
 
 // CR 603.4: Match when the trigger's source becomes the target of a spell or ability.
