@@ -12719,6 +12719,10 @@ pub struct GraveyardPermissionLatch {
     pub extra_cost: Option<crate::types::statics::CastExtraCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enters_with_counter: Option<crate::types::counter::CounterType>,
+    /// CR 614.1d + CR 607.1c: the grant's "that artifact enters tapped" rider
+    /// (Edgar, Master Machinist), kept from announcement (CR 601.2a).
+    #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
+    pub enter_tapped: EtbTapState,
     /// CR 601.3 + CR 601.2i: a `Single` grant allows one cast and ends when
     /// this cast becomes cast.
     #[serde(
@@ -40276,6 +40280,9 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
         // spell remains on the stack.
         && x.cast_occurrence == y.cast_occurrence
         && x.spell_announcement == y.spell_announcement
+        // CR 614.1d: the cast-this-way enters-tapped rider decides the entry's
+        // tap state, so two stack spells differing only in it are different.
+        && x.cast_permission_enter_tapped == y.cast_permission_enter_tapped
         // Horde-deck-token provenance: compare fail-closed so a token mid-reveal
         // never equates to its pre-reveal self on this axis alone.
         && x.is_horde_deck_token == y.is_horde_deck_token
@@ -63670,6 +63677,7 @@ mod tests {
             },
             extra_cost: None,
             enters_with_counter: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             cast_limit: crate::types::statics::PermissionCastLimit::Single,
             mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyColor),
             enters_modifications: Default::default(),

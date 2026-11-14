@@ -94,6 +94,7 @@ mod eagles_delayed_result_phase3;
 mod ebondeath_not_named_died_condition;
 mod edgar_king_of_figaro_two_headed_coin;
 mod edgar_markov_eminence_command_zone;
+mod edgar_master_machinist_graveyard_cast;
 mod electrostatic_bolt;
 mod elemental_spectacle_regression;
 mod elenda_torgaar_starting_life_runtime;

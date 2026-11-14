@@ -1598,10 +1598,21 @@ pub enum StaticMode {
         /// it." (Noctis, Prince of Lucis; Leonardo, Sewer Samurai — both
         /// finality). `None` (default) preserves the existing graveyard-cast
         /// shapes. Placed at the shared `finalize_cast` seam via
-        /// `casting::selected_static_permission_enters_with_counter`. Mirrors
+        /// `casting::selected_static_permission_entry_riders`. Mirrors
         /// `Effect::CastFromZone.enters_with_counter`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enters_with_counter: Option<super::counter::CounterType>,
+        /// CR 614.1d + CR 110.5b + CR 607.1c: Optional enters-tapped rider linked
+        /// to the "cast a spell this way" permission — "If you cast a spell this
+        /// way, that artifact enters tapped." (Edgar, Master Machinist).
+        /// `Unspecified` (default) is no rider. Latched at announcement, carried
+        /// on the spell object, and offered at its entry as a CR 616.1
+        /// replacement candidate (`replacement.rs`, cast-permission enter-tapped).
+        #[serde(
+            default,
+            skip_serializing_if = "super::zones::EtbTapState::is_unspecified"
+        )]
+        enter_tapped: super::zones::EtbTapState,
         /// CR 118.9b: "An effect that allows you to cast a spell may require a
         /// certain alternative cost to be paid." The casting method this
         /// permission restricts the cast to ("You may cast this card from your
@@ -1833,7 +1844,7 @@ pub enum StaticMode {
         /// it." (Intrepid Paleontologist — finality). `None` (default)
         /// preserves the existing exile-cast shapes (Maralen, The Matrix of
         /// Time, Azula, Valgavoth). Placed at the shared `finalize_cast` seam
-        /// via `casting::selected_static_permission_enters_with_counter`.
+        /// via `casting::selected_static_permission_entry_riders`.
         /// Mirrors `Effect::CastFromZone.enters_with_counter`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enters_with_counter: Option<super::counter::CounterType>,
@@ -3077,7 +3088,7 @@ impl Hash for StaticMode {
                 // `CounterType` derives Hash but is collision-safe to skip: the
                 // enters-with rider never distinguishes two otherwise-equal
                 // permissions in the interned set (mirrors `extra_cost` below);
-                // the enters-modifications rider likewise.
+                // the enters-tapped and enters-modifications riders likewise.
                 ..
             } => {
                 frequency.hash(state);
@@ -3479,9 +3490,10 @@ impl fmt::Display for StaticMode {
                 pool,
                 cast_limit,
                 mana_spend_permission,
-                // CR 122.1: the enters-with counter and enters-modifications
-                // payloads ride on serde, not the Display round-trip (mirrors
-                // `extra_cost`); FromStr defaults them to empty.
+                // CR 122.1: the enters-with counter, enters-tapped and
+                // enters-modifications payloads ride on serde, not the Display
+                // round-trip (mirrors `extra_cost`); FromStr defaults them to
+                // empty.
                 ..
             } => {
                 write!(f, "GraveyardCastPermission({play_mode},{frequency}")?;
@@ -4008,6 +4020,7 @@ impl FromStr for StaticMode {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: PermissionCastLimit::Unlimited,
@@ -4032,6 +4045,7 @@ impl FromStr for StaticMode {
                         // to None.
                         extra_cost: None,
                         enters_with_counter: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                         required_cast_keyword: None,
                         pool: if rest.contains(&"pool=any_graveyard") {
                             GraveyardPermissionPool::AnyGraveyard
@@ -4059,6 +4073,7 @@ impl FromStr for StaticMode {
                         graveyard_destination_replacement: None,
                         extra_cost: None,
                         enters_with_counter: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                         required_cast_keyword: None,
                         pool: GraveyardPermissionPool::OwnGraveyard,
                         cast_limit: PermissionCastLimit::Unlimited,
@@ -4982,6 +4997,7 @@ mod tests {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -4994,6 +5010,7 @@ mod tests {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -5006,6 +5023,7 @@ mod tests {
                 graveyard_destination_replacement: Some(Zone::Exile),
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::AnyGraveyard,
                 cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -5203,6 +5221,7 @@ mod tests {
                     mode: CastCostMode::Additional,
                 }),
                 enters_with_counter: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,

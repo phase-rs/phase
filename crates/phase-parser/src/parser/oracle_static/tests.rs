@@ -16541,6 +16541,7 @@ fn own_unlimited_cast_permission(
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             required_cast_keyword: None,
             pool: GraveyardPermissionPool::OwnGraveyard,
             cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,

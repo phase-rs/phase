@@ -126,6 +126,10 @@ pub fn merge_object_onto(
     crate::game::zones::absorb_component(state, merging_id, None);
     if let Some(merging) = state.objects.get_mut(&merging_id) {
         merging.mutate_form = None;
+        // CR 730.2b/c + CR 614.1d: a merged component never enters the
+        // battlefield, so a cast-this-way enters-tapped rider has no entry to
+        // modify; it ends with the spell (it is stack-scoped).
+        merging.cast_permission_enter_tapped = crate::types::zones::EtbTapState::Unspecified;
     }
 
     // CR 730.2 multi-instance stacking: extend the existing stack when

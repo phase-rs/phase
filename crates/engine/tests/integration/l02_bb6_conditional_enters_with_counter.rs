@@ -485,7 +485,7 @@ fn push_death(runner: &mut engine::game::scenario::GameRunner, obj: ObjectId) {
 /// this turn the self-granting graveyard cast is legal and the permanent enters
 /// with a +1/+1 counter. The counter==1 assertion is the ENGINE-CHANGE
 /// discriminator: reverting the self-granting reader fallback in
-/// `selected_static_permission_enters_with_counter` makes it absent (0).
+/// `selected_static_permission_entry_riders` makes it absent (0).
 #[test]
 fn undead_sprinter_runtime_gate_and_linked_counter() {
     let (mut scenario, sprinter) = sprinter_in_graveyard();

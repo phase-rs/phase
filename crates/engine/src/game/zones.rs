@@ -242,6 +242,7 @@ pub(crate) fn apply_zone_exit_cleanup(
         // represented on the stack, never to the new object after it leaves.
         if from == Zone::Stack && to != Zone::Stack {
             obj.cast_occurrence = None;
+            obj.cast_permission_enter_tapped = crate::types::zones::EtbTapState::Unspecified;
             obj.prepared_copy_source = None;
             // CR 400.7: the spell's identity ends with the spell.
             obj.spell_announcement = None;
@@ -1427,6 +1428,7 @@ pub fn apply_resolved_zone_change(
     // must reproduce the live Stack-exit carrier clear from the recorded move.
     if command.from == Zone::Stack && command.to != Zone::Stack {
         object.cast_occurrence = None;
+        object.cast_permission_enter_tapped = crate::types::zones::EtbTapState::Unspecified;
         object.prepared_copy_source = None;
         object.spell_announcement = None;
     }

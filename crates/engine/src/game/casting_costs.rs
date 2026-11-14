@@ -14446,23 +14446,35 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // authorizing source is embedded in `casting_variant`; register the pending
     // ETB counter on the same object so it enters carrying the counter.
     //
-    // CR 601.2b + CR 614.1c: a graveyard cast applies the counter of the
+    // CR 601.2a + CR 614.1c: a graveyard cast applies the riders of the
     // permission it was announced under, as latched then: the grant's source
     // "doesn't need to stay under your control throughout that process"
-    // (Intrepid Paleontologist ruling), so a source sacrificed mid-payment
-    // still gives its counter. A cast that latched none reads it now.
-    let static_perm_etb_counter = match &graveyard_permission_latch {
-        Some(latch) => latch.enters_with_counter.clone(),
-        None => super::casting::selected_static_permission_enters_with_counter(
+    // (Intrepid Paleontologist / Edgar, Master Machinist rulings), so a source
+    // sacrificed mid-payment still gives its riders. A cast that latched none
+    // reads them now, through the one entry-rider authority.
+    let static_perm_entry_riders = match &graveyard_permission_latch {
+        Some(latch) => super::casting::CastPermissionEntryRiders {
+            counter: latch.enters_with_counter.clone(),
+            enter_tapped: latch.enter_tapped,
+        },
+        None => super::casting::selected_static_permission_entry_riders(
             state,
             player,
             &permission_authority,
         ),
     };
-    if let Some(counter_type) = static_perm_etb_counter {
+    if let Some(counter_type) = static_perm_entry_riders.counter {
         state
             .pending_etb_counters
             .push((object_id, counter_type, 1));
+    }
+    // CR 614.1d + CR 607.1c: "If you cast a spell this way, that artifact
+    // enters tapped" (Edgar, Master Machinist) — recorded on the spell itself,
+    // which `replacement::find_applicable_replacements` offers as a CR 616.1
+    // candidate when it resolves onto the battlefield. Stack-scoped: cleared at
+    // every Stack exit and on a copy (CR 707.10).
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.cast_permission_enter_tapped = static_perm_entry_riders.enter_tapped;
     }
 
     // CR 205.1b + CR 613.1d: A `CastFromZone` grant whose rider was "… is a
@@ -19896,6 +19908,7 @@ mod tests {
                         graveyard_destination_replacement: None,
                         extra_cost: None,
                         enters_with_counter: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                         required_cast_keyword: None,
                         pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
                         cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
