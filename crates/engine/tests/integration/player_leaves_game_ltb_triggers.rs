@@ -1489,9 +1489,10 @@ fn diviner_triggers_on_board(
     scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
     let mut runner = scenario.build();
     if let Some(hushbringer) = borrowed_hushbringer {
-        // CR 117.3a: P2 receives priority and casts Turn Against ("Gain control
-        // of target creature until end of turn.") at instant speed here, through
-        // the public action path, then priority returns to P0.
+        // CR 117.3d: stage P2's priority after the preceding players pass; P2
+        // casts Turn Against ("Gain control of target creature until end of
+        // turn.") at instant speed through the public action path, then
+        // priority returns to P0.
         {
             let state = runner.state_mut();
             state.priority_player = P2;
@@ -2154,6 +2155,61 @@ fn a_concession_by_the_active_player_mid_resolution_gives_priority_to_a_living_p
 #[test]
 fn an_ordering_prompt_after_the_active_players_concession_returns_priority_to_a_living_player() {
     concede_the_active_player_mid_skyfisher(true);
+}
+
+/// CR 800.4d + CR 704.3: an ability an earlier state-based-action check
+/// triggered is removed with its controller when they lose in a later check.
+/// P1 owns and controls Profane Memento and Platinum Angel; P0 controls an Air
+/// Elemental; P1 and P2 are at 4 life. P0's Hurricane for 4 makes P2 lose and
+/// kills both creatures in the first check (the Angel keeps P1 in the game for
+/// it), so P1's Memento triggers for P0's Elemental; P1 loses in the second
+/// check, and no trigger of theirs remains queued, announced or on the stack.
+#[test]
+fn an_earlier_checks_trigger_leaves_with_its_controller_who_loses_in_the_next_check() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let memento = scenario.add_real_card(P1, "Profane Memento", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Platinum Angel", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Air Elemental", Zone::Battlefield, db);
+    let hurricane = scenario.add_real_card(P0, "Hurricane", Zone::Hand, db);
+    let mut pool = (0..5)
+        .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+        .collect::<Vec<_>>();
+    pool.extend((0..2).map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![])));
+    scenario.with_mana_pool(P0, pool);
+    scenario.with_life(P1, 4);
+    scenario.with_life(P2, 4);
+    let mut runner = scenario.build();
+    runner.cast(hurricane).x(4).commit();
+    for _ in 0..8 {
+        if runner.state().players[1].is_eliminated {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while Hurricane resolves");
+    }
+    assert!(runner.state().players[2].is_eliminated);
+    assert!(
+        runner.state().players[1].is_eliminated,
+        "reach guard: P1 loses in the check after the Angel is destroyed"
+    );
+    let state = runner.state();
+    let queued = state
+        .pending_trigger_order
+        .iter()
+        .flat_map(|order| order.groups.iter())
+        .flat_map(|group| group.triggers.iter())
+        .chain(state.deferred_triggers.iter())
+        .filter(|context| context.pending.source_id == memento)
+        .count()
+        + state
+            .pending_trigger
+            .iter()
+            .filter(|pending| pending.source_id == memento)
+            .count();
+    assert_eq!(queued + triggers_from(&runner, memento), 0);
 }
 
 /// Welcoming Vampire ("Whenever one or more other creatures you control with

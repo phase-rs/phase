@@ -159,6 +159,9 @@ fn run_state_based_actions(
     );
     // CR 603.3b: what the earlier checks' departures triggered joins the queue
     // now, ahead of the last check's, as one batch with the caller's own.
+    // CR 800.4d: an ability whose controller left in a later check is removed.
+    let held_by_earlier_checks =
+        crate::game::triggers::retire_departed_controller_contexts(state, held_by_earlier_checks);
     let queued_by_earlier_iterations = held_by_earlier_checks.len();
     state.deferred_triggers.extend(held_by_earlier_checks);
     // CR 704.3 + CR 603.10a: the state-based-action event is complete and stamped
