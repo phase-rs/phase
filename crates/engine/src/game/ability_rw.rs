@@ -4389,7 +4389,7 @@ fn filter_threshold_quantity_reads(filter: &TargetFilter) -> RwProfile {
     crate::types::ability::filter_grammar_any(filter, &|node| {
         let node_reads = match node {
             FilterGrammarNode::Prop(prop) => filter_prop_operand_reads(prop),
-            // CR 109.4: a player predicate reads its own operands
+            // A player predicate reads its own operands
             // (`ControlsCount { count }`, `PlayerAttribute { attr, value }`).
             FilterGrammarNode::Player(player) => rw_player_filter(player),
             // A `TargetFilter` node's reads are those of the props it carries,
