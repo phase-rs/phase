@@ -166,6 +166,7 @@ impl NativeTable {
             }
             session.set_card_names(app.db.card_names());
             session.start_game(&app.db).unwrap();
+            crate::socket_test_hooks::elect_contest_winner_to_play(session);
             let key = crate::bind_full_session_key(&app.game_db, &code).unwrap();
             crate::initialize_full_runtime(&app.game_db, session, key.clone()).unwrap();
             (key, tokens)

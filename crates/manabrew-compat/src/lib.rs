@@ -14,7 +14,7 @@ use engine::ai_support::legal_actions_for_viewer;
 use engine::database::CardDatabase;
 use engine::game::combat::AttackTarget;
 use engine::game::derived::derive_display_state;
-use engine::game::derived_views::{derive_views, DerivedViews};
+use engine::game::derived_views::{derive_filtered_views, DerivedViews};
 use engine::game::filter_state_for_viewer;
 use engine::game::game_object::{AttachTarget, GameObject};
 use engine::game::interaction::{derive_viewer_interaction, resolve_interaction_response};
@@ -656,7 +656,9 @@ pub fn prepare_snapshot_with_prompt_id(
     // the adapter sees exactly what every other interaction consumer sees.
     let interaction = derive_viewer_interaction(raw_state, &state, viewer);
     derive_display_state(&mut state);
-    let derived = derive_views(&state, Some(viewer));
+    // The stage of a repeated payment is read from its parked owner, which the
+    // viewer projection drops.
+    let derived = derive_filtered_views(raw_state, &state, Some(viewer));
 
     Ok(PreparedManabrewSnapshot {
         game_id: game_id.into(),
@@ -691,7 +693,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
 /// `upstream.` = the protocol has no primitive for something the engine can do.
 /// `local.` = the protocol has the primitive but this engine cannot source it,
 /// or a documented adapter-local extension is intentionally in use.
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 95] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 96] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
         area: "prompts",
@@ -1148,6 +1150,12 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 95] = [
         area: "actions",
         reason: "CR 103.1: before the first turn a player chooses whether to play or draw. Phase models it (GameAction::ChoosePlayDraw). It is a two-option choice and ChooseBoolean fits, but the framing matters — a boolean's confirm/deny labels would have to read 'Play'/'Draw', which is exactly what confirm_label and deny_label are for. Unmapped, not unrepresentable.",
         suggested_protocol_extension: "None needed upstream — ChooseBoolean with explicit labels. Adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.starting-player-unsupported",
+        area: "actions",
+        reason: "CR 103.1: the player chosen to decide who takes the first turn names the starting player. Phase models the answer (GameAction::ChooseStartingPlayer { player }). Naming one seat among the candidates is a player choice, which is ChooseBoardTargets with TargetKind::Player — the same shape local.clash-unsupported and the other opponent-picker codes describe. Unmapped, not unrepresentable.",
+        suggested_protocol_extension: "None needed upstream — ChooseBoardTargets carries player candidates. This is adapter work.",
     },
     UnsupportedCapability {
         code: "local.planar-die-unsupported",
@@ -1721,6 +1729,17 @@ fn build_prompt_input(
         // happen — a yes/no. `UnlessPaymentChooseCost` is deliberately NOT
         // folded in: it picks *among several costs*, which is a selection, not
         // a boolean, and mapping it here would misreport the question.
+        // CR 702.24a: a repeated payment that was accepted and paused at a
+        // work slice is not offered again; continuing is its only answer, so
+        // it is served as the engine's one-of list rather than as a yes/no
+        // whose "Decline" the engine would refuse.
+        WaitingFor::UnlessPayment { .. }
+            if !prepared
+                .actions
+                .contains(&GameAction::PayUnlessCost { pay: false }) =>
+        {
+            interaction_prompt(prepared, card_lookup)
+        }
         WaitingFor::UnlessPayment {
             effect_description, ..
         } => Ok(PromptInput::ChooseBoolean(ChooseBooleanInput {
@@ -2888,6 +2907,9 @@ pub fn convert_available_action(
         }
         GameAction::ChoosePlayDraw { .. } => {
             AvailableActionConversion::Unsupported("local.play-draw-unsupported")
+        }
+        GameAction::ChooseStartingPlayer { .. } => {
+            AvailableActionConversion::Unsupported("local.starting-player-unsupported")
         }
         GameAction::ChooseOption { .. }
         | GameAction::SubmitVoteCandidate { .. }
@@ -6418,6 +6440,136 @@ mod tests {
         (state, id)
     }
 
+    /// CR 702.24a: Psychic Vortex with 1,025 age counters under an opponent's
+    /// Hullbreacher (verbatim Oracle texts). The upkeep offer is a yes/no; once
+    /// accepted, the payment pauses after one work slice and the adapter serves
+    /// the engine's single answer, which round-trips to the action the engine
+    /// accepts.
+    #[test]
+    fn a_continued_repeated_payment_is_served_as_its_single_answer() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Untap);
+        let vortex = scenario
+            .add_enchantment_from_oracle(
+                P0,
+                "Psychic Vortex",
+                "Cumulative upkeep\u{2014}Draw a card. (At the beginning of your upkeep, put \
+                 an age counter on this permanent, then sacrifice it unless you pay its upkeep \
+                 cost for each age counter on it.)\nAt the beginning of your end step, \
+                 sacrifice a land and discard your hand.",
+            )
+            .id();
+        scenario.add_creature_from_oracle(
+            P1,
+            "Hullbreacher",
+            3,
+            2,
+            "Flash\nIf an opponent would draw a card except the first one they draw in each \
+             of their draw steps, instead you create a Treasure token. (It's an artifact with \
+             \"{T}, Sacrifice this token: Add one mana of any color.\")",
+        );
+        let mut runner = scenario.build();
+        // The one-of list is the engine's interaction projection, which is
+        // served only for a bound session.
+        bind_interaction_authority(
+            runner.state_mut(),
+            InteractionSessionId("continuation".to_string()),
+        )
+        .expect("valid interaction authority binding");
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&vortex)
+            .expect("Psychic Vortex exists")
+            .counters
+            .insert(CounterType::Age, 1_024);
+        runner.auto_advance_to_main_phase();
+        runner.advance_until_stack_empty();
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::UnlessPayment {
+                    repeat: Some(1_025),
+                    ..
+                }
+            ),
+            "reach: the upkeep offers 1,025 draws, got {:?}",
+            runner.state().waiting_for
+        );
+
+        let offer = prepare_snapshot_with_prompt_id(runner.state(), P0, "game-a", 41).unwrap();
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseBoolean(offer_prompt)) =
+            build_prompt(&offer, &lookup).unwrap().input
+        else {
+            panic!("the initial offer is a yes/no");
+        };
+        assert_eq!(
+            (
+                offer_prompt.confirm_label.as_str(),
+                offer_prompt.deny_label.as_str()
+            ),
+            ("Pay", "Decline"),
+        );
+        for value in [true, false] {
+            assert_eq!(
+                translate_response(
+                    41,
+                    PromptOutput::ChooseBoolean(ChooseBooleanOutput::Decision { value }),
+                    &offer.prompt_context(),
+                    runner.state(),
+                )
+                .unwrap(),
+                GameAction::PayUnlessCost { pay: value },
+            );
+        }
+
+        runner
+            .act(GameAction::PayUnlessCost { pay: true })
+            .expect("paying is never refused");
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. })
+                && runner.state().pending_cost_move_resume.is_some(),
+            "reach: the first slice ended at the continuation, got {:?}",
+            runner.state().waiting_for
+        );
+
+        let continuation =
+            prepare_snapshot_with_prompt_id(runner.state(), P0, "game-a", 42).unwrap();
+        assert_eq!(
+            continuation
+                .derived
+                .unless_draw_cost
+                .as_ref()
+                .map(|draw| draw.stage),
+            Some(engine::game::derived_views::UnlessDrawPaymentStage::Continuing),
+            "the snapshot's views read the stage from the authoritative state"
+        );
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) =
+            build_prompt(&continuation, &lookup).unwrap().input
+        else {
+            panic!("the continuation is a one-of list, not a yes/no");
+        };
+        assert_eq!(input.options.len(), 1, "continuing is the only answer");
+        assert_eq!((input.min_total, input.max_total), (1, 1));
+        let action = translate_response(
+            42,
+            PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
+                chosen_indices: vec![0],
+            }),
+            &continuation.prompt_context(),
+            runner.state(),
+        )
+        .unwrap();
+        assert_eq!(action, GameAction::PayUnlessCost { pay: true });
+        runner.act(action).expect("the served answer is accepted");
+        assert!(
+            runner.state().pending_cost_move_resume.is_none(),
+            "the payment completed"
+        );
+    }
+
     fn agenda_selection(state: &GameState, chosen_indices: Vec<usize>) -> Result<GameAction> {
         let prepared = prepare_snapshot_with_prompt_id(state, PlayerId(0), "game-a", 42).unwrap();
         translate_response(
@@ -9033,13 +9185,13 @@ mod tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 95);
+        assert_eq!(capabilities.len(), 96);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 95, "capability codes must be unique");
+        assert_eq!(codes.len(), 96, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(

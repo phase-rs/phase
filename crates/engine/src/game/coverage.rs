@@ -324,6 +324,8 @@ pub enum ItemGap {
     /// CR 608.2e + CR 603.10d: the node's effect is handled, but its fan-out
     /// control boundary is unobservable (`PLAYER_SCOPE_CONTROL_BOUNDARY_GAP`).
     FanOutControlBoundary,
+    /// CR 601.2c / CR 608.2d: the GiveControl player recipient is never bound (`GIVE_CONTROL_UNBOUND_RECIPIENT_GAP`).
+    UnboundControlRecipient,
 }
 
 impl ItemGap {
@@ -331,6 +333,7 @@ impl ItemGap {
     fn handler(self) -> &'static str {
         match self {
             ItemGap::FanOutControlBoundary => PLAYER_SCOPE_CONTROL_BOUNDARY_GAP,
+            ItemGap::UnboundControlRecipient => GIVE_CONTROL_UNBOUND_RECIPIENT_GAP,
         }
     }
 }
@@ -2818,6 +2821,7 @@ fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
                         ThisWayCause::Returned => "returned",
                         ThisWayCause::Bounced => "bounced",
                         ThisWayCause::PutIntoGraveyard => "put into a graveyard",
+                        ThisWayCause::ControlGained => "gained control of",
                     };
                     format!("cards {verb} this way")
                 }
@@ -6069,6 +6073,10 @@ fn build_ability_item(
                 supported = false;
                 gap = Some(ItemGap::FanOutControlBoundary);
             }
+            AbilityNodeGap::UnboundControlRecipient => {
+                supported = false;
+                gap = Some(ItemGap::UnboundControlRecipient);
+            }
         }
     }
     if unimplemented_effect {
@@ -6832,6 +6840,9 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
                         AbilityNodeGap::UnimplementedCost(_) => "Cost: unimplemented".to_string(),
                         AbilityNodeGap::UnobservableFanOutControl => {
                             "Effect: fan_out_control_boundary".to_string()
+                        }
+                        AbilityNodeGap::UnboundControlRecipient => {
+                            "Effect: give_control_unbound_recipient".to_string()
                         }
                     };
                     if !missing.contains(&label) {
@@ -7866,6 +7877,26 @@ enum AbilityNodeGap<'a> {
     /// CR 608.2e + CR 603.10d: a fan-out control boundary the runtime can't
     /// observe (`fan_out_control_boundary_is_unobservable`).
     UnobservableFanOutControl,
+    /// CR 601.2c / CR 608.2d: a player-population GiveControl recipient (`give_control_recipient_is_unbound`).
+    UnboundControlRecipient,
+}
+
+/// The coverage label for a GiveControl whose player recipient ("target player", "target
+/// opponent", "an opponent") is never announced or chosen: `resolve_give` binds it only when
+/// exactly one player qualifies, so it fails with two or more qualifying players (every game for
+/// "target player").
+pub const GIVE_CONTROL_UNBOUND_RECIPIENT_GAP: &str = "Effect:give_control_unbound_recipient";
+
+/// CR 601.2c / CR 608.2d: a "target player/opponent" or "an opponent" recipient that no target
+/// slot or choice binds, so `unique_recipient_from_filter` resolves it only when one player
+/// qualifies.
+fn give_control_recipient_is_unbound(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::GiveControl { recipient, .. }
+            if matches!(recipient, TargetFilter::Player)
+                || crate::types::ability::payer_is_declared_target(recipient)
+    )
 }
 
 /// The strict failures on `def` itself (not its children).
@@ -7876,12 +7907,18 @@ fn ability_node_gaps(def: &AbilityDefinition) -> impl Iterator<Item = AbilityNod
     };
     let boundary = fan_out_control_boundary_is_unobservable(def)
         .then_some(AbilityNodeGap::UnobservableFanOutControl);
+    let recipient = give_control_recipient_is_unbound(&def.effect)
+        .then_some(AbilityNodeGap::UnboundControlRecipient);
     let cost = def
         .cost
         .as_ref()
         .filter(|cost| cost.contains_unimplemented())
         .map(AbilityNodeGap::UnimplementedCost);
-    effect.into_iter().chain(boundary).chain(cost)
+    effect
+        .into_iter()
+        .chain(boundary)
+        .chain(recipient)
+        .chain(cost)
 }
 
 /// Every ability node the coverage walks judge under `def`: `def` itself, its
@@ -8877,6 +8914,9 @@ fn collect_ability_missing_parts(
             AbilityNodeGap::UnimplementedEffect(name) => format!("Effect:{name}"),
             AbilityNodeGap::UnobservableFanOutControl => {
                 PLAYER_SCOPE_CONTROL_BOUNDARY_GAP.to_string()
+            }
+            AbilityNodeGap::UnboundControlRecipient => {
+                GIVE_CONTROL_UNBOUND_RECIPIENT_GAP.to_string()
             }
             // Labelled per cost node below, after the delayed-trigger modes.
             AbilityNodeGap::UnimplementedCost(cost) => {
@@ -26797,5 +26837,71 @@ mod unpublished_event_source_tests {
         assert_eq!(db.card_count(), 2, "both faces reach the audits");
         assert_eq!(audit_resolver_features(&db).total_supported_audited, 1);
         assert_eq!(audit_semantic(&db).total_supported_audited, 1);
+    }
+
+    /// CR 601.2c / CR 608.2d: a `TargetFilter::Player` or declared-target player
+    /// recipient of GiveControl is a coverage gap; a context recipient is not.
+    #[test]
+    fn give_control_player_recipient_is_an_unbound_recipient_gap() {
+        for (name, type_line, types, oracle) in [
+            (
+                "Donate",
+                "Sorcery",
+                &["Sorcery"][..],
+                "Target player gains control of target permanent you control.",
+            ),
+            (
+                "Harmless Offering",
+                "Sorcery",
+                &["Sorcery"][..],
+                "Target opponent gains control of target permanent you control.",
+            ),
+            (
+                "Coveted Falcon",
+                "Artifact Creature — Bird",
+                &["Artifact", "Creature"][..],
+                "Flying\nWhenever this creature attacks, gain control of target permanent you own but don't control.\nDisguise {1}{U}\nWhen this creature is turned face up, target opponent gains control of any number of target permanents you control. Draw a card for each one they gained control of this way.",
+            ),
+        ] {
+            let face = parsed_face(name, type_line, types, oracle);
+            assert!(
+                card_face_gaps(&face)
+                    .iter()
+                    .any(|gap| gap == GIVE_CONTROL_UNBOUND_RECIPIENT_GAP),
+                "{name}: {:?}",
+                card_face_gaps(&face)
+            );
+        }
+
+        let kain = parsed_face(
+            "Kain, Traitorous Dragoon",
+            "Legendary Creature — Human Knight",
+            &["Creature"],
+            "Jump — During your turn, Kain has flying.\nWhenever Kain deals combat damage to a player, that player gains control of Kain. If they do, you draw that many cards, create that many tapped Treasure tokens, then lose that much life.",
+        );
+        let mut triggering_player_recipient = false;
+        for execute in kain.triggers.iter().filter_map(|t| t.execute.as_deref()) {
+            for_each_ability_tree_node(execute, TokenStaticTraversal::Include, &mut |node, _| {
+                triggering_player_recipient |= matches!(
+                    &*node.effect,
+                    Effect::GiveControl {
+                        recipient: TargetFilter::TriggeringPlayer,
+                        ..
+                    }
+                );
+            });
+        }
+        assert!(
+            triggering_player_recipient,
+            "Kain parses a TriggeringPlayer GiveControl: {:#?}",
+            kain.triggers
+        );
+        assert!(
+            !card_face_gaps(&kain)
+                .iter()
+                .any(|gap| gap == GIVE_CONTROL_UNBOUND_RECIPIENT_GAP),
+            "{:?}",
+            card_face_gaps(&kain)
+        );
     }
 }

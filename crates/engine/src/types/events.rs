@@ -1619,19 +1619,19 @@ pub enum GameEvent {
     BlockersDeclared {
         assignments: Vec<(ObjectId, ObjectId)>,
     },
-    /// CR 509.3c: An effect made an attacking creature become blocked, and it was
-    /// an unblocked creature at that time — the precondition for "becomes blocked"
-    /// triggers to fire from an effect-block.
-    /// CR 509.3d: A "becomes blocked BY A CREATURE" trigger, and any blocker-side
-    /// "whenever ~ blocks" trigger, must NOT fire from an effect-block — this event
-    /// is distinct from BlockersDeclared precisely so those matchers ignore it.
+    /// CR 509.3c: An effect or entering blocker changed an unblocked attacker
+    /// into a blocked attacker. Only the bare "becomes blocked" form consumes
+    /// this first-transition event.
+    /// CR 509.3d + CR 509.4: It carries no blocker identity and never fires
+    /// qualified "becomes blocked by" or blocker-side "blocks" abilities; an
+    /// entering blocker supplies a separate per-creature event below.
     AttackerBecameBlockedByEffect {
         attacker: ObjectId,
     },
-    /// CR 509.3d: A per-blocker `Blocks`/`BecomesBlocked`/`BlocksOrBecomesBlocked`
-    /// firing with an explicit blocker/attacker qualifier — carries both ids so
-    /// "that creature"/"the other creature" resolution never has to infer
-    /// orientation from event shape.
+    /// CR 509.3d: An attacker-side, qualified `BecomesBlocked` or
+    /// `BlocksOrBecomesBlocked` occurrence, from declaration or an entering
+    /// blocker. The explicit pair preserves "that creature" context orientation.
+    /// CR 509.4: This event never claims that the entering blocker itself blocked.
     AttackerBecameBlockedByFilteredBlocker {
         attacker: ObjectId,
         blocker: ObjectId,
@@ -1902,9 +1902,11 @@ pub enum GameEvent {
     /// CR 103.1 / CR 706: The game-1 starting-player roll-off, emitted as one
     /// authoritative structured event so the contest can be rendered round by
     /// round (including tie rerolls) with no downstream re-derivation. `rounds`
-    /// preserves the round boundaries the engine computes; `winner` is the
-    /// engine's authoritative starting player (unique max of the final round, or
-    /// the lowest-seat fallback when tied at the reroll cap). Replaces the prior
+    /// preserves the round boundaries the engine computes; `winner` is the roll
+    /// winner (unique max of the final round, or the lowest-seat fallback when
+    /// tied at the reroll cap), who chooses who takes the first turn (CR 103.1);
+    /// under shared team turns the choice passes to that seat's side
+    /// representative (CR 103.1a). Replaces the prior
     /// flat per-roll `DieRolled` batch on the starting-player contest path; in-game
     /// die rolls still emit `DieRolled`.
     StartingPlayerContest {
