@@ -1598,7 +1598,6 @@ pub(crate) fn finish_pending_cost_or_cast(
     {
         pending.alternative_cost_election =
             crate::types::game_state::SpellAlternativeCostElection::Accepted;
-        pending.ability.context.alternative_mana_cost_paid = true;
     }
     if pending.activation_ability_index.is_none()
         && pending.casting_variant == CastingVariant::Normal
@@ -9454,7 +9453,7 @@ fn check_additional_cost_or_pay_with_kept_cost(
     player: PlayerId,
     object_id: ObjectId,
     card_id: CardId,
-    mut ability: ResolvedAbility,
+    ability: ResolvedAbility,
     cost: &crate::types::mana::ManaCost,
     base_cost: Option<ManaCost>,
     casting_variant: CastingVariant,
@@ -9481,7 +9480,6 @@ fn check_additional_cost_or_pay_with_kept_cost(
     {
         lock.alternative_cost_election =
             crate::types::game_state::SpellAlternativeCostElection::Accepted;
-        ability.context.alternative_mana_cost_paid = true;
     }
 
     // CR 601.3d + CR 702.8a: When the cast was authorized as-though-it-had-flash

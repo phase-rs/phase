@@ -1292,3 +1292,90 @@ fn fire_lord_ozai_free_cast_is_not_offered_tlincalli_hunters_cost() {
     assert_eq!(pool(&runner, P0), 0);
     assert_cast_from_exile_without_hunter(&mut runner, bears, hunter);
 }
+
+/// P0's precombat main with `mana` floating and P1's Grizzly Bears on the battlefield above a
+/// three-card library; `setup` adds P0's cards.
+fn mastery_board<T>(
+    mana: Vec<ManaUnit>,
+    setup: impl FnOnce(&mut GameScenario, &CardDatabase) -> T,
+) -> (GameRunner, ObjectId, T) {
+    let db = load_db().expect("the committed integration card fixture loads");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ids = setup(&mut scenario, db);
+    let target = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    for _ in 0..3 {
+        scenario.add_real_card(P1, "Grizzly Bears", Zone::Library, db);
+    }
+    scenario.with_mana_pool(P0, mana);
+    (scenario.build(), target, ids)
+}
+
+/// Passes priority until the stack is empty, targeting `target`, choosing P1 as the opponent and
+/// answering an alternative cost offer with `pay`.
+fn resolve_targeting(runner: &mut GameRunner, target: ObjectId, pay: bool) {
+    for _ in 0..40 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+            WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. } => {
+                GameAction::PassPriority
+            }
+            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { pay },
+            WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            },
+            WaitingFor::NamedChoice { .. } => GameAction::ChooseOption {
+                choice: P1.0.to_string(),
+            },
+            other => panic!("unexpected prompt {other:?}"),
+        };
+        runner.act(action).expect("the action is legal");
+    }
+    panic!("the stack did not empty");
+}
+
+fn hand_size(runner: &GameRunner, player: PlayerId) -> usize {
+    runner.state().players[player.0 as usize].hand.len()
+}
+
+// CR 118.9a: a free cast through Fire Lord Ozai's permission is the cast's one alternative cost,
+// not Baleful Mastery's {1}{B}, so the opponent doesn't draw.
+#[test]
+fn fire_lord_ozai_free_cast_of_baleful_mastery_is_not_its_alternative_cost() {
+    let (mut runner, target, (ozai, mastery)) =
+        mastery_board(floating(ManaType::Red, 6), |scenario, db| {
+            (
+                scenario.add_real_card(P0, "Fire Lord Ozai", Zone::Battlefield, db),
+                scenario.add_real_card(P1, "Baleful Mastery", Zone::Library, db),
+            )
+        });
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: ozai,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("P0 activates Fire Lord Ozai");
+    resolve_targeting(&mut runner, target, false);
+    assert_eq!(runner.state().objects[&mastery].zone, Zone::Exile);
+    let p1_hand = hand_size(&runner, P1);
+    assert!(cast_with(&mut runner, mastery, CastPaymentMode::Auto));
+    resolve_targeting(&mut runner, target, false);
+    assert_eq!(runner.state().objects[&mastery].zone, Zone::Graveyard);
+    assert_eq!(hand_size(&runner, P1), p1_hand);
+}
+
+// CR 118.9: paying Baleful Mastery's own {1}{B} makes the opponent draw.
+#[test]
+fn baleful_mastery_alternative_cost_makes_an_opponent_draw() {
+    let (mut runner, target, mastery) =
+        mastery_board(floating(ManaType::Black, 2), |scenario, db| {
+            scenario.add_real_card(P0, "Baleful Mastery", Zone::Hand, db)
+        });
+    let p1_hand = hand_size(&runner, P1);
+    assert!(cast_with(&mut runner, mastery, CastPaymentMode::Auto));
+    resolve_targeting(&mut runner, target, true);
+    assert_eq!(runner.state().objects[&mastery].zone, Zone::Graveyard);
+    assert_eq!(pool(&runner, P0), 0);
+    assert_eq!(hand_size(&runner, P1), p1_hand + 1);
+}
