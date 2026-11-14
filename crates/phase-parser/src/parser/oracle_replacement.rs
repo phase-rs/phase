@@ -8388,12 +8388,12 @@ fn graveyard_replacement_subject_filter(subject: &str) -> Option<TargetFilter> {
 /// CR 108.2b + CR 111.1: does this folded subject filter say anything the
 /// caller's own token axis does not?
 ///
-/// The bare card/token nouns ARE the token axis: "a card or token" is every
-/// object that can reach a graveyard (Rest in Peace) and "a card" is that minus
-/// tokens (Leyline of the Void), which `TokenScope` already encodes as a
-/// `RepresentedByCard` property. Re-expressing them as a type filter would narrow those
-/// two cards by whatever the `Card` type filter happens not to match, so this
-/// predicate declines them and leaves the axis to its owner.
+/// The caller handles bare card and token nouns through `TokenScope`. "A card"
+/// (Leyline of the Void) maps to `RepresentedByCard`, excluding tokens and spell
+/// copies. "A card or token" (Rest in Peace) currently maps to an unfiltered
+/// `Any` scope. That branch also admits spell copies, which are outside the
+/// printed subject and can reach a graveyard before ceasing to exist
+/// (CR 608.2n + CR 704.5e). This predicate only keeps additional constraints.
 fn filter_constrains_beyond_token_axis(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(typed) => {
@@ -25265,9 +25265,9 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        // CR 108.2b + CR 111.1: "a card or token" names tokens explicitly — token-inclusive,
-        // so NO `RepresentedByCard` constraint and (with `Any` scope) no `valid_card` at all.
-        assert!(def.valid_card.is_none()); // matches all objects, tokens included
+        // The unfiltered `Any` scope includes tokens and currently also admits spell
+        // copies, which the printed "a card or token" subject excludes.
+        assert!(def.valid_card.is_none());
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
             Effect::ChangeZone {
