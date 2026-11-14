@@ -20412,7 +20412,7 @@ pub struct PendingCombatLifelink {
     ///
     /// The source whose gain PAUSED is deliberately absent: its
     /// `ProposedEvent::LifeGain` is owned by `state.pending_replacement` and is
-    /// completed by `engine_replacement::handle_replacement_choice`. Re-queueing
+    /// recorded by `engine_replacement`'s LifeGain arm (`take_staged_answer`). Re-queueing
     /// it here would gain the life twice.
     pub remaining: VecDeque<PendingLifelinkGain>,
     /// CR 101.4 + CR 616.1 + CR 702.15b: gains already staged (their

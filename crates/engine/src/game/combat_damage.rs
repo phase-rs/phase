@@ -2484,8 +2484,8 @@ fn drain_combat_lifelink(
             record.awaiting_staged_gain = true;
             let waiting_for = state.waiting_for.clone();
             let events = record.batch_events.clone();
-            // CR 732.2a: the batch has already moved life (CR 120.3a damage,
-            // and any earlier source's gain). Invalidate now as well as at
+            // CR 732.2a: the batch has already moved life (CR 120.3a damage;
+            // earlier gains are staged and not yet written). Invalidate now as well as at
             // completion, against the SAME pre-batch snapshot, so the ring is
             // not stale for the duration of an arbitrarily long player pause.
             // The guard only ever CLEARS, so the paired calls are idempotent.

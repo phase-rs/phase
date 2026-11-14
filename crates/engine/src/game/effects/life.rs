@@ -2404,14 +2404,6 @@ mod tests {
         );
     }
 
-    /// Issue #317 (Lich): "If you would gain life, draw that many cards
-    /// instead." The replacement substitutes a *different* event type
-    /// (`Effect::Draw`) for the original `LifeGain` event. CR 614.1a +
-    /// CR 614.6: the original event is suppressed, the substitute effect
-    /// runs as a post-replacement continuation. `EventContextAmount` in
-    /// "draw that many cards" must resolve against the original prevented
-    /// gain quantity (via `state.last_effect_count` per the CR 615.5
-    /// fallback path).
     /// CR 101.4 + CR 616.1: `stage_life_gain` arms. (a) amount 0 and CR 119.7
     /// "can't gain life" never reach the pipeline: `Settled(0)`, no change.
     /// (b) a cross-event substitute (Lich: "draw that many cards instead")
@@ -2559,6 +2551,14 @@ mod tests {
         assert_eq!(state.players[0].life, 26);
     }
 
+    /// Issue #317 (Lich): "If you would gain life, draw that many cards
+    /// instead." The replacement substitutes a *different* event type
+    /// (`Effect::Draw`) for the original `LifeGain` event. CR 614.1a +
+    /// CR 614.6: the original event is suppressed, the substitute effect
+    /// runs as a post-replacement continuation. `EventContextAmount` in
+    /// "draw that many cards" must resolve against the original prevented
+    /// gain quantity (via `state.last_effect_count` per the CR 615.5
+    /// fallback path).
     #[test]
     fn lich_gain_life_substituted_by_draw_cards_instead() {
         use crate::types::ability::{AbilityDefinition, AbilityKind, ReplacementDefinition};
