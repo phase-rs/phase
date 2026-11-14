@@ -2315,13 +2315,20 @@ pub fn execute_untap_with_choices(
     untap_permanents(state, events, chosen_not_to_untap);
 }
 
-/// CR 502.4 + CR 503.1a: hold every ability that `events[event_start..]` triggered during the
-/// untap step. CR 603.3: they go on the stack the next time a player would receive priority,
-/// which is usually the upkeep step, together with that boundary's own triggers
-/// (`process_phase_triggers`). CR 603.2c: the occurrences are claimed, so the post-action
-/// ordinary scan does not collect them a second time. CR 800.4d is inherited by living in
-/// `deferred_triggers` (`elimination::prune_deferred_triggers_for_eliminated_players`).
-fn hold_untap_step_triggers(state: &mut GameState, events: &[GameEvent], event_start: usize) {
+/// CR 117.3a + CR 502.4 + CR 503.1a: hold every ability that `events[event_start..]` triggered
+/// during a turn-based action performed as a step or phase begins — the untap step's actions
+/// (CR 502.1 + CR 502.2 + CR 502.3), the draw (CR 504.1 + CR 703.4d), the archenemy's scheme
+/// action (CR 703.4e + CR 904.9) and a Saga's lore counters (CR 703.4f + CR 714.3c). CR 603.3:
+/// they go on the stack the next time a player would receive priority, together with that
+/// boundary's own triggers (`process_phase_triggers`). CR 603.2c: the occurrences are claimed,
+/// so the post-action ordinary scan does not collect them a second time. CR 800.4d is
+/// inherited by living in `deferred_triggers`
+/// (`elimination::prune_deferred_triggers_for_eliminated_players`).
+fn hold_turn_based_action_triggers(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+) {
     if events.len() == event_start {
         return;
     }
@@ -2331,7 +2338,7 @@ fn hold_untap_step_triggers(state: &mut GameState, events: &[GameEvent], event_s
     super::triggers::stamp_deferred_triggers_from(
         state,
         first_held,
-        super::triggers::DeferredTriggerBatchOrigin::UntapStep,
+        super::triggers::DeferredTriggerBatchOrigin::TurnBasedAction,
     );
 }
 
@@ -2370,7 +2377,7 @@ pub(crate) fn perform_untap_step_turn_based_actions(
     }
     // CR 502.1 + CR 702.26a: phasing is the first turn-based action; its triggers
     // wait with the rest of the untap step's triggers until priority.
-    hold_untap_step_triggers(state, events, phasing_start);
+    hold_turn_based_action_triggers(state, events, phasing_start);
 
     // CR 502.1 + CR 702.26c + CR 702.145c + CR 702.145f: a permanent that just phased in
     // with a face that disagrees with day or night transforms immediately, not as a
@@ -2382,14 +2389,14 @@ pub(crate) fn perform_untap_step_turn_based_actions(
     // Cathar's "transforms into Brutal Cathar" exists only on the face it turned to).
     // CR 502.4 + CR 503.1a: they wait for the upkeep in the deferred queue; CR 603.2c: the
     // claimed occurrences aren't collected again by this action's post-action scan.
-    hold_untap_step_triggers(state, events, reconcile_start);
+    hold_turn_based_action_triggers(state, events, reconcile_start);
     // CR 502.2 + CR 731.2: second, check the previous turn in every untap step,
     // an added one included (`begins_turn == false`). CR 603.10 + CR 701.27e:
     // collect its transform and CR 731.1a designation triggers before CR 502.3
     // or the upkeep's SBA check can remove their source; CR 502.4 holds them.
     let transition_start = events.len();
     super::day_night::check_day_night_transition(state, events);
-    hold_untap_step_triggers(state, events, transition_start);
+    hold_turn_based_action_triggers(state, events, transition_start);
     // CR 613.1 + CR 613.4c + CR 122.1a: a transform writes the new face's printed values and
     // marks layers dirty, so settle them before CR 502.3 reads power, color or type: a
     // Brutal Cathar with a +1/+1 counter is 3/3 when Meekstone decides.
@@ -2586,7 +2593,7 @@ fn untap_permanents(
     // step has been processed, so the permanent skips exactly one untap.
     super::layers::prune_controller_untap_step_effects(state, active);
     // CR 502.3 + CR 502.4: "becomes untapped" triggers also wait for priority.
-    hold_untap_step_triggers(state, events, untap_start);
+    hold_turn_based_action_triggers(state, events, untap_start);
 }
 
 /// CR 611.2a: end or arm the durations whose deadline is the start of
@@ -3891,9 +3898,22 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
     true
 }
 
+/// CR 500.6 + CR 703.4: the end of this step's entry in `events` — the index just after the
+/// `PhaseChanged` this entry emitted for `state.phase` — where the turn-based actions
+/// performed as the step begins start. `events.len()` when this buffer holds no entry event
+/// (an entry an earlier action finished).
+fn step_entry_end(state: &GameState, events: &[GameEvent]) -> usize {
+    events
+        .iter()
+        .rposition(
+            |event| matches!(event, GameEvent::PhaseChanged { phase } if *phase == state.phase),
+        )
+        .map_or(events.len(), |index| index + 1)
+}
+
 /// CR 503.1 / CR 504.2 / CR 507.1 / CR 513.1: Process phase triggers for the current step.
 /// Fabricates a PhaseChanged event for `state.phase` and runs trigger matching.
-/// CR 503.1a: held untap-step triggers join this boundary's own triggers in one batch.
+/// CR 117.3a + CR 503.1a + CR 603.3b: the held turn-based-action triggers join this boundary's own triggers in one batch.
 ///
 /// Returns `(fired, ordering_prompt)`:
 /// * `fired` is `true` if any triggers were placed on the stack, are pending
@@ -3934,12 +3954,13 @@ fn process_phase_triggers(
     } else {
         (phase_events, events.to_vec())
     };
-    // CR 503.1a + CR 603.3b: untap-step and upkeep triggers are one APNAP batch;
-    // their controllers order them together, regardless of when they triggered.
-    // CR 502.4 + CR 614.10a: a skipped upkeep hands the batch to the first step
+    // CR 117.3a + CR 503.1a + CR 603.3b: the held turn-based-action triggers (the untap
+    // step's, the draw's, the scheme's, a Saga's) and this step's own triggers are one APNAP
+    // batch; their controllers order them together, regardless of when they triggered.
+    // CR 502.4 + CR 614.10a: a skipped upkeep hands the untap step's batch to the first step
     // that grants priority. A live resolution keeps it held for the drain below.
     let mut normal_pending = if super::triggers::should_drain_deferred_triggers_now(state) {
-        super::triggers::take_untap_step_trigger_batch(state)
+        super::triggers::take_turn_based_action_trigger_batch(state)
     } else {
         Vec::new()
     };
@@ -4240,7 +4261,14 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 }
                 return AutoAdvanceStep::Continue;
             }
-            if let Some(wf) = execute_draw(state, events) {
+            // CR 504.1 + CR 703.4d: the draw is a turn-based action. CR 117.3a + CR 603.3b: its
+            // triggers wait for this step's batch, with the draw step's own triggers (CR 500.6)
+            // and, after a skipped upkeep (CR 500.11), the untap step's held triggers (CR 502.4).
+            // At a pause the held partition waits in the queue for the answer's drain.
+            let draw_start = events.len();
+            let paused = execute_draw(state, events);
+            hold_turn_based_action_triggers(state, events, draw_start);
+            if let Some(wf) = paused {
                 return AutoAdvanceStep::waiting(wf);
             }
             // CR 504.2: "At the beginning of [your] draw step" triggers fire here.
@@ -4260,9 +4288,23 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // CR 714.3c: As the precombat main phase begins, add a lore counter
             // to each Saga the active player controls (turn-based action).
             if state.phase == Phase::PreCombatMain {
-                if !add_lore_counters_to_sagas(state, events) {
+                // CR 703.4e + CR 904.9: the archenemy's scheme action ran as this phase began
+                // (`finish_enter_phase` sets the scheme in motion right after the entry event).
+                // CR 117.3a + CR 603.3b: its "When you set this scheme in motion" triggers wait
+                // for this phase's batch.
+                let scheme_start = step_entry_end(state, events);
+                hold_turn_based_action_triggers(state, events, scheme_start);
+                // CR 703.4f + CR 714.3c: the lore counters come next; their chapter triggers
+                // (CR 714.2b) wait the same way, also at a pause.
+                let lore_start = events.len();
+                let lore_done = add_lore_counters_to_sagas(state, events);
+                hold_turn_based_action_triggers(state, events, lore_start);
+                if !lore_done {
                     return AutoAdvanceStep::waiting(state.waiting_for.clone());
                 }
+                // CR 703.4g + CR 717.4: rolling to visit is the next turn-based action. It is not
+                // held here: `attractions::complete_roll_to_visit` puts its visit triggers on the
+                // stack itself.
                 super::attractions::perform_roll_to_visit_turn_based_action(state, events);
                 // CR 702.xxx: Paradigm (Strixhaven) — turn-based action at
                 // the start of the active player's first precombat main
@@ -8440,12 +8482,12 @@ card into your hand at the beginning of your next end step.";
         assert_eq!(events.iter().filter(|e| matches!(e, GameEvent::PermanentPhasedIn { object_id } if *object_id == phaser)).count(), 1);
     }
 
-    /// CR 502.4 + CR 614.10a + CR 500.11: the first priority boundary consumes
-    /// the held batch even when upkeep was skipped. A draw observer makes the
-    /// shared-batch requirement visible instead of accepting a later separate drain.
-    /// Unit harness: the fixture has no printed skip-upkeep source (Eon Hub).
-    /// The synthetic observer isolates two batch origins on one source; the printed
-    /// untap observer is Ghostly Pilferer, covered through public actions below.
+    /// CR 502.4 + CR 614.10a + CR 500.11: the first priority boundary consumes the held batch
+    /// even when upkeep was skipped. A beginning-of-draw-step observer makes the shared-batch
+    /// requirement visible instead of accepting a later separate drain. Unit harness: the
+    /// synthetic observer isolates two batch origins on one source. The printed board (Eon Hub
+    /// skipping the upkeep, Ghostly Pilferer's untap trigger, Sheoldred, the Apocalypse's draw
+    /// trigger) is `skipped_upkeep_untap_and_draw_triggers_share_one_order_prompt`.
     #[test]
     fn untap_held_batch_joins_draw_triggers_when_upkeep_is_skipped() {
         let mut state = setup();

@@ -334,9 +334,10 @@ fn run_post_action_pipeline_core(
         // choices before anything collects. An "as" choice is part of the
         // turn-based action, not a trigger: offering it here (rather than
         // inside `finish_enter_phase`, whose prompt would not survive the
-        // pass pipeline's `sync_waiting_for`) parks the batch's "when"
-        // triggers in `deferred_triggers` via the ordinary CR 603.3b path
-        // below when the choice pauses, and drains them once it is answered.
+        // pass pipeline's `sync_waiting_for`) reads the raw events. The
+        // scheme's "when" triggers were already held by the precombat-main
+        // arm (`turns::hold_turn_based_action_triggers`); no printed scheme
+        // has both an "as" and a "when" set-in-motion ability.
         // Skipped when the scan itself is skipped.
         if !skip_trigger_scan {
             super::archenemy::resolve_pending_as_set_in_motion_choices(state, events, event_start);

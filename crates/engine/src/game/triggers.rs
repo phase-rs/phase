@@ -198,11 +198,15 @@ pub(crate) enum DeferredTriggerBatchOrigin {
     /// later one behind a wait that is not SBA-owned). It never selects the
     /// `Any` answer scope.
     PriorityBoundary,
-    /// CR 502.4 + CR 503.1a: an ability that triggered during the untap step, where no player
-    /// receives priority. It is held until the next time a player would receive priority and
-    /// placed together with that boundary's own triggers in one CR 603.3b process — "the order
-    /// in which they triggered doesn't matter".
-    UntapStep,
+    /// CR 117.3a + CR 502.4 + CR 503.1a + CR 603.3b: an ability that triggered during a
+    /// turn-based action performed as a step or phase begins (the untap step's actions, the
+    /// draw, the archenemy's scheme action, a Saga's lore counters), before any player
+    /// received priority in that step. It is held until the next time a player would receive
+    /// priority and placed together with that boundary's own triggers in one CR 603.3b
+    /// process — "the order in which they triggered doesn't matter" (CR 503.1a). `UntapStep`
+    /// is the name it was serialized under before it covered every such action.
+    #[serde(alias = "UntapStep")]
+    TurnBasedAction,
 }
 
 fn deferred_trigger_batch_origin_is_ordinary(origin: &DeferredTriggerBatchOrigin) -> bool {
@@ -9195,14 +9199,21 @@ pub(crate) fn take_priority_boundary_batch(state: &mut GameState) -> Vec<Pending
     parked
 }
 
-/// CR 502.4 + CR 503.1a + CR 603.3b: take the held untap-step partition in order.
-/// Ownership is consumed, so a context that pauses during placement re-parks as an
-/// ordinary tail. If a live resolution kept the join from running, the pipeline's
-/// whole-queue drain places the stamped contexts at the same CR 502.4 boundary.
-pub(crate) fn take_untap_step_trigger_batch(state: &mut GameState) -> Vec<PendingTriggerContext> {
+/// CR 117.3a + CR 502.4 + CR 503.1a + CR 603.3b: take the held turn-based-action partition
+/// in order. Ownership is consumed, so a context that pauses during placement re-parks as an
+/// ordinary tail. If a live resolution kept the join from running, the pipeline's whole-queue
+/// drain places the stamped contexts at the same boundary.
+pub(crate) fn take_turn_based_action_trigger_batch(
+    state: &mut GameState,
+) -> Vec<PendingTriggerContext> {
     let (mut held, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut state.deferred_triggers)
         .into_iter()
-        .partition(|context| matches!(context.batch_origin, DeferredTriggerBatchOrigin::UntapStep));
+        .partition(|context| {
+            matches!(
+                context.batch_origin,
+                DeferredTriggerBatchOrigin::TurnBasedAction
+            )
+        });
     state.deferred_triggers = rest;
     for context in &mut held {
         context.batch_origin = DeferredTriggerBatchOrigin::Ordinary;
@@ -19534,6 +19545,19 @@ pub mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// A held context serialized under the origin's earlier name, `UntapStep`, still decodes.
+    #[test]
+    fn turn_based_action_origin_reads_the_untap_step_name() {
+        assert_eq!(
+            serde_json::from_str::<DeferredTriggerBatchOrigin>("\"UntapStep\"").unwrap(),
+            DeferredTriggerBatchOrigin::TurnBasedAction
+        );
+        assert_eq!(
+            serde_json::to_string(&DeferredTriggerBatchOrigin::TurnBasedAction).unwrap(),
+            "\"TurnBasedAction\""
+        );
     }
 
     /// CR 115.10a + CR 609.7a: a SOURCE-scoped prevention's recipient field is
