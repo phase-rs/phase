@@ -400,7 +400,7 @@ fn kiora_mixed_land_and_spell_keeps_eligible_cast_offer() {
     }
 }
 
-/// CR 701.25a + CR 401.5 + CR 608.2d: surveilling the only library card into
+/// CR 701.25a + CR 609.3 + CR 608.2d: surveilling the only library card into
 /// the graveyard leaves Planetarium's subsequent look with no "that card"
 /// referent, so no optional cast action can be offered.
 #[test]
