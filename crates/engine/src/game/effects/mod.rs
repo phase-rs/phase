@@ -21866,7 +21866,7 @@ fn reset_top_level_resolution_state(state: &mut GameState) {
     // a prior one's, so a grant whose own resolution noted nothing captures
     // `None` and reads fall back to the live global.
     state.noted_numbers_this_resolution.clear();
-    // CR 401.5 + CR 608.2c + CR 609.3 + issue #4950: Defense in depth —
+    // CR 608.2c + CR 609.3 + issue #4950: Defense in depth —
     // `apply_parent_chain_context` already consumes this at the very next
     // parent->child hand-off after a Dig/ChooseFromZone/RevealHand sets
     // it, but one with no sub_ability at all would otherwise leave it
