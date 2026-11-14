@@ -2452,92 +2452,214 @@ fn r23_esix_gargantuan(carry: PauseCarry) {
 /// acquired as-enters color choices before priority and belong to Twinflame's cleanup.
 #[test]
 fn r24_doubled_gargantuan_own_entry_choices_keep_the_full_batch() {
-    r24_doubled_gargantuan(PauseCarry::Live);
+    r24_doubled_gargantuan(PauseCarry::Live, GargantuanBatch::BothCopy);
 }
 
 #[test]
 fn r24s_doubled_gargantuan_own_entry_choices_across_save_and_restore() {
-    r24_doubled_gargantuan(PauseCarry::SavedAndRestored);
+    r24_doubled_gargantuan(PauseCarry::SavedAndRestored, GargantuanBatch::BothCopy);
 }
 
-fn r24_doubled_gargantuan(carry: PauseCarry) {
+// Verbatim Oracle text checked against /mnt/data/dev/phase/data/card-data.json:
+// Soul Warden: "Whenever another creature enters, you gain 1 life."
+// Quicksilver Gargantuan: "You may have this creature enter as a copy of any creature on the battlefield, except it's 7/7."
+// Painter's Servant: "As this creature enters, choose a color.\nAll cards that aren't on the battlefield, spells, and permanents are the chosen color in addition to their other colors."
+// Parallel Lives: "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead."
+// Twinflame: "Strive — This spell costs {2}{R} more to cast for each target beyond the first.\nChoose any number of target creatures you control. For each of them, create a token that's a copy of that creature, except it has haste. Exile those tokens at the beginning of the next end step."
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GargantuanBatch {
+    BothCopy,
+    ObserveEntries,
+    DeclineSecond,
+}
+
+/// CR 603.6a + CR 603.3b: both entries trigger the observer in one batch.
+#[test]
+fn r25_doubled_gargantuan_observer_sees_both_entries() {
+    r24_doubled_gargantuan(PauseCarry::Live, GargantuanBatch::ObserveEntries);
+}
+
+#[test]
+fn r25s_doubled_gargantuan_observer_across_save_and_restore() {
+    r24_doubled_gargantuan(
+        PauseCarry::SavedAndRestored,
+        GargantuanBatch::ObserveEntries,
+    );
+}
+
+/// CR 614.12a + CR 608.2c: declining the second entry copy still publishes it.
+#[test]
+fn r26_doubled_gargantuan_decline_second_keeps_both_tokens() {
+    r24_doubled_gargantuan(PauseCarry::Live, GargantuanBatch::DeclineSecond);
+}
+
+#[test]
+fn r26s_doubled_gargantuan_decline_second_across_save_and_restore() {
+    r24_doubled_gargantuan(PauseCarry::SavedAndRestored, GargantuanBatch::DeclineSecond);
+}
+
+fn r24_doubled_gargantuan(carry: PauseCarry, batch: GargantuanBatch) {
     let mut choices = 0;
     let mut offers = 0;
     let mut colors = 0;
-    let driven = cast_twinflame_with(
-        &[QUICKSILVER_GARGANTUAN],
-        &[(P0, PARALLEL_LIVES), (P0, PAINTERS_SERVANT)],
-        |waiting, driven| {
-            if is_paused(&driven.runner) {
-                match carry {
-                    PauseCarry::Live => {}
-                    PauseCarry::SavedAndRestored => {
-                        driven.runner = save_and_restore(&driven.runner);
-                    }
+    let mut observed_batch = false;
+    let mut board = vec![(P0, PARALLEL_LIVES), (P0, PAINTERS_SERVANT)];
+    if batch == GargantuanBatch::ObserveEntries {
+        board.push((P1, "Soul Warden"));
+    }
+    let driven = cast_twinflame_with(&[QUICKSILVER_GARGANTUAN], &board, |waiting, driven| {
+        if is_paused(&driven.runner) {
+            assert!(
+                driven.runner.state().stack.is_empty(),
+                "CR 117.2e: no trigger is stacked between entries"
+            );
+            match carry {
+                PauseCarry::Live => {}
+                PauseCarry::SavedAndRestored => {
+                    driven.runner = save_and_restore(&driven.runner);
                 }
             }
-            match waiting {
-                WaitingFor::ReplacementChoice {
-                    player, candidates, ..
-                } => {
-                    assert_eq!(*player, P0);
-                    assert_eq!(candidates.len(), 2);
-                    assert!(candidates
+        }
+        match waiting {
+            WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } => {
+                assert_eq!(*player, P0);
+                assert_eq!(candidates.len(), 2);
+                assert!(candidates
+                    .iter()
+                    .all(|candidate| !driven.pre.contains(&candidate.source_id)));
+                offers += 1;
+                let decline = batch == GargantuanBatch::DeclineSecond && offers == 2;
+                Some(GameAction::ChooseReplacement {
+                    index: candidates
                         .iter()
-                        .all(|candidate| !driven.pre.contains(&candidate.source_id)));
-                    offers += 1;
-                    Some(GameAction::ChooseReplacement {
-                        index: candidates
-                            .iter()
-                            .position(|candidate| candidate.description != "Decline")
-                            .expect("entry copy acceptance offered"),
-                    })
-                }
-                WaitingFor::CopyTargetChoice {
-                    player,
-                    valid_targets,
-                    ..
-                } => {
-                    assert_eq!(*player, P0);
-                    let donor = driven
-                        .pre
-                        .iter()
-                        .copied()
-                        .find(|id| driven.runner.state().objects[id].name == PAINTERS_SERVANT)
-                        .expect("original Painter's Servant exists");
-                    assert!(valid_targets.contains(&donor));
-                    choices += 1;
-                    Some(GameAction::ChooseTarget {
-                        target: Some(TargetRef::Object(donor)),
-                    })
-                }
-                WaitingFor::NamedChoice {
-                    player, options, ..
-                } => {
-                    assert_eq!(*player, P0);
-                    colors += 1;
-                    Some(GameAction::ChooseOption {
-                        choice: options[0].clone(),
-                    })
-                }
-                _ => None,
+                        .position(|candidate| (candidate.description == "Decline") == decline)
+                        .expect("entry copy acceptance offered"),
+                })
             }
-        },
-    );
+            WaitingFor::CopyTargetChoice {
+                player,
+                valid_targets,
+                ..
+            } => {
+                assert_eq!(*player, P0);
+                let donor = driven
+                    .pre
+                    .iter()
+                    .copied()
+                    .find(|id| driven.runner.state().objects[id].name == PAINTERS_SERVANT)
+                    .expect("original Painter's Servant exists");
+                assert!(valid_targets.contains(&donor));
+                choices += 1;
+                Some(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(donor)),
+                })
+            }
+            WaitingFor::NamedChoice {
+                player, options, ..
+            } => {
+                assert_eq!(*player, P0);
+                colors += 1;
+                Some(GameAction::ChooseOption {
+                    choice: options[0].clone(),
+                })
+            }
+            WaitingFor::OrderTriggers { player, triggers }
+                if batch == GargantuanBatch::ObserveEntries =>
+            {
+                assert_eq!(*player, P1);
+                assert_eq!(colors, 2, "both entries complete before the observer batch");
+                assert_eq!(
+                    triggers.len(),
+                    2,
+                    "Soul Warden must trigger for both entries"
+                );
+                assert!(triggers
+                    .iter()
+                    .all(|trigger| trigger.source_name == "Soul Warden"));
+                driven
+                    .runner
+                    .act(GameAction::OrderTriggers { order: vec![1, 0] })
+                    .expect("order both entry triggers");
+                finish_warden_batch(driven);
+                observed_batch = true;
+                None
+            }
+            WaitingFor::Priority { .. } if batch == GargantuanBatch::ObserveEntries => {
+                // This also makes the reviewed head fail on its single-trigger exit.
+                assert_eq!(
+                    driven.runner.state().stack.len(),
+                    2,
+                    "Soul Warden must trigger for both entries"
+                );
+                finish_warden_batch(driven);
+                observed_batch = true;
+                None
+            }
+            _ => None,
+        }
+    });
     let Some(mut driven) = driven else {
         return;
     };
     assert_eq!(offers, 2, "both tokens offer their entry copy choice");
-    assert_eq!(choices, 2, "both tokens choose the Painter donor");
+    let copied = if batch == GargantuanBatch::DeclineSecond {
+        1
+    } else {
+        2
+    };
     assert_eq!(
-        colors, 2,
+        choices, copied,
+        "every accepted copy chooses the Painter donor"
+    );
+    assert_eq!(
+        colors, copied,
         "both tokens answer their acquired as-enters choice"
     );
     let tokens = driven.created_tokens();
     assert_eq!(tokens.len(), 2, "Parallel Lives keeps both tokens");
-    assert_eq!(named(&driven, PAINTERS_SERVANT), tokens);
+    assert_eq!(named(&driven, PAINTERS_SERVANT), tokens[..copied]);
+    if batch == GargantuanBatch::DeclineSecond {
+        let second = &driven.runner.state().objects[&tokens[1]];
+        assert_eq!(second.name, QUICKSILVER_GARGANTUAN);
+        assert_eq!((second.power, second.toughness), (Some(7), Some(7)));
+    }
+    if batch == GargantuanBatch::ObserveEntries {
+        assert!(
+            observed_batch,
+            "the post-resolution observer batch was inspected"
+        );
+    }
     assert_eq!(driven.runner.state().last_created_token_ids, tokens);
     assert_eq!(assert_referent_is_every_token(&driven), tokens);
     driven.sources = driven.pre.iter().copied().collect();
     assert_end_step_exiles_every_token(driven);
+}
+
+/// CR 603.6a + CR 603.3b: inspect the post-resolution batch before resolving it.
+fn finish_warden_batch(driven: &mut Driven) {
+    let state = driven.runner.state();
+    assert!(state.resolution_stack.is_empty());
+    assert_eq!(
+        state.stack.len(),
+        2,
+        "both entry triggers share the first priority boundary"
+    );
+    assert!(state
+        .stack
+        .iter()
+        .all(|entry| state.objects[&entry.source_id].name == "Soul Warden"));
+    let life = state.players[1].life;
+    for _ in 0..MAX_PROMPTS {
+        if driven.runner.state().stack.is_empty() {
+            break;
+        }
+        driven
+            .runner
+            .act(GameAction::PassPriority)
+            .expect("resolve Soul Warden triggers");
+    }
+    assert!(driven.runner.state().stack.is_empty());
+    assert_eq!(driven.runner.state().players[1].life, life + 2);
 }

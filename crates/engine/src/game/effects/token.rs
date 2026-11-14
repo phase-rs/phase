@@ -40,7 +40,7 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
     CopyTokenSpec, EntryChoices, ProposedEvent, TokenAttackRequest, TokenHostRequest, TokenSpec,
 };
-use crate::types::resolution::ChildStackDepth;
+use crate::types::resolution::{ChildStackDepth, ResolutionFrame};
 use crate::types::resolved_commands::{
     ResolvedCopyBodyModifications, ResolvedTokenBody, ResolvedTokenCreationCommand,
     ResolvedTokenCreationReplayInvariantError,
@@ -2270,11 +2270,15 @@ fn continue_liminal_copy_token_batch(
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
     };
+    super::counters::retire_exhausted_counter_additions(state);
     record_copy_batch_ledger_on_active_copy_token(state);
     let Some(continuation) = continuation else {
         return finish_liminal_copy_token_batch(state, events);
     };
     if continuation.remaining_count > 0 {
+        // The liminal entrant loop leaves this owner unchanged; its terminal
+        // handoff publishes the ledger and advances or consumes the owner.
+        let copy_owner = state.active_copy_token().cloned();
         let initial_created_ids = state.last_created_token_ids.clone();
         let status = super::token_copy::apply_copy_token_after_replacement_with_created_ids(
             state,
@@ -2291,6 +2295,36 @@ fn continue_liminal_copy_token_batch(
             status.completion,
             super::token_copy::CopyTokenApplyCompletion::Paused
         ) {
+            if copy_owner.as_ref().is_some_and(|owner| {
+                state.resolution_stack.iter().any(|frame| {
+                    matches!(frame, ResolutionFrame::CopyToken(current) if current == owner)
+                })
+            }) {
+                // CR 603.6a + CR 603.3b: these copies entered before the next
+                // entrant paused, with their CopyToken owner still parked. No
+                // later action scans this buffer. Collect only their committed
+                // entry pairs, claiming the original occurrences so a resumed
+                // post-resolution scan cannot collect them again.
+                let committed: HashSet<_> = state.last_created_token_ids.iter().copied().collect();
+                crate::game::triggers::collect_paused_exit_triggers_matching(
+                    state,
+                    events,
+                    0,
+                    |event| match event {
+                        // A consumer of the batch's entries, not a construction.
+                        GameEvent::ZoneChanged {
+                            object_id,
+                            from,
+                            to,
+                            ..
+                        } if from.is_none() && *to == Zone::Battlefield => {
+                            committed.contains(object_id)
+                        }
+                        GameEvent::TokenCreated { object_id, .. } => committed.contains(object_id),
+                        _ => false,
+                    },
+                );
+            }
             return false;
         }
     }
@@ -2305,6 +2339,7 @@ pub(crate) fn finish_liminal_copy_token_batch(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> bool {
+    super::counters::retire_exhausted_counter_additions(state);
     if !super::counters::resume_parked_token_event_delivery(state, events) {
         return false;
     }

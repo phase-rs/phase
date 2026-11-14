@@ -405,6 +405,24 @@ pub(crate) fn park_pending_counter_completion_at_child_boundary(
     }
 }
 
+/// CR 608.2c + CR 614.12a: an entry continuation that re-paused can leave
+/// an exhausted carrier over its copy-batch owner. Once that entry resumes,
+/// retire only carriers with no remaining work before publishing or draining
+/// the owner, whether the optional entry replacement was accepted or declined.
+pub(crate) fn retire_exhausted_counter_additions(state: &mut GameState) {
+    while state.active_counter_additions().is_some_and(|queue| {
+        queue.remaining.is_empty()
+            && queue
+                .completion
+                .as_ref()
+                .is_some_and(|completion| completion.is_noop())
+    }) {
+        let _ = state
+            .take_active_counter_additions()
+            .expect("an exhausted entry carrier owns the active frame");
+    }
+}
+
 /// CR 614.1a + CR 608.2c: when the active queue is the rest of a compound
 /// CreateToken event, parked over a copy batch's pause
 /// (`token::drive_token_event_delivery`), that batch has now finished: deliver

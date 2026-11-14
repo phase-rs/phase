@@ -3638,18 +3638,7 @@ fn surface_copy_entry_pause(
 ) -> Option<WaitingFor> {
     // An exhausted carrier has no remaining work. Retire it before producing
     // the choice so the chain driver cannot mistake it for the choice's child.
-    let exhausted = state.active_counter_additions().is_some_and(|queue| {
-        queue.remaining.is_empty()
-            && queue
-                .completion
-                .as_ref()
-                .is_some_and(|completion| completion.is_noop())
-    });
-    if exhausted {
-        let _ = state
-            .take_active_counter_additions()
-            .expect("an exhausted entry carrier owns the active frame");
-    }
+    super::effects::counters::retire_exhausted_counter_additions(state);
     // The chain driver places a paused instruction's tail below its active
     // child. This owner predates the instruction, so keep it outside that
     // producer and restore it below the complete child stack afterwards.
