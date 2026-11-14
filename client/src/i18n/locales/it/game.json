@@ -2652,6 +2652,7 @@
   },
   "outsideGame": {
     "fromExile": "Dall'esilio",
+    "fromCompanion": "Dal compagno",
     "fromSideboard": "Dalla sideboard",
     "fromBoosterPack": "Da una busta {{setCode}}",
     "fromCubeBoosterPack": "Da una busta del cube"

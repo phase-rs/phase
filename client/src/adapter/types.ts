@@ -863,7 +863,9 @@ export type OutsideGameChoiceSource =
   | {
       type: "BoosterPack";
       data: { pack_slot: number; origin: PackOrigin; card: CardFacePartial };
-    };
+    }
+  /** CR 702.139a: the player's revealed companion, still outside the game. */
+  | { type: "Companion"; data: { card: CardFacePartial } };
 
 /**
  * Where an opened booster pack came from, for display. Mirrors Rust
@@ -884,7 +886,8 @@ export interface OutsideGameChoiceEntry {
 export type OutsideGameSelection =
   | { type: "Sideboard"; data: { sideboard_index: number } }
   | { type: "FaceUpExile"; data: { object_id: ObjectId } }
-  | { type: "BoosterPack"; data: { pack_slot: number } };
+  | { type: "BoosterPack"; data: { pack_slot: number } }
+  | { type: "Companion" };
 
 export interface OutsideGameCardUse {
   player: PlayerId;

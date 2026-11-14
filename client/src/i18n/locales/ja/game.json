@@ -2670,6 +2670,7 @@
   },
   "outsideGame": {
     "fromExile": "追放領域から",
+    "fromCompanion": "相棒から",
     "fromSideboard": "サイドボードから",
     "fromBoosterPack": "{{setCode}}ブースターパックから",
     "fromCubeBoosterPack": "キューブ・ブースターパックから"

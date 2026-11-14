@@ -615,6 +615,75 @@ pub(super) fn advance_companion_reveal(
     super::conspiracy::agenda_choices_or_mulligan(state, events)
 }
 
+// ── Revealed companion as a card outside the game ──────────────────────
+
+/// CR 702.139a + CR 400.11: the player's revealed companion while it is still
+/// outside the game. Revealing a companion does not bring it into the game
+/// (it is not in any zone), so it stays "a card you own from outside the game"
+/// until it is put into hand (CR 702.139c) — by the special action
+/// (`finish_paid_companion_to_hand`) or by an effect that finds it from outside
+/// the game ([`bring_revealed_companion_into_game`]); both set `used`. The
+/// single authority for what a player's companion contributes to "outside the
+/// game".
+pub(crate) fn outside_game_companion(
+    state: &GameState,
+    player: PlayerId,
+) -> Option<&CompanionInfo> {
+    state
+        .players
+        .iter()
+        .find(|entry| entry.id == player)?
+        .companion
+        .as_ref()
+        .filter(|companion| !companion.used)
+}
+
+/// CR 400.11b + CR 702.139c: an effect that finds cards from outside the game
+/// (Living Wish) brings the revealed companion into `destination`. It remains
+/// in the game from then on, so the companion is marked used: it is no longer
+/// outside the game, and the special action can no longer put it into hand.
+/// CR 203.1 + CR 206.1: the created object carries the printing captured at the
+/// reveal (display-only).
+pub(crate) fn bring_revealed_companion_into_game(
+    state: &mut GameState,
+    player: PlayerId,
+    destination: Zone,
+) -> Result<crate::types::identifiers::ObjectId, EngineError> {
+    let (card_face, printing) = outside_game_companion(state, player)
+        .map(|companion| {
+            (
+                companion.card.card.clone(),
+                companion.printing.get().clone(),
+            )
+        })
+        .ok_or_else(|| {
+            EngineError::InvalidAction("Companion is not outside the game".to_string())
+        })?;
+    // CR 407.3: refused here as at every other outside-the-game source.
+    let object_id = super::effects::search_outside_game::put_outside_game_face_into(
+        state,
+        player,
+        &card_face,
+        destination,
+    )
+    .ok_or_else(|| {
+        EngineError::InvalidAction(format!(
+            "{} can't be brought into the game from outside the game (CR 407.3)",
+            card_face.name
+        ))
+    })?;
+    if let Some(companion) = state
+        .players
+        .iter_mut()
+        .find(|entry| entry.id == player)
+        .and_then(|entry| entry.companion.as_mut())
+    {
+        companion.used = true;
+    }
+    deck_loading::stamp_created_card_shared(state, object_id, printing);
+    Ok(object_id)
+}
+
 // ── Special Action: Pay {3} to Move Companion to Hand ───────────────────
 
 /// CR 116.2g + CR 702.139a: Derive the companion special action's final cost.

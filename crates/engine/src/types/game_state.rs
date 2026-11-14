@@ -12041,6 +12041,16 @@ pub enum OutsideGameChoiceSource {
         /// would raise it.
         card: Box<crate::types::card::CardFace>,
     },
+    /// CR 702.139a + CR 400.11: the player's revealed companion while it is still
+    /// outside the game (`Player::companion` with `used == false`). Revealing it
+    /// does not bring it into the game, so an effect that finds cards "from
+    /// outside the game" can find it until the companion special action (or a
+    /// prior such effect) puts it into hand (CR 702.139c). It leaves the
+    /// sideboard pool at the reveal, so it is not a `Sideboard` entry. Boxed for
+    /// the same `WaitingFor` size budget as `BoosterPack`.
+    Companion {
+        card: Box<crate::types::card::CardFace>,
+    },
 }
 
 /// Where an opened booster pack came from, for display. Every card in one pack

@@ -1479,6 +1479,14 @@ fn limited_pools_after_reveal_window(
     main_deck: Vec<DeckEntry>,
     declaration: Option<CompanionDeclaration>,
 ) -> Vec<engine::types::game_state::PlayerDeckPool> {
+    limited_state_after_reveal_window(main_deck, declaration).deck_pools
+}
+
+/// Plays a Limited game 1 to the end of the companion reveal window and returns the state.
+fn limited_state_after_reveal_window(
+    main_deck: Vec<DeckEntry>,
+    declaration: Option<CompanionDeclaration>,
+) -> GameState {
     let payload = DeckPayload {
         player: PlayerDeckPayload {
             main_deck: main_deck.clone(),
@@ -1535,7 +1543,7 @@ fn limited_pools_after_reveal_window(
         "the reveal window is closed, got {:?}",
         state.waiting_for
     );
-    state.deck_pools.clone()
+    state
 }
 
 /// CR 100.4b + CR 400.11a: once the reveal window closes, a Limited designation that was
@@ -1567,6 +1575,8 @@ fn limited_unrevealed_designation_is_a_sideboard_card_for_outside_the_game_effec
         "never offered: {never_offered:?}"
     );
 
+    // The revealed companion leaves the SIDEBOARD pool; it is offered separately, as a card
+    // still outside the game (see the Living Wish tests below).
     let revealed = living_wish_offers(limited_pools_after_reveal_window(
         eligible,
         Some(reveal_lurrus()),
@@ -1795,4 +1805,174 @@ fn limited_lutri_from_oracle_admission_requires_distinct_nonland_names() {
             result.selected_format_reasons
         );
     }
+}
+
+/// A game-1 Limited deck Lurrus accepts: 23 two-drops and 17 Plains.
+fn lurrus_eligible_deck() -> Vec<DeckEntry> {
+    let mut deck: Vec<DeckEntry> = (0..23)
+        .map(|i| creature(&format!("Small Creature {i}"), 2))
+        .collect();
+    deck.push(land("Plains", 17));
+    deck
+}
+
+/// A scenario with Living Wish in P0's hand and P0's pools and revealed companion copied from
+/// `prepared`, a game that went through the real reveal window.
+fn living_wish_runner(prepared: &GameState) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let wish = scenario
+        .add_spell_to_hand_from_oracle(P0, "Living Wish", false, LIVING_WISH)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().deck_pools = prepared.deck_pools.clone();
+    runner.state_mut().players[P0.0 as usize].companion =
+        prepared.players[P0.0 as usize].companion.clone();
+    (runner, wish)
+}
+
+/// Casts Living Wish and accepts its optional reveal, stopping at the outside-the-game choice,
+/// whose offered entries are returned.
+fn cast_living_wish_to_choice(
+    runner: &mut GameRunner,
+    wish: ObjectId,
+) -> Vec<engine::types::game_state::OutsideGameChoiceEntry> {
+    let card_id = runner.state().objects[&wish].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: wish,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Living Wish is castable");
+    for _ in 0..8 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("reveal from outside the game");
+            }
+            _ => break,
+        }
+    }
+    match &runner.state().waiting_for {
+        WaitingFor::OutsideGameChoice { choices, .. } => choices.clone(),
+        other => panic!("Living Wish must reach its outside-the-game choice, got {other:?}"),
+    }
+}
+
+fn companion_entries(
+    choices: &[engine::types::game_state::OutsideGameChoiceEntry],
+) -> Vec<&engine::types::game_state::OutsideGameChoiceEntry> {
+    choices
+        .iter()
+        .filter(|choice| {
+            matches!(
+                choice.source,
+                engine::types::game_state::OutsideGameChoiceSource::Companion { .. }
+            )
+        })
+        .collect()
+}
+
+fn add_white_mana(runner: &mut GameRunner, amount: usize) {
+    for _ in 0..amount {
+        runner.state_mut().players[P0.0 as usize]
+            .mana_pool
+            .add(ManaUnit::new(ManaType::White, ObjectId(999), false, vec![]));
+    }
+}
+
+/// CR 702.139a + CR 400.11 + CR 100.4b: a revealed Limited companion is still a card outside
+/// the game until it is put into hand, so Living Wish ("a creature or land card you own from
+/// outside the game") can find it even though the reveal took it out of the sideboard pool.
+/// Taking it through the wish brings it into the game (CR 702.139c) and uses the companion up:
+/// the special action is then refused.
+#[test]
+fn living_wish_finds_the_revealed_limited_companion_and_uses_it_up() {
+    let prepared = limited_state_after_reveal_window(lurrus_eligible_deck(), Some(reveal_lurrus()));
+    assert!(
+        prepared.players[P0.0 as usize]
+            .companion
+            .as_ref()
+            .is_some_and(|companion| !companion.used),
+        "reach guard: Lurrus was revealed and is not yet in hand"
+    );
+
+    let (mut runner, wish) = living_wish_runner(&prepared);
+    let choices = cast_living_wish_to_choice(&mut runner, wish);
+    let offered = companion_entries(&choices);
+    assert_eq!(
+        offered.len(),
+        1,
+        "the companion is offered once: {choices:?}"
+    );
+    assert_eq!(offered[0].name, "Lurrus of the Dream-Den");
+    assert_eq!(offered[0].count, 1);
+    assert_eq!(
+        choices
+            .iter()
+            .filter(|choice| choice.name == "Lurrus of the Dream-Den")
+            .count(),
+        1,
+        "the companion is not ALSO a sideboard entry: {choices:?}"
+    );
+
+    runner
+        .act(GameAction::ChooseOutsideGameCards {
+            selections: vec![engine::types::actions::OutsideGameSelection::Companion],
+        })
+        .expect("the revealed companion can be brought in from outside the game");
+    assert!(
+        runner.state().objects.values().any(|obj| {
+            obj.owner == P0 && obj.zone == Zone::Hand && obj.name == "Lurrus of the Dream-Den"
+        }),
+        "the wish put the companion into hand"
+    );
+    assert!(runner.state().players[P0.0 as usize]
+        .companion
+        .as_ref()
+        .is_some_and(|companion| companion.used));
+
+    // It is in the game now: the special action cannot put a second copy into hand.
+    add_white_mana(&mut runner, 3);
+    assert!(!can_activate_companion(runner.state(), P0));
+    assert!(runner.act(GameAction::CompanionToHand).is_err());
+}
+
+/// CR 702.139c: once the special action has put the companion into hand it is in the game, no
+/// longer a card outside it, so a later Living Wish cannot find it. Paired with the test above,
+/// which finds the same unused companion before the special action.
+#[test]
+fn living_wish_cannot_find_a_companion_already_put_into_hand() {
+    let prepared = limited_state_after_reveal_window(lurrus_eligible_deck(), Some(reveal_lurrus()));
+    let (mut runner, wish) = living_wish_runner(&prepared);
+    add_white_mana(&mut runner, 3);
+    runner
+        .act(GameAction::CompanionToHand)
+        .expect("the companion special action pays {3} and puts Lurrus into hand");
+    assert!(runner.state().players[P0.0 as usize]
+        .companion
+        .as_ref()
+        .is_some_and(|companion| companion.used));
+
+    let choices = cast_living_wish_to_choice(&mut runner, wish);
+    assert!(
+        companion_entries(&choices).is_empty(),
+        "the companion is in the game: {choices:?}"
+    );
+    assert!(
+        choices.iter().any(|choice| choice.name == "Plains"),
+        "reach guard: the wish still saw the sideboard: {choices:?}"
+    );
+    assert!(runner
+        .act(GameAction::ChooseOutsideGameCards {
+            selections: vec![engine::types::actions::OutsideGameSelection::Companion],
+        })
+        .is_err());
 }

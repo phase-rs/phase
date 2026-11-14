@@ -76,6 +76,27 @@ pub fn resolve(
         })
         .unwrap_or_default();
 
+    // CR 702.139a + CR 400.11: a revealed companion that has not been put into
+    // hand yet is still a card outside the game. It left the sideboard pool at
+    // the reveal, so it is offered here, filtered and ante-gated like a
+    // sideboard card.
+    if let Some(companion) =
+        crate::game::companion::outside_game_companion(state, ability.controller)
+    {
+        let face = &companion.card.card;
+        if crate::game::filter::matches_target_filter_against_face(face, filter)
+            && crate::game::ante::admits_face_from_outside_game(state, face)
+        {
+            choices.push(OutsideGameChoiceEntry {
+                source: OutsideGameChoiceSource::Companion {
+                    card: Box::new(face.clone()),
+                },
+                count: 1,
+                name: face.name.clone(),
+            });
+        }
+    }
+
     // CR 406.3 + CR 400.11: Karn/Coax-class — also append face-up exile cards
     // the controller owns and that match the filter. The exile zone is a normal
     // in-game zone, so we route through the standard filter pipeline.
