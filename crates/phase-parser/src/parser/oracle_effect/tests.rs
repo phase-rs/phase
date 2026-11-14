@@ -52959,6 +52959,151 @@ fn maelstrom_pulse_destroys_only_same_named_permanents() {
     );
 }
 
+/// CR 201.2 + CR 201.2a: Detention Sphere's "target nonland permanent not
+/// named Detention Sphere and all other permanents with the same name as that
+/// permanent" keeps both the name restriction on the target and the
+/// same-name mass exile (issue #10125). Before the fix the "not named" suffix
+/// stopped the target parse and both clauses were dropped.
+#[test]
+fn detention_sphere_keeps_not_named_target_and_same_name_mass_exile() {
+    let parsed = crate::parser::parse_oracle_text(
+        "When this enchantment enters, you may exile target nonland permanent not named Detention Sphere and all other permanents with the same name as that permanent.\nWhen this enchantment leaves the battlefield, return the exiled cards to the battlefield under their owner's control.",
+        "Detention Sphere",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let root = parsed.triggers[0].execute.as_deref().expect("ETB execute");
+    let Effect::ChangeZone {
+        destination: Zone::Exile,
+        target: TargetFilter::Typed(target),
+        ..
+    } = &*root.effect
+    else {
+        panic!("expected targeted exile, got {:?}", root.effect);
+    };
+    assert_eq!(
+        target.type_filters,
+        vec![
+            TypeFilter::Permanent,
+            TypeFilter::Non(Box::new(TypeFilter::Land))
+        ]
+    );
+    assert_eq!(
+        target.properties,
+        vec![FilterProp::Not {
+            prop: Box::new(FilterProp::Named {
+                name: "detention sphere".to_string(),
+            }),
+        }],
+        "the target must exclude permanents named Detention Sphere"
+    );
+    let sub = root.sub_ability.as_ref().expect("same-name mass exile");
+    let Effect::ChangeZoneAll {
+        destination: Zone::Exile,
+        target: TargetFilter::Typed(mass),
+        ..
+    } = &*sub.effect
+    else {
+        panic!("expected ChangeZoneAll(Exile), got {:?}", sub.effect);
+    };
+    assert_eq!(mass.type_filters, vec![TypeFilter::Permanent]);
+    assert_eq!(
+        mass.controller, None,
+        "\"all other permanents\" spans every controller"
+    );
+    assert!(mass.properties.contains(&FilterProp::Another));
+    assert!(mass
+        .properties
+        .contains(&FilterProp::SameNameAsParentTarget));
+}
+
+/// CR 201.2 + CR 115.1: a "target <type> not named <name>" suffix lowers to
+/// `Not(Named)` on the target filter, ending the name at the shared clause
+/// boundary and leaving trailing text ("from a graveyard") to the caller.
+#[test]
+fn target_not_named_suffix_restricts_target_filter() {
+    for (name, types, text, expected_name, expected_origin) in [
+        (
+            "Clever Conjurer",
+            "Creature",
+            "Mage Hand — {T}: Untap target permanent not named Clever Conjurer. Activate only as a sorcery.",
+            "clever conjurer",
+            None,
+        ),
+        (
+            "Dutiful Replicator",
+            "Artifact",
+            "When this creature enters, you may pay {1}. When you do, create a token that's a copy of target token you control not named Dutiful Replicator.",
+            "dutiful replicator",
+            None,
+        ),
+        (
+            "Staff of Eden, Vault's Key",
+            "Artifact",
+            "When Staff of Eden enters, put target legendary permanent card not named Staff of Eden, Vault's Key from a graveyard onto the battlefield under your control.",
+            "staff of eden, vault's key",
+            Some(Zone::Graveyard),
+        ),
+    ] {
+        let parsed =
+            crate::parser::parse_oracle_text(text, name, &[], &[types.to_string()], &[]);
+        let root = parsed
+            .abilities
+            .first()
+            .or_else(|| parsed.triggers.first().and_then(|t| t.execute.as_deref()))
+            .unwrap_or_else(|| panic!("{name}: no ability"));
+        let (targeted, origin) = std::iter::successors(Some(root), |def| def.sub_ability.as_deref())
+            .find_map(|def| match &*def.effect {
+                Effect::SetTapState { target, .. } | Effect::CopyTokenOf { target, .. } => {
+                    Some((target.clone(), None))
+                }
+                Effect::ChangeZone { target, origin, .. } => Some((target.clone(), *origin)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name}: no targeted effect"));
+        let TargetFilter::Typed(typed) = targeted else {
+            panic!("{name}: expected Typed target, got {targeted:?}");
+        };
+        assert!(
+            typed.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::Named {
+                    name: expected_name.to_string(),
+                }),
+            }),
+            "{name}: target must exclude its name, got {:?}",
+            typed.properties
+        );
+        assert_eq!(origin, expected_origin, "{name}: origin zone");
+    }
+}
+
+/// CR 201.2 + CR 115.1: a coordinated "creature or planeswalker not named X"
+/// restricts every alternative, not just the last one.
+#[test]
+fn target_not_named_suffix_distributes_over_coordinated_types() {
+    let mut ctx = ParseContext::default();
+    let (filter, rest) = crate::parser::oracle_target::parse_target_with_ctx(
+        "target creature or planeswalker not named Foo",
+        &mut ctx,
+    );
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected Or, got {filter:?}");
+    };
+    assert_eq!(filters.len(), 2);
+    for f in &filters {
+        let TargetFilter::Typed(typed) = f else {
+            panic!("expected Typed branch, got {f:?}");
+        };
+        assert!(typed.properties.contains(&FilterProp::Not {
+            prop: Box::new(FilterProp::Named {
+                name: "foo".to_string(),
+            }),
+        }));
+    }
+    assert!(rest.trim().is_empty(), "suffix consumed, got {rest:?}");
+}
+
 /// CR 608.2c + CR 201.2a: "<verb> target <object> an opponent
 /// controls and all <X> that player controls with the same name as that
 /// <object>" — "that player" is the targeted object's controller, so the mass
