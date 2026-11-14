@@ -2315,6 +2315,8 @@ fn initialize_game_impl(
 
 /// Natively callable body of `initialize_game_impl`, after the
 /// `restore_game_state_inner` precedent.
+// Mirrors `initialize_game_impl`'s parameters one for one.
+#[allow(clippy::too_many_arguments)]
 fn initialize_game_inner(
     deck_data: Option<Result<DeckList, String>>,
     seed: u64,
