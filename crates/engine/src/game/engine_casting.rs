@@ -1648,13 +1648,19 @@ pub(crate) fn restore_legacy_cast_timing_routes(
             // `Permission` adds no route-specific cost or target requirement to a kept cast.
             let route = route.unwrap_or(CastTimingRoute::Permission);
             for owner in owners.iter().copied() {
-                if let Some(live) = state.pending_cast_at_mut(owner) {
+                if let Some(mut live) = state.pending_cast_at(owner).cloned() {
                     live.cast_timing_permission = Some(route);
                     if let Some(grant) = &paid_alternative {
                         casting_costs::record_elected_alternative_cost(
-                            live,
+                            state,
+                            player,
+                            &mut live,
+                            &grant.cost,
                             grant.once_per_turn_source,
                         );
+                    }
+                    if let Some(slot) = state.pending_cast_at_mut(owner) {
+                        *slot = live;
                     }
                 }
             }

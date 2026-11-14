@@ -694,18 +694,15 @@ fn apply_only_payable_alternative_cost(
     alt_cost: PayableSpellAlternativeCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    record_elected_alternative_cost(&mut pending, alt_cost.once_per_turn_source);
+    record_elected_alternative_cost(
+        state,
+        player,
+        &mut pending,
+        &alt_cost.cost,
+        alt_cost.once_per_turn_source,
+    );
     match alt_cost.cost {
-        AbilityCost::Mana { cost: alt_mana } => {
-            pending.base_cost = Some(alt_mana);
-            pending.cost = super::casting::recompute_pending_mana_total(
-                state,
-                player,
-                &pending,
-                pending.ability.chosen_x,
-            );
-            finish_pending_cost_or_cast(state, player, pending, events)
-        }
+        AbilityCost::Mana { .. } => finish_pending_cost_or_cast(state, player, pending, events),
         cost => pay_additional_cost_with_source(
             state,
             player,
@@ -717,9 +714,13 @@ fn apply_only_payable_alternative_cost(
     }
 }
 
-/// CR 601.2b: marks `pending` as cast with its granted alternative cost.
+/// CR 601.2b + CR 118.9d: marks `pending` as cast with its alternative cost, whose mana component
+/// is the base additional costs and cost increases apply to.
 pub(super) fn record_elected_alternative_cost(
+    state: &GameState,
+    player: PlayerId,
     pending: &mut PendingCast,
+    alternative: &AbilityCost,
     once_per_turn_source: Option<ObjectId>,
 ) {
     pending.alternative_cost_election =
@@ -727,6 +728,16 @@ pub(super) fn record_elected_alternative_cost(
     pending.ability.context.alternative_mana_cost_paid = true;
     pending.ability.context.alt_cost_grant_source = once_per_turn_source;
     pending.alt_cost_grant_source = once_per_turn_source;
+    pending.base_cost = Some(match alternative {
+        AbilityCost::Mana { cost } => cost.clone(),
+        _ => ManaCost::NoCost,
+    });
+    pending.cost = super::casting::recompute_pending_mana_total(
+        state,
+        player,
+        pending,
+        pending.ability.chosen_x,
+    );
 }
 
 pub(crate) fn handle_decide_additional_cost(
@@ -830,7 +841,7 @@ pub(crate) fn handle_decide_additional_cost(
     // a `ReduceCost { condition: AdditionalCostPaid }` static only applies once
     // `additional_cost_paid` is set.
     let mut optional_cost_paid = false;
-    let mut alternative_base_override = None;
+    let mut elected_alternative: Option<AbilityCost> = None;
     let mut recompute_choice_cost = false;
 
     let cost_to_pay = match additional_cost {
@@ -870,25 +881,12 @@ pub(crate) fn handle_decide_additional_cost(
                     ability
                         .context
                         .record_additional_cost_payment(AdditionalCostOrigin::Other, 1);
-                } else if matches!(preferred, AbilityCost::Mana { .. }) {
-                    // CR 118.9: Spellcasting-option alternative mana costs are not
-                    // additional costs; gate riders via `alternative_mana_cost_paid`.
-                    ability.context.alternative_mana_cost_paid = true;
                 }
                 let is_spell_alternative_choice = answers_alternative_cost;
                 if is_spell_alternative_choice {
-                    ability.context.alternative_mana_cost_paid = true;
-                    // CR 118.9 + CR 601.2b: accepting a once-per-turn grant's
-                    // alternative cost records the source on the ability context so
-                    // finalize_cast consumes its per-turn slot. Declining (below)
-                    // leaves it `None` — the printed cost was paid, nothing spent.
-                    ability.context.alt_cost_grant_source = pending.alt_cost_grant_source;
+                    elected_alternative = Some(preferred.clone());
                     match preferred {
-                        AbilityCost::Mana { cost } => {
-                            alternative_base_override = Some(cost.clone());
-                            recompute_choice_cost = true;
-                            None
-                        }
+                        AbilityCost::Mana { .. } => None,
                         _ => Some(preferred.clone()),
                     }
                 } else {
@@ -929,8 +927,9 @@ pub(crate) fn handle_decide_additional_cost(
         updated_pending.additional_cost_flow = None;
         updated_pending.additional_cost_decided = true;
     }
-    if let Some(base) = alternative_base_override {
-        updated_pending.base_cost = Some(base);
+    if let Some(alternative) = elected_alternative.as_ref() {
+        let source = updated_pending.alt_cost_grant_source;
+        record_elected_alternative_cost(state, player, &mut updated_pending, alternative, source);
     }
     if recompute_choice_cost {
         updated_pending.cost = super::casting::recompute_pending_mana_total(
@@ -6586,8 +6585,12 @@ fn finish_exile_selection_for_cost(
             // [color] card with mana value X") define X from the pitched card's
             // mana value rather than a prior announcement.
             if pending.ability.chosen_x.is_none()
-                && pending.cost == crate::types::mana::ManaCost::NoCost
-                && pending.base_cost.as_ref().is_some_and(cost_has_x)
+                && pending.alternative_cost_election
+                    == crate::types::game_state::SpellAlternativeCostElection::Accepted
+                && state
+                    .objects
+                    .get(&pending.object_id)
+                    .is_some_and(|spell| cost_has_x(&spell.mana_cost))
             {
                 // CR 202.3d + CR 709.4b: the pitched card is exiled from hand
                 // (off the stack), so a split card defines X from its combined

@@ -1406,3 +1406,106 @@ fn baleful_mastery_alternative_cost_makes_an_opponent_draw() {
     assert_eq!(pool(&runner, P0), 0);
     assert_eq!(hand_size(&runner, P1), p1_hand + 1);
 }
+
+const GNARLID_COLONY: &str = "Kicker {2}{G} (You may pay an additional {2}{G} as you cast this \
+spell.)\nIf this creature was kicked, it enters with two +1/+1 counters on it.\nEach creature you \
+control with a +1/+1 counter on it has trample. (It can deal excess combat damage to the player \
+or planeswalker it's attacking.)";
+
+/// Primal Prayers and Gnarlid Colony (a printed card absent from the integration fixture, built
+/// from its Oracle text and printed {1}{G}) at `phase`, with two energy and `green` {G} floating.
+fn prayers_and_gnarlid(phase: Phase, green: usize) -> (GameRunner, ObjectId) {
+    energy_board(phase, &vec![ManaType::Green; green], |scenario, db| {
+        scenario.add_real_card(P0, "Primal Prayers", Zone::Battlefield, db);
+        scenario
+            .add_creature_to_hand(P0, "Gnarlid Colony", 2, 2)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            })
+            .from_oracle_text_with_keywords(&["Kicker"], GNARLID_COLONY)
+            .id()
+    })
+}
+
+/// Kicks Gnarlid Colony at its kicker prompt, paying automatically, and resolves it kicked.
+fn kick_and_resolve(runner: &mut GameRunner, gnarlid: ObjectId) {
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice {
+                cost: AdditionalCost::Kicker { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("P0 kicks Gnarlid Colony");
+    assert_priority(runner);
+    assert!(on_stack(runner, gnarlid));
+    assert_eq!(pool(runner, P0), 0);
+    runner.resolve_top();
+    let gnarlid = &runner.state().objects[&gnarlid];
+    assert_eq!(gnarlid.zone, Zone::Battlefield);
+    assert_eq!(
+        gnarlid
+            .counters
+            .get(&engine::types::counter::CounterType::Plus1Plus1),
+        Some(&2)
+    );
+}
+
+/// Accepts or declines Primal Prayers' {E} offer for Gnarlid Colony.
+fn answer_prayers_offer(runner: &mut GameRunner, pay: bool) {
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice {
+                cost: AdditionalCost::Choice(
+                    AbilityCost::PayEnergy { .. },
+                    AbilityCost::Mana { .. }
+                ),
+                ..
+            }
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalCost { pay })
+        .expect("P0 answers Primal Prayers' offer");
+}
+
+// CR 118.9d + CR 702.33a: kicker is added to Primal Prayers' {E}, not to Gnarlid Colony's mana
+// cost, so {2}{G} kicks it in the upkeep.
+#[test]
+fn primal_prayers_upkeep_cast_is_kicked_for_only_the_kicker_cost() {
+    let (mut runner, gnarlid) = prayers_and_gnarlid(Phase::Upkeep, 3);
+    assert!(cast(&mut runner, gnarlid));
+    assert_eq!(energy(&runner), 1);
+    kick_and_resolve(&mut runner, gnarlid);
+    assert_eq!(energy(&runner), 1);
+}
+
+// CR 118.9d + CR 702.33a: accepting Primal Prayers' offer leaves only the kicker's {2}{G} to pay.
+#[test]
+fn accepted_primal_prayers_offer_is_kicked_for_only_the_kicker_cost() {
+    let (mut runner, gnarlid) = prayers_and_gnarlid(Phase::PreCombatMain, 3);
+    assert!(cast(&mut runner, gnarlid));
+    answer_prayers_offer(&mut runner, true);
+    kick_and_resolve(&mut runner, gnarlid);
+    assert_eq!(energy(&runner), 1);
+}
+
+// CR 601.2f + CR 702.33a: declining Primal Prayers' offer pays the printed {1}{G} plus the kicker.
+#[test]
+fn declined_primal_prayers_offer_is_kicked_for_the_mana_cost_and_kicker() {
+    let (mut runner, gnarlid) = prayers_and_gnarlid(Phase::PreCombatMain, 5);
+    assert!(cast(&mut runner, gnarlid));
+    answer_prayers_offer(&mut runner, false);
+    kick_and_resolve(&mut runner, gnarlid);
+    assert_eq!(energy(&runner), 2);
+}

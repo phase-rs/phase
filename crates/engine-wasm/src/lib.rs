@@ -5578,9 +5578,11 @@ mod legacy_pending_cast_timing_restore_tests {
         );
     }
 
-    /// Kicks the restored Gnarlid Colony and finishes paying, asserting no further cost prompt.
+    /// Kicks the restored Gnarlid Colony and finishes paying only the kicker's {2}{G}, asserting
+    /// no further cost prompt.
     fn kick_and_finish(restored: GameState) -> GameState {
         let gnarlid = object_named(&restored, "Gnarlid Colony");
+        let before = pool(&restored);
         let mut runner = GameRunner::from_state(restored);
         runner
             .act(GameAction::DecideOptionalCost { pay: true })
@@ -5600,7 +5602,17 @@ mod legacy_pending_cast_timing_restore_tests {
             state.waiting_for
         );
         assert_eq!(state.objects[&gnarlid].zone, Zone::Stack);
+        assert_eq!(pool(&state), before - 3);
         state
+    }
+
+    /// Resolves the kicked Gnarlid Colony and asserts it entered with two +1/+1 counters.
+    fn assert_resolves_kicked(finished: GameState, gnarlid: ObjectId) {
+        let mut runner = GameRunner::from_state(finished);
+        runner.resolve_top();
+        let gnarlid = &runner.state().objects[&gnarlid];
+        assert_eq!(gnarlid.zone, Zone::Battlefield);
+        assert_eq!(gnarlid.counters.get(&CounterType::Plus1Plus1), Some(&2));
     }
 
     /// The release spent Primal Prayers' {E} at announcement, then offered it again.
@@ -5641,6 +5653,7 @@ mod legacy_pending_cast_timing_restore_tests {
                 _
             ))
         ));
+        assert_resolves_kicked(finished, gnarlid);
     }
 
     // CR 118.9a + CR 601.2b: the release's second offer of Primal Prayers' paid {E} is retired, so
@@ -5655,12 +5668,28 @@ mod legacy_pending_cast_timing_restore_tests {
         assert_eq!(energy(&restored), 1);
         let gnarlid = object_named(&restored, "Gnarlid Colony");
 
-        let mut runner = GameRunner::from_state(kick_and_finish(restored));
-        assert_eq!(energy(runner.state()), 1);
-        runner.resolve_top();
-        let gnarlid = &runner.state().objects[&gnarlid];
-        assert_eq!(gnarlid.zone, Zone::Battlefield);
-        assert_eq!(gnarlid.counters.get(&CounterType::Plus1Plus1), Some(&2));
+        let finished = kick_and_finish(restored);
+        assert_eq!(energy(&finished), 1);
+        assert_resolves_kicked(finished, gnarlid);
+    }
+
+    // CR 118.9d + CR 702.33a: the restored cast still owes only the kicker's {2}{G}, so exactly
+    // that much mana kicks it.
+    #[test]
+    fn legacy_cast_with_paid_alternative_cost_is_kicked_with_only_the_kicker_mana() {
+        let mut save = raw(&v124!("prayers_gnarlid_energy2"));
+        save["state"]["players"][0]["mana_pool"]["mana"]
+            .as_array_mut()
+            .expect("the save floats mana")
+            .truncate(3);
+        let restored = restore_legacy_cast(&save.to_string());
+        assert_eq!(pool(&restored), 3);
+        assert_at_kicker(&restored);
+        let gnarlid = object_named(&restored, "Gnarlid Colony");
+        let finished = kick_and_finish(restored);
+        assert_eq!(pool(&finished), 0);
+        assert_eq!(energy(&finished), 1);
+        assert_resolves_kicked(finished, gnarlid);
     }
 
     // CR 601.2b + CR 601.3: with Leyline's permission also open, the paid {E} is still Primal
