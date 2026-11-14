@@ -839,9 +839,7 @@ pub(crate) fn optional_triggering_source_move_is_infeasible(
 // CR 701.24a + CR 701.24d: An explicitly owned terminal Shuffle randomizes the
 // delivered set once. Bottom is only a transient delivery position; a printed
 // placement remains authoritative, and ordinary library moves keep auto-shuffling.
-// Shared with `zone_pipeline::deliver_replaced_zone_change`, which applies it to
-// the post-replacement destination (a shuffle-back redirect's library).
-pub(crate) fn member_library_placement(
+fn member_library_placement(
     destination: Zone,
     printed_position: Option<LibraryPosition>,
     library_shuffle: LibraryShuffleMode,

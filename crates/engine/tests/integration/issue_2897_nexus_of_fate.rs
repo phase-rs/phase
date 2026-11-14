@@ -5,8 +5,7 @@
 //! https://github.com/phase-rs/phase/issues/2897
 
 use engine::game::scenario::{GameScenario, P0};
-use engine::types::ability::{Effect, LibraryShuffleMode, TargetFilter};
-use engine::types::events::{GameEvent, PlayerActionKind};
+use engine::types::ability::{Effect, TargetFilter};
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -46,14 +45,11 @@ fn nexus_of_fate_parses_shuffle_back_replacement_as_self_scoped() {
         "self shuffle-back must be discoverable while the spell is on the stack"
     );
     let execute = repl.execute.as_ref().expect("replacement execute");
-    // CR 701.24a + CR 608.2c: the chained `Shuffle` owns the one shuffle the
-    // card instructs, so the redirected delivery must not auto-shuffle too.
     assert!(matches!(
         *execute.effect,
         Effect::ChangeZone {
             destination: Zone::Library,
             target: TargetFilter::SelfRef,
-            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             ..
         }
     ));
@@ -90,40 +86,5 @@ fn nexus_of_fate_shuffles_into_library_on_resolution() {
     assert!(
         matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
         "resolution should end at priority, not an unexpected prompt"
-    );
-
-    // CR 608.2c + CR 701.24a: "reveal Nexus of Fate and shuffle it into its
-    // owner's library" is one reveal followed by exactly one shuffle — the
-    // redirected delivery must not add a shuffle of its own.
-    let events = outcome.events();
-    let reveal_at = events
-        .iter()
-        .position(
-            |e| matches!(e, GameEvent::CardsRevealed { card_ids, .. } if card_ids.contains(&nexus)),
-        )
-        .expect("Nexus of Fate must be revealed by its replacement");
-    let shuffles: Vec<usize> = events
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| {
-            matches!(
-                e,
-                GameEvent::PlayerPerformedAction {
-                    player_id,
-                    action: PlayerActionKind::ShuffledLibrary,
-                    ..
-                } if *player_id == P0
-            )
-        })
-        .map(|(index, _)| index)
-        .collect();
-    assert_eq!(
-        shuffles.len(),
-        1,
-        "the shuffle-back must shuffle its owner's library exactly once"
-    );
-    assert!(
-        reveal_at < shuffles[0],
-        "the reveal must precede the shuffle, in the order the card instructs"
     );
 }

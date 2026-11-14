@@ -11,7 +11,7 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::events::{GameEvent, PlayerActionKind};
+use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -24,7 +24,6 @@ const GRENZO: &str = "Grenzo enters with X +1/+1 counters on it.\n{2}: Put the b
 
 const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
 const LEYLINE_OF_THE_VOID: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.";
-const BLIGHTSTEEL_COLOSSUS: &str = "Trample, infect, indestructible\nIf Blightsteel Colossus would be put into a graveyard from anywhere, reveal Blightsteel Colossus and shuffle it into its owner's library instead.";
 
 /// A plain removal spell: Grenzo must be put into the graveyard in response to
 /// its own activation. Murder is "Destroy target creature." for {1}{B}{B}.
@@ -446,158 +445,6 @@ fn grenzo_puts_eligible_creature_onto_battlefield_after_replacement_choice() {
         "the resolution must finish back at priority"
     );
     // CR 701.17a: bottom card move is not a mill, so no Milled event may be emitted.
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, GameEvent::Milled { .. })),
-        "a bottom-edge move must not publish Milled"
-    );
-}
-
-/// CR 614.1a + CR 614.6 + CR 400.7j + CR 701.20b/d: Blightsteel Colossus replaces
-/// its move to the graveyard from anywhere by revealing itself and shuffling into
-/// its owner's library. Under CR 614.6 the replaced graveyard move never happens.
-/// The reveal leaves the card in a hidden zone, and shuffling ends the reveal.
-/// Grenzo cannot retrieve it as an object moved to a public zone, so the Colossus
-/// reveals, shuffles, and stays in the library rather than entering the battlefield.
-#[test]
-fn grenzo_bottom_card_blightsteel_colossus_shuffles_back_and_stays_in_library() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_mana_pool(
-        P0,
-        vec![
-            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
-            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
-        ],
-    );
-
-    let grenzo = scenario
-        .add_creature_from_oracle(P0, "Grenzo, Dungeon Warden", 2, 2, GRENZO)
-        .id();
-    // Grenzo has base power 2. With nine +1/+1 counters, Grenzo has 11 power,
-    // meeting the printed 11-power bound for Blightsteel Colossus.
-    scenario.with_counter(grenzo, CounterType::Plus1Plus1, 9);
-
-    let colossus = scenario
-        .add_spell_to_library_top(P0, "Blightsteel Colossus", false)
-        .as_creature()
-        .with_mana_cost(ManaCost::Cost {
-            shards: vec![],
-            generic: 12,
-        })
-        .from_oracle_text(BLIGHTSTEEL_COLOSSUS)
-        .id();
-
-    let top = scenario.add_card_to_library_top(P0, "Top Filler");
-
-    let mut runner = scenario.build();
-
-    // Set Blightsteel Colossus power/toughness to printed 11/11
-    {
-        let obj = runner
-            .state_mut()
-            .objects
-            .get_mut(&colossus)
-            .expect("staged Colossus");
-        obj.power = Some(11);
-        obj.toughness = Some(11);
-        obj.base_power = Some(11);
-        obj.base_toughness = Some(11);
-    }
-
-    let mut events = activate_onto_stack(&mut runner, grenzo);
-
-    for _ in 0..64 {
-        match &runner.state().waiting_for {
-            WaitingFor::Priority { .. } => {
-                if runner.state().stack.is_empty() {
-                    break;
-                }
-                events.extend(
-                    runner
-                        .act(GameAction::PassPriority)
-                        .expect("pass priority")
-                        .events,
-                );
-            }
-            WaitingFor::ManaPayment { .. } => {
-                events.extend(
-                    runner
-                        .act(GameAction::PassPriority)
-                        .expect("pay mana")
-                        .events,
-                );
-            }
-            other => panic!("unexpected waiting_for {other:?}"),
-        }
-    }
-
-    // CR 608.2c + CR 701.24a: "reveal Blightsteel Colossus and shuffle it into
-    // its owner's library" is one reveal followed by exactly one shuffle; the
-    // redirected delivery must not add a shuffle of its own (an opponent's
-    // Cosi's Trickster would otherwise see two).
-    let reveal_at = events
-        .iter()
-        .position(|e| matches!(e, GameEvent::CardsRevealed { card_ids, .. } if card_ids.contains(&colossus)))
-        .expect("Colossus must be revealed by its replacement effect");
-    let shuffles: Vec<usize> = events
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| {
-            matches!(
-                e,
-                GameEvent::PlayerPerformedAction {
-                    player_id,
-                    action: PlayerActionKind::ShuffledLibrary,
-                    ..
-                } if *player_id == P0
-            )
-        })
-        .map(|(index, _)| index)
-        .collect();
-    assert_eq!(
-        shuffles.len(),
-        1,
-        "the owner's library must be shuffled exactly once"
-    );
-    assert!(
-        reveal_at < shuffles[0],
-        "the reveal must precede the shuffle, in the order the card instructs"
-    );
-
-    // CR 614.1a + CR 614.6: Colossus replaced its graveyard move, stays in library
-    assert_eq!(
-        runner.state().objects[&colossus].zone,
-        Zone::Library,
-        "Colossus must remain in the library"
-    );
-    assert!(
-        runner.state().players[0].library.contains(&colossus),
-        "Colossus must be in P0's library"
-    );
-    assert!(
-        !runner.state().players[0].graveyard.contains(&colossus),
-        "Colossus must not be in the graveyard"
-    );
-    assert!(
-        !runner.state().battlefield.contains(&colossus),
-        "Colossus must not have entered the battlefield"
-    );
-    assert_eq!(
-        runner.state().objects[&top].zone,
-        Zone::Library,
-        "Top filler must remain in the library"
-    );
-    assert_eq!(
-        runner.state().objects[&grenzo].zone,
-        Zone::Battlefield,
-        "Grenzo must remain on the battlefield"
-    );
-    assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-        "the resolution must finish back at priority"
-    );
     assert!(
         !events
             .iter()

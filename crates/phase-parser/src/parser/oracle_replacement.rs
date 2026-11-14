@@ -8779,13 +8779,6 @@ fn parse_graveyard_redirect_replacement(
         } => enter_with_counters.clone(),
         Outcome::ShuffleBack { .. } => vec![],
     };
-    // CR 701.24a + CR 608.2c: the shuffle-back outcome's chained `Shuffle`
-    // (below) is the one shuffle the card text instructs, so the redirected
-    // library delivery must not auto-shuffle a second time.
-    let redirect_library_shuffle = match &outcome {
-        Outcome::Exile { .. } => crate::types::ability::LibraryShuffleMode::PerObject,
-        Outcome::ShuffleBack { .. } => crate::types::ability::LibraryShuffleMode::TerminalShuffle,
-    };
 
     // Build the ChangeZone redirect. `event_modifiers_for_ability` extracts the
     // `destination` field (and `enter_with_counters`, when present) from this
@@ -8798,7 +8791,7 @@ fn parse_graveyard_redirect_replacement(
             origin: None,
             target: TargetFilter::SelfRef,
             owner_library: false,
-            library_shuffle: redirect_library_shuffle,
+            library_shuffle: Default::default(),
             enter_transformed: false,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,

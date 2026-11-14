@@ -802,8 +802,14 @@ fn proposed_events(
             .collect(),
         // CR 701.17a: only a top-edge move into a graveyard is a mill, so only it
         // proposes `Mill`. Any other edge (Cellar Door; Grenzo, Dungeon Warden)
-        // is an ordinary library→zone move whose cards each meet the per-card
-        // `Moved` replacements, exactly as the resolver proposes them.
+        // is an ordinary library→zone move whose card meets the per-card
+        // `Moved` replacements, as the resolver proposes it.
+        //
+        // CR 401.2 + CR 400.2: the library is a face-down pile in a hidden zone,
+        // so which card sits on that edge is not public. The projection stands
+        // for the moved card with every card of the pile: a replacement that
+        // could apply to any of them may apply to the move. The answer then
+        // depends only on the pile, never on which hidden card is on the edge.
         Effect::Mill {
             destination,
             position,
@@ -818,9 +824,10 @@ fn proposed_events(
                         applied: Default::default(),
                     }]
                 } else {
-                    super::mill::library_edge_cards(board, player_id, 1, position)
-                        .into_iter()
-                        .map(|id| {
+                    board
+                        .library_of(player_id)
+                        .iter()
+                        .map(|&id| {
                             ProposedEvent::zone_change(id, Zone::Library, *destination, source)
                         })
                         .collect()

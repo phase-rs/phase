@@ -6529,15 +6529,14 @@ mod tests {
         );
 
         // Re-exile: a later departure recorded under the same storage id (the
-        // CR 800.4a exile of an already-exiled card) overwrites `lki_cache`,
-        // and CR 400.8 makes it a new object (incarnation bumped), so the
-        // pinned stack snapshot still answers (CR 400.7).
+        // CR 800.4a exile of an already-exiled card) overwrites `lki_cache`, but
+        // a same-zone move keeps the incarnation, so the pinned stack snapshot
+        // still answers (CR 400.7).
         let exile_incarnation = state.objects[&spell].incarnation;
         zones::move_to_zone(&mut state, spell, Zone::Exile, &mut events);
         assert_eq!(
-            state.objects[&spell].incarnation,
-            exile_incarnation + 1,
-            "CR 400.8: an Exile→Exile move creates a new object"
+            state.objects[&spell].incarnation, exile_incarnation,
+            "reach guard: an Exile→Exile move keeps the incarnation"
         );
         assert_ne!(
             state.lki_cache[&spell].controller,

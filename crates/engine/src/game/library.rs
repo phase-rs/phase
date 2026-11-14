@@ -107,12 +107,6 @@ pub fn apply_resolved_library_shuffle(
     // ability. This mark is derived cache state, rebuilt from the installed
     // order rather than stored as an independent command operand.
     crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
-    // CR 701.20d: Shuffling a library ends any active reveal of cards in that library.
-    state.last_revealed_ids.retain(|id| {
-        state.objects.get(id).is_some_and(|obj| {
-            obj.zone != crate::types::zones::Zone::Library || obj.owner != command.player
-        })
-    });
     // CR 701.24a + CR 701.24e: every library shuffle, including an identity
     // shuffle of a zero- or one-card library, publishes one action event.
     events.push(GameEvent::PlayerPerformedAction {

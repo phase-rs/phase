@@ -1133,15 +1133,11 @@ pub fn resolve_and_apply_zone_change(
     }
 
     let timestamps = resolve_zone_timestamps(state, object_id, from, to);
-    // CR 400.7 + CR 400.8: an ordinary zone move creates a new object; an
-    // object in the exile zone that is exiled doesn't change zones, but it
-    // becomes a new object that has just been exiled.
-    let resulting_incarnation =
-        if to == Zone::Battlefield || from != to || (from == Zone::Exile && to == Zone::Exile) {
-            occurrence.incarnation + 1
-        } else {
-            occurrence.incarnation
-        };
+    let resulting_incarnation = if to == Zone::Battlefield || from != to {
+        occurrence.incarnation + 1
+    } else {
+        occurrence.incarnation
+    };
     let installed_owner = receiver.unwrap_or(owner);
     let rebound_from = (installed_owner != owner).then_some(owner);
     let destination_position =
@@ -1894,9 +1890,8 @@ pub(crate) fn move_to_zone_with_entry_flags(
                         .expect("battlefield entry draws a timestamp"),
                 );
                 zone_change_record.entered_incarnation = Some(obj_mut.incarnation);
-            } else if from != to || (from == Zone::Exile && to == Zone::Exile) {
-                // CR 400.7 + CR 400.8: a move between zones, or re-exiling an
-                // object already in exile, creates a new object.
+            } else if from != to {
+                // CR 400.7: a move between zones creates a new object.
                 obj_mut.bump_incarnation();
             }
             // CR 601.2a: the caster's ownership is installed as the spell arrives on

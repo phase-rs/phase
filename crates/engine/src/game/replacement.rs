@@ -7913,31 +7913,12 @@ fn object_replacement_candidate_applies(
         } => Some(*object_id),
         _ => None,
     };
-    // CR 614.1a + CR 614.15: a card put into a graveyard from anywhere can carry its own
-    // self-scoped replacement (e.g. Blightsteel Colossus / Darksteel Colossus / Progenitus
-    // shuffle-back redirect).
-    let graveyard_self_moving_object_id = match event {
-        ProposedEvent::ZoneChange {
-            object_id,
-            to: Zone::Graveyard,
-            ..
-        } if repl_def.destination_zone == Some(Zone::Graveyard)
-            && matches!(
-                repl_def.valid_card.as_ref(),
-                Some(crate::types::ability::TargetFilter::SelfRef)
-            ) =>
-        {
-            Some(*object_id)
-        }
-        _ => None,
-    };
 
     let is_liminal_source = state.liminal_entries.contains_key(&obj.id);
     let declares_zones = !repl_def.active_zones.is_empty();
     let is_entering = entering_object_id == Some(obj.id);
     let is_being_discarded = discarding_object_id == Some(obj.id);
     let is_stack_self_move = stack_self_moving_object_id == Some(obj.id);
-    let is_graveyard_self_move = graveyard_self_moving_object_id == Some(obj.id);
     let replacement_player = replacement_source_player(obj);
 
     // "Is this definition functioning from the zone its source is in RIGHT NOW?"
@@ -7977,19 +7958,14 @@ fn object_replacement_candidate_applies(
             Zone::Battlefield,
         );
 
-    // CR 614.12 / CR 702.35a / CR 608.2n / CR 614.1a: an object outside the scanned zones
+    // CR 614.12 / CR 702.35a / CR 608.2n: an object outside the scanned zones
     // still applies its OWN self-replacement as it enters, as it is discarded,
-    // as it leaves the stack, or as it would be put into a graveyard from anywhere.
-    // These carve-outs extend the CR 113.6 DEFAULT
+    // or as it leaves the stack. These carve-outs extend the CR 113.6 DEFAULT
     // only — a definition that has stated its zones gets them solely through the
     // CR 113.6h entry match above, never on the strength of being mid-move.
     if !in_scanned_zone
         && !declared_zone_admits_own_entry
-        && (declares_zones
-            || (!is_entering
-                && !is_being_discarded
-                && !is_stack_self_move
-                && !is_graveyard_self_move))
+        && (declares_zones || (!is_entering && !is_being_discarded && !is_stack_self_move))
     {
         return false;
     }
@@ -8066,14 +8042,6 @@ fn object_replacement_candidate_applies(
     // CR 608.2n + CR 614.1a: stack self-move replacements are scoped to the
     // moving spell's own SelfRef replacement.
     if is_stack_self_move
-        && !in_scanned_zone
-        && repl_def.valid_card != Some(crate::types::ability::TargetFilter::SelfRef)
-    {
-        return false;
-    }
-    // CR 614.1a + CR 614.15: graveyard self-move replacements are scoped to the
-    // moving card's own SelfRef replacement.
-    if is_graveyard_self_move
         && !in_scanned_zone
         && repl_def.valid_card != Some(crate::types::ability::TargetFilter::SelfRef)
     {
@@ -10012,11 +9980,6 @@ pub(super) struct EventModifiers {
     etb_tap_state: EtbTapState,
     etb_counters: Vec<(CounterType, u32)>,
     redirect_zone: Option<Zone>,
-    /// CR 701.24a: who owns the shuffle when `redirect_zone` is a library.
-    /// `TerminalShuffle` (Blightsteel Colossus's "reveal ~ and shuffle it into
-    /// its owner's library instead") leaves the single shuffle to the
-    /// redirect's chained `Shuffle` instruction instead of the delivery tail.
-    redirect_library_shuffle: crate::types::ability::LibraryShuffleMode,
     /// CR 110.2a: Controller override for a self-ETB replacement
     /// (`ReplacementDefinition::enters_under`). Carried as an unresolved
     /// `ControllerRef`; resolved to a concrete `PlayerId` and written onto the
@@ -10107,7 +10070,6 @@ fn event_modifiers_for_ability(
 ) -> EventModifiers {
     let mut etb_tap_state = EtbTapState::Unspecified;
     let mut redirect = None;
-    let mut redirect_library_shuffle = crate::types::ability::LibraryShuffleMode::PerObject;
     let mut current = ability;
     while let Some(def) = current {
         if etb_tap_state == EtbTapState::Unspecified {
@@ -10128,14 +10090,8 @@ fn event_modifiers_for_ability(
             };
         }
         if redirect.is_none() {
-            if let Effect::ChangeZone {
-                destination,
-                library_shuffle,
-                ..
-            } = &*def.effect
-            {
+            if let Effect::ChangeZone { destination, .. } = &*def.effect {
                 redirect = Some(*destination);
-                redirect_library_shuffle = *library_shuffle;
             }
         }
         if !EventModifiers::is_event_modifier_effect(&def.effect) {
@@ -10148,7 +10104,6 @@ fn event_modifiers_for_ability(
         etb_tap_state,
         etb_counters: counters,
         redirect_zone: redirect,
-        redirect_library_shuffle,
         controller_override: None,
     }
 }
@@ -11248,22 +11203,10 @@ fn apply_single_replacement(
                     if let ProposedEvent::ZoneChange {
                         ref mut to,
                         ref mut cause,
-                        ref mut library_shuffle,
                         ..
                     } = new_event
                     {
                         *to = zone;
-                        // CR 701.24a + CR 608.2c: a redirect whose own chained
-                        // `Shuffle` randomizes the library ("reveal ~ and shuffle
-                        // it into its owner's library instead") owns the one
-                        // shuffle; delivery must not shuffle a second time. An
-                        // event already owned by a terminal shuffle keeps it.
-                        if matches!(
-                            modifiers.redirect_library_shuffle,
-                            crate::types::ability::LibraryShuffleMode::TerminalShuffle
-                        ) {
-                            *library_shuffle = modifiers.redirect_library_shuffle;
-                        }
                         // CR 607.2b: the redirecting replacement's own source is
                         // the "exiled with [this object]" linked-ability
                         // authority for whatever this event ultimately

@@ -570,3 +570,86 @@ fn cellar_door_stack_reach_defers_to_a_per_card_graveyard_redirect() {
     runner.advance_until_stack_empty();
     assert_eq!(runner.state().objects[&bottom].zone, Zone::Exile);
 }
+
+/// Verbatim printed Oracle text (Scryfall): a card carrying its own
+/// from-anywhere graveyard replacement.
+const BLIGHTSTEEL_COLOSSUS: &str = "Trample, infect, indestructible\nIf Blightsteel Colossus would be put into a graveyard from anywhere, reveal Blightsteel Colossus and shuffle it into its owner's library instead.";
+
+/// Cellar Door on the stack targeting P1, whose library holds a Grizzly Bears
+/// and a Blightsteel Colossus under two fillers. `colossus_on_bottom` picks
+/// which of the two hidden cards is the bottommost; nothing visible differs.
+fn stage_hidden_bottom_pair(colossus_on_bottom: bool) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let cellar_door = scenario
+        .add_artifact_from_oracle(P0, "Cellar Door", CELLAR_DOOR)
+        .id();
+    // `add_*_to_library_top` seats each card at the top (CR 401.2), so the
+    // card added first ends up bottommost.
+    let add_bears = |scenario: &mut GameScenario| {
+        scenario
+            .add_spell_to_library_top(P1, "Grizzly Bears", false)
+            .as_creature();
+    };
+    let add_colossus = |scenario: &mut GameScenario| {
+        scenario
+            .add_spell_to_library_top(P1, "Blightsteel Colossus", false)
+            .as_creature()
+            .from_oracle_text(BLIGHTSTEEL_COLOSSUS);
+    };
+    if colossus_on_bottom {
+        add_colossus(&mut scenario);
+        add_bears(&mut scenario);
+    } else {
+        add_bears(&mut scenario);
+        add_colossus(&mut scenario);
+    }
+    for i in 0..2 {
+        scenario.add_card_to_library_top(P1, &format!("{FILLER} {i}"));
+    }
+    let mut runner = scenario.build();
+    announce_cellar_door(&mut runner, cellar_door, P1);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the activation must stop with the ability on the stack"
+    );
+    (runner, cellar_door)
+}
+
+/// CR 401.2 + CR 400.2: the library is a face-down pile in a hidden zone, so
+/// stack reach must not tell which card is on its bottom. Swapping the two
+/// hidden cards (Grizzly Bears, Blightsteel Colossus) leaves the answer for
+/// Cellar Door's move unchanged; the Bruvac and Rest in Peace tests above
+/// remain the controls for a public replacement.
+#[test]
+fn cellar_door_stack_reach_is_invariant_to_the_hidden_bottom_card() {
+    let (bears_bottom, bears_door) = stage_hidden_bottom_pair(false);
+    let (colossus_bottom, colossus_door) = stage_hidden_bottom_pair(true);
+
+    // Reach guard: the two boards really differ only in the hidden bottom card.
+    let bottom_name = |runner: &GameRunner| {
+        let state = runner.state();
+        let bottom = *state.players[1].library.last().expect("staged library");
+        state.objects[&bottom].name.clone()
+    };
+    assert_eq!(bottom_name(&bears_bottom), "Grizzly Bears");
+    assert_eq!(bottom_name(&colossus_bottom), "Blightsteel Colossus");
+
+    let reach = mill_node_reach(&bears_bottom, bears_door);
+    assert_eq!(
+        reach,
+        vec![TargetRef::Player(P1)],
+        "no public replacement applies, so the move acts on the chosen player"
+    );
+    assert_eq!(
+        mill_node_reach(&colossus_bottom, colossus_door),
+        reach,
+        "which hidden card is on the bottom must not change stack reach"
+    );
+}

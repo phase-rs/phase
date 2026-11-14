@@ -160,10 +160,7 @@ pub fn apply_mill_after_replacement(
 /// take more cards than are in their library; if instructed to, they take as
 /// many as possible. A placement-only `LibraryPosition` names no edge and yields
 /// nothing.
-///
-/// Single authority for which cards an `Effect::Mill` moves, shared by the
-/// resolver and `stack_reach`'s replacement projection.
-pub(crate) fn library_edge_cards(
+fn library_edge_cards(
     state: &GameState,
     player_id: crate::types::player::PlayerId,
     count: u32,

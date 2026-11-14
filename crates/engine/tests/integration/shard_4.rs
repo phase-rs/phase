@@ -305,7 +305,6 @@ mod m_odo_the_gnarled_oracle_activation;
 mod machine_gods_effigy_copy_exception;
 mod mad_mage_lost_level_scry_runtime;
 mod madame_null_integration;
-mod madness_decline_rest_in_peace_reexile;
 mod madrush_cyclops_haste_grant;
 mod maestros_ascendancy_permission_destination;
 mod magmatic_scorchwing_intervening_if;
