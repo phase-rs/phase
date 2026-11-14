@@ -3278,7 +3278,35 @@ fn collect_matching_triggers_inner(
     // Synthesized granted-keyword triggers are appended after the printed set
     // with indices offset past `obj.trigger_definitions.len()` so the
     // `(obj_id, trig_idx)` dedup keys never collide with printed triggers.
-    let printed_trigger_count = if use_latched_trigger_entries {
+    // CR 603.10 + CR 603.6c: the game immediately after the event has no source
+    // on the battlefield that left it in the event, the moving source
+    // included. Its after-read takes the destination-zone abilities from the
+    // object that is there now, so a copy's ability does not follow its card
+    // (CR 400.7) and an ability it regained on arrival is found. Only a token
+    // that has already ceased to exist has no such object, and its ability
+    // triggers from the record (CR 111.7).
+    let after_read_of_moving_source = use_latched_trigger_entries
+        && matches!(visit, TriggerSourceVisit::EventSubject)
+        && matches!(
+            collection,
+            LogicalZoneTriggerCollection::Observed(TriggerObservationTime::ImmediatelyAfter)
+        );
+    let after_read_destination_object = if after_read_of_moving_source {
+        match event {
+            GameEvent::ZoneChanged { to, .. } => state
+                .objects
+                .get(&source_context.identity.reference.object_id)
+                .map(|object| (object.zone == *to).then_some(object)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let printed_trigger_count = if let Some(live) = after_read_destination_object {
+        live.map_or(0, |object| {
+            super::functioning_abilities::active_trigger_definitions(state, object).count()
+        })
+    } else if use_latched_trigger_entries {
         source_context.trigger_entries.len()
     } else {
         match source {
@@ -3291,7 +3319,16 @@ fn collect_matching_triggers_inner(
         Option<TriggerDefinitionRef>,
         &TriggerDefinition,
         Option<crate::types::keywords::KeywordKind>,
-    )> = if use_latched_trigger_entries {
+    )> = if let Some(live) = after_read_destination_object {
+        live.into_iter()
+            .flat_map(|object| {
+                super::functioning_abilities::active_trigger_definitions(state, object)
+            })
+            // The definition belongs to the successor incarnation, not to the
+            // record's source context, so it carries no definition ref.
+            .map(|active| (active.live_index, None, active.definition, None))
+            .collect()
+    } else if use_latched_trigger_entries {
         source_context
             .trigger_entries
             .iter()
@@ -3373,21 +3410,8 @@ fn collect_matching_triggers_inner(
             } else {
                 trig_def.trigger_zones.contains(&zone)
             };
-            // CR 603.10 + CR 603.6c: the game immediately after the event has
-            // no source on the battlefield that left it in the event, the
-            // moving source included. An after-read admits that source only
-            // through the zone it moved to, and only while the object that
-            // is there now has the ability (CR 400.7: a copy ability does not
-            // follow its card). A token that has already ceased to exist has
-            // no such object, and its ability triggers (CR 111.7).
-            let after_read_of_moving_source = use_latched_trigger_entries
-                && matches!(visit, TriggerSourceVisit::EventSubject)
-                && matches!(
-                    collection,
-                    LogicalZoneTriggerCollection::Observed(
-                        TriggerObservationTime::ImmediatelyAfter
-                    )
-                );
+            // The after-read admits the moving source's abilities only through
+            // the zone it moved to, never as if it were still where it left.
             if after_read_of_moving_source {
                 zones_match = false;
             }
@@ -3401,18 +3425,7 @@ fn collect_matching_triggers_inner(
             {
                 if let GameEvent::ZoneChanged { record, to, .. } = event {
                     zones_match = record.from_zone == Some(source_context.identity.expected_zone)
-                        && trig_def.trigger_zones.contains(to)
-                        && (!after_read_of_moving_source
-                            || state
-                                .objects
-                                .get(&source_context.identity.reference.object_id)
-                                .is_none_or(|object| {
-                                    object.zone == *to
-                                        && super::functioning_abilities::active_trigger_definitions(
-                                            state, object,
-                                        )
-                                        .any(|active| active.definition == trig_def)
-                                }));
+                        && trig_def.trigger_zones.contains(to);
                 }
             }
             if !zones_match {
