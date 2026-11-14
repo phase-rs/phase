@@ -33,6 +33,9 @@ import {
   NativeEngineVersionMismatchError,
   PROTOCOL_VERSION,
   WebSocketAdapter,
+  acknowledgeFullTerminalDelivery,
+  bootstrapFullTerminalDelivery,
+  readFullTerminalResult,
 } from "../ws-adapter";
 import { AdapterError, AdapterErrorCode, supportsMatchConcede, supportsTakeback, supportsTurnRewind } from "../types";
 import { STATE_CODEC_DECODE_TIMEOUT_MS, StateCodecRuntime, type StateCodecSession } from "../state-codec-runtime";
@@ -77,7 +80,7 @@ class MockWebSocket extends EventTarget {
   }
   // Deliver raw observers and the IDL handler once each; happy-dom would
   // otherwise invoke the same IDL handler again through dispatchEvent.
-  dispatchSynthetic(type: "message" | "close", data?: string, closeEvent = new CloseEvent("close")) {
+  dispatchSynthetic(type: "message" | "close" | "error", data?: string, closeEvent = new CloseEvent("close")) {
     if (type === "message" && data !== undefined) {
       const handler = this.onmessage;
       this.onmessage = null;
@@ -87,6 +90,12 @@ class MockWebSocket extends EventTarget {
     } else if (type === "close") {
       this.onclose?.(closeEvent);
       this.dispatchEvent(closeEvent);
+    } else if (type === "error") {
+      const handler = this.onerror;
+      this.onerror = null;
+      this.dispatchEvent(new Event("error"));
+      this.onerror = handler;
+      handler?.();
     }
   }
 }
@@ -899,7 +908,7 @@ describe("WebSocketAdapter", () => {
   });
 
   describe("native AI transport", () => {
-    const nativeAiOptions = (socketFactory: () => PhaseSocketTransport) => ({
+    const nativeAiOptions = (socketFactory: (url: string) => PhaseSocketTransport) => ({
       nativeAi: {
         socketFactory,
         aiSeats: [{
@@ -1269,6 +1278,280 @@ describe("WebSocketAdapter", () => {
       expect(nativeSocket.send).not.toHaveBeenCalledWith(
         expect.stringContaining("CreateGameWithSettings"),
       );
+    });
+
+    const NATIVE_FULL_KEY = { game_code: "NATIVE", generation: 1 };
+    const nativeDelivery: FullTerminalDelivery = {
+      key: NATIVE_FULL_KEY,
+      terminalRevision: 5,
+      deliveryId: "del-123",
+      credential: "cred-456",
+      display: { winner: 0, reason: "Victory" },
+    };
+
+    /** Starts a live native solo game whose resumable session is established. */
+    async function liveNativeGame() {
+      const sockets: MockWebSocket[] = [];
+      const socketFactory = vi.fn((url: string) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket as unknown as PhaseSocketTransport;
+      });
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Player",
+        nativeAiOptions(socketFactory),
+      );
+      const initPromise = nativeAdapter.initialize();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "GameCreated",
+        data: { game_code: "NATIVE", player_token: "native-token", full_key: NATIVE_FULL_KEY },
+      }));
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "GameStarted",
+        data: {
+          state: createMockState(),
+          your_player: 0,
+          player_token: "native-token",
+          full_key: NATIVE_FULL_KEY,
+        },
+      }));
+      await initPromise;
+      const events: Array<{ type: string } & Record<string, unknown>> = [];
+      nativeAdapter.onEvent((event) => events.push(event));
+      return { nativeAdapter, nativeSocket, socketFactory, sockets, events };
+    }
+
+    it("surfaces a transport error during a live native game", async () => {
+      // Positive control for the suppression tests below: the same fixture and
+      // the same error dispatch reach the production `onerror` handler.
+      const { nativeAdapter, nativeSocket, events } = await liveNativeGame();
+
+      nativeSocket.dispatchSynthetic("error");
+
+      expect(events).toContainEqual({ type: "error", message: "WebSocket connection failed" });
+      nativeAdapter.dispose();
+    });
+
+    it("suppresses a transport error after GameOver", async () => {
+      const { nativeAdapter, nativeSocket, events } = await liveNativeGame();
+
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "GameOver",
+        data: { winner: 0, reason: "victory" },
+      }));
+      expect(events).toContainEqual(expect.objectContaining({ type: "gameOver", winner: 0 }));
+
+      nativeSocket.dispatchSynthetic("error");
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "error" }));
+      nativeAdapter.dispose();
+    });
+
+    it("claims a native terminal delivery before persistence and acknowledges it through the bridge", async () => {
+      let releaseCommit!: (retained: boolean) => void;
+      terminalStore.commit.mockImplementationOnce(
+        () => new Promise<boolean>((resolve) => { releaseCommit = resolve; }),
+      );
+      const { nativeAdapter, nativeSocket, socketFactory, sockets, events } = await liveNativeGame();
+
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "TerminalResult",
+        data: { delivery: nativeDelivery },
+      }));
+      expect(terminalStore.commit).toHaveBeenCalledWith(nativeDelivery);
+
+      // The bridge fails while the delivery is still being persisted.
+      nativeSocket.dispatchSynthetic("error");
+      nativeSocket.dispatchSynthetic("close", undefined, new CloseEvent("close", { code: 1006, wasClean: false }));
+      await Promise.resolve();
+
+      const types = () => events.map((event) => event.type);
+      expect(types()).not.toContain("error");
+      expect(types()).not.toContain("reconnecting");
+      expect(types()).not.toContain("reconnectFailed");
+      expect(types()).not.toContain("terminalDelivery");
+      expect(socketFactory).toHaveBeenCalledOnce();
+
+      releaseCommit(true);
+      await vi.waitFor(() => {
+        expect(events).toContainEqual({ type: "terminalDelivery", delivery: nativeDelivery });
+        expect(socketFactory).toHaveBeenCalledTimes(2);
+      });
+      // The resumable session survives the transport loss as a terminal-only
+      // recovery pointer until the acknowledgement lands.
+      expect(events).toContainEqual({
+        type: "sessionChanged",
+        session: expect.objectContaining({ gameCode: "NATIVE", fullKey: NATIVE_FULL_KEY, terminalOnly: true }),
+      });
+      expect(events).not.toContainEqual({ type: "sessionChanged", session: null });
+
+      const ackSocket = sockets[1]!;
+      expect(ackSocket.url).toBe("native-engine");
+      ackSocket.dispatchSynthetic("message", SERVER_HELLO);
+      await vi.waitFor(() => expect(ackSocket.send).toHaveBeenCalledWith(JSON.stringify({
+        type: "AckTerminalDelivery",
+        data: { delivery_id: nativeDelivery.deliveryId, credential: nativeDelivery.credential },
+      })));
+      ackSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "TerminalDeliveryAcknowledged",
+          data: { delivery_id: nativeDelivery.deliveryId },
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(events).toContainEqual({ type: "sessionChanged", session: null });
+      });
+      expect(types()).not.toContain("terminalUnavailable");
+      expect(types()).not.toContain("error");
+      nativeAdapter.dispose();
+    });
+
+    it("keeps the session and skips the acknowledgement when a native terminal delivery cannot be retained", async () => {
+      terminalStore.commit.mockResolvedValueOnce(false);
+      const { nativeAdapter, nativeSocket, socketFactory, events } = await liveNativeGame();
+
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "TerminalResult",
+        data: { delivery: nativeDelivery },
+      }));
+      await vi.waitFor(() => {
+        expect(events).toContainEqual({ type: "terminalUnavailable", message: "Failed to retain terminal delivery" });
+      });
+      nativeSocket.dispatchSynthetic("error");
+
+      const types = events.map((event) => event.type);
+      expect(types).not.toContain("terminalDelivery");
+      expect(types).not.toContain("error");
+      expect(socketFactory).toHaveBeenCalledOnce();
+
+      nativeAdapter.dispose();
+      expect(events).not.toContainEqual({ type: "sessionChanged", session: null });
+    });
+
+    it.each([
+      ["an absent data payload", { type: "TerminalResult" }],
+      ["a null data payload", { type: "TerminalResult", data: null }],
+      ["a null delivery", { type: "TerminalResult", data: { delivery: null } }],
+      ["an empty delivery", { type: "TerminalResult", data: { delivery: {} } }],
+      ["a delivery without a credential", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, credential: "" } } }],
+      ["a delivery with a null key", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, key: null } } }],
+      ["a delivery with a null display", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, display: null } } }],
+      ["a delivery with a null finalView", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, finalView: null } } }],
+      ["another generation's delivery", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, key: { game_code: "NATIVE", generation: 2 } } } }],
+      ["another game's delivery", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, key: { game_code: "OTHER", generation: 1 } } } }],
+    ])("leaves the live session's error and reconnect paths intact after %s", async (_case, frame) => {
+      const { nativeAdapter, nativeSocket, socketFactory, events } = await liveNativeGame();
+
+      nativeSocket.dispatchSynthetic("message", JSON.stringify(frame));
+      await Promise.resolve();
+
+      // Nothing was retained, published or acknowledged.
+      expect(terminalStore.commit).not.toHaveBeenCalled();
+      const types = () => events.map((event) => event.type);
+      expect(types()).not.toContain("terminalDelivery");
+      expect(types()).not.toContain("terminalUnavailable");
+      expect(types()).not.toContain("sessionChanged");
+      expect(socketFactory).toHaveBeenCalledOnce();
+
+      // The same transport failures a matching delivery suppresses still reach
+      // their consumers: the error, then a reconnect attempt on close.
+      nativeSocket.dispatchSynthetic("error");
+      expect(events).toContainEqual({ type: "error", message: "WebSocket connection failed" });
+      nativeSocket.dispatchSynthetic("close", undefined, new CloseEvent("close", { code: 1006, wasClean: false }));
+      await vi.waitFor(() => expect(types()).toContain("reconnecting"));
+      nativeAdapter.dispose();
+    });
+  });
+
+  describe("terminal request helpers bind each reply to its request", () => {
+    const KEY = { game_code: "NATIVE", generation: 1 };
+    const delivery: FullTerminalDelivery = {
+      key: KEY,
+      terminalRevision: 5,
+      deliveryId: "del-123",
+      credential: "cred-456",
+      display: { winner: 0, reason: "Victory" },
+    };
+
+    /** Runs one terminal-only request over a fake bridge and answers it with `reply`. */
+    async function answer<T>(
+      call: (socketFactory: (url: string) => PhaseSocketTransport) => Promise<T>,
+      reply: unknown,
+    ): Promise<T> {
+      const sockets: MockWebSocket[] = [];
+      const pending = call((url) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket as unknown as PhaseSocketTransport;
+      });
+      await vi.waitFor(() => expect(sockets).toHaveLength(1));
+      sockets[0]!.dispatchSynthetic("message", SERVER_HELLO);
+      await vi.waitFor(() => expect(sockets[0]!.send).toHaveBeenCalledOnce());
+      sockets[0]!.dispatchSynthetic("message", JSON.stringify(reply));
+      return pending;
+    }
+
+    const bootstrap = (reply: unknown) => answer(
+      (factory) => bootstrapFullTerminalDelivery("native-engine", KEY, "token", "request-1", factory),
+      reply,
+    );
+    const read = (reply: unknown) => answer(
+      (factory) => readFullTerminalResult("native-engine", delivery.credential, factory),
+      reply,
+    );
+    const ack = (reply: unknown) => answer(
+      (factory) => acknowledgeFullTerminalDelivery("native-engine", delivery.deliveryId, delivery.credential, factory),
+      reply,
+    );
+
+    it("returns the requested seat's delivery, and null when the server holds none", async () => {
+      await expect(bootstrap({ type: "TerminalBootstrapResult", data: { delivery } })).resolves.toEqual(delivery);
+      await expect(bootstrap({ type: "TerminalBootstrapResult", data: {} })).resolves.toBeNull();
+      await expect(read({ type: "TerminalResult", data: { delivery } })).resolves.toEqual(delivery);
+      await expect(read({ type: "TerminalResult", data: {} })).resolves.toBeNull();
+    });
+
+    it.each([
+      ["another generation", { game_code: "NATIVE", generation: 2 }],
+      ["another game", { game_code: "OTHER", generation: 1 }],
+    ])("rejects a bootstrap reply for %s", async (_case, key) => {
+      await expect(bootstrap({ type: "TerminalBootstrapResult", data: { delivery: { ...delivery, key } } }))
+        .rejects.toThrow("Mismatched terminal bootstrap key");
+    });
+
+    it("rejects a read reply that carries another credential", async () => {
+      await expect(read({ type: "TerminalResult", data: { delivery: { ...delivery, credential: "other" } } }))
+        .rejects.toThrow("Mismatched terminal delivery read");
+    });
+
+    it.each([
+      ["an absent data payload", undefined],
+      ["a null data payload", null],
+      ["an array envelope", []],
+      ["a null delivery", { delivery: null }],
+      ["an empty delivery", { delivery: {} }],
+      ["a delivery with a null key", { delivery: { ...delivery, key: null } }],
+      ["a delivery with a null display", { delivery: { ...delivery, display: null } }],
+      ["a delivery with a malformed finalView", { delivery: { ...delivery, finalView: {} } }],
+    ])("rejects %s rather than reporting no result", async (_case, data) => {
+      await expect(bootstrap({ type: "TerminalBootstrapResult", data })).rejects.toThrow(/^Malformed terminal/);
+      await expect(read({ type: "TerminalResult", data })).rejects.toThrow(/^Malformed terminal/);
+    });
+
+    it("accepts only an acknowledgement that names the acknowledged delivery", async () => {
+      await expect(ack({ type: "TerminalDeliveryAcknowledged", data: { delivery_id: delivery.deliveryId } }))
+        .resolves.toBe(true);
+      await expect(ack({ type: "TerminalDeliveryAcknowledged", data: { delivery_id: "other" } })).resolves.toBe(false);
+      await expect(ack({ type: "TerminalDeliveryAcknowledged" })).resolves.toBe(false);
+      await expect(ack({ type: "TerminalDeliveryAcknowledged", data: null })).resolves.toBe(false);
     });
   });
 

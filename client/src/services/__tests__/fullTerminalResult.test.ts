@@ -12,6 +12,7 @@ vi.mock("idb-keyval", () => ({
 import { get as idbGet, set as idbSet } from "idb-keyval";
 import {
   commitFullTerminalDelivery,
+  isValidFinalView,
   isValidFullTerminalDelivery,
   loadFullTerminalDelivery,
   replaceFullTerminalDelivery,
@@ -74,6 +75,10 @@ describe("full terminal result persistence", () => {
     vi.mocked(idbGet).mockResolvedValueOnce(legacySnapshot);
 
     expect(isValidFullTerminalDelivery(legacySnapshot)).toBe(false);
+    expect(isValidFullTerminalDelivery({ ...delivery, finalView: {} as never })).toBe(false);
+    expect(isValidFinalView({})).toBe(false);
+    expect(isValidFinalView({ players: [], objects: {} })).toBe(true);
+    expect(isValidFinalView({ players: [], stack: [], battlefield: [], turn_number: 1, objects: {} })).toBe(true);
     await expect(loadFullTerminalDelivery(delivery.key)).resolves.toBeNull();
     await expect(commitFullTerminalDelivery(legacySnapshot as never)).resolves.toBe(false);
   });

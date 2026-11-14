@@ -5,6 +5,7 @@ import { GameProvider } from "../GameProvider";
 import { PROTOCOL_VERSION, WebSocketAdapter } from "../../adapter/ws-adapter";
 import { gameStateFactory } from "../../test/factories/gameStateFactory";
 import { useGameStore } from "../../stores/gameStore";
+import { useMultiplayerStore } from "../../stores/multiplayerStore";
 import { saveWsSession, loadWsSession, WS_SESSION_TTL_MS, type WsSessionData } from "../../services/multiplayerSession";
 import {
   commitFullTerminalDelivery, loadFullTerminalDelivery, type FullTerminalDelivery,
@@ -89,14 +90,17 @@ class ServerSocket extends EventTarget {
           break;
         case "BootstrapTerminalDelivery":
           if (holdBootstrap) pendingBootstraps.push(this);
-          else this.receive({ type: "TerminalBootstrapResult", data: { delivery: bootstrap } });
+          else this.receive({ type: "TerminalBootstrapResult", data: bootstrap ? { delivery: bootstrap } : {} });
           break;
         case "AckTerminalDelivery":
           if (ackOutcome === "reject") this.onerror?.();
           else if (ackOutcome === "pending") pendingAcks.push(this);
           else {
             if (ackOutcome === "success") successfulAckResponses += 1;
-            this.receive({ type: ackOutcome === "success" ? "TerminalDeliveryAcknowledged" : "TerminalDeliveryRejected" });
+            this.receive({
+              type: ackOutcome === "success" ? "TerminalDeliveryAcknowledged" : "TerminalDeliveryRejected",
+              data: { delivery_id: delivery.deliveryId },
+            });
           }
           break;
         case "Reconnect":
@@ -215,7 +219,9 @@ describe("ordinary WebSocket terminal routing across real persistence and remoun
     };
     saveWsSession(replacement);
     expect(pendingAcks).toHaveLength(1);
-    await act(async () => { pendingAcks[0].receive({ type: "TerminalDeliveryAcknowledged" }); });
+    await act(async () => {
+      pendingAcks[0].receive({ type: "TerminalDeliveryAcknowledged", data: { delivery_id: delivery.deliveryId } });
+    });
     expect(loadWsSession()).toEqual(replacement);
   });
 
@@ -250,7 +256,9 @@ describe("ordinary WebSocket terminal routing across real persistence and remoun
     saveWsSession({ ...retained, timestamp: Date.now() - WS_SESSION_TTL_MS - 1 });
     expect(loadWsSession()).toMatchObject({ serverUrl: session.serverUrl, fullKey: session.fullKey, terminalOnly: true });
     expect(pendingAcks).toHaveLength(1);
-    await act(async () => { pendingAcks[0].receive({ type: "TerminalDeliveryAcknowledged" }); });
+    await act(async () => {
+      pendingAcks[0].receive({ type: "TerminalDeliveryAcknowledged", data: { delivery_id: delivery.deliveryId } });
+    });
     await waitFor(() => expect(loadWsSession()).toBeNull());
     expect(await loadFullTerminalDelivery(delivery.key)).toEqual(delivery);
   });
@@ -315,5 +323,92 @@ describe("ordinary WebSocket terminal routing across real persistence and remoun
     });
     expect.soft(controller.mock.calls.length).toBe(controllerCount);
     expect(await loadFullTerminalDelivery(delivery.key)).toEqual(delivery);
+  });
+
+  describe("terminal response identity binding", () => {
+    const sentTypes = () => requests.map(({ message }) => message.type).filter((type) => type !== "ClientHello");
+
+    it("reports a foreign bootstrap key without committing, acknowledging, or reconnecting", async () => {
+      saveWsSession(session);
+      bootstrap = { ...delivery, key: { game_code: "FOREIGN", generation: 1 } };
+      const { events } = mountProvider();
+
+      await waitFor(() => expect(events).toHaveBeenCalledWith({
+        type: "terminalUnavailable", message: "Mismatched terminal bootstrap key",
+      }));
+      expect(sentTypes()).toEqual(["BootstrapTerminalDelivery"]);
+      expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "terminalDelivery" }));
+      expect(await loadFullTerminalDelivery(bootstrap.key)).toBeNull();
+      expect(await loadFullTerminalDelivery(delivery.key)).toBeNull();
+      expect(loadWsSession()).toEqual(session);
+    });
+
+    it.each([
+      ["another credential", { credential: "foreign-credential" }],
+      ["another delivery", { deliveryId: "foreign-delivery" }],
+    ])("keeps the retained result and route when the read returns %s", async (_case, changed) => {
+      const retained = delivery;
+      await commitFullTerminalDelivery(retained);
+      saveWsSession({ ...session, terminalOnly: true });
+      delivery = { ...retained, ...changed, display: { winner: 1, reason: "Another game's result" } };
+      const { events } = mountProvider();
+
+      await waitFor(() => expect(events).toHaveBeenCalledWith({
+        type: "terminalUnavailable", message: "Mismatched terminal delivery read",
+      }));
+      // No acknowledgement was sent for the foreign reply.
+      expect(sentTypes()).toEqual(["ReadTerminalResult"]);
+      const published = events.mock.calls
+        .map(([event]) => event as { type: string })
+        .filter((event) => event.type === "terminalDelivery");
+      expect(published).toEqual([{ type: "terminalDelivery", delivery: { ...retained, finalView: undefined } }]);
+      expect(await loadFullTerminalDelivery(session.fullKey)).toEqual(retained);
+      expect(loadWsSession()).toEqual({ ...session, terminalOnly: true });
+    });
+
+    it("keeps the recovery route when the server acknowledges a different delivery", async () => {
+      ackOutcome = "pending";
+      saveWsSession({ ...session, terminalOnly: true });
+      await commitFullTerminalDelivery(delivery);
+      const { events } = mountProvider();
+
+      await waitFor(() => expect(pendingAcks).toHaveLength(1));
+      await act(async () => {
+        pendingAcks[0].receive({
+          type: "TerminalDeliveryAcknowledged",
+          data: { delivery_id: "other-delivery-id" },
+        });
+      });
+
+      expect(sentTypes()).toEqual(["ReadTerminalResult", "AckTerminalDelivery"]);
+      expect(events).toHaveBeenCalledWith({ type: "terminalDelivery", delivery });
+      expect(loadWsSession()).toEqual({ ...session, terminalOnly: true });
+    });
+
+    it("restores authoritative guest seat 1 identity upon terminal recovery", async () => {
+      const guestSession: WsSessionData = {
+        ...session,
+        playerId: 1,
+        terminalOnly: true,
+      };
+      saveWsSession(guestSession);
+      const guestDelivery: FullTerminalDelivery = {
+        ...delivery,
+        display: { winner: 1, reason: "Life reduction victory (CR 704.5a)" },
+      };
+      await commitFullTerminalDelivery(guestDelivery);
+
+      useMultiplayerStore.getState().setActivePlayerId(null as never);
+      expect(useMultiplayerStore.getState().activePlayerId).toBeNull();
+
+      const { events } = mountProvider();
+      await waitFor(() => expect(events).toHaveBeenCalledWith({
+        type: "terminalDelivery",
+        delivery: { ...guestDelivery, finalView: undefined },
+      }));
+
+      // The authoritative recipient seat 1 is restored before identity event
+      expect(useMultiplayerStore.getState().activePlayerId).toBe(1);
+    });
   });
 });

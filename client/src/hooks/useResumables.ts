@@ -17,6 +17,7 @@ import {
   loadActiveDraftPod,
   type ActiveDraftPodMeta,
 } from "../services/draftPersistence";
+import { ACTIVE_GAME_CHANGED_EVENT } from "../services/gamePersistence";
 import {
   clearActiveGame,
   loadActiveGame,
@@ -64,71 +65,127 @@ export function useResumables(): Resumables {
 
   useEffect(() => {
     let cancelled = false;
-    setQuickDraft(loadActiveQuickDraft());
-    setPod(loadActiveDraftPod());
 
-    const saved = loadActiveGame();
-    if (!saved) return;
+    const validate = () => {
+      setQuickDraft(loadActiveQuickDraft());
+      setPod(loadActiveDraftPod());
 
-    // Validate the saved match against the session/state that actually backs it,
-    // clearing the pointer when the backing data is gone so we never offer a
-    // resume that would fail. The session/state lookups are async, so guard their
-    // setState against a mid-flight unmount (the cancelled pattern the other
-    // async hooks already use).
-    if (saved.mode === "online") {
-      if (loadWsSession() !== null) setMatch(saved);
-      else clearActiveGame();
-    } else if (saved.mode === "p2p-join" && saved.p2pRoomCode) {
-      loadP2PSession(`phase-${saved.p2pRoomCode}`).then((session) => {
-        if (cancelled) return;
-        if (session) setMatch(saved);
-        else clearActiveGame();
-      });
-    } else if (saved.nativeSession) {
-      // Native solo (AI) games are server-authoritative: their state lives in
-      // the local phase-server, not IndexedDB, so there is no snapshot to
-      // validate against here. The reconnect on resume is the real validation.
-      // No matchSummary — turn/life aren't available client-side until we
-      // reconnect, so the resume hero shows the match without a board snapshot.
-      //
-      // Only offer it when the native engine can actually be attached
-      // (enabled + available for this origin). Resuming routes back through the
-      // native path, which needs the engine; if it is unavailable the resume
-      // would dead-end at a fresh in-browser game. Keep the pointer silently so
-      // the resume reappears once native is available again — don't clear it.
-      const nativeAvailable =
-        canAttemptNativeEngine(usePreferencesStore.getState().nativeEngineEnabled)
-        && nativeEngineKeyForCurrentOrigin() !== null;
-      if (nativeAvailable) setMatch(saved);
-    } else {
-      loadGame(saved.id).then((state) => {
-        if (cancelled) return;
-        if (state) {
-          const publicState = persistedGameStateView(state);
+      const saved = loadActiveGame();
+      if (!saved) {
+        setMatch(null);
+        setMatchSummary(null);
+        return;
+      }
+
+      // Validate the saved match against the session/state that actually backs it,
+      // clearing the pointer when the backing data is gone so we never offer a
+      // resume that would fail. The session/state lookups are async, so guard their
+      // setState against a mid-flight unmount (the cancelled pattern the other
+      // async hooks already use).
+      if (saved.mode === "online") {
+        const wsSession = loadWsSession();
+        if (wsSession !== null && !wsSession.terminalOnly) {
           setMatch(saved);
-          // CR 800.4: eliminated players are out — only live seats count as
-          // opponents. Seat 0 is the local human in AI/host matches.
-          const you = publicState.players.find((p) => p.id === 0);
-          const liveCount = publicState.players.filter((p) => !p.is_eliminated).length;
-          setMatchSummary({
-            turn: publicState.turn_number,
-            isYourTurn: publicState.active_player === 0,
-            yourLife: you && !you.is_eliminated ? you.life : null,
-            opponentCount: Math.max(0, liveCount - 1),
-          });
         } else {
-          clearActiveGame();
+          setMatch(null);
+          setMatchSummary(null);
+          if (!wsSession) clearActiveGame();
         }
-      });
-    }
+      } else if (saved.mode === "p2p-join" && saved.p2pRoomCode) {
+        loadP2PSession(`phase-${saved.p2pRoomCode}`).then((session) => {
+          if (cancelled) return;
+          if (session) {
+            setMatch(saved);
+          } else {
+            setMatch(null);
+            setMatchSummary(null);
+            clearActiveGame();
+          }
+        });
+      } else if (saved.nativeSession) {
+        // Native solo (AI) games are server-authoritative: their state lives in
+        // the local phase-server, not IndexedDB, so there is no snapshot to
+        // validate against here. The reconnect on resume is the real validation.
+        // No matchSummary — turn/life aren't available client-side until we
+        // reconnect, so the resume hero shows the match without a board snapshot.
+        //
+        // Terminal-only sessions have finished and cannot be resumed to gameplay.
+        // Only offer it when the native engine can actually be attached
+        // (enabled + available for this origin). Resuming routes back through the
+        // native path, which needs the engine; if it is unavailable the resume
+        // would dead-end at a fresh in-browser game. Keep the pointer silently so
+        // the resume reappears once native is available again — don't clear it.
+        if (saved.nativeSession.terminalOnly) {
+          setMatch(null);
+          setMatchSummary(null);
+          return;
+        }
+        const nativeAvailable =
+          canAttemptNativeEngine(usePreferencesStore.getState().nativeEngineEnabled)
+          && nativeEngineKeyForCurrentOrigin() !== null;
+        if (nativeAvailable) {
+          setMatch(saved);
+        } else {
+          setMatch(null);
+          setMatchSummary(null);
+        }
+      } else {
+        loadGame(saved.id).then((state) => {
+          if (cancelled) return;
+          if (state) {
+            const publicState = persistedGameStateView(state);
+            setMatch(saved);
+            // CR 800.4: eliminated players are out — only live seats count as
+            // opponents. Seat 0 is the local human in AI/host matches.
+            const you = publicState.players.find((p) => p.id === 0);
+            const liveCount = publicState.players.filter((p) => !p.is_eliminated).length;
+            setMatchSummary({
+              turn: publicState.turn_number,
+              isYourTurn: publicState.active_player === 0,
+              yourLife: you && !you.is_eliminated ? you.life : null,
+              opponentCount: Math.max(0, liveCount - 1),
+            });
+          } else {
+            setMatch(null);
+            setMatchSummary(null);
+            clearActiveGame();
+          }
+        });
+      }
+    };
+
+    validate();
+    window.addEventListener("storage", validate);
+    window.addEventListener(ACTIVE_GAME_CHANGED_EVENT, validate);
 
     return () => {
       cancelled = true;
+      window.removeEventListener("storage", validate);
+      window.removeEventListener(ACTIVE_GAME_CHANGED_EVENT, validate);
     };
   }, []);
 
   const resumeMatch = () => {
     if (!match) return;
+    const current = loadActiveGame();
+    if (!current || current.id !== match.id) {
+      setMatch(null);
+      setMatchSummary(null);
+      return;
+    }
+    if (current.nativeSession?.terminalOnly) {
+      setMatch(null);
+      setMatchSummary(null);
+      return;
+    }
+    if (current.mode === "online") {
+      const wsSession = loadWsSession();
+      if (!wsSession || wsSession.terminalOnly) {
+        setMatch(null);
+        setMatchSummary(null);
+        return;
+      }
+    }
     useGameStore.setState({ gameId: match.id });
     if (match.mode === "online") {
       navigate(`/game/${match.id}?mode=host`);

@@ -28,7 +28,11 @@ type NativeAdapterEvent =
   // Non-terminal: the server refused a fire-and-forget request. Listed here
   // alongside the two terminal events precisely because `handleNativeEvent`
   // must treat it differently from both.
-  | { type: "requestRejected"; reason: string };
+  | { type: "requestRejected"; reason: string }
+  // Terminal events from the native engine (mirrors WsAdapterEvent)
+  | { type: "terminalDelivery"; delivery: { key: { game_code: string; generation: number }; terminalRevision: number; deliveryId: string; credential: string; display: { winner: number | null; reason: string }; finalView?: unknown } }
+  | { type: "gameOver"; winner: number | null; reason: string }
+  | { type: "terminalUnavailable"; message: string };
 
 const {
   NativeEngineVersionMismatchError,
@@ -160,6 +164,7 @@ const {
     adapter: null as unknown,
     gameId: null as string | null,
     gameState: null,
+    waitingFor: null as unknown,
     initGame: vi.fn(async (gameId: string, adapter: { initialize: () => Promise<void> }, ..._payload: unknown[]) => {
       gameStoreState.gameId = gameId;
       gameStoreState.adapter = adapter;
@@ -347,6 +352,12 @@ vi.mock("../../services/quickDraftPersistence", () => ({
   inspectActiveQuickDraftLifecycle,
 }));
 
+// Routing tests resume a live seat. The terminal recovery a resume runs first
+// is exercised end to end in GameProvider.nativeTerminalRecovery.test.tsx.
+vi.mock("../../services/fullTerminalRecovery", () => ({
+  recoverFullTerminal: vi.fn(async () => "reconnect"),
+}));
+
 vi.mock("../../services/serverDetection", () => ({
   detectServerUrl: vi.fn(async () => "ws://test-server"),
 }));
@@ -477,6 +488,7 @@ describe("GameProvider native AI routing", () => {
     loadActiveGame.mockReturnValue(null);
     gameStoreState.resumeNativeSolo.mockClear();
     gameStoreState.initGame.mockClear();
+    gameStoreState.waitingFor = null;
     nativeAdapters.splice(0);
     wasmAdapters.splice(0);
     multiplayerDraftGetState.mockReset();
@@ -2275,6 +2287,99 @@ describe("GameProvider native AI routing", () => {
 
   it("disposes a native game and surfaces bridge errors as terminal", async () => {
     await expectNativeTerminalEvent({ type: "error", message: "WebSocket connection failed" });
+  });
+
+  it("forwards terminalDelivery, updates waitingFor to GameOver, and disposes the controller", async () => {
+    const onWsEvent = vi.fn();
+    render(
+      <GameProvider gameId="native-terminal-delivery" mode="ai" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setGameMode).toHaveBeenCalledWith("native-ai");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    const nativeAdapter = nativeAdapters[0]!;
+    const delivery = {
+      key: { game_code: "GAME01", generation: 1 },
+      terminalRevision: 5,
+      deliveryId: "del-1",
+      credential: "cred-1",
+      display: { winner: 0, reason: "Victory" },
+    };
+    const event = { type: "terminalDelivery" as const, delivery };
+    const controllers = vi.mocked(createGameLoopController).mock.results;
+    const latestController = controllers[controllers.length - 1]?.value;
+
+    act(() => {
+      nativeAdapter.emit(event);
+    });
+
+    expect(onWsEvent).toHaveBeenCalledWith(event);
+    expect(gameStoreState.waitingFor).toEqual({
+      type: "GameOver",
+      data: { winner: 0 },
+    });
+    expect(latestController?.dispose).toHaveBeenCalled();
+    expect(nativeAdapter.dispose).not.toHaveBeenCalled();
+  });
+
+  it("forwards gameOver, updates waitingFor to GameOver, and disposes the controller", async () => {
+    const onWsEvent = vi.fn();
+    render(
+      <GameProvider gameId="native-game-over" mode="ai" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setGameMode).toHaveBeenCalledWith("native-ai");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    const nativeAdapter = nativeAdapters[0]!;
+    const event = { type: "gameOver" as const, winner: 1, reason: "opponentConceded" };
+    const controllers = vi.mocked(createGameLoopController).mock.results;
+    const latestController = controllers[controllers.length - 1]?.value;
+
+    act(() => {
+      nativeAdapter.emit(event);
+    });
+
+    expect(onWsEvent).toHaveBeenCalledWith(event);
+    expect(gameStoreState.waitingFor).toEqual({
+      type: "GameOver",
+      data: { winner: 1 },
+    });
+    expect(latestController?.dispose).toHaveBeenCalled();
+    expect(nativeAdapter.dispose).not.toHaveBeenCalled();
+  });
+
+  it("forwards terminalUnavailable without disposing the native session", async () => {
+    const onWsEvent = vi.fn();
+    render(
+      <GameProvider gameId="native-terminal-unavailable" mode="ai" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setGameMode).toHaveBeenCalledWith("native-ai");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    const nativeAdapter = nativeAdapters[0]!;
+    const event = { type: "terminalUnavailable" as const, message: "Storage error" };
+
+    act(() => {
+      nativeAdapter.emit(event);
+    });
+
+    expect(onWsEvent).toHaveBeenCalledWith(event);
+    expect(nativeAdapter.dispose).not.toHaveBeenCalled();
   });
 
   it("keeps a native setup failure off the terminal connection surface", async () => {

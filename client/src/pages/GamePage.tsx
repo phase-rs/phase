@@ -43,6 +43,7 @@ import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
 import { useResolvedGridRows, useResolvedSplitGridRows } from "../hooks/useResolvedGridRows.ts";
 import { useDebugHandReveal } from "../hooks/useDebugHandReveal";
+import { isValidFinalView } from "../services/fullTerminalResult";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
 import { formatLifeReadout, lifeReadout } from "../hooks/useDisplayedLife.ts";
 import { useLocalizedCardContent } from "../hooks/useLocalizedCardContent.ts";
@@ -414,6 +415,18 @@ export function GamePage() {
   const [gameStartedAt, setGameStartedAt] = useState<number | null>(null);
   const [terminalReason, setTerminalReason] = useState<string | null>(null);
   const hasConcededRef = useRef(false);
+  // The id of the game whose terminal result has been displayed. Keyed by game
+  // rather than a bare flag: Rematch navigates to a new game id on this same
+  // mounted page, and a transport failure of that new game must still surface
+  // the Connection Lost banner.
+  const endedGameIdRef = useRef<string | null>(null);
+  const markGameOver = useCallback(() => {
+    endedGameIdRef.current = gameId ?? null;
+  }, [gameId]);
+  const isGameOver = useCallback(
+    () => gameId !== undefined && endedGameIdRef.current === gameId,
+    [gameId],
+  );
   // GH #1507: "request takeback" — the table-wide pending request, if any.
   const [pendingTakeback, setPendingTakeback] = useState<
     { requester: number; requesterName: string; voters: number[] } | null
@@ -491,7 +504,9 @@ export function GamePage() {
         setReconnectState({ status: "idle" });
         break;
       case "reconnectFailed":
-        setReconnectState({ status: "failed" });
+        if (!isGameOver()) {
+          setReconnectState({ status: "failed" });
+        }
         break;
       case "stateChanged":
         // Record game start time on first state update
@@ -510,6 +525,7 @@ export function GamePage() {
         // Skip if we already navigated away from a self-concede — the server sends
         // both Conceded and GameOver to all players, so this would race with navigate.
         if (hasConcededRef.current) break;
+        markGameOver();
         // Server-initiated game end (concede, disconnect timeout, etc.)
         // Map the server's authoritative winner into the store so GameOverScreen renders.
         clearPromptOverlayState();
@@ -519,11 +535,15 @@ export function GamePage() {
         });
         break;
       case "terminalDelivery":
+        markGameOver();
         clearPromptOverlayState();
         if (gameId) clearGame(gameId);
         setTerminalReason(event.delivery.display.reason);
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.delivery.display.winner } },
+          ...(event.delivery.finalView && isValidFinalView(event.delivery.finalView)
+            ? { gameState: event.delivery.finalView }
+            : {}),
         });
         break;
       case "terminalUnavailable":
@@ -612,7 +632,7 @@ export function GamePage() {
         useMultiplayerStore.getState().showToast(event.message);
         // Native engine sockets emit an error before close; the provider disposes
         // that terminal adapter, so no reconnectFailed event follows.
-        if (!isOnlineMode) {
+        if (!isOnlineMode && !isGameOver()) {
           setReconnectState({ status: "failed" });
         }
         break;
@@ -629,7 +649,7 @@ export function GamePage() {
         });
         break;
     }
-  }, [gameId, navigate, joinCode, serverParam, isOnlineMode, t, handleTakebackEvent]);
+  }, [gameId, navigate, joinCode, serverParam, isOnlineMode, t, handleTakebackEvent, markGameOver, isGameOver]);
 
   const handleP2PEvent = useCallback((event: P2PAdapterEvent) => {
     switch (event.type) {
@@ -740,12 +760,15 @@ export function GamePage() {
         );
         break;
       case "reconnectFailed":
-        setReconnectState({ status: "failed" });
+        if (!isGameOver()) {
+          setReconnectState({ status: "failed" });
+        }
         break;
       case "playerSlotsUpdated":
         useMultiplayerStore.setState({ playerSlots: event.slots });
         break;
       case "gameOver":
+        markGameOver();
         clearPromptOverlayState();
         if (gameId) clearGame(gameId);
         useGameStore.setState({
@@ -753,6 +776,7 @@ export function GamePage() {
         });
         break;
       case "terminalResult":
+        markGameOver();
         clearPromptOverlayState();
         // Display is independent of native guest convergence. The provider /
         // adapter owns deletion after durable cleanup ownership is established.
@@ -779,7 +803,9 @@ export function GamePage() {
         break;
       case "error":
         useMultiplayerStore.getState().showToast(event.message);
-        setReconnectState({ status: "failed" });
+        if (!isGameOver()) {
+          setReconnectState({ status: "failed" });
+        }
         break;
       case "hostingFailed": {
         // Pre-game setup failure — distinct from `error` (catch-all for
@@ -800,7 +826,7 @@ export function GamePage() {
         break;
       }
     }
-  }, [navigate, formatConfig, matchConfig, playerCount, gameId, joinCode, t, handleTakebackEvent]);
+  }, [navigate, formatConfig, matchConfig, playerCount, gameId, joinCode, t, handleTakebackEvent, markGameOver, isGameOver]);
 
   const handleReady = useCallback(() => {
     setWaitingForOpponent(false);
@@ -992,7 +1018,7 @@ function GamePageContent({
   // committed atomically with the waiting state.
   const engineWaitingFor = useGameStore((s) => s.waitingFor);
   const deckPools = useGameStore((s) => s.gameState?.deck_pools);
-  const stackLength = useGameStore((s) => s.gameState?.stack.length ?? 0);
+  const stackLength = useGameStore((s) => s.gameState?.stack?.length ?? 0);
   const isSandboxGame = useGameStore(
     (s) => s.gameState?.format_config?.allow_debug_actions === true,
   );
@@ -3098,10 +3124,10 @@ function GameOverScreen({
 
   const activePlayerId = useMultiplayerStore((s) => s.activePlayerId) ?? 0;
 
-  const playerLife = formatLifeReadout(lifeReadout(gameState, activePlayerId));
+  const playerLife = gameState ? formatLifeReadout(lifeReadout(gameState, activePlayerId)) : null;
   const opponentId = players?.find((p) => p.id !== activePlayerId)?.id;
   const opponentLife =
-    opponentId === undefined ? "0" : formatLifeReadout(lifeReadout(gameState, opponentId));
+    gameState && opponentId !== undefined ? formatLifeReadout(lifeReadout(gameState, opponentId)) : null;
 
   const isVictory = winner === activePlayerId;
   const isDraw = winner == null;
@@ -3237,18 +3263,20 @@ function GameOverScreen({
             transition={{ duration: 0.4 }}
           >
             {terminalReason && <p className="mb-2 text-sm text-slate-300">{terminalReason}</p>}
-            <p className="text-base text-gray-200 sm:text-lg">
-              <Trans
-                i18nKey="gamePage.gameOver.lifeSummary"
-                t={t}
-                values={{ playerLife, opponentLife }}
-                components={{
-                  player: <span className="font-bold text-white" />,
-                  sep: <span className="mx-3 text-gray-500" />,
-                  opponent: <span className="font-bold text-white" />,
-                }}
-              />
-            </p>
+            {gameState && playerLife !== null && opponentLife !== null && (
+              <p className="text-base text-gray-200 sm:text-lg">
+                <Trans
+                  i18nKey="gamePage.gameOver.lifeSummary"
+                  t={t}
+                  values={{ playerLife, opponentLife }}
+                  components={{
+                    player: <span className="font-bold text-white" />,
+                    sep: <span className="mx-3 text-gray-500" />,
+                    opponent: <span className="font-bold text-white" />,
+                  }}
+                />
+              </p>
+            )}
             {(turnCount > 0 || gameDuration !== null) && (
               <p className="mt-2 text-xs text-gray-400 sm:text-sm">
                 {turnCount > 0 && <span>{t("gamePage.gameOver.turns", { count: turnCount })}</span>}

@@ -48,6 +48,7 @@ let capturedOnP2PEvent: ((event: P2PAdapterEvent) => void) | undefined;
 // The join/spectate origin the route carried, handed down as a provider prop.
 let capturedServerUrl: string | undefined;
 let capturedPile: string | undefined;
+let capturedGameId: string | undefined;
 
 const {
   mockCanActForWaitingState,
@@ -79,7 +80,7 @@ let capturedGameMenuProps: Record<string, unknown> | undefined;
 const { mockMultiplayerState, mockUseMultiplayerStore } = vi.hoisted(() => {
   const mockMultiplayerState = {
     serverInfo: null,
-    activePlayerId: null,
+    activePlayerId: null as number | null,
     playerNames: new Map<string, string>(),
     playerAvatars: new Map<string, string>(),
     connectionStatus: "disconnected",
@@ -114,6 +115,7 @@ const { mockMultiplayerState, mockUseMultiplayerStore } = vi.hoisted(() => {
 vi.mock("../../providers/GameProvider", () => ({
   GameProvider: ({
     children,
+    gameId,
     onNoDeck,
     onWsEvent,
     onP2PEvent,
@@ -122,6 +124,7 @@ vi.mock("../../providers/GameProvider", () => ({
     pile,
   }: {
     children: React.ReactNode;
+    gameId: string;
     onNoDeck?: (reason?: string, bracketViolation?: boolean) => void;
     onWsEvent?: (event: WsAdapterEvent) => void;
     onP2PEvent?: (event: P2PAdapterEvent) => void;
@@ -129,6 +132,7 @@ vi.mock("../../providers/GameProvider", () => ({
     serverUrl?: string;
     pile?: string;
   }) => {
+    capturedGameId = gameId;
     capturedOnNoDeck = onNoDeck;
     capturedOnWsEvent = onWsEvent;
     capturedOnP2PEvent = onP2PEvent;
@@ -459,6 +463,7 @@ beforeEach(() => {
   capturedOnWsEvent = undefined;
   capturedOnP2PEvent = undefined;
   capturedServerUrl = undefined;
+  capturedGameId = undefined;
   capturedGameMenuProps = undefined;
   storeOverrides.adapter = null;
   storeOverrides.gameState = null;
@@ -516,6 +521,43 @@ describe("GamePage — cEDH bracket-violation blocking modal", () => {
 
     expect(screen.getByText("Connection lost")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Return to Menu" })).toBeInTheDocument();
+  });
+
+  it("does not show connection-lost banner when error arrives after terminal delivery", () => {
+    renderGamePage();
+
+    act(() => {
+      capturedOnWsEvent?.({
+        type: "terminalDelivery",
+        delivery: {
+          key: { game_code: "GAME01", generation: 1 },
+          terminalRevision: 1,
+          deliveryId: "del-1",
+          credential: "cred-1",
+          display: { winner: 0, reason: "Victory" },
+        },
+      });
+    });
+
+    act(() => {
+      capturedOnWsEvent?.({ type: "error", message: "WebSocket connection failed" });
+    });
+
+    expect(screen.queryByText("Connection lost")).toBeNull();
+  });
+
+  it("does not show connection-lost banner when reconnectFailed arrives after gameOver", () => {
+    renderGamePage();
+
+    act(() => {
+      capturedOnWsEvent?.({ type: "gameOver", winner: 0, reason: "victory" });
+    });
+
+    act(() => {
+      capturedOnWsEvent?.({ type: "reconnectFailed" });
+    });
+
+    expect(screen.queryByText("Connection lost")).toBeNull();
   });
 
   it("passes Two-Headed Giant to GameProvider for a direct local URL", () => {
@@ -1839,6 +1881,196 @@ describe("GamePage — rematch preserves the format the game was played with", (
     // `FORMAT_DEFAULTS` is a Proxy in this suite, so a lost hand-over surfaces
     // as `undefined` here rather than as the real 40.
     expect(capturedFormatConfig?.starting_life).toBe(25);
+  });
+
+  it("surfaces a transport failure of the rematched game after the previous game ended", async () => {
+    const user = userEvent.setup();
+    storeOverrides.waitingFor = { type: "GameOver", data: { winner: 0 } };
+    renderGamePage("/game/old-game-id?mode=ai");
+
+    act(() => {
+      capturedOnWsEvent?.({
+        type: "terminalDelivery",
+        delivery: {
+          key: { game_code: "GAME01", generation: 1 },
+          terminalRevision: 1,
+          deliveryId: "del-1",
+          credential: "cred-1",
+          display: { winner: 0, reason: "Victory" },
+        },
+      });
+    });
+    // Within the finished game a late transport error stays suppressed.
+    act(() => {
+      capturedOnWsEvent?.({ type: "error", message: "WebSocket connection failed" });
+    });
+    expect(screen.queryByText("Connection lost")).toBeNull();
+
+    await user.click(await screen.findByRole("button", { name: "Rematch" }));
+    storeOverrides.waitingFor = null;
+    await waitFor(() => expect(capturedGameId).not.toBe("old-game-id"));
+    expect(capturedGameId).toEqual(expect.any(String));
+
+    act(() => {
+      capturedOnWsEvent?.({ type: "error", message: "WebSocket connection failed" });
+    });
+
+    expect(screen.getByText("Connection lost")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Return to Menu" })).toBeInTheDocument();
+  });
+
+  it("shows actual final life totals on reopen when terminal delivery carries an authoritative final view", async () => {
+    mockSetGameState.mockImplementation((update: Record<string, unknown>) => {
+      Object.assign(storeOverrides, update);
+    });
+    storeOverrides.gameState = null;
+    storeOverrides.waitingFor = null;
+    renderGamePage("/game/reopened-authoritative?mode=ai");
+
+    act(() => {
+      capturedOnWsEvent?.({
+        type: "terminalDelivery",
+        delivery: {
+          key: { game_code: "AUTH01", generation: 1 },
+          terminalRevision: 1,
+          deliveryId: "del-auth",
+          credential: "cred-auth",
+          display: { winner: 0, reason: "Victory" },
+          finalView: gameStateFactory.withPlayers(
+            { id: 0, life: 12 },
+            { id: 1, life: 0 },
+          ).build({
+            waiting_for: { type: "GameOver", data: { winner: 0 } },
+          }),
+        },
+      });
+    });
+
+    expect(await screen.findByText("Victory")).toBeInTheDocument();
+    expect(screen.getByText("12")).toBeInTheDocument();
+    expect(screen.getByText("0")).toBeInTheDocument();
+  });
+
+  it("omits the life summary on summary-only terminal reopen when no final view is available", async () => {
+    mockSetGameState.mockImplementation((update: Record<string, unknown>) => {
+      Object.assign(storeOverrides, update);
+    });
+    storeOverrides.gameState = null;
+    storeOverrides.waitingFor = null;
+    renderGamePage("/game/reopened-summary-only?mode=ai");
+
+    act(() => {
+      capturedOnWsEvent?.({
+        type: "terminalDelivery",
+        delivery: {
+          key: { game_code: "SUMM01", generation: 1 },
+          terminalRevision: 1,
+          deliveryId: "del-summ",
+          credential: "cred-summ",
+          display: { winner: 0, reason: "Commander victory" },
+          finalView: undefined,
+        },
+      });
+    });
+
+    expect(await screen.findByText("Commander victory")).toBeInTheDocument();
+    expect(screen.queryByText(/You:/)).toBeNull();
+    expect(screen.queryByText(/Opponent:/)).toBeNull();
+  });
+
+  it("labels reopened guest life totals from authoritative seat 1 perspective", async () => {
+    mockSetGameState.mockImplementation((update: Record<string, unknown>) => {
+      Object.assign(storeOverrides, update);
+    });
+    storeOverrides.gameState = null;
+    storeOverrides.waitingFor = null;
+    mockMultiplayerState.activePlayerId = 1;
+    renderGamePage("/game/reopened-seat-1?mode=join");
+
+    act(() => {
+      capturedOnWsEvent?.({
+        type: "terminalDelivery",
+        delivery: {
+          key: { game_code: "SEAT01", generation: 1 },
+          terminalRevision: 1,
+          deliveryId: "del-seat-1",
+          credential: "cred-seat-1",
+          display: { winner: 1, reason: "Life reduction victory (CR 704.5a)" },
+          finalView: gameStateFactory.withPlayers(
+            { id: 0, life: 0 },
+            { id: 1, life: 12 },
+          ).build({
+            waiting_for: { type: "GameOver", data: { winner: 1 } },
+          }),
+        },
+      });
+    });
+
+    expect(await screen.findByText("Life reduction victory (CR 704.5a)")).toBeInTheDocument();
+    expect(screen.getByText("VICTORY")).toBeInTheDocument();
+    const summary = screen.getByText(/You:/);
+    expect(summary).toHaveTextContent("You: 12 / Opponent: 0");
+  });
+
+  it("labels reopened native solo life totals from seat 0 perspective", async () => {
+    mockSetGameState.mockImplementation((update: Record<string, unknown>) => {
+      Object.assign(storeOverrides, update);
+    });
+    storeOverrides.gameState = null;
+    storeOverrides.waitingFor = null;
+    mockMultiplayerState.activePlayerId = 0;
+    renderGamePage("/game/reopened-native-seat-0?mode=ai");
+
+    act(() => {
+      capturedOnWsEvent?.({
+        type: "terminalDelivery",
+        delivery: {
+          key: { game_code: "NATIVE01", generation: 1 },
+          terminalRevision: 1,
+          deliveryId: "del-native-0",
+          credential: "cred-native-0",
+          display: { winner: 0, reason: "Victory" },
+          finalView: gameStateFactory.withPlayers(
+            { id: 0, life: 20 },
+            { id: 1, life: 0 },
+          ).build({
+            waiting_for: { type: "GameOver", data: { winner: 0 } },
+          }),
+        },
+      });
+    });
+
+    expect(await screen.findByText("Victory")).toBeInTheDocument();
+    const summary = screen.getByText(/You:/);
+    expect(summary).toHaveTextContent("You: 20 / Opponent: 0");
+  });
+
+  it("rejects a matching identity with a malformed finalView without crashing GamePage", async () => {
+    mockSetGameState.mockImplementation((update: Record<string, unknown>) => {
+      Object.assign(storeOverrides, update);
+    });
+    storeOverrides.gameState = null;
+    storeOverrides.waitingFor = null;
+    renderGamePage("/game/reopened-malformed-view?mode=ai");
+
+    expect(() => {
+      act(() => {
+        capturedOnWsEvent?.({
+          type: "terminalDelivery",
+          delivery: {
+            key: { game_code: "MALF01", generation: 1 },
+            terminalRevision: 1,
+            deliveryId: "del-malf",
+            credential: "cred-malf",
+            display: { winner: 0, reason: "Commander victory" },
+            finalView: {} as never,
+          },
+        });
+      });
+    }).not.toThrow();
+
+    expect(await screen.findByText("Commander victory")).toBeInTheDocument();
+    expect(screen.queryByText(/You:/)).toBeNull();
   });
 });
 

@@ -12,6 +12,7 @@ import { isCustomGameFormat } from "../adapter/types";
 import { formatMetadata } from "../data/formatRegistry";
 import type { SeatState } from "../multiplayer/seatTypes";
 import type { FullSessionKey } from "./multiplayerSession";
+import { sameFullSessionKey } from "./fullSessionKey";
 import type { P2PSessionKey } from "./p2pSession";
 import { isValidP2PTerminalResult, type P2PTerminalResult } from "./p2pTerminalResult";
 import { ACTIVE_GAME_KEY, GAME_CHECKPOINTS_PREFIX, GAME_KEY_PREFIX } from "../constants/storage";
@@ -43,7 +44,14 @@ export interface NativeSoloSession {
   playerId: PlayerId;
   playerToken: string;
   fullKey: FullSessionKey;
+  /** Set once this game's terminal delivery is committed locally. The pointer
+   *  then recovers only that result (re-display and ACK retry) and never
+   *  reconnects to gameplay; it is removed when the server acknowledges. */
+  terminalOnly?: true;
 }
+
+/** The server-issued identity a native solo pointer was saved for. */
+export type NativeSoloSessionIdentity = Pick<NativeSoloSession, "gameCode" | "playerToken" | "fullKey">;
 
 export interface ActiveGameMeta {
   id: string;
@@ -425,6 +433,7 @@ export async function loadGameStrict(gameId: string): Promise<PersistedGameState
 }
 
 export async function clearGame(gameId: string): Promise<void> {
+  const pointer = activeGamePointerToken();
   try {
     await withGameWriteLock(gameId, async () => {
       await del(GAME_KEY_PREFIX + gameId, getGameStore());
@@ -435,24 +444,23 @@ export async function clearGame(gameId: string): Promise<void> {
       await del(P2P_HOST_KEY_PREFIX + gameId, getGameStore());
     });
   } catch { /* best effort */ }
-  const active = loadActiveGame();
-  if (active?.id === gameId && !(await hasTerminalCleanup(gameId).catch(() => true))) {
-    clearActiveGame();
-  }
+  if (!ownsActiveGame(gameId, pointer)) return;
+  if (await hasTerminalCleanup(gameId).catch(() => true)) return;
+  if (ownsActiveGame(gameId, pointer)) clearActiveGame();
 }
 
 /** Remove every game-scoped record before reusing a game ID for a fresh start. */
 export async function clearGameStrict(gameId: string): Promise<void> {
+  const pointer = activeGamePointerToken();
   await withGameWriteLock(gameId, async () => {
     const store = getGameStore();
     await del(GAME_CHECKPOINTS_PREFIX + gameId, store);
     await del(P2P_HOST_KEY_PREFIX + gameId, store);
     await del(GAME_KEY_PREFIX + gameId, store);
   });
-  const active = loadActiveGame();
-  if (active?.id === gameId && !(await hasTerminalCleanup(gameId))) {
-    clearActiveGame();
-  }
+  if (!ownsActiveGame(gameId, pointer)) return;
+  if (await hasTerminalCleanup(gameId)) return;
+  if (ownsActiveGame(gameId, pointer)) clearActiveGame();
 }
 
 export async function saveFullTerminalCleanupStrict(
@@ -570,8 +578,26 @@ export async function loadCheckpoints(gameId: string): Promise<PersistedGameStat
 
 // ── Active Game Meta (localStorage — tiny, synchronous) ─────────────────
 
+export const ACTIVE_GAME_CHANGED_EVENT = "phase:active-game-changed";
+
+export function notifyActiveGameChange(): void {
+  if (typeof window !== "undefined") {
+    try {
+      window.dispatchEvent(new Event("storage"));
+      window.dispatchEvent(new CustomEvent(ACTIVE_GAME_CHANGED_EVENT));
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 export function saveActiveGame(meta: ActiveGameMeta): void {
-  localStorage.setItem(ACTIVE_GAME_KEY, JSON.stringify(meta));
+  try {
+    localStorage.setItem(ACTIVE_GAME_KEY, JSON.stringify(meta));
+    notifyActiveGameChange();
+  } catch {
+    /* storage denied */
+  }
 }
 
 export function loadActiveGame(): ActiveGameMeta | null {
@@ -585,5 +611,71 @@ export function loadActiveGame(): ActiveGameMeta | null {
 }
 
 export function clearActiveGame(): void {
-  localStorage.removeItem(ACTIVE_GAME_KEY);
+  try {
+    localStorage.removeItem(ACTIVE_GAME_KEY);
+    notifyActiveGameChange();
+  } catch {
+    /* storage denied */
+  }
+}
+
+/** The stored pointer exactly as written: game cleanup's compare-and-delete token. */
+function activeGamePointerToken(): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_GAME_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether game cleanup may release the stored pointer: a compare-and-delete
+ * against the pointer the cleanup started with. Any pointer written while the
+ * cleanup awaited storage — for another game, or for this game ID with a new
+ * session — is a replacement and survives. A native pointer is owned solely by
+ * native terminal persistence and is released only by `clearNativeSoloSession`,
+ * with its session identity checked, once its session has ended.
+ */
+function ownsActiveGame(gameId: string, startedWith: string | null): boolean {
+  if (startedWith === null || activeGamePointerToken() !== startedWith) return false;
+  const active = loadActiveGame();
+  return active?.id === gameId && active.nativeSession === undefined;
+}
+
+function holdsNativeSoloSession(
+  meta: ActiveGameMeta | null,
+  gameId: string,
+  expected: NativeSoloSessionIdentity,
+): meta is ActiveGameMeta & { nativeSession: NativeSoloSession } {
+  const session = meta?.nativeSession;
+  return meta?.id === gameId
+    && session !== undefined
+    && session.gameCode === expected.gameCode
+    && session.playerToken === expected.playerToken
+    && sameFullSessionKey(session.fullKey, expected.fullKey);
+}
+
+/** Marks this game's native pointer terminal-only. A pointer for any other
+ *  game or session is a replacement and is left untouched. */
+export function markNativeSoloSessionTerminal(
+  gameId: string,
+  expected: NativeSoloSessionIdentity,
+): void {
+  try {
+    const active = loadActiveGame();
+    if (!holdsNativeSoloSession(active, gameId, expected)) return;
+    saveActiveGame({ ...active, nativeSession: { ...active.nativeSession, terminalOnly: true } });
+  } catch {
+    /* storage denied */
+  }
+}
+
+/** Removes this game's native pointer after its session has ended. A pointer
+ *  for any other game or session is a replacement and is kept. */
+export function clearNativeSoloSession(gameId: string, expected: NativeSoloSessionIdentity): void {
+  try {
+    if (holdsNativeSoloSession(loadActiveGame(), gameId, expected)) clearActiveGame();
+  } catch {
+    /* storage denied */
+  }
 }
