@@ -309,9 +309,13 @@ fn census(needle: &str) -> Vec<Hit> {
 /// * 24 ⇒ 28: the reduction's typed-absence rows — three READS in
 ///   `engine/src/game/engine.rs` and one fixture WRITER in
 ///   `engine/src/game/interaction.rs`.
-/// * 28 ⇒ the pinned value: `offer_period` in `phase-ai/src/policies/loop_shortcut.rs`'s
+/// * 28 ⇒ 29: `offer_period` in `phase-ai/src/policies/loop_shortcut.rs`'s
 ///   `#[cfg(test)]` module — a READ of an offer `apply()` minted (its period and
 ///   declaration), minting none.
+/// * 29 ⇒ the pinned value: `first_mandatory_recurrence` in
+///   `engine/src/game/period_confirm.rs`'s `#[cfg(test)]` module — a READ: it
+///   declines (CR 732.2a) each offer play minted on its way to a priority frame
+///   inside a mandatory loop, minting none.
 ///
 /// EVERY addition listed above is in a `#[cfg(test)]` scope — mints and reads
 /// both — which is the benign case this row's own failure message names: a test
@@ -376,7 +380,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
 
     assert_eq!(
         (production.len(), in_test.len()),
-        (29, 29),
+        (29, 30),
         "CR 732.2a OFFER-WRITER SURFACE CHANGED (not re-measured — this number is an \
          INVARIANCE pin over the whole 5d U-series).\n\
          The four CERTIFICATION-PATH writers are `reconcile_terminal_result` (object-growth \
@@ -396,7 +400,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
          certify without declaring or driving — §10 ruling condition (2), i.e. \
          answer-legality-at-certification becomes OWED WORK and the U-series stops. A new READ \
          site is the benign case; adjudicate, do not relax the assert.\n\
-         THE TEST HALF HAS BEEN ADJUDICATED NINE TIMES.\n\
+         THE TEST HALF HAS BEEN ADJUDICATED TEN TIMES.\n\
          measured per-file production multiset: {multiset:?}\n\
          production: {production:?}\n\
          test: {in_test:?}"

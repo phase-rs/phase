@@ -59,11 +59,22 @@ fn instruction_boundary(
     ability: &ResolvedAbility,
     population: impl FnOnce(&GameState) -> Vec<ObjectId>,
 ) -> (InstructionBoundary, Vec<ObjectId>) {
+    // CR 702.26b: a phased-out permanent can't be affected, so it is never a member.
+    let eligible = |state: &GameState| {
+        let mut members = population(state);
+        members.retain(|id| {
+            !state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.is_phased_out_permanent())
+        });
+        members
+    };
     match carried_boundary(state, ability) {
-        Some(boundary) => (boundary, population(state)),
+        Some(boundary) => (boundary, eligible(state)),
         None => {
             crate::game::layers::flush_layers(state);
-            let members = population(state);
+            let members = eligible(state);
             let capture = capture_control_change_instruction(state, members.iter().copied());
             (InstructionBoundary::Own(capture), members)
         }
@@ -479,6 +490,7 @@ pub fn resolve_give(
         give_control_object_targets(state, ability, target)
     });
 
+    let mut installed_subject = None;
     for obj_id in object_ids {
         if !state.objects.contains_key(&obj_id) {
             return Err(EffectError::ObjectNotFound(obj_id));
@@ -500,10 +512,13 @@ pub fn resolve_give(
         if installed.is_none() {
             continue;
         }
+        // CR 118.12 + CR 613.1b: an installed control effect is the instruction performed, even for a recipient who already controls the object.
+        if installed_subject.is_none() {
+            installed_subject = state.capture_event_object_snapshot(obj_id);
+        }
         mark_echo_due_for_new_controller(state, obj_id);
 
-        // CR 110.2: Record the handoff for downstream "if they do" riders and
-        // `ControllerChanged` triggers (mirrors `resolve_all`).
+        // CR 603.2: publish the handoff for `ControllerChanged` triggers (mirrors `resolve_all`).
         if let Some(member) = member {
             publish_controller_changed(state, events, member, recipient_id);
         }
@@ -512,7 +527,7 @@ pub fn resolve_give(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::GiveControl,
         source_id: ability.source_id,
-        subject: None,
+        subject: installed_subject.map(Box::new),
     });
 
     Ok(())
@@ -521,7 +536,8 @@ pub fn resolve_give(
 /// CR 611.2c: the objects whose controller this effect changes, fixed when the
 /// control-change continuous effect begins.
 ///
-/// SINGLE AUTHORITY: `resolve_give` hands control over exactly this list, and
+/// SINGLE AUTHORITY: `resolve_give` hands control over this list less any
+/// phased-out permanent (CR 702.26b), and
 /// `effects::affected_objects_from_events` publishes exactly this list as the
 /// chain tracked set. The `ControllerChanged` event is deliberately NOT the
 /// authority: `resolve_give` emits it only when the controller actually changed,
@@ -1417,6 +1433,67 @@ mod tests {
         ));
         assert_eq!(controller, PlayerId(0));
         assert!(!changed);
+    }
+
+    /// CR 800.4b + CR 701.12a: a control effect for a player who has left the game installs
+    /// nothing, and a simultaneous batch with such a member installs no member.
+    #[test]
+    fn control_effect_for_a_departed_player_installs_nothing() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        state.players[1].is_eliminated = true;
+        let install = |state: &mut GameState, recipient: PlayerId| {
+            state.add_transient_continuous_effect(
+                ObjectId(100),
+                recipient,
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: creature },
+                vec![ContinuousModification::ChangeController],
+                None,
+            )
+        };
+
+        assert_eq!(install(&mut state, PlayerId(1)), None);
+        assert!(state.transient_continuous_effects.is_empty());
+        assert!(install(&mut state, PlayerId(2)).is_some());
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        let exchange = |state: &mut GameState, second_recipient: PlayerId| {
+            state.add_simultaneous_transient_continuous_effects(
+                ObjectId(100),
+                Duration::Permanent,
+                vec![
+                    (
+                        PlayerId(2),
+                        TargetFilter::SpecificObject { id: creature },
+                        vec![ContinuousModification::ChangeController],
+                    ),
+                    (
+                        second_recipient,
+                        TargetFilter::SpecificObject { id: other },
+                        vec![ContinuousModification::ChangeController],
+                    ),
+                ],
+            )
+        };
+
+        assert!(!exchange(&mut state, PlayerId(1)));
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        assert!(exchange(&mut state, PlayerId(0)));
+        assert_eq!(state.transient_continuous_effects.len(), 3);
     }
 
     /// CR 706.2 + CR 102.1 + CR 103.1 + CR 613.3: End-to-end resolution of

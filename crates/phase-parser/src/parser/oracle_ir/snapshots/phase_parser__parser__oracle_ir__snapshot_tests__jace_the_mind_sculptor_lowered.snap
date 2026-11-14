@@ -199,6 +199,14 @@ expression: "&lowered"
         "kind": "Spell",
         "effect": {
           "type": "ChangeZoneAll",
+          "actor": {
+            "Player": {
+              "player": {
+                "type": "DeclaredPlayer",
+                "group": 2147483649
+              }
+            }
+          },
           "origin": "Hand",
           "destination": "Library",
           "target": {

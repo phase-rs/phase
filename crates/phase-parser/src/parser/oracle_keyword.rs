@@ -696,8 +696,7 @@ fn parse_ward_cost(cost_text: &str) -> Option<Keyword> {
             // CR 702.21a + CR 118.3: a ward cost is paid in full or not at all,
             // so every comma-separated leg is part of the one cost; a leg the
             // grammar declines leaves the cost unmodeled — decline rather than
-            // re-read the whole text as one leg (the mana fallback would make
-            // that a partial cost).
+            // re-read the whole text as one leg.
             return parts
                 .iter()
                 .map(|part| parse_ward_cost_single(part.trim()))
@@ -747,9 +746,7 @@ fn parse_get_player_counters_ward_cost(input: &str) -> OracleResult<'_, WardCost
 /// - `Err`: the text does not start with the discard verb, so it is not a
 ///   discard leg.
 /// - `Ok((_, None))`: discard-led but unmodeled (bare verb, inflected verb,
-///   unreadable or unsupported body). The caller declines the whole cost; it
-///   must never reach the mana fallback, which reads brace-free text as a free
-///   Ward {0}.
+///   unreadable or unsupported body). The caller declines the whole cost.
 /// - `Ok((_, Some(cost)))`: modeled.
 ///
 /// The verb is recognized independently of its body and carries no trailing
@@ -790,6 +787,13 @@ fn ward_discard_from_ability_cost(cost: Option<AbilityCost>) -> Option<WardCost>
         filter,
         selection,
     })
+}
+
+/// CR 702.21a: a ward leg is a mana cost only when written wholly in mana symbols.
+fn parse_ward_mana_leg(text: &str) -> Option<ManaCost> {
+    let upper = text.trim().to_ascii_uppercase();
+    let parsed = all_consuming(nom_primitives::parse_mana_cost).parse(&upper);
+    parsed.ok().map(|(_, cost)| cost)
 }
 
 /// Parse a single ward cost component (not compound).
@@ -833,21 +837,22 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
                     .or(rest.strip_prefix("an "))
                     .unwrap_or(rest),
             ));
-        let (filter, _) = parse_type_phrase_folding(after_count);
+        let (filter, rest) = parse_type_phrase_folding(after_count);
+        // CR 702.21a: unread qualifier text would make the cost cheaper than printed; decline.
+        if !rest.trim().is_empty() {
+            return None;
+        }
         return Some(WardCost::Sacrifice { count, filter });
     }
 
     // CR 702.21a + CR 701.67: "waterbend {N}" — ward cost paid via waterbend mechanic.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("waterbend").parse(lower) {
-        let cost = crate::types::mana::parse_mtgjson_mana_cost(rest.trim());
-        return Some(WardCost::Waterbend(cost));
+        return parse_ward_mana_leg(rest).map(WardCost::Waterbend);
     }
 
     // CR 702.21a + CR 122.1 + CR 104.3d: "get N <kind> counter(s)" — a
     // player-counter ward cost (The Serpent Society: "Ward—Get five poison
-    // counters."). MUST run before the mana-cost fallback below, which
-    // otherwise silently parses unrecognized cost text with no mana
-    // symbols/braces as a free, always-paid Ward (phase-rs/phase#6640).
+    // counters.").
     //
     // One grammatical authority over the count/article, kind, and
     // singular/plural axes — composed nom combinators, not string-suffix
@@ -858,18 +863,12 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
             Ok((_, cost)) => Some(cost),
             // CR 702.21a: recognized as counter-shaped ("get ...") but the
             // count, kind, or "counter(s)" tail didn't parse in full — fail
-            // closed rather than falling through to the mana-cost fallback
-            // below, which would otherwise silently produce a free,
-            // always-paid Ward for unsupported/malformed counter text
-            // (phase-rs/phase#6640's exact bug class, for different
-            // malformed input).
+            // closed.
             Err(_) => None,
         };
     }
 
-    // Fall back to mana cost parsing
-    let cost = crate::types::mana::parse_mtgjson_mana_cost(lower.trim());
-    Some(WardCost::Mana(cost))
+    parse_ward_mana_leg(lower).map(WardCost::Mana)
 }
 
 /// Split a string on ", " but only when the comma is outside mana braces {}.
@@ -3422,7 +3421,6 @@ mod tests {
     #[test]
     fn ward_get_poison_counters_parses_as_player_counter_cost() {
         // Issue #6640 (The Serpent Society): "Ward—Get five poison counters."
-        // must not silently fall through to the mana-cost fallback.
         let result = parse_ward_cost("Get five poison counters.");
         assert_eq!(
             result,
@@ -3460,8 +3458,7 @@ mod tests {
 
     // Issue #6640 follow-up: counter-shaped "get ... counter(s)" text that
     // fails to parse (malformed count, unknown kind) must fail closed
-    // (`None`) rather than silently falling through to the mana-cost
-    // fallback and becoming a free, always-paid Ward.
+    // (`None`).
     #[test]
     fn ward_get_counters_with_unparseable_count_fails_closed() {
         let result = parse_ward_cost("Get many poison counters.");
@@ -3572,8 +3569,7 @@ mod tests {
     }
 
     /// CR 702.21a: a bare or inflected discard verb is discard-led and fails
-    /// closed; it must never reach the mana fallback, which would read it as a
-    /// free Ward {0}.
+    /// closed.
     #[test]
     fn ward_discard_bare_and_inflected_verbs_fail_closed() {
         use crate::types::ability::CardSelectionMode::Chosen;
@@ -3608,11 +3604,95 @@ mod tests {
         assert_eq!(parse_ward_cost("{2}, Discard."), None);
     }
 
+    /// CR 702.21a + CR 118.3: a ward leg is modeled only when its grammar reads all of it.
+    #[test]
+    fn ward_unmodeled_cost_legs_fail_closed() {
+        assert_eq!(
+            parse_ward_cost("{2}"),
+            Some(Keyword::Ward(WardCost::Mana(ManaCost::generic(2))))
+        );
+        // No printed Ward has a colored mana cost; extends Captain Howler, Sea Scourge's "Ward—{2}, Pay 2 life.".
+        assert_eq!(
+            parse_ward_cost("{2}{U}."),
+            Some(Keyword::Ward(WardCost::Mana(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 2,
+            })))
+        );
+        assert_eq!(
+            parse_ward_cost("{2}, Pay 2 life."),
+            Some(Keyword::Ward(WardCost::Compound(vec![
+                WardCost::Mana(ManaCost::generic(2)),
+                WardCost::PayLife(2),
+            ])))
+        );
+        assert_eq!(
+            parse_ward_cost("Waterbend {4}."),
+            Some(Keyword::Ward(WardCost::Waterbend(ManaCost::generic(4))))
+        );
+        let Some(Keyword::Ward(WardCost::Sacrifice { count: 1, filter })) =
+            parse_ward_cost("Sacrifice a permanent with mana value 1 or greater.")
+        else {
+            panic!("Ulamog's Dreadsire's sacrifice ward must parse");
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a typed sacrifice filter, got {filter:?}");
+        };
+        assert!(
+            typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Cmc { .. })),
+            "{typed:?}"
+        );
+        assert!(matches!(
+            parse_ward_cost("Sacrifice three nonland permanents."),
+            Some(Keyword::Ward(WardCost::Sacrifice { count: 3, .. }))
+        ));
+
+        for unmodeled in [
+            "Collect evidence 4.",
+            "Blight 2.",
+            // No printed Ward has this shape; extends Captain Howler, Sea Scourge's "Ward—{2}, Pay 2 life.".
+            "{2}, Blight 2.",
+            // No printed Ward has this shape; extends The Unagi of Kyoshi Island's "Ward—Waterbend {4}.".
+            "Waterbend frob.",
+            // No printed Ward has this shape; extends Ulamog's Dreadsire's sacrifice Ward.
+            "Sacrifice a permanent with mana value 1 or greater splorf.",
+        ] {
+            assert_eq!(parse_ward_cost(unmodeled), None, "{unmodeled}");
+        }
+
+        assert_eq!(
+            parse_router_keyword_line("Ward\u{2014}{2}, Pay 2 life.").and_then(|r| r.keyword),
+            Some(Keyword::Ward(WardCost::Compound(vec![
+                WardCost::Mana(ManaCost::generic(2)),
+                WardCost::PayLife(2),
+            ])))
+        );
+        assert_eq!(
+            parse_router_keyword_line("Ward\u{2014}Waterbend {4}.").and_then(|r| r.keyword),
+            Some(Keyword::Ward(WardCost::Waterbend(ManaCost::generic(4))))
+        );
+        for unread_tail in [
+            // No printed Ward has this shape; extends Captain Howler, Sea Scourge's "Ward—{2}, Pay 2 life.".
+            "Ward\u{2014}{2} splorf.",
+            // No printed Ward has this shape; extends The Unagi of Kyoshi Island's "Ward—Waterbend {4}.".
+            "Ward\u{2014}Waterbend {4} splorf.",
+        ] {
+            assert!(
+                parse_router_keyword_line(unread_tail).is_none(),
+                "{unread_tail}"
+            );
+        }
+    }
+
     /// The strict router must not accept a discard ward line with a trailing
     /// clause the keyword grammar never read.
     #[test]
     fn ward_discard_router_rejects_trailing_clause() {
         assert!(parse_router_keyword_line("Ward\u{2014}Discard a card.").is_some());
+        // No printed Ward has a conditional tail; extends Forum Necroscribe's "Ward—Discard a card.".
         assert!(parse_router_keyword_line(
             "Ward\u{2014}Discard a card if you control an artifact."
         )

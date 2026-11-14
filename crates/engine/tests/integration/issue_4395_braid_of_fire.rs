@@ -110,6 +110,7 @@ fn fixed_mana_effect_cost_pays_into_the_unless_payers_mana_pool() {
         trigger_event: None,
         effect_description: None,
         remaining: vec![],
+        repeat: None,
     };
 
     runner

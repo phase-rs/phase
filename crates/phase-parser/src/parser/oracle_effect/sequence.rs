@@ -1,8 +1,10 @@
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_until};
-use nom::character::complete::{multispace0, multispace1};
-use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, recognize, rest, value, verify};
+use nom::character::complete::{multispace0, multispace1, one_of};
+use nom::combinator::{
+    all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
+};
 use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -2799,6 +2801,32 @@ pub(super) fn starts_clause_text(text: &str) -> bool {
     starts_clause_text_lower(&lower)
 }
 
+#[cfg(test)]
+mod r2_shuffle_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn shuffle_token_preserves_imperative_and_conjugated_routes() {
+        for text in [
+            "shuffle",
+            "shuffle.",
+            "shuffle, then draw a card",
+            "shuffle your library",
+        ] {
+            assert!(starts_clause_text(text), "{text}");
+        }
+        assert!(!starts_clause_text("shuffles it into their library"));
+        assert!(starts_clause_text_or_conjugated(
+            "shuffles it into their library"
+        ));
+        assert!(starts_clause_text_or_conjugated("draws two cards"));
+        for text in ["shuffled", "shuffleboard", "shufflesomething"] {
+            assert!(!starts_clause_text(text), "{text}");
+            assert!(!starts_clause_text_or_conjugated(text), "{text}");
+        }
+    }
+}
+
 /// Check whether `text` begins with a conjugated (third-person) verb form that,
 /// after deconjugation, would match a recognized imperative verb.
 ///
@@ -2813,7 +2841,9 @@ pub(super) fn starts_clause_text_or_conjugated(text: &str) -> bool {
         return true;
     }
     let lower = text.to_ascii_lowercase();
-    let first_word = lower.split_whitespace().next().unwrap_or("");
+    let first_raw = lower.split_whitespace().next().unwrap_or("");
+    // allow-noncombinator: punctuation trim on an already-tokenized word; not phrase dispatch.
+    let first_word = first_raw.trim_end_matches(['.', ',', ';', ':', '!', '?']);
     // Only attempt deconjugation on words ending in 's' that aren't already
     // recognized — avoids false positives on noun phrases.
     if !first_word.ends_with('s') || first_word.ends_with("ss") {
@@ -2832,7 +2862,7 @@ pub(super) fn starts_clause_text_or_conjugated(text: &str) -> bool {
         return false; // normalize_verb_token didn't change it — not a conjugated verb
     }
     // Reconstruct with the base form and check again.
-    let rest = &lower[first_word.len()..];
+    let rest = &lower[first_raw.len()..];
     let deconjugated = format!("{base}{rest}");
     starts_clause_text_lower(&deconjugated)
 }
@@ -3010,6 +3040,17 @@ fn starts_turn_face_up_down_clause(s: &str) -> bool {
 }
 
 /// Inner implementation operating on pre-lowercased input.
+fn shuffle_imperative_token(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        terminated(
+            tag("shuffle"),
+            peek(alt((value((), eof), value((), one_of(" \t\r\n.,;:"))))),
+        ),
+    )
+    .parse(input)
+}
+
 fn starts_clause_text_lower(s: &str) -> bool {
     if starts_multiword_keyword_continuation(s) {
         return false;
@@ -3100,7 +3141,7 @@ fn starts_clause_text_lower(s: &str) -> bool {
         value((), tag("sacrifice ")),
         value((), tag("scry ")),
         value((), tag("search ")),
-        value((), tag("shuffle")),
+        shuffle_imperative_token,
         value((), tag("surveil ")),
         value((), tag("tap ")),
         value((), tag("that ")),
@@ -3597,7 +3638,7 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("sacrifice ")),
         value((), tag("scry ")),
         value((), tag("search ")),
-        value((), tag("shuffle")),
+        shuffle_imperative_token,
         value((), tag("surveil ")),
         value((), tag("tap ")),
         value((), tag("untap ")),
@@ -5390,6 +5431,7 @@ pub(super) fn apply_clause_continuation(
                 Some(Zone::Library)
             };
             let put_effect = Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: put_origin,
                 destination,
@@ -5819,6 +5861,7 @@ pub(super) fn apply_clause_continuation(
                 defs.push(AbilityDefinition::new(
                     kind,
                     Effect::ChangeZoneAll {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         origin: Some(Zone::Library),
                         destination,
                         target: TargetFilter::LastRevealed,
@@ -5866,6 +5909,7 @@ pub(super) fn apply_clause_continuation(
                     defs.push(AbilityDefinition::new(
                         kind,
                         Effect::ChangeZoneAll {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
                             origin: Some(Zone::Library),
                             destination,
                             target: TargetFilter::LastRevealed,
@@ -5981,6 +6025,7 @@ pub(super) fn apply_clause_continuation(
             defs.push(AbilityDefinition::new(
                 kind,
                 Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     origin: Some(Zone::Library),
                     destination,
                     target: TargetFilter::LastRevealed,
@@ -6312,6 +6357,7 @@ pub(super) fn apply_clause_continuation(
                         defs.push(AbilityDefinition::new(
                             kind,
                             Effect::ChangeZoneAll {
+                                actor: crate::types::ability::LibraryInstructionActor::Controller,
                                 origin: Some(mill_destination),
                                 destination: kept_dest.unwrap_or(Zone::Battlefield),
                                 target: TargetFilter::TrackedSetFiltered {
@@ -6342,6 +6388,7 @@ pub(super) fn apply_clause_continuation(
                         let mut def = AbilityDefinition::new(
                             kind,
                             Effect::ChangeZone {
+                                actor: crate::types::ability::LibraryInstructionActor::Controller,
                                 library_shuffle: Default::default(),
                                 // CR 400.3: a bounded "put up to N <filter> milled
                                 // this way onto the battlefield face down" form
@@ -6526,6 +6573,7 @@ pub(super) fn apply_clause_continuation(
                 let mut chosen_def = AbilityDefinition::new(
                     kind,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         origin: None,
                         destination: chosen_destination,
@@ -6545,6 +6593,7 @@ pub(super) fn apply_clause_continuation(
                 let mut rest_def = AbilityDefinition::new(
                     kind,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         origin: None,
                         destination: rest_destination,
@@ -6677,6 +6726,7 @@ pub(super) fn apply_clause_continuation(
                 AbilityDefinition::new(
                     kind,
                     Effect::ChangeZoneAll {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         origin: None,
                         destination: Zone::Exile,
                         target,
@@ -7020,6 +7070,7 @@ pub(super) fn apply_clause_continuation(
                         let mut placement = AbilityDefinition::new(
                             kind,
                             Effect::ChangeZoneAll {
+                                actor: crate::types::ability::LibraryInstructionActor::Controller,
                                 origin: Some(Zone::Library),
                                 destination,
                                 // The cards this reveal revealed — those still in the
@@ -9113,8 +9164,12 @@ fn is_anaphoric_entry_counters_clause(sentence: &str) -> bool {
     if let (Some(cond), body) = super::conditions::strip_card_type_conditional(sentence) {
         return represented(&cond, &body);
     }
-    match super::conditions::strip_routed_suffix_conditional(sentence, &mut ParseContext::default())
-    {
+    // The entry-counter rider follows the instruction that moved the permanent.
+    match super::conditions::strip_routed_suffix_conditional(
+        sentence,
+        &mut ParseContext::default(),
+        super::conditions::GatedInstructionPosition::AfterInstruction,
+    ) {
         (Some((cond, _)), body) => represented(&cond, &body),
         (None, _) => false,
     }
@@ -12415,6 +12470,7 @@ mod tests {
     #[test]
     fn multi_zone_search_put_restatement_absorbed_after_origin_none_destination() {
         let previous = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
@@ -12441,6 +12497,7 @@ mod tests {
     #[test]
     fn search_exile_them_followup_is_absorbed_after_library_exile_destination() {
         let previous = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Exile,
@@ -12464,6 +12521,7 @@ mod tests {
     #[test]
     fn search_exile_face_down_followup_uses_compositional_reference_grammar() {
         let previous = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Exile,
