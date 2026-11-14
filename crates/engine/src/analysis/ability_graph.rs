@@ -759,8 +759,9 @@ fn effect_projection(effect: &Effect) -> Projection {
                     QuantityExpr::Fixed { value: -1 } => 1,
                     // A printed amount removes that many.
                     QuantityExpr::Fixed { value } => i64::from(*value),
-                    // A dynamic amount is unknown statically: one unit of
-                    // consumption, with its magnitude left open below.
+                    // A dynamic amount is unknown statically: it is recorded as
+                    // one unit of consumption (a consumption marks no axis
+                    // magnitude).
                     QuantityExpr::Ref { .. }
                     | QuantityExpr::DivideRounded { .. }
                     | QuantityExpr::Offset { .. }
