@@ -725,6 +725,10 @@ fn is_static_compound_pattern(lower: &str) -> bool {
     if scan_contains(lower, "as though it had flash") && !lower_starts_with(lower, "you may cast") {
         return true;
     }
+    // CR 601.3b: "you may cast the first <qualifier> spell … as though it had flash".
+    if super::oracle_static::is_nth_qualified_spell_flash_permission(lower) {
+        return true;
+    }
     if scan_contains(lower, "enters with ") && !scan_contains(lower, "counter") {
         return true;
     }
@@ -1609,6 +1613,20 @@ mod tests {
         let lower = "each other vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. otherwise, it enters with three additional +1/+1 counters on it.";
         assert!(is_static_pattern(lower));
         assert!(is_replacement_pattern(lower));
+    }
+
+    /// The Blue Spirit routes to statics; the self-flash permission does not.
+    #[test]
+    fn classifies_first_qualified_spell_flash_permission_as_static() {
+        let lower =
+            "you may cast the first creature spell you cast each turn as though it had flash.";
+        assert!(super::super::oracle_static::is_nth_qualified_spell_flash_permission(lower));
+        assert!(is_static_pattern(lower));
+        assert!(
+            !super::super::oracle_static::is_nth_qualified_spell_flash_permission(
+                "you may cast this spell as though it had flash."
+            )
+        );
     }
 
     // -------------------------------------------------------------------

@@ -18029,6 +18029,24 @@ fn clause_is_additional_land_permission(clause: &ParsedEffectClause) -> bool {
     )
 }
 
+/// CR 601.3b + CR 608.2d: a granted "as though they had flash" permission is used by a later
+/// cast, so its "may" is not a choice made at resolution.
+fn clause_is_flash_timing_permission_grant(clause: &ParsedEffectClause) -> bool {
+    matches!(
+        &clause.effect,
+        Effect::GenericEffect {
+            static_abilities,
+            ..
+        } if static_abilities.iter().any(|definition| {
+            definition.modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::GrantStaticAbility { definition }
+                    if definition.mode == StaticMode::CastWithFlash
+            ))
+        })
+    )
+}
+
 /// CR 606.3 + CR 101.1: "You may activate [recipient]'s loyalty ability N more
 /// times this turn" grants the permission to make the activations later. Its
 /// "may" is that later activation (CR 608.2d), not a choice made while the grant
@@ -35873,17 +35891,14 @@ fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedE
         }
     }
 
-    let granted_static = StaticDefinition::new(StaticMode::CastWithKeyword {
-        keyword: Keyword::Flash,
-    })
-    .affected(spell_filter);
+    let granted_static = StaticDefinition::new(StaticMode::CastWithFlash).affected(spell_filter);
 
     // CR 611.2c + CR 601.3b + CR 702.8a: This grant modifies the rules of the game
     // for its CONTROLLER (the player gains permission to cast matching spells at
     // instant speed), not the characteristics of an object. Store it as a
     // player-scoped transient continuous effect: `target: Controller` resolves at
     // effect.rs (the `Some(TargetFilter::Controller)` arm) to a
-    // `SpecificPlayer { id: controller }` binding, read by `granted_spell_keywords`
+    // `SpecificPlayer { id: controller }` binding, read by `spell_has_effective_flash`
     // (casting.rs). Binding it to the source object (`SelfRef` → `SpecificObject`)
     // was the wrong seam — `prune_affected_object_left_effects` (layers.rs) drops it
     // the instant Teferi leaves, violating CR 611.2a/c (the effect's DURATION, not
@@ -51361,6 +51376,7 @@ fn parse_effect_chain_ir_body(
         // CR 601.3: a granted graveyard cast permission ("you may cast <type>
         // spells from your graveyard this turn") lets the player cast later; its
         // "may" is that later cast, not a choice made at resolution (CR 608.2d).
+        // So is a granted "as though they had flash" timing permission.
         //
         // CR 606.3 + CR 101.1: the same holds for an extra loyalty-activation
         // grant ("you may activate ~'s loyalty ability two more times this turn"):
@@ -51384,6 +51400,7 @@ fn parse_effect_chain_ir_body(
                 }
             )
             || clause_is_additional_land_permission(&clause)
+            || clause_is_flash_timing_permission_grant(&clause)
             || clause_is_extra_loyalty_activation_grant(&clause)
             || clause_is_pay_to_end_effect_termination(normalized_text)
         {

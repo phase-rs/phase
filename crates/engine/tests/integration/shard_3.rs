@@ -196,6 +196,7 @@ mod finality_counter_death_to_exile;
 mod fire_lord_ozai_each_opponent_library_top;
 mod fire_prophecy;
 mod fireball_x_cost_surcharge_timing;
+mod first_creature_spell_flash;
 mod first_family_union_color_count;
 mod fixture_deck_size_conformance;
 mod flame_spill_excess_damage;

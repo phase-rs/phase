@@ -8181,7 +8181,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     fn optional_you_may_accepts_teferi_flash_grant_generic_effect() {
         // CR 117.3a + CR 702.8a: Teferi, Time Raveler's [+1] ("you may cast
         // sorcery spells as though they had flash") lowers to a `GenericEffect`
-        // granting `StaticMode::CastWithKeyword { Flash }`. The granted casting
+        // granting `StaticMode::CastWithFlash`. The granted casting
         // permission IS the "you may cast" opt-in, so the "you may " marker must
         // NOT be reported as a swallowed clause.
         let parsed = parse_named(
@@ -8203,7 +8203,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
                 .iter()
                 .any(def_tree_grants_cast_with_keyword),
             "expected Teferi [+1] to lower to a GenericEffect granting \
-             CastWithKeyword, parsed abilities: {:#?}",
+             CastWithFlash, parsed abilities: {:#?}",
             parsed.abilities
         );
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
@@ -8419,7 +8419,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         }
     }
 
-    /// Walk a def tree for a `GenericEffect` granting `CastWithKeyword` (directly
+    /// Walk a def tree for a `GenericEffect` granting `CastWithKeyword` or `CastWithFlash` (directly
     /// or via `GrantStaticAbility`) — the flash-grant shape Teferi's [+1] lowers
     /// to and the swallow-check exemption keys on.
     fn def_tree_grants_cast_with_keyword(def: &AbilityDefinition) -> bool {
@@ -8429,15 +8429,20 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         } = &*def.effect
         {
             static_abilities.iter().any(|s| {
-                matches!(s.mode, StaticMode::CastWithKeyword { .. })
-                    || s.modifications.iter().any(|m| {
-                        matches!(
-                            m,
-                            crate::types::ability::ContinuousModification::GrantStaticAbility {
-                                definition,
-                            } if matches!(definition.mode, StaticMode::CastWithKeyword { .. })
+                matches!(
+                    s.mode,
+                    StaticMode::CastWithKeyword { .. } | StaticMode::CastWithFlash
+                ) || s.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        crate::types::ability::ContinuousModification::GrantStaticAbility {
+                            definition,
+                        } if matches!(
+                            definition.mode,
+                            StaticMode::CastWithKeyword { .. } | StaticMode::CastWithFlash
                         )
-                    })
+                    )
+                })
             })
         } else {
             false

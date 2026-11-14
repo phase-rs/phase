@@ -32,11 +32,7 @@ expression: "&lowered"
   "triggers": [],
   "statics": [
     {
-      "mode": {
-        "CastWithKeyword": {
-          "keyword": "Flash"
-        }
-      },
+      "mode": "CastWithFlash",
       "affected": {
         "type": "Typed",
         "type_filters": [

@@ -6418,11 +6418,52 @@ fn migrated_dump_decodes_through_both_decoders_and_unmigrated_through_neither() 
     assert_eq!(
         diffs,
         vec![
+            "state.deck_pools (different elements)".to_string(),
+            "state.objects.14.abilities (different elements)".to_string(),
+            "state.objects.14.base_abilities (different elements)".to_string(),
             "state.stack (different elements)".to_string(),
             "state.zone_changes_this_turn (different elements)".to_string(),
         ],
-        "the production restore changes only the persisted zone-change provenance surfaces"
+        "the production restore changes only the persisted zone-change provenance surfaces \
+         and Emergence Zone's legacy flash grant"
     );
+    let assert_flash_grant = |abilities: &[engine::types::ability::AbilityDefinition]| {
+        let grants: Vec<_> = abilities
+            .iter()
+            .filter_map(|ability| {
+                let effect = serde_json::to_string(&ability.effect).expect("the effect serializes");
+                effect.contains("CastWith").then_some((ability, effect))
+            })
+            .collect();
+        let [(grant, effect)] = grants.as_slice() else {
+            panic!("expected one flash grant, got {grants:?}");
+        };
+        assert!(effect.contains("\"CastWithFlash\""), "{effect}");
+        assert!(!effect.contains("CastWithKeyword"), "{effect}");
+        assert!(!grant.optional);
+    };
+    let emergence_zone = &routed_restored.objects[&ObjectId(14)];
+    assert_eq!(emergence_zone.name, "Emergence Zone");
+    assert_flash_grant(&emergence_zone.abilities);
+    assert_flash_grant(&emergence_zone.base_abilities);
+    let pooled: Vec<_> = routed_restored
+        .deck_pools
+        .iter()
+        .flat_map(|pool| {
+            [
+                &pool.registered_main,
+                &pool.registered_sideboard,
+                &pool.current_main,
+                &pool.current_sideboard,
+            ]
+        })
+        .flat_map(|entries| entries.iter())
+        .filter(|entry| entry.card.name == "Emergence Zone")
+        .collect();
+    assert_eq!(pooled.len(), 2, "both deck lists carry Emergence Zone");
+    for entry in pooled {
+        assert_flash_grant(&entry.card.abilities);
+    }
 
     let stack_zone_change_keys = |state: &GameState| {
         state

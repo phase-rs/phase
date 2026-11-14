@@ -9,8 +9,9 @@ use crate::types::ability::{
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CollectEvidenceResume, GameState, PendingCast, PendingManaAbility, PlayerDeckPool,
-    SpellCastReversal, SpellCastUndo, WaitingFor,
+    CastTimingRoute, CollectEvidenceResume, GameState, PendingCast, PendingCastStage,
+    PendingManaAbility, PersistedRestoreError, PlayerDeckPool, SpellCastReversal, SpellCastUndo,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
@@ -19,7 +20,7 @@ use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use super::engine::EngineError;
 use super::game_object::UndecodedObjectRules;
-use super::{casting, casting_costs, mana_abilities};
+use super::{casting, casting_costs, mana_abilities, restrictions};
 use casting_costs::{CostSelection, SpellCostPayment};
 
 // A cast can start after its enclosing action consumed a parent choice. Share
@@ -1575,6 +1576,162 @@ pub(super) fn cancel_pending_cast(
         );
     }
     Ok(WaitingFor::Priority { player })
+}
+
+/// CR 601.2a–d + CR 601.6: gives a pending cast that an old save recorded only as cast "as
+/// though it had flash" a timing route, or reverses it while its proposal is still open.
+pub(crate) fn restore_legacy_cast_timing_routes(
+    state: &mut GameState,
+) -> Result<(), PersistedRestoreError> {
+    let ids = std::mem::take(&mut state.legacy_unrouted_pending_casts);
+    let owners = state.live_pending_cast_owners();
+    let Some(pending) = owners
+        .first()
+        .and_then(|owner| state.pending_cast_at(*owner))
+        .filter(|pending| ids.contains(&pending.object_id))
+        .cloned()
+    else {
+        return Ok(());
+    };
+    // CR 601.2a: the caster, who need not control the card being cast.
+    let player = pending.ability.controller;
+    // A legacy route is recovered from the proposal's own timing authority, and a cast is
+    // reversed only while its proposal (CR 601.2a–d) is still open and that authority finds no
+    // route; after the proposal, CR 601.6 keeps the cast.
+    let proposal_open = state.pending_cast_stage() == Some(PendingCastStage::Proposal);
+    let timing_open_without_flash = state.objects.get(&pending.object_id).is_some_and(|obj| {
+        restrictions::check_spell_timing(
+            state,
+            player,
+            obj,
+            casting::combined_spell_ability_def(obj).as_ref(),
+            false,
+            pending.casting_variant,
+        )
+        .is_ok()
+    });
+    // CR 601.2b + CR 601.3c: an energy debit made during this cast under a timing
+    // alternative-cost grant is that cost's election.
+    let paid_alternative = (matches!(
+        pending.alternative_cost_election,
+        crate::types::game_state::SpellAlternativeCostElection::Undecided
+            | crate::types::game_state::SpellAlternativeCostElection::Offered
+    ) && casting_energy_debited(state, &pending))
+    .then(|| {
+        casting_costs::spell_alternative_cost_for_timing(
+            state,
+            player,
+            pending.object_id,
+            pending.casting_variant,
+            crate::types::ability::CastTimingPermission::AsThoughHadFlash,
+        )
+    })
+    .flatten();
+    let route = restrictions::open_flash_timing_routes(
+        state,
+        player,
+        pending.object_id,
+        pending.casting_variant,
+    )
+    .first()
+    .copied()
+    .or(paid_alternative
+        .as_ref()
+        .map(|_| CastTimingRoute::AlternativeCost));
+    match route {
+        None if proposal_open && !timing_open_without_flash => {
+            // CR 601.3 + CR 733.1: nothing allows this cast to begin now, so the incomplete
+            // proposal is reversed.
+            state.waiting_for = cancel_pending_cast(state, player, &pending, &mut Vec::new())
+                .map_err(|error| {
+                    PersistedRestoreError::LegacyPendingCastNotRestorable(error.to_string())
+                })?;
+            if !state.live_pending_cast_owners().is_empty() {
+                return Err(PersistedRestoreError::LegacyPendingCastNotRestorable(
+                    "a pending cast owner survived the reversal".to_string(),
+                ));
+            }
+        }
+        route => {
+            // `Permission` adds no route-specific cost or target requirement to a kept cast.
+            let route = route.unwrap_or(CastTimingRoute::Permission);
+            for owner in owners.iter().copied() {
+                if let Some(live) = state.pending_cast_at_mut(owner) {
+                    live.cast_timing_permission = Some(route);
+                    if let Some(grant) = &paid_alternative {
+                        casting_costs::record_elected_alternative_cost(
+                            live,
+                            grant.once_per_turn_source,
+                        );
+                    }
+                }
+            }
+            if paid_alternative.is_some()
+                && pending.alternative_cost_election
+                    == crate::types::game_state::SpellAlternativeCostElection::Offered
+            {
+                // CR 118.9a + CR 601.2b: the debit already made this cast's one alternative-cost
+                // election, so the release's second offer of it is retired.
+                let accepted = state
+                    .pending_cast_at(owners[0])
+                    .cloned()
+                    .expect("the legacy cast's owner is live");
+                let mut next = state.clone();
+                let mut events = Vec::new();
+                next.waiting_for = casting_costs::finish_pending_cost_or_cast(
+                    &mut next,
+                    player,
+                    accepted.clone(),
+                    &mut events,
+                )
+                .map_err(|error| {
+                    PersistedRestoreError::LegacyPendingCastNotRestorable(error.to_string())
+                })?;
+                if events.is_empty() {
+                    *state = next;
+                } else {
+                    // CR 601.2g: a cast whose next step acts waits at its mana-payment window, so
+                    // that step runs as the player's next action.
+                    state.pending_cast = Some(Box::new(accepted));
+                    state.waiting_for = WaitingFor::ManaPayment {
+                        player,
+                        convoke_mode: None,
+                    };
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether the caster lost energy to a cost of `pending` within its reversal window.
+fn casting_energy_debited(state: &GameState, pending: &PendingCast) -> bool {
+    use crate::types::resolved_commands::{
+        ResolvedPlayerEdit, ResolvedPlayerEditCommand, ResolvedRulesCommand as C,
+        RulesExecutionNodeRef as N,
+    };
+    let Some(reversal) = state
+        .spell_cast_reversal
+        .as_ref()
+        .filter(|reversal| reversal.object_id == pending.object_id)
+    else {
+        return false;
+    };
+    state
+        .resolved_rules_journal
+        .entries_since(reversal.journal_start)
+        .iter()
+        .any(|entry| {
+            matches!(entry.node, N::Proposal(_) | N::Payment(_))
+                && matches!(
+                    entry.command,
+                    Some(C::PlayerEdit(ResolvedPlayerEditCommand {
+                        player,
+                        edit: ResolvedPlayerEdit::Energy { delta },
+                        ..
+                    })) if player == pending.ability.controller && delta < 0
+                )
+        })
 }
 
 pub(super) fn handle_target_selection_select_targets(
