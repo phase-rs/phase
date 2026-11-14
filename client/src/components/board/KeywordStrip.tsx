@@ -114,7 +114,7 @@ export const KeywordStrip = memo(function KeywordStrip({
         const ring = item.granted ? "ring-indigo-300/80" : "ring-white/25";
         const tint = item.granted ? "text-indigo-100" : "text-white";
         return (
-          <span key={i} title={title} className={`${BADGE_CLASS} ${ring} ${tint}`}>
+          <span key={i} title={title} className={`${BADGE_CLASS} ${ring} ${tint}`} data-keyword-badge="">
             {item.iconClass ? (
               <ManaFontIcon
                 iconClass={item.iconClass}
@@ -142,6 +142,7 @@ export const KeywordStrip = memo(function KeywordStrip({
         <span
           title={hidden.map((h) => h.text).join("\n")}
           className={`${BADGE_CLASS} text-white ring-white/30`}
+          data-keyword-badge=""
         >
           <span className="font-bold leading-none" style={{ fontSize: "0.46em" }}>
             +{hidden.length}

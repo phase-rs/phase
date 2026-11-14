@@ -55,7 +55,9 @@ vi.mock("../../card/CardImage.tsx", () => ({
 
 vi.mock("../KeywordStrip.tsx", () => ({
   KeywordStrip: ({ keywords }: { keywords: unknown }) => (
-    <output data-testid="keyword-strip">{JSON.stringify(keywords)}</output>
+    <span data-keyword-badge="" data-testid="keyword-strip">
+      {JSON.stringify(keywords)}
+    </span>
   ),
 }));
 
@@ -986,6 +988,54 @@ describe("PermanentCard", () => {
 
       // Moving back to the control on the captured route sends zero new touches; re-entering touches.
       under = button;
+      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
+      expect(touches()).toHaveLength(3);
+      under = host;
+      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
+      expect(touches()).toEqual([[touchAction], [touchAction], [touchAction], [touchAction]]);
+    });
+
+    it("never touches the host through its keyword badges, on either pointer route", () => {
+      // Vile Bile (1) is touchable and has keyword badges (e.g. Trample from Rancor).
+      // The badges straddle the card's top-left edge; the overhanging portion must not
+      // register as a touch on the host.
+      const gameState = makeState();
+      gameState.un_actions = { enabled_players: [0], touchable: [1] };
+      gameState.derived = {
+        ...gameState.derived,
+        battlefield_keyword_badges: { 1: ["Trample"] },
+      };
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+      usePreferencesStore.setState({ showKeywordStrip: true });
+      const { container } = renderPermanent();
+      const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+      const badge = container.querySelector('[data-keyword-badge]') as HTMLElement;
+      expect(badge).toBeInTheDocument();
+      expect(host.contains(badge)).toBe(true);
+
+      // Route 1: an uncaptured pointer crossing onto the keyword badge, then the host face.
+      fireEvent.pointerOver(badge, { pointerId: 1, pointerType: "mouse" });
+      expect(touches()).toEqual([]);
+      fireEvent.pointerOver(host, { pointerId: 1, pointerType: "mouse" });
+      expect(touches()).toEqual([[touchAction]]);
+
+      // Moving back to the badge sends zero new touches; re-entering the host face touches again.
+      fireEvent.pointerOver(badge, { pointerId: 1, pointerType: "mouse" });
+      expect(touches()).toHaveLength(1);
+      fireEvent.pointerOver(host, { pointerId: 1, pointerType: "mouse" });
+      expect(touches()).toEqual([[touchAction], [touchAction]]);
+
+      // Route 2: a captured pointer hit-tested onto the keyword badge, then the host face.
+      let under: Element = badge;
+      stubElementFromPoint(() => under);
+      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
+      expect(touches()).toHaveLength(2);
+      under = host;
+      fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
+      expect(touches()).toEqual([[touchAction], [touchAction], [touchAction]]);
+
+      // Moving back to the badge on the captured route sends zero new touches; re-entering touches.
+      under = badge;
       fireEvent.pointerMove(document, { pointerId: 5, buttons: 1, pointerType: "touch" });
       expect(touches()).toHaveLength(3);
       under = host;
