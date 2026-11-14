@@ -196,6 +196,17 @@ pub(crate) fn settle_event_outcomes(
         mut losers,
         winners,
     } = outcomes;
+    // CR 810.8a: "If either player on a team loses the game, the team loses the game": a
+    // shared-life teammate of a loser loses too, before any win is weighed against the losses.
+    for loser in losers.clone() {
+        if super::topology::has_shared_life(state, loser) {
+            for teammate in players::teammates(state, loser) {
+                if players::is_alive(state, teammate) && !losers.contains(&teammate) {
+                    losers.push(teammate);
+                }
+            }
+        }
+    }
     // CR 104.3f: a winner who also lost to an effect in the event loses instead of winning.
     let effect_losers = losers.clone();
     for winner in winners

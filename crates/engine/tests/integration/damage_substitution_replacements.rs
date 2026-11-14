@@ -1515,6 +1515,83 @@ fn a_player_who_wins_and_loses_in_one_batch_loses() {
     ));
 }
 
+/// CR 810.8a + CR 104.3f: in Two-Headed Giant a team wins and loses only as a team. P0 and P1
+/// are one team, P2 and P3 the other. Under Rakdos Charm's "Each creature deals 1 damage to its
+/// controller", P0 sends its Vampire of the Dire Moon's and Laboratory Maniac's damage to its Wall
+/// with Pariah, so the Vampire's lifelink becomes the Lich's draw and Laboratory Maniac's win;
+/// P1's Grizzly Bears meet P1's Nefarious Lich, which can't exile, so P1 loses. P1's loss is the
+/// team's, so P0 would both win and lose and loses: P0's team loses and P2's team wins.
+#[test]
+fn a_two_headed_giant_team_that_wins_and_loses_in_one_batch_loses() {
+    let mut scenario = GameScenario::new_with_format(
+        engine::types::format::FormatConfig::two_headed_giant(),
+        4,
+        42,
+    );
+    scenario.at_phase(Phase::PreCombatMain);
+    let vampire = super::unpreventable_damage_prevention_effects::creature_with_keywords(
+        &mut scenario, P0, "Vampire of the Dire Moon", (1, 1),
+        &["Deathtouch", "Lifelink"],
+        "Deathtouch (Any amount of damage this deals to a creature is enough to destroy it.)\nLifelink (Damage dealt by this creature also causes you to gain that much life.)",
+    );
+    scenario.add_creature_from_oracle(
+        P0,
+        "Laboratory Maniac",
+        2,
+        2,
+        "If you would draw a card while your library has no cards in it, you win the game instead.",
+    );
+    let wall = scenario.add_creature(P0, "Wall", 0, 20).id();
+    let pariah = scenario
+        .add_enchantment_from_oracle(P0, "Pariah", PARIAH)
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text_with_keywords(&["Enchant"], PARIAH)
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Nefarious Lich", NEFARIOUS_LICH);
+    scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+    scenario.add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH);
+    let charm = instant(&mut scenario, "Rakdos Charm", RAKDOS_CHARM);
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), pariah, wall);
+    assert!(player(&runner, P0).library.is_empty());
+    let mut events = cast_rakdos_charm_damage_mode(&mut runner, charm);
+
+    // P0's portions: Pariah over the Lich, sending them to the Wall.
+    let prompts = answer_batch_prompts(&mut runner, &mut events, |_, candidates| {
+        candidates
+            .iter()
+            .any(|c| c.source_id == pariah)
+            .then_some(pariah)
+    });
+
+    assert!(
+        events.iter().any(
+            |e| matches!(e, GameEvent::DamageDealt { source_id, .. } if *source_id == vampire)
+        ),
+        "reach: the Vampire's 1 is dealt to the Wall: {prompts:?}"
+    );
+    for loser in [P0, P1] {
+        assert!(
+            events.iter().any(
+                |e| matches!(e, GameEvent::PlayerEliminated { player_id } if *player_id == loser)
+            ),
+            "{loser:?} loses with its team"
+        );
+    }
+    for winner in [PlayerId(2), PlayerId(3)] {
+        assert!(
+            !events.iter().any(
+                |e| matches!(e, GameEvent::PlayerEliminated { player_id } if *player_id == winner)
+            ),
+            "{winner:?}'s team wins"
+        );
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(_) }
+    ));
+}
+
 /// Both players' Nefarious Lich, each with an empty graveyard, under Rakdos Charm's "Each creature
 /// deals 1 damage to its controller". `p0_cards` puts cards in P0's graveyard for P0's first
 /// exiles, so a substitution action pauses on an exile choice before P0's loss.

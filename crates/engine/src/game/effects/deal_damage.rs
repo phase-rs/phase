@@ -566,6 +566,19 @@ pub(crate) fn pre_replacement_damage_gate(
         }
     }
 
+    let proposed = ProposedEvent::Damage {
+        source_id: ctx.source_id,
+        target: target.clone(),
+        amount,
+        is_combat,
+        applied: HashSet::new(),
+    };
+    // CR 615.12: protection's prevention is a prevention effect, so damage that can't be
+    // prevented (Stomp: "Damage can't be prevented this turn.") passes it by.
+    if replacement::damage_prevention_disabled(state, &proposed) {
+        return Some(proposed);
+    }
+
     // CR 702.16b + CR 702.16e + CR 608.2h: Protection prevents damage from sources
     // with the matching quality. Emits DamagePrevented so "when damage is prevented"
     // triggers can fire.
@@ -607,13 +620,7 @@ pub(crate) fn pre_replacement_damage_gate(
         }
     }
 
-    Some(ProposedEvent::Damage {
-        source_id: ctx.source_id,
-        target: target.clone(),
-        amount,
-        is_combat,
-        applied: HashSet::new(),
-    })
+    Some(proposed)
 }
 
 pub(crate) fn apply_damage_to_target(

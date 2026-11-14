@@ -1089,43 +1089,66 @@ fn a_fights_capped_redirects_ask_the_recipients_shield_choice() {
     assert_eq!(completions, 1);
 }
 
-/// CR 614.9 + CR 702.16e: a capped redirect's part meets its new recipient's protection. Pit Fight
-/// between a red Hill Giant and Nomads en-Kor, whose shield is aimed at their controller's Silver
-/// Knight (protection from red). The Giant still deals the redirected point, so the Knight's
-/// protection prevents it ("is prevented"); the Nomads take the other 2.
+const STOMP: &str = "Damage can't be prevented this turn. Stomp deals 2 damage to any target.";
+
+/// CR 614.9 + CR 702.16e + CR 615.12: a capped redirect's part meets its new recipient's
+/// protection. Pit Fight between a red Hill Giant and Nomads en-Kor, whose shield is aimed at
+/// their controller's Silver Knight (protection from red). The Giant still deals the redirected
+/// point, so the Knight's protection prevents it ("is prevented"); the Nomads take the other 2.
+/// After Stomp ("Damage can't be prevented this turn."), protection prevents nothing (CR 615.12):
+/// the Knight is dealt its 1.
 #[test]
 fn a_capped_redirects_part_meets_its_new_recipients_protection() {
     use engine::types::keywords::{Keyword, ProtectionTarget};
     use engine::types::mana::ManaColor;
-    let mut scenario = main_phase();
-    let giant = scenario
-        .add_creature(P0, "Hill Giant", 3, 3)
-        .with_color(vec![ManaColor::Red])
-        .id();
-    let nomads = nomads_shielding(&mut scenario, "Nomads en-Kor");
-    let knight = scenario
-        .add_creature(P0, "Silver Knight", 2, 2)
-        .with_keyword(Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)))
-        .id();
-    let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
-    let mut runner = scenario.build();
-    activate_shields_at(&mut runner, &[nomads], knight);
+    for stomped in [false, true] {
+        let mut scenario = main_phase();
+        let giant = scenario
+            .add_creature(P0, "Hill Giant", 3, 3)
+            .with_color(vec![ManaColor::Red])
+            .id();
+        let nomads = nomads_shielding(&mut scenario, "Nomads en-Kor");
+        let knight = scenario
+            .add_creature(P0, "Silver Knight", 2, 2)
+            .with_keyword(Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)))
+            .id();
+        let stomp = spell(&mut scenario, "Stomp", STOMP, true);
+        let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
+        let mut runner = scenario.build();
+        activate_shields_at(&mut runner, &[nomads], knight);
+        if stomped {
+            cast(&mut runner, stomp, vec![TargetRef::Player(P1)]);
+        }
 
-    let events = cast(
-        &mut runner,
-        pit_fight,
-        vec![TargetRef::Object(giant), TargetRef::Object(nomads)],
-    );
+        let events = cast(
+            &mut runner,
+            pit_fight,
+            vec![TargetRef::Object(giant), TargetRef::Object(nomads)],
+        );
 
-    assert_settled(&runner);
-    assert!(damage_dealt_to(&events, knight).is_empty());
-    assert_eq!(runner.state().objects[&knight].damage_marked, 0);
-    assert!(events.iter().any(|e| matches!(
-        e,
-        GameEvent::DamagePrevented { source_id, target: TargetRef::Object(id), amount: 1 }
-            if *source_id == giant && *id == knight
-    )));
-    assert_eq!(damage_dealt_to(&events, nomads), vec![2]);
+        assert_settled(&runner);
+        let knight_prevented = events.iter().any(|e| {
+            matches!(
+                e,
+                GameEvent::DamagePrevented { source_id, target: TargetRef::Object(id), .. }
+                    if *source_id == giant && *id == knight
+            )
+        });
+        if stomped {
+            assert_eq!(damage_dealt_to(&events, knight), vec![1], "stomped");
+            assert_eq!(runner.state().objects[&knight].damage_marked, 1);
+            assert!(!knight_prevented, "stomped: nothing is prevented");
+        } else {
+            assert!(damage_dealt_to(&events, knight).is_empty());
+            assert_eq!(runner.state().objects[&knight].damage_marked, 0);
+            assert!(knight_prevented);
+        }
+        assert_eq!(
+            damage_dealt_to(&events, nomads),
+            vec![2],
+            "stomped {stomped}"
+        );
+    }
 }
 
 /// CR 614.9 + CR 616.1 + CR 101.4d: a capped redirect chosen by an answer splits its 1 off to a

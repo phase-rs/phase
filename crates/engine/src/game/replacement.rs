@@ -6999,6 +6999,13 @@ pub fn replacement_registry() -> &'static IndexMap<ReplacementEvent, Replacement
 
 // --- Prevention gating ---
 
+/// CR 615.12: whether this damage event can't be prevented ("Damage can't be prevented this
+/// turn."), for a prevention that runs outside the replacement pipeline (protection's, CR
+/// 702.16e, at the pre-replacement gate).
+pub(crate) fn damage_prevention_disabled(state: &GameState, proposed: &ProposedEvent) -> bool {
+    is_prevention_disabled(state, proposed)
+}
+
 /// CR 615.12: Check if damage prevention is disabled by a GameRestriction.
 /// When active, prevention-type replacement effects are skipped in the pipeline.
 fn is_prevention_disabled(state: &GameState, proposed: &ProposedEvent) -> bool {
