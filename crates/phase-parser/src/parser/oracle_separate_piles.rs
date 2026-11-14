@@ -325,6 +325,7 @@ fn parse_zone_name(input: &str) -> Option<(&str, Zone)> {
 /// `ParentTarget` because the runtime resolver applies this per-object.
 fn make_change_zone_effect(destination: Zone) -> Effect {
     Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         library_shuffle: Default::default(),
         origin: None,
         destination,
@@ -476,6 +477,7 @@ fn parse_exiled_pile_disposition(
     let chosen_effect = AbilityDefinition::new(
         kind,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: chosen_zone,

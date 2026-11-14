@@ -20326,13 +20326,15 @@ fn commit_land_play(
     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
         controller_override,
         performed_by,
+        ownership_actor,
         ..
     } = &mut proposed
     {
         *controller_override = Some(player);
         // CR 116.2a: the player performs the land play, which a format's
-        // entry-ownership axis may read as the land's new owner.
+        // entry-ownership axis reads as the land's new owner.
         *performed_by = Some(player);
+        *ownership_actor = crate::types::proposed_event::EntryOwnershipActor::Player(player);
     }
 
     // CR 306.5b + CR 310.4b + CR 614.1c: Seed the intrinsic "enters with N
@@ -30772,28 +30774,30 @@ mod resolving_carrier_settle_tests {
                     scenario
                         .add_creature(p2, name, 1, 1)
                         .with_replacement_definition(
-                            ReplacementDefinition::new(ReplacementEvent::Moved)
-                                .destination_zone(Zone::Graveyard)
-                                .execute(AbilityDefinition::new(
-                                    AbilityKind::Spell,
-                                    Effect::ChangeZone {
-                                        library_shuffle: Default::default(),
-                                        destination: Zone::Exile,
-                                        origin: None,
-                                        target: TargetFilter::SelfRef,
-                                        owner_library: false,
-                                        enter_transformed: false,
-                                        enters_under: None,
-                                        enter_tapped: EtbTapState::Unspecified,
-                                        enters_attacking: false,
-                                        up_to: false,
-                                        enter_with_counters: vec![],
-                                        conditional_enter_with_counters: vec![],
-                                        face_down_profile: None,
-                                        enters_modified_if: None,
-                                    },
-                                )),
-                        );
+                        ReplacementDefinition::new(ReplacementEvent::Moved)
+                            .destination_zone(Zone::Graveyard)
+                            .execute(AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::ChangeZone {
+                                    actor:
+                                        crate::types::ability::LibraryInstructionActor::Controller,
+                                    library_shuffle: Default::default(),
+                                    destination: Zone::Exile,
+                                    origin: None,
+                                    target: TargetFilter::SelfRef,
+                                    owner_library: false,
+                                    enter_transformed: false,
+                                    enters_under: None,
+                                    enter_tapped: EtbTapState::Unspecified,
+                                    enters_attacking: false,
+                                    up_to: false,
+                                    enter_with_counters: vec![],
+                                    conditional_enter_with_counters: vec![],
+                                    face_down_profile: None,
+                                    enters_modified_if: None,
+                                },
+                            )),
+                    );
                 }
             }
             let mut runner = scenario.build();

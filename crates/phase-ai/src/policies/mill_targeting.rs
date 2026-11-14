@@ -284,6 +284,7 @@ mod tests {
 
     fn change_zone_from_graveyard_effect() -> Effect {
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Hand,

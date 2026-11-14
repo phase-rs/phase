@@ -1612,6 +1612,7 @@ fn delayed_return_stamps_exile_origin_for_that_card_phrasing() {
 #[test]
 fn non_delayed_parent_target_change_zone_not_stamped() {
     let mut prev = Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         library_shuffle: Default::default(),
         enters_modified_if: None,
         origin: None,
@@ -1668,6 +1669,7 @@ fn delayed_return_stamps_non_exile_prior_destination() {
     let inner_return = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             enters_modified_if: None,
             origin: None,
@@ -1922,6 +1924,7 @@ fn return_target_and_same_name_from_your_graveyard_carries_zone_and_mass_tail() 
 
     let same_name = def.sub_ability.as_ref().expect("expected same-name tail");
     let Effect::ChangeZoneAll {
+        actor: _,
         origin,
         destination,
         target,

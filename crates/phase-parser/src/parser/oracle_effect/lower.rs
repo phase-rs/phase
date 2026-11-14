@@ -1031,6 +1031,7 @@ pub(super) fn attach_graveyard_redirect_rider_to_prior_cast_from_zone(
             arranger: None,
         },
         SpellStackToGraveyardReplacement::Hand => Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             destination: Zone::Hand,
             origin: None,
@@ -6790,6 +6791,13 @@ pub(super) fn rebind_decline_body_recipient(effect: &mut Effect) {
         | Effect::Mill { target, .. }
         | Effect::DealDamage { target, .. } => rebind(target),
         Effect::Token { owner, .. } => rebind(owner),
+        // CR 608.2c: "that player exiles …" in the body is the scoped opponent's
+        // own move, so its performer follows the same rebind.
+        Effect::ChangeZone { actor, .. } | Effect::ChangeZoneAll { actor, .. } => {
+            if let Some(performer) = actor.player_filter_mut() {
+                rebind(performer);
+            }
+        }
         _ => {}
     }
 }

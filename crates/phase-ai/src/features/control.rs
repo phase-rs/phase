@@ -383,6 +383,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,

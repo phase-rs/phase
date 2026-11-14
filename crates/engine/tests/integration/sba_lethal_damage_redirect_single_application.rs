@@ -44,6 +44,7 @@ fn return_to_battlefield_instead_of_dying() -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 destination: Zone::Battlefield,
                 origin: None,

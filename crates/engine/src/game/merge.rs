@@ -490,6 +490,7 @@ pub fn split_merged_permanent_on_leave(
 /// once. Any other library placement leaves each component at the zone
 /// default; the owner's CR 730.3a arrangement of an ordered placement is not
 /// modeled here.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn move_merged_permanent_on_leave(
     state: &mut GameState,
     merged_id: ObjectId,
@@ -497,6 +498,7 @@ pub(crate) fn move_merged_permanent_on_leave(
     library_placement: Option<&LibraryPosition>,
     library_shuffle: LibraryShuffleMode,
     applied: &HashSet<AppliedReplacementKey>,
+    performed_by: Option<crate::types::player::PlayerId>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
     let Some(survivor) = state.objects.get(&merged_id) else {
@@ -538,6 +540,15 @@ pub(crate) fn move_merged_permanent_on_leave(
             };
             ZoneMoveRequest::merged_component(component_id, dest, placement, library_shuffle)
                 .with_replacement_applied(applied.clone())
+                // CR 608.2c + CR 730.3: every component is moved by the
+                // player who performed the merged permanent's move, so each card
+                // that reaches exile records that player as its exiler. No
+                // ownership input is carried, as before: a component goes to its
+                // own owner's zone.
+                .actors(zone_pipeline::MoveActors {
+                    performed_by,
+                    ownership_actor: None,
+                })
         })
         .collect();
 

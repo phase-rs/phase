@@ -4968,7 +4968,14 @@ pub struct PendingChangeZoneIteration {
     /// (CR 603.6a).
     pub remaining: Vec<ChangeZoneMemberEntry>,
     pub source_id: ObjectId,
+    /// Family controller, controller-relative duration anchor, and the
+    /// `EntryOwnership::ActorOwns` input on direct, mass and search paths. The
+    /// pre-existing interactive `EffectZoneChoice` path still carries its
+    /// chooser here, not an independently captured owner.
     pub controller: PlayerId,
+    /// Instruction performer, captured independently across every pause.
+    /// Required: a missing actor cannot safely be inferred from the controller.
+    pub performed_by: PlayerId,
     pub origin: Option<crate::types::zones::Zone>,
     pub destination: crate::types::zones::Zone,
     pub enter_transformed: bool,
@@ -7065,6 +7072,13 @@ pub struct PendingBatchZoneMoveRequest {
     /// CR 608.2c + CR 406.6: the player performing this parked move.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub performed_by: Option<PlayerId>,
+    /// The parked move's ownership input under `EntryOwnership::ActorOwns`,
+    /// kept apart from `performed_by` (`zone_pipeline::MoveActors`).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::proposed_event::EntryOwnershipActor::is_unrecorded"
+    )]
+    pub ownership_actor: crate::types::proposed_event::EntryOwnershipActor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_placement: Option<LibraryPosition>,
     /// CR 701.24a + CR 730.3: the parked move is part of a terminal-shuffle
@@ -18906,6 +18920,15 @@ pub enum WaitingFor {
         /// the `face_down_profile` / `enters_modified_if` carry-through above.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration: Option<crate::types::ability::Duration>,
+        /// CR 608.2c: the player who performs the chosen `ChangeZone` move,
+        /// resolved from the effect's `actor` before the pause, so the
+        /// multi-candidate selection credits the same player the
+        /// single-candidate and random shortcuts do. It is not the chooser: the
+        /// prompt's `player` still makes the choice. `None` (other effect kinds,
+        /// and saves written before this field) keeps the chooser as the
+        /// performer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        performed_by: Option<PlayerId>,
     },
     /// Player chooses which drawn-this-turn hand cards to put on top of their
     /// library. Each unchosen required card is kept by paying life.
@@ -45369,6 +45392,7 @@ mod tests {
             remaining: Vec::new(),
             source_id: object,
             controller: PlayerId(0),
+            performed_by: PlayerId(0),
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             enter_transformed: false,
@@ -50448,6 +50472,7 @@ mod tests {
                         destination: Zone::Exile,
                         source: ObjectIncarnationRef::of(ObjectId(99), 0),
                         grant: None,
+                        actor: Default::default(),
                     },
                 ),
             },
@@ -50489,6 +50514,7 @@ mod tests {
                     destination: Zone::Exile,
                     source: ObjectIncarnationRef::of(ObjectId(99), 0),
                     grant: None,
+                    actor: Default::default(),
                 },
             ),
         }];
@@ -50540,6 +50566,7 @@ mod tests {
                         destination: Zone::Exile,
                         source: ObjectIncarnationRef::of(ObjectId(99), 0),
                         grant: None,
+                        actor: Default::default(),
                     },
                 ),
             },
@@ -59544,6 +59571,7 @@ mod tests {
             discard_frame: None,
         }));
         variants.push(Box::new(WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards: vec![ObjectId(1)],
             count: 1,
@@ -60460,6 +60488,7 @@ mod tests {
             arranger: None,
         };
         let wf = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards: vec![ObjectId(1), ObjectId(2)],
             count: 1,
@@ -60743,6 +60772,7 @@ mod tests {
             }],
             source_id: ObjectId(7),
             controller: PlayerId(0),
+            performed_by: PlayerId(0),
             origin: None,
             destination: Zone::Battlefield,
             enter_transformed: false,
@@ -60796,6 +60826,15 @@ mod tests {
             "face_down_profile must survive the pause/resume round-trip"
         );
         assert_eq!(parsed, original);
+
+        let mut missing_actor = serde_json::to_value(&original).expect("serialize carrier");
+        missing_actor
+            .as_object_mut()
+            .unwrap()
+            .remove("performed_by");
+        let error = serde_json::from_value::<PendingChangeZoneIteration>(missing_actor)
+            .expect_err("an active carrier cannot guess a missing instruction performer");
+        assert!(error.to_string().contains("performed_by"));
 
         let mut legacy = serde_json::to_value(&original).expect("serialize modern carrier");
         legacy
@@ -61251,6 +61290,7 @@ mod tests {
     #[test]
     fn effect_zone_choice_modern_shape_roundtrips_with_player_id() {
         let wf = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards: vec![],
             count: 1,
@@ -61296,6 +61336,63 @@ mod tests {
         );
         let parsed: WaitingFor = serde_json::from_str(&json).expect("roundtrip");
         assert_eq!(parsed, wf);
+    }
+
+    /// CR 608.2c: the performer carried on a `ChangeZone` selection round-trips
+    /// on the wire and is omitted when absent; a save written before the field
+    /// existed decodes it as `None`, which the resume reads as "the chooser
+    /// performs", the behaviour that save was written under.
+    #[test]
+    fn effect_zone_choice_performer_roundtrips_and_defaults_when_missing() {
+        let wf = |performed_by| WaitingFor::EffectZoneChoice {
+            performed_by,
+            player: PlayerId(0),
+            cards: vec![ObjectId(7)],
+            count: 1,
+            min_count: 1,
+            up_to: false,
+            source_id: ObjectId(10),
+            effect_kind: crate::types::ability::EffectKind::ChangeZone,
+            zone: Zone::Hand,
+            destination: Some(Zone::Exile),
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
+            enter_tapped: EtbTapState::Unspecified,
+            enter_transformed: false,
+            enters_under_player: None,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+            face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            count_param: 0,
+            library_position: None,
+            mass_library_order: None,
+            is_cost_payment: false,
+            enters_modified_if: None,
+            duration: None,
+        };
+        let carried = wf(Some(PlayerId(1)));
+        let json = serde_json::to_value(&carried).expect("serialize");
+        assert_eq!(json["data"]["performed_by"], serde_json::json!(1));
+        assert_eq!(
+            serde_json::from_value::<WaitingFor>(json.clone()).expect("roundtrip"),
+            carried
+        );
+
+        let mut legacy = json;
+        legacy["data"]
+            .as_object_mut()
+            .expect("tagged payload")
+            .remove("performed_by");
+        assert_eq!(
+            serde_json::from_value::<WaitingFor>(legacy).expect("a pre-field save decodes"),
+            wf(None)
+        );
+        assert!(serde_json::to_value(wf(None)).expect("serialize")["data"]
+            .get("performed_by")
+            .is_none());
     }
 
     #[test]

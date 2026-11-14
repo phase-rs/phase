@@ -381,6 +381,7 @@ fn connive_redirect_to_battlefield_counter_prompt_records_the_delivered_discard(
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: engine::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         destination: Zone::Battlefield,
                         origin: None,

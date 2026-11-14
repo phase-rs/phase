@@ -2987,6 +2987,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 );
             }
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin,
                 destination: Zone::Battlefield,
@@ -3021,6 +3022,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             up_to,
             multi_target: _,
         } => Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin,
             destination,
@@ -3062,6 +3064,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 _ => origin,
             };
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin,
                 destination,
                 target,
@@ -4240,6 +4243,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             owner,
             quantifier: MultiZoneExileQuantifier::All,
         } => Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Exile,
             target: TargetFilter::Typed(TypedFilter::default().controller(owner).properties(vec![
@@ -6235,6 +6239,7 @@ pub(super) fn parse_for_each_player_exile_controlled(
     // CR 400.7 + CR 608.2c: exile EVERY chosen permanent (`ChangeZoneAll` over
     // the tracked set the per-player choose accumulated).
     let exile_all = Effect::ChangeZoneAll {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: Some(Zone::Battlefield),
         destination: Zone::Exile,
         target: TargetFilter::TrackedSet {
@@ -6372,6 +6377,7 @@ pub(super) fn parse_exile_one_card_from_each_graveyard(
     // CR 608.2c: exile EVERY chosen card (`ChangeZoneAll` over the
     // tracked set the per-player choose accumulated).
     let exile_all = Effect::ChangeZoneAll {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: Some(Zone::Graveyard),
         destination: Zone::Exile,
         target: TargetFilter::TrackedSet {
@@ -9793,6 +9799,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                 );
             }
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin,
                 destination,
                 target,
@@ -9855,6 +9862,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     _ => origin.or(Some(Zone::Exile)),
                 };
                 Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     // CR 608.2c + CR 400.7: A tracked-set / impulse mass move
                     // defaults to scanning Exile (cascade, impulse-draw, and the
                     // `ExiledBySource` class all leave their members in exile).
@@ -9881,6 +9889,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                 }
             } else {
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin,
                     destination,
@@ -9962,6 +9971,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
         // player ("that player") by `inject_subject_target` when the enclosing
         // subject-predicate clause carries a player subject.
         PutImperativeAst::HandToLibraryPosition { position } => Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Hand),
             destination: Zone::Library,
             target: TargetFilter::Controller,
@@ -10830,6 +10840,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 )
             {
                 return with_shuffle_sub_ability(Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     origin: None,
                     destination: Zone::Library,
                     target,
@@ -10848,6 +10859,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
             // possessive classification. See the construction site for the
             // detection grammar and the owner-scoped terminal Shuffle.
             let effect = Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Library,
@@ -10925,6 +10937,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
             // this way" quantity reads). The single-target form keeps `ChangeZone`.
             if all {
                 let effect = Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     origin,
                     destination: Zone::Library,
                     target,
@@ -10940,6 +10953,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 with_shuffle_sub_ability(effect)
             } else {
                 let effect = Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin,
                     destination: Zone::Library,
@@ -11062,6 +11076,7 @@ pub(super) fn lower_multi_filter_search_library(
     // ends at a `SearchLibrary` (the last extra filter) so the outer intrinsic
     // continuation can append the terminal `ChangeZone` for that last search.
     let change_zone_effect = || Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         library_shuffle: Default::default(),
         origin: Some(Zone::Library),
         destination,
@@ -11320,6 +11335,7 @@ pub(super) fn owner_library_shuffle_scope() -> PlayerFilter {
 
 fn change_zone_all_to_library_effect(origin: Zone, target: TargetFilter) -> Effect {
     Effect::ChangeZoneAll {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: Some(origin),
         destination: Zone::Library,
         target,
@@ -17324,6 +17340,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             // the Grave, Reanimate — store Some(Graveyard); that is a different
             // phrase and not this card's.)
             let mut clause = parsed_clause(Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
@@ -17499,6 +17516,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 },
             };
             let primary = Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin,
                 destination,
                 target,
@@ -17515,6 +17533,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 random_order: primary_random,
             };
             let complement = Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: None,
                 destination: rest_destination,
                 target: rest_target,
@@ -19026,6 +19045,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                 // a "with counters" clause (all five non-from-hand construction
                 // sites pass `vec![]`).
                 Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     origin,
                     destination: Zone::Exile,
                     target,
@@ -19040,6 +19060,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                 }
             } else {
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin,
                     destination: Zone::Exile,
@@ -23020,6 +23041,7 @@ mod tests {
         let effect = lower_targeted_action_ast(ast);
         match effect {
             Effect::ChangeZoneAll {
+                actor: _,
                 origin,
                 destination,
                 target: TargetFilter::Or { filters },
