@@ -527,7 +527,7 @@ const GENESIS_ULTIMATUM: &str = "Look at the top five cards of your library. Put
 /// `library_acolyte_first`); the player keeps them in `select_acolyte_first`
 /// order. A pre-existing Ally with two counters is the positive control.
 /// With `clone_between`, a Clone sits between them in both orders: its optional
-/// copy replacement pauses the batch's delivery mid-batch (CR 616.1 / CR 707.9).
+/// copy replacement pauses delivery for a pre-entry choice (CR 614.12a + CR 707.5).
 fn genesis_ultimatum_dig(
     library_acolyte_first: bool,
     select_acolyte_first: bool,
