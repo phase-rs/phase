@@ -127,8 +127,10 @@ fn craig_boone_second_attack_acceptance_uses_quest_counter_amount() {
     let p1_life = life(&runner, P1);
 
     declare_two_attackers(&mut runner, craig, partner);
-    let (events, saw_unless) = resolve_craig_trigger(&mut runner, Some(target), Some(true));
+    let (events, saw_target_selection, saw_unless) =
+        resolve_craig_trigger(&mut runner, Some(target), Some(true));
 
+    assert!(saw_target_selection, "the trigger reaches target selection");
     assert!(
         saw_unless,
         "the chosen creature's controller receives the unless prompt"
@@ -170,8 +172,10 @@ fn craig_boone_second_attack_decline_uses_quest_counter_amount_on_creature() {
     let p1_life = life(&runner, P1);
 
     declare_two_attackers(&mut runner, craig, partner);
-    let (events, saw_unless) = resolve_craig_trigger(&mut runner, Some(target), Some(false));
+    let (events, saw_target_selection, saw_unless) =
+        resolve_craig_trigger(&mut runner, Some(target), Some(false));
 
+    assert!(saw_target_selection, "the trigger reaches target selection");
     assert!(
         saw_unless,
         "the chosen creature's controller receives the unless prompt"
@@ -217,8 +221,12 @@ fn craig_boone_second_attack_with_no_target_deals_no_damage() {
     let p1_life = life(&runner, P1);
 
     declare_two_attackers(&mut runner, craig, partner);
-    let (events, saw_unless) = resolve_craig_trigger(&mut runner, None, None);
+    let (events, saw_target_selection, saw_unless) = resolve_craig_trigger(&mut runner, None, None);
 
+    assert!(
+        saw_target_selection,
+        "the trigger reaches optional target selection before declining the target"
+    );
     assert!(!saw_unless, "no target means no unless cost prompt");
     assert_eq!(quest_counters(&runner, craig), 4);
     assert_eq!(life(&runner, P0), p0_life);
@@ -243,7 +251,11 @@ fn craig_after_first_attack() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let mut runner = scenario.build();
 
     declare_two_attackers(&mut runner, craig, partner);
-    let (events, saw_unless) = resolve_craig_trigger(&mut runner, None, None);
+    let (events, saw_target_selection, saw_unless) = resolve_craig_trigger(&mut runner, None, None);
+    assert!(
+        saw_target_selection,
+        "the first reflexive trigger reaches optional target selection"
+    );
     assert!(
         !saw_unless,
         "the first reflexive trigger deliberately has no target"
@@ -299,18 +311,22 @@ fn resolve_craig_trigger(
     runner: &mut GameRunner,
     target: Option<ObjectId>,
     unless_pay: Option<bool>,
-) -> (Vec<GameEvent>, bool) {
+) -> (Vec<GameEvent>, bool, bool) {
     let mut events = Vec::new();
+    let mut saw_target_selection = false;
     let mut saw_unless = false;
     for _ in 0..96 {
         match runner.state().waiting_for.clone() {
-            WaitingFor::TriggerTargetSelection { .. } => record_action(
-                runner,
-                GameAction::ChooseTarget {
-                    target: target.map(TargetRef::Object),
-                },
-                &mut events,
-            ),
+            WaitingFor::TriggerTargetSelection { .. } => {
+                saw_target_selection = true;
+                record_action(
+                    runner,
+                    GameAction::ChooseTarget {
+                        target: target.map(TargetRef::Object),
+                    },
+                    &mut events,
+                );
+            }
             WaitingFor::UnlessPayment { player, .. } => {
                 assert_eq!(
                     player, P1,
@@ -326,7 +342,7 @@ fn resolve_craig_trigger(
                 );
             }
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
-                return (events, saw_unless);
+                return (events, saw_target_selection, saw_unless);
             }
             WaitingFor::Priority { .. } => {
                 record_action(runner, GameAction::PassPriority, &mut events);
