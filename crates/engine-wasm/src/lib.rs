@@ -756,6 +756,11 @@ thread_local! {
     /// decisions without new information.
     static LLM_DECISION_MEMORY: RefCell<phase_llm::LlmDecisionMemory> =
         RefCell::new(phase_llm::LlmDecisionMemory::new());
+    /// Each LLM seat's Anthropic message thread for the installed game, for
+    /// profiles that opted in. Session-scoped exactly like
+    /// `LLM_DECISION_MEMORY` and cleared with it: a thread describes one game.
+    static LLM_THREAD_MEMORY: RefCell<phase_llm::LlmThreadMemory> =
+        RefCell::new(phase_llm::LlmThreadMemory::new());
     /// The local seat's requested hand disclosure for `get_game_state` (the
     /// "Show AI Hand" toggle). A view preference only: the engine decides
     /// whether the seat is entitled to it, and it never touches `GameState`.
@@ -1059,7 +1064,14 @@ fn clear_ai_session_cache() {
         cache.clear();
         cell.set(cache);
     });
+    clear_llm_memories();
+}
+
+/// Forget every seat's LLM decision memory and message thread. Both describe
+/// the game that was installed, so they go whenever it is replaced.
+fn clear_llm_memories() {
     LLM_DECISION_MEMORY.with(|cell| cell.borrow_mut().clear());
+    LLM_THREAD_MEMORY.with(|cell| cell.borrow_mut().clear());
 }
 
 const TAKEBACK_NOT_HOSTED: &str = "Takeback is only available while hosting a multiplayer game";
@@ -4323,7 +4335,7 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
     // state's history no longer matches the recorded action sequence.
     REPLAY_LOG.with(|cell| cell.set(None));
     invalidate_ai_proposals();
-    LLM_DECISION_MEMORY.with(|cell| cell.borrow_mut().clear());
+    clear_llm_memories();
     Ok(())
 }
 
@@ -4816,6 +4828,101 @@ mod restored_card_db_requirements_tests {
         });
 
         clear_game_state();
+    }
+
+    /// Give `player` an open message thread: one threaded decision whose reply
+    /// was accepted.
+    fn open_llm_thread(player: PlayerId, state: &GameState) {
+        let contract = AiDecisionContract {
+            semantic_owner: player,
+            authorized_actor: player,
+            state_revision: state.state_revision,
+            candidates: [
+                GameAction::PassPriority,
+                GameAction::ChoosePlayDraw { play_first: true },
+            ]
+            .into_iter()
+            .map(|action| engine::ai_support::CandidateAction {
+                action,
+                metadata: engine::ai_support::ActionMetadata::for_actor(
+                    Some(player),
+                    engine::ai_support::TacticalClass::Utility,
+                ),
+            })
+            .collect(),
+        };
+        let decision = phase_llm::build_game_decision_prompt(
+            state,
+            &contract,
+            AiDifficulty::Medium,
+            None,
+            &[],
+        )
+        .expect("a two-option decision builds");
+        let endpoint = phase_llm::LlmEndpointConfig {
+            provider: phase_llm::LlmProvider::Anthropic,
+            base_url: None,
+            api_key: "key".to_string(),
+            model: "claude-test".to_string(),
+            max_output_tokens: None,
+            temperature: None,
+            decision_context: phase_llm::DecisionContext::MessageThread,
+        };
+        let reply = r#"{"id":"msg_1","stop_reason":"end_turn","content":[],"usage":{"input_tokens":10,"output_tokens":2}}"#;
+        LLM_THREAD_MEMORY.with(|cell| {
+            let mut memory = cell.borrow_mut();
+            memory
+                .decision_request(player, &endpoint, &decision, &[])
+                .expect("a threaded request builds");
+            memory.answer_accepted(
+                player,
+                &decision.fingerprint,
+                phase_llm::LlmProvider::Anthropic,
+                reply,
+            );
+            assert!(memory.has_open_thread(player));
+        });
+    }
+
+    fn has_open_llm_thread(player: PlayerId) -> bool {
+        LLM_THREAD_MEMORY.with(|cell| cell.borrow().has_open_thread(player))
+    }
+
+    /// A restore rewinds or replaces the game a seat's thread describes, so the
+    /// thread must not survive it: its next decision starts a new one.
+    #[test]
+    fn restore_game_state_clears_llm_message_threads() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+
+        let player = PlayerId(1);
+        let mut state = GameState::new_two_player(17);
+        state.phase = Phase::PreCombatMain;
+        state.waiting_for = WaitingFor::Priority { player };
+        let json = serde_json::to_string(&state).unwrap();
+
+        open_llm_thread(player, &state);
+        restore_game_state_inner(&json).expect("restore must succeed");
+        assert!(
+            !has_open_llm_thread(player),
+            "restoring game state must clear the seat's message thread"
+        );
+
+        clear_game_state();
+    }
+
+    /// A new game (or a cleared one) never continues the last game's thread.
+    #[test]
+    fn clearing_the_game_clears_llm_message_threads() {
+        clear_game_state();
+        let player = PlayerId(1);
+        open_llm_thread(player, &GameState::new_two_player(17));
+        clear_game_state();
+        assert!(
+            !has_open_llm_thread(player),
+            "clearing the game must clear the seat's message thread"
+        );
     }
 
     /// CR 118.12 + CR 614.17a: a staged payment parked on a recovery checkpoint
@@ -6413,7 +6520,13 @@ pub fn build_llm_decision_request(
                 ))
             }
         };
-        let http = match phase_llm::build_chat_request(&endpoint, &request.prompt) {
+        // A profile that opted into message threads continues the seat's
+        // thread when it can; every other profile gets today's request.
+        let http = LLM_THREAD_MEMORY.with(|cell| {
+            cell.borrow_mut()
+                .decision_request(semantic_owner, &endpoint, &request, &history)
+        });
+        let http = match http {
             Ok(http) => http,
             // The kind rides along so the caller can tell "this provider cannot
             // be asked this decision" (a forced move put to Jev) from a
@@ -6427,10 +6540,11 @@ pub fn build_llm_decision_request(
         Ok(to_js(&serde_json::json!({
             "fingerprint": request.fingerprint,
             "optionCount": request.option_count,
-            // Prompt size, so the effect of history compaction can be measured
-            // for every provider, including those that report no token counts.
-            "promptChars": request.prompt.char_count(),
-            "request": http,
+            // Prompt size, so the effect of history compaction (and of a
+            // message thread's smaller continues) can be measured for every
+            // provider, including those that report no token counts.
+            "promptChars": http.prompt_chars,
+            "request": http.request,
         })))
     })?
 }
@@ -6474,7 +6588,15 @@ pub fn get_ai_action_proposal_from_llm_response(
             },
         ) {
             Ok(selection) => selection,
-            Err(error) => return Ok(llm_failure(&error, usage)),
+            Err(error) => {
+                // The thread is gone; the caller asks this decision again,
+                // which then goes out as a fresh request.
+                if let phase_llm::LlmError::ThreadUnavailable { code } = error {
+                    LLM_THREAD_MEMORY
+                        .with(|cell| cell.borrow_mut().thread_unavailable(semantic_owner, code));
+                }
+                return Ok(llm_failure(&error, usage));
+            }
         };
         // Same admission check `mint_ai_action_proposal` performs, inlined so the
         // reasoning can ride alongside the proposal in one payload.
@@ -6489,6 +6611,13 @@ pub fn get_ai_action_proposal_from_llm_response(
         let Some(token) = issue_ai_proposal_token(contract) else {
             return Ok(llm_failure(&phase_llm::LlmError::StaleDecision, usage));
         };
+        // Accepted: this reply is the turn the seat's next decision continues
+        // from. A refused or failed reply never gets here, which is what keeps
+        // a seat's thread at its last answered turn.
+        LLM_THREAD_MEMORY.with(|cell| {
+            cell.borrow_mut()
+                .answer_accepted(semantic_owner, fingerprint, provider, response_body)
+        });
         // The reasoning is local diagnostic data bound to the same opaque token.
         // The engine never reads it back.
         Ok(to_js(&serde_json::json!({

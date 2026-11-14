@@ -524,6 +524,10 @@
     "apiKeyMissing": "Wpisz klucz API ponownie. Klucze nie są zachowywane po przeładowaniu, a ten dostawca nie jest używany dla miejsc AI ani botów w draftcie, dopóki tego nie zrobisz.",
     "apiKeyStorage": "Przechowywany w pamięci tylko na czas tej sesji przeglądarki. Klucze API nigdy nie trafiają na dysk i są wyłączone z eksportu kopii zapasowej oraz synchronizacji w chmurze, więc po przeładowaniu trzeba go wpisać ponownie. Klucz API wymaga też endpointu https://, chyba że serwer działa na localhost.",
     "apiKeyGet": "Zdobądź klucz",
+    "messageThreads": {
+      "label": "Pamiętaj wcześniejsze decyzje",
+      "hint": "Każde miejsce AI prowadzi przez całą grę jeden wątek wiadomości Anthropic, więc model opiera się na swoim wcześniejszym rozumowaniu."
+    },
     "test": "Testuj połączenie",
     "testing": "Testowanie…",
     "testOk": "Połączono.",

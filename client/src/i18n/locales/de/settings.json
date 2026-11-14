@@ -524,6 +524,10 @@
     "apiKeyMissing": "Gib deinen API-Schlüssel erneut ein. Schlüssel bleiben nach einem Neuladen nicht erhalten, und dieser Anbieter wird erst danach für KI-Plätze oder Draft-Bots verwendet.",
     "apiKeyStorage": "Nur für diese Browsersitzung im Arbeitsspeicher. API-Schlüssel werden nie auf die Festplatte geschrieben und sind vom Backup-Export und der Cloud-Synchronisierung ausgenommen — nach einem Neuladen gibst du ihn erneut ein. Ein API-Schlüssel verlangt außerdem einen https://-Endpunkt, sofern der Server nicht auf localhost läuft.",
     "apiKeyGet": "Schlüssel holen",
+    "messageThreads": {
+      "label": "Frühere Entscheidungen merken",
+      "hint": "Jeder KI-Platz führt die ganze Partie über einen Anthropic-Nachrichtenthread, sodass das Modell auf seinen früheren Überlegungen aufbaut."
+    },
     "test": "Verbindung testen",
     "testing": "Test läuft …",
     "testOk": "Verbunden.",

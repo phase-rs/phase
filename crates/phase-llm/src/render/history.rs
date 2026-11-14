@@ -180,22 +180,64 @@ fn summarize_turn(turn: u32, entries: &[&GameLogEntry]) -> String {
 }
 
 /// The cycle in progress, entry by entry: the events a player's default
-/// timeline shows (`Essential` and `Context`). Phase boundaries are dropped —
-/// every line already names its phase.
+/// timeline shows ([`shows_in_timeline`]).
 fn push_current_cycle(out: &mut String, entries: &[&GameLogEntry], limit: usize) {
-    let shown: Vec<&&GameLogEntry> = entries
+    let shown: Vec<&GameLogEntry> = entries
         .iter()
-        .filter(|entry| {
-            matches!(
-                entry.presentation.importance,
-                LogImportance::Essential | LogImportance::Context
-            ) && entry.presentation.boundary != LogBoundary::Phase
-        })
+        .copied()
+        .filter(|entry| shows_in_timeline(entry))
         .collect();
     if shown.is_empty() {
         return;
     }
     out.push_str("\n--- THIS TURN CYCLE (oldest first) ---\n");
+    push_timeline_lines(out, &shown, limit);
+}
+
+/// Render what the log recorded after the entry numbered `since` — the whole
+/// log when `None` — as the opening section of a message-thread continue.
+///
+/// The thread already holds everything up to the seat's last answer, so this
+/// is the only history a continue carries. It reads exactly like the turn
+/// cycle in progress: the same prompt-safety filter ([`is_prompt_safe`]), the
+/// same timeline entries, the same line format, and the same difficulty-driven
+/// cap on how many of the newest entries are shown. A difficulty that sees no
+/// history (`current_cycle_entries == 0`) gets no section at all.
+pub fn push_since_last_decision(
+    out: &mut String,
+    history: &[GameLogEntry],
+    since: Option<u32>,
+    budget: HistoryBudget,
+) {
+    if budget.current_cycle_entries == 0 {
+        return;
+    }
+    let shown: Vec<&GameLogEntry> = history
+        .iter()
+        .filter(|entry| since.is_none_or(|seen| entry.seq > seen))
+        .filter(|entry| is_prompt_safe(entry) && shows_in_timeline(entry))
+        .collect();
+    out.push_str("--- SINCE YOUR LAST DECISION (oldest first) ---\n");
+    if shown.is_empty() {
+        out.push_str("Nothing new has been logged.\n");
+        return;
+    }
+    push_timeline_lines(out, &shown, budget.current_cycle_entries);
+}
+
+/// Whether an entry is one a player's default timeline shows: `Essential` and
+/// `Context` events. Phase boundaries are dropped — every line already names
+/// its phase.
+fn shows_in_timeline(entry: &GameLogEntry) -> bool {
+    matches!(
+        entry.presentation.importance,
+        LogImportance::Essential | LogImportance::Context
+    ) && entry.presentation.boundary != LogBoundary::Phase
+}
+
+/// `T5 PreCombatMain: Player 1 casts Shock`, one line for each of the newest
+/// `limit` entries, oldest first.
+fn push_timeline_lines(out: &mut String, shown: &[&GameLogEntry], limit: usize) {
     let start = shown.len().saturating_sub(limit);
     for entry in &shown[start..] {
         out.push_str(&format!(
@@ -528,5 +570,74 @@ mod tests {
             },
         ];
         assert_eq!(render_log_entry(&cast), "Player 1 casts Lightning Bolt");
+    }
+
+    // ── Since the seat's last decision ───────────────────────────────────
+
+    /// `game(turns)` with each entry numbered the way the client numbers the
+    /// log it accumulates: one `seq` per entry, in order.
+    fn numbered_game(turns: u32) -> Vec<GameLogEntry> {
+        game(turns)
+            .into_iter()
+            .zip(0u32..)
+            .map(|(mut entry, seq)| {
+                entry.seq = seq;
+                entry
+            })
+            .collect()
+    }
+
+    fn since(history: &[GameLogEntry], seen: Option<u32>, budget: HistoryBudget) -> String {
+        let mut out = String::new();
+        push_since_last_decision(&mut out, history, seen, budget);
+        out
+    }
+
+    #[test]
+    fn only_entries_after_the_last_answer_are_rendered() {
+        // Four entries per turn: entries 0-7 are turns 1-2, 8-11 turn 3.
+        let history = numbered_game(3);
+        let out = since(&history, Some(7), BUDGET);
+        assert!(out.starts_with("--- SINCE YOUR LAST DECISION"), "{out}");
+        assert!(out.contains("T3 PreCombatMain: cast on 3"), "{out}");
+        assert!(out.contains("T3 PreCombatMain: target on 3"), "{out}");
+        for earlier in ["cast on 1", "cast on 2", "target on 2"] {
+            assert!(
+                !out.contains(earlier),
+                "{earlier} was already answered: {out}"
+            );
+        }
+        // The same timeline filter as the cycle in progress.
+        assert!(!out.contains("untap on 3"), "{out}");
+    }
+
+    #[test]
+    fn a_thread_with_nothing_new_says_so() {
+        let history = numbered_game(2);
+        let newest = history.last().map(|entry| entry.seq);
+        let out = since(&history, newest, BUDGET);
+        assert!(out.contains("Nothing new has been logged."), "{out}");
+    }
+
+    #[test]
+    fn the_section_keeps_the_difficultys_window_and_its_filters() {
+        let history = numbered_game(30);
+        let budget = HistoryBudget {
+            summarized_cycles: 0,
+            current_cycle_entries: 2,
+        };
+        let out = since(&history, None, budget);
+        assert!(
+            out.contains("cast on 30") && out.contains("target on 30"),
+            "{out}"
+        );
+        assert!(!out.contains("cast on 29"), "window overran: {out}");
+
+        let mut secret = hidden(31, "Player 0 draws Black Lotus");
+        secret.seq = 500;
+        let out = since(&[secret], None, BUDGET);
+        assert!(!out.contains("Black Lotus"), "hidden entry leaked: {out}");
+        // A seat that sees no history is shown none here either.
+        assert!(since(&history, None, HistoryBudget::NONE).is_empty());
     }
 }

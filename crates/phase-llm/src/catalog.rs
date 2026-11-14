@@ -35,6 +35,11 @@ pub struct ProviderCatalogEntry {
     /// field; empty for the generic compatible endpoint, which has no vendor.
     pub api_key_url: &'static str,
     pub models: &'static [ModelOption],
+    /// Whether the settings UI offers to keep each seat's game in one message
+    /// thread ([`DecisionContext::MessageThread`](crate::provider::DecisionContext)).
+    /// Published here so the display layer shows the setting exactly where the
+    /// engine will honour it, rather than keeping its own list of protocols.
+    pub supports_message_threads: bool,
 }
 
 const OPENAI_MODELS: &[ModelOption] = &[
@@ -190,6 +195,7 @@ const CATALOG: &[ProviderCatalogEntry] = &[
         requires_api_key: true,
         api_key_url: "https://platform.openai.com/api-keys",
         models: OPENAI_MODELS,
+        supports_message_threads: false,
     },
     ProviderCatalogEntry {
         provider: LlmProvider::Anthropic,
@@ -200,6 +206,7 @@ const CATALOG: &[ProviderCatalogEntry] = &[
         requires_api_key: true,
         api_key_url: "https://console.anthropic.com/settings/keys",
         models: ANTHROPIC_MODELS,
+        supports_message_threads: true,
     },
     ProviderCatalogEntry {
         provider: LlmProvider::Gemini,
@@ -210,6 +217,7 @@ const CATALOG: &[ProviderCatalogEntry] = &[
         requires_api_key: true,
         api_key_url: "https://aistudio.google.com/apikey",
         models: GEMINI_MODELS,
+        supports_message_threads: false,
     },
     ProviderCatalogEntry {
         provider: LlmProvider::DeepSeek,
@@ -220,6 +228,7 @@ const CATALOG: &[ProviderCatalogEntry] = &[
         requires_api_key: true,
         api_key_url: "https://platform.deepseek.com/api_keys",
         models: DEEPSEEK_MODELS,
+        supports_message_threads: false,
     },
     ProviderCatalogEntry {
         provider: LlmProvider::OpenRouter,
@@ -230,6 +239,7 @@ const CATALOG: &[ProviderCatalogEntry] = &[
         requires_api_key: true,
         api_key_url: "https://openrouter.ai/keys",
         models: OPENROUTER_MODELS,
+        supports_message_threads: false,
     },
     ProviderCatalogEntry {
         provider: LlmProvider::OpenAiCompatible,
@@ -240,6 +250,7 @@ const CATALOG: &[ProviderCatalogEntry] = &[
         requires_api_key: false,
         api_key_url: "",
         models: COMPATIBLE_MODELS,
+        supports_message_threads: false,
     },
     ProviderCatalogEntry {
         provider: LlmProvider::Jev,
@@ -250,6 +261,7 @@ const CATALOG: &[ProviderCatalogEntry] = &[
         requires_api_key: true,
         api_key_url: "https://docs.typesafe.ai/api",
         models: JEV_MODELS,
+        supports_message_threads: false,
     },
 ];
 
@@ -289,6 +301,10 @@ mod tests {
             assert_eq!(entry.display_name, entry.provider.display_name());
             assert_eq!(entry.default_base_url, entry.provider.default_base_url());
             assert_eq!(entry.requires_api_key, entry.provider.requires_api_key());
+            assert_eq!(
+                entry.supports_message_threads,
+                entry.provider.wire().supports_message_threads()
+            );
         }
     }
 

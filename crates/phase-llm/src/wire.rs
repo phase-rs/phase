@@ -6,11 +6,15 @@
 //! HTTP call it describes, and hands the raw body back to
 //! [`extract_completion_text`]. No decision, credential handling, or payload
 //! shaping happens outside this module.
+//!
+//! [`build_thread_request`] is the one Anthropic-only builder: a request of a
+//! message thread, which [`crate::game_thread`] uses to keep a seat's game in
+//! one server-side conversation.
 
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
-use crate::error::{LlmError, LlmResult};
+use crate::error::{LlmError, LlmResult, ThreadErrorCode};
 use crate::prompt::{DecisionFrame, LlmPrompt};
 use crate::provider::{
     HttpHeader, HttpRequestSpec, LlmEndpointConfig, LlmProvider, RedirectPolicy, WireProtocol,
@@ -24,6 +28,11 @@ pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 1024;
 /// Anthropic's `anthropic-version` pin. Changing it changes response shapes, so
 /// it lives here beside the parser that reads them.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// The beta that enables Anthropic message threads. The API fixes the set of
+/// `anthropic-beta` values for a thread's lifetime, so every request of a
+/// thread sends exactly this one, and no request outside a thread sends it.
+const MESSAGE_THREADS_BETA: &str = "message-threads-2026-08-12";
 
 const JSON_CONTENT_TYPE: &str = "application/json";
 
@@ -94,29 +103,16 @@ pub fn build_chat_request(
             (format!("{base}/chat/completions"), body)
         }
         WireProtocol::AnthropicMessages => {
-            headers.push(HttpHeader::new("x-api-key", api_key));
+            push_anthropic_headers(&mut headers, api_key);
             // `x-api-key` is not stripped from a cross-origin redirect.
             redirect = RedirectPolicy::Error;
-            headers.push(HttpHeader::new("anthropic-version", ANTHROPIC_VERSION));
-            // Anthropic blocks browser-origin calls unless the caller opts in.
-            // Every consumer here IS a browser (web build and Tauri webview
-            // alike), so the opt-in is unconditional.
-            headers.push(HttpHeader::new(
-                "anthropic-dangerous-direct-browser-access",
-                "true",
-            ));
-            let mut body = json!({
-                "model": model,
-                // Required by the Messages API, unlike the OpenAI contract.
-                "max_tokens": max_tokens,
-                "system": prompt.system,
-                "messages": [
-                    { "role": "user", "content": prompt.user },
-                ],
-            });
-            if let Some(temperature) = config.temperature {
-                body["temperature"] = json!(temperature);
-            }
+            let body = anthropic_body(
+                model,
+                max_tokens,
+                config.temperature,
+                Some(&prompt.system),
+                &prompt.user,
+            );
             (format!("{base}/messages"), body)
         }
         WireProtocol::SystemOneRelay => {
@@ -162,6 +158,163 @@ pub fn build_chat_request(
     })
 }
 
+/// The headers every Anthropic Messages request carries after its content type.
+fn push_anthropic_headers(headers: &mut Vec<HttpHeader>, api_key: &str) {
+    headers.push(HttpHeader::new("x-api-key", api_key));
+    headers.push(HttpHeader::new("anthropic-version", ANTHROPIC_VERSION));
+    // Anthropic blocks browser-origin calls unless the caller opts in. Every
+    // consumer here IS a browser (web build and Tauri webview alike), so the
+    // opt-in is unconditional.
+    headers.push(HttpHeader::new(
+        "anthropic-dangerous-direct-browser-access",
+        "true",
+    ));
+}
+
+/// An Anthropic Messages body carrying one user message, with `system` when
+/// the request is allowed one (a message thread's continue request is not).
+fn anthropic_body(
+    model: &str,
+    max_tokens: u32,
+    temperature: Option<f32>,
+    system: Option<&str>,
+    user: &str,
+) -> Value {
+    let mut body = json!({
+        "model": model,
+        // Required by the Messages API, unlike the OpenAI contract.
+        "max_tokens": max_tokens,
+        "messages": [
+            { "role": "user", "content": user },
+        ],
+    });
+    if let Some(system) = system {
+        body["system"] = json!(system);
+    }
+    if let Some(temperature) = temperature {
+        body["temperature"] = json!(temperature);
+    }
+    body
+}
+
+/// Where one request sits in its seat's Anthropic message thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadTurn<'a> {
+    /// The thread's first request: the complete prompt. The API stores it, and
+    /// the reply, under the reply's `id`.
+    Create { prompt: &'a LlmPrompt },
+    /// A later request: one new user message after the stored reply that
+    /// `previous_message_id` names. Each id can be continued only once.
+    Continue {
+        previous_message_id: &'a str,
+        user: &'a str,
+    },
+}
+
+/// Build one request of an Anthropic message thread.
+///
+/// A create is exactly the request [`build_chat_request`] builds for the same
+/// prompt, plus three things: the `thread` field, the beta header, and a
+/// top-level `cache_control`, which caches the conversation so far on every turn
+/// (a thread caches nothing by itself).
+///
+/// A continue sends no `system`: the thread kept the create's, and the API
+/// refuses a continue that names one, even as `null`. Everything the API fixes
+/// for a thread's lifetime — `model`, the set of beta values and the top-level
+/// `cache_control` — is identical on both shapes, because both are built here
+/// from the same config. `max_tokens` and `temperature` may change per turn.
+///
+/// # Errors
+///
+/// [`LlmError::Configuration`] for an endpoint whose protocol has no message
+/// threads, and for any config [`LlmEndpointConfig::validate`] refuses.
+pub fn build_thread_request(
+    config: &LlmEndpointConfig,
+    turn: ThreadTurn<'_>,
+) -> LlmResult<HttpRequestSpec> {
+    if !config.provider.wire().supports_message_threads() {
+        return Err(LlmError::Configuration {
+            detail: format!("{} has no message threads", config.provider.display_name()),
+        });
+    }
+    config.validate()?;
+    let base = config.resolved_base_url()?;
+    let max_tokens = config
+        .max_output_tokens
+        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+
+    let mut headers = vec![HttpHeader::new("content-type", JSON_CONTENT_TYPE)];
+    push_anthropic_headers(&mut headers, config.api_key.trim());
+    headers.push(HttpHeader::new("anthropic-beta", MESSAGE_THREADS_BETA));
+
+    let (system, user, thread) = match turn {
+        ThreadTurn::Create { prompt } => (
+            Some(prompt.system.as_str()),
+            prompt.user.as_str(),
+            json!({ "type": "create" }),
+        ),
+        ThreadTurn::Continue {
+            previous_message_id,
+            user,
+        } => (
+            None,
+            user,
+            json!({ "type": "continue", "previous_message_id": previous_message_id }),
+        ),
+    };
+    let mut body = anthropic_body(
+        config.model.trim(),
+        max_tokens,
+        config.temperature,
+        system,
+        user,
+    );
+    body["thread"] = thread;
+    body["cache_control"] = json!({ "type": "ephemeral" });
+
+    Ok(HttpRequestSpec {
+        url: format!("{base}/messages"),
+        method: "POST",
+        headers,
+        body: body.to_string(),
+        // The key rides in `x-api-key`, which a followed redirect would replay.
+        redirect: RedirectPolicy::Error,
+    })
+}
+
+/// The id a later request continues a message thread from, when this reply
+/// can be continued at all.
+///
+/// `None` for a protocol without threads, for a body with no `id`, and for a
+/// refusal: the API may hold a refused turn, and a continue cannot remove it,
+/// so a refused thread is never continued.
+pub fn continuable_message_id(provider: LlmProvider, body: &str) -> Option<String> {
+    if !provider.wire().supports_message_threads() {
+        return None;
+    }
+    let value: Value = serde_json::from_str(body).ok()?;
+    if value.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
+        return None;
+    }
+    value.get("id")?.as_str().map(str::to_string)
+}
+
+/// The thread error an Anthropic error envelope carries, if it carries one.
+///
+/// Only `error.details.error_code` decides: the status alone cannot, because a
+/// 404 also answers a request for a model that does not exist.
+fn thread_error_code(provider: LlmProvider, envelope: &Value) -> Option<ThreadErrorCode> {
+    if !provider.wire().supports_message_threads() {
+        return None;
+    }
+    let code = envelope
+        .get("error")?
+        .get("details")?
+        .get("error_code")?
+        .as_str()?;
+    ThreadErrorCode::from_api_code(code)
+}
+
 /// A provider's raw answer to one request, exactly as the transport received it.
 #[derive(Debug, Clone, Copy)]
 pub struct LlmReply<'a> {
@@ -185,8 +338,16 @@ pub fn completion_from_response(
     issued: &[String],
 ) -> LlmResult<String> {
     if !(200..300).contains(&status) {
-        let detail = serde_json::from_str::<Value>(body)
-            .ok()
+        let envelope = serde_json::from_str::<Value>(body).ok();
+        // A thread error is the API declining to continue a thread, not the
+        // provider failing, and the caller recovers from it differently.
+        if let Some(code) = envelope
+            .as_ref()
+            .and_then(|envelope| thread_error_code(provider, envelope))
+        {
+            return Err(LlmError::ThreadUnavailable { code });
+        }
+        let detail = envelope
             .as_ref()
             .and_then(provider_error_detail)
             .unwrap_or_else(|| {
@@ -416,6 +577,9 @@ pub struct TokenUsage {
     pub output_tokens: Option<u64>,
     /// Input tokens served from the provider's prompt cache, when it says.
     pub cached_input_tokens: Option<u64>,
+    /// Input tokens written to the provider's prompt cache, when it says.
+    /// Anthropic reports these apart from `input_tokens` and the cache reads.
+    pub cache_creation_input_tokens: Option<u64>,
 }
 
 /// The token usage a response body reports, if it reports any.
@@ -440,6 +604,7 @@ pub fn token_usage(provider: LlmProvider, body: &str) -> Option<TokenUsage> {
                     usage.and_then(|usage| usage.get("prompt_tokens_details")),
                     "cached_tokens",
                 ),
+                cache_creation_input_tokens: None,
             }
         }
         WireProtocol::AnthropicMessages => {
@@ -448,6 +613,7 @@ pub fn token_usage(provider: LlmProvider, body: &str) -> Option<TokenUsage> {
                 input_tokens: count(usage, "input_tokens"),
                 output_tokens: count(usage, "output_tokens"),
                 cached_input_tokens: count(usage, "cache_read_input_tokens"),
+                cache_creation_input_tokens: count(usage, "cache_creation_input_tokens"),
             }
         }
         WireProtocol::GeminiGenerateContent => {
@@ -456,6 +622,7 @@ pub fn token_usage(provider: LlmProvider, body: &str) -> Option<TokenUsage> {
                 input_tokens: count(usage, "promptTokenCount"),
                 output_tokens: count(usage, "candidatesTokenCount"),
                 cached_input_tokens: count(usage, "cachedContentTokenCount"),
+                cache_creation_input_tokens: None,
             }
         }
         // The System One relay answers a typed question; its envelope carries
@@ -468,6 +635,7 @@ pub fn token_usage(provider: LlmProvider, body: &str) -> Option<TokenUsage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::DecisionContext;
 
     fn prompt() -> LlmPrompt {
         LlmPrompt {
@@ -494,6 +662,7 @@ mod tests {
             model: "model-x".to_string(),
             max_output_tokens: None,
             temperature: None,
+            decision_context: DecisionContext::SelfContained,
         }
     }
 
@@ -606,6 +775,7 @@ mod tests {
                 model: "gemini-flash-latest".to_string(),
                 max_output_tokens: None,
                 temperature: None,
+                decision_context: DecisionContext::SelfContained,
             };
             let spec = build_chat_request(&config, &prompt()).unwrap();
 
@@ -930,6 +1100,7 @@ mod tests {
                 input_tokens: Some(1200),
                 output_tokens: Some(40),
                 cached_input_tokens: Some(1024),
+                cache_creation_input_tokens: None,
             })
         );
 
@@ -944,6 +1115,29 @@ mod tests {
                 input_tokens: Some(900),
                 output_tokens: Some(30),
                 cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+            })
+        );
+
+        // A cached Anthropic turn reports its cache reads and writes apart
+        // from the uncached remainder.
+        let cached = json!({
+            "content": [],
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 30,
+                "cache_read_input_tokens": 4000,
+                "cache_creation_input_tokens": 600,
+            },
+        })
+        .to_string();
+        assert_eq!(
+            token_usage(LlmProvider::Anthropic, &cached),
+            Some(TokenUsage {
+                input_tokens: Some(12),
+                output_tokens: Some(30),
+                cached_input_tokens: Some(4000),
+                cache_creation_input_tokens: Some(600),
             })
         );
 
@@ -1131,5 +1325,277 @@ mod tests {
             completion_from_response(LlmProvider::Jev, 200, &body, &prompt().frame.options),
             Err(LlmError::MalformedResponse { .. })
         ));
+    }
+    // ── Message threads ──────────────────────────────────────────────────
+
+    /// Every protocol's request, byte for byte, as this crate built it before
+    /// message threads existed. The golden strings were captured from that
+    /// build, so any drift in a request a player did not opt into fails here.
+    const TODAYS_REQUESTS: [(LlmProvider, &str); 4] = [
+        (
+            LlmProvider::OpenAi,
+            r#"{"url":"https://api.openai.com/v1/chat/completions","method":"POST","headers":[{"name":"content-type","value":"application/json"},{"name":"authorization","value":"Bearer secret"}],"body":"{\"max_completion_tokens\":512,\"messages\":[{\"content\":\"sys\",\"role\":\"system\"},{\"content\":\"usr\",\"role\":\"user\"}],\"model\":\"model-x\",\"temperature\":0.5}","redirect":"follow"}"#,
+        ),
+        (
+            LlmProvider::Anthropic,
+            r#"{"url":"https://api.anthropic.com/v1/messages","method":"POST","headers":[{"name":"content-type","value":"application/json"},{"name":"x-api-key","value":"secret"},{"name":"anthropic-version","value":"2023-06-01"},{"name":"anthropic-dangerous-direct-browser-access","value":"true"}],"body":"{\"max_tokens\":512,\"messages\":[{\"content\":\"usr\",\"role\":\"user\"}],\"model\":\"model-x\",\"system\":\"sys\",\"temperature\":0.5}","redirect":"error"}"#,
+        ),
+        (
+            LlmProvider::Gemini,
+            r#"{"url":"https://generativelanguage.googleapis.com/v1beta/models/model-x:generateContent","method":"POST","headers":[{"name":"content-type","value":"application/json"},{"name":"x-goog-api-key","value":"secret"}],"body":"{\"contents\":[{\"parts\":[{\"text\":\"usr\"}],\"role\":\"user\"}],\"generationConfig\":{\"maxOutputTokens\":512,\"temperature\":0.5},\"systemInstruction\":{\"parts\":[{\"text\":\"sys\"}]}}","redirect":"error"}"#,
+        ),
+        (
+            LlmProvider::Jev,
+            r#"{"url":"https://phase.example/jev/systemone","method":"POST","headers":[{"name":"content-type","value":"text/plain;charset=UTF-8"}],"body":"{\"apiKey\":\"secret\",\"request\":{\"model\":\"model-x\",\"questions\":{\"pick\":{\"criteria\":{\"0: Pass Priority\":null,\"1: Lightning Bolt — cast\":null,\"2: Shock — cast\":null},\"instructions\":\"You are playing.\\n\\nChoose the best option.\",\"type\":\"choice\"}},\"state\":{\"position\":\"Turn 3. You have 2 lands.\"}}}","redirect":"error"}"#,
+        ),
+    ];
+
+    fn golden_config(provider: LlmProvider, context: DecisionContext) -> LlmEndpointConfig {
+        let mut config = config(provider);
+        config.base_url =
+            (provider == LlmProvider::Jev).then(|| "https://phase.example".to_string());
+        config.temperature = Some(0.5);
+        config.max_output_tokens = Some(512);
+        config.decision_context = context;
+        config
+    }
+
+    /// The self-contained builder is what every draft pick, every connection
+    /// probe and every unthreaded game decision sends. Turning message threads
+    /// on for a profile must not change one byte of it, for any protocol.
+    #[test]
+    fn todays_requests_are_unchanged_whatever_the_decision_context() {
+        for (provider, golden) in TODAYS_REQUESTS {
+            for context in [
+                DecisionContext::SelfContained,
+                DecisionContext::MessageThread,
+            ] {
+                let spec =
+                    build_chat_request(&golden_config(provider, context), &prompt()).unwrap();
+                assert_eq!(
+                    serde_json::to_string(&spec).unwrap(),
+                    golden,
+                    "{provider:?} under {context:?}"
+                );
+            }
+        }
+    }
+
+    fn thread_config() -> LlmEndpointConfig {
+        golden_config(LlmProvider::Anthropic, DecisionContext::MessageThread)
+    }
+
+    fn body_of(spec: &HttpRequestSpec) -> Value {
+        serde_json::from_str(&spec.body).unwrap()
+    }
+
+    #[test]
+    fn a_thread_create_is_todays_request_plus_the_thread_fields() {
+        let today = build_chat_request(&thread_config(), &prompt()).unwrap();
+        let create =
+            build_thread_request(&thread_config(), ThreadTurn::Create { prompt: &prompt() })
+                .unwrap();
+
+        let mut body = body_of(&create);
+        assert_eq!(body["thread"], json!({ "type": "create" }));
+        assert_eq!(body["cache_control"], json!({ "type": "ephemeral" }));
+        let fields = body.as_object_mut().unwrap();
+        fields.remove("thread");
+        fields.remove("cache_control");
+        assert_eq!(body, body_of(&today));
+
+        // The same headers, with the beta appended.
+        let mut expected_headers = today.headers.clone();
+        expected_headers.push(HttpHeader::new("anthropic-beta", MESSAGE_THREADS_BETA));
+        assert_eq!(create.headers, expected_headers);
+        assert_eq!(create.url, today.url);
+        assert_eq!(create.redirect, RedirectPolicy::Error);
+    }
+
+    #[test]
+    fn a_thread_continue_sends_one_user_message_and_no_system() {
+        let spec = build_thread_request(
+            &thread_config(),
+            ThreadTurn::Continue {
+                previous_message_id: "msg_01",
+                user: "what changed",
+            },
+        )
+        .unwrap();
+        let body = body_of(&spec);
+        assert_eq!(
+            body["thread"],
+            json!({ "type": "continue", "previous_message_id": "msg_01" })
+        );
+        assert_eq!(
+            body["messages"],
+            json!([{ "role": "user", "content": "what changed" }])
+        );
+        // The API refuses a continue that names `system` or `tools`, even as null.
+        let fields = body.as_object().unwrap();
+        assert!(!fields.contains_key("system"), "{body}");
+        assert!(!fields.contains_key("tools"), "{body}");
+        // Free fields still travel on every turn.
+        assert_eq!(body["max_tokens"], json!(512));
+        assert_eq!(body["temperature"], json!(0.5));
+    }
+
+    /// A field the API fixes for a thread that drifted between the create and
+    /// a continue is a `thread_fingerprint_mismatch` on the continue.
+    #[test]
+    fn every_field_a_thread_fixes_is_identical_on_create_and_continue() {
+        let create =
+            build_thread_request(&thread_config(), ThreadTurn::Create { prompt: &prompt() })
+                .unwrap();
+        let continuation = build_thread_request(
+            &thread_config(),
+            ThreadTurn::Continue {
+                previous_message_id: "msg_01",
+                user: "u",
+            },
+        )
+        .unwrap();
+        let (create_body, continue_body) = (body_of(&create), body_of(&continuation));
+        for fixed in [
+            "model",
+            "thinking",
+            "output_config",
+            "cache_control",
+            "tool_choice",
+        ] {
+            assert_eq!(create_body.get(fixed), continue_body.get(fixed), "{fixed}");
+        }
+        assert_eq!(create.headers, continuation.headers);
+        assert_eq!(create.url, continuation.url);
+    }
+
+    #[test]
+    fn only_the_anthropic_protocol_builds_a_thread_request() {
+        for provider in [
+            LlmProvider::OpenAi,
+            LlmProvider::Gemini,
+            LlmProvider::Jev,
+            LlmProvider::OpenRouter,
+        ] {
+            let config = golden_config(provider, DecisionContext::MessageThread);
+            assert!(
+                matches!(
+                    build_thread_request(&config, ThreadTurn::Create { prompt: &prompt() }),
+                    Err(LlmError::Configuration { .. })
+                ),
+                "{provider:?}"
+            );
+        }
+    }
+
+    fn anthropic_error(error_type: &str, error_code: &str) -> String {
+        json!({
+            "type": "error",
+            "error": {
+                "type": error_type,
+                "message": "thread: details",
+                "details": { "error_code": error_code },
+            },
+            "request_id": "req_1",
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn every_documented_thread_error_is_a_thread_error() {
+        for (status, error_type, code, expected) in [
+            (
+                404,
+                "not_found_error",
+                "thread_not_found",
+                ThreadErrorCode::NotFound,
+            ),
+            (
+                400,
+                "invalid_request_error",
+                "thread_already_continued",
+                ThreadErrorCode::AlreadyContinued,
+            ),
+            (
+                400,
+                "invalid_request_error",
+                "thread_continue_in_flight",
+                ThreadErrorCode::ContinueInFlight,
+            ),
+            (
+                400,
+                "invalid_request_error",
+                "thread_fingerprint_mismatch",
+                ThreadErrorCode::FingerprintMismatch,
+            ),
+            (
+                400,
+                "invalid_request_error",
+                "thread_unsupported_request",
+                ThreadErrorCode::UnsupportedRequest,
+            ),
+        ] {
+            let body = anthropic_error(error_type, code);
+            assert_eq!(
+                completion_from_response(LlmProvider::Anthropic, status, &body, &[]),
+                Err(LlmError::ThreadUnavailable { code: expected }),
+                "{code}"
+            );
+            assert_eq!(expected.api_code(), code);
+        }
+    }
+
+    /// The status decides nothing on its own: a 404 also answers an unknown
+    /// model, and retrying that as a lost thread would only fail again.
+    #[test]
+    fn a_404_without_a_thread_error_code_is_an_ordinary_provider_error() {
+        let unknown_model = json!({
+            "type": "error",
+            "error": { "type": "not_found_error", "message": "model: claude-nope" },
+        })
+        .to_string();
+        assert!(matches!(
+            completion_from_response(LlmProvider::Anthropic, 404, &unknown_model, &[]),
+            Err(LlmError::Provider { .. })
+        ));
+        let other_code = anthropic_error("invalid_request_error", "something_else");
+        assert!(matches!(
+            completion_from_response(LlmProvider::Anthropic, 400, &other_code, &[]),
+            Err(LlmError::Provider { .. })
+        ));
+        // Another protocol's envelope is never read for Anthropic's codes.
+        let shaped_alike = anthropic_error("not_found_error", "thread_not_found");
+        assert!(matches!(
+            completion_from_response(LlmProvider::OpenAi, 404, &shaped_alike, &[]),
+            Err(LlmError::Provider { .. })
+        ));
+    }
+
+    #[test]
+    fn only_an_answered_anthropic_reply_can_be_continued() {
+        let answered = json!({
+            "id": "msg_01",
+            "stop_reason": "end_turn",
+            "content": [{ "type": "text", "text": "{\"choice\": 0}" }],
+        })
+        .to_string();
+        assert_eq!(
+            continuable_message_id(LlmProvider::Anthropic, &answered),
+            Some("msg_01".to_string())
+        );
+        // The API may hold a refused turn, and a continue cannot remove it.
+        let refused =
+            json!({ "id": "msg_02", "stop_reason": "refusal", "content": [] }).to_string();
+        assert_eq!(
+            continuable_message_id(LlmProvider::Anthropic, &refused),
+            None
+        );
+        assert_eq!(
+            continuable_message_id(LlmProvider::Anthropic, r#"{"content": []}"#),
+            None
+        );
+        // Ids from a protocol without threads are never threaded.
+        let openai = json!({ "id": "chatcmpl-1", "choices": [] }).to_string();
+        assert_eq!(continuable_message_id(LlmProvider::OpenAi, &openai), None);
     }
 }

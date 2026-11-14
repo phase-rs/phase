@@ -13,7 +13,7 @@ vi.mock("../../services/llm/catalog", () => catalogMock);
 
 const CATALOG: LlmProviderCatalogEntry[] = [{
   provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null,
-  defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [],
+  defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [], supportsMessageThreads: false,
 }];
 
 /**

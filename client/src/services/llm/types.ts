@@ -32,7 +32,23 @@ export interface LlmProviderCatalogEntry {
   requiresApiKey: boolean;
   apiKeyUrl: string;
   models: LlmModelOption[];
+  /**
+   * Whether the engine can keep each seat's game in one message thread for
+   * this provider, so the settings toggle appears exactly where it is honoured.
+   */
+  supportsMessageThreads: boolean;
 }
+
+/**
+ * Matches `phase_llm::provider::DecisionContext`: how an endpoint carries one
+ * seat's game from one decision to the next.
+ *
+ * - `selfContained` (the default): every decision is a complete request.
+ * - `messageThread`: each seat's game is one Anthropic message thread, so the
+ *   model keeps its earlier turns. The engine ignores it for any provider whose
+ *   catalog row does not set `supportsMessageThreads`.
+ */
+export type LlmDecisionContext = "selfContained" | "messageThread";
 
 /** Matches `phase_llm::provider::LlmEndpointConfig`. */
 export interface LlmEndpointConfig {
@@ -42,6 +58,7 @@ export interface LlmEndpointConfig {
   model: string;
   maxOutputTokens: number | null;
   temperature: number | null;
+  decisionContext: LlmDecisionContext;
 }
 
 /** Matches `phase_llm::provider::HttpRequestSpec` — executed verbatim. */
@@ -87,6 +104,8 @@ export interface LlmTokenUsage {
   inputTokens?: number | null;
   outputTokens?: number | null;
   cachedInputTokens?: number | null;
+  /** Input tokens written to the provider's prompt cache (Anthropic). */
+  cacheCreationInputTokens?: number | null;
 }
 
 /** What the engine did with one seat's draft response. */
@@ -122,6 +141,7 @@ export function endpointOf(profile: LlmProfile): LlmEndpointConfig {
     model: profile.model,
     maxOutputTokens: profile.maxOutputTokens,
     temperature: profile.temperature,
+    decisionContext: profile.decisionContext,
   };
 }
 

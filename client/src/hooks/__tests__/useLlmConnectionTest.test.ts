@@ -24,6 +24,7 @@ function profile(overrides: Partial<LlmProfile> = {}): LlmProfile {
     model: "gpt-5",
     maxOutputTokens: null,
     temperature: null,
+    decisionContext: "selfContained",
     enabled: true,
     ...overrides,
   };

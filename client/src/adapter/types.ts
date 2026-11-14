@@ -5798,6 +5798,13 @@ export interface AiLlmProposalResult {
   reasoning?: string | null;
   error?: string;
   /**
+   * The engine's typed refusal (`phase_llm::LlmError`), when it carries one.
+   * `threadUnavailable` means the provider would not continue the seat's
+   * message thread: the engine has dropped it, and the same decision may be
+   * asked once more as a fresh request.
+   */
+  errorKind?: { kind: string };
+  /**
    * Provider-reported token usage (`phase_llm::wire::TokenUsage`), present on
    * success and refusal alike. Diagnostic only.
    */
@@ -5805,6 +5812,7 @@ export interface AiLlmProposalResult {
     inputTokens?: number | null;
     outputTokens?: number | null;
     cachedInputTokens?: number | null;
+    cacheCreationInputTokens?: number | null;
   } | null;
 }
 

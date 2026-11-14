@@ -3,7 +3,12 @@ import { persist } from "zustand/middleware";
 
 import { LLM_ENDPOINTS_KEY } from "../constants/storage";
 import { defaultJevRelayOrigin } from "../services/llm/relayOrigin";
-import type { LlmProfile, LlmProviderCatalogEntry, LlmProviderId } from "../services/llm/types";
+import type {
+  LlmDecisionContext,
+  LlmProfile,
+  LlmProviderCatalogEntry,
+  LlmProviderId,
+} from "../services/llm/types";
 import { useMultiplayerStore } from "./multiplayerStore";
 
 /**
@@ -26,6 +31,7 @@ const STORED_PROFILE_KEYS = [
   "model",
   "maxOutputTokens",
   "temperature",
+  "decisionContext",
   "enabled",
 ] as const satisfies readonly (keyof StoredProfile)[];
 
@@ -133,6 +139,15 @@ function normalizeFiniteNumber(value: unknown): number | null {
 }
 
 /**
+ * Only an explicit `"messageThread"` opts a profile into message threads.
+ * Anything else, including the absent field of a profile saved before the
+ * setting existed, keeps the self-contained requests it always sent.
+ */
+function normalizeDecisionContext(value: unknown): LlmDecisionContext {
+  return value === "messageThread" ? "messageThread" : "selfContained";
+}
+
+/**
  * Profiles recovered from a persisted payload, NORMALIZED to complete records.
  *
  * Storage is not a trusted input: the record can be hand-edited, truncated by a
@@ -171,6 +186,7 @@ function readPersistedProfiles(value: unknown): LlmProfile[] {
         model: normalizeString(record.model),
         maxOutputTokens: normalizePositiveNumber(record.maxOutputTokens),
         temperature: normalizeFiniteNumber(record.temperature),
+        decisionContext: normalizeDecisionContext(record.decisionContext),
         // A profile whose model did not survive cannot be usable, so it must
         // not present itself as enabled.
         enabled: record.enabled === true && normalizeString(record.model).trim() !== "",
@@ -305,6 +321,8 @@ export const useLlmStore = create<LlmState>()(
           model: "",
           maxOutputTokens: null,
           temperature: null,
+          // Message threads are opt-in, per profile.
+          decisionContext: "selfContained",
           // New profiles start ENABLED: the player has just asked for a provider,
           // so making them find the switch afterwards is a step that only
           // produces a configured-but-inert profile. A half-filled one is still
