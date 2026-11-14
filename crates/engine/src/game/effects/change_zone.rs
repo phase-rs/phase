@@ -14051,6 +14051,10 @@ mod tests {
         ability.duration = Some(Duration::UntilOpponentBecomesMonarch);
         resolve_all(&mut state, &ability, &mut Vec::new()).expect("typed mass exile resolves");
         if paused {
+            // CR 701.8a + CR 616.1 + CR 101.4c (this PR's staged population): the
+            // sweep consulted both P1-owned cards, so P1 holds both decisions and
+            // first chooses which to make.
+            answer_decision_order(&mut state, PlayerId(1), &cards, cards[0]);
             for _ in 0..2 {
                 assert!(matches!(
                     state.waiting_for,
