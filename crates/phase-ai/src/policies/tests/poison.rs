@@ -18,7 +18,7 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::counter::CounterType;
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{CastPaymentMode, GameState, PendingCast, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, LayersDirty, PendingCast, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
@@ -117,6 +117,8 @@ fn spell_object(state: &mut GameState, idx: u64, abilities: Vec<AbilityDefinitio
         subtypes: Vec::new(),
     };
     *Arc::make_mut(&mut object.abilities) = abilities;
+    // The hand-built characteristics are the settled ones.
+    state.layers_dirty = LayersDirty::Clean;
     oid
 }
 
@@ -143,6 +145,7 @@ fn creature_object(
     object.keywords = keywords;
     object.power = Some(power);
     object.toughness = Some(power.max(1));
+    state.layers_dirty = LayersDirty::Clean;
     oid
 }
 
@@ -1142,6 +1145,7 @@ fn board(
     for &(seat, count) in poison {
         runner.state_mut().players[seat.0 as usize].poison_counters = count;
     }
+    engine::game::layers::flush_layers(runner.state_mut());
     (runner, ids)
 }
 
@@ -2012,41 +2016,81 @@ fn an_opponent_owned_choice_withholds_the_lethal_read() {
     }
 }
 
-/// CR 601.2c: a permanent that triggers when Infectious Bite targets the opponent's first creature
-/// (The Serpent Society's Ward, Frost Titan, Bonecrusher Giant, or Diffusion Sliver watching Muscle
-/// Sliver) withholds lethal; Grizzly Bears there is lethal.
+/// The F1 board: the AI at five poison with Grizzly Bears, the opponent at nine with `creatures`,
+/// and Infectious Bite in hand.
+fn infectious_bite_board(creatures: &[&str]) -> (GameRunner, ObjectId) {
+    let poison = [(OPPONENT, 9), (AI, 5)];
+    let (runner, ids) = board(FormatConfig::standard(), 2, &poison, |s| {
+        grizzly_bears(s, AI);
+        for creature in creatures {
+            s.add_real_card(
+                OPPONENT,
+                creature,
+                Zone::Battlefield,
+                shared_integration_card_db(),
+            );
+        }
+        vec![s
+            .add_spell_to_hand_from_oracle(AI, "Infectious Bite", true, INFECTIOUS_BITE)
+            .id()]
+    });
+    (runner, ids[0])
+}
+
+/// CR 601.2c + CR 702.21a: a permanent that triggers when Infectious Bite targets the opponent's
+/// creature withholds lethal (Ward with nothing else to target, Frost Titan, Bonecrusher Giant,
+/// Diffusion Sliver watching Muscle Sliver, Kira's granted trigger); the AI targets around Ward
+/// when it can, in either order.
 #[test]
 fn a_ward_trigger_on_a_target_withholds_the_lethal_read() {
-    let expected: [(&[&str], &str); 5] = [
-        (&["The Serpent Society"], "poison_clock_pressure"),
-        (&["Frost Titan"], "poison_clock_pressure"),
-        (&["Bonecrusher Giant"], "poison_clock_pressure"),
-        (
-            &["Muscle Sliver", "Diffusion Sliver"],
-            "poison_clock_pressure",
-        ),
-        (&["Grizzly Bears"], "poison_clock_lethal"),
+    let pressure = "poison_clock_pressure";
+    let lethal = "poison_clock_lethal";
+    let expected: [(&[&str], &str); 10] = [
+        (&["The Serpent Society"], pressure),
+        (&["Frost Titan"], pressure),
+        (&["Bonecrusher Giant"], pressure),
+        (&["Muscle Sliver", "Diffusion Sliver"], pressure),
+        (&["Kira, Great Glass-Spinner"], pressure),
+        (&["Grizzly Bears", "The Serpent Society"], lethal),
+        (&["The Serpent Society", "Grizzly Bears"], lethal),
+        (&["Coppercoat Vanguard", "Elite Vanguard"], lethal),
+        (&["Elite Vanguard", "Coppercoat Vanguard"], lethal),
+        (&["Grizzly Bears"], lethal),
     ];
     let kinds = expected.map(|(creatures, _)| {
-        let poison = [(OPPONENT, 9), (AI, 5)];
-        let (runner, ids) = board(FormatConfig::standard(), 2, &poison, |s| {
-            grizzly_bears(s, AI);
-            for creature in creatures {
-                s.add_real_card(
-                    OPPONENT,
-                    creature,
-                    Zone::Battlefield,
-                    shared_integration_card_db(),
-                );
-            }
-            vec![s
-                .add_spell_to_hand_from_oracle(AI, "Infectious Bite", true, INFECTIOUS_BITE)
-                .id()]
-        });
+        let (runner, bite) = infectious_bite_board(creatures);
         (
             creatures,
-            verdict_on(runner.state(), &cast_candidate(ids[0])).1.kind,
+            verdict_on(runner.state(), &cast_candidate(bite)).1.kind,
         )
     });
     assert_eq!(kinds, expected);
+
+    let (mut unsettled, bite) = infectious_bite_board(&["Grizzly Bears"]);
+    unsettled.state_mut().layers_dirty.mark_full();
+    let reason = verdict_on(unsettled.state(), &cast_candidate(bite)).1;
+    assert_eq!(
+        reason.kind, pressure,
+        "an unsettled board may hide a granted trigger"
+    );
+}
+
+/// A spell with no target announces nothing, so Frost Titan does not withhold Prologue's lethal.
+#[test]
+fn an_untargeted_spell_ignores_becomes_target_triggers() {
+    let (_, reason) = cast_beside(
+        FormatConfig::standard(),
+        2,
+        &[(OPPONENT, 9)],
+        prologue_to_phyresis,
+        |s| {
+            s.add_real_card(
+                OPPONENT,
+                "Frost Titan",
+                Zone::Battlefield,
+                shared_integration_card_db(),
+            )
+        },
+    );
+    assert_eq!(reason.kind, "poison_clock_lethal");
 }

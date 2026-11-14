@@ -261,7 +261,13 @@ fn ability_delivery(
                 .map(|slot| match slot.chooser {
                     Some(chooser) if chooser != ai_player => None,
                     _ if slot.legal_targets.contains(&chosen) => Some(chosen.clone()),
-                    _ => slot.legal_targets.first().cloned(),
+                    // The AI targets around Ward when the slot allows it.
+                    _ => slot
+                        .legal_targets
+                        .iter()
+                        .find(|target| !has_ward(state, target))
+                        .or(slot.legal_targets.first())
+                        .cloned(),
                 })
                 .collect::<Option<Vec<_>>>()?;
             // CR 601.2c: "Any abilities that trigger when those objects and/or players become the
@@ -292,20 +298,23 @@ fn ability_delivery(
     })
 }
 
-/// CR 702.21a: Ward on a targeted object, or a live becomes-target trigger on any permanent.
+/// CR 702.21a: Ward on a targeted object, or a live becomes-target trigger on any permanent; an
+/// unsettled board may hide granted ones.
 fn targeting_may_trigger(state: &GameState, targets: &[TargetRef]) -> bool {
-    let warded = |target: &TargetRef| {
-        matches!(target, TargetRef::Object(id) if state.objects.get(id).is_some_and(|obj| {
-            obj.keywords.iter().any(|k| matches!(k, Keyword::Ward(_)))
-        }))
-    };
-    targets.iter().any(warded)
+    state.layers_dirty.is_dirty()
+        || targets.iter().any(|target| has_ward(state, target))
         || battlefield_active_triggers(state).any(|(_, active)| {
             matches!(
                 active.definition.mode,
                 TriggerMode::BecomesTarget | TriggerMode::BecomesTargetOnce
             )
         })
+}
+
+fn has_ward(state: &GameState, target: &TargetRef) -> bool {
+    matches!(target, TargetRef::Object(id) if state.objects.get(id).is_some_and(|obj| {
+        obj.keywords.iter().any(|k| matches!(k, Keyword::Ward(_)))
+    }))
 }
 
 /// CR 702.70a: a trigger whose instructions give poison counters (Poisonous).
