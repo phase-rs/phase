@@ -419,11 +419,15 @@ pub(crate) fn selected_mode_abilities<'a>(
         .collect()
 }
 
-/// The object whose modes a pending `SelectModes` decision is choosing among.
-pub(crate) fn pending_mode_source(waiting_for: &WaitingFor) -> Option<ObjectId> {
-    match waiting_for {
+/// The stack entry whose modes a pending `SelectModes` decision is choosing among.
+pub(crate) fn pending_mode_entry(state: &GameState) -> Option<ObjectId> {
+    match &state.waiting_for {
         WaitingFor::ModeChoice { pending_cast, .. } => Some(pending_cast.object_id),
-        WaitingFor::AbilityModeChoice { source_id, .. } => Some(*source_id),
+        // CR 603.3c: a modal trigger's mode is chosen as it is put on the stack.
+        WaitingFor::AbilityModeChoice {
+            is_activated: false,
+            ..
+        } => state.pending_trigger_entry,
         _ => None,
     }
 }

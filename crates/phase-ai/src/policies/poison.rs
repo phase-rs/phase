@@ -68,7 +68,7 @@ use crate::features::poison::{
 };
 use crate::features::DeckFeatures;
 
-use super::context::{pending_mode_source, selected_mode_abilities, PolicyContext};
+use super::context::{pending_mode_entry, selected_mode_abilities, PolicyContext};
 use super::registry::{
     DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy, CRITICAL_MAX, STRONG_MAX,
 };
@@ -234,10 +234,11 @@ fn candidate_delivery(
 ) -> Option<GameState> {
     let chosen = TargetRef::Player(seat);
     let mut board = state.clone();
-    // CR 601.2a: a spell whose modes are being chosen is already on the stack, so the depth is
-    // the stack below it.
-    let depth = pending_mode_source(&board.waiting_for)
-        .and_then(|spell| board.stack.iter().position(|entry| entry.id == spell))
+    // CR 601.2a + CR 603.3c: a spell or trigger whose modes are being chosen is already on the
+    // stack, so the depth is the stack below it.
+    let entry = pending_mode_entry(&board);
+    let depth = entry
+        .and_then(|entry| board.stack.iter().position(|item| item.id == entry))
         .unwrap_or(board.stack.len());
     let mut action = action.clone();
     let payment_mode = match (&mut action, &mut board.waiting_for) {
@@ -262,7 +263,7 @@ fn candidate_delivery(
     }
     apply_as_current_for_simulation(&mut board, action).ok()?;
     let mut steps = CANDIDATE_DELIVERY_MAX_STEPS;
-    let mut board = settled_cast(board, ai_player, depth, &chosen, &mut steps)?;
+    let mut board = settled_cast(board, ai_player, depth, entry, &chosen, &mut steps)?;
     while let Some(left) = steps.checked_sub(1) {
         steps = left;
         let answer = match &board.waiting_for {
@@ -289,6 +290,7 @@ fn settled_cast(
     board: GameState,
     ai_player: PlayerId,
     depth: usize,
+    entry: Option<ObjectId>,
     chosen: &TargetRef,
     steps: &mut usize,
 ) -> Option<GameState> {
@@ -297,8 +299,9 @@ fn settled_cast(
         // CR 603.3: a trigger the cast caused sits above the candidate and resolves first.
         WaitingFor::Priority { .. } => {
             let alone = board.stack.len() == depth + 1
-                && board.stack.last().is_some_and(|top| {
-                    !matches!(top.kind, StackEntryKind::TriggeredAbility { .. })
+                && board.stack.last().is_some_and(|top| match entry {
+                    Some(entry) => top.id == entry,
+                    None => !matches!(top.kind, StackEntryKind::TriggeredAbility { .. }),
                 });
             alone.then_some(board)
         }
@@ -319,7 +322,7 @@ fn settled_cast(
                     target: Some(target),
                 };
                 apply_as_current_for_simulation(&mut attempt, answer).ok()?;
-                settled_cast(attempt, ai_player, depth, chosen, steps)
+                settled_cast(attempt, ai_player, depth, entry, chosen, steps)
             })
         }
         _ => None,

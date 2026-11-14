@@ -2499,3 +2499,77 @@ fn a_selected_mode_is_read_with_its_mana_paid_automatically() {
         }
     }
 }
+
+const POLLENBRIGHT_DRUID: &str = "When this creature enters, choose one —\n• Put a +1/+1 counter on target creature.\n• Proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)";
+
+/// Pollenbright Druid: "When this creature enters, choose one — • Put a +1/+1 counter on target
+/// creature. • Proliferate." CR 603.3c: its trigger is on the stack as its mode is chosen, so
+/// proliferate is lethal at nine and the counter mode is not; the opponent's Soul Warden
+/// ("Whenever another creature enters, you gain 1 life.") triggers above it and withholds lethal.
+#[test]
+fn a_modal_trigger_is_read_from_its_own_stack_entry() {
+    let config = config();
+    let context = ai_context(&config);
+    for (soul_warden, mode, kind) in [
+        (false, 1, "poison_clock_lethal"),
+        (false, 0, "poison_clock_na"),
+        (true, 1, "poison_clock_pressure"),
+    ] {
+        let (mut runner, ids) = board(FormatConfig::standard(), 2, &[(OPPONENT, 9)], |s| {
+            let db = shared_integration_card_db();
+            s.at_phase(Phase::PreCombatMain);
+            s.with_mana_pool(AI, floating(&[ManaType::Green; 2]));
+            if soul_warden {
+                s.add_real_card(OPPONENT, "Soul Warden", Zone::Battlefield, db);
+            }
+            vec![s
+                .add_creature_to_hand_from_oracle(
+                    AI,
+                    "Pollenbright Druid",
+                    1,
+                    1,
+                    POLLENBRIGHT_DRUID,
+                )
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Green],
+                    generic: 1,
+                })
+                .id()]
+        });
+        let card_id = runner.state().objects[&ids[0]].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: ids[0],
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        for _ in 0..4 {
+            if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        let state = runner.state();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::AbilityModeChoice {
+                is_activated: false,
+                ..
+            }
+        ));
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: Vec::new(),
+        };
+        let candidate = select_modes_candidate(vec![mode]);
+        let (delta, reason) = score_of(
+            PoisonClockPolicy.verdict(&ctx(state, &candidate, &decision, &context, &config)),
+        );
+        assert_eq!(reason.kind, kind, "soul warden {soul_warden}, mode {mode}");
+        if mode == 0 {
+            assert_eq!(delta, 0.0);
+        }
+    }
+}
