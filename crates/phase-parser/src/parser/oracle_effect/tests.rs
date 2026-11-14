@@ -21,10 +21,10 @@ use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermi
 use crate::types::ability::{
     AbilityUseTally, ActivationRestriction, AttachSelection, AttachmentKind, AttachmentReferent,
     CardSelectionMode, CastCostModifier, CastManaObjectScope, CastManaSpentMetric, ChooseOneOfKind,
-    CommanderOwnership, CountBinding, CounterTransferMode, DigRestOrder, DigRestRemainder,
-    DigSource, ExcessRecipient, ForEachCategoryAction, LibraryShuffleMode, ModalChoice,
-    PerpetualModification, PileSource, PossessionAxis, RepeatContinuation, RuntimeHandler,
-    SeatDirection, TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
+    CommanderOwnership, CopyRecipient, CountBinding, CounterTransferMode, DigRestOrder,
+    DigRestRemainder, DigSource, ExcessRecipient, ForEachCategoryAction, LibraryShuffleMode,
+    ModalChoice, PerpetualModification, PileSource, PossessionAxis, RepeatContinuation,
+    RuntimeHandler, SeatDirection, TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
 };
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
@@ -79573,7 +79573,12 @@ fn compound_choice_c3_declines_and_preserves_existing_choose_shapes() {
             target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
         }
     );
-    assert_eq!(legacy.target_choice_timing, TargetChoiceTiming::Stack);
+    // CR 115.10 + CR 115.10a + CR 608.2d: a bare choose is not a target.
+    assert_eq!(legacy.target_choice_timing, TargetChoiceTiming::Resolution);
+    // CR 601.2c: an explicit target is still announced while casting.
+    let targeted = parse_effect_chain("Choose target creature you control.", AbilityKind::Spell);
+    assert_eq!(targeted.effect, legacy.effect);
+    assert_eq!(targeted.target_choice_timing, TargetChoiceTiming::Stack);
     // A bare Effect cannot represent both instructions. The chain succeeds in
     // U-C4; this lower-level entry point must fail closed rather than lose one.
     let Effect::Unimplemented { name, description } =
@@ -79591,6 +79596,1722 @@ fn compound_choice_c3_declines_and_preserves_existing_choose_shapes() {
         Some("a creature you control and an opponent"),
         "the marker carries the printed clause, not Debug-formatted AST"
     );
+}
+
+/// SHAPE: a prior instruction cannot erase the compound object/player producer's
+/// resolution-time object choice.
+/// Synthetic Oracle: the clause is Risky Move's ("... choose a creature you
+/// control and an opponent."); no printed card puts it after another instruction.
+#[test]
+fn compound_choice_prefixed_object_and_player_keeps_resolution_timing() {
+    let head = parse_effect_chain(
+        "Choose a creature you control and an opponent.",
+        AbilityKind::Spell,
+    );
+    let prefixed = parse_effect_chain(
+        "Draw a card. Choose a creature you control and an opponent.",
+        AbilityKind::Spell,
+    );
+    let later = prefixed
+        .sub_ability
+        .as_deref()
+        .expect("the compound choice must follow the draw");
+    for (name, choice) in [("head", &head), ("after draw", later)] {
+        assert_eq!(
+            choice.effect.as_ref(),
+            &Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+            "{name}: the compound object choice must remain reachable"
+        );
+        let player = choice
+            .sub_ability
+            .as_deref()
+            .expect("the compound choice must retain its player instruction");
+        assert!(
+            matches!(
+                player.effect.as_ref(),
+                Effect::Choose {
+                    choice_type: ChoiceType::Opponent { .. },
+                    ..
+                }
+            ),
+            "{name}: must reach the compound producer: {player:#?}"
+        );
+    }
+    assert_eq!(head.target_choice_timing, TargetChoiceTiming::Resolution);
+    assert_eq!(later.target_choice_timing, head.target_choice_timing);
+}
+
+/// SHAPE: printed single-creature choices and a synthetic modal analogue use
+/// resolution timing; supported continuations retain the chosen-creature reference.
+#[test]
+fn bare_choose_printed_cards_use_resolution_timing() {
+    fn assert_choice(name: &str, head: &AbilityDefinition) {
+        assert_eq!(
+            head.effect.as_ref(),
+            &Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+            "{name}: {head:#?}"
+        );
+        // CR 115.10 + CR 115.10a + CR 608.2d: no target is declared.
+        assert_eq!(
+            head.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "{name}"
+        );
+    }
+
+    for (name, text) in [
+        ("Final Showdown", "Spree (Choose one or more additional costs.)\n+ {1} — All creatures lose all abilities until end of turn.\n+ {1} — Choose a creature you control. It gains indestructible until end of turn.\n+ {3}{W}{W} — Destroy all creatures."),
+        ("Sakashima's Will", "Choose one. If you control a commander as you cast this spell, you may choose both instead.\n• Target opponent chooses a creature they control. You gain control of it.\n• Choose a creature you control. Each other creature you control becomes a copy of that creature until end of turn."),
+        ("Synthetic modal choice timing probe (Final Showdown analogue)", "Spree (Choose one or more additional costs.)\n+ {1} — Draw a card.\n+ {1} — Choose a creature you control. It gains indestructible until end of turn.\n+ {1} — Deal 2 damage to target creature you don't control."),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &[], &[]);
+        let head = &parsed.abilities[1];
+        assert_choice(name, head);
+        let continuation = head
+            .sub_ability
+            .as_deref()
+            .expect("chosen-creature continuation");
+        assert!(
+            matches!(
+                continuation.effect.as_ref(),
+                Effect::GenericEffect {
+                    target: Some(TargetFilter::ParentTarget),
+                    ..
+                } | Effect::BecomeCopy {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "{name}: chosen creature must remain ParentTarget: {continuation:#?}"
+        );
+    }
+
+    // Ascent's redirection and Hatchery's toxic-value quantity remain
+    // Unimplemented. These rows cover their choice heads, not full-card support.
+    let ascent = parse_oracle_text(
+        "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI, II — Choose a creature you control. Until your next turn, all damage that would be dealt to creatures you control is dealt to that creature instead.\nIII — Return target creature card from your graveyard to the battlefield with a flying counter on it. That creature is an Angel Warrior in addition to its other types.",
+        "Ascent of the Worthy", &[], &["Enchantment".to_string()], &["Saga".to_string()],
+    );
+    for chapter in &ascent.triggers[..2] {
+        assert_choice(
+            "Ascent of the Worthy I/II",
+            chapter.execute.as_deref().unwrap(),
+        );
+    }
+
+    let hatchery = parse_oracle_text(
+        "When this enchantment enters, create two 3/3 green Phyrexian Beast creature tokens with toxic 1. (Players dealt combat damage by them also get a poison counter.)\nCorrupted — At the beginning of your upkeep, if an opponent has three or more poison counters, choose a creature you control, then draw cards equal to its total toxic value.",
+        "Goliath Hatchery", &[], &["Enchantment".to_string()], &[],
+    );
+    assert_choice(
+        "Goliath Hatchery upkeep",
+        hatchery.triggers[1].execute.as_deref().unwrap(),
+    );
+
+    // Sakashima the Impostor Avatar's second sentence declares its own target,
+    // not the chosen recipient. The card is a Vanguard (CR 313.1), which has no
+    // subtypes (CR 313.3).
+    let parsed = parse_oracle_text(
+        "{2}: Choose a creature you control. It becomes a copy of target creature except for its name.",
+        "Sakashima the Impostor Avatar",
+        &[],
+        &["Vanguard".to_string()],
+        &[],
+    );
+    let avatar = &parsed.abilities[0];
+    assert!(matches!(avatar.effect.as_ref(), Effect::TargetOnly { .. }));
+    assert_eq!(avatar.target_choice_timing, TargetChoiceTiming::Resolution);
+    let copy = avatar
+        .sub_ability
+        .as_deref()
+        .expect("Avatar copy instruction");
+    assert!(
+        matches!(
+            copy.effect.as_ref(),
+            Effect::BecomeCopy {
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        ),
+        "{copy:#?}"
+    );
+    assert!(
+        matches!(
+            copy.effect.as_ref(),
+            Effect::BecomeCopy {
+                recipient: CopyRecipient::Untargeted(TargetFilter::ParentTarget),
+                ..
+            }
+        ),
+        "the chosen creature must remain the untargeted copy recipient: {copy:#?}"
+    );
+    // CR 601.2c: the explicit copy-source target stays stack-time.
+    assert_eq!(copy.target_choice_timing, TargetChoiceTiming::Stack);
+}
+
+/// SHAPE: printed cards whose controller-choice "choose a <object> you control"
+/// follows an earlier instruction declare `Resolution` timing (CR 115.10a: the
+/// choice is not a target; CR 608.2d: it is announced as the effect is applied).
+/// Tunnel of Love, whose controller choice follows an opponent's, is in
+/// `bare_choose_beside_a_cast_time_choice_keeps_base_timing`.
+#[test]
+fn bare_choose_later_chunk_printed_cards_use_resolution_timing() {
+    fn assert_you_choice(name: &str, node: &AbilityDefinition) {
+        let Effect::TargetOnly {
+            target: TargetFilter::Typed(tf),
+        } = node.effect.as_ref()
+        else {
+            panic!("{name}: expected the bare-choice TargetOnly node: {node:#?}");
+        };
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::You),
+            "{name}: the choice must be a creature-class you control: {node:#?}"
+        );
+        assert_eq!(
+            node.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "{name}: a later-chunk bare choice must declare Resolution: {node:#?}"
+        );
+    }
+
+    let armed = parse_card(
+        "Vehicles you control become artifact creatures until end of turn. Choose a Dwarf you control. Attach any number of Equipment you control to it.",
+        "Armed and Armored",
+        &[],
+        &["Instant"],
+    );
+    assert_you_choice(
+        "Armed and Armored",
+        armed.abilities[0]
+            .sub_ability
+            .as_deref()
+            .expect("Armed and Armored: the choice must follow the Vehicle animation"),
+    );
+
+    let escape = parse_card(
+        "Destroy all non-Vehicle creatures. Then choose a Vehicle you control. It perpetually becomes an artifact creature.",
+        "Turbocharged Escape",
+        &[],
+        &["Sorcery"],
+    );
+    assert_you_choice(
+        "Turbocharged Escape",
+        escape.abilities[0]
+            .sub_ability
+            .as_deref()
+            .expect("Turbocharged Escape: the choice must follow the destruction"),
+    );
+
+    let elderspell = parse_card(
+        "Destroy any number of target planeswalkers. Choose a planeswalker you control. Put two loyalty counters on it for each planeswalker destroyed this way.",
+        "The Elderspell",
+        &[],
+        &["Sorcery"],
+    );
+    assert_you_choice(
+        "The Elderspell",
+        elderspell.abilities[0]
+            .sub_ability
+            .as_deref()
+            .expect("The Elderspell: the choice must follow the destruction"),
+    );
+
+    let wraith = parse_card(
+        "Wraith Form — This creature can't be blocked.\nTransdimensional Scout — When this creature deals combat damage to a player, you may pay {3} and sacrifice it. If you do, choose a land you control. Then search your library for up to two basic land cards which have the same name as the chosen land, put them onto the battlefield tapped, then shuffle.",
+        "Canoptek Wraith",
+        &[],
+        &["Artifact", "Creature"],
+    );
+    assert_you_choice(
+        "Canoptek Wraith",
+        wraith.triggers[0]
+            .execute
+            .as_deref()
+            .and_then(|execute| execute.sub_ability.as_deref())
+            .and_then(|pay| pay.sub_ability.as_deref())
+            .expect("Canoptek Wraith: the choice must follow the pay-and-sacrifice instructions"),
+    );
+
+    let brudiclad = parse_card(
+        "Creature tokens you control have haste.\nAt the beginning of combat on your turn, create a 2/1 blue Phyrexian Myr artifact creature token. Then you may choose a token you control. If you do, each other token you control becomes a copy of that token.",
+        "Brudiclad, Telchor Engineer",
+        &[],
+        &["Artifact", "Creature"],
+    );
+    assert_you_choice(
+        "Brudiclad, Telchor Engineer",
+        brudiclad.triggers[0]
+            .execute
+            .as_deref()
+            .and_then(|execute| execute.sub_ability.as_deref())
+            .expect("Brudiclad, Telchor Engineer: the choice must follow the token creation"),
+    );
+}
+
+/// SHAPE: the bare-choice producer declares `Resolution` at any chain position,
+/// the head and a later chunk alike (CR 115.10a: the choice is not a target;
+/// CR 608.2d: it is announced as the effect is applied). The later printed
+/// "target creature you don't control" damage recipient stays stack-time
+/// (CR 601.2c) in both rows.
+/// Synthetic Oracle: no printed card has this shape through this producer; the
+/// nearest printed card is Crush Underfoot ("Choose a Giant creature you control.
+/// It deals damage equal to its power to target creature."), whose damage
+/// recipient is mis-lowered on main.
+#[test]
+fn bare_choose_resolves_at_any_chain_position_and_keeps_later_printed_target_at_stack() {
+    for (text, choice_index) in [
+        (
+            "Choose a creature you control. It deals damage equal to its power to target creature you don't control.",
+            0,
+        ),
+        (
+            "Draw a card. Choose a creature you control. It deals damage equal to its power to target creature you don't control.",
+            1,
+        ),
+    ] {
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        let choice = &ir.clauses[choice_index];
+        assert!(
+            matches!(choice.parsed.effect, Effect::TargetOnly { .. }),
+            "{text}: must reach the bare-choice producer: {choice:#?}"
+        );
+        assert_eq!(
+            choice.declared_target_choice_timing,
+            Some(TargetChoiceTiming::Resolution),
+            "{text}"
+        );
+
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let choice = std::iter::successors(Some(&def), |node| node.sub_ability.as_deref())
+            .nth(choice_index)
+            .expect("bare-choice instruction must survive lowering");
+        assert!(
+            matches!(choice.effect.as_ref(), Effect::TargetOnly { .. }),
+            "{text}: {choice:#?}"
+        );
+        assert_eq!(
+            choice.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "{text}"
+        );
+        let damage = choice
+            .sub_ability
+            .as_deref()
+            .expect("printed damage instruction");
+        assert!(
+            matches!(
+                damage.effect.as_ref(),
+                Effect::DealDamage {
+                    target: TargetFilter::Typed(_),
+                    damage_source: Some(DamageSource::Target),
+                    ..
+                }
+            ),
+            "{text}: the damage must retain its independent recipient: {damage:#?}"
+        );
+        assert_eq!(
+            damage.target_choice_timing,
+            TargetChoiceTiming::Stack,
+            "{text}"
+        );
+    }
+}
+
+/// SHAPE: regression pins for the printed "they control" class (Imperial Edict,
+/// Sakashima's Will mode 1). These rows parse to a non-You controller
+/// ("they control" -> `TargetOpponent`), so the producer's controller gate
+/// rejects them before any third-party guard runs. They do not cover the
+/// subject-layer withdrawal; the synthetic rows of
+/// `bare_choose_non_controller_subject_keeps_stack_timing` do.
+#[test]
+fn bare_choose_third_party_printed_choices_keep_stack_timing() {
+    let target =
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetOpponent));
+    for (name, text) in [
+        (
+            "Imperial Edict (first sentence)",
+            "Target opponent chooses a creature they control.",
+        ),
+        (
+            "Sakashima's Will mode 1",
+            "Target opponent chooses a creature they control. You gain control of it.",
+        ),
+    ] {
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        let head = &ir.clauses[0];
+        assert_eq!(
+            head.parsed.effect,
+            Effect::TargetOnly {
+                target: target.clone(),
+            },
+            "{name}: the creature retains its targeted-opponent controller"
+        );
+        assert_eq!(head.declared_target_choice_timing, None, "{name}");
+
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert_eq!(
+            def.effect.as_ref(),
+            &Effect::TargetOnly {
+                target: target.clone(),
+            },
+            "{name}: the player target must survive lowering"
+        );
+        assert!(
+            crate::types::ability::effect_references_target_player(&def.effect),
+            "{name}: the companion player target must remain declared"
+        );
+        assert_eq!(
+            def.target_choice_timing,
+            TargetChoiceTiming::Stack,
+            "{name}"
+        );
+    }
+}
+
+/// SHAPE: a partially parsed object phrase cannot establish resolution timing.
+/// Synthetic Oracle: no printed bare choose carries "that hasn't attacked this
+/// turn"; the nearest printed card is Final Showdown ("Choose a creature you
+/// control.").
+#[test]
+fn bare_choose_partial_object_phrase_keeps_stack_timing() {
+    let rest = "a creature you control that hasn't attacked this turn";
+    let (_, remainder) = parse_target_with_ctx(rest, &mut ParseContext::default());
+    assert!(
+        !remainder.is_empty(),
+        "the target parser must leave the unsupported restriction unconsumed"
+    );
+
+    let text = "Choose a creature you control";
+    let lower = text.to_ascii_lowercase();
+    let mut ctx = ParseContext::default();
+    assert!(
+        matches!(
+            super::imperative::parse_choose_ast(text, &lower, &mut ctx),
+            Some(ChooseImperativeAst::TargetOnly { .. })
+        ),
+        "the fully consumed control must reach the TargetOnly producer"
+    );
+    assert_eq!(
+        ctx.declared_target_choice_timing,
+        Some(TargetChoiceTiming::Resolution),
+        "the fully consumed control must declare resolution timing"
+    );
+
+    let text = "Choose a creature you control that hasn't attacked this turn";
+    let lower = text.to_ascii_lowercase();
+    let mut ctx = ParseContext::default();
+    assert!(
+        matches!(
+            super::imperative::parse_choose_ast(text, &lower, &mut ctx),
+            Some(ChooseImperativeAst::TargetOnly { .. })
+        ),
+        "the partial phrase must reach the same TargetOnly producer"
+    );
+    assert_eq!(
+        ctx.declared_target_choice_timing, None,
+        "an unconsumed restriction must prevent resolution timing"
+    );
+
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert_eq!(def.target_choice_timing, TargetChoiceTiming::Stack);
+}
+
+/// SHAPE: a non-controller subject cannot use the controller-only resolution chooser.
+#[test]
+fn bare_choose_non_controller_subject_keeps_stack_timing() {
+    // Synthetic Oracle: no printed card says "other than this creature" on a bare
+    // choose; the nearest printed card is Guard Dogs ("Choose a permanent you control.").
+    let text = "Choose a permanent you control other than this creature.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        matches!(def.effect.as_ref(), Effect::TargetOnly { .. }),
+        "the controller-choice control must reach TargetOnly: {def:#?}"
+    );
+    assert_eq!(
+        def.target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "the controller-choice control must use resolution timing"
+    );
+
+    // Subject-path control: the controller as the printed subject takes the same
+    // seam as the third-party rows below, so only a non-controller subject may
+    // withdraw the Resolution declaration. Synthetic: the nearest printed card is
+    // Tunnel of Love ("They choose a creature they control, then you choose a creature
+    // you control.").
+    let text = "You choose a permanent you control other than this creature.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        matches!(def.effect.as_ref(), Effect::TargetOnly { .. }),
+        "the controller-subject control must reach TargetOnly: {def:#?}"
+    );
+    assert_eq!(
+        def.target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "a controller subject must keep resolution timing"
+    );
+
+    // Synthetic discriminators: no printed card has these third-party subject-led
+    // bare-choice shapes. The nearest printed cards are Wormfang Crab (extra tail,
+    // below) and Divine Reckoning (distributive "they control", below).
+    for text in [
+        "An opponent chooses a permanent you control other than this creature.",
+        "Target opponent chooses a permanent you control other than this creature.",
+        "Each opponent chooses a permanent you control.",
+        "Each opponent may choose a permanent you control.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(def.effect.as_ref(), Effect::TargetOnly { .. }),
+            "{text}: the subject-led choice must reach TargetOnly: {def:#?}"
+        );
+        assert_eq!(
+            def.target_choice_timing,
+            TargetChoiceTiming::Stack,
+            "{text}: the controller must not choose for the opponent"
+        );
+    }
+
+    let parsed = parse_oracle_text(
+        "This creature can't be blocked.\nWhen this creature enters, an opponent chooses a permanent you control other than this creature and exiles it.\nWhen this creature leaves the battlefield, return the exiled card to the battlefield under its owner's control.",
+        "Wormfang Crab",
+        &[],
+        &["Creature".to_string()],
+        &["Nightmare".to_string(), "Crab".to_string()],
+    );
+    let head = parsed
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .find(|head| matches!(head.effect.as_ref(), Effect::TargetOnly { .. }))
+        .expect("Wormfang Crab must retain its subject-led TargetOnly trigger head");
+    // Regression pin on the printed card's timing only: the trailing "and exiles
+    // it" already fails the producer's whole-remainder gate, so this passes
+    // without the subject-layer withdrawal; the synthetic rows above guard that.
+    assert_eq!(
+        head.target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "Wormfang Crab's trigger head must keep stack timing: {head:#?}"
+    );
+
+    // "They control" is not a controller-You filter, so the producer never
+    // declares Resolution for Divine Reckoning's distributive choice.
+    let parsed = parse_oracle_text(
+        "Each player chooses a creature they control. Destroy the rest.\nFlashback {5}{W}{W} (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
+        "Divine Reckoning",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let head = &parsed.abilities[0];
+    assert!(
+        matches!(head.effect.as_ref(), Effect::TargetOnly { .. }),
+        "Divine Reckoning must retain its distributive TargetOnly head: {head:#?}"
+    );
+    assert_eq!(head.target_choice_timing, TargetChoiceTiming::Stack);
+    assert_eq!(head.player_scope, Some(PlayerFilter::All));
+}
+
+/// Every `TargetOnly` link of an ability chain with its target-choice timing, head first.
+fn target_only_chain_timings(def: &AbilityDefinition) -> Vec<TargetChoiceTiming> {
+    let mut timings = Vec::new();
+    let mut node = Some(def);
+    while let Some(link) = node {
+        if matches!(link.effect.as_ref(), Effect::TargetOnly { .. }) {
+            timings.push(link.target_choice_timing);
+        }
+        node = link.sub_ability.as_deref();
+    }
+    timings
+}
+
+/// SHAPE: a non-controller subject owns the bare choice inherited by a compound
+/// continuation. Synthetic Oracle: no printed card pairs an object action with an
+/// inherited bare choose under a third-party subject; the nearest printed card is
+/// Wormfang Crab ("an opponent chooses a permanent you control other than this
+/// creature and exiles it"). The controller-subject rows are the matched controls.
+#[test]
+fn bare_choose_compound_child_inherits_non_controller_subject_timing() {
+    // The inherited verb is already imperative ("choose"), so no singular
+    // "chooses" deconjugation is involved.
+    let text = "Your opponents exile target creature and choose a creature you control.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert_eq!(
+        target_only_chain_timings(&def),
+        vec![TargetChoiceTiming::Stack],
+        "{text}: the inherited bare choice must reach a TargetOnly link that the \
+         controller does not choose at resolution: {def:#?}"
+    );
+
+    for text in [
+        "Exile target creature and choose a creature you control.",
+        "You exile target creature and choose a creature you control.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert_eq!(
+            target_only_chain_timings(&def),
+            vec![TargetChoiceTiming::Resolution],
+            "{text}: a controller subject keeps the resolution-time choice: {def:#?}"
+        );
+    }
+}
+
+/// SHAPE: a compound continuation that reads the primary instruction's object ("...
+/// and choose a creature you control other than it") is parsed in the splitter's
+/// anaphoric arm, whose context is rebuilt blank. The chooser of the predicate it
+/// continues still owns its bare choice there: a non-controller subject, an
+/// accepting-player scope and a per-player scope each keep the `Stack` timing the
+/// choice lowered to before the producer existed (pinned as the unchanged
+/// baseline, not as a rules claim: the other player should choose, which
+/// `TargetOnly` cannot express). The controller row is the matched control and
+/// declares `Resolution` (CR 115.10a + CR 608.2d). Synthetic Oracle: no printed card
+/// continues a compound with "choose a <object> you control other than it"; the
+/// nearest printed third-party chooser is Wormfang Crab ("an opponent chooses a
+/// permanent you control other than this creature and exiles it").
+#[test]
+fn bare_choose_anaphoric_compound_continuation_keeps_the_enclosing_chooser() {
+    let continuation_timing = |text: &str| {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let continuation = def
+            .sub_ability
+            .as_deref()
+            .expect("the compound continuation");
+        assert!(
+            matches!(continuation.effect.as_ref(), Effect::TargetOnly { .. }),
+            "{text}: the anaphoric continuation must reach the bare-choice producer: {def:#?}"
+        );
+        continuation.target_choice_timing
+    };
+    let mut mismatches = Vec::new();
+    for text in [
+        "Your opponents exile target creature and choose a creature you control other than it.",
+        "Any opponent may tap target creature and choose a creature you control other than it.",
+        "Each player may tap target creature and choose a creature you control other than it.",
+    ] {
+        let observed = continuation_timing(text);
+        if observed != TargetChoiceTiming::Stack {
+            mismatches.push(format!("{text}: {observed:?}"));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "the enclosing chooser owns the continuation's choice: {mismatches:#?}"
+    );
+    let control = "Exile target creature and choose a creature you control other than it.";
+    assert_eq!(
+        continuation_timing(control),
+        TargetChoiceTiming::Resolution,
+        "{control}"
+    );
+}
+
+/// SHAPE: a non-controller subject's object-and-player choice keeps the timing it
+/// had before the bare-choice change: `Resolution`, declared for every subject.
+/// TargetOnly's resolution chooser only prompts the controller, an existing
+/// third-party chooser limitation this producer deliberately leaves unchanged
+/// (the value is pinned as the unchanged baseline, not as a rules claim).
+/// Synthetic Oracle: no printed card puts a third-party subject on this clause; the
+/// nearest printed card is Risky Move ("... choose a creature you control and an
+/// opponent."), the matched controller control.
+#[test]
+fn compound_choice_non_controller_subject_object_and_player_keeps_base_resolution_timing() {
+    let timing = |text: &str| {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(def.effect.as_ref(), Effect::TargetOnly { .. }),
+            "{text}: the compound object choice must stay reachable: {def:#?}"
+        );
+        def.target_choice_timing
+    };
+    assert_eq!(
+        timing("Choose a creature you control and an opponent."),
+        TargetChoiceTiming::Resolution,
+        "the controller keeps the resolution-time object choice"
+    );
+    assert_eq!(
+        timing("An opponent chooses a creature you control and an opponent."),
+        TargetChoiceTiming::Resolution,
+        "the producer's base timing is kept for the third-party subject"
+    );
+}
+
+/// The lowered two-clause chain of an `<head>, then <choice>` text, after guarding
+/// the head's own `Draw.target` (the clause whose subject the continuation may
+/// inherit) and the continuation's fully consumed `TargetOnly { creature you control }`
+/// (the shape both resolution-choice producers lower to). Returns the continuation's
+/// declared timing and the chain's `TargetOnly` timings.
+fn head_then_choice_timings(
+    text: &str,
+    head_target: &TargetFilter,
+) -> (Option<TargetChoiceTiming>, Vec<TargetChoiceTiming>) {
+    let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+    assert_eq!(
+        ir.clauses.len(),
+        2,
+        "{text}: head and choice clauses: {ir:#?}"
+    );
+    let Effect::Draw { target, .. } = &ir.clauses[0].parsed.effect else {
+        panic!(
+            "{text}: the head must lower to Draw: {:#?}",
+            ir.clauses[0].parsed.effect
+        );
+    };
+    assert_eq!(target, head_target, "{text}: the head's player target");
+    assert_eq!(
+        ir.clauses[1].parsed.effect,
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        },
+        "{text}: the continuation must reach the TargetOnly producers' output"
+    );
+    let chain = parse_effect_chain(text, AbilityKind::Spell);
+    (
+        ir.clauses[1].declared_target_choice_timing,
+        target_only_chain_timings(&chain),
+    )
+}
+
+/// The opponent filter the parser lowers "Target opponent draws a card" to.
+fn target_opponent_head() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+}
+
+/// SHAPE: the carried player subject of a conjugated continuation is the carry
+/// every row below depends on. Printed card: Cephalid Looter ("{T}: Target player
+/// draws a card, then discards a card."), whose "discards" inherits the declared
+/// player of "Target player draws". A reach guard for the comma-then grammar.
+#[test]
+fn inherited_player_subject_carry_reaches_comma_then_grammar() {
+    let def = parse_effect_chain(
+        "Target player draws a card, then discards a card.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::Draw {
+                target: TargetFilter::Player,
+                ..
+            }
+        ),
+        "the head must be the declared player draw: {def:#?}"
+    );
+    let sub = def
+        .sub_ability
+        .as_deref()
+        .expect("the discard continuation");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::Discard {
+                target: TargetFilter::DeclaredPlayer { .. },
+                ..
+            }
+        ),
+        "the elided subject must carry the declared player: {sub:#?}"
+    );
+}
+
+/// SHAPE: a conjugated continuation's elided subject is the preceding non-controller
+/// subject (CR 608.2c), who announces the choice (CR 608.2d); the choice is not a
+/// target (CR 115.10a). `TargetOnly`'s resolution chooser prompts only the
+/// controller, so the Resolution declaration must not apply to the continuation.
+/// `Stack` is the value this bare choice lowered to before the producer existed; it is
+/// pinned as that restoration, not as a rules claim: the target opponent should
+/// choose, which `TargetOnly` cannot express (third-party chooser limitation).
+/// Synthetic Oracle: no printed card continues a non-controller subject with
+/// "chooses a creature you control". The nearest printed cards are Arcane Artisan
+/// ("{2}{U}, {T}: Target player draws a card, then exiles a card from their hand.
+/// ...") for the shape and Cephalid Looter for the carry (guarded above).
+#[test]
+fn bare_choose_inherited_non_controller_subject_keeps_stack_timing() {
+    let mut mismatches = Vec::new();
+    for (text, head) in [
+        (
+            "Target opponent draws a card, then chooses a creature you control.",
+            target_opponent_head(),
+        ),
+        (
+            "Target player draws a card, then chooses a creature you control.",
+            TargetFilter::Player,
+        ),
+    ] {
+        let observed = head_then_choice_timings(text, &head);
+        if observed != (None, vec![TargetChoiceTiming::Stack]) {
+            mismatches.push(format!("{text}: {observed:?}"));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "the inherited subject owns the choice, so no Resolution is declared \
+         (expected (None, [Stack])): {mismatches:#?}"
+    );
+}
+
+/// SHAPE: a controller-owned bare choice keeps its Resolution declaration, whether
+/// the controller is the default subject or re-asserted after a third-party head.
+/// Printed controller choice: Final Showdown ("Choose a creature you control. It
+/// gains indestructible until end of turn."); the rows are synthetic chains of it.
+/// The second row carries a player-target head, so only the explicit "you" ends the
+/// carry (CR 608.2c).
+#[test]
+fn bare_choose_controller_subject_chain_keeps_resolution_timing() {
+    for (text, head) in [
+        (
+            "Draw a card, then choose a creature you control.",
+            TargetFilter::Controller,
+        ),
+        (
+            "Target opponent draws a card, then you choose a creature you control.",
+            target_opponent_head(),
+        ),
+    ] {
+        let (declared, chain) = head_then_choice_timings(text, &head);
+        assert_eq!(declared, Some(TargetChoiceTiming::Resolution), "{text}");
+        assert_eq!(chain, vec![TargetChoiceTiming::Resolution], "{text}");
+    }
+}
+
+/// SHAPE: a sentence boundary ends the carried player's claim on the next choice
+/// (CR 608.2c): "Target opponent draws a card." does not make the opponent the
+/// chooser of the following sentence's imperative bare choice, which the controller
+/// makes (CR 608.2d). Synthetic chain of Final Showdown's "Choose a creature you
+/// control." The in-sentence comma-then row that does inherit is
+/// `bare_choose_inherited_non_controller_subject_keeps_stack_timing`.
+#[test]
+fn bare_choose_after_sentence_boundary_keeps_resolution_timing() {
+    let text = "Target opponent draws a card. Choose a creature you control.";
+    let (declared, chain) = head_then_choice_timings(text, &target_opponent_head());
+    assert_eq!(declared, Some(TargetChoiceTiming::Resolution), "{text}");
+    assert_eq!(chain, vec![TargetChoiceTiming::Resolution], "{text}");
+}
+
+/// The declared timing of a chain's last clause, which must be a bare choice, and
+/// the lowered timing of every `TargetOnly` in the chain.
+fn last_choice_timings(text: &str) -> (Option<TargetChoiceTiming>, Vec<TargetChoiceTiming>) {
+    let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+    let choice = ir.clauses.last().expect("the chain's last clause");
+    assert_eq!(
+        choice.parsed.effect,
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        },
+        "{text}: the last clause must reach the bare-choice producer: {ir:#?}"
+    );
+    let chain = parse_effect_chain(text, AbilityKind::Spell);
+    (
+        choice.declared_target_choice_timing,
+        target_only_chain_timings(&chain),
+    )
+}
+
+/// SHAPE: a chunk that names no subject of its own continues the latest subject its
+/// sentence named (CR 608.2c), who makes the choice while the effect is applied
+/// (CR 608.2d), even when the chain carries no player reference for that subject:
+/// a chosen opponent ("An opponent draws a card, then chooses ..."), a plural
+/// subject whose verb does not conjugate ("Your opponents draw a card, then choose
+/// ..."), or an earlier chunk's peeled accepting-player or player scope ("Any
+/// opponent may draw a card, then choose ..."; "Each opponent may ..."). A subject
+/// the parser does not recognize earlier in its sentence fails closed ("Your
+/// opponents each draw a card", "An opponent does the same", "Your opponents may
+/// draw a card", "The monarch draws a card", "Its controller and you each draw a
+/// card"); "does the same" and "may"
+/// chunks are also ones a special-case branch of the chain loop can consume before
+/// the subject is read. No Resolution is declared, so each keeps the `Stack` timing
+/// it lowered to before the producer existed. That value is pinned as the unchanged
+/// baseline, not as a rules claim: the other player should choose, which
+/// `TargetOnly` cannot express (the existing third-party chooser limitation). The
+/// matched controls name the controller ("you", "you may") or start a new
+/// sentence, and keep `Resolution`. A chunk opening with a conjugated verb and no
+/// subject anywhere in its sentence ("Each opponent who does chooses ...", "An
+/// opponent who controls an artifact chooses ...", whose relative-clause subject
+/// the chain lifts into a condition) is a third person too (CR 109.5).
+/// Synthetic Oracle: no printed card continues a third-party subject with
+/// "choose(s) a <object> you control"; the nearest printed card for the
+/// third-party chooser is Wormfang Crab ("an opponent chooses a permanent you
+/// control other than this creature and exiles it").
+#[test]
+fn bare_choose_continuing_an_uncarried_sentence_subject_keeps_stack_timing() {
+    let mut mismatches = Vec::new();
+    for text in [
+        "An opponent draws a card, then chooses a creature you control.",
+        "An opponent loses 2 life, then chooses a creature you control.",
+        "Your opponents draw a card, then choose a creature you control.",
+        "An opponent does the same, then chooses a creature you control.",
+        "Your opponents do the same, then choose a creature you control.",
+        "Your opponents may draw a card, then choose a creature you control.",
+        "Any opponent may draw a card, then choose a creature you control.",
+        "Each opponent may draw a card, then choose a creature you control.",
+        "The monarch draws a card, then chooses a creature you control.",
+        "Your opponents each draw a card, then choose a creature you control.",
+        "Exile target creature. Its controller and you each draw a card, then choose a creature you control.",
+        "Each opponent may draw a card. Each opponent who does chooses a creature you control.",
+        "Each opponent who controls a creature chooses a creature you control.",
+        "An opponent who controls an artifact chooses a creature you control.",
+    ] {
+        let observed = last_choice_timings(text);
+        if observed != (None, vec![TargetChoiceTiming::Stack]) {
+            mismatches.push(format!("{text}: {observed:?}"));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "the sentence's third-party subject owns the choice, so no Resolution is \
+         declared (expected (None, [Stack])): {mismatches:#?}"
+    );
+
+    for text in [
+        "An opponent draws a card. Choose a creature you control.",
+        "Your opponents draw a card, then you choose a creature you control.",
+        "You may draw a card, then choose a creature you control.",
+        "An opponent draws a card. You may draw a card, then choose a creature you control.",
+    ] {
+        assert_eq!(
+            last_choice_timings(text),
+            (
+                Some(TargetChoiceTiming::Resolution),
+                vec![TargetChoiceTiming::Resolution]
+            ),
+            "{text}: the controller makes this choice"
+        );
+    }
+}
+
+/// SHAPE: an inherited non-controller subject's object-and-player choice keeps the
+/// timing the producer declared before the bare-choice change: `Resolution`, for
+/// every subject, matching
+/// `compound_choice_non_controller_subject_object_and_player_keeps_base_resolution_timing`.
+/// The carried-subject seed therefore changes nothing for this producer; it only
+/// keeps the bare-choice producer (above) from declaring `Resolution` for a carried
+/// third-party chooser, which is also the base timing. The target opponent should
+/// make both choices, which `TargetOnly` cannot express (an existing third-party
+/// chooser limitation, pinned as the unchanged baseline and not as a rules claim).
+/// Synthetic Oracle: no printed card reaches the shape; the nearest printed card for
+/// the choice is Risky Move ("choose a creature you control and an opponent").
+#[test]
+fn compound_choice_inherited_non_controller_subject_object_and_player_keeps_base_resolution_timing()
+{
+    let text = "Target opponent draws a card, then chooses a creature you control and an opponent.";
+    let (declared, chain) = head_then_choice_timings(text, &target_opponent_head());
+    assert_eq!(
+        declared,
+        Some(TargetChoiceTiming::Resolution),
+        "{text}: the producer's base declaration is kept for the inherited subject"
+    );
+    assert_eq!(chain, vec![TargetChoiceTiming::Resolution], "{text}");
+}
+
+/// SHAPE: a peeled accepting-player scope ("Any opponent may choose ...") declares
+/// nothing in the bare-choice producer, so the accepting-player timing fallback
+/// keeps the `Resolution` timing it produced before the producer existed (CR 115.10a;
+/// CR 608.2d). TargetOnly's resolution chooser still prompts the controller, an
+/// existing third-party chooser limitation pinned here as the unchanged baseline
+/// and not as a rules claim. The `None` declaration discriminates: a producer that
+/// writes `Stack` here moves the timing off its baseline and asks the caster for the
+/// permanent before the opponent receives the offer. Synthetic Oracle: no printed
+/// card has "<opponent or player> may choose a <object> you control"; the nearest
+/// printed accepting-player body is Reservoir Kraken ("any opponent may tap an
+/// untapped creature they control"), and the nearest printed choose verb is Druid
+/// of Purification, whose "each player may" peels as a per-player scope rather
+/// than an accepting-player one.
+#[test]
+fn bare_choose_opponent_may_scope_keeps_base_resolution_timing() {
+    for text in [
+        "Any opponent may choose a permanent you control.",
+        "Any opponent may choose a creature you control.",
+        "Any player may choose a permanent you control.",
+        "Any other player may choose a permanent you control.",
+    ] {
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        assert!(
+            matches!(ir.clauses[0].parsed.effect, Effect::TargetOnly { .. }),
+            "{text}: the accepting-player choice must reach TargetOnly: {ir:#?}"
+        );
+        assert_eq!(
+            ir.clauses[0].declared_target_choice_timing, None,
+            "{text}: the producer declares nothing for a peeled accepting-player scope"
+        );
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert_eq!(
+            def.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "{text}"
+        );
+    }
+}
+
+/// SHAPE: a bare choice whose follow-up prints "target" but is bound to the chosen
+/// object keeps the timing it had before the producer existed (CR 601.2c). The
+/// anaphora rewrite collapses Crush Underfoot's printed "target creature" into the
+/// chosen object, so moving the Giant choice to resolution would remove the last
+/// announcement slot (upstream issue #10688 tracks the binding). Printed card:
+/// Crush Underfoot. A follow-up that prints "target" but lowers to `Unimplemented`
+/// is treated alike. Printed card: Guard Dogs. The reach guards pin the shapes the
+/// rule keys on; the matched controls keep `Resolution` where the printed target
+/// retains its own slot (a typed "target creature you don't control" recipient, or
+/// a "Target creature" effect that does not read the chosen object).
+#[test]
+fn bare_choose_feeding_a_printed_target_through_the_chosen_object_keeps_stack_timing() {
+    let parsed = parse_oracle_text(
+        "Choose a Giant creature you control. It deals damage equal to its power to target creature.",
+        "Crush Underfoot",
+        &[],
+        &["Kindred".to_string(), "Instant".to_string()],
+        &["Giant".to_string()],
+    );
+    let head = &parsed.abilities[0];
+    assert!(
+        matches!(head.effect.as_ref(), Effect::TargetOnly { .. }),
+        "Crush Underfoot must reach the bare-choice producer: {head:#?}"
+    );
+    let damage = head
+        .sub_ability
+        .as_deref()
+        .expect("Crush Underfoot's damage instruction");
+    assert!(
+        matches!(
+            damage.effect.as_ref(),
+            Effect::DealDamage {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "reach guard: the rewrite must bind the printed recipient to the chosen object: {damage:#?}"
+    );
+    assert_eq!(
+        head.target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "the Giant choice must stay announced at cast"
+    );
+
+    // Guard Dogs prints "target creature" in a clause the parser leaves
+    // `Unimplemented`, which has no announcement slot either, so the choice that
+    // clause reads ("that permanent") keeps its stack-time timing as well.
+    let parsed = parse_oracle_text(
+        "{2}{W}, {T}: Choose a permanent you control. Prevent all combat damage target creature would deal this turn if it shares a color with that permanent.",
+        "Guard Dogs",
+        &[],
+        &["Creature".to_string()],
+        &["Dog".to_string()],
+    );
+    let head = &parsed.abilities[0];
+    assert!(
+        matches!(head.effect.as_ref(), Effect::TargetOnly { .. }),
+        "Guard Dogs must reach the bare-choice producer: {head:#?}"
+    );
+    assert!(
+        matches!(
+            head.sub_ability.as_deref().map(|sub| sub.effect.as_ref()),
+            Some(Effect::Unimplemented { .. })
+        ),
+        "reach guard: the printed-target prevention clause stays unimplemented: {head:#?}"
+    );
+    assert_eq!(head.target_choice_timing, TargetChoiceTiming::Stack);
+
+    // The withheld choice is the printed target's antecedent, not every earlier
+    // choice: the first choice only feeds the indestructible grant and keeps
+    // `Resolution`; the second feeds the rebound "target creature" and keeps
+    // `Stack`. Synthetic chain of Final Showdown's mode and Crush Underfoot.
+    let text = "Choose a creature you control. It gains indestructible until end of turn. Choose a Giant creature you control. It deals damage equal to its power to target creature.";
+    let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+    let declared: Vec<_> = ir
+        .clauses
+        .iter()
+        .filter(|clause| matches!(clause.parsed.effect, Effect::TargetOnly { .. }))
+        .map(|clause| clause.declared_target_choice_timing)
+        .collect();
+    assert_eq!(
+        declared,
+        vec![Some(TargetChoiceTiming::Resolution), None],
+        "{text}: choice A keeps its declaration, choice B (the printed target's antecedent) loses it"
+    );
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert_eq!(
+        target_only_chain_timings(&def),
+        vec![TargetChoiceTiming::Resolution, TargetChoiceTiming::Stack],
+        "{text}: {def:#?}"
+    );
+
+    // A later instruction that prints "target" and reads the chosen object through
+    // a fight's subject, or an exchange's first side, needs the choice announced
+    // too: the engine recovers both fighters from the announced root slots.
+    // Synthetic Oracle; the nearest printed Fight shape with a chosen object is
+    // Crush Underfoot's damage, and the nearest printed exchange is Daring Thief.
+    for (text, reads) in [
+        (
+            "Choose a creature you control. It fights target creature you don't control.",
+            "Fight",
+        ),
+        (
+            "Choose a creature you control, then it fights target creature.",
+            "Fight",
+        ),
+        (
+            "Choose a creature you control. Exchange control of it and target creature an opponent controls.",
+            "ExchangeControl",
+        ),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let consumer = def.sub_ability.as_deref().expect("the consumer clause");
+        assert!(
+            matches!(
+                (reads, consumer.effect.as_ref()),
+                (
+                    "Fight",
+                    Effect::Fight {
+                        subject: TargetFilter::ParentTarget,
+                        ..
+                    }
+                ) | (
+                    "ExchangeControl",
+                    Effect::ExchangeControl {
+                        target_a: TargetFilter::ParentTarget,
+                        ..
+                    }
+                )
+            ),
+            "{text}: reach guard for the consumer reading the choice: {def:#?}"
+        );
+        assert_eq!(
+            def.target_choice_timing,
+            TargetChoiceTiming::Stack,
+            "{text}: the choice stays announced"
+        );
+    }
+
+    // A reader of the chain's announced root slots (a fight; a delayed trigger not
+    // bound to a tracked set, in a chain that announces a printed target) withholds
+    // every earlier bare choice, whichever clause prints the "target" word.
+    // Synthetic Oracle; the nearest printed chains are Crush Underfoot and the
+    // delayed "Sacrifice it at the beginning of the next end step" riders.
+    for text in [
+        "Choose a creature you control. Tap target creature. It fights that creature.",
+        "Choose a creature you control. Choose target creature you don't control. Those creatures fight each other.",
+        "Choose a creature you control. Untap it. Sacrifice it at the beginning of the next end step. Target creature gets +1/+1 until end of turn.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let timings = target_only_chain_timings(&def);
+        assert!(
+            timings.contains(&TargetChoiceTiming::Stack)
+                && !timings.contains(&TargetChoiceTiming::Resolution),
+            "{text}: every bare choice stays announced: {timings:?}: {def:#?}"
+        );
+    }
+    // Controls: with no printed target the delayed trigger reads nothing the choice
+    // must occupy a slot for, so the choice resolves at resolution.
+    let text = "Choose a creature you control. Untap it. Sacrifice it at the beginning of the next end step.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert_eq!(
+        target_only_chain_timings(&def),
+        vec![TargetChoiceTiming::Resolution],
+        "{text}: {def:#?}"
+    );
+
+    // An intervening announced target is the rebound printed target's antecedent,
+    // not the earlier choice, which keeps `Resolution`. Synthetic.
+    let text = "Choose a creature you control. Destroy target artifact. It deals damage equal to its power to target creature.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let damage = std::iter::successors(Some(&def), |node| node.sub_ability.as_deref())
+        .find(|node| matches!(node.effect.as_ref(), Effect::DealDamage { .. }))
+        .expect("the damage instruction");
+    assert!(
+        matches!(
+            damage.effect.as_ref(),
+            Effect::DealDamage {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "{text}: reach guard for the rebound printed target: {def:#?}"
+    );
+    assert_eq!(
+        target_only_chain_timings(&def),
+        vec![TargetChoiceTiming::Resolution],
+        "{text}"
+    );
+
+    // An intervening player target names no object (CR 109.1), so the walk
+    // reaches the earlier choice and withholds it. Synthetic: Guard Dogs' text
+    // with "Target player draws a card." interposed.
+    let text = "Choose a permanent you control. Target player draws a card. Prevent all combat damage target creature would deal this turn if it shares a color with that permanent.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        std::iter::successors(Some(&def), |node| node.sub_ability.as_deref())
+            .any(|node| matches!(node.effect.as_ref(), Effect::Draw { .. })),
+        "{text}: reach guard for the interposed player draw: {def:#?}"
+    );
+    assert_eq!(
+        target_only_chain_timings(&def),
+        vec![TargetChoiceTiming::Stack],
+        "{text}: {def:#?}"
+    );
+
+    // A player-only declaration is a `TargetOnly` too and names no object either
+    // (CR 109.1). Synthetic: Guard Dogs' text with Thought-Stalker Warlock's
+    // printed "choose target opponent" interposed.
+    let text = "Choose a permanent you control. Choose target opponent. Prevent all combat damage target creature would deal this turn if it shares a color with that permanent.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let player_declaration = def
+        .sub_ability
+        .as_deref()
+        .expect("the interposed player declaration");
+    assert!(
+        matches!(
+            player_declaration.effect.as_ref(),
+            Effect::TargetOnly { target } if target.denotes_player_target()
+        ),
+        "{text}: reach guard for the interposed player-only TargetOnly: {def:#?}"
+    );
+    assert!(
+        matches!(def.effect.as_ref(), Effect::TargetOnly { target } if !target.denotes_player_target()),
+        "{text}: reach guard for the bare permanent choice: {def:#?}"
+    );
+    assert_eq!(
+        def.target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "{text}: the permanent choice is withheld: {def:#?}"
+    );
+
+    // Predicate-bearing player filters name no object either: a qualified
+    // player-only declaration and a qualified player subject. Synthetic.
+    for text in [
+        "Choose a permanent you control. Choose target player with the most life. Prevent all combat damage target creature would deal this turn if it shares a color with that permanent.",
+        "Choose a permanent you control. The player with the most life draws a card. Prevent all combat damage target creature would deal this turn if it shares a color with that permanent.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let interposed = def.sub_ability.as_deref().expect("the interposed clause");
+        assert!(
+            interposed
+                .effect
+                .target_filter()
+                .is_some_and(|filter| matches!(filter, TargetFilter::PlayerMatching { .. })),
+            "{text}: reach guard for the predicate-bearing player filter: {def:#?}"
+        );
+        assert_eq!(
+            def.target_choice_timing,
+            TargetChoiceTiming::Stack,
+            "{text}: the permanent choice is withheld: {def:#?}"
+        );
+    }
+
+    // A compound continuation's choice is an antecedent too ("... and choose a
+    // creature you control."), and keeps the `Stack` it lowered to before the
+    // producer existed when the next sentence's printed target is rebound to it.
+    // Synthetic: Crush Underfoot's follow-up after a compound choice.
+    let text = "Exile all graveyards and choose a creature you control. It deals damage equal to its power to target creature.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let choice = def
+        .sub_ability
+        .as_deref()
+        .expect("the compound continuation");
+    assert!(
+        matches!(choice.effect.as_ref(), Effect::TargetOnly { .. }),
+        "{text}: reach guard for the compound choice: {def:#?}"
+    );
+    assert!(
+        matches!(
+            choice
+                .sub_ability
+                .as_deref()
+                .map(|damage| damage.effect.as_ref()),
+            Some(Effect::DealDamage {
+                target: TargetFilter::ParentTarget,
+                ..
+            })
+        ),
+        "{text}: reach guard for the rebound printed target: {def:#?}"
+    );
+    assert_eq!(
+        choice.target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "{text}"
+    );
+    let control = "Exile all graveyards and choose a creature you control. It gains indestructible until end of turn.";
+    let def = parse_effect_chain(control, AbilityKind::Spell);
+    assert_eq!(
+        target_only_chain_timings(&def),
+        vec![TargetChoiceTiming::Resolution],
+        "{control}: with no printed target after it the compound choice resolves"
+    );
+
+    for text in [
+        "Choose a creature you control. It deals damage equal to its power to target creature you don't control.",
+        "Choose a creature you control. Target creature gets +1/+1 until end of turn.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(def.effect.as_ref(), Effect::TargetOnly { .. }),
+            "{text}: control must reach the bare-choice producer: {def:#?}"
+        );
+        assert_eq!(
+            def.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "{text}: the printed target keeps its own announcement slot"
+        );
+    }
+}
+
+/// SHAPE: the printed-target withhold applies to the bare object choice only. The
+/// object-and-player producer has always declared `Resolution`, and a later clause
+/// whose printed "target" is bound to its chosen object or left unimplemented
+/// leaves that declaration as it was (the value is pinned as the unchanged
+/// baseline, not as a rules claim). Synthetic Oracle: Risky Move's "choose a
+/// creature you control and an opponent" followed by Crush Underfoot's and Guard
+/// Dogs' printed-target follow-ups; no printed card combines them. The reach guards
+/// pin the follow-up shapes the withhold keys on.
+#[test]
+fn compound_choice_object_and_player_keeps_resolution_before_printed_target_followup() {
+    for text in [
+        "Choose a creature you control and an opponent. It deals damage equal to its power to target creature.",
+        "Choose a creature you control and an opponent. Prevent all combat damage target creature would deal this turn if it shares a color with that creature.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(def.effect.as_ref(), Effect::TargetOnly { .. }),
+            "{text}: the object-and-player head: {def:#?}"
+        );
+        let player_choice = def.sub_ability.as_deref().expect("the player choice");
+        assert!(
+            matches!(player_choice.effect.as_ref(), Effect::Choose { .. }),
+            "{text}: the chained player choice: {def:#?}"
+        );
+        let followup = player_choice
+            .sub_ability
+            .as_deref()
+            .expect("the printed-target follow-up");
+        assert!(
+            matches!(
+                followup.effect.as_ref(),
+                Effect::DealDamage {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                } | Effect::Unimplemented { .. }
+            ),
+            "{text}: reach guard for the withhold's follow-up shape: {followup:#?}"
+        );
+        assert_eq!(
+            def.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "{text}: the object-and-player producer's declaration stands"
+        );
+    }
+}
+
+/// SHAPE: the resolution chooser enumerates battlefield permanents only, so a bare
+/// choice of a card in another zone ("a creature card you control in exile") keeps
+/// the announced pick it had before the producer existed (CR 608.2d: the choice
+/// must be one the engine can offer). Synthetic Oracle: the printed analogues say
+/// "you own" and stay unimplemented. The control is the battlefield choice.
+#[test]
+fn bare_choose_in_another_zone_keeps_base_timing() {
+    for text in [
+        "Choose a creature card you control in exile. Put it onto the battlefield.",
+        "Choose an artifact card you control in a graveyard. Return it to the battlefield.",
+        "Choose a card you control in exile.",
+    ] {
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        assert!(
+            matches!(ir.clauses[0].parsed.effect, Effect::TargetOnly { .. }),
+            "{text}: reach guard for the bare choice: {ir:#?}"
+        );
+        assert_eq!(
+            ir.clauses[0].declared_target_choice_timing, None,
+            "{text}: a non-battlefield choice declares nothing"
+        );
+    }
+    let control = parse_effect_chain("Choose a creature you control.", AbilityKind::Spell);
+    assert_eq!(control.target_choice_timing, TargetChoiceTiming::Resolution);
+}
+
+/// SHAPE: the bare-choice stamp must not change how later clauses lower. While the
+/// chunk loop lowers later chunks, a pending `Resolution` stamp would turn the
+/// declared-slot registry `Indeterminate` (a slot-indexed attachment read fails
+/// closed) and strict-fail a keyword-anaphor condition. Both read as `Stack`
+/// there, so each later clause lowers as before the producer existed, and the
+/// choice then stays announced because a later clause reads a declared slot or the
+/// announced pick. Synthetic Oracle: the Crush Underfoot damage plus an Aura tail,
+/// a keyword-anaphor condition ("If it has flying"), and the die-exile rider
+/// (Fiery Annihilation's shape).
+#[test]
+fn bare_choose_does_not_change_how_later_clauses_lower() {
+    fn nodes(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+        std::iter::successors(Some(def), |node| node.sub_ability.as_deref()).collect()
+    }
+    // Each row names the serialized markers of the later instruction it protects,
+    // so a row cannot pass with that instruction dropped.
+    let aura_tail = ["\"DestroyAll\"", "\"DeclaredTarget\""];
+    let keyword_condition = ["\"TargetMatchesFilter\""];
+    let die_exile_rider = ["\"AddTargetReplacement\"", "\"ParentTargetSlot\""];
+    let rows: [(&str, Vec<&str>); 8] = [
+        (
+            "Choose a Giant creature you control. It deals damage equal to its power to target creature. Destroy up to two Auras attached to that creature.",
+            aura_tail.to_vec(),
+        ),
+        (
+            "Choose an artifact you control. Tap target creature. Destroy up to two Auras attached to that creature.",
+            aura_tail.to_vec(),
+        ),
+        (
+            "Choose a creature you control. If it has flying, draw a card.",
+            [keyword_condition.as_slice(), &["\"Draw\""]].concat(),
+        ),
+        (
+            "Choose a creature you control. If it has flying, it gains haste until end of turn.",
+            [keyword_condition.as_slice(), &["\"Haste\""]].concat(),
+        ),
+        (
+            "Choose an artifact you control. This spell deals 5 damage to target creature. Exile up to one target Equipment attached to that creature. If that creature would die this turn, exile it instead.",
+            [die_exile_rider.as_slice(), &["\"DeclaredTarget\"", "\"Equipment\""]].concat(),
+        ),
+        (
+            "Choose a creature you control. Exile target artifact. If that creature would die this turn, exile it instead.",
+            die_exile_rider.to_vec(),
+        ),
+        (
+            "Choose a creature you control. Destroy target artifact. If that creature would die this turn, exile it instead.",
+            die_exile_rider.to_vec(),
+        ),
+        (
+            "Choose a creature you control. Target player loses 2 life. If that creature would die this turn, exile it instead.",
+            die_exile_rider.to_vec(),
+        ),
+    ];
+    for (text, markers) in rows {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            !nodes(&def)
+                .iter()
+                .any(|node| matches!(node.effect.as_ref(), Effect::Unimplemented { .. })),
+            "{text}: every later clause lowers supported: {def:#?}"
+        );
+        let json = serde_json::to_string(&def).expect("the definition serializes");
+        for marker in markers {
+            assert!(
+                json.contains(marker),
+                "{text}: the later instruction must survive with {marker}: {def:#?}"
+            );
+        }
+        assert_eq!(
+            target_only_chain_timings(&def),
+            vec![TargetChoiceTiming::Stack],
+            "{text}: the choice stays announced: {def:#?}"
+        );
+    }
+    // The control: nothing later reads a declared slot or the announced pick.
+    let control = parse_effect_chain(
+        "Choose a creature you control. It gains indestructible until end of turn.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(control.target_choice_timing, TargetChoiceTiming::Resolution);
+}
+
+/// SHAPE: a filter that reads an earlier object ("that shares a creature type with
+/// it") is enumerated against the slots declared as the spell is cast, so a
+/// resolution-time choice cannot supply the object it reads (CR 601.2c). Both
+/// directions keep base timing: a printed target whose filter reads the chosen
+/// object ("Exile target creature that shares a creature type with it") keeps the
+/// choice announced, and a bare choice whose own filter reads an earlier object
+/// does not declare `Resolution`. The control is a later printed target that reads
+/// nothing. Synthetic Oracle; the nearest printed filter that reads a prior target
+/// is Daring Thief's "target permanent an opponent controls that shares a card type with it".
+#[test]
+fn bare_choose_reading_a_prior_object_keeps_base_timing() {
+    for text in [
+        "Choose a creature you control. Exile target creature that shares a creature type with it.",
+        "Choose a creature you control. Exile target permanent that shares a card type with it.",
+        "Choose a creature you control, then exile target creature that shares a creature type with it.",
+        "Destroy target creature. Choose a creature you control that shares a creature type with it.",
+        "Choose a creature you control. Choose a creature you control that shares a color with it.",
+        "Exile target creature. Choose a creature you control with the same name as that creature.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let timings = target_only_chain_timings(&def);
+        assert!(
+            !timings.is_empty() && timings.iter().all(|timing| *timing == TargetChoiceTiming::Stack),
+            "{text}: every bare choice stays announced: {timings:?}: {def:#?}"
+        );
+    }
+    let control = parse_effect_chain(
+        "Choose a creature you control. Exile target creature.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(control.target_choice_timing, TargetChoiceTiming::Resolution);
+}
+
+/// SHAPE: a bare choice repeated once per opponent keeps the timing it had before
+/// the producer existed (`Stack`): no printed card repeats one, and the
+/// resolution-time prompt's resume through the repeat loop is not exercised. The
+/// reach guard pins the repeat; the control is the same choice not repeated.
+/// Synthetic Oracle; no printed card repeats a bare choice per opponent.
+#[test]
+fn bare_choose_repeated_per_opponent_keeps_base_timing() {
+    let text = "For each opponent, choose a creature you control.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        matches!(def.effect.as_ref(), Effect::TargetOnly { .. }) && def.repeat_for.is_some(),
+        "{text}: reach guard for the repeated bare choice: {def:#?}"
+    );
+    assert_eq!(
+        def.target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "{text}"
+    );
+    // A compound continuation's choice repeats with its clause and keeps its base
+    // timing too.
+    let text = "For each opponent, exile all graveyards and choose a creature you control.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        def.repeat_for.is_some(),
+        "{text}: reach guard for the repeat: {def:#?}"
+    );
+    assert_eq!(
+        target_only_chain_timings(&def),
+        vec![TargetChoiceTiming::Stack],
+        "{text}: {def:#?}"
+    );
+    // The object-and-player choice is not a bare choice: it keeps the `Resolution`
+    // its producer has always declared, repeated or not, at the head and as a
+    // compound continuation (Risky Move's "choose a creature you control and an
+    // opponent"). Synthetic repeats.
+    for text in [
+        "For each opponent, choose a creature you control and an opponent.",
+        "For each opponent, destroy target artifact and choose a creature you control and an opponent.",
+    ] {
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        assert!(
+            ir.clauses.iter().any(|clause| clause.repeat_for.is_some()),
+            "{text}: reach guard for the repeat: {ir:#?}"
+        );
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert_eq!(
+            target_only_chain_timings(&def),
+            vec![TargetChoiceTiming::Resolution],
+            "{text}: {def:#?}"
+        );
+    }
+    let control = parse_effect_chain("Choose a creature you control.", AbilityKind::Spell);
+    assert_eq!(control.target_choice_timing, TargetChoiceTiming::Resolution);
+}
+
+/// SHAPE: the controller's object-and-player choice keeps Resolution under the same
+/// chain shape (the matched control of
+/// `compound_choice_inherited_non_controller_subject_object_and_player_keeps_base_resolution_timing`).
+/// Synthetic chain of Risky Move's "choose a creature you control and an opponent".
+#[test]
+fn compound_choice_controller_object_and_player_chain_keeps_resolution_timing() {
+    let text = "Draw a card, then choose a creature you control and an opponent.";
+    let (declared, chain) = head_then_choice_timings(text, &TargetFilter::Controller);
+    assert_eq!(declared, Some(TargetChoiceTiming::Resolution), "{text}");
+    assert_eq!(chain, vec![TargetChoiceTiming::Resolution], "{text}");
+}
+
+/// SHAPE: a bare choice moves to resolution only when no other bare choice of its
+/// chain stays a cast-time pick: the choices are made in the order written (CR
+/// 608.2c), and moving only one of them would reorder them. Another player's bare
+/// choice stays at cast because `TargetOnly` cannot prompt that player as the
+/// effect is applied, so the controller's choice beside it keeps the `Stack` timing
+/// it had before the producer existed (pinned as the unchanged baseline, not as a
+/// rules claim). Printed cards: Sculpted Sunburst, whose opponents' choice depends
+/// on the controller's ("with equal or lesser power"), and Tunnel of Love. The
+/// matched control is a synthetic chain of two controller choices (Final
+/// Showdown's mode twice), which both move.
+#[test]
+fn bare_choose_beside_a_cast_time_choice_keeps_base_timing() {
+    let sunburst = parse_card(
+        "Choose a creature you control, then each opponent chooses a creature they control with equal or lesser power. If you chose a creature this way, exile each creature not chosen by any player this way.",
+        "Sculpted Sunburst",
+        &[],
+        &["Sorcery"],
+    );
+    let head = &sunburst.abilities[0];
+    let opponents = head
+        .sub_ability
+        .as_deref()
+        .expect("Sculpted Sunburst: the opponents' choice follows the controller's");
+    assert!(
+        matches!(
+            (head.effect.as_ref(), opponents.effect.as_ref()),
+            (Effect::TargetOnly { .. }, Effect::TargetOnly { .. })
+        ),
+        "Sculpted Sunburst: reach guard for the two bare choices: {head:#?}"
+    );
+    assert_eq!(
+        (head.target_choice_timing, opponents.target_choice_timing),
+        (TargetChoiceTiming::Stack, TargetChoiceTiming::Stack),
+        "Sculpted Sunburst: the controller's choice is not moved past the opponents'"
+    );
+
+    // The Visit-trigger gate requires the Attraction subtype.
+    let tunnel = parse_oracle_text(
+        "Visit — Choose an opponent. They choose a creature they control, then you choose a creature you control. You may exile the chosen creatures. If you do, return them to the battlefield under their owners' control at the beginning of the next end step. Otherwise, the chosen creatures fight each other.",
+        "Tunnel of Love",
+        &[],
+        &["Artifact".to_string()],
+        &["Attraction".to_string()],
+    );
+    let opponent_choice = tunnel.triggers[0]
+        .execute
+        .as_deref()
+        .and_then(|execute| execute.sub_ability.as_deref())
+        .expect("Tunnel of Love: the opponent's choice must follow 'Choose an opponent'");
+    let own_choice = opponent_choice
+        .sub_ability
+        .as_deref()
+        .expect("Tunnel of Love: the controller's choice must follow the opponent's");
+    assert!(
+        matches!(
+            (opponent_choice.effect.as_ref(), own_choice.effect.as_ref()),
+            (Effect::TargetOnly { .. }, Effect::TargetOnly { .. })
+        ),
+        "Tunnel of Love: reach guard for the two bare choices: {opponent_choice:#?}"
+    );
+    assert_eq!(
+        (
+            opponent_choice.target_choice_timing,
+            own_choice.target_choice_timing
+        ),
+        (TargetChoiceTiming::Stack, TargetChoiceTiming::Stack),
+        "Tunnel of Love: both choices keep their base timing"
+    );
+
+    // Another player's choice whose clause prints "target" only for that player
+    // ("Target opponent chooses ...") is a cast-time pick too, and holds the chain
+    // in either order. Synthetic Oracle; the nearest printed card is Sakashima's
+    // Will, mode 1 ("Target opponent chooses a creature they control. You gain
+    // control of it.").
+    for text in [
+        "Choose a creature you control. Target opponent chooses a creature they control.",
+        "Choose a creature you control, then target opponent chooses a creature you control.",
+        "Target opponent chooses a creature you control, then you choose a creature you control.",
+        "Choose a creature you control. If you do, target opponent chooses a creature you control.",
+        "Choose a creature you control. When you do, target opponent chooses a creature you control.",
+        "Choose a creature you control. If you control a Giant, target opponent chooses a creature you control.",
+        "Choose a creature you control. If you do, target player chooses a creature you control.",
+        "Choose a Goblin you control. If you do, then target opponent chooses a creature you control.",
+        "Choose a Goblin you control. If you control a Goblin, an Elf, or a Warrior, target opponent chooses a creature you control.",
+        "Choose a Goblin you control. If you control a creature, then target player chooses a creature you control.",
+        "Choose a Goblin you control. When you do, then target opponent chooses a creature you control.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert_eq!(
+            target_only_chain_timings(&def),
+            vec![TargetChoiceTiming::Stack, TargetChoiceTiming::Stack],
+            "{text}: both choices keep their base timing: {def:#?}"
+        );
+    }
+
+    let control = "Choose a creature you control. It gains indestructible until end of turn. Choose a creature you control. It gains flying until end of turn.";
+    let def = parse_effect_chain(control, AbilityKind::Spell);
+    assert_eq!(
+        target_only_chain_timings(&def),
+        vec![
+            TargetChoiceTiming::Resolution,
+            TargetChoiceTiming::Resolution
+        ],
+        "{control}"
+    );
+}
+
+/// SHAPE: Log Flume's printed Visit choice cannot enter the single-object chooser.
+#[test]
+fn bare_choose_stripped_quantifier_does_not_declare_resolution_timing() {
+    let text = "choose a creature you control";
+    let mut ctx = ParseContext::default();
+    assert!(
+        matches!(
+            super::imperative::parse_choose_ast(text, text, &mut ctx),
+            Some(ChooseImperativeAst::TargetOnly { .. })
+        ),
+        "the default-context control must reach the TargetOnly producer"
+    );
+    assert_eq!(
+        ctx.declared_target_choice_timing,
+        Some(TargetChoiceTiming::Resolution),
+        "an unstripped singular choice must declare resolution timing"
+    );
+
+    let target = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+    let log_flume = "Choose up to four creatures you control.";
+    let final_showdown = "Choose a creature you control.";
+    // Reach guard only; count-preserving resolution-time selection remains unsupported.
+    let ir = parse_effect_chain_ir(log_flume, AbilityKind::Spell, &mut ParseContext::default());
+    assert!(
+        matches!(ir.clauses[0].parsed.effect, Effect::TargetOnly { .. }),
+        "Log Flume's quantified head must reach TargetOnly: {:#?}",
+        ir.clauses[0].parsed.effect
+    );
+    assert_eq!(ir.clauses[0].declared_target_choice_timing, None);
+
+    // Synthetic Oracle: no printed card chains Log Flume's choice before Final
+    // Showdown's. The quantified head stays an undeclared cast-time pick, so the
+    // later singular choice keeps its base timing too rather than being made after
+    // a choice printed after it (CR 608.2c; see
+    // `bare_choose_beside_a_cast_time_choice_keeps_base_timing`).
+    let chain = format!("{log_flume} {final_showdown}");
+    let ir = parse_effect_chain_ir(&chain, AbilityKind::Spell, &mut ParseContext::default());
+    assert_eq!(ir.clauses.len(), 2);
+    assert!(
+        matches!(ir.clauses[0].parsed.effect, Effect::TargetOnly { .. }),
+        "Log Flume's chained quantified head must reach TargetOnly: {:#?}",
+        ir.clauses[0].parsed.effect
+    );
+    assert_eq!(ir.clauses[0].declared_target_choice_timing, None);
+    assert_eq!(ir.clauses[1].parsed.effect, Effect::TargetOnly { target });
+    assert_eq!(ir.clauses[1].declared_target_choice_timing, None);
+}
+
+/// SHAPE: an exact-count choice cannot enter the single-object chooser.
+#[test]
+fn bare_choose_exact_count_does_not_declare_resolution_timing() {
+    let ir = parse_effect_chain_ir(
+        "Choose a permanent you control.",
+        AbilityKind::Spell,
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(ir.clauses[0].parsed.effect, Effect::TargetOnly { .. }),
+        "the singular permanent control must reach TargetOnly: {:#?}",
+        ir.clauses[0].parsed.effect
+    );
+    assert_eq!(
+        ir.clauses[0].declared_target_choice_timing,
+        Some(TargetChoiceTiming::Resolution),
+        "the singular permanent control must declare resolution timing"
+    );
+
+    let clarion = "Choose five permanents you control. For each of those permanents, you may search your library for a card with the same name as that permanent. Put those cards onto the battlefield tapped, then shuffle.";
+    // Reach guard only; count-preserving resolution-time selection remains unsupported.
+    let ir = parse_effect_chain_ir(clarion, AbilityKind::Spell, &mut ParseContext::default());
+    assert!(
+        matches!(ir.clauses[0].parsed.effect, Effect::TargetOnly { .. }),
+        "Clarion Ultimatum's quantified head must reach TargetOnly: {:#?}",
+        ir.clauses[0].parsed.effect
+    );
+    assert_eq!(ir.clauses[0].declared_target_choice_timing, None);
+}
+
+/// SHAPE: a random object selection must not enter the controller-choice path.
+/// Synthetic Oracle: no printed card chooses "a creature you control at random";
+/// the nearest printed card is Last One Standing ("Choose a creature at random,
+/// then destroy the rest.").
+#[test]
+fn bare_choose_random_object_keeps_stack_timing() {
+    let def = parse_effect_chain(
+        "Choose a creature you control at random.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        def.effect.as_ref(),
+        &Effect::TargetOnly {
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        }
+    );
+    assert_eq!(def.target_selection_mode, TargetSelectionMode::Random);
+    assert_eq!(def.target_choice_timing, TargetChoiceTiming::Stack);
 }
 
 /// Keep the coin-branch representation in one helper for the FlipCoins rebase.
@@ -98901,6 +100622,51 @@ fn fused_subject_look_exile_preserves_or_rejects_the_complete_instruction() {
         }),
         "the public chain must retain the honest gap, not fall back to Dig: {unsupported:?}"
     );
+}
+
+/// CR 601.2c: a printed target whose filter binds a prior target is enumerated
+/// against the first object slot declared before it. SYNTHETIC texts (the printed
+/// filter-class analogue is Daring Thief, "target permanent an opponent controls
+/// that shares a card type with it"). With an announced object target between the
+/// bare choice and the dependent target, the choice must stay announced, as on
+/// the merge base; an unrelated later target leaves the choice at resolution.
+#[test]
+fn bare_choose_read_by_a_first_slot_filter_past_another_target_keeps_stack_timing() {
+    for (text, expected) in [
+        (
+            "Choose a creature you control. Tap target artifact. Exile target creature that shares a creature type with that creature.",
+            TargetChoiceTiming::Stack,
+        ),
+        (
+            "Choose a creature you control. Tap target artifact. Exile target creature that shares a creature type with it.",
+            TargetChoiceTiming::Stack,
+        ),
+        // Control: the later targets read nothing earlier.
+        (
+            "Choose a creature you control. Tap target artifact. Exile target creature.",
+            TargetChoiceTiming::Resolution,
+        ),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let reads_prior_target = std::iter::successors(Some(&def), |node| {
+            node.sub_ability.as_deref()
+        })
+        .any(|node| {
+            node.effect
+                .target_filter()
+                .is_some_and(crate::types::ability::target_filter_binds_prior_target)
+        });
+        assert_eq!(
+            reads_prior_target,
+            expected == TargetChoiceTiming::Stack,
+            "{text}: reach guard on the dependent filter: {def:#?}"
+        );
+        assert_eq!(
+            target_only_chain_timings(&def),
+            vec![expected],
+            "{text}: {def:#?}"
+        );
+    }
 }
 
 /// CR 115.1c + CR 115.1d: an exact count before "other target" ("Untap two

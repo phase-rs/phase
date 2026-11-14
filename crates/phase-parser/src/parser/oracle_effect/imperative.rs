@@ -4976,6 +4976,12 @@ fn try_parse_choose_object_and_player(
     if min != 1 || max != Some(1) {
         return None;
     }
+    // CR 608.2d + CR 115.10a: the object and player are chosen while the effect is
+    // applied. Declared for every subject, exactly as before the bare-choice
+    // timing change: a non-controller subject's choice is still prompted to the
+    // controller by TargetOnly's resolution chooser (an existing third-party
+    // chooser limitation), and this producer deliberately leaves that behavior
+    // unchanged rather than moving it.
     choice_ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Resolution);
     choice_ctx.relative_player_scope = Some(ControllerRef::ChosenPlayer {
         index: choice_ctx.chosen_player_count,
@@ -5005,6 +5011,16 @@ pub(super) fn is_standalone_object_choice_clause(fragment: &str) -> bool {
     let rest_lower = &lower[lower.len() - rest.len()..];
     let mut throwaway = ParseContext::default();
     parse_battlefield_object_choice_core(rest, rest_lower, &mut throwaway).is_some()
+}
+
+fn is_you_controlled_target(target: &TargetFilter) -> bool {
+    matches!(
+        target,
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            ..
+        })
+    )
 }
 
 pub(super) fn parse_choose_ast(
@@ -5176,6 +5192,39 @@ pub(super) fn parse_choose_ast(
                         && filter.properties.is_empty())
             {
                 return None;
+            }
+            // CR 115.10a + CR 608.2d: a fully parsed, untargeted singular
+            // "a/an <object> you control" declares Resolution here, at any chain
+            // position. Stripped optional quantifiers and exact counts fail the
+            // a/an gate. Peeled actor scopes and random selections are not
+            // controller choices. The engine's TargetOnly exemption in
+            // `defers_conditional_target_selection` keeps later announced targets.
+            // A peeled opponent-may scope is not a controller choice and declares
+            // nothing here, so the accepting-player timing fallback keeps the
+            // timing it had before this producer existed.
+            if ctx.clause_opponent_may_scope.is_none()
+                && remainder.trim().is_empty()
+                && nom_primitives::parse_article(rest_lower.trim_start()).is_ok()
+                && ctx.target_selection_mode == TargetSelectionMode::Chosen
+                && ctx.clause_player_scope.is_none()
+                && ctx.clause_subject_chooser.is_none()
+                && !nom_primitives::scan_contains(rest_lower, "target ")
+                && is_you_controlled_target(&target)
+                && !target.is_context_ref()
+                && !target.denotes_player_target()
+                // A filter that reads an earlier object ("that shares a creature
+                // type with it") is enumerated against the slots declared at cast,
+                // and a resolution-time choice has none to read.
+                && !super::filter_reads_earlier_object(&target)
+                // The resolution chooser enumerates battlefield permanents only,
+                // so a card in another zone ("a creature card you control in
+                // exile") keeps its announced pick.
+                && target
+                    .extract_zones()
+                    .iter()
+                    .all(|zone| *zone == Zone::Battlefield)
+            {
+                ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Resolution);
             }
             return Some(ChooseImperativeAst::TargetOnly { target });
         }
