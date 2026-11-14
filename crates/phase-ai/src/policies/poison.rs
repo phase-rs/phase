@@ -77,7 +77,7 @@ pub struct PoisonClockPolicy;
 
 /// One poison clock a candidate advances (CR 810.10: teammates share one), the seat that opened
 /// it, the counters credited to it, and whether those counters may claim lethal.
-/// Every reading of a pool (lethal, pressure, choice) goes through `left()`.
+/// Lethal, pressure and the closest-pool order all read `left()`.
 #[derive(Debug, Clone, PartialEq)]
 struct PoisonPool {
     seat: PlayerId,
