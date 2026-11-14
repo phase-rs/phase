@@ -4084,6 +4084,44 @@ describe("Limited companion support", () => {
       });
     });
 
+    it.each(["desktop", "phone-portrait"] as const)(
+      "offers no companion designation in the fixed-pool %s editor, whose submission cannot carry one",
+      async (responsiveLayout) => {
+        engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+        compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+        engineIsCardCompanion.mockClear();
+
+        render(
+          <LimitedDeckBuilder
+            local={{
+              view: { ...TEST_VIEW, pool: poolWithLurrus },
+              workspace: lurrusWorkspace("sideboard"),
+              preferences: createDefaultDraftWorkspacePreferences(),
+              interactionLocked: false,
+              capabilities: { kind: "fixed-pool" },
+              onWorkspaceChange: () => {},
+              onPreferencesChange: () => {},
+              onSubmitDeck: () => {},
+              // An earlier accepted designation must not surface a control either.
+              initialCompanion: "Lurrus of the Dream-Den",
+            }}
+            responsiveLayout={responsiveLayout}
+            showSuggestions={false}
+          />,
+        );
+
+        // Reach guard: the engine resolved Lurrus as a companion candidate, so the
+        // absence below is the editor's decision rather than an unresolved lookup.
+        await waitFor(() => expect(engineIsCardCompanion).toHaveBeenCalled());
+        await waitFor(() => {
+          expect(screen.queryByText("Companion")).not.toBeInTheDocument();
+        });
+        expect(screen.queryByRole("button", { name: "Lurrus of the Dream-Den" })).not.toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Remove companion" })).not.toBeInTheDocument();
+        expect(screen.queryByText("Companion requirement met")).not.toBeInTheDocument();
+      },
+    );
+
     it("exports the companion while a drafted copy sits outside the deck", async () => {
       engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
       compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());

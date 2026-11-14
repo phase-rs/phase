@@ -1387,6 +1387,10 @@ function WorkspaceDeckBuilder({
   } = controller;
   const editableController = isEditableWorkspaceController(controller) ? controller : null;
   const poolChangesEnabled = editableController !== null;
+  // CR 702.139a: a companion is designated at deck construction. The fixed-pool
+  // (between-games) editor submits only the main/sideboard partitions, so a
+  // designation made there could never reach the engine; it offers no control.
+  const companionDesignationEnabled = editableController !== null;
   const suggestionsEnabled = showSuggestions && editableController !== null
     && (editableController.capabilities?.suggestions ?? true);
 
@@ -1470,7 +1474,7 @@ function WorkspaceDeckBuilder({
   } = useLimitedCompanion({
     pool,
     mainDeckNames: deckNames,
-    initialCompanion: controller.initialCompanion,
+    initialCompanion: companionDesignationEnabled ? controller.initialCompanion : null,
     onCompanionSelect: handleCompanionSelectInWorkspace,
   });
   const effectiveFormat: GameFormat | null = commandersRequired > 0
@@ -1812,8 +1816,8 @@ function WorkspaceDeckBuilder({
         isCommanderEligible={isCommanderEligible}
         onSetCommander={handleSetCommander}
         onRemoveCommander={handleRemoveCommander}
-        companion={companion ?? undefined}
-        companionCandidates={companionCandidates}
+        companion={companionDesignationEnabled ? (companion ?? undefined) : undefined}
+        companionCandidates={companionDesignationEnabled ? companionCandidates : null}
         onSetCompanion={handleSetCompanion}
         onRemoveCompanion={handleRemoveCompanion}
         onCardHover={handleHover}
@@ -1829,7 +1833,7 @@ function WorkspaceDeckBuilder({
       )}
     </section>
   ) : null;
-  const companionControls = (!designationRequired && companionCandidates && companionCandidates.length > 0) ? (
+  const companionControls = (companionDesignationEnabled && !designationRequired && companionCandidates && companionCandidates.length > 0) ? (
     <LimitedCompanionPanel
       companion={companion}
       companionCandidates={companionCandidates}
