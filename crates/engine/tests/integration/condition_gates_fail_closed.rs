@@ -30,12 +30,16 @@ use engine::game::scenario::{GameRunner, GameScenario, Outcome, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::Effect;
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
+use engine::types::TargetRef;
+
+use super::support::{assert_damage_dealt, assert_no_damage_to};
 
 const BRONZE_HORSE: &str = "Trample\nAs long as you control another creature, prevent all damage that would be dealt to this creature by spells that target it.";
 
@@ -134,6 +138,16 @@ fn advance_to_declare_blockers(runner: &mut GameRunner) {
 
 /// Bolt the shielded creature; returns the damage marked on it.
 fn bolt_shielded(name: &str, oracle: &str, power: i32, toughness: i32) -> u32 {
+    let (outcome, shielded, _) = bolt_shielded_outcome(name, oracle, power, toughness);
+    outcome.damage_marked(shielded)
+}
+
+fn bolt_shielded_outcome(
+    name: &str,
+    oracle: &str,
+    power: i32,
+    toughness: i32,
+) -> (Outcome, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let shielded = scenario
@@ -142,11 +156,8 @@ fn bolt_shielded(name: &str, oracle: &str, power: i32, toughness: i32) -> u32 {
         .id();
     let bolt = scenario.add_bolt_to_hand(P0);
     let mut runner = scenario.build();
-    runner
-        .cast(bolt)
-        .target_object(shielded)
-        .resolve()
-        .damage_marked(shielded)
+    let outcome = runner.cast(bolt).target_object(shielded).resolve();
+    (outcome, shielded, bolt)
 }
 
 /// What attacks the shielded blocker.
@@ -166,24 +177,27 @@ fn shielded_blocks(
     toughness: i32,
     attacker: Attacker,
 ) -> u32 {
-    let (outcome, blocker) = shielded_block_outcome(name, oracle, power, toughness, attacker);
+    let (outcome, blocker, _) =
+        shielded_block_outcome(name, oracle, power, toughness, attacker, 2, 2);
     outcome.damage_marked(blocker)
 }
 
-/// The shielded creature blocks an attacking 2/2; returns the combat outcome
-/// and the blocker.
+/// The shielded creature blocks an attacker with the supplied stats; returns
+/// the combat outcome, blocker, and attacker.
 fn shielded_block_outcome(
     name: &str,
     oracle: &str,
     power: i32,
     toughness: i32,
     attacker: Attacker,
-) -> (Outcome, ObjectId) {
+    attacker_power: i32,
+    attacker_toughness: i32,
+) -> (Outcome, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Filler A"]);
     scenario.with_library_top(P1, &["Filler B"]);
-    let mut bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2);
+    let mut bear = scenario.add_creature(P0, "Grizzly Bears", attacker_power, attacker_toughness);
     if matches!(attacker, Attacker::ArtifactCreature) {
         bear.as_artifact_creature();
     }
@@ -217,7 +231,7 @@ fn shielded_block_outcome(
     runner
         .declare_blockers(&[(blocker, bear)])
         .expect("the shielded creature may block");
-    (runner.combat_damage(), blocker)
+    (runner.combat_damage(), blocker, bear)
 }
 
 /// CR 615.1a: Champion Lancer's shield prevents only damage from creatures. A
@@ -225,16 +239,45 @@ fn shielded_block_outcome(
 /// scope was dropped and the shield prevented every source).
 #[test]
 fn champion_lancer_prevents_creature_damage_only() {
-    assert_eq!(
-        bolt_shielded("Champion Lancer", CHAMPION_LANCER, 3, 3),
+    let (bolt_outcome, lancer, bolt) =
+        bolt_shielded_outcome("Champion Lancer", CHAMPION_LANCER, 3, 3);
+    assert_damage_dealt(
+        bolt_outcome.events(),
+        bolt,
+        TargetRef::Object(lancer),
         3,
-        "an instant is not a creature — its damage is not prevented"
+        false,
     );
+    assert_eq!(bolt_outcome.zone_of(lancer), Zone::Graveyard);
+
     // Positive control: a creature's combat damage is prevented.
-    assert_eq!(
-        shielded_blocks("Champion Lancer", CHAMPION_LANCER, 3, 3, Attacker::Creature),
-        0
+    let (combat_outcome, lancer, attacker) = shielded_block_outcome(
+        "Champion Lancer",
+        CHAMPION_LANCER,
+        3,
+        3,
+        Attacker::Creature,
+        3,
+        3,
     );
+    assert!(combat_outcome.events().iter().any(|event| matches!(
+        event,
+        GameEvent::DamagePrevented {
+            source_id,
+            target: TargetRef::Object(target),
+            amount: 3,
+        } if *source_id == lancer && *target == lancer
+    )));
+    assert_no_damage_to(combat_outcome.events(), TargetRef::Object(lancer));
+    assert_damage_dealt(
+        combat_outcome.events(),
+        lancer,
+        TargetRef::Object(attacker),
+        3,
+        true,
+    );
+    assert_eq!(combat_outcome.zone_of(lancer), Zone::Battlefield);
+    assert_eq!(combat_outcome.zone_of(attacker), Zone::Graveyard);
 }
 
 /// CR 615.1a: Argothian Treefolk's shield prevents only damage from artifact
@@ -276,18 +319,27 @@ fn argothian_treefolk_prevents_artifact_source_damage_only() {
 /// and dies (CR 704.5g).
 #[test]
 fn enchanted_being_prevents_only_enchanted_creatures_damage() {
-    let (outcome, being) = shielded_block_outcome(
+    let (outcome, being, _) = shielded_block_outcome(
         "Enchanted Being",
         ENCHANTED_BEING,
         2,
         2,
         Attacker::EnchantedCreature,
+        2,
+        2,
     );
     assert_eq!(outcome.damage_marked(being), 0);
     assert_eq!(outcome.zone_of(being), Zone::Battlefield);
     // Hostile: an attacker with no Aura is not an enchanted creature.
-    let (outcome, being) =
-        shielded_block_outcome("Enchanted Being", ENCHANTED_BEING, 2, 2, Attacker::Creature);
+    let (outcome, being, _) = shielded_block_outcome(
+        "Enchanted Being",
+        ENCHANTED_BEING,
+        2,
+        2,
+        Attacker::Creature,
+        2,
+        2,
+    );
     assert_eq!(outcome.zone_of(being), Zone::Graveyard);
 }
 

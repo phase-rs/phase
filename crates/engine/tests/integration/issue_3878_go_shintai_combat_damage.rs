@@ -4,29 +4,31 @@
 //! https://github.com/phase-rs/phase/issues/3878
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::ability::TargetRef;
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
-use super::rules::run_combat;
-
-const GO_SHINTAI_ORACLE: &str = "{W}{U}{B}{R}{G}, {T}: Return target enchantment card from your graveyard to the battlefield.\n\
-    Whenever Go-Shintai of Life's Origin or another nontoken Shrine you control enters, create a 1/1 colorless Shrine enchantment creature token.";
+use super::rules::{assert_damage_dealt, run_combat_and_collect_events};
 
 #[test]
 fn go_shintai_takes_combat_damage() {
+    let db = crate::support::shared_card_db().expect("shared integration card database loads");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
     let attacker = scenario.add_creature(P0, "Attacker", 3, 3).id();
-    let shintai = scenario
-        .add_creature_from_oracle(P1, "Go-Shintai of Life's Origin", 1, 1, GO_SHINTAI_ORACLE)
-        .id();
+    let shintai = scenario.add_real_card(P1, "Go-Shintai of Life's Origin", Zone::Battlefield, db);
 
     let mut runner = scenario.build();
-    run_combat(&mut runner, vec![attacker], vec![(shintai, attacker)]);
+    assert_eq!(runner.state().objects[&shintai].power, Some(3));
+    assert_eq!(runner.state().objects[&shintai].toughness, Some(4));
+    let events =
+        run_combat_and_collect_events(&mut runner, vec![attacker], vec![(shintai, attacker)]);
 
-    assert!(
-        runner.state().objects[&shintai].damage_marked >= 3,
-        "Go-Shintai must take combat damage from the blocked attacker, got damage_marked={}",
-        runner.state().objects[&shintai].damage_marked
-    );
+    assert_damage_dealt(&events, attacker, TargetRef::Object(shintai), 3, true);
+    assert_damage_dealt(&events, shintai, TargetRef::Object(attacker), 3, true);
+    assert_eq!(runner.state().objects[&shintai].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&shintai].damage_marked, 3);
+    assert_eq!(runner.state().objects[&attacker].zone, Zone::Graveyard);
 }

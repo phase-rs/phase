@@ -9,6 +9,7 @@ use engine::types::ability::{
     PreventionScope, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TypeFilter,
 };
 use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -16,7 +17,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 const PLAY_WITH_FIRE: &str = "Play with Fire deals 2 damage to any target. \
-If a player is dealt damage this way, scry 1.";
+If a player is dealt damage this way, scry 1. (Look at the top card of your library. You may put that card on the bottom.)";
 
 #[test]
 fn play_with_fire_parses_player_damage_scry_condition() {
@@ -70,7 +71,16 @@ fn play_with_fire_parses_player_damage_scry_condition() {
     );
 }
 
-fn cast_play_with_fire(at_player: bool, prevent_player_damage: bool) -> (bool, i32, u32) {
+struct PlayWithFireResult {
+    scried: bool,
+    player_life: i32,
+    spell: ObjectId,
+    creature: ObjectId,
+    creature_zone: Zone,
+    events: Vec<GameEvent>,
+}
+
+fn cast_play_with_fire(at_player: bool, prevent_player_damage: bool) -> PlayWithFireResult {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_card_to_library_top(P0, "Mountain");
@@ -113,7 +123,7 @@ fn cast_play_with_fire(at_player: bool, prevent_player_damage: bool) -> (bool, i
             .expect("installing the player-damage prevention shield must succeed");
     }
     let card_id = runner.state().objects[&spell].card_id;
-    runner
+    let cast = runner
         .act(GameAction::CastSpell {
             object_id: spell,
             card_id,
@@ -121,11 +131,12 @@ fn cast_play_with_fire(at_player: bool, prevent_player_damage: bool) -> (bool, i
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting Play with Fire must succeed");
+    let mut events = cast.events;
 
     for _ in 0..24 {
         match runner.state().waiting_for.clone() {
             WaitingFor::TargetSelection { .. } => {
-                runner
+                let result = runner
                     .act(GameAction::SelectTargets {
                         targets: vec![if at_player {
                             TargetRef::Player(P1)
@@ -134,27 +145,33 @@ fn cast_play_with_fire(at_player: bool, prevent_player_damage: bool) -> (bool, i
                         }],
                     })
                     .expect("selecting Play with Fire's target must succeed");
+                events.extend(result.events);
             }
             WaitingFor::ScryChoice { .. } => {
-                let damage = runner
-                    .state()
-                    .objects
-                    .get(&creature)
-                    .map_or(2, |object| object.damage_marked);
-                return (true, runner.state().players[P1.0 as usize].life, damage);
+                return PlayWithFireResult {
+                    scried: true,
+                    player_life: runner.state().players[P1.0 as usize].life,
+                    spell,
+                    creature,
+                    creature_zone: runner.state().objects[&creature].zone,
+                    events,
+                };
             }
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
-                let damage = runner
-                    .state()
-                    .objects
-                    .get(&creature)
-                    .map_or(2, |object| object.damage_marked);
-                return (false, runner.state().players[P1.0 as usize].life, damage);
+                return PlayWithFireResult {
+                    scried: false,
+                    player_life: runner.state().players[P1.0 as usize].life,
+                    spell,
+                    creature,
+                    creature_zone: runner.state().objects[&creature].zone,
+                    events,
+                };
             }
             WaitingFor::Priority { .. } => {
-                runner
+                let result = runner
                     .act(GameAction::PassPriority)
                     .expect("passing priority must succeed");
+                events.extend(result.events);
             }
             other => panic!("unexpected Play with Fire prompt: {other:?}"),
         }
@@ -164,25 +181,48 @@ fn cast_play_with_fire(at_player: bool, prevent_player_damage: bool) -> (bool, i
 
 #[test]
 fn play_with_fire_damages_player_and_scries() {
-    let (scried, life, _) = cast_play_with_fire(true, false);
-    assert!(scried, "damaging a player must offer scry 1");
-    assert_eq!(life, 18, "the targeted player must take 2 damage");
+    let result = cast_play_with_fire(true, false);
+    assert!(result.scried, "damaging a player must offer scry 1");
+    assert_eq!(
+        result.player_life, 18,
+        "the targeted player must take 2 damage"
+    );
 }
 
 #[test]
 fn play_with_fire_damages_creature_without_scrying() {
-    let (scried, life, damage) = cast_play_with_fire(false, false);
-    assert!(!scried, "damaging a creature must not offer scry 1");
-    assert_eq!(life, 20, "damaging a creature must not change player life");
-    assert_eq!(damage, 2, "the targeted creature must take 2 damage");
+    let result = cast_play_with_fire(false, false);
+    assert!(!result.scried, "damaging a creature must not offer scry 1");
+    assert_eq!(
+        result.player_life, 20,
+        "damaging a creature must not change player life"
+    );
+    assert_eq!(
+        result.creature_zone,
+        Zone::Graveyard,
+        "2 damage is lethal to the targeted 2/2 creature"
+    );
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Object(id),
+            amount: 2,
+            is_combat: false,
+            ..
+        } if *source_id == result.spell && *id == result.creature
+    )));
 }
 
 #[test]
 fn play_with_fire_prevented_player_damage_does_not_scry() {
-    let (scried, life, _) = cast_play_with_fire(true, true);
-    assert!(!scried, "prevented player damage must not offer scry 1");
+    let result = cast_play_with_fire(true, true);
+    assert!(
+        !result.scried,
+        "prevented player damage must not offer scry 1"
+    );
     assert_eq!(
-        life, 20,
+        result.player_life, 20,
         "the player-damage prevention shield must be applied"
     );
 }

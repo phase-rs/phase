@@ -118,6 +118,10 @@ fn printed_colors_from_face(card_face: &CardFace) -> Vec<ManaColor> {
 }
 
 pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
+    // CR 400.7 + CR 614.3: refreshing printed characteristics does not move
+    // this object to a new zone, so preserve its installed resolution
+    // replacements with their duration and consumption state intact.
+    let carried_live_replacements = obj.replacement_definitions.clone();
     // CR 716.2b: capture the pre-call init flag so we can distinguish
     // first-time face application from re-application by
     // `rehydrate_game_from_card_db`. Used below to gate `class_level` seeding.
@@ -166,8 +170,13 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     for replacement in &mut replacements {
         replacement.fix_legacy_parse_time_consumed_flag();
     }
+    obj.base_replacement_definitions = Arc::new(replacements);
+    obj.replacement_definitions =
+        crate::game::game_object::reseed_replacements_carrying_resolution_effects(
+            &carried_live_replacements,
+            &obj.base_replacement_definitions,
+        );
     obj.abilities = Arc::new(abilities.clone());
-    obj.replacement_definitions = replacements.clone().into();
     obj.static_definitions = card_face.static_abilities.clone().into();
     // CR 702.148a-b: Carry the cleave-cost ability set onto the object so the
     // casting flow can swap it in when the spell is cast for its cleave cost.
@@ -198,7 +207,6 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
         obj.install_trigger_base_definitions(trigger_definitions)
             .expect("trigger base-set generation must not overflow");
     }
-    obj.base_replacement_definitions = Arc::new(replacements);
     obj.base_static_definitions = Arc::new(card_face.static_abilities.clone());
     obj.base_color = color;
     obj.base_characteristics_initialized = true;
@@ -329,6 +337,9 @@ pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &Ca
 }
 
 pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) {
+    // CR 712.18: a transform changes this same permanent's face, so carry its
+    // still-live resolution effects across the characteristic rebaseline.
+    let carried_live_replacements = obj.replacement_definitions.clone();
     obj.name = back_face.name.clone();
     obj.power = back_face.power;
     obj.toughness = back_face.toughness;
@@ -339,7 +350,6 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.mana_cost = back_face.mana_cost.clone();
     obj.replace_keywords(back_face.keywords.clone());
     obj.abilities = Arc::new(back_face.abilities.clone());
-    obj.replacement_definitions = back_face.replacement_definitions.clone();
     obj.static_definitions = back_face.static_definitions.clone();
     obj.color = back_face.color.clone();
     obj.base_power = back_face.power;
@@ -372,6 +382,11 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
             .cloned()
             .collect(),
     );
+    obj.replacement_definitions =
+        crate::game::game_object::reseed_replacements_carrying_resolution_effects(
+            &carried_live_replacements,
+            &obj.base_replacement_definitions,
+        );
     obj.base_static_definitions =
         Arc::new(back_face.static_definitions.iter_all().cloned().collect());
     obj.base_color = back_face.color;
@@ -696,12 +711,12 @@ pub(crate) fn printed_prepare_face(
 /// CR 707.2 / CR 707.2b: copiable values are the object's printed/defining
 /// characteristics, NOT resolved continuous effects installed by other
 /// permanents (CR 611.2b "for as long as you control ~" locks). A
-/// `ControllerControlsSource`-gated replacement and a turn-bound, target-bound
-/// die-exile rider are runtime effects durably stored in
-/// `base_replacement_definitions` purely so they survive a layer reset
-/// (evaluate_layers rebuilds live defs from base — layers.rs); neither is a
-/// printed characteristic. Exclude them from copiable values so that a copy of
-/// the affected host does not inherit the lock or die-exile rider.
+/// `ControllerControlsSource`-gated replacement and a host-lifetime replacement
+/// are runtime effects durably stored in `base_replacement_definitions` so they
+/// survive a layer reset (evaluate_layers rebuilds live defs from base —
+/// layers.rs). A turn-bound, target-bound die-exile rider is resolution-installed
+/// in the live replacement store. None is a printed characteristic or copiable
+/// value, so a copy of the affected host does not inherit them.
 ///
 /// Zero-alloc fast path: every printed card has no gated def, so the common case
 /// keeps sharing the source `Arc<Vec<_>>`. A filtered allocation is paid only
@@ -737,8 +752,8 @@ pub(crate) fn is_runtime_control_gated_replacement(def: &ReplacementDefinition) 
 
 /// CR 614.1a + CR 514.2: True for a runtime replacement attached to a damaged
 /// target by an effect such as Torch the Tower or Obliterating Bolt. It is
-/// persisted in base only to survive layer resets; it is not a copiable value
-/// and must lapse when that object leaves the battlefield (CR 400.7).
+/// resolution-installed in the live replacement store, is not a copiable value,
+/// and ends when that object leaves the battlefield (CR 400.7).
 pub(crate) fn is_runtime_target_die_exile_replacement(def: &ReplacementDefinition) -> bool {
     def.event == ReplacementEvent::Moved
         && matches!(def.valid_card, Some(TargetFilter::SelfRef))
@@ -759,7 +774,7 @@ pub(crate) fn is_runtime_target_die_exile_replacement(def: &ReplacementDefinitio
 /// lifetime of the OBJECT hosting it — the "if it would leave the battlefield,
 /// exile it instead" rider installed by Unearth (CR 702.84a) and the
 /// parser-driven reanimation cards (Gruesome Encore, Whip of Erebos, …). It is
-/// stamped `RestrictionExpiry::UntilHostLeavesPlay`. Like the die-exile rider it
+/// stamped `RestrictionExpiry::UntilHostLeavesPlay`. It
 /// is persisted in base only to survive CR 613.1 layer reseeds; it is NOT a
 /// copiable value (a copy of the host must not inherit the exile redirect,
 /// CR 707.2) and must lapse when the host leaves the battlefield (CR 400.7).
@@ -897,13 +912,13 @@ pub fn apply_copiable_values(
             )
         })
         .collect();
-    // CR 613.1a + CR 707.2 + CR 611.2c: a copy effect applies COPIABLE VALUES —
+    // CR 613.1a + CR 707.2: a copy effect applies COPIABLE VALUES —
     // "the values derived from the text printed on the object" (CR 707.2), which
     // closes "Other effects ..., status, counters, and stickers are not copied."
-    // A replacement created by the resolution of a spell or ability is not a
-    // characteristic at all (CR 611.2c), so a Clone / Vesuvan / Mirrorweave /
-    // Copy-Enchantment recipient must keep the shields it already carries. Without
-    // this, the Layer-1a assignment here would destroy them MID-PASS, before the
+    // A copy replaces copiable characteristics, while a resolution-created
+    // replacement remains attached to this same permanent. A Clone / Vesuvan /
+    // Mirrorweave / Copy-Enchantment recipient must keep the effects it already
+    // carries. Without this, the Layer-1a assignment here would destroy them MID-PASS, before the
     // tail settle and before the CR 613.2b Layer-1b reseed (which rebuilds the
     // carried set by reading `live` and so cannot recover them).
     // `copiable_replacement_definitions` already encodes the producer half of this
@@ -1067,13 +1082,14 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
                 })
                 .collect()
         },
-        // CR 611.2c + CR 613.1 (issue #8485): a face snapshot captures the FACE's
-        // characteristics. A replacement created by the resolution of a spell or
-        // ability is not one of them, so it must not ride out with the face.
+        // CR 613.1 + CR 614.1a + CR 614.3: a face snapshot captures the face's
+        // characteristic baseline, not a live replacement effect. Keep the
+        // resolution-installed effect on the same object and reseed it after the
+        // face baseline is restored.
         //
         // This filter is load-bearing for correctness, not tidiness.
-        // `apply_back_face_to_object` writes this vector to BOTH the live store and
-        // `base_replacement_definitions`. A `Resolution`-origin def reaching base
+        // `apply_back_face_to_object` writes the baseline here and separately
+        // reseeds the same object's live effects. A `Resolution`-origin def reaching base
         // breaks the precondition that
         // `game_object::reseed_replacements_carrying_resolution_effects` relies on
         // ("no baseline ever contains a `Resolution` member"): the carry-over would
@@ -1084,12 +1100,8 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
         //
         // Same guard `copiable_replacement_definitions` (producer side) and
         // `GameObject::sync_missing_base_characteristics` (back-fill side) already
-        // apply. Filtering HERE rather than at the base write also stops the live
-        // write from restoring a stale, possibly already-consumed shield.
-        //
-        // Consequence, deliberate and documented: a transform DROPS a carried
-        // resolution shield rather than duplicating it. See the removal-paths note
-        // on `reseed_replacements_carrying_resolution_effects`.
+        // apply. Filtering HERE rather than at the base write stops a snapshot
+        // from restoring a stale, possibly already-consumed shield.
         replacement_definitions: obj
             .replacement_definitions
             .iter_all()
@@ -2130,22 +2142,14 @@ mod tests {
     use crate::types::ability::ChooseOneOfKind;
     use crate::types::format::FormatConfig;
 
-    /// CR 611.2c + CR 613.1 (issue #8485, round-5 HIGH-1): a transform ROUND TRIP
-    /// must not seed `base_replacement_definitions` with a resolution-created
-    /// shield, and must not multiply it once per layer pass.
+    /// CR 613.1 + CR 614.3 (issue #8485): a transform round trip keeps a live
+    /// resolution-created shield out of `base_replacement_definitions` while
+    /// preserving exactly one copy across layer passes.
     ///
-    /// The bug this pins: `snapshot_object_face` copied the LIVE store verbatim and
-    /// `apply_back_face_to_object` writes that snapshot to live AND base. A
-    /// `Resolution`-origin def in base falsifies the precondition
-    /// `game_object::reseed_replacements_carrying_resolution_effects` depends on, so
-    /// the carry-over computed `base ++ live_resolution` on EVERY pass and the shield
-    /// count grew without bound — a Maze of Ith / regeneration / Fog shield would
-    /// prevent N damage events instead of one. No existing test covered a transform
-    /// round-trip over a live resolution shield, which is how it survived review.
-    ///
-    /// Revert-failing on two independent assertions: un-filter
-    /// `snapshot_object_face` and (a) base holds a `Resolution` def and (b) the
-    /// per-object resolution count GROWS between the two `evaluate_layers` passes.
+    /// A same-object face rewrite must carry the live resolution shield while
+    /// keeping it out of both printed face snapshots. Each direction is checked
+    /// before and after repeated layer evaluation so a dropped shield and a
+    /// per-pass duplicate both fail this production-writer regression.
     #[test]
     fn transform_round_trip_does_not_duplicate_a_resolution_shield() {
         fn printed_def() -> ReplacementDefinition {
@@ -2199,11 +2203,13 @@ mod tests {
             state.objects[&id].name, "Back Face",
             "reach-guard: the transform must actually have happened"
         );
+        assert_eq!(resolution_count(&state, id), 1);
         swap_object_faces(state.objects.get_mut(&id).unwrap());
         assert_eq!(
             state.objects[&id].name, "Front Face",
             "reach-guard: the return transform must actually have happened"
         );
+        assert_eq!(resolution_count(&state, id), 1);
 
         // The invariant the whole carry-over rests on.
         assert!(
@@ -2227,10 +2233,7 @@ mod tests {
             "the resolution-shield count must not grow per layer pass \
              (pass 1: {after_first}, pass 2: {after_second})"
         );
-        assert!(
-            after_second <= 1,
-            "at most one copy of the shield may survive, got {after_second}"
-        );
+        assert_eq!(after_second, 1, "exactly one carried shield must survive");
     }
 
     use crate::database::CardDatabase;

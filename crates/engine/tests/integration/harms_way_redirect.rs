@@ -342,14 +342,21 @@ fn lightning_strike_does_not_resolve_when_its_target_leaves_the_any_target_domai
 
     let (mut runner, strike, golem) = golem_fixture("Lightning Strike", LIGHTNING_STRIKE);
     let cast = runner.cast(strike).target_objects(&[golem]).resolve();
+    assert_eq!(cast.zone_of(strike), Zone::Graveyard);
     assert_eq!(
-        cast.state().objects[&golem].damage_marked,
-        3,
-        "paired positive: a legal artifact-creature target takes 3"
+        cast.zone_of(golem),
+        Zone::Graveyard,
+        "paired positive: lethal damage moves the legal target to its graveyard"
     );
     assert!(cast.events().iter().any(|event| matches!(
         event,
-        GameEvent::DamageDealt { target: TargetRef::Object(id), amount: 3, .. } if *id == golem
+        GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Object(id),
+            amount: 3,
+            is_combat: false,
+            ..
+        } if *source_id == strike && *id == golem
     )));
 }
 

@@ -2303,7 +2303,7 @@ impl GameObject {
             .collect();
     }
 
-    /// CR 611.2a + CR 611.2c + CR 613.1: install a replacement effect created by the
+    /// CR 611.2a + CR 614.3 + CR 613.1: install a replacement effect created by the
     /// RESOLUTION of a spell or ability onto this object as its HOST.
     ///
     /// THE single authority for resolution-time object installs. Callers must never
@@ -2319,12 +2319,11 @@ impl GameObject {
     /// it is also what makes the carry-over idempotent under mid-pass re-entry
     /// (see `reseed_replacements_carrying_resolution_effects`).
     pub(crate) fn install_resolution_replacement(&mut self, mut def: ReplacementDefinition) {
-        // CR 611.2a: a `Resolution`-origin def is carried across every CR 613.1
+        // CR 614.3 / CR 615.3: a `Resolution`-origin def is carried across every CR 613.1
         // reset, so its SCHEDULED removal paths are an expiry prune (`turns.rs`, all
-        // three of which key on `expiry` alone) and a zone change. (Three face
-        // rewrites — transform/specialize, flip, morph — also drop it in place; see
-        // `reseed_replacements_carrying_resolution_effects`. Those are unscheduled
-        // shield-loss and cannot be relied on to end anything.) A def with no expiry
+        // three of which key on `expiry` alone) and a zone change. Same-object face,
+        // flip, and copy rewrites preserve it through
+        // `reseed_replacements_carrying_resolution_effects`. A def with no expiry
         // has no scheduled end at all — carrying it would make it immortal. Fail
         // CLOSED:
         // install it live-only, exactly as this call site behaved before the
@@ -2343,14 +2342,12 @@ impl GameObject {
         // `reseed_replacements_carrying_resolution_effects` needs to stay
         // idempotent, and violating it causes unbounded per-pass duplication.
         //
-        // Deliberately NOT `base.contains(&def)`. That older form compared the
+        // Deliberately NOT `base.contains(&def)`. That form compares the
         // incoming def — necessarily still `Characteristic` at this point, since the
         // stamp is applied below — against base by full structural equality, so it
-        // fired on a legitimate shape: a turn-bound rider installed through this arm
-        // onto an object that already carries a structurally identical rider written
-        // to base by `add_target_replacement`'s `install_to_base` trio (two Auras or
-        // two triggers granting the same rider). That is legal and harmless, and it
-        // would have aborted debug and test builds.
+        // can collide with an identical `Characteristic` definition already in the
+        // baseline. Structural equality cannot distinguish that legitimate base
+        // member from a `Resolution`-origin member that would violate the invariant.
         //
         // Placed after the fail-closed return because an unbounded def is never
         // stamped and so cannot break the invariant either way. This form would also
@@ -3215,11 +3212,11 @@ impl GameObject {
         self.materialize_test_fixture_trigger_base();
         if self.base_replacement_definitions.is_empty() && !self.replacement_definitions.is_empty()
         {
-            // CR 611.2c: a resolution-created continuous effect is NOT a printed
-            // characteristic, so it must never be back-filled into the base store.
-            // Doing so would put it in base AND in the carried set, double-applying
-            // it and resurrecting its consumed/depleted runtime state at the next
-            // CR 613.1 reseed. This function is the ONLY production path in the tree
+            // CR 613.1: a layer baseline back-fill must not capture a live
+            // resolution-created replacement. Doing so would put it in base AND
+            // in the carried set, double-applying it and resurrecting its
+            // consumed/depleted runtime state at the next reseed. This function is
+            // the ONLY production path in the tree
             // that can copy the live store into base; the filter is what makes
             // `reseed_replacements_carrying_resolution_effects`'s idempotence
             // invariant ("no baseline ever contains a `Resolution` member")
@@ -4009,6 +4006,10 @@ impl GameObject {
     /// by `apply_zone_exit_cleanup` in zones.rs.
     pub fn reset_for_battlefield_exit(&mut self) {
         self.base_controller = Some(self.owner);
+        // CR 400.7: Marked damage belongs to the departing battlefield object and
+        // is not carried by the new object in its destination zone.
+        self.damage_marked = 0;
+        self.dealt_deathtouch_damage = false;
         // CR 701.37b: Monstrous designation clears when a permanent leaves the battlefield.
         self.monstrous = false;
         // CR 701.64b: Harnessed designation clears when a permanent leaves the battlefield.
@@ -4672,20 +4673,13 @@ pub(crate) fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Op
         })
 }
 
-/// CR 611.2c + CR 613.1: rebuild a live replacement store from a baseline while
-/// CARRYING FORWARD every replacement created by the resolution of a spell or
-/// ability.
+/// CR 613.1: rebuild a live replacement store from a characteristic baseline
+/// while carrying forward every still-live resolution-installed effect.
 ///
-/// CR 613.1 governs an object's CHARACTERISTICS. CR 611.2c settles that a
-/// prevention shield is not one — CR 611.2c's EXAMPLE block says so outright:
-/// "An effect that reads 'Prevent all damage creatures would deal this turn'
-/// doesn't modify any object's characteristics, so it's modifying the rules of
-/// the game." (That sentence is the Example, not the rule text proper; the rule
-/// itself is the surrounding CR 611.2c paragraph on continuous effects from
-/// resolution.) A shield is merely stored on an
-/// object so the pipeline can find it, and CR 611.2a gives it the lifetime the
-/// ability stated, not "until the next layer pass". CR 615.3 ends it when it is
-/// used up or its duration expires.
+/// Replacement and prevention effects have their own lifetime: CR 614.3 and
+/// CR 615.3 keep them active until used or their duration expires. A layer
+/// baseline write therefore must preserve their live state without copying them
+/// into the characteristic baseline.
 ///
 /// Carried entries keep their runtime state — CR 615.3 consumption, CR 615.7
 /// depletion, CR 701.19a regeneration — because the carried VALUE is copied
@@ -4722,16 +4716,9 @@ pub(crate) fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Op
 ///      anywhere in the tree that can copy the LIVE store INTO base, and it filters
 ///      `Resolution` defs out.
 ///   3. `printed_cards::apply_back_face_to_object` writes a `BackFaceData` snapshot
-///      to base. That snapshot comes from `printed_cards::snapshot_object_face`,
-///      which copies the LIVE store — so it MUST filter `Resolution` defs out, and
-///      does. This leg was previously (and wrongly) written as "a parsed / printed /
-///      face / snapshot source" being safe by construction; it is not, and a
-///      transform round-trip (`transform.rs` stashes the live face and restores it,
-///      also reachable via `turn_face_up.rs`, `morph.rs`, `zones.rs`, `casting.rs`,
-///      `specialize.rs`) put a `Resolution` def into base and made this function
-///      compute `base ++ live_resolution` on EVERY pass — unbounded per-pass
-///      duplication of the shield. Pinned by
-///      `printed_cards::tests::transform_round_trip_does_not_duplicate_a_resolution_shield`.
+///      to base, then reseeds the same object's still-live `Resolution` entries
+///      into the live store. `printed_cards::snapshot_object_face` filters those
+///      entries out of the snapshot so base remains free of runtime effects.
 ///   4. EVERY other production write to `base_replacement_definitions` sources its
 ///      content from a parsed / printed source, or is a RETAIN over what is already
 ///      there, or is a `#[cfg(test)]` fixture. Regenerate that audit with:
@@ -4741,17 +4728,11 @@ pub(crate) fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Op
 ///      which `copiable_replacement_definitions` derives from base — so it inherits
 ///      the invariant rather than threatening it.)
 ///
-/// REMOVAL PATHS, stated accurately. The expiry prunes (`turns.rs`: cleanup,
-/// end-of-combat teardown, untap step) and a zone change
-/// (`revert_layered_characteristics_to_base`, CR 400.7) are the SCHEDULED ends. They
-/// are not the only ones: three in-place face rewrites also drop a carried shield,
-/// because each wholesale-assigns the live store from a face snapshot —
-/// `printed_cards::apply_back_face_to_object` (transform / specialize),
-/// `flip.rs` (CR 710.1b), and `morph.rs` (turn face down, CR 708.2a). Those three
-/// are shield-LOSS, not duplication, and are a known limitation rather than a
-/// correctness hazard; CR 611.2a argues the shield should survive them, and this
-/// comment is that limitation's only record. Do not restate the old "removed ONLY
-/// by an expiry prune or a zone change" claim — it is false.
+/// REMOVAL PATHS: expiry prunes (`turns.rs`: cleanup, end-of-combat teardown,
+/// untap step) and a battlefield exit (`revert_layered_characteristics_to_base`,
+/// CR 400.7) remove carried entries. Same-object face, flip, and copy rebaselines
+/// preserve the current live entries while replacing only the characteristic
+/// baseline.
 ///
 /// The carried set is therefore invariant across all three IN-PASS rewrites, for
 /// every baseline the two callers can supply. That is why this function takes the
@@ -6082,7 +6063,7 @@ mod tests {
             .expiry(crate::types::ability::RestrictionExpiry::EndOfTurn)
     }
 
-    /// CR 611.2a + CR 611.2c: the install authority stamps `Resolution` and leaves
+    /// CR 611.2a + CR 614.3: the install authority stamps `Resolution` and leaves
     /// the base store untouched. The base half is the invariant that makes the
     /// carry-over idempotent — a def in base AND in the carried set applies twice.
     #[test]
@@ -6099,7 +6080,7 @@ mod tests {
         assert!(obj.replacement_definitions[0].is_resolution_installed());
         assert!(
             obj.base_replacement_definitions.is_empty(),
-            "CR 611.2c: a resolution shield is not a printed characteristic"
+            "a resolution-installed shield stays out of the characteristic baseline"
         );
     }
 
@@ -6193,7 +6174,7 @@ mod tests {
         assert_eq!(reseeded.as_slice(), base_y.as_slice());
     }
 
-    /// CR 611.2c: the base back-fill on an uninitialized fixture must never capture
+    /// CR 613.1: the base back-fill on an uninitialized fixture must never capture
     /// a resolution shield — that is what keeps the idempotence invariant ("no
     /// baseline ever contains a `Resolution` member") unconditional.
     #[test]

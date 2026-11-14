@@ -27,7 +27,9 @@ use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-use super::rules::run_combat;
+use super::rules::run_combat_and_collect_events;
+use super::support::assert_damage_dealt;
+use engine::types::ability::TargetRef;
 
 /// Install the same continuous effect Thoughtweft Lieutenant's trigger creates
 /// on its chosen target: +1/+1 and trample until end of turn, scoped to a single
@@ -116,22 +118,19 @@ fn thoughtweft_buffed_trample_excess_reaches_player() {
     assert_eq!(attacker_life_before, 20, "precondition: P1 starts at 20");
 
     // Declare the 3/3 trampler as attacker; P1 blocks with the 2/2.
-    run_combat(&mut runner, vec![attacker], vec![(blocker, attacker)]);
+    let events =
+        run_combat_and_collect_events(&mut runner, vec![attacker], vec![(blocker, attacker)]);
 
-    // CR 510.1c: the trample attacker assigns lethal (2 = the blocker's
-    // toughness) to its single blocker before any excess is assigned. This is the
-    // discriminating signal that the 3-power trampler split its damage correctly:
-    // it marked the blocker with exactly lethal and pushed the remainder onward.
-    let blocker_damage = runner
-        .state()
-        .objects
-        .get(&blocker)
-        .map(|b| b.damage_marked)
-        .expect("blocker present immediately after the combat damage step");
+    // CR 702.19b: exactly lethal (2 = blocker toughness) is assigned to the
+    // blocker before the remaining point tramples over to P1.
+    assert_damage_dealt(&events, attacker, TargetRef::Object(blocker), 2, true);
     assert_eq!(
-        blocker_damage, 2,
-        "CR 510.1c: exactly lethal (2 = blocker toughness) is assigned to the 2/2 blocker"
+        runner.state().objects[&blocker].zone,
+        Zone::Graveyard,
+        "CR 704.5g: lethal combat damage moves the blocker to its graveyard"
     );
+    assert_eq!(runner.state().objects[&attacker].damage_marked, 2);
+    assert_damage_dealt(&events, attacker, TargetRef::Player(P1), 1, true);
 
     // CR 702.19b: the buffed excess (3 power − 2 lethal = 1) tramples over to the
     // defending player. 20 → 19.
@@ -145,10 +144,4 @@ fn thoughtweft_buffed_trample_excess_reaches_player() {
     // destroyed and moves to its owner's graveyard. The object record persists in
     // `state.objects` with an updated zone, so check the zone rather than key
     // presence.
-    runner.advance_until_stack_empty();
-    assert_eq!(
-        runner.state().objects.get(&blocker).map(|b| b.zone),
-        Some(Zone::Graveyard),
-        "CR 704.5g: the 2/2 blocker took 2 lethal damage and should be in the graveyard"
-    );
 }
