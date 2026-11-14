@@ -1,8 +1,8 @@
 use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, ResolvedAbility,
-    SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, PlayerScope,
+    ResolvedAbility, SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
@@ -399,30 +399,16 @@ fn handle_opponent_may_choice_inner(
                 state, &ability,
             ) == Some(true)
             {
-                if let Some((&next, rest)) = remaining.split_first() {
-                    state.waiting_for = WaitingFor::OpponentMayChoice {
-                        player: next,
-                        decision_subject_id,
-                        source_id,
-                        description,
-                        remaining: rest.to_vec(),
-                    };
-                    return Ok(state.waiting_for.clone());
-                }
-
-                state
-                    .take_active_optional_effect_frame()
-                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
-                    .expect("cloned optional-effect frame remains active until final decision");
-                set_active_priority(state);
-                resolve_all_declined_opponent_may(state, &frame.ability, events)?;
-                resume_pending_continuation_if_priority(state, events)?;
-                super::triggers::collect_and_drain_observer_triggers_if_settled(
+                return spend_unable_promptee_and_advance_poll(
                     state,
+                    &frame.ability,
+                    &remaining,
+                    decision_subject_id,
+                    source_id,
+                    description,
                     events,
                     events_before,
                 );
-                return Ok(state.waiting_for.clone());
             }
 
             ability.optional = false;
@@ -439,6 +425,94 @@ fn handle_opponent_may_choice_inner(
             } = &mut ability.effect
             {
                 typed.controller = Some(ControllerRef::ScopedPlayer);
+            }
+
+            // CR 118.12: "[A player] may [do something]. If [that player]
+            // [does], [effect]" — the offered action is a cost paid on
+            // resolution, and the rider checks whether that player chose to pay
+            // it. So an accepted "any player may pay ..." is paid by the player
+            // who accepted. Exactly as with the sacrifice rebind above, the
+            // parsed `payer` records who was OFFERED the payment (the
+            // "any player may" shell lowers to `Controller`), not who performs
+            // it. `set_scoped_player_recursive` above has already bound the
+            // scope to the promptee.
+            //
+            // CR 119.4 + CR 608.2c: the amount is likewise the accepting
+            // player's — "pay half THEIR life". A third-person possessive
+            // lowers to `PlayerScope::Target`, which is the correct encoding
+            // when the ability has a player target (Astarion's "life they lost
+            // this turn" resolves against its target, not its controller), but
+            // this class of trigger has no targets at all, so the anaphor
+            // dangles and the amount resolves to 0 — the cost becomes free and
+            // the "If that player does" rider fires for nothing. Rebind the
+            // dangling anaphor onto the scoped player, through the traversal
+            // authorities (`for_each_quantity_expr_mut` -> `each_ref_mut` ->
+            // `player_scope_mut`) rather than matching one cost shape, so every
+            // quantity-bearing cost in the class is covered. Guarded on the
+            // absence of a player target so a genuine target-relative amount is
+            // never redirected.
+            let payer_anaphor_dangles = !ability
+                .targets
+                .iter()
+                .any(|target| matches!(target, TargetRef::Player(_)));
+            if let Effect::PayCost { payer, cost, .. } = &mut ability.effect {
+                *payer = TargetFilter::ScopedPlayer;
+                if payer_anaphor_dangles {
+                    cost.for_each_quantity_expr_mut(&mut |expr| {
+                        expr.each_ref_mut(&mut |qty| {
+                            if let Some(scope) = qty.player_scope_mut() {
+                                if *scope == PlayerScope::Target {
+                                    *scope = PlayerScope::ScopedPlayer;
+                                }
+                            }
+                        });
+                    });
+                }
+            }
+
+            // CR 118.3 + CR 608.2d: "A player can't pay a cost without having
+            // the necessary resources to pay it fully", and a player "can't
+            // choose an option that's illegal or impossible". Dash Hopes says so
+            // in print: "A player can't choose to pay 5 life unless they
+            // actually have 5 or more life to pay."
+            //
+            // This matters only now that the payer is bound to the promptee
+            // above. Before that, payability was judged against the controller,
+            // who was always the one actually charged. A promptee who cannot pay
+            // must not consume their slot as an acceptance: the resolver's own
+            // failure channel (`cost_payment_failed_flag`) would still keep the
+            // "if a player does" rider from firing, but the ledger would record
+            // an acceptance that never happened
+            // (`PlayerActionKind::AcceptedOptionalEffect`, which "did a player
+            // do this" riders read), so the question has to be asked here.
+            //
+            // Asked through the single payment authority with exactly the scope
+            // `effects::pay::resolve_ability_cost_payment` uses, so this can
+            // never refuse a payment that resolver would have taken.
+            let promptee_cannot_pay = match &ability.effect {
+                Effect::PayCost { cost, .. } => !costs::can_pay(
+                    state,
+                    promptee,
+                    ability.source_id,
+                    cost,
+                    &costs::PaymentScope::Resolution {
+                        ability: &ability,
+                        cost_move_root: costs::ResolutionCostMoveRoot::EffectPayCost,
+                    },
+                ),
+                _ => false,
+            };
+            if promptee_cannot_pay {
+                return spend_unable_promptee_and_advance_poll(
+                    state,
+                    &frame.ability,
+                    &remaining,
+                    decision_subject_id,
+                    source_id,
+                    description,
+                    events,
+                    events_before,
+                );
             }
 
             let target_selection = match &ability.effect {
@@ -584,6 +658,55 @@ fn handle_opponent_may_choice_inner(
                 set_active_priority(state);
                 effects::resolve_ability_chain(state, &ability, events, 1)
                     .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+
+                // CR 118.12 + CR 101.4: an acceptance answers one responder, not
+                // the poll. Dash Hopes' ruling is explicit: "As soon as any
+                // player performs the action, the spell is countered, but the
+                // remaining players still get the option." Re-park the frame for
+                // the next responder instead of letting the first acceptance end
+                // the poll.
+                //
+                // The re-offered frame carries the ORIGINAL ability (this
+                // promptee's bindings — scoped player, payer, rebound anaphor —
+                // are theirs alone and must not leak to the next responder),
+                // with `optional_effect_performed` set so a later all-decline
+                // does not fire the "if no one does" rider for an action that
+                // was performed.
+                //
+                // Only from a settled priority: a chain that suspended on its
+                // own prompt owns the stack top, and burying it under another
+                // direct-choice frame is exactly what
+                // `install_direct_choice_frame` refuses. No card in this class
+                // reaches that case today (the costs resolve to completion), and
+                // the invariant is the right thing to respect rather than work
+                // around — the remaining responders are dropped there, as they
+                // were on every path before this change.
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    if let Some((&next, rest)) = remaining.split_first() {
+                        let mut reoffered = frame.ability.clone();
+                        reoffered.context.optional_effect_performed = true;
+                        state
+                            .install_direct_choice_frame(
+                                crate::types::resolution::ResolutionFrame::OptionalEffect(
+                                    OptionalEffectFrame {
+                                        ability: reoffered,
+                                        trigger_event: frame.trigger_event.clone(),
+                                        trigger_events: frame.trigger_events.clone(),
+                                        trigger_match_count: frame.trigger_match_count,
+                                        return_result_occurrence: frame.return_result_occurrence,
+                                    },
+                                ),
+                                WaitingFor::OpponentMayChoice {
+                                    player: next,
+                                    decision_subject_id,
+                                    source_id,
+                                    description,
+                                    remaining: rest.to_vec(),
+                                },
+                            )
+                            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                    }
+                }
             }
         }
     } else if !remaining.is_empty() {
@@ -612,11 +735,63 @@ fn handle_opponent_may_choice_inner(
     Ok(state.waiting_for.clone())
 }
 
+/// CR 608.2d + CR 101.4: this promptee cannot legally take the offer, so their
+/// slot in the poll is spent as a decline and the next responder in APNAP order
+/// is asked. It must never end the poll while a later player might still be able
+/// to accept — that is the whole reason this is a poll and not a single offer.
+///
+/// Shared tail for every "this player can't accept" refusal: an infeasible exact
+/// scoped-graveyard exile, and an unaffordable `Effect::PayCost` (CR 118.3).
+/// When no responder is left it finishes the all-declined path exactly as the
+/// ordinary decline branch does.
+#[allow(clippy::too_many_arguments)]
+fn spend_unable_promptee_and_advance_poll(
+    state: &mut GameState,
+    frame_ability: &ResolvedAbility,
+    remaining: &[PlayerId],
+    decision_subject_id: Option<ObjectId>,
+    source_id: ObjectId,
+    description: Option<String>,
+    events: &mut Vec<GameEvent>,
+    events_before: usize,
+) -> Result<WaitingFor, EngineError> {
+    if let Some((&next, rest)) = remaining.split_first() {
+        state.waiting_for = WaitingFor::OpponentMayChoice {
+            player: next,
+            decision_subject_id,
+            source_id,
+            description,
+            remaining: rest.to_vec(),
+        };
+        return Ok(state.waiting_for.clone());
+    }
+
+    state
+        .take_active_optional_effect_frame()
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+        .expect("cloned optional-effect frame remains active until final decision");
+    set_active_priority(state);
+    resolve_all_declined_opponent_may(state, frame_ability, events)?;
+    resume_pending_continuation_if_priority(state, events)?;
+    super::triggers::collect_and_drain_observer_triggers_if_settled(state, events, events_before);
+    Ok(state.waiting_for.clone())
+}
+
 fn resolve_all_declined_opponent_may(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    // CR 118.12 + the Dash Hopes ruling ("As soon as any player performs the
+    // action, the spell is countered, but the remaining players still get the
+    // option"): because the poll continues past the first acceptance, a LATER
+    // decline reaches this path even though the action WAS performed. The
+    // "if no one does" rider must not fire then. The re-offered frame carries
+    // the performed bit forward for exactly this check; on every other path
+    // into this function the frame's ability is pristine and the bit is false.
+    if ability.context.optional_effect_performed {
+        return Ok(());
+    }
     if let Some(ref sub) = ability.sub_ability {
         if sub
             .condition
