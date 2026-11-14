@@ -378,17 +378,23 @@ fn advance_to_next_p0_precombat(runner: &mut GameRunner) {
                     .act(GameAction::PassPriority)
                     .expect("pass priority through the remaining turn");
             }
-            WaitingFor::DeclareAttackers { .. } => runner
-                .declare_attackers(&[])
-                .expect("opponent declares no attackers"),
-            WaitingFor::DeclareBlockers { .. } => runner
-                .declare_blockers(&[])
-                .expect("no blockers are declared"),
-            WaitingFor::OrderTriggers { triggers, .. } => runner
-                .act(GameAction::OrderTriggers {
-                    order: (0..triggers.len()).collect(),
-                })
-                .expect("order triggers while advancing the turn"),
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .declare_attackers(&[])
+                    .expect("opponent declares no attackers");
+            }
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .declare_blockers(&[])
+                    .expect("no blockers are declared");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order triggers while advancing the turn");
+            }
             other => panic!("unexpected prompt advancing to Craig's next turn: {other:?}"),
         }
     }
@@ -401,7 +407,7 @@ fn advance_to_next_p0_precombat(runner: &mut GameRunner) {
 fn quest_counters(runner: &GameRunner, object: ObjectId) -> u32 {
     runner.state().objects[&object]
         .counters
-        .get(&CounterType::Quest)
+        .get(&CounterType::Generic("quest".to_string()))
         .copied()
         .unwrap_or(0)
 }
