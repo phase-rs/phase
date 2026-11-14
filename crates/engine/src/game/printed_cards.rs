@@ -161,7 +161,7 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
         obj.is_conspiracy = true;
     }
     obj.mana_cost = card_face.mana_cost.clone();
-    obj.keywords = keywords.clone();
+    obj.replace_keywords(keywords.clone());
     let mut abilities = card_face.abilities.clone();
     for ability in &mut abilities {
         ability.normalize_parsed_replacement_flags();
@@ -348,7 +348,7 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.defense = back_face.defense;
     obj.card_types = back_face.card_types.clone();
     obj.mana_cost = back_face.mana_cost.clone();
-    obj.keywords = back_face.keywords.clone();
+    obj.replace_keywords(back_face.keywords.clone());
     obj.abilities = Arc::new(back_face.abilities.clone());
     obj.static_definitions = back_face.static_definitions.clone();
     obj.color = back_face.color.clone();
@@ -889,7 +889,7 @@ pub fn apply_copiable_values(
     obj.layer_base_toughness = values.toughness;
     obj.loyalty = values.loyalty;
     obj.printed_loyalty = values.printed_loyalty;
-    obj.keywords = values.keywords.clone();
+    obj.replace_keywords(values.keywords.clone());
     // All four ability sets are Arc-shared — refcount bumps, no deep copy.
     obj.abilities = Arc::clone(&values.abilities);
     obj.trigger_definitions = values
@@ -957,7 +957,7 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
     obj.toughness = values.toughness;
     obj.loyalty = values.loyalty;
     obj.printed_loyalty = values.printed_loyalty;
-    obj.keywords = values.keywords.clone();
+    obj.replace_keywords(values.keywords.clone());
     obj.abilities = Arc::clone(&values.abilities);
     obj.replacement_definitions = Arc::clone(&values.replacement_definitions).into();
     obj.static_definitions = Arc::clone(&values.static_definitions).into();
