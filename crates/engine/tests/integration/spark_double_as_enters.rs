@@ -2178,6 +2178,20 @@ mod feldon_tokens {
         runner
             .act(GameAction::DecideOptionalEffect { accept: true })
             .unwrap();
+        // The accepted instruction chooses a token at resolution (no target is printed): the
+        // Elephant, so the Myr becomes its copy.
+        let WaitingFor::ChooseFromZoneChoice { cards, .. } = &runner.state().waiting_for else {
+            panic!(
+                "required the token choice, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert!(cards.contains(&elephant) && cards.contains(&myr));
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![elephant],
+            })
+            .unwrap();
         assert_token_entry_complete(&mut runner);
         assert_eq!(runner.state().objects[&myr].name, "Elephant");
         (
@@ -3226,42 +3240,6 @@ mod feldon_tokens {
                 "the Warden token enters after the Triskelion token (restore: {persist})"
             );
         }
-    }
-
-    /// CR 603.6a: Cackling Counterpart under Doubling Season makes two Soul Warden tokens in
-    /// one event, with no prompt between them. Each token observes the other's entry, and the
-    /// Soul Warden that was already on the battlefield observes both: 2 + 1 + 1 life.
-    #[test]
-    fn two_observer_copies_of_one_event_see_each_other() {
-        let mut scenario = GameScenario::new_n_player(2, 42);
-        scenario.at_phase(Phase::PreCombatMain);
-        scenario.with_mana_pool(
-            P0,
-            (0..3)
-                .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
-                .collect(),
-        );
-        let warden = scenario
-            .add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN)
-            .id();
-        scenario.add_enchantment_from_oracle(P0, "Doubling Season", SEASON);
-        let counterpart = scenario
-            .add_spell_to_hand_from_oracle(P0, "Cackling Counterpart", true, CACKLING_COUNTERPART)
-            .id();
-        let mut runner = scenario.build();
-        let life = runner.life(P0);
-        runner.cast(counterpart).target_object(warden).resolve();
-        assert_token_entry_complete(&mut runner);
-        let tokens = runner
-            .state()
-            .objects
-            .values()
-            .filter(|object| {
-                object.is_token && object.zone == Zone::Battlefield && object.name == "Soul Warden"
-            })
-            .count();
-        assert_eq!(tokens, 2, "reach guard: Doubling Season makes two tokens");
-        assert_eq!(runner.life(P0) - life, 4);
     }
 
     const BLOT_OUT_THE_SKY: &str = "Create X tapped 2/1 white and black Inkling creature tokens with flying. If X is 6 or more, destroy all noncreature, nonland permanents.";

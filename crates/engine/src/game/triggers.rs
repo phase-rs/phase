@@ -3949,6 +3949,14 @@ fn source_enters_with_event(
     if record.recorded_turn_number != state.turn_number {
         return false;
     }
+    // Only a cohort that included an entry held across answers: an entry that was never held
+    // keeps the positional lifetime guard.
+    if !state
+        .released_entry_rows
+        .contains(&record.turn_zone_change_index)
+    {
+        return false;
+    }
     entry_ledger_index
         .get(&source_id)
         .is_some_and(|source_entry| {
@@ -9831,6 +9839,7 @@ pub(crate) fn collect_completed_entry_instruction(
     if scan.is_empty() {
         return;
     }
+    note_released_entry_cohorts(state, &scan, &held_keys);
     collect_triggers_into_deferred(state, &scan);
     resolve_and_apply_trigger_collection(
         state,
@@ -10011,6 +10020,7 @@ pub(crate) fn settle_entry_batch_scan(
     state: &mut GameState,
     candidates: Vec<GameEvent>,
 ) -> Vec<GameEvent> {
+    state.released_entry_rows.clear();
     let unsettled = !action_has_settled(state) && battlefield_entry_in_progress(state);
     if !unsettled && state.unsettled_entry_batch_events.is_empty() {
         return candidates;
@@ -10043,7 +10053,34 @@ pub(crate) fn settle_entry_batch_scan(
             state.unsettled_entry_batch_events.push(event);
         }
     }
+    note_released_entry_cohorts(state, &scan, &held_keys);
     scan
+}
+
+/// CR 603.6a + CR 608.2c: the entries of `scan` in an instruction that held an entry across
+/// answers (`held_keys`) are one event whose co-entrants observe each other, whichever answer
+/// recorded them; they are noted for the collection that follows
+/// (`GameState::released_entry_rows`).
+fn note_released_entry_cohorts(
+    state: &mut GameState,
+    scan: &[GameEvent],
+    held_keys: &[(u32, usize, ObjectId)],
+) {
+    let held_instructions: Vec<usize> = held_keys
+        .iter()
+        .filter(|(turn, _, _)| *turn == state.turn_number)
+        .map(|(_, row, _)| state.instruction_of_zone_change(*row))
+        .collect();
+    let rows: Vec<usize> = scan
+        .iter()
+        .filter_map(battlefield_entry_key)
+        .filter(|(turn, row, _)| {
+            *turn == state.turn_number
+                && held_instructions.contains(&state.instruction_of_zone_change(*row))
+        })
+        .map(|(_, row, _)| row)
+        .collect();
+    state.released_entry_rows = rows;
 }
 
 /// CR 117.5 + CR 603.3b: a settled action still holds entries whose observers
@@ -46659,11 +46696,12 @@ pub mod tests {
         (state, events)
     }
 
-    /// CR 603.6a + CR 608.2c: entrants of one instruction are one entry event, so a
-    /// newcomer observes a co-entrant's entry even when its own entry record comes later in
-    /// the batch; the entries of separate instructions happen in order, and a newcomer does not
-    /// observe an entry that preceded it (issue #8160). Synthetic: three hand-made entries on
-    /// the ledger cut by one instruction boundary.
+    /// CR 603.6a + CR 608.2c: entrants of one instruction whose entry was held across answers
+    /// are one entry event, so a newcomer observes a co-entrant's entry even when its own entry
+    /// record comes later in the batch; the entries of separate instructions happen in order,
+    /// and a newcomer does not observe an entry that preceded it (issue #8160), nor one that
+    /// was never held. Synthetic: three hand-made entries on the ledger cut by one
+    /// instruction boundary.
     #[test]
     fn a_newcomer_observes_only_the_entries_of_its_own_instruction() {
         let mut state = setup();
@@ -46678,6 +46716,21 @@ pub mod tests {
         // The boundary falls between the second and third entries: First and Second are one
         // instruction, Third is the next.
         state.instruction_boundary_marks = vec![2];
+        // An entry that was never held keeps the positional guard: nothing is observed.
+        {
+            let boundaries = battlefield_entry_observation_indices(&events);
+            let ledger = battlefield_entry_ledger_indices(&state, &events);
+            assert!(!battlefield_source_observes_event(
+                &state,
+                0,
+                &events,
+                entrants[1],
+                &boundaries,
+                &ledger,
+            ));
+        }
+        // The cohort of an instruction that held an entry across answers is observed.
+        state.released_entry_rows = vec![0, 1, 2];
         let boundaries = battlefield_entry_observation_indices(&events);
         let ledger = battlefield_entry_ledger_indices(&state, &events);
         let observes = |event_idx: usize, source: ObjectId| {

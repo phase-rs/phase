@@ -24667,6 +24667,14 @@ declare_game_state! {
     /// ingress caller rejects. Transient — never serialized.
     #[serde(skip)]
     pub(crate) ingress_life_window: Option<IngressLifeWindow>,
+    /// CR 603.6a: the ledger rows of the battlefield entries in an entry cohort that included an
+    /// entry held across answers, set by `triggers::settle_entry_batch_scan` and
+    /// `triggers::collect_completed_entry_instruction` for the collection that follows. Only
+    /// these entries are observed by a co-entrant that entered later in their instruction
+    /// (`triggers::source_enters_with_event`); every other entry keeps the positional
+    /// lifetime guard. Transient — never serialized, cleared per action.
+    #[serde(skip)]
+    pub(crate) released_entry_rows: Vec<usize>,
     /// A replacement's computed life, player-counter or energy quantity
     /// overflowed while the current event was being replaced (see
     /// `ReplacementQuantityOverflow`). Recorded by the life and player/energy
@@ -34960,6 +34968,7 @@ impl GameState {
             active_paid_resolution_offer_tail: None,
             active_spend_only_on_x_count: None,
             ingress_life_window: None,
+            released_entry_rows: Vec::new(),
             replacement_quantity_overflow: None,
             active_auto_tap_row_policy: None,
             battlefield: im::Vector::new(),
@@ -36793,6 +36802,7 @@ impl GameState {
         self.die_result_publication = None;
         self.consumed_before_priority_trigger_events.clear();
         self.ingress_life_window = None;
+        self.released_entry_rows.clear();
         self.replacement_quantity_overflow = None;
     }
 
@@ -38683,6 +38693,7 @@ impl GameState {
             active_paid_resolution_offer_tail: _,
             active_spend_only_on_x_count: _,
             ingress_life_window: _,
+            released_entry_rows: _,
             replacement_quantity_overflow: _,
             active_auto_tap_row_policy: _,
             battlefield: _,
@@ -40490,6 +40501,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_paid_resolution_offer_tail: _,
         active_spend_only_on_x_count: _,
         ingress_life_window: _,
+        released_entry_rows: _,
         replacement_quantity_overflow: _,
         active_auto_tap_row_policy: _,
         battlefield: _,
