@@ -2773,6 +2773,9 @@ fn starts_prefix_clause(current_lower: &str) -> bool {
         // reaches `strip_temporal_prefix` instead of splitting at the comma
         // (Fortune, Loyal Steed: "at end of combat, exile it and …").
         tag("at end of combat"),
+        // CR 603.7a: "At this turn's next end of combat, …" (Gaze of the Gorgon). Keep the
+        // deferred body attached so it reaches `strip_temporal_prefix`.
+        tag("at this turn's next end of combat"),
         tag("for as long as "),
         // CR 508.6: "During any turn [you attacked with X], [effect]" — temporal
         // attack-history gate (Neyali, Neriv, Boros Strike-Captain). Keep the
@@ -3205,6 +3208,10 @@ fn is_inside_temporal_prefix(lower: &str) -> bool {
         tag::<_, _, OracleError<'_>>("at the beginning of the next "),
         tag("at the beginning of your next "),
         tag("at the end of "),
+        // CR 603.7a: "At this turn's next end of combat, …" — the same prefix
+        // `starts_prefix_clause` keeps whole, so a bare "and" inside the deferred
+        // body stays with it (Triton Tactics: "… and it doesn't untap …").
+        tag("at this turn's next end of combat"),
     ))
     .parse(trimmed)
     .is_ok()

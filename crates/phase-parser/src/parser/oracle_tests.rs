@@ -8,9 +8,10 @@ use crate::parser::oracle_ir::doc::{
 use crate::parser::oracle_ir::static_ir::StaticIr;
 use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
 use crate::types::ability::{
-    AdditionalCostOrigin, AdditionalCostPaymentSource, ChooseOneOfKind, CoinFlipRun,
-    CombatRelation, CombatRelationSubject, CountScope, CounterAdjustment, DamageKindFilter,
-    DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement, SubAbilityLink, TargetReadOrigin,
+    AdditionalCostOrigin, AdditionalCostPaymentSource, BlockPairDirection, ChooseOneOfKind,
+    CoinFlipRun, CombatRelation, CombatRelationSubject, CountScope, CounterAdjustment,
+    DamageKindFilter, DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement, SubAbilityLink,
+    TargetReadOrigin,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::phase::{PhaseGroup, TurnSegment};
@@ -1981,7 +1982,10 @@ fn named_step_activation_cards_parse_without_gaps() {
         target,
         &TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None
+                },
                 subject: CombatRelationSubject::Source,
             }
         ])),

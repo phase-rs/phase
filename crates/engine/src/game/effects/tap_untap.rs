@@ -395,6 +395,46 @@ fn prompt_resolution_tap_untap_choice(
     true
 }
 
+/// CR 608.2c: the permanents a mass "tap/untap all ..." instruction selects:
+/// every battlefield permanent its filter matches, whether or not its status
+/// changes. The resolver walks this set, and a following "they" names it.
+fn mass_tap_state_selection(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Vec<ObjectId> {
+    let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
+    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
+        })
+        .copied()
+        .collect()
+}
+
+/// CR 608.2c + CR 701.26a: the population a mass tap/untap instruction is
+/// about to select, read on the board before it acts. Acting can change what
+/// the filter matches (an untap that removes a creature's only stun counter
+/// instead, CR 122.1d), so a following "they" binds this snapshot rather than
+/// a rescan. Empty for every other instruction, whose referents are its events.
+pub(crate) fn selection_before_resolution(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<ObjectId> {
+    match &ability.effect {
+        Effect::SetTapState {
+            target,
+            scope: EffectScope::All,
+            ..
+        } => mass_tap_state_selection(state, ability, target),
+        _ => Vec::new(),
+    }
+}
+
 /// CR 701.26a (tap) / CR 701.26b (untap): Mass tap/untap of every permanent
 /// matching the filter (legacy `Effect::TapAll`/`Effect::UntapAll`). Unlike the
 /// single scope this never declares targets — it iterates the resolved
@@ -406,18 +446,7 @@ fn resolve_all(
     change: TapStateChange,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
-
-    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-    let ctx = crate::game::filter::FilterContext::from_ability(ability);
-    let matching: Vec<_> = state
-        .battlefield
-        .iter()
-        .filter(|id| {
-            crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
-        })
-        .copied()
-        .collect();
+    let matching = mass_tap_state_selection(state, ability, target);
 
     for obj_id in matching {
         let outcome = match change {

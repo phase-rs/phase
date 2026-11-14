@@ -725,6 +725,9 @@ pub fn resolve(
     };
     delayed_ability.set_target_incarnations_recursive(target_pins);
     delayed_ability.set_unpinned_targets(snapshot_targets);
+    // CR 115.10a: the creation-time referents are not chosen targets; a
+    // target the payload declares is chosen when it triggers (CR 603.3d).
+    crate::game::ability_utils::clear_chosen_target_slots(&mut delayed_ability);
     // CR 608.2b + CR 603.7c: retain an unavailable creation-time announcement
     // on reference-only payloads so firing cannot invent a new antecedent.
     if ability.has_authoritative_empty_binding()
@@ -2014,24 +2017,10 @@ fn filter_refs_parent_object_anaphor_in(filter: &TargetFilter, relation: HostRel
             // `Typed { controller: ParentTargetController }` selects objects BY
             // the parent's controller; the referent being filtered is not the
             // parent's object, so it is NOT a parent object anaphor.
-            typed.properties.iter().any(|prop| match prop {
-                crate::types::ability::FilterProp::DistinctFrom { reference } => {
-                    filter_refs_parent_object_anaphor_in(reference, relation)
-                }
-                // CR 701.3a: a mass object set defined by attachment to the
-                // parent object ("Auras attached to that creature") names the
-                // parent inside the host filter. `ability_pins_object_anaphor`
-                // reads this function to decide whether the creation snapshot
-                // records `target_incarnations`, so missing this arm loses the
-                // incarnation pin the delayed payload needs at resolution.
-                crate::types::ability::FilterProp::AttachedTo {
-                    to: crate::types::ability::AttachmentReferent::Host { filter },
-                } => {
-                    relation == HostRelation::Dependency
-                        && filter_refs_parent_object_anaphor_in(filter, relation)
-                }
-                _ => false,
-            })
+            typed
+                .properties
+                .iter()
+                .any(|prop| prop_refs_parent_object_anaphor_in(prop, relation))
         }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
             .iter()
@@ -2040,6 +2029,47 @@ fn filter_refs_parent_object_anaphor_in(filter: &TargetFilter, relation: HostRel
         TargetFilter::TrackedSetFiltered { filter, .. } => {
             filter_refs_parent_object_anaphor_in(filter, relation)
         }
+        _ => false,
+    }
+}
+
+/// The property arm of [`filter_refs_parent_object_anaphor_in`]. Recurses into
+/// `Not` / `AnyOf`, matching `filter_refs_parent_target`, so the incarnation pin
+/// follows every shape the target freeze does.
+fn prop_refs_parent_object_anaphor_in(
+    prop: &crate::types::ability::FilterProp,
+    relation: HostRelation,
+) -> bool {
+    match prop {
+        crate::types::ability::FilterProp::DistinctFrom { reference } => {
+            filter_refs_parent_object_anaphor_in(reference, relation)
+        }
+        // CR 701.3a: a mass object set defined by attachment to the
+        // parent object ("Auras attached to that creature") names the
+        // parent inside the host filter. `ability_pins_object_anaphor`
+        // reads this function to decide whether the creation snapshot
+        // records `target_incarnations`, so missing this arm loses the
+        // incarnation pin the delayed payload needs at resolution.
+        crate::types::ability::FilterProp::AttachedTo {
+            to: crate::types::ability::AttachmentReferent::Host { filter },
+        } => {
+            relation == HostRelation::Dependency
+                && filter_refs_parent_object_anaphor_in(filter, relation)
+        }
+        // CR 603.7c + CR 400.7: a history relation to the parent object is a
+        // DEPENDENCY of the payload, like the attachment host above. Without
+        // the pin, a target that changed zones would read as its new object,
+        // which blocked nothing (CR 608.2i, Gaze of the Gorgon's ruling).
+        crate::types::ability::FilterProp::CombatRelation {
+            subject: crate::types::ability::CombatRelationSubject::AnaphoricTarget,
+            ..
+        } => relation == HostRelation::Dependency,
+        crate::types::ability::FilterProp::Not { prop } => {
+            prop_refs_parent_object_anaphor_in(prop, relation)
+        }
+        crate::types::ability::FilterProp::AnyOf { props } => props
+            .iter()
+            .any(|prop| prop_refs_parent_object_anaphor_in(prop, relation)),
         _ => false,
     }
 }
@@ -6267,6 +6297,118 @@ mod tests {
         assert!(
             filter_names_parent_object_subject(&TargetFilter::ParentTarget),
             "a direct referent is still the moving subject"
+        );
+
+        // T-U4c — a history relation to an earlier instruction's target follows
+        // the attachment host: a dependency the payload pins, never the
+        // condition's moving subject. `Source` names the parent in neither role.
+        let history_with =
+            |subject| {
+                TargetFilter::Typed(crate::types::ability::TypedFilter::creature().properties(
+                    vec![crate::types::ability::FilterProp::CombatRelation {
+                        relation: crate::types::ability::CombatRelation::BlockPairing {
+                            direction: crate::types::ability::BlockPairDirection::Either,
+                            scope: Some(crate::types::ability::CombatHistoryScope::ThisTurn),
+                        },
+                        subject,
+                    }],
+                ))
+            };
+        let anaphoric = history_with(crate::types::ability::CombatRelationSubject::AnaphoricTarget);
+        assert!(
+            filter_refs_parent_object_anaphor(&anaphoric),
+            "payload pins must see the history dependency"
+        );
+        assert!(
+            !filter_names_parent_object_subject(&anaphoric),
+            "a history dependency is not the condition's moving subject"
+        );
+        // The pin follows the target freeze into `Not` / `AnyOf` properties.
+        let relation = crate::types::ability::FilterProp::CombatRelation {
+            relation: crate::types::ability::CombatRelation::BlockPairing {
+                direction: crate::types::ability::BlockPairDirection::Either,
+                scope: Some(crate::types::ability::CombatHistoryScope::ThisTurn),
+            },
+            subject: crate::types::ability::CombatRelationSubject::AnaphoricTarget,
+        };
+        let wrapped = |prop| {
+            TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature().properties(vec![prop]),
+            )
+        };
+        assert!(
+            filter_refs_parent_object_anaphor(&wrapped(crate::types::ability::FilterProp::Not {
+                prop: Box::new(relation.clone()),
+            })),
+            "a negated history dependency is still pinned"
+        );
+        assert!(
+            filter_refs_parent_object_anaphor(&wrapped(crate::types::ability::FilterProp::AnyOf {
+                props: vec![crate::types::ability::FilterProp::Token, relation.clone()],
+            })),
+            "a history dependency inside AnyOf is still pinned"
+        );
+        assert!(
+            !filter_refs_parent_object_anaphor(&wrapped(
+                crate::types::ability::FilterProp::AnyOf {
+                    props: vec![crate::types::ability::FilterProp::Token],
+                }
+            )),
+            "AnyOf without the relation pins nothing"
+        );
+        // The wrappers carry `HostRelation` unchanged: a nested history or
+        // attachment-host dependency is still never the condition's moving
+        // subject, and a nested player-only reference still names no object.
+        assert!(
+            !filter_names_parent_object_subject(&wrapped(crate::types::ability::FilterProp::Not {
+                prop: Box::new(relation.clone()),
+            })),
+            "a negated history dependency is not the moving subject"
+        );
+        assert!(
+            !filter_names_parent_object_subject(&wrapped(
+                crate::types::ability::FilterProp::AnyOf {
+                    props: vec![crate::types::ability::FilterProp::Token, relation],
+                }
+            )),
+            "a history dependency inside AnyOf is not the moving subject"
+        );
+        let nested_host = wrapped(crate::types::ability::FilterProp::Not {
+            prop: Box::new(crate::types::ability::FilterProp::AttachedTo {
+                to: crate::types::ability::AttachmentReferent::Host {
+                    filter: Box::new(TargetFilter::ParentTarget),
+                },
+            }),
+        });
+        assert!(
+            filter_refs_parent_object_anaphor(&nested_host),
+            "a negated host dependency is still pinned"
+        );
+        assert!(
+            !filter_names_parent_object_subject(&nested_host),
+            "a negated host dependency is not the moving subject"
+        );
+        for player_only in [
+            TargetFilter::ParentTargetController,
+            TargetFilter::ParentTargetOwner,
+        ] {
+            let nested_player = wrapped(crate::types::ability::FilterProp::AnyOf {
+                props: vec![crate::types::ability::FilterProp::Not {
+                    prop: Box::new(crate::types::ability::FilterProp::DistinctFrom {
+                        reference: Box::new(player_only),
+                    }),
+                }],
+            });
+            assert!(
+                !filter_refs_parent_object_anaphor(&nested_player),
+                "a nested player-only reference names no object"
+            );
+            assert!(!filter_names_parent_object_subject(&nested_player));
+        }
+        let source = history_with(crate::types::ability::CombatRelationSubject::Source);
+        assert!(
+            !filter_refs_parent_object_anaphor(&source),
+            "a source-subject relation names no parent object"
         );
 
         // ---- The shared function was NOT modified: all four still true. ----

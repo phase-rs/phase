@@ -26,7 +26,7 @@ use super::super::oracle_quantity::{
     parse_for_each_short_of_clause_expr, parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
-    parse_bare_was_dealt_damage_suffix, parse_source_blocked_history_clause, parse_target,
+    parse_bare_was_dealt_damage_suffix, parse_block_history_clause, parse_target,
     parse_target_with_ctx, parse_target_with_syntax, parse_that_clause_suffix,
     parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, TargetSyntax,
 };
@@ -1570,9 +1570,15 @@ pub(super) fn fold_search_choose_type_conditional_destination(def: &mut AbilityD
 /// is returned only if every difference from the unseeded one is confined to the
 /// positions the bindings may occupy (`accepting_bindings_confined`).
 pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
+    lower_effect_chain_ir_with_provenance(ir).value
+}
+
+pub(crate) fn lower_effect_chain_ir_with_provenance(
+    ir: &EffectChainIr,
+) -> crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition> {
     let unseeded = {
         let _pass = tracing::debug_span!(target: "engine::parser::binding", "assembly_attempt", pass = "unseeded").entered();
-        super::assembly::assemble_effect_chain(ir)
+        super::assembly::assemble_effect_chain_with_provenance(ir)
     };
     if ir
         .clauses
@@ -1589,9 +1595,9 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         .for_each(transplant_accepting_player_bindings);
     let seeded = {
         let _pass = tracing::debug_span!(target: "engine::parser::binding", "assembly_attempt", pass = "seeded").entered();
-        super::assembly::assemble_effect_chain(&seeded_ir)
+        super::assembly::assemble_effect_chain_with_provenance(&seeded_ir)
     };
-    let confined = accepting_bindings_confined(&unseeded, &seeded);
+    let confined = accepting_bindings_confined(&unseeded.value, &seeded.value);
     tracing::debug!(target: "engine::parser::binding", confined, selected_pass = if confined { "seeded" } else { "unseeded" }, "assembly selected");
     if confined {
         seeded
@@ -3776,6 +3782,52 @@ pub(super) fn resolve_those_tokens_anaphors(defs: &mut [AbilityDefinition]) {
         let prev = &prev_rest[i - 1];
         let cur = &mut cur_rest[0];
         rewrite_those_tokens_from_antecedent(&mut cur.effect, &prev.effect);
+    }
+}
+
+/// CR 608.2c: a typed "those <type>" anaphor names its nearest antecedent. When
+/// the previous instruction reads the chain set restricted to one "this way"
+/// action ("Each Wolf tapped this way deals damage ..."), a following "those
+/// Wolves" names those same members, so it reads the same action. A mass tap
+/// selects members it leaves unchanged too (CR 701.26a), so the bare set is
+/// wider than its "tapped this way" members (Master of the Wild Hunt).
+pub(super) fn inherit_this_way_cause_from_antecedent(defs: &mut [AbilityDefinition]) {
+    for i in 1..defs.len() {
+        let Some((antecedent_id, cause)) = this_way_operand(&defs[i - 1].effect) else {
+            continue;
+        };
+        if let Some(TargetFilter::TrackedSetFiltered {
+            id,
+            caused_by: caused_by @ None,
+            ..
+        }) = defs[i].effect.target_filter_mut()
+        {
+            if *id == antecedent_id {
+                *caused_by = Some(cause);
+            }
+        }
+    }
+}
+
+/// The chain-set operand an instruction acts on or from, when it is restricted
+/// to one "this way" action.
+fn this_way_operand(
+    effect: &Effect,
+) -> Option<(
+    crate::types::identifiers::TrackedSetId,
+    crate::types::ability::ThisWayCause,
+)> {
+    let operand = match effect {
+        Effect::EachSourceDealsDamage { sources, .. } => sources,
+        other => other.target_filter()?,
+    };
+    match operand {
+        TargetFilter::TrackedSetFiltered {
+            id,
+            caused_by: Some(cause),
+            ..
+        } => Some((*id, *cause)),
+        _ => None,
     }
 }
 
@@ -7689,7 +7741,13 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
                     .parse(seg)
                     .is_ok()
             }) && quantity_clause_owns_this_turn_suffix(&lower[..this_turn_end]);
-        if !before.is_empty() && !quantity_owns_suffix {
+        // CR 608.2c + CR 608.2i: a "this turn" that closes a block-history clause
+        // ("tap all creatures ~ blocked this turn, or draw a card") is that
+        // clause's window, not the effect's duration, as at the end of the text.
+        let history_owns_suffix = lower
+            .get(..this_turn_end)
+            .is_some_and(combat_history_relative_clause_owns_suffix);
+        if !before.is_empty() && !quantity_owns_suffix && !history_owns_suffix {
             return (duration_text[..before.len()].trim_end(), Some(duration));
         }
     }
@@ -7938,19 +7996,23 @@ fn spell_history_relative_clause_owns_suffix(input: &str) -> bool {
 }
 
 /// CR 608.2i + CR 611.2a: a combat-history relative clause ("each creature it
-/// blocked this combat", "all creatures it blocked this turn") owns its trailing
-/// window; it is a look-back restriction, not an effect duration (#9179:
-/// Cathedral Membrane, Defiant Vanguard). Context-free on purpose: when the
-/// target parser declines to bind a bare "it" (no `SelfRef` antecedent), the
-/// window still belongs to the clause, so no spurious duration appears and the
-/// swallow audit reports the unrepresented clause. Recognition is delegated to
-/// `parse_source_blocked_history_clause`, the clause's single authority, and the
-/// clause must run to end of input, so a genuine OUTER duration after it leaves
-/// a non-empty remainder and still strips.
+/// blocked this combat", "all creatures that blocked or were blocked by it this
+/// turn") owns its trailing window; it is a look-back restriction, not an effect
+/// duration (#9179: Cathedral Membrane, Defiant Vanguard). Context-free on
+/// purpose: when the target parser declines to bind the clause's partner (a bare
+/// "it" with no antecedent, or a partner no subject word covers, such as Triton
+/// Tactics' "one of those creatures"), the window still belongs to the clause,
+/// so no spurious duration appears and the instruction fails closed instead
+/// (`instruction_drops_block_partner`). The same holds for a partner that is an
+/// indefinite filter phrase ("a Zombie": Time to Reflect), which no relation
+/// represents yet.
+/// Recognition is delegated to `parse_block_history_clause`, the clause's single
+/// authority, and the clause must run to end of input, so a genuine OUTER
+/// duration after it leaves a non-empty remainder and still strips.
 fn combat_history_relative_clause_owns_suffix(input: &str) -> bool {
     nom_primitives::scan_at_word_boundaries(input, |i| {
         terminated(
-            parse_source_blocked_history_clause,
+            parse_block_history_clause,
             (
                 multispace0,
                 opt(alt((tag("."), tag(",")))),
@@ -8373,14 +8435,21 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                 },
                 tag("at the beginning of that combat, "),
             ),
-            // CR 511.2 + CR 603.7a: "At this turn's next end of combat, …"
-            // fires at the end-of-combat step of the current turn.
-            // Covers Triton Tactics, Glyph of Doom, Gaze of the Gorgon,
-            // Venomous Breath, and the full class of spells that schedule
-            // an end-of-combat effect during resolution.
+            // CR 511.2 + CR 603.7b: "At this turn's next end of combat" is bounded to its
+            // turn, so a delayed ability created after the turn's last end of combat lapses
+            // at cleanup unfired. It waits for a later combat this turn (CR 500.8).
+            // Covers Triton Tactics, Glyph of Doom, Gaze of the Gorgon and
+            // Venomous Breath.
             value(
-                DelayedTriggerCondition::AtNextPhase {
-                    phase: Phase::EndCombat,
+                DelayedTriggerCondition::WhenNextEvent {
+                    trigger: Box::new(
+                        crate::types::ability::TriggerDefinition::new(
+                            crate::types::triggers::TriggerMode::Phase,
+                        )
+                        .phase(Phase::EndCombat),
+                    ),
+                    or_trigger: None,
+                    lifetime: crate::types::ability::DelayedTriggerLifetime::ThisTurn,
                 },
                 tag("at this turn's next end of combat, "),
             ),
@@ -10186,6 +10255,8 @@ pub(super) fn try_parse_distribute_damage(
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::DealDamage {
@@ -10274,6 +10345,8 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
 
     let counter_name = counter_type.as_str().into_owned();
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::PutCounter {
@@ -10336,6 +10409,8 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::PreventDamage {
@@ -10463,6 +10538,8 @@ pub(super) fn try_parse_bidirectional_prevent(
     by_ability.sub_link = SubAbilityLink::SequentialSibling;
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: to_effect,
@@ -16333,14 +16410,32 @@ mod tests {
         assert_eq!(cond, Some(expected));
     }
 
-    /// CR 511.2 + CR 603.7a: "At this turn's next end of combat, …" prefix-form
-    /// delayed trigger fires at the end-of-combat step of the current turn.
-    /// Covers Triton Tactics, Glyph of Doom.
+    /// CR 511.2 + CR 603.7b: "At this turn's next end of combat, …" prefix-form
+    /// delayed trigger waits for the next end-of-combat step of the current turn
+    /// and lapses at cleanup unfired (`DelayedTriggerLifetime::ThisTurn`).
+    /// Covers Triton Tactics, Glyph of Doom. Bare "at end of combat, " has no
+    /// turn bound and stays `AtNextPhase`.
     #[test]
     fn strip_temporal_prefix_at_this_turns_next_end_of_combat() {
         let (text, cond) =
             strip_temporal_prefix("at this turn's next end of combat, untap that creature");
         assert_eq!(text, "untap that creature");
+        assert_eq!(
+            cond,
+            Some(DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(
+                    crate::types::ability::TriggerDefinition::new(
+                        crate::types::triggers::TriggerMode::Phase,
+                    )
+                    .phase(Phase::EndCombat),
+                ),
+                or_trigger: None,
+                lifetime: crate::types::ability::DelayedTriggerLifetime::ThisTurn,
+            })
+        );
+
+        let (text, cond) = strip_temporal_prefix("at end of combat, exile it");
+        assert_eq!(text, "exile it");
         assert_eq!(
             cond,
             Some(DelayedTriggerCondition::AtNextPhase {

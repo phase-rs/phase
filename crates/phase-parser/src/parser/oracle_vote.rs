@@ -37,8 +37,13 @@ use crate::types::zones::{EtbTapState, Zone};
 // CR 701.38a: vote results are effects of the enclosing spell/ability, not
 // independent ability bodies. All result-body entries retain the nested default,
 // including when a helper strips a tally or distributes a shared player subject.
-use super::oracle_effect::{parse_effect_chain_with_context, strip_trailing_duration};
+#[cfg(test)]
+use super::oracle_effect::parse_effect_chain_with_context;
+use super::oracle_effect::{
+    parse_effect_chain_with_context_and_provenance, strip_trailing_duration,
+};
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::history_provenance::{InstructionStep, Lowered, PendingHistory};
 use super::oracle_ir::trigger::VoteIr;
 use super::oracle_keyword::parse_granted_keyword_fragment;
 use super::oracle_target::parse_target;
@@ -156,7 +161,8 @@ pub(crate) fn parse_vote_block_ir(
     // sub-effect with `PlayerFilter::VotedFor { choice_index }` so the runtime
     // re-binds the sub-effect controller to each labeled player.
     let is_controller_labels = matches!(voter_scope, VoterScope::ControllerLabels);
-    let mut slots: Vec<Option<Box<AbilityDefinition>>> = (0..choices.len()).map(|_| None).collect();
+    let mut slots: Vec<Option<Lowered<AbilityDefinition>>> =
+        (0..choices.len()).map(|_| None).collect();
     // CR 608.2d + CR 102.2: a "[then ]choose a(n) opponent/player at random."
     // setup sentence that precedes a "for each <choice> vote" damage clause is
     // hoisted to a wrapping `Effect::Choose` (see below). The suffix-clause
@@ -221,7 +227,7 @@ pub(crate) fn parse_vote_block_ir(
             if setup.is_some() {
                 pre_vote_choose = setup;
             }
-            (rest, idx, *parsed_def, false)
+            (rest, idx, parsed_def, false)
         } else {
             // CR 701.38 + CR 122.1 + CR 608.2c: aggregate-tally shape (Emissary
             // Green). The effect body carries a placeholder count slot (the
@@ -243,7 +249,7 @@ pub(crate) fn parse_vote_block_ir(
             // binder to the strip above, so stage the tally as the caller-bound
             // count the head's count position reads ("You create a number of
             // Treasure tokens").
-            let mut parsed = parse_effect_chain_with_context(
+            let mut parsed = parse_effect_chain_with_context_and_provenance(
                 head,
                 kind,
                 &mut ParseContext {
@@ -258,7 +264,7 @@ pub(crate) fn parse_vote_block_ir(
             // count — `?` falls through by returning None so dispatch can try
             // another shape or emit a diagnostic, rather than producing an
             // effect with the wrong (placeholder) count.
-            *parsed.effect.count_expr_mut()? = tally;
+            *parsed.value.effect.count_expr_mut()? = tally;
             (rest, idx, parsed, false)
         };
         if slots[idx].is_some() {
@@ -275,15 +281,26 @@ pub(crate) fn parse_vote_block_ir(
             //   friend-or-foe; no explicit CR section) routes to every
             //   labeled player, re-binding the sub-effect controller to
             //   each labeled player so "they" / "their" refers correctly.
-            parsed.player_scope = Some(PlayerFilter::VotedFor {
+            parsed.value.player_scope = Some(PlayerFilter::VotedFor {
                 choice_index: idx as u32,
             });
         }
-        slots[idx] = Some(Box::new(parsed));
+        slots[idx] = Some(parsed);
         walk = rest.trim_start();
     }
+    let mut history = Vec::new();
     let per_choice_effect: Vec<Box<AbilityDefinition>> =
-        slots.into_iter().collect::<Option<Vec<_>>>()?;
+        slots
+            .into_iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                let lowered = slot?;
+                history.extend(lowered.history.into_iter().map(|record| {
+                    PendingHistory::nested(record, InstructionStep::VoteChoice(index))
+                }));
+                Some(Box::new(lowered.value))
+            })
+            .collect::<Option<Vec<_>>>()?;
 
     let vote = Effect::Vote {
         choices,
@@ -308,10 +325,16 @@ pub(crate) fn parse_vote_block_ir(
         // before vs. after the ballot is outcome-equivalent.
         Some(choice_type) => Some(
             VoteIr::new(vote, Some(choice_type))
+                .with_history(history)
                 .with_source(text)
                 .with_context(ctx),
         ),
-        None => Some(VoteIr::new(vote, None).with_source(text).with_context(ctx)),
+        None => Some(
+            VoteIr::new(vote, None)
+                .with_history(history)
+                .with_source(text)
+                .with_context(ctx),
+        ),
     }
 }
 
@@ -319,7 +342,15 @@ pub(crate) fn parse_vote_block_ir(
 /// lowered definition. Trigger parsing uses [`parse_vote_block_ir`] so its root
 /// goes through the ordinary trigger effect-chain arm.
 pub fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
-    parse_vote_block_ir(text, kind, &ParseContext::default()).map(|vote| vote.into_ability(kind))
+    parse_vote_block_with_provenance(text, kind).map(|lowered| lowered.value)
+}
+
+pub(crate) fn parse_vote_block_with_provenance(
+    text: &str,
+    kind: AbilityKind,
+) -> Option<Lowered<AbilityDefinition>> {
+    parse_vote_block_ir(text, kind, &ParseContext::default())
+        .map(|vote| vote.into_ability_with_provenance(kind))
 }
 
 /// CR 701.38a: Parse the Will-of-the-council threshold-clause body that
@@ -358,7 +389,8 @@ fn parse_threshold_vote_clauses(
     // Per-choice effect slots, parallel to `choices`, plus the discovered
     // tie-breaker index. Each named clause binds to its choice's slot; unlisted
     // choices stay `None` and are filled with `Effect::NoOp` below.
-    let mut slots: Vec<Option<Box<AbilityDefinition>>> = (0..choices.len()).map(|_| None).collect();
+    let mut slots: Vec<Option<Lowered<AbilityDefinition>>> =
+        (0..choices.len()).map(|_| None).collect();
     let mut tie_breaker_index: Option<u8> = None;
     let mut walk = input.trim_start();
     let mut clause_count = 0usize;
@@ -370,9 +402,12 @@ fn parse_threshold_vote_clauses(
             // Same choice named twice — not a shape we model.
             return None;
         }
-        let parsed =
-            parse_effect_chain_with_context(effect_text, kind, &mut ParseContext::default());
-        slots[idx] = Some(Box::new(parsed));
+        let parsed = parse_effect_chain_with_context_and_provenance(
+            effect_text,
+            kind,
+            &mut ParseContext::default(),
+        );
+        slots[idx] = Some(parsed);
         if has_tie {
             if tie_breaker_index.is_some() {
                 // Two "...or the vote is tied" qualifiers — malformed.
@@ -404,25 +439,38 @@ fn parse_threshold_vote_clauses(
 
     // CR 101.3: Fill any unlisted choice with a no-op outcome so the
     // `per_choice_effect.len() == choices.len()` Vote invariant holds.
+    let mut history = Vec::new();
     let per_choice_effect: Vec<Box<AbilityDefinition>> = slots
         .into_iter()
-        .map(|slot| slot.unwrap_or_else(|| Box::new(AbilityDefinition::new(kind, Effect::NoOp))))
+        .enumerate()
+        .map(|(index, slot)| match slot {
+            Some(lowered) => {
+                history.extend(lowered.history.into_iter().map(|record| {
+                    PendingHistory::nested(record, InstructionStep::VoteChoice(index))
+                }));
+                Box::new(lowered.value)
+            }
+            None => Box::new(AbilityDefinition::new(kind, Effect::NoOp)),
+        })
         .collect();
 
-    Some(VoteIr::new(
-        Effect::Vote {
-            choices: choices.to_vec(),
-            per_choice_effect,
-            starting_with,
-            voter_scope,
-            tally_mode: VoteTally::TopVotes {
-                tie: TieResolution::Breaker(tie_breaker_index),
+    Some(
+        VoteIr::new(
+            Effect::Vote {
+                choices: choices.to_vec(),
+                per_choice_effect,
+                starting_with,
+                voter_scope,
+                tally_mode: VoteTally::TopVotes {
+                    tie: TieResolution::Breaker(tie_breaker_index),
+                },
+                subject: VoteSubject::Named,
+                visibility,
             },
-            subject: VoteSubject::Named,
-            visibility,
-        },
-        None,
-    ))
+            None,
+        )
+        .with_history(history),
+    )
 }
 
 /// CR 701.38a: Parse the "...or tied for most votes" all-tied outcome over named
@@ -589,7 +637,7 @@ fn parse_object_vote_block(
 
 /// One filled per-choice slot produced by a conjoined-suffix clause:
 /// `(choice_index, parsed_effect)`.
-type VoteChoiceSlot = (usize, Box<AbilityDefinition>);
+type VoteChoiceSlot = (usize, Lowered<AbilityDefinition>);
 
 /// CR 701.38 + CR 608.2c: Parse a conjoined dual-suffix Council's-dilemma clause
 /// (Capital Punishment): "Each [subject] [verb-A] for each <a> vote and [verb-B]
@@ -619,7 +667,7 @@ fn parse_conjoined_suffix_clauses<'a>(
     .parse(sentence);
     let (after_subject, subject) = subj_res.ok()?;
 
-    let mut pairs: Vec<(usize, Box<AbilityDefinition>)> = Vec::new();
+    let mut pairs: Vec<VoteChoiceSlot> = Vec::new();
     let mut remaining = after_subject;
     loop {
         // Locate the next "for each <choice> vote[s]" suffix; `head` is the
@@ -633,10 +681,13 @@ fn parse_conjoined_suffix_clauses<'a>(
         // Rebuild the conjunct with the shared subject so the chain parser
         // derives `player_scope` uniformly, then bind the scaled vote count.
         let conjunct_text = format!("{subject}{head}");
-        let mut parsed =
-            parse_effect_chain_with_context(&conjunct_text, kind, &mut ParseContext::default());
-        bind_vote_count_aggregate(&mut parsed, idx)?;
-        pairs.push((idx, Box::new(parsed)));
+        let mut parsed = parse_effect_chain_with_context_and_provenance(
+            &conjunct_text,
+            kind,
+            &mut ParseContext::default(),
+        );
+        bind_vote_count_aggregate(&mut parsed.value, idx)?;
+        pairs.push((idx, parsed));
 
         let tail = tail.trim_start();
         if tail.is_empty() {
@@ -1108,13 +1159,13 @@ fn parse_per_choice_body(
     text: &str,
     kind: AbilityKind,
     scope: Option<ControllerRef>,
-) -> AbilityDefinition {
+) -> Lowered<AbilityDefinition> {
     let mut ctx = ParseContext::default();
     match scope {
         Some(scope) => ctx.with_player_scope(scope, |ctx| {
-            parse_effect_chain_with_context(text, kind, ctx)
+            parse_effect_chain_with_context_and_provenance(text, kind, ctx)
         }),
-        None => parse_effect_chain_with_context(text, kind, &mut ctx),
+        None => parse_effect_chain_with_context_and_provenance(text, kind, &mut ctx),
     }
 }
 
@@ -1245,7 +1296,12 @@ fn parse_vote_for_each_suffix_clause<'a>(
     input: &'a str,
     choices: &[String],
     kind: AbilityKind,
-) -> Option<(&'a str, usize, Box<AbilityDefinition>, Option<ChoiceType>)> {
+) -> Option<(
+    &'a str,
+    usize,
+    Lowered<AbilityDefinition>,
+    Option<ChoiceType>,
+)> {
     // 1. Optional "[then ]choose a(n) opponent/player at random. " setup. The
     //    whole tuple is `opt`-wrapped, so when the leading "then " matches but the
     //    "choose ... at random" alternative does not, nom restores the original
@@ -1284,18 +1340,19 @@ fn parse_vote_for_each_suffix_clause<'a>(
     //    CR 608.2c: an effect exposing no bindable count slot is a strict-failure
     //    (fall through via `?`) rather than a silent mis-parse — mirrors the
     //    prefix aggregate clause.
-    let mut parsed = parse_effect_chain_with_context(head, kind, &mut ParseContext::default());
-    bind_vote_count_aggregate(&mut parsed, idx)?;
+    let mut parsed =
+        parse_effect_chain_with_context_and_provenance(head, kind, &mut ParseContext::default());
+    bind_vote_count_aggregate(&mut parsed.value, idx)?;
 
     // 4. When a random "choose <player>" setup was hoisted to wrap the Vote, the
     //    "that player" anaphor (lowered to TriggeringPlayer) refers to the
     //    persisted chosen player; retarget it so the damage resolves against that
     //    choice (CR 608.2c + CR 120.1).
     if setup.is_some() {
-        retarget_that_player_to_chosen(parsed.effect.as_mut());
+        retarget_that_player_to_chosen(parsed.value.effect.as_mut());
     }
 
-    Some((rest, idx, Box::new(parsed), setup))
+    Some((rest, idx, parsed, setup))
 }
 
 /// Retarget a `"that player"` anaphor (`TargetFilter::TriggeringPlayer`) to the
@@ -2527,6 +2584,7 @@ mod tests {
             AbilityKind::Spell,
         )
         .expect("suffix aggregate parses");
+        let def = def.value;
         assert_eq!(idx, 0);
         assert_eq!(rest, "");
         assert!(setup.is_none());
@@ -2556,6 +2614,7 @@ mod tests {
             AbilityKind::Spell,
         )
         .expect("suffix aggregate with setup parses");
+        let def = def.value;
         assert_eq!(idx, 1);
         assert_eq!(rest, "");
         assert!(matches!(
@@ -2837,14 +2896,14 @@ mod parent_controller_population_tests {
             let body = format!("~ deals 2 damage to target creature and 1 damage to {population}");
             // The per-choice helper's two context arms (1111/1113).
             for scope in [None, Some(ControllerRef::ScopedPlayer)] {
-                assert_nested_population(&parse_per_choice_body(&body, AbilityKind::Spell, scope));
+                assert_nested_population(
+                    &parse_per_choice_body(&body, AbilityKind::Spell, scope).value,
+                );
             }
             let earlier_target = format!("Tap target creature and {body}");
-            assert_nested_population(&parse_per_choice_body(
-                &earlier_target,
-                AbilityKind::Spell,
-                None,
-            ));
+            assert_nested_population(
+                &parse_per_choice_body(&earlier_target, AbilityKind::Spell, None).value,
+            );
             // The threshold result entry (371), with damage inside the If body.
             let threshold = format!("If ember gets more votes, {body}.");
             let threshold = parse_threshold_vote_clauses(
@@ -2869,7 +2928,7 @@ mod parent_controller_population_tests {
             let (_, _, definition, _) =
                 parse_vote_for_each_suffix_clause(&suffix, &choices, AbilityKind::Spell)
                     .expect("suffix aggregate body entry");
-            assert_nested_population(&definition);
+            assert_nested_population(&definition.value);
         }
     }
 
@@ -2903,7 +2962,7 @@ mod parent_controller_population_tests {
         ).expect("conjoined suffix body entries");
         for (idx, definition) in pairs {
             assert_eq!(
-                definition.effect.count_expr(),
+                definition.value.effect.count_expr(),
                 Some(&QuantityExpr::Ref {
                     qty: QuantityRef::VoteCount {
                         choice_index: idx as u32

@@ -2753,7 +2753,9 @@ pub(crate) fn record_root_target_slots(ability: &mut ResolvedAbility) {
     ability.chosen_target_slots = ChosenTargetSlots::Recorded(chain_node_positions(ability));
 }
 
-fn clear_chosen_target_slots(ability: &mut ResolvedAbility) {
+/// CR 115.10a: records that no node of the chain holds a chosen target, so a
+/// value it carries (a delayed ability's creation-time referent) is not one.
+pub(crate) fn clear_chosen_target_slots(ability: &mut ResolvedAbility) {
     ability.chosen_target_slots = ChosenTargetSlots::Recorded(Vec::new());
     for (_, child) in ability.child_links_mut() {
         clear_chosen_target_slots(child);
@@ -8317,13 +8319,24 @@ fn per_opponent_fanout_constraint_targets(
 }
 
 fn per_opponent_fanout_object_filter(ability: &ResolvedAbility) -> Option<TargetFilter> {
+    per_opponent_fanout_object_filter_as(ability, ControllerRef::You)
+}
+
+/// The fanout's object filter with its "that player" controller read as
+/// `player`: `You` where the filter is evaluated with the paired opponent as
+/// its controller, or `SpecificPlayer` where it is evaluated for the
+/// ability's controller (a retarget's slot pool).
+fn per_opponent_fanout_object_filter_as(
+    ability: &ResolvedAbility,
+    player: ControllerRef,
+) -> Option<TargetFilter> {
     let mut filter = ability.effect.target_filter()?.clone();
     // CR 109.5 + CR 108.3: each paired opponent changes the control context,
     // while original ownership keeps the declaring authority.
     if !super::filter::bind_declaring_owner_authority(&mut filter, ability.controller) {
         return None;
     }
-    Some(rewrite_declared_target_player(&filter, ControllerRef::You))
+    Some(rewrite_declared_target_player(&filter, player))
 }
 
 fn per_opponent_fanout_legal_object_targets(
@@ -11943,40 +11956,47 @@ fn emit_node(
     node: &ResolvedAbility,
     path: &[ChainStep],
     base_exposed: bool,
+    declared: &DeclaredPositions,
     bindings: &mut Vec<RetargetSlotBinding>,
     next_run: &mut usize,
 ) {
-    if node.targets.is_empty() {
+    // CR 115.7 + CR 115.10a: only a chosen target can be changed. The node's
+    // declared positions are projected out of what it holds, each keeping its
+    // own address, so a value it carries without having received it as a choice
+    // (a delayed ability's creation-time referent) neither takes a slot filter
+    // nor is offered.
+    let positions = declared.at(node, path);
+    if positions.is_empty() {
         return;
     }
+    if is_per_opponent_target_fanout(node) {
+        emit_fanout_objects(node, path, &positions, bindings);
+        return;
+    }
+    let binding = |slot: usize, enforcement, run| RetargetSlotBinding {
+        address: RetargetSlotAddress {
+            path: path.to_vec(),
+            slot,
+        },
+        enforcement,
+        current: node.targets[slot].clone(),
+        run,
+    };
     match node_slot_filters(node) {
-        NodeSlotFilters::PerSlot(filters) if filters.len() == node.targets.len() => {
-            for (slot, (filter, target)) in filters.into_iter().zip(node.targets.iter()).enumerate()
-            {
-                bindings.push(RetargetSlotBinding {
-                    address: RetargetSlotAddress {
-                        path: path.to_vec(),
-                        slot,
-                    },
-                    enforcement: SlotEnforcement::Filtered(filter),
-                    current: target.clone(),
-                    run: None,
-                });
+        NodeSlotFilters::PerSlot(filters) if filters.len() == positions.len() => {
+            for (filter, &slot) in filters.into_iter().zip(&positions) {
+                bindings.push(binding(slot, SlotEnforcement::Filtered(filter), None));
             }
         }
         NodeSlotFilters::UniformRun(filter) => {
             let run = *next_run;
             *next_run += 1;
-            for (slot, target) in node.targets.iter().enumerate() {
-                bindings.push(RetargetSlotBinding {
-                    address: RetargetSlotAddress {
-                        path: path.to_vec(),
-                        slot,
-                    },
-                    enforcement: SlotEnforcement::Filtered(filter.clone()),
-                    current: target.clone(),
-                    run: Some(run),
-                });
+            for &slot in &positions {
+                bindings.push(binding(
+                    slot,
+                    SlotEnforcement::Filtered(filter.clone()),
+                    Some(run),
+                ));
             }
         }
         other => {
@@ -11988,24 +12008,90 @@ fn emit_node(
                     false,
                     "node_slot_filters PerSlot length {} disagrees with {} declared targets for {:?}",
                     filters.len(),
-                    node.targets.len(),
+                    positions.len(),
                     node.effect,
                 );
             }
             if base_exposed {
-                for (slot, target) in node.targets.iter().enumerate() {
-                    bindings.push(RetargetSlotBinding {
-                        address: RetargetSlotAddress {
-                            path: path.to_vec(),
-                            slot,
-                        },
-                        enforcement: SlotEnforcement::Legacy,
-                        current: target.clone(),
-                        run: None,
-                    });
+                for &slot in &positions {
+                    bindings.push(binding(slot, SlotEnforcement::Legacy, None));
                 }
             }
         }
+    }
+}
+
+/// CR 115.7a + CR 115.9a: a per-opponent fanout's object targets, each at its
+/// own stored address and checked against "that player controls" for the
+/// opponent its preceding player binder names. The binders are the iteration,
+/// not targets, so none is offered.
+fn emit_fanout_objects(
+    node: &ResolvedAbility,
+    path: &[ChainStep],
+    positions: &[usize],
+    bindings: &mut Vec<RetargetSlotBinding>,
+) {
+    for &slot in positions {
+        let Some(TargetRef::Player(bound)) = node.targets[..slot]
+            .iter()
+            .rev()
+            .find(|target| matches!(target, TargetRef::Player(_)))
+        else {
+            continue;
+        };
+        let Some(filter) = per_opponent_fanout_object_filter_as(
+            node,
+            ControllerRef::SpecificPlayer { id: *bound },
+        ) else {
+            continue;
+        };
+        bindings.push(RetargetSlotBinding {
+            address: RetargetSlotAddress {
+                path: path.to_vec(),
+                slot,
+            },
+            enforcement: SlotEnforcement::Filtered(filter),
+            current: node.targets[slot].clone(),
+            run: None,
+        });
+    }
+}
+
+/// CR 601.2c + CR 115.10a: the positions of each node's targets that are
+/// declared ones, by path, as [`walk_declared_slots`] numbers them, and a
+/// per-opponent fanout's object positions. A node the numbering doesn't
+/// declare positions for (one it reads through a delegate) keeps every
+/// position it holds.
+struct DeclaredPositions(Vec<(Vec<ChainStep>, Vec<usize>)>);
+
+impl DeclaredPositions {
+    fn of(root: &ResolvedAbility) -> Self {
+        let mut nodes = Vec::new();
+        walk_declared_slots(
+            root,
+            DeclaredNumbering::of(root),
+            &mut |node, path, declared| {
+                if let Some(declared) = declared {
+                    // A fanout's numbering compacts its slots; its object
+                    // targets are the positions it holds past its binders.
+                    let positions = if is_per_opponent_target_fanout(node) {
+                        chain_node_positions(node)
+                    } else {
+                        declared.positions.clone()
+                    };
+                    nodes.push((path.to_vec(), positions));
+                }
+            },
+        );
+        Self(nodes)
+    }
+
+    fn at(&self, node: &ResolvedAbility, path: &[ChainStep]) -> Vec<usize> {
+        self.0
+            .iter()
+            .find(|(node_path, _)| node_path.as_slice() == path)
+            .map(|(_, positions)| positions.clone())
+            .unwrap_or_else(|| (0..node.targets.len()).collect())
     }
 }
 
@@ -12017,6 +12103,7 @@ fn emit_node(
 fn descend_retarget_slots(
     ability: &ResolvedAbility,
     path: &[ChainStep],
+    declared: &DeclaredPositions,
     bindings: &mut Vec<RetargetSlotBinding>,
     next_run: &mut usize,
 ) {
@@ -12025,17 +12112,18 @@ fn descend_retarget_slots(
         child_path.push(edge);
         match disposition {
             AnnouncementDisposition::Declare => {
-                emit_node(child, &child_path, false, bindings, next_run);
-                descend_retarget_slots(child, &child_path, bindings, next_run);
+                emit_node(child, &child_path, false, declared, bindings, next_run);
+                descend_retarget_slots(child, &child_path, declared, bindings, next_run);
             }
             AnnouncementDisposition::Inherited => {
-                descend_retarget_slots(child, &child_path, bindings, next_run)
+                descend_retarget_slots(child, &child_path, declared, bindings, next_run)
             }
             AnnouncementDisposition::AfterDeferred => {
                 // The route already names the skipped immediate child.
                 descend_retarget_slots_after_deferred_effect(
                     child.sub_ability.as_deref(),
                     &child_path,
+                    declared,
                     bindings,
                     next_run,
                 );
@@ -12054,6 +12142,7 @@ fn descend_retarget_slots(
 fn descend_retarget_slots_after_deferred_effect(
     sub_ability: Option<&ResolvedAbility>,
     path: &[ChainStep],
+    declared: &DeclaredPositions,
     bindings: &mut Vec<RetargetSlotBinding>,
     next_run: &mut usize,
 ) {
@@ -12069,13 +12158,14 @@ fn descend_retarget_slots_after_deferred_effect(
         descend_retarget_slots_after_deferred_effect(
             sub.sub_ability.as_deref(),
             &sub_path,
+            declared,
             bindings,
             next_run,
         );
         return;
     }
-    emit_node(sub, &sub_path, false, bindings, next_run);
-    descend_retarget_slots(sub, &sub_path, bindings, next_run);
+    emit_node(sub, &sub_path, false, declared, bindings, next_run);
+    descend_retarget_slots(sub, &sub_path, declared, bindings, next_run);
 }
 
 pub fn chain_retarget_slots(ability: &ResolvedAbility) -> Vec<RetargetSlotBinding> {
@@ -12096,20 +12186,32 @@ pub fn chain_retarget_slots(ability: &ResolvedAbility) -> Vec<RetargetSlotBindin
     }
     let (base_node, base_path) = resolve_base_exposed(ability, Vec::new());
 
+    let declared = DeclaredPositions::of(ability);
     let mut bindings = Vec::new();
     let mut next_run = 0usize;
     // Step 2: emit the BASE-exposed node, unconditionally.
-    emit_node(base_node, &base_path, true, &mut bindings, &mut next_run);
+    emit_node(
+        base_node,
+        &base_path,
+        true,
+        &declared,
+        &mut bindings,
+        &mut next_run,
+    );
 
     // Step 3: blanket early-outs — the faithful mirror of
     // `assign_targets_in_chain`'s own early-outs, which assign the node's
     // targets and stop without gating on derivability.
-    if is_per_opponent_target_fanout(base_node) || !chain_has_target_sink(base_node) {
-        return bindings;
+    if !is_per_opponent_target_fanout(base_node) && chain_has_target_sink(base_node) {
+        // Step 4: descend.
+        descend_retarget_slots(
+            base_node,
+            &base_path,
+            &declared,
+            &mut bindings,
+            &mut next_run,
+        );
     }
-
-    // Step 4: descend.
-    descend_retarget_slots(base_node, &base_path, &mut bindings, &mut next_run);
     bindings
 }
 
@@ -13316,7 +13418,7 @@ mod tests {
         AttachCardinality, AttachmentReferent, CoinFlipResult, CopyRecipient, ManaProduction,
         ManaTargetRole, PreventionAmount, PreventionScope,
     };
-    use crate::types::ability::{CombatRelation, CombatRelationSubject};
+    use crate::types::ability::{BlockPairDirection, CombatRelation, CombatRelationSubject};
     use crate::types::game_state::DistributionUnit;
     use crate::types::phase::Phase;
 
@@ -14014,6 +14116,7 @@ mod tests {
                 true,
                 vec![creature.clone()],
             ),
+            (CombatRelationSubject::AnaphoricTarget, false, vec![]),
             (CombatRelationSubject::Source, false, vec![]),
         ] {
             assert_declaration_witnesses(
@@ -14022,7 +14125,10 @@ mod tests {
                     target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
                         FilterProp::CombatRelation {
                             subject,
-                            relation: CombatRelation::BlockingOrBlockedBy,
+                            relation: CombatRelation::BlockPairing {
+                                direction: BlockPairDirection::Either,
+                                scope: None,
+                            },
                         },
                     ])),
                 }),
@@ -14426,12 +14532,32 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
                     FilterProp::CombatRelation {
                         subject: CombatRelationSubject::ParentTarget,
-                        relation: CombatRelation::BlockingOrBlockedBy,
+                        relation: CombatRelation::BlockPairing {
+                            direction: BlockPairDirection::Either,
+                            scope: None,
+                        },
                     },
                 ])),
             },
             1,
             1,
+        ));
+        cases.push((
+            "combat relation anaphor",
+            Effect::DestroyAll {
+                cant_regenerate: false,
+                target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::CombatRelation {
+                        subject: CombatRelationSubject::AnaphoricTarget,
+                        relation: CombatRelation::BlockPairing {
+                            direction: BlockPairDirection::Either,
+                            scope: None,
+                        },
+                    },
+                ])),
+            },
+            0,
+            0,
         ));
         cases.push((
             "one-sided quantity source",
@@ -14713,7 +14839,10 @@ mod tests {
                 defender: Some(ControllerRef::You),
             },
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None,
+                },
                 subject: CombatRelationSubject::Source,
             },
         ] {

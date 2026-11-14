@@ -40380,7 +40380,10 @@ fn assert_block_count_shape(condition: &TriggerCondition, minimum: i32, noun: &s
         .properties
         .push(FilterProp::Attacking { defender: None });
     expected.properties.push(FilterProp::CombatRelation {
-        relation: CombatRelation::BlockingOrBlockedBy,
+        relation: CombatRelation::BlockPairing {
+            direction: BlockPairDirection::Either,
+            scope: None,
+        },
         subject: CombatRelationSubject::Source,
     });
     assert_eq!(filter, &expected);
@@ -41965,7 +41968,10 @@ fn parse_card(
 fn blocked_by_source_creatures(scope: CombatHistoryScope) -> TargetFilter {
     TargetFilter::Typed(
         TypedFilter::creature().properties(vec![FilterProp::CombatRelation {
-            relation: CombatRelation::BlockedBySubject { scope: Some(scope) },
+            relation: CombatRelation::BlockPairing {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                scope: Some(scope),
+            },
             subject: CombatRelationSubject::Source,
         }]),
     )

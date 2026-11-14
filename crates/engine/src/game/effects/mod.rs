@@ -3613,6 +3613,107 @@ fn tapped_object_context_from_events(
     tapped.next().is_none().then_some(first)
 }
 
+/// CR 608.2c: does `effect` read a characteristic of the object an earlier instruction named?
+fn effect_reads_instruction_referent(effect: &Effect) -> bool {
+    let mut reads = false;
+    effect.for_each_quantity_expr(&mut |quantity| {
+        reads |= quantity.any_ref(&mut |qty| {
+            matches!(
+                qty,
+                QuantityRef::Power { scope }
+                | QuantityRef::Toughness { scope }
+                | QuantityRef::ObjectManaValue { scope }
+                    if matches!(scope, ObjectScope::Demonstrative | ObjectScope::Anaphoric)
+            )
+        });
+    });
+    reads
+}
+
+/// CR 608.2c: does `effect` deal its damage to the parent instruction's own target? Every
+/// printed face of that shape is a parse that dropped the recipient its text prints
+/// (Crush Underfoot: "It deals damage equal to its power to target creature."), so a
+/// referent would turn the announced object's damage on itself. Such an instruction
+/// keeps the reading it has without one.
+fn damages_parent_target(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::DealDamage {
+            target: TargetFilter::ParentTarget,
+            ..
+        } | Effect::DamageAll {
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    )
+}
+
+/// CR 601.2c: did `node` choose the object `id` as one of its own targets?
+fn chose_object(node: &ResolvedAbility, id: ObjectId) -> bool {
+    node.chosen_target_slots
+        .slots()
+        .iter()
+        .any(|&slot| node.targets.get(slot) == Some(&TargetRef::Object(id)))
+}
+
+/// CR 608.2c + CR 608.2h: an ability's next instruction refers back to the object its first
+/// instruction named, whether or not that instruction left an event naming it: a shield
+/// (Heal the Scars), a grant (Sheltering Word), counters (The Provider), a prevention shield
+/// (Boros Fury-Shield), a retarget (Imp's Mischief), a destroy or counter the target
+/// survived (Feed the Swarm, Essence Backlash), or a card put into a library (Lagonna-Band
+/// Storyteller). Only the root instruction announces, and only its next instruction reads:
+/// a later instruction's "that card" names a card some other instruction looked for, and may
+/// have found nothing (Judge Unworthy with an empty library). The root is the instruction
+/// that chose the object as its own target when the resolving stack object's root chose it
+/// too (CR 601.2c). Depth cannot say so: a "you may" root resumes after the choice at depth 1
+/// (Lagonna-Band Storyteller), and both records travel with it. Only a single object target
+/// is a referent, and never for an instruction that deals damage to the parent's own target
+/// (`damages_parent_target`). The object is snapshot live, after the layers settle (CR 613.1:
+/// The Provider's counters count).
+/// Stamps `snapshot` as the next instruction's effect-context object. Boxed and
+/// kept out of line so the clone stays off the recursive chain walker's frame.
+#[inline(never)]
+fn with_next_effect_context_object(
+    ability: &ResolvedAbility,
+    snapshot: &CostPaidObjectSnapshot,
+) -> Box<ResolvedAbility> {
+    let mut owned = Box::new(ability.clone());
+    if let Some(next) = owned.sub_ability.as_deref_mut() {
+        next.effect_context_object = Some(snapshot.clone());
+    }
+    owned
+}
+
+fn announced_object_context(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+) -> Option<CostPaidObjectSnapshot> {
+    if !ability.sub_ability.as_deref().is_some_and(|sub| {
+        effect_reads_instruction_referent(&sub.effect) && !damages_parent_target(&sub.effect)
+    }) {
+        return None;
+    }
+    crate::game::layers::flush_layers(state);
+    let mut objects =
+        ability
+            .targets
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, target)| match target {
+                TargetRef::Object(id) => state.objects.get(id).map(|object| (slot, object)),
+                TargetRef::Player(_) => None,
+            });
+    let (slot, object) = objects.next()?;
+    let is_root = ability.chosen_target_slots.slots().contains(&slot)
+        && state
+            .resolving_stack_entry
+            .as_ref()
+            .and_then(|entry| entry.ability())
+            .is_some_and(|root| chose_object(root, object.id));
+    (is_root && objects.next().is_none())
+        .then(|| CostPaidObjectSnapshot::capture(object, object.snapshot_for_mana_spent()))
+}
+
 fn sacrificed_object_context_from_events(
     state: &GameState,
     events: &[GameEvent],
@@ -15758,6 +15859,11 @@ pub(crate) enum TrackedSetPublicationInput<'a> {
     ResolvedEvents {
         ability: &'a ResolvedAbility,
         events: &'a [GameEvent],
+        /// CR 608.2c: the population the instruction selected before acting
+        /// ([`tap_untap::selection_before_resolution`]). A member whose state
+        /// the instruction left unchanged emits no event but is still among
+        /// its referents; empty when the referents are exactly the events.
+        selection: &'a [ObjectId],
     },
 }
 
@@ -16053,9 +16159,25 @@ pub(crate) fn publish_tracked_set_for_resolution(
         ) => publish_prospective_tracked_set(state, objects, participants, cause),
         (
             TrackedSetPublicationMode::Normal,
-            TrackedSetPublicationInput::ResolvedEvents { ability, events },
+            TrackedSetPublicationInput::ResolvedEvents {
+                ability,
+                events,
+                selection,
+            },
         ) if resolution_next_needs_tracked_set(state, producer) => {
-            let affected = affected_objects_with_causes(state, ability, &ability.effect, events);
+            let mut affected =
+                affected_objects_with_causes(state, ability, &ability.effect, events);
+            // CR 608.2c + CR 701.26a: "tap all creatures that blocked this
+            // creature this turn. They don't untap ..." (Joven's Ferrets) names
+            // an already-tapped blocker too. Such a member emits no event, so it
+            // joins from the selection; it was not "tapped this way", so its
+            // cause is read like any other member's.
+            for &id in selection {
+                if !affected.iter().any(|(member, _)| *member == id) {
+                    let cause = this_way_cause_for_resolved(state, &ability.effect, events, id);
+                    affected.push((id, cause));
+                }
+            }
             publish_tracked_set_with_causes(state, affected);
         }
         (
@@ -19081,6 +19203,7 @@ fn publish_player_scope_clause_results(
             TrackedSetPublicationInput::ResolvedEvents {
                 ability: scoped_template,
                 events: scoped_events,
+                selection: &[],
             },
         );
     }
@@ -23972,6 +24095,13 @@ fn resolve_chain_body(
 
     // CR 608.2c: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
+    // CR 608.2c: the population the instruction selects, read before it acts,
+    // for a following reference to it.
+    let selection_before = if resolution_next_needs_tracked_set(state, ability) {
+        tap_untap::selection_before_resolution(state, ability)
+    } else {
+        Vec::new()
+    };
     // CR 608.2e: a generated seat leg of a paused player-scope token clause
     // begins that seat's instruction. Its entry becomes the seat in progress
     // before the node acts, so a pause inside it re-parks the sidecar (cloned
@@ -24768,6 +24898,7 @@ fn resolve_chain_body(
             TrackedSetPublicationInput::ResolvedEvents {
                 ability,
                 events: &events[events_before..],
+                selection: &selection_before,
             },
         );
     }
@@ -24865,18 +24996,31 @@ fn resolve_chain_body(
     // CR 608.2c + CR 608.2h: a later instruction may read a public-to-hidden
     // move's last-known controller/owner metadata, without treating the hidden
     // object itself as an available parent referent.
-    let effect_context_object =
-        parent_referent_context_from_events(state, effect_events).or_else(|| {
-            ability
-                .sub_ability
-                .as_deref()
-                .is_some_and(|sub| {
-                    effect_refs_parent_target_metadata(&sub.effect)
-                        && !effect_requires_parent_target_object(&sub.effect)
-                })
-                .then(|| library_move_metadata_context_from_events(state, effect_events))
-                .flatten()
-        });
+    let event_context_object = parent_referent_context_from_events(state, effect_events);
+    // CR 608.2c + CR 609.3: an instruction that left no referent event still names
+    // the object its root instruction announced (`announced_object_context`), for
+    // the next instruction only. A later "that card" names what some other
+    // instruction looked for, and if it found nothing, it names nothing (Judge
+    // Unworthy with an empty library), so the object is stamped on the next
+    // instruction alone, below.
+    let announced_object = event_context_object
+        .is_none()
+        .then(|| announced_object_context(state, ability))
+        .flatten();
+    let effect_context_object = event_context_object.or_else(|| {
+        if announced_object.is_some() {
+            return None;
+        }
+        ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(|sub| {
+                effect_refs_parent_target_metadata(&sub.effect)
+                    && !effect_requires_parent_target_object(&sub.effect)
+            })
+            .then(|| library_move_metadata_context_from_events(state, effect_events))
+            .flatten()
+    });
     let amassed_army_object = amassed_army_context_from_events(state, &events[events_before..]);
 
     // CR 610.3a / CR 610.3b + CR 118.12: a bounded zone move refused because its "until"
@@ -24983,6 +25127,14 @@ fn resolve_chain_body(
         &effect_context_owned
     } else {
         ability
+    };
+    let announced_owned;
+    let ability = match &announced_object {
+        Some(snapshot) if ability.sub_ability.is_some() => {
+            announced_owned = with_next_effect_context_object(ability, snapshot);
+            &*announced_owned
+        }
+        _ => ability,
     };
 
     // CR 608.2c: "the revealed cards" of a reveal-only until-loop name the cards

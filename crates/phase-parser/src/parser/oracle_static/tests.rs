@@ -7,10 +7,11 @@ use super::test_helpers::P3_SEG;
 use super::*;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
-    CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageKindFilter,
-    Duration, Effect, FilterProp, ObjectProperty, ObjectScope, Parity, ParitySource, PlayerFilter,
-    PlayerRelation, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
-    SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    BlockPairDirection, CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef,
+    CountScope, DamageKindFilter, Duration, Effect, FilterProp, ObjectProperty, ObjectScope,
+    Parity, ParitySource, PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, SubtypeExclusion,
+    TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -36649,10 +36650,13 @@ fn combat_relation_subject_static_binds_source_anchored_filter() {
         };
         assert!(
             props.contains(&FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None
+                },
                 subject: CombatRelationSubject::Source,
             }),
-            "{line:?}: expected a source-anchored BlockingOrBlockedBy prop, got {props:?}"
+            "{line:?}: expected a source-anchored Either pairing prop, got {props:?}"
         );
     }
 }

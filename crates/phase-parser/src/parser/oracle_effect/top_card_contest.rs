@@ -20,10 +20,11 @@ use nom::Parser;
 
 use super::imperative::parse_library_player_suffix;
 use super::lower::strip_each_player_subject;
-use super::parse_effect_chain_with_context;
+use super::{parse_nested_effect_chain_with_damage_context_and_provenance, DamageTargetContext};
 use crate::parser::oracle_ir::ast::parsed_clause;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::effect_chain::EffectChainIr;
+use crate::parser::oracle_ir::history_provenance::{InstructionStep, PendingHistory};
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use crate::parser::oracle_nom::quantity::{parse_aggregate_property, parse_max_extremum_adjective};
@@ -128,7 +129,7 @@ pub(super) fn parse_exile_top_card_contest_ir(
     // The winner's instruction is a predicate whose subject is the winner
     // ("takes an extra turn after this one"); it parses like any "each player"
     // predicate, acting for the player the resolver binds.
-    let winner_effect = parse_effect_chain_with_context(
+    let winner = parse_nested_effect_chain_with_damage_context_and_provenance(
         instruction,
         kind,
         &mut ParseContext {
@@ -136,17 +137,25 @@ pub(super) fn parse_exile_top_card_contest_ir(
             in_trigger: ctx.in_trigger,
             ..Default::default()
         },
+        DamageTargetContext::InheritedTargets,
     );
-    if matches!(*winner_effect.effect, Effect::Unimplemented { .. }) {
+    if matches!(*winner.value.effect, Effect::Unimplemented { .. }) {
         return None;
     }
 
+    let mut clause = parsed_clause(Effect::ExileTopCardContest {
+        winner_effect: Box::new(winner.value),
+    });
+    clause.head_text = Some(String::new());
+    clause.history = winner
+        .history
+        .into_iter()
+        .map(|record| PendingHistory::nested(record, InstructionStep::ContestWinner))
+        .collect();
     Some(EffectChainIr::single_clause(
         text,
         kind,
-        parsed_clause(Effect::ExileTopCardContest {
-            winner_effect: Box::new(winner_effect),
-        }),
+        clause,
         None,
         ctx.actor.clone(),
         ctx.in_trigger,

@@ -490,8 +490,8 @@ const BATCH_GENUINE_ROWS: &[&str] = &[
     // #5719 — the Draw was Unimplemented until the quantity channel bound Intensity,
     // and the sweep skips Unimplemented-bearing triggers.
     "great desert hellion",
-    // Dies (self_ref): DestroyAll{creatures with CombatRelation{BlockingOrBlockedBy,
-    // subject: Source}} (AST measured). Each co-departing Abu Ja'far answers from
+    // Dies (self_ref): DestroyAll{creatures with CombatRelation{BlockPairing{Either,
+    // None}, subject: Source}} (AST measured). Each co-departing Abu Ja'far answers from
     // ITS OWN departure row's block pairings (CR 608.2h), so the members destroy
     // different creatures, and a leaves trigger one resolution sets off resolves
     // before the next (Reveillark returning the creature the other Abu Ja'far
@@ -500,7 +500,7 @@ const BATCH_GENUINE_ROWS: &[&str] = &[
     // two_abu_jafars_dying_together_let_their_controller_order_the_triggers
     "abu ja'far",
     // Dies during combat (self_ref): DamageAll{6, creatures with CombatRelation{
-    // BlockedBySubject{ThisCombat}, subject: Source}} (AST measured). Each
+    // BlockPairing{SubjectIsBlocker, ThisCombat}, subject: Source}} (AST measured). Each
     // co-departing Membrane damages the attacker IT blocked, the attacker dies to
     // state-based actions between the two resolutions, and a leaves trigger it
     // sets off resolves before the next (CR 603.6c): same shape as Abu Ja'far.

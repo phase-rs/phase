@@ -3369,14 +3369,14 @@ fn self_ref_possessive_does_not_swallow_sentence_boundary_in_clause_splitter() {
     );
 }
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AggregateFunction, BounceSelection, CardTypeSetSource,
-    CastVariantPaid, ChoiceType, ChosenSubtypeKind, CombatRelation, CombatRelationSubject,
-    Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission, CountScope,
-    DevotionColors, DoublePTMode, Duration, FilterProp, IterationCategory, LibraryPosition,
-    LinkedExileScope, ManaContribution, ManaProduction, ObjectProperty, ObjectScope,
-    PermissionGrantee, PlayerFilter, PlayerRelation, PreventionScope, PtStat, PtValue,
-    PtValueScope, QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality,
-    TargetChoiceTiming, TypeFilter, TypedFilter, ZoneRef,
+    AbilityCondition, AbilityCost, AggregateFunction, BlockPairDirection, BounceSelection,
+    CardTypeSetSource, CastVariantPaid, ChoiceType, ChosenSubtypeKind, CombatRelation,
+    CombatRelationSubject, Comparator, ContinuousModification, ControllerRef,
+    CopyRetargetPermission, CountScope, DevotionColors, DoublePTMode, Duration, FilterProp,
+    IterationCategory, LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction,
+    ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter, PlayerRelation, PreventionScope,
+    PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, SearchSelectionConstraint,
+    SharedQuality, TargetChoiceTiming, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::Supertype;
 use crate::types::game_state_kinds::{DistributionUnit, TargetSelectionConstraint};
@@ -12277,7 +12277,10 @@ fn effect_bounce_all_creatures_blocking_or_blocked_by_target_creature() {
             assert_eq!(
                 filter.properties,
                 vec![FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockingOrBlockedBy,
+                    relation: CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::Either,
+                        scope: None
+                    },
                     subject: CombatRelationSubject::ParentTarget,
                 }]
             );

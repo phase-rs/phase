@@ -9,6 +9,7 @@ use serde::Serialize;
 use super::ast::{parsed_clause, ModalOptionality};
 use super::context::ParseContext;
 use super::effect_chain::{DieResultBranchIr, EffectChainIr, ModalModeIr};
+use super::history_provenance::{HistoryProvenance, InstructionStep, Lowered, PendingHistory};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef,
     Effect, IllegalTargetsDisposition, ModalChoice, TargetFilter, TargetSelectionMode,
@@ -46,6 +47,8 @@ pub(crate) enum TriggerNodeIr {
     /// Already-assembled definition from a recognizer that builds its own.
     /// `lower_trigger_node_ir` returns it untouched.
     Assembled {
+        #[serde(skip)]
+        history: Vec<HistoryProvenance>,
         definition: Box<TriggerDefinition>,
         /// The recognizer's own input text — provenance only. Document lowering
         /// derives spans and fragments from the emitting line, never from here.
@@ -56,7 +59,16 @@ pub(crate) enum TriggerNodeIr {
 impl TriggerNodeIr {
     /// Wrap a recognizer-produced trigger definition for source-ordered emission.
     pub(crate) fn from_definition(source_text: &str, definition: TriggerDefinition) -> Self {
+        Self::from_definition_with_history(source_text, definition, Vec::new())
+    }
+
+    pub(crate) fn from_definition_with_history(
+        source_text: &str,
+        definition: TriggerDefinition,
+        history: Vec<HistoryProvenance>,
+    ) -> Self {
         Self::Assembled {
+            history,
             definition: Box::new(definition),
             source_text: source_text.to_string(),
         }
@@ -230,6 +242,8 @@ pub(crate) struct ModalIr {
 /// then sends the root through ordinary trigger-chain lowering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct VoteIr {
+    #[serde(skip)]
+    history: Vec<PendingHistory>,
     source_text: String,
     vote: Effect,
     pre_vote_choose: Option<ChoiceType>,
@@ -241,12 +255,18 @@ impl VoteIr {
     pub(crate) fn new(vote: Effect, pre_vote_choose: Option<ChoiceType>) -> Self {
         debug_assert!(matches!(vote, Effect::Vote { .. }));
         Self {
+            history: Vec::new(),
             source_text: String::new(),
             vote,
             pre_vote_choose,
             actor: None,
             in_trigger: false,
         }
+    }
+
+    pub(crate) fn with_history(mut self, history: Vec<PendingHistory>) -> Self {
+        self.history = history;
+        self
     }
 
     pub(crate) fn with_source(mut self, source_text: &str) -> Self {
@@ -264,7 +284,7 @@ impl VoteIr {
     /// root definition. The nested vote definition is a continuation payload
     /// of the typed random-choice wrapper, not the trigger body itself.
     pub(crate) fn effect_chain(&self, kind: AbilityKind) -> EffectChainIr {
-        let parsed = match &self.pre_vote_choose {
+        let mut parsed = match &self.pre_vote_choose {
             Some(choice_type) => {
                 let mut root = parsed_clause(Effect::Choose {
                     chooser: crate::types::ability::ControllerRef::You,
@@ -277,6 +297,13 @@ impl VoteIr {
             }
             None => parsed_clause(self.vote.clone()),
         };
+        parsed.head_text = Some(String::new());
+        parsed.history = self.history.clone();
+        if self.pre_vote_choose.is_some() {
+            for record in &mut parsed.history {
+                record.prepend(InstructionStep::SubAbility);
+            }
+        }
         EffectChainIr::single_clause(
             &self.source_text,
             kind,
@@ -288,9 +315,27 @@ impl VoteIr {
     }
 
     /// Compatibility lowering for callers outside the native spell router.
-    pub(crate) fn into_ability(self, kind: AbilityKind) -> AbilityDefinition {
+    pub(crate) fn into_ability_with_provenance(
+        self,
+        kind: AbilityKind,
+    ) -> Lowered<AbilityDefinition> {
+        // This compatibility constructor preserves its historical runtime
+        // fields. Its payload layout is exactly the one-clause IR layout, so
+        // commit the same records without applying extra assembly transforms.
+        let chain = self.effect_chain(kind);
+        let clause = &chain.clauses[0];
+        let history = clause
+            .parsed
+            .history
+            .iter()
+            .map(|pending| {
+                let mut record = pending.committed(clause.id);
+                record.locator = pending.locator.clone();
+                record
+            })
+            .collect();
         let vote = AbilityDefinition::new(kind, self.vote);
-        match self.pre_vote_choose {
+        let value = match self.pre_vote_choose {
             Some(choice_type) => AbilityDefinition::new(
                 kind,
                 Effect::Choose {
@@ -302,7 +347,13 @@ impl VoteIr {
             )
             .sub_ability(vote),
             None => vote,
-        }
+        };
+        Lowered { value, history }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_ability(self, kind: AbilityKind) -> AbilityDefinition {
+        self.into_ability_with_provenance(kind).value
     }
 }
 
@@ -313,6 +364,8 @@ impl VoteIr {
 /// trigger effect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct PileIr {
+    #[serde(skip)]
+    history: Vec<PendingHistory>,
     source_text: String,
     effect: Effect,
     actor: Option<ControllerRef>,
@@ -323,11 +376,17 @@ impl PileIr {
     pub(crate) fn new(effect: Effect) -> Self {
         debug_assert!(matches!(effect, Effect::SeparateIntoPiles { .. }));
         Self {
+            history: Vec::new(),
             source_text: String::new(),
             effect,
             actor: None,
             in_trigger: false,
         }
+    }
+
+    pub(crate) fn with_history(mut self, history: Vec<PendingHistory>) -> Self {
+        self.history = history;
+        self
     }
 
     pub(crate) fn with_source(mut self, source_text: &str) -> Self {
@@ -344,10 +403,13 @@ impl PileIr {
     /// Construct the trigger-context chain without lowering the root outside
     /// ordinary trigger lowering.
     pub(crate) fn effect_chain(&self, kind: AbilityKind) -> EffectChainIr {
+        let mut parsed = parsed_clause(self.effect.clone());
+        parsed.head_text = Some(String::new());
+        parsed.history = self.history.clone();
         EffectChainIr::single_clause(
             &self.source_text,
             kind,
-            parsed_clause(self.effect.clone()),
+            parsed,
             None,
             self.actor.clone(),
             self.in_trigger,

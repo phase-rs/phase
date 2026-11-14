@@ -478,6 +478,146 @@ fn a_per_opponent_trigger_targets_only_the_permanents_it_is_aimed_at() {
     );
 }
 
+/// CR 115.7a + CR 115.9a: with one opponent, Riptide Gearhulk's "for each
+/// opponent, put up to one target nonland permanent that player controls into
+/// its owner's library third from the top" chooses one permanent, so Bolt Bend
+/// can target the trigger. Its retarget offers that permanent's own slot, not
+/// the opponent the fanout pairs it with, against "that player controls" for
+/// that opponent: P1's other creature is offered, and neither P1's hexproof
+/// creature nor P0's Gearhulk is. The change keeps the opponent and moves only
+/// the new permanent.
+#[test]
+fn bolt_bend_changes_only_the_permanent_a_per_opponent_trigger_chose() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario.add_creature(P1, "First Bear", 2, 2).id();
+    let second = scenario.add_creature(P1, "Second Bear", 2, 2).id();
+    let shrouded = scenario
+        .add_creature(P1, "Hexproof Bear", 2, 2)
+        .with_keyword(Keyword::Hexproof)
+        .id();
+    let gearhulk = scenario
+        .add_creature_to_hand_from_oracle(P0, "Riptide Gearhulk", 4, 4, RIPTIDE_GEARHULK)
+        .from_oracle_text_with_keywords(&["Double strike", "Prowess"], RIPTIDE_GEARHULK)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let bend = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bolt Bend", true, BOLT_BEND)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    scenario.with_library_top(P1, &["Forest", "Forest", "Forest", "Forest"]);
+    let mut runner = scenario.build();
+    runner.cast(gearhulk).commit();
+    for _ in 0..12 {
+        match &runner.state().waiting_for {
+            WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(first)),
+                    })
+                    .expect("aim the trigger at the first Bear");
+            }
+            _ if runner.state().stack.iter().any(|e| {
+                e.source_id == gearhulk && matches!(e.kind, StackEntryKind::TriggeredAbility { .. })
+            }) =>
+            {
+                break;
+            }
+            _ => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+        }
+    }
+    let entry = trigger_of(&mut runner, gearhulk);
+    let stored = |runner: &GameRunner| {
+        runner
+            .state()
+            .stack
+            .iter()
+            .find(|e| e.id == entry)
+            .and_then(|e| e.ability())
+            .expect("the trigger")
+            .targets
+            .clone()
+    };
+    assert_eq!(
+        stored(&runner),
+        vec![TargetRef::Player(P1), TargetRef::Object(first)],
+        "reach guard: the fanout pairs the opponent with its permanent"
+    );
+    assert_eq!(
+        both(runner.state(), entry).1,
+        vec![TargetRef::Object(first)]
+    );
+    let card_id = runner.state().objects[&bend].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bend,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Bolt Bend");
+    // Prowess triggers above Bolt Bend and resolves first.
+    let spell = runner
+        .state()
+        .stack
+        .iter()
+        .find(|e| e.source_id == bend)
+        .expect("reach guard: Bolt Bend was cast with no target prompt");
+    assert_eq!(
+        spell.ability().expect("a spell").targets,
+        vec![TargetRef::Object(entry)],
+        "the trigger has a single target"
+    );
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::RetargetChoice { .. }
+        ) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass");
+    }
+    let WaitingFor::RetargetChoice {
+        current_targets,
+        slots,
+        legal_new_targets,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("a retarget prompt: {:?}", runner.state().waiting_for);
+    };
+    assert_eq!(current_targets, &vec![TargetRef::Object(first)]);
+    assert_eq!(slots.len(), 1);
+    assert_eq!(
+        slots[0].slot, 1,
+        "the permanent's own address, not the opponent's"
+    );
+    assert!(legal_new_targets.contains(&TargetRef::Object(second)));
+    assert!(
+        !legal_new_targets.contains(&TargetRef::Object(gearhulk)),
+        "\"that player controls\" is the opponent's"
+    );
+    assert!(
+        !legal_new_targets.contains(&TargetRef::Object(shrouded)),
+        "CR 702.11b: hexproof against P0's ability"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(second)),
+        })
+        .expect("change the permanent");
+    assert_eq!(
+        stored(&runner),
+        vec![TargetRef::Player(P1), TargetRef::Object(second)],
+        "the opponent stays paired with the new permanent"
+    );
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&second].zone, Zone::Library);
+    assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+}
+
 fn crimes(state: &GameState, player: PlayerId) -> u32 {
     state
         .players
@@ -636,8 +776,17 @@ struct FissureTrigger {
 /// resolves. P0 then casts Murder at the 2/2 and passes until the delayed
 /// trigger is on the stack, choosing the first Swamp if asked.
 fn fissure_trigger(lands: usize) -> FissureTrigger {
+    fissure_trigger_with(lands, |_| ()).0
+}
+
+/// [`fissure_trigger`], with `setup` adding to the board first.
+fn fissure_trigger_with<T>(
+    lands: usize,
+    setup: impl FnOnce(&mut GameScenario) -> T,
+) -> (FissureTrigger, T) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    let extra = setup(&mut scenario);
     let bear = scenario.add_creature(P1, "Bear", 2, 2).id();
     let fissure = scenario
         .add_spell_to_hand_from_oracle(P0, "Fatal Fissure", true, FATAL_FISSURE)
@@ -688,15 +837,18 @@ fn fissure_trigger(lands: usize) -> FissureTrigger {
         Zone::Graveyard,
         "reach guard: the creature the delayed trigger waited on died"
     );
-    FissureTrigger {
-        runner,
-        bear,
-        swamps,
-        entry,
-        at_prompt,
-        targeted,
-        criminals,
-    }
+    (
+        FissureTrigger {
+            runner,
+            bear,
+            swamps,
+            entry,
+            at_prompt,
+            targeted,
+            criminals,
+        },
+        extra,
+    )
 }
 
 #[test]
@@ -741,6 +893,102 @@ fn a_delayed_trigger_with_a_chosen_land_targets_only_the_land() {
         "CR 115.10a"
     );
     assert_eq!(fissure.criminals, Vec::new(), "CR 700.13");
+}
+
+/// CR 115.7a + CR 115.9a + CR 115.10a: Fatal Fissure's delayed earthbend holds
+/// the creature it waited on and declares only "target land you control". Its
+/// one declared target makes it a single-target ability for Bolt Bend, and the
+/// retarget checks that slot against the land filter, at the land's own
+/// address: P0's creature isn't offered, and with a second Swamp the change
+/// takes, so the earthbend animates that Swamp. With one Swamp, chosen without
+/// a prompt, that Swamp is the only legal choice and stays the target.
+#[test]
+fn bolt_bend_changes_only_the_delayed_earthbends_land() {
+    for lands in [1, 2] {
+        let (mut fissure, (bend, guard)) = fissure_trigger_with(lands, |scenario| {
+            let bend = scenario
+                .add_spell_to_hand_from_oracle(P0, "Bolt Bend", true, BOLT_BEND)
+                .with_mana_cost(ManaCost::generic(0))
+                .id();
+            let guard = scenario.add_creature(P0, "Guard", 2, 2).id();
+            (bend, guard)
+        });
+        assert_eq!(
+            fissure.at_prompt.is_some(),
+            lands == 2,
+            "reach guard: lands {lands}: whether the land was chosen at a prompt"
+        );
+        let runner = &mut fissure.runner;
+        let card_id = runner.state().objects[&bend].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: bend,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("cast Bolt Bend");
+        let top = runner.state().stack.last().expect("Bolt Bend");
+        assert_eq!(top.source_id, bend, "reach guard: no target prompt");
+        assert_eq!(
+            top.ability().expect("a spell").targets,
+            vec![TargetRef::Object(fissure.entry)],
+            "the delayed earthbend has a single target"
+        );
+        runner.act(GameAction::PassPriority).expect("pass");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("Bolt Bend resolves");
+        let WaitingFor::RetargetChoice {
+            scope,
+            current_targets,
+            slots,
+            legal_new_targets,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("a retarget prompt: {:?}", runner.state().waiting_for);
+        };
+        assert_eq!(*scope, RetargetScope::Single);
+        assert_eq!(current_targets, &vec![TargetRef::Object(fissure.swamps[0])]);
+        let held = &runner.state().stack[0]
+            .ability()
+            .expect("the delayed earthbend")
+            .targets;
+        assert_eq!(
+            held.get(slots[0].slot),
+            Some(&TargetRef::Object(fissure.swamps[0])),
+            "the slot keeps the land's own address beside the held creature: {held:?}"
+        );
+        assert!(
+            !legal_new_targets.contains(&TargetRef::Object(guard)),
+            "the land filter, not a legacy pool"
+        );
+        let animated = fissure.swamps[lands - 1];
+        assert!(
+            legal_new_targets.contains(&TargetRef::Object(animated)),
+            "lands {lands}: the land to keep or change to is offered"
+        );
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(animated)),
+            })
+            .expect("change the land, or keep the only one");
+        runner.advance_until_stack_empty();
+        assert!(
+            runner.state().objects[&animated]
+                .card_types
+                .core_types
+                .contains(&engine::types::card_type::CoreType::Creature),
+            "lands {lands}: the earthbend animated the land it targets"
+        );
+        if lands == 2 {
+            assert!(!runner.state().objects[&fissure.swamps[0]]
+                .card_types
+                .core_types
+                .contains(&engine::types::card_type::CoreType::Creature));
+        }
+    }
 }
 
 const GIFT_OF_IMMORTALITY: &str = "Enchant creature\nWhen enchanted creature dies, return that card to the battlefield under its owner's control. Return this card to the battlefield attached to that creature at the beginning of the next end step.";
