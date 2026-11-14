@@ -1,6 +1,8 @@
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getSharedAdapter } from "../../adapter/wasm-adapter";
+import type { FullTerminalDelivery } from "../../services/fullTerminalResult";
+import { gameStateFactory } from "../../test/factories/gameStateFactory";
 
 /**
  * The join/spectate origin is carried by the route and handed to
@@ -13,6 +15,7 @@ const {
   adapters,
   acknowledgeFullTerminalDelivery,
   bootstrapFullTerminalDelivery,
+  clearWsSession,
   commitFullTerminalDelivery,
   detectServerUrl,
   gameStoreState,
@@ -74,38 +77,16 @@ const {
   return {
     adapters,
     acknowledgeFullTerminalDelivery: vi.fn(async () => true),
-    bootstrapFullTerminalDelivery: vi.fn<
-      () => Promise<{ deliveryId: string; credential: string; finalView?: unknown } | null>
-    >(async () => null),
+    bootstrapFullTerminalDelivery: vi.fn(async (): Promise<FullTerminalDelivery | null> => null),
+    clearWsSession: vi.fn(),
     commitFullTerminalDelivery: vi.fn(async () => true),
     detectServerUrl: vi.fn(async () => "ws://test-server"),
     gameStoreState,
     loadWsSession: vi.fn<() => Record<string, unknown> | null>(() => null),
-    loadFullTerminalDelivery: vi.fn(async () => null as {
-      key: { game_code: string; generation: number };
-      terminalRevision: number;
-      deliveryId: string;
-      credential: string;
-      display: { winner: number | null; reason: string };
-      finalView?: unknown;
-    } | null),
+    loadFullTerminalDelivery: vi.fn(async (): Promise<FullTerminalDelivery | null> => null),
     multiplayerState,
-    readFullTerminalResult: vi.fn(async () => null as {
-      key: { game_code: string; generation: number };
-      terminalRevision: number;
-      deliveryId: string;
-      credential: string;
-      display: { winner: number | null; reason: string };
-      finalView?: unknown;
-    } | null),
-    replaceFullTerminalDelivery: vi.fn(async (_delivery: {
-      key: { game_code: string; generation: number };
-      terminalRevision: number;
-      deliveryId: string;
-      credential: string;
-      display: { winner: number | null; reason: string };
-      finalView?: unknown;
-    }) => true),
+    readFullTerminalResult: vi.fn(async (): Promise<FullTerminalDelivery | null> => null),
+    replaceFullTerminalDelivery: vi.fn(async (_delivery: FullTerminalDelivery) => true),
     tryReconnect,
     useGameStore,
     WebSocketAdapter,
@@ -225,7 +206,7 @@ vi.mock("../../services/playerAvatars", () => ({
 }));
 
 vi.mock("../../services/multiplayerSession", () => ({
-  clearWsSession: vi.fn(),
+  clearWsSession,
   loadWsSession,
   saveWsSession: vi.fn(),
 }));
@@ -339,10 +320,14 @@ describe("GameProvider join origin", () => {
       serverUrl: "wss://session.example/ws",
       timestamp: Date.now(),
     });
+    const finalView = gameStateFactory.build({ turn_number: 7 });
     bootstrapFullTerminalDelivery.mockResolvedValue({
+      key: { game_code: "ABC123", generation: 1 },
+      terminalRevision: 8,
       deliveryId: "d1",
       credential: "c1",
-      finalView: { turn_number: 7, objects: { "3": { owner_id: 0 } }, derived: {} },
+      display: { winner: 1, reason: "Match conceded" },
+      finalView,
     });
     const onWsEvent = vi.fn();
 
@@ -359,9 +344,7 @@ describe("GameProvider join origin", () => {
         expect.objectContaining({ type: "terminalDelivery" }),
       );
     });
-    expect(commitFullTerminalDelivery).toHaveBeenCalledWith(
-      expect.objectContaining({ finalView: { turn_number: 7, objects: { "3": { owner_id: 0 } }, derived: {} } }),
-    );
+    expect(commitFullTerminalDelivery).toHaveBeenCalledWith(expect.objectContaining({ finalView }));
     expect(acknowledgeFullTerminalDelivery).toHaveBeenCalledOnce();
     expect(commitFullTerminalDelivery.mock.invocationCallOrder[0])
       .toBeLessThan(acknowledgeFullTerminalDelivery.mock.invocationCallOrder[0]);
@@ -369,20 +352,21 @@ describe("GameProvider join origin", () => {
   });
 
   it("emits the locally retained final view after an acknowledged terminal refresh", async () => {
-    const localDelivery = {
+    const localFinalView = gameStateFactory.build({ turn_number: 7 });
+    const localDelivery: FullTerminalDelivery = {
       key: { game_code: "ABC123", generation: 1 },
       terminalRevision: 8,
       deliveryId: "d1",
       credential: "c1",
       display: { winner: 1, reason: "Match conceded" },
-      finalView: { turn_number: 7, objects: { "3": { owner_id: 0 } }, derived: { storm_count: 2 } },
+      finalView: localFinalView,
     };
-    const refreshed = {
+    const refreshed: FullTerminalDelivery = {
       ...localDelivery,
       terminalRevision: 9,
       display: { winner: 1, reason: "Match conceded" },
     };
-    delete (refreshed as Partial<typeof refreshed>).finalView;
+    delete refreshed.finalView;
     let locallyStored: { terminalRevision: number; finalView?: unknown } = localDelivery;
 
     loadWsSession.mockReturnValue({
@@ -398,7 +382,7 @@ describe("GameProvider join origin", () => {
       // Model the real persistence helper: a matching terminal authority keeps
       // its already durable view when an acknowledged server read omits it.
       locallyStored = replacement.finalView === undefined
-        ? { ...replacement, finalView: localDelivery.finalView }
+        ? { ...replacement, finalView: localFinalView }
         : replacement;
       return true;
     });
@@ -415,11 +399,11 @@ describe("GameProvider join origin", () => {
         type: "terminalDelivery",
         delivery: expect.objectContaining({
           terminalRevision: 9,
-          finalView: localDelivery.finalView,
+          finalView: localFinalView,
         }),
       }));
     });
-    expect(locallyStored.finalView).toEqual(localDelivery.finalView);
+    expect(locallyStored.finalView).toEqual(localFinalView);
     expect(locallyStored.terminalRevision).toBe(9);
     expect(replaceFullTerminalDelivery).toHaveBeenCalledWith(
       expect.objectContaining({ deliveryId: "d1", credential: "c1" }),
@@ -440,19 +424,20 @@ describe("GameProvider join origin", () => {
     ["FullSessionKey", { key: { game_code: "XYZ789", generation: 2 } }],
     ["deliveryId", { deliveryId: "d2" }],
     ["credential", { credential: "c2" }],
-  ])("does not merge a local final view when %s changes", async (_field, changedTuple) => {
-    const localDelivery = {
+  ])("keeps the retained result and route when a refreshed read's %s differs", async (_field, changedTuple) => {
+    const localDelivery: FullTerminalDelivery = {
       key: { game_code: "ABC123", generation: 1 },
       terminalRevision: 8,
       deliveryId: "d1",
       credential: "c1",
       display: { winner: 1, reason: "Match conceded" },
-      finalView: { turn_number: 7, objects: { "3": { owner_id: 0 } }, derived: {} },
+      finalView: gameStateFactory.build({ turn_number: 7 }),
     };
-    const refreshed = {
+    const refreshed: FullTerminalDelivery = {
       ...localDelivery,
       ...changedTuple,
       terminalRevision: 9,
+      display: { winner: 0, reason: "Another game's result" },
       finalView: undefined,
     };
     loadWsSession.mockReturnValue({
@@ -473,13 +458,55 @@ describe("GameProvider join origin", () => {
     );
 
     await waitFor(() => {
-      expect(onWsEvent).toHaveBeenCalledWith(expect.objectContaining({ type: "terminalDelivery" }));
+      expect(onWsEvent).toHaveBeenCalledWith({
+        type: "terminalUnavailable",
+        message: "Mismatched terminal delivery read",
+      });
     });
-    expect(replaceFullTerminalDelivery).toHaveBeenCalledWith(refreshed);
-    expect(onWsEvent).not.toHaveBeenCalledWith(expect.objectContaining({
-      type: "terminalDelivery",
-      delivery: expect.objectContaining({ finalView: localDelivery.finalView }),
-    }));
+    // Reach guard: the read ran against the retained credential.
+    expect(readFullTerminalResult).toHaveBeenCalledWith("wss://session.example/ws", "c1", undefined);
+    // Only the retained summary was published; the foreign reply was never
+    // retained, displayed, or acknowledged, and the route was not released.
+    const published = onWsEvent.mock.calls
+      .map(([event]) => event as { type: string; delivery?: FullTerminalDelivery })
+      .filter((event) => event.type === "terminalDelivery");
+    expect(published).toEqual([
+      { type: "terminalDelivery", delivery: { ...localDelivery, finalView: undefined } },
+    ]);
+    expect(replaceFullTerminalDelivery).not.toHaveBeenCalled();
+    expect(acknowledgeFullTerminalDelivery).not.toHaveBeenCalled();
+    expect(clearWsSession).not.toHaveBeenCalled();
+    expect(adapters).toHaveLength(0);
+  });
+
+  it("reports a misrouted bootstrap reply without committing, acknowledging, or reconnecting", async () => {
+    loadWsSession.mockReturnValue({
+      gameCode: "ABC123",
+      playerToken: "tok",
+      fullKey: { game_code: "ABC123", generation: 1 },
+      serverUrl: "wss://session.example/ws",
+      timestamp: Date.now(),
+    });
+    // The request helper binds the reply to the requested key and throws on a
+    // foreign one (see the ws-adapter terminal helper tests).
+    bootstrapFullTerminalDelivery.mockRejectedValue(new Error("Mismatched terminal bootstrap key"));
+    const onWsEvent = vi.fn();
+
+    render(
+      <GameProvider gameId="g1" mode="online" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(onWsEvent).toHaveBeenCalledWith({
+        type: "terminalUnavailable",
+        message: "Mismatched terminal bootstrap key",
+      });
+    });
+    expect(commitFullTerminalDelivery).not.toHaveBeenCalled();
+    expect(acknowledgeFullTerminalDelivery).not.toHaveBeenCalled();
+    expect(clearWsSession).not.toHaveBeenCalled();
     expect(adapters).toHaveLength(0);
   });
 });

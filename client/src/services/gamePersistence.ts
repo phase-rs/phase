@@ -12,6 +12,7 @@ import { isCustomGameFormat } from "../adapter/types";
 import { formatMetadata } from "../data/formatRegistry";
 import type { SeatState } from "../multiplayer/seatTypes";
 import type { FullSessionKey } from "./multiplayerSession";
+import { sameFullSessionKey } from "./fullSessionKey";
 import type { P2PSessionKey } from "./p2pSession";
 import { isValidP2PTerminalResult, type P2PTerminalResult } from "./p2pTerminalResult";
 import { ACTIVE_GAME_KEY, GAME_CHECKPOINTS_PREFIX, GAME_KEY_PREFIX } from "../constants/storage";
@@ -432,7 +433,7 @@ export async function loadGameStrict(gameId: string): Promise<PersistedGameState
 }
 
 export async function clearGame(gameId: string): Promise<void> {
-  const activeBefore = loadActiveGame();
+  const pointer = activeGamePointerToken();
   try {
     await withGameWriteLock(gameId, async () => {
       await del(GAME_KEY_PREFIX + gameId, getGameStore());
@@ -443,27 +444,23 @@ export async function clearGame(gameId: string): Promise<void> {
       await del(P2P_HOST_KEY_PREFIX + gameId, getGameStore());
     });
   } catch { /* best effort */ }
-  const activeCurrent = loadActiveGame();
-  if (activeCurrent?.id !== gameId) return;
-  if (activeBefore && JSON.stringify(activeCurrent) !== JSON.stringify(activeBefore)) return;
+  if (!ownsActiveGame(gameId, pointer)) return;
   if (await hasTerminalCleanup(gameId).catch(() => true)) return;
-  clearReleasedActiveGame(gameId);
+  if (ownsActiveGame(gameId, pointer)) clearActiveGame();
 }
 
 /** Remove every game-scoped record before reusing a game ID for a fresh start. */
 export async function clearGameStrict(gameId: string): Promise<void> {
-  const activeBefore = loadActiveGame();
+  const pointer = activeGamePointerToken();
   await withGameWriteLock(gameId, async () => {
     const store = getGameStore();
     await del(GAME_CHECKPOINTS_PREFIX + gameId, store);
     await del(P2P_HOST_KEY_PREFIX + gameId, store);
     await del(GAME_KEY_PREFIX + gameId, store);
   });
-  const activeCurrent = loadActiveGame();
-  if (activeCurrent?.id !== gameId) return;
-  if (activeBefore && JSON.stringify(activeCurrent) !== JSON.stringify(activeBefore)) return;
+  if (!ownsActiveGame(gameId, pointer)) return;
   if (await hasTerminalCleanup(gameId)) return;
-  clearReleasedActiveGame(gameId);
+  if (ownsActiveGame(gameId, pointer)) clearActiveGame();
 }
 
 export async function saveFullTerminalCleanupStrict(
@@ -599,15 +596,23 @@ export function clearActiveGame(): void {
   localStorage.removeItem(ACTIVE_GAME_KEY);
 }
 
+/** The stored pointer exactly as written: game cleanup's compare-and-delete token. */
+function activeGamePointerToken(): string | null {
+  return localStorage.getItem(ACTIVE_GAME_KEY);
+}
+
 /**
- * Game cleanup's pointer release. The pointer is read here, after the caller's
- * awaits, so one saved meanwhile for another game survives. A native pointer
- * is owned solely by native terminal persistence and is released only by
- * `clearNativeSoloSession` once the server acknowledges.
+ * Whether game cleanup may release the stored pointer: a compare-and-delete
+ * against the pointer the cleanup started with. Any pointer written while the
+ * cleanup awaited storage — for another game, or for this game ID with a new
+ * session — is a replacement and survives. A native pointer is owned solely by
+ * native terminal persistence and is released only by `clearNativeSoloSession`,
+ * with its session identity checked, once its session has ended.
  */
-function clearReleasedActiveGame(gameId: string): void {
+function ownsActiveGame(gameId: string, startedWith: string | null): boolean {
+  if (startedWith === null || activeGamePointerToken() !== startedWith) return false;
   const active = loadActiveGame();
-  if (active?.id === gameId && active.nativeSession === undefined) clearActiveGame();
+  return active?.id === gameId && active.nativeSession === undefined;
 }
 
 function holdsNativeSoloSession(
@@ -620,8 +625,7 @@ function holdsNativeSoloSession(
     && session !== undefined
     && session.gameCode === expected.gameCode
     && session.playerToken === expected.playerToken
-    && session.fullKey.game_code === expected.fullKey.game_code
-    && session.fullKey.generation === expected.fullKey.generation;
+    && sameFullSessionKey(session.fullKey, expected.fullKey);
 }
 
 /** Marks this game's native pointer terminal-only. A pointer for any other

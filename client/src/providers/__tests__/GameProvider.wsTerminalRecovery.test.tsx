@@ -325,43 +325,51 @@ describe("ordinary WebSocket terminal routing across real persistence and remoun
   });
 
   describe("terminal response identity binding", () => {
-    it("leaves the route and storage intact when the bootstrap key is foreign", async () => {
+    const sentTypes = () => requests.map(({ message }) => message.type).filter((type) => type !== "ClientHello");
+
+    it("reports a foreign bootstrap key without committing, acknowledging, or reconnecting", async () => {
       saveWsSession(session);
       bootstrap = { ...delivery, key: { game_code: "FOREIGN", generation: 1 } };
-      mountProvider();
+      const { events } = mountProvider();
 
-      await waitFor(() => {
-        expect(requests.some(({ message }) => message.type === "BootstrapTerminalDelivery")).toBe(true);
-      });
-      // Mismatched bootstrap delivery is not committed.
+      await waitFor(() => expect(events).toHaveBeenCalledWith({
+        type: "terminalUnavailable", message: "Mismatched terminal bootstrap key",
+      }));
+      expect(sentTypes()).toEqual(["BootstrapTerminalDelivery"]);
+      expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "terminalDelivery" }));
       expect(await loadFullTerminalDelivery(bootstrap.key)).toBeNull();
       expect(await loadFullTerminalDelivery(delivery.key)).toBeNull();
-      // Route is left intact and not cleared.
-      expect(loadWsSession()).toMatchObject({ serverUrl: session.serverUrl, fullKey: session.fullKey });
+      expect(loadWsSession()).toEqual(session);
     });
 
-    it("leaves the retained delivery and route intact when a credential read mismatches", async () => {
-      await commitFullTerminalDelivery(delivery);
+    it.each([
+      ["another credential", { credential: "foreign-credential" }],
+      ["another delivery", { deliveryId: "foreign-delivery" }],
+    ])("keeps the retained result and route when the read returns %s", async (_case, changed) => {
+      const retained = delivery;
+      await commitFullTerminalDelivery(retained);
       saveWsSession({ ...session, terminalOnly: true });
-      // Server returns delivery for another deliveryId / credential on the read request.
-      const mismatchedDelivery = { ...delivery, deliveryId: "foreign-id", credential: "foreign-cred" };
-      delivery = mismatchedDelivery;
-      mountProvider();
+      delivery = { ...retained, ...changed, display: { winner: 1, reason: "Another game's result" } };
+      const { events } = mountProvider();
 
-      await waitFor(() => {
-        expect(requests.some(({ message }) => message.type === "ReadTerminalResult")).toBe(true);
-      });
-      // The original delivery is preserved and not replaced with the mismatched one.
-      const stored = await loadFullTerminalDelivery(session.fullKey);
-      expect(stored?.deliveryId).toBe("recipient-delivery");
-      expect(loadWsSession()).toMatchObject({ serverUrl: session.serverUrl, fullKey: session.fullKey });
+      await waitFor(() => expect(events).toHaveBeenCalledWith({
+        type: "terminalUnavailable", message: "Mismatched terminal delivery read",
+      }));
+      // No acknowledgement was sent for the foreign reply.
+      expect(sentTypes()).toEqual(["ReadTerminalResult"]);
+      const published = events.mock.calls
+        .map(([event]) => event as { type: string })
+        .filter((event) => event.type === "terminalDelivery");
+      expect(published).toEqual([{ type: "terminalDelivery", delivery: { ...retained, finalView: undefined } }]);
+      expect(await loadFullTerminalDelivery(session.fullKey)).toEqual(retained);
+      expect(loadWsSession()).toEqual({ ...session, terminalOnly: true });
     });
 
-    it("leaves the recovery route intact when the server ACKs a different delivery ID", async () => {
+    it("keeps the recovery route when the server acknowledges a different delivery", async () => {
       ackOutcome = "pending";
       saveWsSession({ ...session, terminalOnly: true });
       await commitFullTerminalDelivery(delivery);
-      mountProvider();
+      const { events } = mountProvider();
 
       await waitFor(() => expect(pendingAcks).toHaveLength(1));
       await act(async () => {
@@ -371,8 +379,9 @@ describe("ordinary WebSocket terminal routing across real persistence and remoun
         });
       });
 
-      // Mismatched ACK does not release the route.
-      expect(loadWsSession()).toMatchObject({ serverUrl: session.serverUrl, fullKey: session.fullKey });
+      expect(sentTypes()).toEqual(["ReadTerminalResult", "AckTerminalDelivery"]);
+      expect(events).toHaveBeenCalledWith({ type: "terminalDelivery", delivery });
+      expect(loadWsSession()).toEqual({ ...session, terminalOnly: true });
     });
   });
 });

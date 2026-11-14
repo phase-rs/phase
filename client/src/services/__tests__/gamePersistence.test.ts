@@ -493,6 +493,25 @@ describe("game persistence", () => {
       expect(stored()).toEqual(replacement);
     });
 
+    it.each(clears)("%s keeps a same-ID pointer first written while it awaits IndexedDB", async (_name, clear) => {
+      let release!: () => void;
+      vi.mocked(idbDel).mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve(); }));
+      const pending = clear("native-game");
+      const fresh = { id: "native-game", mode: "ai" as const, difficulty: "Medium" };
+      saveActiveGame(fresh);
+      release();
+      await pending;
+      expect(stored()).toEqual(fresh);
+    });
+
+    it.each(clears)("%s releases its own unchanged pointer", async (_name, clear) => {
+      // Positive control for the replacement cases above.
+      const own = { id: "native-game", mode: "ai" as const, difficulty: "Medium" };
+      saveActiveGame(own);
+      await clear("native-game");
+      expect(stored()).toBeNull();
+    });
+
     it.each(clears)("%s leaves any native session pointer to native terminal persistence", async (_name, clear) => {
       saveActiveGame(pointer);
       markNativeSoloSessionTerminal("native-game", session);

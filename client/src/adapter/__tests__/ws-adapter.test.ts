@@ -33,6 +33,9 @@ import {
   NativeEngineVersionMismatchError,
   PROTOCOL_VERSION,
   WebSocketAdapter,
+  acknowledgeFullTerminalDelivery,
+  bootstrapFullTerminalDelivery,
+  readFullTerminalResult,
 } from "../ws-adapter";
 import { AdapterError, AdapterErrorCode, supportsMatchConcede, supportsTakeback, supportsTurnRewind } from "../types";
 import { STATE_CODEC_DECODE_TIMEOUT_MS, StateCodecRuntime, type StateCodecSession } from "../state-codec-runtime";
@@ -1465,6 +1468,87 @@ describe("WebSocketAdapter", () => {
       nativeSocket.dispatchSynthetic("close", undefined, new CloseEvent("close", { code: 1006, wasClean: false }));
       await vi.waitFor(() => expect(types()).toContain("reconnecting"));
       nativeAdapter.dispose();
+    });
+  });
+
+  describe("terminal request helpers bind each reply to its request", () => {
+    const KEY = { game_code: "NATIVE", generation: 1 };
+    const delivery: FullTerminalDelivery = {
+      key: KEY,
+      terminalRevision: 5,
+      deliveryId: "del-123",
+      credential: "cred-456",
+      display: { winner: 0, reason: "Victory" },
+    };
+
+    /** Runs one terminal-only request over a fake bridge and answers it with `reply`. */
+    async function answer<T>(
+      call: (socketFactory: (url: string) => PhaseSocketTransport) => Promise<T>,
+      reply: unknown,
+    ): Promise<T> {
+      const sockets: MockWebSocket[] = [];
+      const pending = call((url) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket as unknown as PhaseSocketTransport;
+      });
+      await vi.waitFor(() => expect(sockets).toHaveLength(1));
+      sockets[0]!.dispatchSynthetic("message", SERVER_HELLO);
+      await vi.waitFor(() => expect(sockets[0]!.send).toHaveBeenCalledOnce());
+      sockets[0]!.dispatchSynthetic("message", JSON.stringify(reply));
+      return pending;
+    }
+
+    const bootstrap = (reply: unknown) => answer(
+      (factory) => bootstrapFullTerminalDelivery("native-engine", KEY, "token", "request-1", factory),
+      reply,
+    );
+    const read = (reply: unknown) => answer(
+      (factory) => readFullTerminalResult("native-engine", delivery.credential, factory),
+      reply,
+    );
+    const ack = (reply: unknown) => answer(
+      (factory) => acknowledgeFullTerminalDelivery("native-engine", delivery.deliveryId, delivery.credential, factory),
+      reply,
+    );
+
+    it("returns the requested seat's delivery, and null when the server holds none", async () => {
+      await expect(bootstrap({ type: "TerminalBootstrapResult", data: { delivery } })).resolves.toEqual(delivery);
+      await expect(bootstrap({ type: "TerminalBootstrapResult", data: {} })).resolves.toBeNull();
+      await expect(read({ type: "TerminalResult", data: { delivery } })).resolves.toEqual(delivery);
+      await expect(read({ type: "TerminalResult", data: { delivery: null } })).resolves.toBeNull();
+    });
+
+    it.each([
+      ["another generation", { game_code: "NATIVE", generation: 2 }],
+      ["another game", { game_code: "OTHER", generation: 1 }],
+    ])("rejects a bootstrap reply for %s", async (_case, key) => {
+      await expect(bootstrap({ type: "TerminalBootstrapResult", data: { delivery: { ...delivery, key } } }))
+        .rejects.toThrow("Mismatched terminal bootstrap key");
+    });
+
+    it("rejects a read reply that carries another credential", async () => {
+      await expect(read({ type: "TerminalResult", data: { delivery: { ...delivery, credential: "other" } } }))
+        .rejects.toThrow("Mismatched terminal delivery read");
+    });
+
+    it.each([
+      ["an absent data payload", undefined],
+      ["a null data payload", null],
+      ["an empty delivery", { delivery: {} }],
+      ["a delivery with a null key", { delivery: { ...delivery, key: null } }],
+      ["a delivery with a null display", { delivery: { ...delivery, display: null } }],
+    ])("rejects %s rather than reporting no result", async (_case, data) => {
+      await expect(bootstrap({ type: "TerminalBootstrapResult", data })).rejects.toThrow(/^Malformed terminal/);
+      await expect(read({ type: "TerminalResult", data })).rejects.toThrow(/^Malformed terminal/);
+    });
+
+    it("accepts only an acknowledgement that names the acknowledged delivery", async () => {
+      await expect(ack({ type: "TerminalDeliveryAcknowledged", data: { delivery_id: delivery.deliveryId } }))
+        .resolves.toBe(true);
+      await expect(ack({ type: "TerminalDeliveryAcknowledged", data: { delivery_id: "other" } })).resolves.toBe(false);
+      await expect(ack({ type: "TerminalDeliveryAcknowledged" })).resolves.toBe(false);
+      await expect(ack({ type: "TerminalDeliveryAcknowledged", data: null })).resolves.toBe(false);
     });
   });
 

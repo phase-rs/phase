@@ -2277,9 +2277,11 @@ export function GameProvider({
           nativeSessionLive = true;
           // Persist the resume pointer only now that the session is live — an
           // earlier write would strand a Resume button if setup failed midway.
-          // Suspending (navigating away) keeps this pointer; only an explicit
-          // Concede (useConcedeHandler → clearGame) removes it. The player token
-          // lives only here — it is the reconnect credential.
+          // Suspending (navigating away) keeps this pointer. It is released
+          // only through the `sessionChanged` listener above, once the game has
+          // ended and its terminal result is acknowledged (a Concede ends the
+          // game the same way). The player token lives only here — it is the
+          // reconnect credential.
           const session = nativeAdapter.nativeSession;
           if (session) {
             saveActiveGame(

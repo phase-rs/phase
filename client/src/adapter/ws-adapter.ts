@@ -57,6 +57,7 @@ import {
 import i18n from "i18next";
 import { isValidWebSocketUrl, mixedContentBlockReason } from "../services/serverDetection";
 import type { FullSessionKey, WsSessionData } from "../services/multiplayerSession";
+import { sameFullSessionKey } from "../services/fullSessionKey";
 import {
   commitFullTerminalDelivery,
   isValidFullTerminalDelivery,
@@ -129,6 +130,23 @@ async function terminalSocketRequest(
   });
 }
 
+/**
+ * The delivery a terminal reply carries, total over JSON input: `null` when the
+ * server reports none, and an error when one is present but malformed (an
+ * absent result would otherwise send the caller to an ordinary reconnect).
+ */
+function terminalReplyDelivery(data: unknown): FullTerminalDelivery | null {
+  if (typeof data !== "object" || data === null) {
+    throw new Error("Malformed terminal reply");
+  }
+  const delivery = (data as { delivery?: unknown }).delivery;
+  if (delivery === undefined || delivery === null) return null;
+  if (!isValidFullTerminalDelivery(delivery)) {
+    throw new Error("Malformed terminal delivery");
+  }
+  return delivery;
+}
+
 export async function bootstrapFullTerminalDelivery(
   serverUrl: string,
   key: FullSessionKey,
@@ -153,10 +171,13 @@ export async function bootstrapFullTerminalDelivery(
   if (response.type !== "TerminalBootstrapResult") {
     throw new Error("Unexpected terminal bootstrap response");
   }
-  const data = response.data;
-  if (!data || typeof data !== "object") return null;
-  const delivery = (data as { delivery?: unknown }).delivery;
-  return isValidFullTerminalDelivery(delivery) ? delivery : null;
+  const delivery = terminalReplyDelivery(response.data);
+  // The reply is bound to the seat it was asked for: a delivery for another
+  // game or generation is a misrouted reply, never this seat's result.
+  if (delivery && !sameFullSessionKey(delivery.key, key)) {
+    throw new Error("Mismatched terminal bootstrap key");
+  }
+  return delivery;
 }
 
 export async function readFullTerminalResult(
@@ -172,10 +193,13 @@ export async function readFullTerminalResult(
   if (response.type !== "TerminalResult") {
     throw new Error("Unexpected terminal result response");
   }
-  const data = response.data;
-  if (!data || typeof data !== "object") return null;
-  const delivery = (data as { delivery?: unknown }).delivery;
-  return isValidFullTerminalDelivery(delivery) ? delivery : null;
+  const delivery = terminalReplyDelivery(response.data);
+  // The server reads by credential, so a delivery carrying another credential
+  // answers a different request.
+  if (delivery && delivery.credential !== credential) {
+    throw new Error("Mismatched terminal delivery read");
+  }
+  return delivery;
 }
 
 export async function acknowledgeFullTerminalDelivery(
@@ -190,9 +214,11 @@ export async function acknowledgeFullTerminalDelivery(
     socketFactory,
   );
   if (response.type !== "TerminalDeliveryAcknowledged") return false;
+  // Only an acknowledgement naming this delivery releases it.
   const data = response.data;
-  if (!data || typeof data !== "object") return false;
-  return (data as { delivery_id?: string }).delivery_id === deliveryId;
+  return typeof data === "object"
+    && data !== null
+    && (data as { delivery_id?: unknown }).delivery_id === deliveryId;
 }
 
 /** AI seat configuration for the private native-engine host path. */
@@ -1868,11 +1894,6 @@ interface SessionIdentityRules {
   readonly label: string;
   readonly seat: "required" | "ifPresent" | "absent";
   readonly token: "optional" | "required";
-}
-
-/** Whether two Full keys name the same generation of the same game. */
-function sameFullSessionKey(a: FullSessionKey, b: FullSessionKey): boolean {
-  return a.game_code === b.game_code && a.generation === b.generation;
 }
 
 /**

@@ -269,43 +269,57 @@ describe("native solo terminal recovery across real persistence and reopen", () 
   });
 
   describe("terminal response identity binding", () => {
-    it("leaves the route and storage intact when the bootstrap key is foreign", async () => {
+    const terminalPointer = (): ActiveGameMeta => ({
+      id: GAME_ID, mode: "ai", difficulty: "Medium", nativeSession: { ...session, terminalOnly: true },
+    });
+
+    it("reports a foreign bootstrap key without committing, acknowledging, or reconnecting", async () => {
       bootstrap = { ...delivery, key: { game_code: "FOREIGN", generation: 1 } };
+      const controllers = controller.mock.calls.length;
       const reopened = await reopen();
 
-      await waitFor(() => {
-        expect(requests.some(({ type }) => type === "BootstrapTerminalDelivery")).toBe(true);
-      });
+      await waitFor(() => expect(reopened.events).toHaveBeenCalledWith({
+        type: "terminalUnavailable", message: "Mismatched terminal bootstrap key",
+      }));
+      expect(reopened.after()).toEqual(["BootstrapTerminalDelivery"]);
       expect(reopened.events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "terminalDelivery" }));
       expect(await loadFullTerminalDelivery(bootstrap.key)).toBeNull();
       expect(await loadFullTerminalDelivery(delivery.key)).toBeNull();
       expect(pointer()).toEqual({ id: GAME_ID, mode: "ai", difficulty: "Medium", nativeSession: session });
+      expect(controller.mock.calls.length).toBe(controllers);
     });
 
-    it("leaves the retained delivery and pointer intact when a credential read mismatches", async () => {
-      await commitFullTerminalDelivery(delivery);
-      saveActiveGame({ id: GAME_ID, mode: "ai", difficulty: "Medium", nativeSession: { ...session, terminalOnly: true } });
+    it.each([
+      ["another credential", { credential: "foreign-credential" }],
+      ["another delivery", { deliveryId: "foreign-delivery" }],
+    ])("keeps the retained result and pointer when the read returns %s", async (_case, changed) => {
+      const retained = delivery;
+      await commitFullTerminalDelivery(retained);
+      saveActiveGame(terminalPointer());
+      delivery = { ...retained, ...changed, display: { winner: 1, reason: "Another game's result" } };
+      const reopened = await reopen();
 
-      const mismatchedDelivery = { ...delivery, deliveryId: "foreign-id", credential: "foreign-cred" };
-      delivery = mismatchedDelivery;
-      await reopen();
-
-      await waitFor(() => {
-        expect(requests.some(({ type }) => type === "ReadTerminalResult")).toBe(true);
-      });
-      const stored = await loadFullTerminalDelivery(session.fullKey);
-      expect(stored?.deliveryId).toBe("native-delivery");
-      expect(pointer()?.nativeSession).toMatchObject({ gameCode: session.gameCode, terminalOnly: true });
+      await waitFor(() => expect(reopened.events).toHaveBeenCalledWith({
+        type: "terminalUnavailable", message: "Mismatched terminal delivery read",
+      }));
+      // No acknowledgement was sent for the foreign reply.
+      expect(reopened.after()).toEqual(["ReadTerminalResult"]);
+      // Only the retained summary is on screen.
+      const published = reopened.events.mock.calls
+        .map(([event]) => event)
+        .filter((event) => event.type === "terminalDelivery");
+      expect(published).toEqual([{ type: "terminalDelivery", delivery: { ...retained, finalView: undefined } }]);
+      expect(await loadFullTerminalDelivery(session.fullKey)).toEqual(retained);
+      expect(pointer()).toEqual(terminalPointer());
     });
 
-    it("leaves the recovery pointer intact when the server ACKs a different delivery ID", async () => {
+    it("keeps the recovery pointer when the server acknowledges a different delivery", async () => {
       ackOutcome = "pending";
       await commitFullTerminalDelivery(delivery);
-      saveActiveGame({ id: GAME_ID, mode: "ai", difficulty: "Medium", nativeSession: { ...session, terminalOnly: true } });
+      saveActiveGame(terminalPointer());
 
-      await reopen();
+      const reopened = await reopen();
       await waitFor(() => expect(pendingAcks).toHaveLength(1));
-
       await act(async () => {
         pendingAcks[0]!.receive({
           type: "TerminalDeliveryAcknowledged",
@@ -313,7 +327,9 @@ describe("native solo terminal recovery across real persistence and reopen", () 
         });
       });
 
-      expect(pointer()?.nativeSession).toMatchObject({ gameCode: session.gameCode, terminalOnly: true });
+      expect(reopened.after()).toEqual(["ReadTerminalResult", "AckTerminalDelivery"]);
+      expect(reopened.events).toHaveBeenCalledWith({ type: "terminalDelivery", delivery });
+      expect(pointer()).toEqual(terminalPointer());
     });
   });
 });

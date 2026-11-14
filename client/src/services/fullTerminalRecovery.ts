@@ -10,6 +10,7 @@ import {
   type FullTerminalDelivery,
 } from "./fullTerminalResult";
 import type { FullSessionKey } from "./multiplayerSession";
+import { sameFullSessionKey } from "./fullSessionKey";
 import type { PhaseSocketFactory } from "./openPhaseSocket";
 
 /** A persisted recovery pointer for one Full seat. */
@@ -95,21 +96,20 @@ export async function recoverFullTerminal(
     // establish matching authority before reusing a private view.
     publish({ type: "terminalDelivery", delivery: { ...retained, finalView: undefined } });
     try {
+      // The read is bound to the retained credential by the request helper.
+      // A reply naming another game or delivery is still not this pointer's
+      // result: it is never retained, published, or acknowledged, and the
+      // retained summary stays on screen with the pointer intact.
       const refreshed = await readFullTerminalResult(route.serverUrl, retained.credential, route.socketFactory);
       if (owner.isCancelled()) return "settled";
-      const matchesRetained = refreshed !== null
-        && refreshed.key.game_code === route.fullKey.game_code
-        && refreshed.key.generation === route.fullKey.generation
-        && refreshed.deliveryId === retained.deliveryId
-        && refreshed.credential === retained.credential;
-      if (refreshed !== null && !matchesRetained) {
+      if (refreshed !== null && !sameTerminalAuthority(refreshed, retained)) {
         throw new Error("Mismatched terminal delivery read");
       }
-      const effectiveRefresh = matchesRetained
-        ? ((refreshed.finalView === undefined && retained.finalView !== undefined)
-            ? { ...refreshed, finalView: retained.finalView }
-            : refreshed)
-        : null;
+      const effectiveRefresh = refreshed !== null
+        && refreshed.finalView === undefined
+        && retained.finalView !== undefined
+        ? { ...refreshed, finalView: retained.finalView }
+        : refreshed;
       if (effectiveRefresh && !(await replaceFullTerminalDelivery(effectiveRefresh))) {
         throw new Error("Failed to retain terminal delivery");
       }
@@ -122,6 +122,8 @@ export async function recoverFullTerminal(
     return "settled";
   }
 
+  // The bootstrap reply is bound to `route.fullKey` by the request helper: a
+  // delivery for another game or generation throws before it is committed.
   let bootstrap: FullTerminalDelivery | null;
   try {
     bootstrap = await bootstrapFullTerminalDelivery(
@@ -137,13 +139,6 @@ export async function recoverFullTerminal(
   }
   if (owner.isCancelled()) return "settled";
   if (!bootstrap) return "reconnect";
-  if (
-    bootstrap.key.game_code !== route.fullKey.game_code
-    || bootstrap.key.generation !== route.fullKey.generation
-  ) {
-    fail(new Error("Mismatched terminal delivery key"), "Terminal result is unavailable");
-    return "settled";
-  }
   if (!(await commitFullTerminalDelivery(bootstrap))) {
     fail(null, "Failed to retain terminal delivery");
     return "settled";
@@ -152,4 +147,11 @@ export async function recoverFullTerminal(
   acknowledge(bootstrap);
   publish({ type: "terminalDelivery", delivery: bootstrap });
   return "settled";
+}
+
+/** Whether two deliveries carry the same terminal authority for one seat. */
+function sameTerminalAuthority(a: FullTerminalDelivery, b: FullTerminalDelivery): boolean {
+  return sameFullSessionKey(a.key, b.key)
+    && a.deliveryId === b.deliveryId
+    && a.credential === b.credential;
 }

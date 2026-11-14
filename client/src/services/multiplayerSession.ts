@@ -1,4 +1,5 @@
 import type { FormatConfig, MatchType } from "../adapter/types";
+import { sameFullSessionKey } from "./fullSessionKey";
 
 export const WS_SESSION_STORAGE_KEY = "phase-ws-session";
 export const WS_SESSION_TTL_MS = 2 * 60 * 60 * 1000;
@@ -68,8 +69,7 @@ function matchesStoredWsSession(expected: WsSessionIdentity): boolean {
   const current = loadWsSession();
   return current !== null
     && current.serverUrl === expected.serverUrl
-    && current.fullKey.game_code === expected.fullKey.game_code
-    && current.fullKey.generation === expected.fullKey.generation
+    && sameFullSessionKey(current.fullKey, expected.fullKey)
     && current.playerToken === expected.playerToken;
 }
 
