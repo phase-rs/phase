@@ -11,6 +11,8 @@ import {
   formatCost,
   spellCostDisplay,
   stripLoyaltyCostPrefix,
+  unlessDrawCostLabel,
+  unlessPaymentCanBeDeclined,
 } from "../costLabel.ts";
 
 function makeObject(overrides: Partial<GameObject> = {}): GameObject {
@@ -590,5 +592,47 @@ describe("spellCostDisplay", () => {
   it("does not flag an unchanged effective cost as reduced", () => {
     const { isReduced } = spellCostDisplay(cost(5, ["Blue"]), cost(5, ["Blue"]));
     expect(isReduced).toBe(false);
+  });
+});
+
+describe("unlessDrawCostLabel renders the engine-resolved draw", () => {
+  it("names a single one-card instruction as drawing a card", () => {
+    expect(unlessDrawCostLabel({ cards: 1, instructions: 1, stage: "Offered" })).toBe(
+      i18n.t("game:gamePage.cost.draw"),
+    );
+  });
+
+  it("counts a multi-card instruction", () => {
+    expect(unlessDrawCostLabel({ cards: 3, instructions: 1, stage: "Offered" })).toBe(
+      i18n.t("game:gamePage.cost.drawCount", { count: 3 }),
+    );
+  });
+
+  it("shows a resolved zero instead of drawing a card", () => {
+    const label = unlessDrawCostLabel({ cards: 0, instructions: 1, stage: "Offered" });
+    expect(label).toBe(i18n.t("game:gamePage.cost.drawCount", { count: 0 }));
+    expect(label).not.toBe(i18n.t("game:gamePage.cost.draw"));
+  });
+
+  it("appends the repetition the engine supplies", () => {
+    expect(unlessDrawCostLabel({ cards: 1, instructions: 65, stage: "Offered" })).toBe(
+      `${i18n.t("game:gamePage.cost.draw")} × 65`,
+    );
+  });
+});
+
+describe("unlessPaymentCanBeDeclined follows the engine's payment stage", () => {
+  it("offers a decline while the payment is only offered", () => {
+    expect(unlessPaymentCanBeDeclined({ cards: 1, instructions: 3, stage: "Offered" })).toBe(true);
+  });
+
+  it("offers a decline for a cost that is not a draw", () => {
+    expect(unlessPaymentCanBeDeclined(undefined)).toBe(true);
+  });
+
+  it("offers no decline once the payment is continuing", () => {
+    expect(unlessPaymentCanBeDeclined({ cards: 1, instructions: 2, stage: "Continuing" })).toBe(
+      false,
+    );
   });
 });

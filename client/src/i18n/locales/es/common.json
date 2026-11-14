@@ -331,6 +331,11 @@
     "body": "La aplicación encontró un error inesperado y no puede continuar en esta pantalla. Recargar suele solucionarlo.",
     "reload": "Recargar"
   },
+  "stateCodec": {
+    "actionInterrupted": "La transmisión del estado se interrumpió durante la acción",
+    "submissionNotSent": "Se está restableciendo la transmisión del estado; esta acción no se ha enviado.",
+    "reconnectSubmissionNotSent": "Se está restableciendo la conexión; esta acción no se ha enviado."
+  },
   "actionError": {
     "title": "{{action}} falló",
     "skipTarget": "Omitir objetivo",
