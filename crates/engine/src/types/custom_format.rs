@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::format::{
     DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, RangeOfInfluenceConfig, SideboardPolicy,
+    INDIVIDUAL_POISON_LOSS_THRESHOLD,
 };
 
 /// Lightweight, `Copy`, per-`GameState` transport tag for a custom format.
@@ -255,12 +256,28 @@ impl CommanderEligibilityRule {
             | GameFormat::Archenemy
             | GameFormat::Planechase
             | GameFormat::Momir
+            // Like Momir, the command zone holds an engine object (the Horde
+            // emblem), not a decklist commander — Commander-format hordes whose
+            // survivors run commanders are a config-level axis, not a
+            // format-level eligibility rule.
+            | GameFormat::Horde
             | GameFormat::Freeform
             | GameFormat::Dandan => Ok(None),
             GameFormat::Custom(id) => Err(FormatConfigError(format!(
                 "from_source_format: source must be a built-in GameFormat, never Custom({})",
                 id.0
             ))),
+        }
+    }
+
+    /// Whether a custom format modeled on this rule's source is a Commander
+    /// variant (CR 903), mirroring `GameFormat::uses_commander`.
+    pub fn uses_commander(self) -> bool {
+        match self {
+            Self::Standard | Self::FreeformAnyCastableCard => true,
+            // CR 903.12a: Brawl is a Commander variant.
+            Self::BrawlColorIdentity => true,
+            Self::TinyLeaders | Self::OathbreakerSignatureSpell => false,
         }
     }
 }
@@ -321,6 +338,19 @@ pub struct StructuralRules {
     /// `UpTo(1)` fallback — the same silent-data-loss bug `sideboard_policy`
     /// exists to prevent.
     pub default_deck_copy_limit: DeckCopyLimit,
+    /// CR 704.5c: the DECLARED individual poison loss threshold, mirroring
+    /// `FormatConfig.poison_counter_threshold`. A bare `u8`: a custom format never
+    /// takes the Two-Headed Giant shared-poison topology (`has_shared_poison` keys
+    /// on the built-in 2HG family), so CR 704.5c always applies to it.
+    /// Defaulted so definitions persisted before this field keep loading.
+    #[serde(default = "default_structural_poison_counter_threshold")]
+    pub poison_counter_threshold: u8,
+}
+
+/// Serde default for `StructuralRules.poison_counter_threshold`: a definition
+/// persisted before the field existed was written under CR 704.5c's ten.
+fn default_structural_poison_counter_threshold() -> u8 {
+    INDIVIDUAL_POISON_LOSS_THRESHOLD
 }
 
 impl StructuralRules {
@@ -353,6 +383,12 @@ impl StructuralRules {
             team_based: config.team_based,
             sideboard_policy: config.sideboard_policy,
             default_deck_copy_limit: config.default_deck_copy_limit,
+            // A Two-Headed Giant-family source has no individual rule (`None`),
+            // but the custom format it becomes never shares poison, so CR
+            // 704.5c's value is the rule that will govern it.
+            poison_counter_threshold: config
+                .poison_counter_threshold
+                .unwrap_or(INDIVIDUAL_POISON_LOSS_THRESHOLD),
         }
     }
 }

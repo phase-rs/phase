@@ -33,6 +33,6 @@ Current-head review: none | clean at <SHA> | findings at <SHA>
 
 Whenever the branch head changes after acceptance, including through a rebase, update `Current branch head`, set `Pipeline status` to `historical — <reason>`, and reset `Current-head review` to `none`. When current-head evidence is desired, run ordinary `review-engine-impl` against the complete current PR/head — not checkpoint mode and not an incremental-only diff — then record `clean at <SHA>` or `findings at <SHA>` for that exact SHA. Each future head change repeats the reset. `Pipeline status` remains historical unless the current head again equals the original accepted `CANDIDATE_SHA`, in which case set it to `current`.
 
-Residual findings shipped under the [decline path](SKILL.md#run-limits) are listed under the PR's Validation Failures heading with their evidence and follow-up.
+Findings the [decline path](SKILL.md#run-limits) leaves open are listed as unresolved under the PR's Validation Failures heading with their evidence, and the PR claims no clean final review for them; [AI-CONTRIBUTOR §5](../../../docs/AI-CONTRIBUTOR.md#5-validate-the-review-actually-happened-and-was-addressed) gives the `## Final review-impl` line to write instead of the PASS line.
 
 If later work invalidates the approved plan or architecture, return to plan review. Otherwise, this is a concise reporting and navigation flow only: it is not a gate, GitHub automation, an executor change, or a PR-handler change.

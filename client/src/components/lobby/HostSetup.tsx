@@ -10,6 +10,7 @@ import type {
   LoopDetectionMode,
   MatchType,
 } from "../../adapter/types";
+import { U8_MAX } from "../../adapter/types";
 import { AI_DIFFICULTIES, isAiDifficulty } from "../../constants/ai";
 import { FORMAT_REGISTRY, formatSuppliesDeck, isPlanechaseFamilyFormat } from "../../data/formatRegistry";
 import {
@@ -1284,6 +1285,25 @@ export function HostSetup({
                   setLocalFormatConfig((prev) => ({
                     ...prev,
                     commander_damage_threshold: threshold,
+                  }))
+                }
+                className={inp}
+              />
+            </Field>
+          )}
+
+          {/* Individual poison-loss threshold (CR 704.5c; absent in Two-Headed Giant) */}
+          {formatConfig.poison_counter_threshold != null && (
+            <Field label={t("hostSetup.poisonCounters")} htmlFor="host-setup-poison">
+              <IntegerField
+                id="host-setup-poison"
+                value={formatConfig.poison_counter_threshold}
+                min={1}
+                max={U8_MAX}
+                onCommit={(poison_counter_threshold) =>
+                  setLocalFormatConfig((prev) => ({
+                    ...prev,
+                    poison_counter_threshold,
                   }))
                 }
                 className={inp}

@@ -366,6 +366,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Command),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,

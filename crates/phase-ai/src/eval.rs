@@ -134,8 +134,33 @@ impl EvalWeightSet {
     }
 }
 
-const WIN_SCORE: f64 = 10000.0;
-const LOSS_SCORE: f64 = -10000.0;
+pub(crate) const WIN_SCORE: f64 = 10000.0;
+pub(crate) const LOSS_SCORE: f64 = -10000.0;
+
+/// How a finished game ended for the evaluating player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalOutcome {
+    Won,
+    Lost,
+}
+
+/// CR 104.1: a game ends immediately when a player wins; a player at 0 or less life loses
+/// (CR 104.3b) and, in a multiplayer game, leaves a game that continues (CR 800.4). The
+/// evaluator scores a won position `WIN_SCORE` and a lost one `LOSS_SCORE`
+/// ([`evaluate_features`]); every term the planner layers on a leaf (strategy terms, the
+/// 0.05-scaled interior and prior terms, the utility reducer's elimination and pressure terms)
+/// is bounded far inside half of either, as is the evaluation of any realistic unfinished
+/// board. A search value past half of either bound therefore came from a position the
+/// evaluating player has already won or lost. A drawn game scores 0.0 and is not distinguished.
+pub(crate) fn terminal_outcome(value: f64) -> Option<TerminalOutcome> {
+    if value >= WIN_SCORE / 2.0 {
+        Some(TerminalOutcome::Won)
+    } else if value <= LOSS_SCORE / 2.0 {
+        Some(TerminalOutcome::Lost)
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrategicIntent {
@@ -2292,6 +2317,49 @@ mod tests {
         state.players[1].life = 0;
         let weights = EvalWeights::default();
         assert_eq!(evaluate_state(&state, PlayerId(0), &weights), WIN_SCORE);
+    }
+
+    /// `terminal_outcome` reads the evaluator's own terminal values, and nothing else: a won
+    /// `GameOver`, a lost one, and every opponent at 0 life classify; an unfinished board and a
+    /// drawn game (0.0, the documented limit) do not.
+    #[test]
+    fn terminal_outcome_reads_finished_games_only() {
+        let weights = EvalWeights::default();
+
+        let mut over = make_state();
+        over.waiting_for = WaitingFor::GameOver {
+            winner: Some(PlayerId(0)),
+        };
+        assert_eq!(
+            terminal_outcome(evaluate_state(&over, PlayerId(0), &weights)),
+            Some(TerminalOutcome::Won)
+        );
+        assert_eq!(
+            terminal_outcome(evaluate_state(&over, PlayerId(1), &weights)),
+            Some(TerminalOutcome::Lost)
+        );
+
+        let mut opponents_dead = make_state();
+        opponents_dead.players[1].life = 0;
+        assert_eq!(
+            terminal_outcome(evaluate_state(&opponents_dead, PlayerId(0), &weights)),
+            Some(TerminalOutcome::Won)
+        );
+
+        let open = make_state();
+        let open_value = evaluate_state(&open, PlayerId(0), &weights);
+        assert!(
+            open_value.is_finite(),
+            "reach: the unfinished board evaluates"
+        );
+        assert_eq!(terminal_outcome(open_value), None);
+
+        let mut drawn = make_state();
+        drawn.waiting_for = WaitingFor::GameOver { winner: None };
+        assert_eq!(
+            terminal_outcome(evaluate_state(&drawn, PlayerId(0), &weights)),
+            None
+        );
     }
 
     #[test]

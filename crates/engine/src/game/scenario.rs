@@ -588,6 +588,27 @@ impl GameScenario {
         }
     }
 
+    /// Add an artifact card to a player's graveyard (CR 404), without
+    /// introducing a creature or spell type that the printed card lacks.
+    pub fn add_artifact_to_graveyard(&mut self, player: PlayerId, name: &str) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Graveyard,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types = obj.card_types.clone();
+
+        CardBuilder {
+            state: &mut self.state,
+            id,
+        }
+    }
+
     /// Add a creature card to a player's exile. Returns a `CardBuilder` for
     /// fluent chaining. Used to stage cards tracked by source-linked exile
     /// effects.
@@ -2072,6 +2093,7 @@ impl GameRunner {
             WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
             WaitingFor::RippleBottomOrder { .. } => "RippleBottomOrder",
             WaitingFor::RevealUntilBottomOrder { .. } => "RevealUntilBottomOrder",
+            WaitingFor::DigBottomOrder { .. } => "DigBottomOrder",
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
@@ -2090,12 +2112,14 @@ impl GameRunner {
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
+            WaitingFor::HeroEventChoice { .. } => "HeroEventChoice",
             WaitingFor::EffectZoneChoice { .. } => "EffectZoneChoice",
             WaitingFor::DrawnThisTurnTopdeckChoice { .. } => "DrawnThisTurnTopdeckChoice",
             WaitingFor::ManifestDreadChoice { .. } => "ManifestDreadChoice",
             WaitingFor::TriggerTargetSelection { .. } => "TriggerTargetSelection",
             WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",
             WaitingFor::BetweenGamesChoosePlayDraw { .. } => "BetweenGamesChoosePlayDraw",
+            WaitingFor::ChooseStartingPlayer { .. } => "ChooseStartingPlayer",
             WaitingFor::NamedChoice { .. } => "NamedChoice",
             WaitingFor::OpponentGuess { .. } => "OpponentGuess",
             WaitingFor::SpellbookDraft { .. } => "SpellbookDraft",
@@ -2182,6 +2206,7 @@ impl GameRunner {
             WaitingFor::TributeChoice { .. } => "TributeChoice",
             WaitingFor::UnlessPayment { .. } => "UnlessPayment",
             WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
+            WaitingFor::SecretAgendaChoice { .. } => "SecretAgendaChoice",
             WaitingFor::CompanionReveal { .. } => "CompanionReveal",
             WaitingFor::ChooseRingBearer { .. } => "ChooseRingBearer",
             WaitingFor::ChooseRoomDoor { .. } => "ChooseRoomDoor",
@@ -3228,6 +3253,7 @@ fn waiting_for_variant_name(waiting: &WaitingFor) -> &'static str {
         WaitingFor::NamedChoice { .. } => "NamedChoice",
         WaitingFor::TributeChoice { .. } => "TributeChoice",
         WaitingFor::DiscardChoice { .. } => "DiscardChoice",
+        WaitingFor::HeroEventChoice { .. } => "HeroEventChoice",
         WaitingFor::EffectZoneChoice { .. } => "EffectZoneChoice",
         WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
         WaitingFor::CopyRetarget { .. } => "CopyRetarget",
@@ -3722,7 +3748,8 @@ fn drive_resolution(
                 act_collect(runner, GameAction::SelectCards { cards: keep }, &mut events)?;
             }
             WaitingFor::RippleBottomOrder { cards, .. }
-            | WaitingFor::RevealUntilBottomOrder { cards, .. } => {
+            | WaitingFor::RevealUntilBottomOrder { cards, .. }
+            | WaitingFor::DigBottomOrder { cards, .. } => {
                 let cards = cards.clone();
                 act_collect(runner, GameAction::SelectCards { cards }, &mut events)?;
             }
@@ -5699,6 +5726,7 @@ mod tests {
 
     fn move_zone_effect(origin: Option<Zone>, destination: Zone, target: TargetFilter) -> Effect {
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin,
             destination,
             target,
