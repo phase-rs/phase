@@ -11,6 +11,7 @@
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::merge::*;
 use crate::game::scenario::{GameScenario, P0};
+use crate::types::ability::{ForwardedResultContext, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -31,6 +32,31 @@ fn two_creatures() -> (
     // Rider: 4/4 named "Rider", the mutating creature card.
     let rider = sc.add_creature(P0, "Rider", 4, 4).id();
     (sc.state, host, rider, P0)
+}
+
+/// CR 603.7c + CR 608.2c: the event/delayed binding records a keyed pin for the
+/// referent it found, which is what proves a recorded departure. A fresh choice
+/// has no such pin.
+fn departure_reference(
+    state: &crate::types::game_state::GameState,
+    id: ObjectId,
+) -> crate::types::ability::ResolvedAbility {
+    let mut ability = fresh_reference(id);
+    ability.set_target_incarnations_recursive(vec![ObjectIncarnationRef::from_object(
+        &state.objects[&id],
+    )]);
+    ability
+}
+
+fn fresh_reference(id: ObjectId) -> crate::types::ability::ResolvedAbility {
+    crate::types::ability::ResolvedAbility::new(
+        crate::types::ability::Effect::Shuffle {
+            target: crate::types::ability::TargetFilter::Any,
+        },
+        Vec::new(),
+        id,
+        PlayerId(0),
+    )
 }
 
 #[test]
@@ -459,22 +485,215 @@ fn exile_records_component_backlink_and_continuity_return_collects_all() {
     );
 
     // A continuity reference ("return it") resolving to the survivor expands to
-    // include the co-exiled component (CR 730.3c).
-    let expanded =
-        expand_returned_merge_components(&state, vec![host], &TargetFilter::ParentTarget);
+    // include the co-exiled component (CR 730.3c) — the event binding recorded a
+    // keyed pin for that referent.
+    let expanded = expand_returned_merge_components(
+        &state,
+        &departure_reference(&state, host),
+        vec![host],
+        &TargetFilter::ParentTarget,
+    );
     assert_eq!(
         expanded,
         vec![host, rider],
         "a flicker returns the whole pile, not just the survivor"
     );
 
-    // A freshly chosen target (e.g. reanimating one specific card) must NOT
-    // over-return — only continuity references expand.
-    let fresh = expand_returned_merge_components(&state, vec![host], &TargetFilter::Any);
+    // A freshly chosen target (Riftsweeper choosing one exiled card; reanimating
+    // one specific card) must NOT over-return: its ParentTarget carries only an
+    // announcement occurrence, no recorded departure.
+    let fresh = expand_returned_merge_components(
+        &state,
+        &fresh_reference(host),
+        vec![host],
+        &TargetFilter::ParentTarget,
+    );
     assert_eq!(
         fresh,
         vec![host],
-        "a non-continuity target returns only the chosen object"
+        "a fresh ParentTarget choice returns only the chosen object"
+    );
+}
+
+/// CR 730.3c + CR 400.7 + CR 608.2c: departure evidence must name the exact
+/// referent. An ability that carries an unrelated object's pin or an unrelated
+/// forwarded result (an earlier instruction in the chain moved some other
+/// card) has not found the object a merged permanent became; a fresh selection
+/// of that former survivor returns only the selected card. The same evidence
+/// naming the referent itself expands to the whole pile.
+#[test]
+fn unrelated_target_context_is_not_a_departure_of_the_selected_survivor() {
+    let (mut state, host, rider, _p0) = two_creatures();
+    state.battlefield.retain(|&id| id != rider);
+    let mut events = Vec::new();
+    merge_object_onto(&mut state, rider, host, MergeSide::Top, &mut events);
+    crate::game::zones::move_to_zone(&mut state, host, Zone::Exile, &mut events);
+    let unrelated = crate::game::zones::create_object(
+        &mut state,
+        crate::types::identifiers::CardId(9701),
+        PlayerId(0),
+        "Unrelated Card".to_string(),
+        Zone::Graveyard,
+    );
+
+    let mut pinned_elsewhere = fresh_reference(host);
+    pinned_elsewhere.set_target_incarnations_recursive(vec![ObjectIncarnationRef::from_object(
+        &state.objects[&unrelated],
+    )]);
+    let mut forwarded_elsewhere = fresh_reference(host);
+    forwarded_elsewhere.context.forwarded_result_context = Some(Box::new(
+        ForwardedResultContext::from_object_ids(&state, &[unrelated]),
+    ));
+    for (label, ability) in [
+        ("unrelated pin", &pinned_elsewhere),
+        ("unrelated forwarded result", &forwarded_elsewhere),
+    ] {
+        assert_eq!(
+            expand_returned_merge_components(
+                &state,
+                ability,
+                vec![host],
+                &TargetFilter::ParentTarget
+            ),
+            vec![host],
+            "{label}: a fresh selection of the former survivor stays one card"
+        );
+    }
+
+    let mut forwarded_referent = fresh_reference(host);
+    forwarded_referent.context.forwarded_result_context = Some(Box::new(
+        ForwardedResultContext::from_object_ids(&state, &[host]),
+    ));
+    assert_eq!(
+        expand_returned_merge_components(
+            &state,
+            &forwarded_referent,
+            vec![host],
+            &TargetFilter::ParentTarget
+        ),
+        vec![host, rider],
+        "a producer that moved the referent itself records its departure"
+    );
+}
+
+/// CR 730.3c + CR 400.7e + CR 603.10a: a `TriggeringSource` reference finds the
+/// object a merged permanent became only when the trigger event is that
+/// referent's own departure from the battlefield. The same referent under an
+/// unrelated object's zone-change event is not a departure of it.
+#[test]
+fn triggering_source_expands_only_for_the_referents_own_departure() {
+    let (mut state, host, rider, p0) = two_creatures();
+    state.battlefield.retain(|&id| id != rider);
+    let mut events = Vec::new();
+    merge_object_onto(&mut state, rider, host, MergeSide::Top, &mut events);
+    let bystander = crate::game::zones::create_object(
+        &mut state,
+        crate::types::identifiers::CardId(9702),
+        p0,
+        "Bystander".to_string(),
+        Zone::Battlefield,
+    );
+    let mut departure_events = Vec::new();
+    crate::game::zones::move_to_zone(&mut state, host, Zone::Exile, &mut departure_events);
+    let mut unrelated_events = Vec::new();
+    crate::game::zones::move_to_zone(
+        &mut state,
+        bystander,
+        Zone::Graveyard,
+        &mut unrelated_events,
+    );
+    let zone_change_of = |events: &[GameEvent], id: ObjectId| {
+        events
+            .iter()
+            .find(|event| matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == id))
+            .cloned()
+            .expect("the move publishes its zone change")
+    };
+    let ability = fresh_reference(host);
+
+    state.current_trigger_event = Some(zone_change_of(&unrelated_events, bystander));
+    assert_eq!(
+        expand_returned_merge_components(
+            &state,
+            &ability,
+            vec![host],
+            &TargetFilter::TriggeringSource
+        ),
+        vec![host],
+        "another object's departure is not evidence for this referent"
+    );
+
+    state.current_trigger_event = Some(zone_change_of(&departure_events, host));
+    assert_eq!(
+        expand_returned_merge_components(
+            &state,
+            &ability,
+            vec![host],
+            &TargetFilter::TriggeringSource
+        ),
+        vec![host, rider],
+        "the referent's own battlefield departure finds every card it became"
+    );
+}
+
+/// CR 730.3c + CR 400.7 + CR 601.2c: a `ParentTarget` whose announced
+/// incarnation is exactly one behind the referent's current one was moved by an
+/// earlier instruction of the same resolution ("Exile target creature you
+/// control, then return that card"), so it finds every card the merged
+/// permanent became. A selection announced at the incarnation the object still
+/// has (a fresh choice of an already-exiled card) does not, and neither does a
+/// pin for a different object.
+#[test]
+fn announced_incarnation_one_behind_is_a_same_chain_departure() {
+    let (mut state, host, rider, _p0) = two_creatures();
+    state.battlefield.retain(|&id| id != rider);
+    let mut events = Vec::new();
+    merge_object_onto(&mut state, rider, host, MergeSide::Top, &mut events);
+    let announced = ObjectIncarnationRef::from_object(&state.objects[&host]);
+    crate::game::zones::move_to_zone(&mut state, host, Zone::Exile, &mut events);
+    let current = ObjectIncarnationRef::from_object(&state.objects[&host]);
+    assert_eq!(announced.incarnation + 1, current.incarnation);
+
+    let with_pin = |pin: ObjectIncarnationRef| {
+        let mut ability = fresh_reference(host);
+        ability.targets = vec![crate::types::ability::TargetRef::Object(host)];
+        ability.target_pins = vec![Some(pin)];
+        ability
+    };
+    let expand = |ability: &crate::types::ability::ResolvedAbility| {
+        expand_returned_merge_components(
+            &state,
+            ability,
+            vec![host],
+            &crate::types::ability::TargetFilter::ParentTarget,
+        )
+    };
+
+    assert_eq!(
+        expand(&with_pin(announced)),
+        vec![host, rider],
+        "announced one incarnation behind: the same resolution moved it"
+    );
+    assert_eq!(
+        expand(&with_pin(current)),
+        vec![host],
+        "announced at the current incarnation: a fresh selection"
+    );
+    assert_eq!(
+        expand(&with_pin(ObjectIncarnationRef::of(
+            rider,
+            announced.incarnation
+        ))),
+        vec![host],
+        "a pin for a different object is not evidence for this referent"
+    );
+    assert_eq!(
+        expand(&with_pin(ObjectIncarnationRef::of(
+            host,
+            crate::types::identifiers::LEGACY_INCARNATION
+        ))),
+        vec![host],
+        "a legacy pin neither panics nor counts as evidence"
     );
 }
 
@@ -491,8 +710,12 @@ fn flicker_returns_components_unmerged_and_clears_backlink() {
 
     // Return the whole pile — what the `ChangeZone` return loop does for each
     // expanded id (CR 730.3c).
-    let to_return =
-        expand_returned_merge_components(&state, vec![host], &TargetFilter::ParentTarget);
+    let to_return = expand_returned_merge_components(
+        &state,
+        &departure_reference(&state, host),
+        vec![host],
+        &TargetFilter::ParentTarget,
+    );
     for id in to_return {
         crate::game::zones::move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
     }
@@ -553,8 +776,12 @@ fn split_component_backlink_clears_on_non_battlefield_zone_move() {
     // former component in one zone. A continuity reference to the survivor must
     // NOT re-collect the moved-on component (the stale link is gone).
     crate::game::zones::move_to_zone(&mut state, host, Zone::Graveyard, &mut events);
-    let expanded =
-        expand_returned_merge_components(&state, vec![host], &TargetFilter::ParentTarget);
+    let expanded = expand_returned_merge_components(
+        &state,
+        &departure_reference(&state, host),
+        vec![host],
+        &TargetFilter::ParentTarget,
+    );
     assert_eq!(
         expanded,
         vec![host],
@@ -829,6 +1056,7 @@ fn graveyard_exile_replacement() -> crate::types::ability::ReplacementDefinition
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 destination: Zone::Exile,
                 origin: None,
                 target: TargetFilter::SelfRef,
@@ -1009,6 +1237,7 @@ fn graveyard_exile_replacement_card_scoped() -> crate::types::ability::Replaceme
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 destination: Zone::Exile,
                 origin: None,
                 target: TargetFilter::SelfRef,

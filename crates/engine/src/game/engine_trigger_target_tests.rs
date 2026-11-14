@@ -79,6 +79,7 @@ fn trigger_target_selection_select_targets_pushes_to_stack() {
     // Manually set up the pending trigger state (as process_triggers would)
     let ability = crate::types::ability::ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             enters_modified_if: None,
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
@@ -208,6 +209,7 @@ fn trigger_target_selection_rejects_illegal_target() {
         condition: None,
         ability: Box::new(crate::types::ability::ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 enters_modified_if: None,
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,

@@ -45,8 +45,12 @@ use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit
 use engine::types::match_config::{MatchConfig, MatchPhase, MatchType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::StaticMode;
+use engine::types::zones::Zone;
 
-use crate::loop_period_remade_token_source::{markers, repetitions, take_recorded};
+use crate::loop_period_remade_token_source::{
+    activate, markers, repetitions, settle, take_recorded, Answers,
+};
 
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
@@ -124,6 +128,473 @@ pub(crate) fn setup_2p_drain(mode: LoopDetectionMode) -> (GameRunner, ObjectId) 
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = mode;
     (runner, kickoff)
+}
+
+// ─────────── #7899: projected cost journals must not veto an unrelated recurrence ───────────
+
+/// Blaster Hulk verbatim (`data/card-data.json`). Its first line is a self-spell cost reduction
+/// whose `active_zones` opt into hand and library (CR 113.6), so the static FUNCTIONS while the
+/// card sits uncast in hand — the metadata that must not veto an energy-free recurrence.
+const BLASTER_HULK: &str = "This spell costs {1} less to cast for each {E} (energy counter) you've paid or lost this turn.\nHaste\nWhenever this creature attacks, you get {E}{E}, then you may pay eight {E}. When you do, this creature deals 8 damage divided as you choose among up to eight targets.";
+
+/// Longtusk Cub verbatim (`data/card-data.json`): a `{E}{E}` ACTIVATION cost — the production
+/// route by which `energy_paid_or_lost_this_turn` advances (CR 107.14), as opposed to the
+/// hand-assigned journal value the helper-level comparison uses.
+const LONGTUSK_CUB: &str = "Whenever this creature deals combat damage to a player, you get {E}{E} (two energy counters).\nPay {E}{E}: Put a +1/+1 counter on this creature.";
+
+/// Park a REAL Blaster Hulk in `P0`'s hand, parsed by the production parser.
+fn add_uncast_blaster_hulk(scenario: &mut GameScenario) -> ObjectId {
+    let mut builder =
+        scenario.add_creature_to_hand_from_oracle(P0, "Blaster Hulk", 8, 8, BLASTER_HULK);
+    builder
+        .as_artifact_creature()
+        .with_subtypes(vec!["Pirate"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+            generic: 6,
+        });
+    builder.id()
+}
+
+/// The shipped 2p constant-depth drain pair (the Exquisite Blood / Marauding Blight-Priest shape)
+/// plus an uncast Hulk in hand, under the production `LoopDetectionMode::On`.
+fn setup_2p_drain_with_uncast_hulk() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 6);
+    scenario.add_creature_from_oracle(P0, "Test Drain Cleric", 2, 2, DRAIN_CLERIC);
+    scenario.add_creature_from_oracle(P0, "Test Blood Sipper", 2, 2, BLOOD_SIPPER);
+    let kickoff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .id();
+    let hulk = add_uncast_blaster_hulk(&mut scenario);
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::On;
+    (runner, kickoff, hulk)
+}
+
+/// CR 732.2a + CR 601.2f: an UNCAST Blaster Hulk in hand must not stop an unrelated, energy-free
+/// recurrence from certifying. Its self-spell reduction functions in hand (CR 113.6 —
+/// `active_zones` opts into Hand/Library), but the period pays no energy, so the journal it
+/// prices on is zero on both compared frames and its price cannot differ between repeats. Under
+/// `LoopDetectionMode::On` the winner is crowned EARLY, with the victim still at positive life —
+/// a natural CR 704.5a death would mean the recurrence was refused.
+#[test]
+fn uncast_blaster_hulk_in_hand_does_not_block_drain_loop_certification() {
+    let (mut runner, kickoff, hulk) = setup_2p_drain_with_uncast_hulk();
+
+    // Reach guard: the production parser put the real self-spell reduction on the hand card,
+    // and it functions from Hand — the exact metadata that used to trip the veto.
+    {
+        let state = runner.state();
+        assert_eq!(state.objects[&hulk].zone, Zone::Hand);
+        let reduction = state.objects[&hulk]
+            .static_definitions
+            .iter_all()
+            .find(|def| {
+                matches!(
+                    def.mode,
+                    StaticMode::ModifyCost {
+                        dynamic_count: Some(
+                            engine::types::ability::QuantityRef::EnergyPaidOrLostThisTurn
+                        ),
+                        ..
+                    }
+                )
+            })
+            .expect("the parsed Blaster Hulk carries its energy cost reduction");
+        assert!(
+            reduction.active_zones.contains(&Zone::Hand),
+            "CR 113.6: the self-spell reduction is live from hand"
+        );
+        assert_eq!(
+            state.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+            0
+        );
+    }
+
+    let _ = runner.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut runner, 500);
+    assert_eq!(
+        wf,
+        WaitingFor::GameOver { winner: Some(P0) },
+        "the drain recurrence must still certify with an uncast Hulk in hand"
+    );
+    assert!(
+        life(&runner, P1) > 0,
+        "the shortcut crowned early — the victim should still be at positive life, not {}",
+        life(&runner, P1)
+    );
+}
+
+/// CR 601.2f + CR 107.14 + CR 732.2a: the control that keeps the test above from being a blanket
+/// exemption. On the SAME production board with the SAME real Hulk, a frame where the journal the
+/// reduction reads has MOVED (the shape one `{E}{E}` payment leaves) must compare UNEQUAL: the
+/// journal is projected out of the comparison, so without the period-tied veto these frames would
+/// certify an energy-paying recurrence whose price changes every repeat.
+#[test]
+fn moved_energy_journal_with_live_hulk_rejects_the_recurrence() {
+    let (runner, _kickoff, hulk) = setup_2p_drain_with_uncast_hulk();
+    assert_eq!(runner.state().objects[&hulk].zone, Zone::Hand);
+    assert!(
+        loop_states_equal_modulo_resources(runner.state(), &runner.state().clone()),
+        "control: unchanged frames compare EQUAL"
+    );
+
+    let mut paid = runner.state().clone();
+    paid.players[P0.0 as usize].energy_paid_or_lost_this_turn = 2;
+    assert!(
+        !loop_states_equal_modulo_resources(runner.state(), &paid),
+        "CR 601.2f: the live Hulk prices the moved journal ⇒ the recurrence is not constant"
+    );
+}
+
+/// The shipped 2p drain pair plus a REAL Longtusk Cub holding two energy counters.
+/// `include_hulk` parks the uncast Blaster Hulk in `P0`'s hand — the only variable between the
+/// two runs below. Returns runner, kickoff, and the payer.
+fn setup_2p_drain_with_energy_payer(include_hulk: bool) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 6);
+    scenario.add_creature_from_oracle(P0, "Test Drain Cleric", 2, 2, DRAIN_CLERIC);
+    scenario.add_creature_from_oracle(P0, "Test Blood Sipper", 2, 2, BLOOD_SIPPER);
+    let kickoff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .id();
+    let cub = {
+        let mut builder = scenario.add_creature_from_oracle(P0, "Longtusk Cub", 2, 2, LONGTUSK_CUB);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        });
+        builder.id()
+    };
+    if include_hulk {
+        add_uncast_blaster_hulk(&mut scenario);
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::On;
+    // CR 107.14: the Cub holds, but has not spent, two energy counters.
+    runner.state_mut().players[P0.0 as usize].energy = 2;
+    (runner, kickoff, cub)
+}
+
+/// CR 107.14 + CR 601.2f: SUPPLEMENTAL payment coverage — the production route that advances the
+/// journal, isolated from the recurrence machinery.
+/// `GameRunner::activate` pays the Cub's `{E}{E}` through the shared cost resolver (`costs.rs`),
+/// the only production route that advances `energy_paid_or_lost_this_turn`, and the engine's own
+/// comparator refuses the resulting pair while a live modifier prices the journal. The no-Hulk
+/// control is the SAME payment on the SAME board: with nothing pricing the journal (its reserve,
+/// counter and journal are all projected out) the frames compare EQUAL, so the refusal in the
+/// first half is the modifier's, not the payment's.
+///
+/// This row does NOT claim a recurrence was presented to production: it activates once in
+/// `LoopDetectionMode::On`, where the mandatory-loop winner route — not the recorded/interactive
+/// offer — is what runs, and no take is declared.
+/// `printed_energy_activation_period_reaches_the_recorded_offer_and_replays_each_payment`
+/// carries the production proof through the recorded offer and its take.
+#[test]
+fn real_energy_payment_through_game_runner_updates_the_journal_it_prices() {
+    let (mut with_hulk, _kickoff, cub) = setup_2p_drain_with_energy_payer(true);
+    let before = with_hulk.state().clone();
+    with_hulk.activate(cub, 0).resolve();
+
+    // Reach guard: the production resolver really paid, so the journal the Hulk prices on moved.
+    assert_eq!(
+        with_hulk.state().players[P0.0 as usize].energy,
+        0,
+        "CR 107.14: paying {{E}}{{E}} removes both counters"
+    );
+    assert_eq!(
+        with_hulk.state().players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        2,
+        "the production cost resolver advances the journal Blaster Hulk's reduction reads"
+    );
+    assert!(
+        !loop_states_equal_modulo_resources(&before, with_hulk.state()),
+        "CR 601.2f: the live Hulk prices the journal the real payment moved ⇒ the pair is not \
+         constant"
+    );
+
+    // Control: identical payment, nothing pricing the journal ⇒ the frames compare EQUAL.
+    let (mut no_hulk, _kickoff, cub) = setup_2p_drain_with_energy_payer(false);
+    let before = no_hulk.state().clone();
+    no_hulk.activate(cub, 0).resolve();
+    assert_eq!(
+        no_hulk.state().players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        2,
+        "reach guard: the control ran the same real payment"
+    );
+    assert!(
+        loop_states_equal_modulo_resources(&before, no_hulk.state()),
+        "control: with no live modifier reading the journal the same payment stays projected \
+         history ⇒ EQUAL"
+    );
+}
+
+/// Automated Assembly Line verbatim (Scryfall). A PRINTED `{E}`-paying activation whose effect
+/// mints one inert vanilla token per period — the production route by which
+/// `energy_paid_or_lost_this_turn` advances once per repeat, with nothing else moving.
+const AUTOMATED_ASSEMBLY_LINE: &str = "Whenever one or more artifact creatures you control deal combat damage to a player, you get {E} (an energy counter).\nPay {E}{E}{E}: Create a tapped 3/3 colorless Robot artifact creature token.";
+
+/// Decoction Module verbatim (MTGJSON): three copies refund each Robot's three-energy payment.
+const DECOCTION_MODULE: &str = "Whenever a creature you control enters, you get {E} (an energy counter).\n{4}, {T}: Return target creature you control to its owner's hand.";
+
+/// The activation's banked energy: enough for every repetition these rows drive.
+const BANKED_ENERGY: u32 = 30;
+
+/// The 2p recorded-road board: P0 controls Automated Assembly Line with `BANKED_ENERGY` energy
+/// banked. `include_hulk` parks the REAL Blaster Hulk in P0's hand — the only variable between
+/// the bounded runs below. Each Module refunds one energy on entry. Interactive mode, so the
+/// recorded road (and the `take_route` it feeds) runs.
+fn setup_energy_activation_loop(include_hulk: bool, module_count: usize) -> (GameState, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 40);
+    scenario.with_life(P1, 40);
+    let mut builder =
+        scenario.add_artifact_from_oracle(P0, "Automated Assembly Line", AUTOMATED_ASSEMBLY_LINE);
+    builder.with_mana_cost(ManaCost::Cost {
+        shards: vec![],
+        generic: 2,
+    });
+    let line = builder.id();
+    for _ in 0..module_count {
+        scenario.add_artifact_from_oracle(P0, "Decoction Module", DECOCTION_MODULE);
+    }
+    if include_hulk {
+        add_uncast_blaster_hulk(&mut scenario);
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    runner.state_mut().players[P0.0 as usize].energy = BANKED_ENERGY;
+    (runner.state().clone(), line)
+}
+
+/// The parsed `{E}{E}{E}` activation — the index the drive activates, and a reach guard on the
+/// production parser.
+fn energy_activation_index(state: &GameState, line: ObjectId) -> usize {
+    state.objects[&line]
+        .abilities
+        .iter()
+        .position(|ability| {
+            ability.kind == engine::types::ability::AbilityKind::Activated
+                && matches!(
+                    ability.cost,
+                    Some(engine::types::ability::AbilityCost::PayEnergy { .. })
+                )
+        })
+        .expect("the production parser must give Automated Assembly Line its {E}{E}{E} activation")
+}
+
+/// One recorded period: the printed `{E}{E}{E}` activation and its resolution.
+fn energy_activation_period(state: &mut GameState, line: ObjectId, index: usize) {
+    activate(state, line, index);
+    settle(
+        state,
+        &Answers {
+            color: ManaType::Red,
+            aim: None,
+            cost: None,
+            accept: false,
+        },
+    );
+}
+
+/// The Robot tokens P0 controls.
+fn robots(state: &GameState) -> usize {
+    state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            let object = &state.objects[id];
+            object.is_token && object.name == "Robot" && object.controller == P0
+        })
+        .count()
+}
+
+/// CR 107.14 + CR 601.2f + CR 732.2a/c: a PRINTED `{E}{E}{E}` period driven through the
+/// production recorded road. Its first activation is enough for the confirmer to name, CONFIRM
+/// and OFFER the period (reach control: the recurrence/offer boundary really is reached), and the
+/// offer is the counting replay's SPEND bound — the reserve left at the offer divided by three —
+/// not an unbounded ∞ certificate, because every repetition consumes counters. A
+/// bounded period is PERFORMED, so an accepted take replays the printed payment each time
+/// instead of marking the period and omitting the journal change (CR 732.2c).
+///
+/// The real Blaster Hulk in hand is the ONLY variable between the two runs (CR 601.2f): its
+/// projection-priced reduction must neither suppress the confirmed period nor change what the
+/// take performs, and the journal assertions are exactly what a mark route would omit.
+#[test]
+fn printed_energy_activation_period_reaches_the_recorded_offer_and_replays_each_payment() {
+    let (mut control, line) = setup_energy_activation_loop(false, 0);
+    let index = energy_activation_index(&control, line);
+    let mut offered_after = 0;
+    for cycle in 1..=3 {
+        energy_activation_period(&mut control, line, index);
+        if let WaitingFor::LoopShortcut {
+            road,
+            schema,
+            period,
+            ..
+        } = &control.waiting_for
+        {
+            assert_eq!(
+                *road,
+                engine::analysis::loop_check::OfferRoad::RecordedPeriod
+            );
+            assert!(
+                !period.is_empty(),
+                "the offer must carry the confirmed period"
+            );
+            assert_eq!(
+                schema.measured_repetition_bound,
+                Some((BANKED_ENERGY - 3 * cycle) / 3),
+                "the counting replay bounds the spend by the reserve left at the offer"
+            );
+            offered_after = cycle;
+            break;
+        }
+    }
+    assert!(
+        offered_after > 0,
+        "reach control: the printed energy loop must reach the recorded offer boundary; got {:?}",
+        control.waiting_for
+    );
+    assert_eq!(
+        control.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        3 * offered_after,
+        "each confirmed period paid {{E}}{{E}}{{E}}"
+    );
+
+    let (mut refused, line) = setup_energy_activation_loop(true, 0);
+    let index = energy_activation_index(&refused, line);
+    // Reach guard: the parsed reduction FUNCTIONS from hand — the metadata the veto prices.
+    {
+        let hulk = refused
+            .objects
+            .values()
+            .find(|object| object.name == "Blaster Hulk")
+            .expect("the uncast Hulk");
+        assert_eq!(hulk.zone, Zone::Hand);
+        let reduction = hulk
+            .static_definitions
+            .iter_all()
+            .find(|def| {
+                matches!(
+                    def.mode,
+                    StaticMode::ModifyCost {
+                        dynamic_count: Some(
+                            engine::types::ability::QuantityRef::EnergyPaidOrLostThisTurn
+                        ),
+                        ..
+                    }
+                )
+            })
+            .expect("the parsed Blaster Hulk carries its energy cost reduction");
+        assert!(
+            reduction.active_zones.contains(&Zone::Hand),
+            "CR 113.6: the self-spell reduction is live from hand"
+        );
+    }
+    for cycle in 1..=3 {
+        energy_activation_period(&mut refused, line, index);
+        assert_eq!(
+            refused.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+            3 * cycle,
+            "the production activation paid {{E}}{{E}}{{E}} each period"
+        );
+        assert_eq!(
+            refused.players[P0.0 as usize].energy,
+            BANKED_ENERGY - 3 * cycle
+        );
+        if matches!(refused.waiting_for, WaitingFor::LoopShortcut { .. }) {
+            break;
+        }
+    }
+    assert!(
+        matches!(refused.waiting_for, WaitingFor::LoopShortcut { .. }),
+        "reach guard: the printed, repeated energy activation must reach the offer boundary; got {:?}",
+        refused.waiting_for
+    );
+    let journal = refused.players[P0.0 as usize].energy_paid_or_lost_this_turn;
+    let reserve = refused.players[P0.0 as usize].energy;
+    let take = take_recorded(&mut refused, 3);
+    assert_eq!(
+        markers(&take.events),
+        vec![(P0, 1), (P0, 3)],
+        "the accepted shortcut commits the first and last markers (middle markers are elided)"
+    );
+    assert_eq!(
+        refused.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        journal + 9,
+        "CR 601.2f: Replay performs the agreed payment that Mark would omit"
+    );
+    assert_eq!(
+        refused.players[P0.0 as usize].energy,
+        reserve - 9,
+        "CR 107.14: every replayed period removes its three energy counters"
+    );
+    assert!(
+        robots(&refused) >= 4,
+        "each replayed period creates its Robot"
+    );
+}
+
+/// CR 107.14 + CR 601.2f + CR 732.2a/c: three printed Modules refund Assembly Line's
+/// payment, so the recorded offer is unbounded even though Hulk's cost journal keeps moving.
+/// The accepted fixed take must replay those gross payments, not merely mark token growth.
+#[test]
+fn printed_refunding_energy_period_replays_the_journal_at_the_accepted_take() {
+    let (mut state, line) = setup_energy_activation_loop(true, 3);
+    let index = energy_activation_index(&state, line);
+    for cycle in 1..=3 {
+        energy_activation_period(&mut state, line, index);
+        assert_eq!(state.players[P0.0 as usize].energy, BANKED_ENERGY);
+        assert_eq!(
+            state.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+            3 * cycle,
+            "the settled printed payment is refunded, not removed from its journal"
+        );
+        if matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }) {
+            break;
+        }
+    }
+    let WaitingFor::LoopShortcut {
+        road,
+        schema,
+        period,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "the refunding printed period must reach its offer: {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(
+        *road,
+        engine::analysis::loop_check::OfferRoad::RecordedPeriod
+    );
+    assert!(!period.is_empty());
+    assert_eq!(
+        schema.measured_repetition_bound, None,
+        "reach guard: refunds leave no net spend bound on this offer"
+    );
+    let journal = state.players[P0.0 as usize].energy_paid_or_lost_this_turn;
+    let tokens = robots(&state);
+    let take = take_recorded(&mut state, 3);
+    assert_eq!(markers(&take.events), vec![(P0, 1), (P0, 3)]);
+    assert_eq!(
+        state.players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        journal + 9,
+        "Replay preserves the three payments that Mark would omit"
+    );
+    assert_eq!(state.players[P0.0 as usize].energy, BANKED_ENERGY);
+    assert_eq!(robots(&state), tokens + 3);
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
 
 /// 2p ESCALATING TARGETED drain (PR-7 gate-relax witness): Vito + Sanguine Bond (two
@@ -723,6 +1194,97 @@ fn an_accepted_until_lethal_grant_drains_even_with_a_foreign_period_in_state() {
         "CR 732.2a SITE D: an opponent's play describes no sequence this proposer can take, so \
          the accepted `UntilLethal` grant must still drive the DRAIN it was certified on. A \
          `Priority` handback here is the defect: the drive fell into `until_lethal_fallback`"
+    );
+}
+
+/// #10464: validating a responder's `Accept` must not TAKE the shortcut.
+///
+/// The last responder's `Accept` is the answer that materializes the whole take, so
+/// `SimulationFilter` used to answer "is this legal?" by cloning the state and applying it: the
+/// take ran once for the verdict and again for the real answer, holding the game lock for about
+/// two takes. This row measures the take drive itself (`take_cost_snapshot`), never a wall clock,
+/// and it measures it at the public `legal_actions` boundary — the call the server session makes
+/// after every action.
+///
+/// **Fixture pin:** P1 accepts first, so the window measured is P2's with `remaining_players`
+/// empty — the seat whose `Accept` is the materializing one (CR 732.2c: the shortcut is taken once
+/// the last player has answered). On a window that still has a queued
+/// responder an `Accept` merely advances the poll, which is why the shorter window would pass
+/// vacuously. The enumeration reach guard (`exactly one RespondToShortcut`) is what keeps the
+/// zero counters from being satisfied by an empty action list.
+#[test]
+fn shortcut_accept_validation_does_not_take_the_shortcut() {
+    // This measures the generic shortcut protocol using the existing composed synthetic loop.
+    // Nearest printed anchors: Marauding Blight-Priest and Exquisite Blood; the fixture's
+    // fixed-one Test Blood Sipper is not Exquisite Blood's variable-amount printed ability.
+    let (mut runner, kickoff) = setup_3p_optional_cascade(LoopDetectionMode::Interactive);
+    let _ = runner.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut runner, 500);
+    assert!(
+        matches!(wf, WaitingFor::LoopShortcut { .. }),
+        "REACH-GUARD: the offer must fire, got {wf:?}"
+    );
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::UntilLethal,
+            template: None,
+        })
+        .expect("P0 declares the shortcut");
+    runner
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("P1 accepts");
+
+    let WaitingFor::RespondToShortcut {
+        player,
+        remaining_players,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "REACH-GUARD: P2 must be prompted, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P2, "APNAP: the last responder is P2");
+    assert!(
+        remaining_players.is_empty(),
+        "REACH-GUARD: this row needs the seat whose Accept MATERIALIZES the take"
+    );
+
+    let before = take_cost_snapshot();
+    let validation_before = engine::game::perf_counters::snapshot().raw_validation_state_clones;
+    let actions = engine::ai_support::legal_actions(runner.state());
+    let during = take_cost_snapshot().since(before);
+    let validation_clones =
+        engine::game::perf_counters::snapshot().raw_validation_state_clones - validation_before;
+
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept
+            }]
+        ),
+        "REACH-GUARD: the window enumerates exactly the materializing Accept, got {actions:?} — \
+         a Shorten at place 0 takes nothing, so the take counters below would not be measuring \
+         the take this row exists to remove"
+    );
+    assert_eq!(
+        validation_clones, 0,
+        "deciding whether the Accept is legal must not reach the clone-and-apply probe"
+    );
+    // MEASURED, same fixture, same window: base `bf584d6bd` answers this call with
+    // `validation_clones=1, state_copies=50`; head with `0` and `1`. The copies above the one the
+    // candidate probe makes are the simulated Accept driving the shortcut — `GameState::clone`
+    // accounts every copy, so the take's snapshots land in this counter.
+    // `drive_snapshots` is 0 on BOTH sides here (the UntilLethal take drives through a path that
+    // records no drive snapshot), so the state copy is this board's take instrument, not that
+    // counter.
+    assert_eq!(
+        during.state_copies, 1,
+        "one copy, the candidate probe's; the legality verdict must not add a take's snapshot"
     );
 }
 
@@ -4804,8 +5366,8 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // ── the classifier's own reach-guard: the enum was actually found ──
     let total = enum_variants(&enum_src, "WaitingFor").len();
     assert_eq!(
-        total, 144,
-        "`WaitingFor` has 144 variants at this tip, read off the `syn` parse. This number is \
+        total, 148,
+        "`WaitingFor` has 148 variants at this tip, read off the `syn` parse. This number is \
          pinned so a variant REMOVED is as visible as one added; if you added a variant and it \
          carries no `DecisionTemplate`, update this number. A wildly different count means the \
          reader lost its anchor, and every assertion below would then be measuring an empty enum"
@@ -4881,6 +5443,26 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // real-time physical clicking contest driven by the host engine contest driver,
     // not a shortcut-style template — so it is not a third carrier and the carrier
     // assertion below is unchanged by it.
+    // 144 ⇒ 145 is ADJUDICATED: the conspiracy agenda prompt added
+    // `SecretAgendaChoice { player, object_id, name_count }`. That body holds NO
+    // `DecisionTemplate`, so it is not a third carrier either.
+    // 145 ⇒ 146 is ADJUDICATED: Petals of Insight's bottom ordering added
+    // `DigBottomOrder { player, source_id, cards }`. Its body holds NO
+    // `DecisionTemplate` — it is a card-permutation prompt answered by
+    // `SelectCards` — so it is not a third carrier and the carrier assertion
+    // below is unchanged by it.
+    // 146 ⇒ 147 is ADJUDICATED: Turtle Team-Up added `HeroEventChoice` (hero-choice
+    // Events answered with `GameAction::SelectCards`, handled in
+    // `engine_resolution_choices`). Measured, not inferred from the diff: that body
+    // holds NO `DecisionTemplate` (zero matches) — it is a resolution-choice prompt,
+    // not a shortcut-style template — so it is not a third carrier and the carrier
+    // assertion below is unchanged by it.
+    // 147 ⇒ 148 is ADJUDICATED: CR 103.1's game-one starting-player choice added
+    // `ChooseStartingPlayer { player: PlayerId, candidates: Vec<PlayerId> }`. Its body holds
+    // NO `DecisionTemplate`, directly or through a field type, so it is not a third carrier.
+    // It is also deliberately absent from the `filter_state_for_scope` redaction loop: its
+    // fields are seat ids, which are public, the same reasoning that leaves
+    // `BetweenGamesChoosePlayDraw` unredacted.
 
     let carriers = carriers_in_source(&enum_src, "WaitingFor", &corpus, &marker, true);
     assert_eq!(

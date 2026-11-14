@@ -49,6 +49,7 @@ fn redirect_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefin
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 destination: redirected_to,
                 origin: None,
                 target: TargetFilter::SelfRef,
@@ -158,6 +159,7 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
@@ -284,6 +286,7 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
             up_to: true,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
@@ -409,6 +412,7 @@ fn dig_mass_put_all_nonbattlefield_redirect_publishes_only_delivered_set() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
@@ -570,6 +574,7 @@ fn uninterrupted_dig_rest_and_mass_put_all_complete_synchronously() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: false,
@@ -629,6 +634,7 @@ fn uninterrupted_dig_rest_and_mass_put_all_complete_synchronously() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: false,
@@ -717,6 +723,7 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
@@ -982,6 +989,7 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         sacrifice_provenance: None,
         candidates: vec![ReplacementId { source, index: 0 }],
         search_found_candidates: Vec::new(),
+        ordering_peers: Vec::new(),
         depth: 0,
         is_optional: false,
         choice_player: None,
@@ -3382,6 +3390,157 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
     );
 }
 
+/// CR 608.2c + CR 614.12a + CR 616.1: an effect puts the Mimeoplasm forced-cost witness onto the
+/// battlefield and then gains 3 life. Its accepted two-card exile cost pauses on a redirect choice for each
+/// card, and the effect's next instruction waits until both exiles and the entry have completed.
+///
+/// Revert probe: without the rider exclusion for the exile carrier, the life gain resolves after the first
+/// redirect answer — before the second cost exile is even paid — and precedes the entry.
+#[test]
+fn an_exile_may_cost_entry_finishes_before_the_effects_next_instruction() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario
+        .add_creature_to_graveyard(P0, "First Mimeoplasm Witness", 2, 2)
+        .id();
+    let second = scenario
+        .add_creature_to_graveyard(P0, "Second Mimeoplasm Witness", 3, 3)
+        .id();
+    let mimeoplasm = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Mimeoplasm Forced-Cost Witness",
+            5,
+            5,
+            "As ~ enters, you may exile two creature cards from graveyards. If you do, ~ enters as a copy of one of them, except it has +1/+1 counters equal to the other's power.",
+        )
+        .id();
+    for name in ["First Mimeoplasm Redirect", "Second Mimeoplasm Redirect"] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Hand));
+    }
+    let mut runner = scenario.build();
+    let mut forced_cost_only =
+        runner.state().objects[&mimeoplasm].replacement_definitions[0].clone();
+    // As in the test above: strip only the independent copy/counter branch.
+    forced_cost_only.execute = None;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&mimeoplasm)
+        .expect("Mimeoplasm witness exists")
+        .replacement_definitions = vec![forced_cost_only].into();
+
+    let entry_then_life = ResolvedAbility::new(
+        Effect::ChangeZone {
+            origin: Some(Zone::Hand),
+            destination: Zone::Battlefield,
+            target: TargetFilter::SpecificObject { id: mimeoplasm },
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+            library_shuffle: Default::default(),
+        },
+        vec![],
+        ObjectId(9000),
+        P0,
+    )
+    .sub_ability(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        ObjectId(9000),
+        P0,
+    ));
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &entry_then_life, &mut events, 0)
+        .expect("the effect pauses on the witness's entry replacement");
+
+    let entry_and_life_order = |events: &[GameEvent]| -> Vec<&'static str> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if *object_id == mimeoplasm => Some("entry"),
+                GameEvent::LifeChanged { .. } => Some("life"),
+                _ => None,
+            })
+            .collect()
+    };
+    let frame_kinds = |state: &GameState| -> Vec<engine::types::resolution::FrameKind> {
+        state
+            .resolution_stack
+            .iter()
+            .map(|frame| frame.kind())
+            .collect()
+    };
+
+    // Accept the cost, then answer the first card's redirect.
+    for _ in 0..2 {
+        let result = runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("the replacement answer is legal");
+        events.extend(result.events);
+    }
+    let state = runner.state();
+    assert_eq!(state.objects[&first].zone, Zone::Hand);
+    assert_eq!(state.objects[&second].zone, Zone::Graveyard);
+    assert!(
+        matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "the second card's redirect prompt is open, got {:?}",
+        state.waiting_for
+    );
+    assert_eq!(
+        state.objects[&mimeoplasm].zone,
+        Zone::Hand,
+        "no premature entry"
+    );
+    assert_eq!(
+        state.players[0].life, 20,
+        "the effect's next instruction waits"
+    );
+    assert_eq!(
+        frame_kinds(state),
+        vec![
+            engine::types::resolution::FrameKind::AbilityContinuation,
+            engine::types::resolution::FrameKind::ChangeZone,
+        ],
+        "the enclosing effect's frames are still live"
+    );
+
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the second redirect answer is legal");
+    events.extend(result.events);
+
+    let state = runner.state();
+    assert_eq!(entry_and_life_order(&events), vec!["entry", "life"]);
+    assert_eq!(state.players[0].life, 23);
+    assert_eq!(state.objects[&second].zone, Zone::Hand);
+    assert_eq!(state.objects[&mimeoplasm].zone, Zone::Battlefield);
+    assert!(state.pending_cost_move_resume.is_none());
+    assert!(state.pending_replacement.is_none());
+    assert!(
+        state.resolution_stack.is_empty(),
+        "got {:?}",
+        frame_kinds(state)
+    );
+}
+
 #[test]
 fn self_return_activation_cost_pauses_for_moved_redirect_without_pending_cast() {
     let mut scenario = GameScenario::new();
@@ -3876,6 +4035,7 @@ fn mana_self_exile_cost_redirect_serializes_and_resumes_unless_payment_once() {
         trigger_event: None,
         effect_description: Some("unless payment witness".to_string()),
         remaining: vec![P1],
+        repeat: None,
     };
     let mut initial_events = Vec::new();
     let initial = activate_mana_ability(
@@ -3905,7 +4065,8 @@ fn mana_self_exile_cost_redirect_serializes_and_resumes_unless_payment_once() {
                 trigger_event: None,
                 effect_description: Some(description),
                 remaining,
-            } if cost.as_ref() == &unless_cost
+
+                ..} if cost.as_ref() == &unless_cost
                 && paused_effect.as_ref() == &pending_effect
                 && description == "unless payment witness"
                 && remaining == &vec![P1]
@@ -3947,6 +4108,7 @@ fn mana_self_exile_cost_redirect_serializes_and_resumes_unless_payment_once() {
             trigger_event,
             effect_description,
             remaining,
+            ..
         } => {
             assert_eq!(*player, P0);
             assert_eq!(cost, &unless_cost);
@@ -4088,6 +4250,7 @@ fn auto_tap_cost_move_redirect_preserves_outer_unless_payment() {
         trigger_event: None,
         effect_description: Some("auto-tap unless payment witness".to_string()),
         remaining: vec![P1],
+        repeat: None,
     };
 
     let paused = runner
@@ -4108,7 +4271,8 @@ fn auto_tap_cost_move_redirect_preserves_outer_unless_payment() {
                 trigger_event: None,
                 effect_description: Some(description),
                 remaining,
-            } if cost.as_ref() == &unless_cost
+
+                ..} if cost.as_ref() == &unless_cost
                 && paused_effect.as_ref() == &pending_effect
                 && description == "auto-tap unless payment witness"
                 && remaining == &vec![P1]
@@ -4699,6 +4863,144 @@ fn repeated_unattach_activation_witness(
     (runner, source, [first, second])
 }
 
+/// Synthetic witness for a TWO-slot `UnattachFrom` leg. No printed card has a
+/// multi-attachment unattach cost (Captain America, First Avenger is the only
+/// `AbilityCost::UnattachFrom` card and its count is 1), so the distinctness
+/// conjunct — which a one-slot leg cannot distinguish — needs a count-2 leg.
+/// The nearest printed card is named as the justification for the shape; the
+/// behavior under test is CR 118.3 + CR 601.2h ("one object can't pay two
+/// slots"), not a claim about any printed card.
+fn two_slot_unattach_activation_witness() -> (
+    GameRunner,
+    engine::types::identifiers::ObjectId,
+    [engine::types::identifiers::ObjectId; 2],
+) {
+    let unattach = AbilityCost::UnattachFrom {
+        filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+        count: 2,
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Two-Slot Unattach Activation Witness", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(unattach),
+        )
+        .id();
+    let first = scenario
+        .add_creature(P0, "First Two-Slot Unattach Witness", 0, 1)
+        .as_artifact()
+        .id();
+    let second = scenario
+        .add_creature(P0, "Second Two-Slot Unattach Witness", 0, 1)
+        .as_artifact()
+        .id();
+    let mut runner = scenario.build();
+    for attachment in [first, second] {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&attachment)
+            .unwrap()
+            .attached_to = Some(AttachTarget::Object(source));
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .attachments
+            .push(attachment);
+    }
+    (runner, source, [first, second])
+}
+
+/// CR 118.3 + CR 601.2h: a count-2 unattach leg needs two DISTINCT attachments.
+/// Submitting the same id twice passes the raw count (2 == 2) and detaches it
+/// once, so the leg is "paid" with one object — the duplicate guard must refuse
+/// it before any state changes, and the prompt must stay answerable.
+///
+/// Revert probe: at base the handler has no distinctness check, so `[a, a]`
+/// reaches the detach loop and the activation reaches the stack — the
+/// `expect_err` (and the exact-message assertion) panics.
+#[test]
+fn unattach_cost_rejects_the_same_attachment_for_two_slots() {
+    let (mut runner, source, [first, second]) = two_slot_unattach_activation_witness();
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the two-slot unattach cost surfaces its payment prompt");
+
+    match runner.state().waiting_for.clone() {
+        WaitingFor::PayCost {
+            kind: PayCostKind::UnattachFrom { .. },
+            count,
+            min_count,
+            ..
+        } => assert_eq!(
+            (count, min_count),
+            (2, 2),
+            "the prompt advertises the leg's exact cardinality"
+        ),
+        other => panic!("expected PayCost UnattachFrom, got {other:?}"),
+    }
+
+    let duplicate = runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, first],
+        })
+        .expect_err("CR 118.3: one attachment cannot pay two slots");
+    let engine::game::EngineError::InvalidAction(message) = &duplicate else {
+        panic!("a repeated attachment must be an InvalidAction, got {duplicate:?}");
+    };
+    assert_eq!(
+        message, "Cannot unattach the same attachment more than once for a cost",
+        "the distinctness guard must be what rejected the payment"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::PayCost {
+            kind: PayCostKind::UnattachFrom { .. },
+            ..
+        }
+    ));
+    for attachment in [first, second] {
+        assert!(
+            runner.state().objects[&attachment].attached_to.is_some(),
+            "a rejected payment must not detach anything"
+        );
+        assert_eq!(runner.state().objects[&attachment].zone, Zone::Battlefield);
+    }
+    assert_eq!(runner.state().stack.len(), 0, "no stack entry on refusal");
+
+    // Reach guard: two distinct attachments pay the two-slot leg.
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, second],
+        })
+        .expect("two distinct attachments pay the two-slot cost");
+    for attachment in [first, second] {
+        assert!(
+            runner.state().objects[&attachment].attached_to.is_none(),
+            "each paid attachment detaches"
+        );
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "the activation reaches the stack"
+    );
+}
+
 #[test]
 fn repeated_and_one_of_interactive_activation_costs_surface_each_unpaid_leg() {
     for one_of in [false, true] {
@@ -5029,6 +5331,7 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         sacrifice_provenance: None,
         candidates: vec![ReplacementId { source, index: 0 }],
         search_found_candidates: Vec::new(),
+        ordering_peers: Vec::new(),
         depth: 0,
         is_optional: false,
         choice_player: None,
@@ -9465,6 +9768,7 @@ fn prevented_mana_cost_move_serializes_and_restores_unless_payment_root() {
             trigger_event: None,
             effect_description: Some("prevented unless payment witness".to_string()),
             remaining: vec![P1],
+            repeat: None,
         },
         None,
     )
@@ -9490,7 +9794,8 @@ fn prevented_mana_cost_move_serializes_and_restores_unless_payment_root() {
             trigger_event: None,
             effect_description: Some(ref description),
             ref remaining,
-        } if cost == &unless_cost
+
+            ..} if cost == &unless_cost
             && resumed_effect.as_ref() == &pending_effect
             && description == "prevented unless payment witness"
             && remaining == &vec![P1]
@@ -12954,6 +13259,7 @@ fn dig_kept_nonbattlefield_redirect_pauses_before_tail() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Graveyard),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
@@ -13105,6 +13411,7 @@ fn r2_effect_zone_moves_stay_synchronous_without_redirects() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: Some(Zone::Graveyard),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             reveal: true,
@@ -14272,6 +14579,7 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: Some(position),
+            library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,

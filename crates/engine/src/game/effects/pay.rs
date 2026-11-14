@@ -4,8 +4,11 @@ use crate::game::targeting::resolve_effect_player_ref;
 use crate::game::{casting, casting_costs};
 use crate::types::ability::{is_pay_any_amount, AbilityCost, Effect};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PayableResource, WaitingFor};
-use crate::types::mana::ManaCost;
+use crate::types::game_state::{
+    GameState, ManaAmountComposition, PayableResource, ResolutionPaymentOrigin, WaitingFor,
+};
+use crate::types::identifiers::ObjectId;
+use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::player::PlayerId;
 
 use super::{EffectError, ResolvedAbility};
@@ -78,6 +81,10 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 118.12: a drained latched remainder or a replayed staged root resumes a
+    // choice already made. Taken once, so only this instruction — the chain's
+    // head — skips the choice gate.
+    let origin = std::mem::take(&mut state.resolving_head_payment_origin);
     let (cost, scale, payer_filter) = match &ability.effect {
         Effect::PayCost { cost, scale, payer } => (cost, scale, payer),
         _ => return Err(EffectError::MissingParam("PayCost".to_string())),
@@ -110,6 +117,19 @@ pub fn resolve(
         && !state.payment_transaction_replay
         && state.payment_transaction.is_none()
     {
+        // CR 118.12: a latched Composite remainder lives only on a transaction
+        // shadow (a top-level Composite always stages, and a remainder exists
+        // only after its root paused inside that transaction), so it is drained
+        // under replay and never reaches `begin`, which would judge it fresh.
+        if !origin.is_fresh_choice() {
+            tracing::warn!(
+                "a latched Composite PayCost head reached payment_transaction::begin; judging it fresh"
+            );
+        }
+        debug_assert!(
+            matches!(origin, ResolutionPaymentOrigin::FreshChoice),
+            "a latched Composite head never opens a staged transaction"
+        );
         return crate::game::payment_transaction::begin(state, ability, events);
     }
 
@@ -125,6 +145,27 @@ pub fn resolve(
                 "PayCost.scale requires a Mana cost base".to_string(),
             ));
         };
+        // CR 107.1c + CR 107.3f + CR 118.1: a scale that still carries the unannounced X
+        // ("pay any amount of {R}") is a player-chosen multiplier — offer 0..=max and pay
+        // base.scaled(n) on submit (engine_resolution_choices). A scale without X
+        // (TrackedSetSize: Thelon's Curse, Magnetic Mountain, Mudslide, Dream Tides)
+        // was already chosen by an earlier instruction and stays on the direct path below.
+        if times.contains_x() {
+            let max = resolution_mana_per_unit_max(state, payer, ability.source_id, base);
+            state.waiting_for = WaitingFor::PayAmountChoice {
+                player: payer,
+                resource: PayableResource::Mana {
+                    base_cost: base.clone(),
+                    composition: ManaAmountComposition::PerUnit,
+                },
+                min: 0,
+                max,
+                accumulated: 0,
+                source_id: ability.source_id,
+                pending_mana_ability: None,
+            };
+            return Ok(());
+        }
         let times = resolve_quantity_with_targets(state, times, &payment_ability).max(0);
         let times = u32::try_from(times).unwrap_or(0);
         let scaled = scale_mana_cost(base, times);
@@ -133,6 +174,7 @@ pub fn resolve(
             &payment_ability,
             payer,
             &AbilityCost::Mana { cost: scaled },
+            origin,
             events,
         )?;
         return Ok(());
@@ -152,8 +194,9 @@ pub fn resolve(
                         .map_or(max, |amount| max.min(amount));
                     state.waiting_for = WaitingFor::PayAmountChoice {
                         player: payer,
-                        resource: PayableResource::ManaGeneric {
+                        resource: PayableResource::Mana {
                             base_cost: mana_cost.clone(),
+                            composition: ManaAmountComposition::ConcretizeX,
                         },
                         min: 0,
                         max,
@@ -234,7 +277,7 @@ pub fn resolve(
             )
             .unwrap_or(0);
             let outcome =
-                resolve_ability_cost_payment(state, &payment_ability, payer, cost, events)?;
+                resolve_ability_cost_payment(state, &payment_ability, payer, cost, origin, events)?;
             // Gate the stamp on THIS payment's outcome, not the global
             // `cost_payment_failed_flag` — a stale flag from an earlier effect
             // must not suppress the stamp for a payment that succeeded.
@@ -250,7 +293,7 @@ pub fn resolve(
         // `pay_life_as_cost`).
         _ => {
             prepare_pay_cost_life_amount(state, &mut payment_ability, cost);
-            resolve_ability_cost_payment(state, &payment_ability, payer, cost, events)?;
+            resolve_ability_cost_payment(state, &payment_ability, payer, cost, origin, events)?;
         }
     }
     Ok(())
@@ -266,16 +309,7 @@ pub(crate) fn scale_mana_cost(base: &ManaCost, times: u32) -> ManaCost {
         | ManaCost::SelfManaCost
         | ManaCost::SelfManaValue
         | ManaCost::SelfManaCostReduced { .. } => ManaCost::zero(),
-        ManaCost::Cost { shards, generic } => {
-            let mut scaled_shards = Vec::with_capacity(shards.len() * times as usize);
-            for _ in 0..times {
-                scaled_shards.extend(shards.iter().copied());
-            }
-            ManaCost::Cost {
-                shards: scaled_shards,
-                generic: generic.saturating_mul(times),
-            }
-        }
+        ManaCost::Cost { .. } => base.scaled(times),
     }
 }
 
@@ -297,14 +331,19 @@ pub(crate) fn scale_mana_cost(base: &ManaCost, times: u32) -> ManaCost {
 /// perf fix). The authority's outcome maps to the resolution-scope failure
 /// channel (`cost_payment_failed_flag`).
 ///
-/// CR 614.17b: after the counter-placement fold, this pre-gate can also refuse a
-/// `Composite` whose payment would include an event a mandatory can't-effect
-/// forbids, not only one the payer cannot afford.
+/// CR 614.17b + CR 121.2b: every fresh payment, including a transaction-staged
+/// `Composite`, meets the choice gate at `costs::pay_ability_cost_for_resolution`;
+/// this `Composite` pre-gate is bypassed under payment-transaction replay. A
+/// latched head (a prepended remainder or the replayed root) pays through
+/// `costs::resume_ability_cost_for_resolution`; a latched `Composite` head
+/// never reaches the pre-gate, because it drains under
+/// `payment_transaction_replay`.
 fn resolve_ability_cost_payment(
     state: &mut GameState,
     ability: &ResolvedAbility,
     payer: PlayerId,
     cost: &AbilityCost,
+    origin: ResolutionPaymentOrigin,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EffectError> {
     if matches!(cost, AbilityCost::Composite { .. })
@@ -317,6 +356,7 @@ fn resolve_ability_cost_payment(
             &costs::PaymentScope::Resolution {
                 ability,
                 cost_move_root: costs::ResolutionCostMoveRoot::EffectPayCost,
+                origin,
             },
         )
     {
@@ -327,7 +367,15 @@ fn resolve_ability_cost_payment(
             },
         });
     }
-    match costs::pay_ability_cost_for_resolution(state, payer, cost, ability, events) {
+    let outcome = match origin {
+        ResolutionPaymentOrigin::FreshChoice => {
+            costs::pay_ability_cost_for_resolution(state, payer, cost, ability, events)
+        }
+        ResolutionPaymentOrigin::LatchedSuffix => {
+            costs::resume_ability_cost_for_resolution(state, payer, cost, ability, events)
+        }
+    };
+    match outcome {
         Ok(outcome @ PaymentOutcome::Paid) => Ok(outcome),
         // CR 616.1: a replacement-effect choice — or an interactive
         // `DiscardChoice` — interrupted payment. `state.waiting_for` is already
@@ -376,6 +424,11 @@ fn resolve_ability_cost_payment(
 /// payable, X = 0 is payable too. The downward search below therefore never
 /// needs to re-check 0 separately — reaching `max == 0` and failing there is
 /// exactly the "not even 0 works" case.
+///
+/// The search starts at `casting::effect_payment_ceiling` (the larger of the
+/// simulated production and the announcement-time `max_x_value` estimate) and
+/// descends to the largest X at or below it that the unchanged single-pass exact
+/// check accepts; see `resolution_mana_per_unit_max` for the contract.
 fn resolution_mana_x_max(
     state: &GameState,
     payer: PlayerId,
@@ -384,20 +437,32 @@ fn resolution_mana_x_max(
 ) -> Option<u32> {
     // Resolution-time X costs are not spell casts — convoke/improvise/waterbend
     // tap-payments do not apply, so no spell object is passed.
-    let mut max = casting_costs::max_x_value(state, payer, cost, None);
+    //
+    // CR 118.1 + CR 605.3a + CR 106.12b: the starting point is the larger of the
+    // simulated production (which counts replacement multipliers such as
+    // Nyxbloom Ancient and TapsForMana bonuses) and the announcement-time
+    // `max_x_value` estimate, which stays the floor and is itself untouched.
+    // The exact check below still gates every candidate, so an over-estimate is
+    // never offered.
+    let legacy = casting_costs::max_x_value(state, payer, cost, None);
+    let mut max = casting::effect_payment_ceiling(state, payer, source_id, legacy, |x| {
+        x_concrete_checked(cost, x)
+    });
     loop {
-        let mut concrete = cost.clone();
-        concrete.concretize_x(max);
+        // `None` (X not representable) counts as not payable.
+        let concrete = x_concrete_checked(cost, max);
         // CR 605.3b + CR 616.1: the chosen amount is paid through
         // `pay_unless_cost`, which has no resume root, so the offered range must
         // not count a mana source whose own cost would pause.
-        if casting::can_pay_effect_mana_cost_after_auto_tap(
-            state,
-            payer,
-            source_id,
-            &concrete,
-            casting::PausedManaPayment::Unresumable,
-        ) {
+        if concrete.as_ref().is_some_and(|concrete| {
+            casting::can_pay_effect_mana_cost_after_auto_tap(
+                state,
+                payer,
+                source_id,
+                concrete,
+                casting::PausedManaPayment::Unresumable,
+            )
+        }) {
             return Some(max);
         }
         if max == 0 {
@@ -405,6 +470,92 @@ fn resolution_mana_x_max(
         }
         max -= 1;
     }
+}
+
+/// `cost` with every `{X}` concretized to `x` (`ManaCost::concretize_x`), or
+/// `None` when the resulting generic amount is not representable in `u32`.
+/// `concretize_x` multiplies and adds unchecked, so the width is checked here
+/// before the cost is built.
+fn x_concrete_checked(cost: &ManaCost, x: u32) -> Option<ManaCost> {
+    if let ManaCost::Cost { shards, generic } = cost {
+        let x_count = u32::try_from(
+            shards
+                .iter()
+                .filter(|shard| matches!(shard, ManaCostShard::X))
+                .count(),
+        )
+        .ok()?;
+        generic.checked_add(x.checked_mul(x_count)?)?;
+    }
+    let mut concrete = cost.clone();
+    concrete.concretize_x(x);
+    Some(concrete)
+}
+
+/// CR 107.1c + CR 118.1: Largest N for which `per_unit` repeated N times
+/// (`ManaCost::scaled`) is payable right now at resolution — the upper bound of
+/// a "pay any amount of {R}" prompt (Leyline Tyrant).
+///
+/// Unlike `resolution_mana_x_max` this never fails: `per_unit.scaled(0)` is
+/// `{0}`, which CR 118.5 makes payable by acknowledgment alone, so the search
+/// floors at 0 rather than returning `None`.
+///
+/// The search starts at `casting::effect_payment_ceiling` — the larger of the
+/// simulated production (the real effect-context auto-tap and inline-trigger
+/// pipeline on an over-sized probe, which counts replacement multipliers such as
+/// Nyxbloom Ancient, TapsForMana bonuses and colour rules) and the per-permanent
+/// capacity bound `casting::effect_payment_mana_ceiling` — and descends to the
+/// largest N at or below it that the unchanged single-pass exact check
+/// `casting::can_pay_effect_mana_cost_after_auto_tap` accepts, so colors the
+/// unit demands, and sources whose mana may not be spent at resolution, are
+/// enforced exactly as on submit. That is the largest accepted N overall
+/// whenever no exactly-acceptable N exceeds the starting ceiling; the ceiling
+/// is derived from the same pipeline the exact check runs, but this is not
+/// proved for every printed producer. Like the X path it builds one probe cost
+/// per candidate.
+///
+/// CR 605.3a + CR 605.3b: the chosen amount is paid through `pay_unless_cost`,
+/// which has no resume root, so the offered range must not count a mana source
+/// whose own cost would pause.
+fn resolution_mana_per_unit_max(
+    state: &GameState,
+    payer: PlayerId,
+    source_id: ObjectId,
+    per_unit: &ManaCost,
+) -> u32 {
+    let legacy = casting::effect_payment_mana_ceiling(state, payer);
+    let mut n = casting::effect_payment_ceiling(state, payer, source_id, legacy, |n| {
+        per_unit_scaled_checked(per_unit, n)
+    });
+    loop {
+        if n == 0 {
+            return 0;
+        }
+        if per_unit_scaled_checked(per_unit, n).is_some_and(|scaled| {
+            casting::can_pay_effect_mana_cost_after_auto_tap(
+                state,
+                payer,
+                source_id,
+                &scaled,
+                casting::PausedManaPayment::Unresumable,
+            )
+        }) {
+            return n;
+        }
+        n -= 1;
+    }
+}
+
+/// `per_unit` repeated `n` times (`ManaCost::scaled`), or `None` when the
+/// scaled shard count or generic amount is not representable in `u32`.
+/// `ManaCost::scaled` multiplies unchecked, so the width is checked here before
+/// any cost is built.
+fn per_unit_scaled_checked(per_unit: &ManaCost, n: u32) -> Option<ManaCost> {
+    if let ManaCost::Cost { shards, generic } = per_unit {
+        let width = u32::try_from(shards.len()).ok()?.checked_add(*generic)?;
+        n.checked_mul(width)?;
+    }
+    Some(per_unit.scaled(n))
 }
 
 fn trigger_event_amount(state: &GameState) -> Option<u32> {
@@ -434,12 +585,14 @@ mod tests {
 
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ChooseOneOfKind, ManaProduction, ManaSpendRestriction,
-        QuantityExpr, QuantityRef, TargetFilter,
+        AbilityDefinition, AbilityKind, ChooseOneOfKind, ManaContribution, ManaProduction,
+        ManaSpendRestriction, QuantityExpr, QuantityRef, TargetFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
-    use crate::types::mana::{ManaCost, ManaCostShard, ManaRestriction, ManaType, ManaUnit};
+    use crate::types::mana::{
+        ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaType, ManaUnit,
+    };
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -1708,11 +1861,12 @@ mod tests {
             WaitingFor::PayAmountChoice { resource, max, .. } => {
                 assert_eq!(
                     *resource,
-                    PayableResource::ManaGeneric {
+                    PayableResource::Mana {
                         base_cost: ManaCost::Cost {
                             shards: vec![ManaCostShard::X],
                             generic: 0,
                         },
+                        composition: ManaAmountComposition::ConcretizeX,
                     }
                 );
                 assert_eq!(*max, 3);
@@ -1847,7 +2001,7 @@ mod tests {
             WaitingFor::PayAmountChoice { resource, max, .. } => {
                 assert_eq!(
                     *resource,
-                    PayableResource::ManaGeneric {
+                    PayableResource::Mana {
                         base_cost: ManaCost::Cost {
                             shards: vec![
                                 ManaCostShard::X,
@@ -1857,6 +2011,7 @@ mod tests {
                             ],
                             generic: 0,
                         },
+                        composition: ManaAmountComposition::ConcretizeX,
                     },
                     "base_cost must carry the colored pips alongside X, not just per_x"
                 );
@@ -2090,11 +2245,12 @@ mod tests {
             } => {
                 assert_eq!(
                     *resource,
-                    PayableResource::ManaGeneric {
+                    PayableResource::Mana {
                         base_cost: ManaCost::Cost {
                             shards: vec![ManaCostShard::X, ManaCostShard::White],
                             generic: 0,
                         },
+                        composition: ManaAmountComposition::ConcretizeX,
                     }
                 );
                 assert_eq!(*min, 0);
@@ -2246,11 +2402,12 @@ mod tests {
             WaitingFor::PayAmountChoice { resource, max, .. } => {
                 assert_eq!(
                     *resource,
-                    PayableResource::ManaGeneric {
+                    PayableResource::Mana {
                         base_cost: ManaCost::Cost {
                             shards: vec![ManaCostShard::X],
                             generic: 0,
                         },
+                        composition: ManaAmountComposition::ConcretizeX,
                     }
                 );
                 assert_eq!(
@@ -3610,6 +3767,574 @@ mod tests {
         assert_eq!(scale_mana_cost(&colored, 0), ManaCost::zero());
     }
 
+    // ---- "pay any amount of {R}" (per-unit mana prompt) -------------------
+    //
+    // No printed card parses to the per-unit shape yet (the parser leaf lands
+    // separately), so these tests build Leyline Tyrant's resolution-time
+    // payment directly: `PayCost { {R}, scale: Some(X) }`, the encoding of
+    // "you may pay any amount of {R}. When you do, it deals that much
+    // damage to any target." The source objects carry the real card names.
+
+    fn add_pool_mana(state: &mut GameState, color: ManaType, count: usize) {
+        for _ in 0..count {
+            state.players[0].mana_pool.add(ManaUnit {
+                color,
+                source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            });
+        }
+    }
+
+    /// A land whose only ability is `{T}: Add {R}.` (Mountain).
+    fn create_red_source(
+        state: &mut GameState,
+        card_id: CardId,
+        name: &str,
+        restrictions: Vec<ManaSpendRestriction>,
+    ) -> ObjectId {
+        let source = create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Red],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions,
+                    grants: Vec::new(),
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        source
+    }
+
+    fn create_leyline_tyrant(state: &mut GameState) -> ObjectId {
+        create_object(
+            state,
+            CardId(600),
+            PlayerId(0),
+            "Leyline Tyrant".to_string(),
+            Zone::Battlefield,
+        )
+    }
+
+    fn variable_x() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }
+    }
+
+    fn red_unit() -> ManaCost {
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        }
+    }
+
+    /// `PayCost { base, scale }` paid by the controller of `source_id`.
+    fn scaled_pay(source_id: ObjectId, base: ManaCost, scale: QuantityExpr) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Mana { cost: base },
+                scale: Some(scale),
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        )
+    }
+
+    /// Leyline Tyrant's payment followed by a "that much" rider. The rider is
+    /// `Draw { EventContextAmount }` so the bound amount is observable as a
+    /// hand-size delta.
+    fn per_unit_red_pay_then_draw_that_many(source_id: ObjectId) -> ResolvedAbility {
+        let draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut pay = scaled_pay(source_id, red_unit(), variable_x());
+        pay.sub_ability = Some(Box::new(draw));
+        pay
+    }
+
+    fn fill_library(state: &mut GameState, count: u64) {
+        for n in 0..count {
+            create_object(
+                state,
+                CardId(100 + n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Library,
+            );
+        }
+    }
+
+    fn pay_amount_prompt(state: &GameState) -> (PayableResource, u32, u32) {
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice {
+                resource, min, max, ..
+            } => (resource.clone(), *min, *max),
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+    }
+
+    fn submit_pay_amount(
+        state: &mut GameState,
+        amount: u32,
+        events: &mut Vec<GameEvent>,
+    ) -> Result<
+        crate::game::engine_resolution_choices::ResolutionChoiceOutcome,
+        crate::game::engine::EngineError,
+    > {
+        let waiting_for = state.waiting_for.clone();
+        crate::game::engine_resolution_choices::handle_resolution_choice(
+            state,
+            waiting_for,
+            crate::types::actions::GameAction::SubmitPayAmount { amount },
+            events,
+        )
+    }
+
+    /// CR 107.1c + CR 118.1 + CR 603.12a: "pay any amount of {R}" offers
+    /// 0..=available red, pays `{R}` × N, and binds "that much" to N.
+    #[test]
+    fn pay_any_amount_per_unit_red_mana_prompts_and_pays_scaled_cost() {
+        use crate::game::effects::resolve_ability_chain;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_leyline_tyrant(&mut state);
+        fill_library(&mut state, 5);
+        add_pool_mana(&mut state, ManaType::Red, 3);
+
+        let pay = per_unit_red_pay_then_draw_that_many(source_id);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+
+        let (resource, min, max) = pay_amount_prompt(&state);
+        assert_eq!(
+            resource,
+            PayableResource::Mana {
+                base_cost: red_unit(),
+                composition: ManaAmountComposition::PerUnit,
+            }
+        );
+        assert_eq!(min, 0);
+        assert_eq!(max, 3);
+
+        submit_pay_amount(&mut state, 2, &mut events).unwrap();
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Red),
+            1,
+            "{{R}} paid twice, not once"
+        );
+        assert_eq!(state.last_effect_count, Some(2));
+        assert_eq!(state.players[0].hand.len(), 2, "drew that many (2)");
+    }
+
+    /// CR 107.1c + CR 118.1: `{R}` can't be paid with colorless mana, so the
+    /// per-unit `max` counts only red.
+    #[test]
+    fn pay_any_amount_per_unit_ignores_colorless_mana_in_max() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_leyline_tyrant(&mut state);
+        add_pool_mana(&mut state, ManaType::Red, 1);
+        add_pool_mana(&mut state, ManaType::Colorless, 3);
+
+        let pay = scaled_pay(source_id, red_unit(), variable_x());
+        let mut events = Vec::new();
+        resolve(&mut state, &pay, &mut events).unwrap();
+
+        let (_, _, max) = pay_amount_prompt(&state);
+        assert_eq!(max, 1);
+    }
+
+    /// CR 605.3b + CR 616.1: a red source whose mana may only be spent to
+    /// activate abilities can't fund a resolution-time payment, so it is not
+    /// counted toward `max`; the same board with an unrestricted Mountain
+    /// counts it (paired reach-guard).
+    #[test]
+    fn pay_any_amount_per_unit_max_rejects_activation_only_red_source() {
+        let mut restricted_state = GameState::new_two_player(42);
+        let source_id = create_leyline_tyrant(&mut restricted_state);
+        add_pool_mana(&mut restricted_state, ManaType::Red, 1);
+        let restricted_land = create_red_source(
+            &mut restricted_state,
+            CardId(10),
+            "Mountain",
+            vec![ManaSpendRestriction::ActivateOnly],
+        );
+        let pay = scaled_pay(source_id, red_unit(), variable_x());
+        let mut events = Vec::new();
+        resolve(&mut restricted_state, &pay, &mut events).unwrap();
+        let (_, _, max) = pay_amount_prompt(&restricted_state);
+        assert_eq!(max, 1, "the activation-only red source must not count");
+        assert!(!restricted_state.objects[&restricted_land].tapped);
+
+        let mut open_state = GameState::new_two_player(42);
+        let source_id = create_leyline_tyrant(&mut open_state);
+        add_pool_mana(&mut open_state, ManaType::Red, 1);
+        create_red_source(&mut open_state, CardId(10), "Mountain", Vec::new());
+        let pay = scaled_pay(source_id, red_unit(), variable_x());
+        resolve(&mut open_state, &pay, &mut events).unwrap();
+        let (_, _, max) = pay_amount_prompt(&open_state);
+        assert_eq!(max, 2, "an unrestricted Mountain counts toward max");
+    }
+
+    /// CR 605.3a: an untapped Mountain ("{T}: Add {R}.") counts toward `max`
+    /// and is tapped when the chosen amount needs it.
+    #[test]
+    fn pay_any_amount_per_unit_counts_and_taps_auto_tappable_red_source() {
+        use crate::game::effects::resolve_ability_chain;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_leyline_tyrant(&mut state);
+        fill_library(&mut state, 5);
+        add_pool_mana(&mut state, ManaType::Red, 1);
+        let mountain = create_red_source(&mut state, CardId(10), "Mountain", Vec::new());
+
+        let pay = per_unit_red_pay_then_draw_that_many(source_id);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        let (_, _, max) = pay_amount_prompt(&state);
+        assert_eq!(max, 2);
+
+        submit_pay_amount(&mut state, 2, &mut events).unwrap();
+        assert!(state.objects[&mountain].tapped, "Mountain tapped for {{R}}");
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
+        assert_eq!(state.players[0].hand.len(), 2);
+    }
+
+    /// CR 107.1c + CR 118.5: zero is always a legal amount — `{R}` × 0 is
+    /// `{0}`, paid by acknowledgment — so the prompt opens even with no mana,
+    /// and choosing 0 binds "that much" to 0 (CR 120.8: 0 damage is not dealt).
+    #[test]
+    fn pay_any_amount_per_unit_zero_is_always_offered() {
+        use crate::game::effects::resolve_ability_chain;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_leyline_tyrant(&mut state);
+        fill_library(&mut state, 5);
+
+        let pay = per_unit_red_pay_then_draw_that_many(source_id);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        assert!(
+            !state.cost_payment_failed_flag,
+            "an empty pool must not fail the payment"
+        );
+        let (_, min, max) = pay_amount_prompt(&state);
+        assert_eq!((min, max), (0, 0));
+
+        submit_pay_amount(&mut state, 0, &mut events).unwrap();
+        assert_eq!(state.last_effect_count, Some(0));
+        assert!(state.players[0].hand.is_empty(), "drew 0 cards");
+    }
+
+    /// The shared range guard rejects an amount above `max` before anything
+    /// is paid; the same board accepts `max` itself (paired positive).
+    #[test]
+    fn pay_any_amount_per_unit_submit_above_max_is_rejected_without_payment() {
+        use crate::game::effects::resolve_ability_chain;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_leyline_tyrant(&mut state);
+        fill_library(&mut state, 5);
+        add_pool_mana(&mut state, ManaType::Red, 3);
+        let pay = per_unit_red_pay_then_draw_that_many(source_id);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        let (_, _, max) = pay_amount_prompt(&state);
+        assert_eq!(max, 3);
+        let last_effect_count_before = state.last_effect_count;
+
+        assert!(submit_pay_amount(&mut state, 4, &mut events).is_err());
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 3);
+        assert_eq!(state.last_effect_count, last_effect_count_before);
+
+        let mut fresh = GameState::new_two_player(42);
+        let source_id = create_leyline_tyrant(&mut fresh);
+        fill_library(&mut fresh, 5);
+        add_pool_mana(&mut fresh, ManaType::Red, 3);
+        let pay = per_unit_red_pay_then_draw_that_many(source_id);
+        resolve_ability_chain(&mut fresh, &pay, &mut events, 0).unwrap();
+        submit_pay_amount(&mut fresh, 3, &mut events).unwrap();
+        assert_eq!(fresh.players[0].mana_pool.count_color(ManaType::Red), 0);
+        assert_eq!(fresh.players[0].hand.len(), 3);
+    }
+
+    /// CR 118.1: Thelon's Curse ("pay {U} for each creature chosen this way")
+    /// scales by an already-chosen tracked-set size, not by a prompt — no
+    /// `PayAmountChoice`, exactly two `{U}` paid.
+    #[test]
+    fn per_object_tracked_set_size_payment_mints_no_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(601),
+            PlayerId(0),
+            "Thelon's Curse".to_string(),
+            Zone::Battlefield,
+        );
+        let a = create_object(
+            &mut state,
+            CardId(602),
+            PlayerId(0),
+            "Creature A".to_string(),
+            Zone::Battlefield,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(603),
+            PlayerId(0),
+            "Creature B".to_string(),
+            Zone::Battlefield,
+        );
+        crate::game::effects::publish_tracked_set(&mut state, vec![a, b]);
+        add_pool_mana(&mut state, ManaType::Blue, 3);
+        let blue_unit = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        let pay = scaled_pay(
+            source_id,
+            blue_unit,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &pay, &mut events).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::PayAmountChoice { .. }),
+            "a TrackedSetSize scale must not mint a prompt"
+        );
+        assert!(!state.cost_payment_failed_flag);
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Blue),
+            1,
+            "exactly two {{U}} paid"
+        );
+    }
+
+    /// The per-unit prompt is gated on the scale carrying X, not on the
+    /// scale being present: the same board mints the prompt for `X` and pays
+    /// directly for `TrackedSetSize`.
+    #[test]
+    fn per_unit_scale_prompt_is_gated_on_x_not_on_scale() {
+        let board = |scale: QuantityExpr| {
+            let mut state = GameState::new_two_player(42);
+            let source_id = create_leyline_tyrant(&mut state);
+            let a = create_object(
+                &mut state,
+                CardId(602),
+                PlayerId(0),
+                "Creature A".to_string(),
+                Zone::Battlefield,
+            );
+            let b = create_object(
+                &mut state,
+                CardId(603),
+                PlayerId(0),
+                "Creature B".to_string(),
+                Zone::Battlefield,
+            );
+            crate::game::effects::publish_tracked_set(&mut state, vec![a, b]);
+            add_pool_mana(&mut state, ManaType::Red, 3);
+            let pay = scaled_pay(source_id, red_unit(), scale);
+            let mut events = Vec::new();
+            resolve(&mut state, &pay, &mut events).unwrap();
+            state
+        };
+
+        let x_state = board(variable_x());
+        let (resource, _, max) = pay_amount_prompt(&x_state);
+        assert_eq!(
+            resource,
+            PayableResource::Mana {
+                base_cost: red_unit(),
+                composition: ManaAmountComposition::PerUnit,
+            }
+        );
+        assert_eq!(max, 3);
+
+        let tracked_state = board(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        });
+        assert!(!matches!(
+            tracked_state.waiting_for,
+            WaitingFor::PayAmountChoice { .. }
+        ));
+        assert_eq!(
+            tracked_state.players[0]
+                .mana_pool
+                .count_color(ManaType::Red),
+            1
+        );
+    }
+
+    /// CR 107.3a + CR 107.3f: Elenda and Azor's `{X}{W}{U}{B}` still opens the
+    /// X prompt with `ConcretizeX` and still demands the colored pips on submit.
+    #[test]
+    fn mana_x_path_still_concretizes_composition() {
+        use crate::game::effects::resolve_ability_chain;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Elenda and Azor".to_string(),
+            Zone::Battlefield,
+        );
+        add_pool_mana(&mut state, ManaType::White, 1);
+        add_pool_mana(&mut state, ManaType::Blue, 1);
+        add_pool_mana(&mut state, ManaType::Black, 1);
+        add_pool_mana(&mut state, ManaType::Colorless, 2);
+        let base_cost = ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::X,
+                ManaCostShard::White,
+                ManaCostShard::Blue,
+                ManaCostShard::Black,
+            ],
+            generic: 0,
+        };
+        let pay = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: base_cost.clone(),
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        let (resource, _, max) = pay_amount_prompt(&state);
+        assert_eq!(
+            resource,
+            PayableResource::Mana {
+                base_cost,
+                composition: ManaAmountComposition::ConcretizeX,
+            }
+        );
+        assert_eq!(max, 2);
+
+        submit_pay_amount(&mut state, 2, &mut events).unwrap();
+        assert!(
+            state.players[0].mana_pool.is_empty(),
+            "{{2}}{{W}}{{U}}{{B}} paid in full, pool: {:?}",
+            state.players[0].mana_pool
+        );
+    }
+
+    /// CR 107.3i: Well of Lost Dreams caps its X by the life gained through a
+    /// where-X clause; "pay any amount of {R}" has no such clause, so a
+    /// trigger event amount must not cap the per-unit `max`.
+    #[test]
+    fn pay_any_amount_per_unit_max_is_not_capped_by_trigger_event_amount() {
+        let max_with_event = |event: Option<GameEvent>| {
+            let mut state = GameState::new_two_player(42);
+            let source_id = create_leyline_tyrant(&mut state);
+            add_pool_mana(&mut state, ManaType::Red, 3);
+            state.current_trigger_event = event;
+            let pay = scaled_pay(source_id, red_unit(), variable_x());
+            let mut events = Vec::new();
+            resolve(&mut state, &pay, &mut events).unwrap();
+            pay_amount_prompt(&state).2
+        };
+
+        assert_eq!(max_with_event(None), 3);
+        assert_eq!(
+            max_with_event(Some(GameEvent::LifeChanged {
+                player_id: PlayerId(0),
+                amount: 1,
+                new_total: crate::types::events::LifeTotalReading::default(),
+            })),
+            3,
+            "the trigger event's amount must not cap a per-unit payment"
+        );
+    }
+
+    /// CR 107.3f + CR 118.12: both mana compositions announce the amount
+    /// paid to the parked rider; Counters/Speed do not.
+    #[test]
+    fn paused_payment_x_announcement_classifies_both_mana_compositions_as_paid_amount() {
+        use crate::game::engine_resolution_choices::paused_payment_x_announcement;
+        use crate::types::game_state::ContinuationXAnnouncement;
+
+        let paying = scaled_pay(ObjectId(1), red_unit(), variable_x());
+        let prompt = |resource: PayableResource| WaitingFor::PayAmountChoice {
+            player: PlayerId(0),
+            resource,
+            min: 0,
+            max: 3,
+            accumulated: 0,
+            source_id: ObjectId(1),
+            pending_mana_ability: None,
+        };
+
+        // Reach-guard: the classifier is entered for this paying ability.
+        assert_eq!(
+            paused_payment_x_announcement(&paying, &prompt(PayableResource::Energy)),
+            Some(ContinuationXAnnouncement::PaidAmount)
+        );
+        for composition in [
+            ManaAmountComposition::ConcretizeX,
+            ManaAmountComposition::PerUnit,
+        ] {
+            assert_eq!(
+                paused_payment_x_announcement(
+                    &paying,
+                    &prompt(PayableResource::Mana {
+                        base_cost: red_unit(),
+                        composition,
+                    })
+                ),
+                Some(ContinuationXAnnouncement::PaidAmount),
+                "{composition:?}"
+            );
+        }
+        for resource in [PayableResource::Counters, PayableResource::Speed] {
+            assert_eq!(
+                paused_payment_x_announcement(&paying, &prompt(resource.clone())),
+                None,
+                "{resource:?}"
+            );
+        }
+    }
+
     /// CR 119.4 + CR 118.3: Install a CantLoseLife permanent for `owner`, used
     /// to verify the "pay any amount of life" prompt clamps `max` to 0 (CR 119.8).
     fn add_cant_lose_life_permanent(state: &mut GameState, owner: PlayerId) {
@@ -3982,5 +4707,954 @@ mod tests {
             0,
             "paying 0 life draws 0 cards"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 118.12: a prepended `PayCost` remainder pays through the authority's
+    // latched entry, and the latch belongs to its head alone.
+    // -----------------------------------------------------------------------
+
+    mod latched_remainder {
+        use super::*;
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::types::ability::{
+            AbilityCondition, Comparator, ForwardedResultContext, PlayerFilter, RepeatContinuation,
+            SubAbilityLink,
+        };
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::PendingContinuation;
+        use crate::types::phase::Phase;
+
+        /// Maralen of the Mornsong, verbatim Oracle text: a CR 121.3 can't-draw effect.
+        const MARALEN_ORACLE: &str = "Players can't draw cards.\n\
+            At the beginning of each player's draw step, that player loses 3 life, searches \
+            their library for a card, puts it into their hand, then shuffles.";
+
+        /// Spirit of the Labyrinth, verbatim Oracle text: a CR 121.2b one-card-per-turn limit.
+        const SPIRIT_OF_THE_LABYRINTH_ORACLE: &str =
+            "Each player can't draw more than one card each turn.";
+
+        /// Stinkweed Imp, verbatim Oracle text: Dredge 5 makes each of P0's draws a replacement choice.
+        const STINKWEED_IMP_ORACLE: &str = "Flying\n\
+            Whenever this creature deals combat damage to a creature, destroy that creature.\n\
+            Dredge 5 (If you would draw a card, you may mill five cards instead. If you do, \
+            return this card from your graveyard to your hand.)";
+
+        enum Restriction {
+            Maralen,
+            Spirit,
+        }
+
+        fn draw_cost(count: i32) -> AbilityCost {
+            AbilityCost::EffectCost {
+                effect: Box::new(Effect::Draw {
+                    count: QuantityExpr::Fixed { value: count },
+                    target: TargetFilter::Controller,
+                }),
+            }
+        }
+
+        fn pay_cost(cost: AbilityCost) -> Effect {
+            Effect::PayCost {
+                cost,
+                scale: None,
+                payer: TargetFilter::Controller,
+            }
+        }
+
+        fn gain_life(amount: i32) -> Effect {
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: amount },
+                player: TargetFilter::Controller,
+            }
+        }
+
+        fn two_draw_legs() -> AbilityCost {
+            AbilityCost::Composite {
+                costs: vec![draw_cost(1), draw_cost(1)],
+            }
+        }
+
+        /// "P0 has at least `count` opponents": true on these two-player boards for 1, false for 5.
+        fn at_least_opponents(count: i32) -> AbilityCondition {
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::Opponent,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: count },
+            }
+        }
+
+        /// PreCombatMain, P0's library staged, the restriction under P1, and (when `dredge`) Stinkweed Imp in
+        /// P0's graveyard. Layers are evaluated after `build()` so every static is live.
+        fn board(restriction: Restriction, dredge: bool) -> (GameRunner, ObjectId) {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_library_top(P0, &["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"]);
+            let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+            if dredge {
+                scenario
+                    .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+                    .from_oracle_text(STINKWEED_IMP_ORACLE);
+            }
+            match restriction {
+                Restriction::Maralen => {
+                    scenario.add_creature_from_oracle(
+                        P1,
+                        "Maralen of the Mornsong",
+                        2,
+                        3,
+                        MARALEN_ORACLE,
+                    );
+                }
+                Restriction::Spirit => {
+                    scenario.add_creature_from_oracle(
+                        P1,
+                        "Spirit of the Labyrinth",
+                        3,
+                        1,
+                        SPIRIT_OF_THE_LABYRINTH_ORACLE,
+                    );
+                }
+            }
+            let mut runner = scenario.build();
+            crate::game::layers::evaluate_layers(runner.state_mut());
+            (runner, source)
+        }
+
+        fn hand_size(state: &GameState) -> usize {
+            state.players[P0.0 as usize].hand.len()
+        }
+
+        fn is_dredge_prompt_for_p0(state: &GameState) -> bool {
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == P0)
+        }
+
+        /// CR 614.17c + CR 702.52a: under Maralen each draw can't happen, so Stinkweed Imp's Dredge (a
+        /// continuous replacement, never a self-replacement) is not offered for it: no prompt, nothing milled,
+        /// and the Imp stays in P0's graveyard. A latched draw leg still reaches the Draw arm and is clamped.
+        fn assert_dredge_not_offered(state: &GameState) {
+            assert!(
+                !is_dredge_prompt_for_p0(state),
+                "Dredge can't replace a draw that can't happen"
+            );
+            let graveyard = &state.players[P0.0 as usize].graveyard;
+            assert_eq!(graveyard.len(), 1, "nothing was milled");
+            assert_eq!(
+                state.objects[&graveyard[0]].name, "Stinkweed Imp",
+                "the Imp was not returned"
+            );
+        }
+
+        /// CR 118.12 + CR 118.11: the remainder a paused PayCost
+        /// queues pays latched. Under Maralen the draw still reaches the Draw arm, is clamped (no Dredge:
+        /// CR 614.17c), and the remainder settles paid.
+        ///
+        /// Revert probe: queueing the remainder `FreshChoice` refuses it before the Draw arm (flag true).
+        #[test]
+        fn a_prepended_pay_cost_remainder_is_latched() {
+            let (mut runner, source) = board(Restriction::Maralen, true);
+            let root = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            crate::game::effects::prepend_remaining_pay_cost_continuation(
+                state,
+                &root,
+                P0,
+                draw_cost(1),
+            );
+            // Pre-seeded, so a final `false` is a positive clear by `pay::resolve`.
+            state.cost_payment_failed_flag = true;
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert_dredge_not_offered(state);
+            assert!(
+                !state.cost_payment_failed_flag,
+                "the latched remainder is paid"
+            );
+            assert_eq!(
+                hand_size(state),
+                hand_before,
+                "the draw is clamped by Maralen"
+            );
+            assert!(state.active_ability_continuation().is_none());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+
+            // Reach guard: the same board refuses a fresh choice before the Draw arm.
+            let (mut runner, source) = board(Restriction::Maralen, true);
+            let fresh = ResolvedAbility::new(pay_cost(draw_cost(1)), vec![], source, P0);
+            let state = runner.state_mut();
+            crate::game::effects::resolve_ability_chain(state, &fresh, &mut Vec::new(), 0).unwrap();
+            assert!(
+                state.cost_payment_failed_flag,
+                "the fresh PayCost is refused"
+            );
+            assert!(
+                !is_dredge_prompt_for_p0(state),
+                "the fresh gate refuses before the Draw arm"
+            );
+        }
+
+        /// CR 614.17c control + CR 702.52a: where the latched draw CAN happen (Spirit of the Labyrinth, P0's
+        /// first draw this turn), Stinkweed Imp's Dredge is a legal replacement of it. Accepting mills five
+        /// and returns the Imp, and the remainder settles paid.
+        ///
+        /// Revert probe: a can't-happen filter that ignored the per-turn allowance (refusing every draw
+        /// under a limit) withholds this prompt.
+        #[test]
+        fn a_latched_draw_that_can_happen_offers_a_legal_dredge() {
+            let (mut runner, source) = board(Restriction::Spirit, true);
+            let root = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+            let state = runner.state_mut();
+            let library_before = state.players[P0.0 as usize].library.len();
+            crate::game::effects::prepend_remaining_pay_cost_continuation(
+                state,
+                &root,
+                P0,
+                draw_cost(1),
+            );
+            state.cost_payment_failed_flag = true;
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert!(
+                is_dredge_prompt_for_p0(state),
+                "the latched draw offers Dredge"
+            );
+            crate::game::engine::apply(state, P0, GameAction::ChooseReplacement { index: 0 })
+                .expect("accepting Dredge is legal");
+            let p0 = &state.players[P0.0 as usize];
+            assert!(
+                p0.hand
+                    .iter()
+                    .any(|id| state.objects[id].name == "Stinkweed Imp"),
+                "Dredge returned the Imp"
+            );
+            assert_eq!(p0.library.len(), library_before - 5, "Dredge milled five");
+            assert!(!state.cost_payment_failed_flag, "the latched draw is paid");
+            assert!(state.active_ability_continuation().is_none());
+        }
+
+        /// CR 118.12 + CR 121.2b (multi-authority): the latch binds the queued head only.
+        /// The head draws P0's one card; the fresh `PayCost` in its tail is then a separate choice, which
+        /// Spirit of the Labyrinth refuses. Scope: on this board the head's fresh verdict is also false, so
+        /// this row proves the tail is not latched; `a_prepended_pay_cost_remainder_is_latched` owns
+        /// "the head pays latched".
+        ///
+        /// Revert probe: reading the transient without taking it lets the tail pay latched (flag false).
+        #[test]
+        fn a_latched_head_does_not_latch_a_fresh_pay_cost_in_its_tail() {
+            let (mut runner, source) = board(Restriction::Spirit, false);
+            let mut root = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+            root.sub_ability = Some(Box::new(ResolvedAbility::new(
+                pay_cost(draw_cost(1)),
+                vec![],
+                source,
+                P0,
+            )));
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            crate::game::effects::prepend_remaining_pay_cost_continuation(
+                state,
+                &root,
+                P0,
+                draw_cost(1),
+            );
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert_eq!(
+                hand_size(state),
+                hand_before + 1,
+                "the latched head reached the Draw arm and drew"
+            );
+            assert!(
+                state.cost_payment_failed_flag,
+                "the tail's fresh PayCost is refused: P0 already drew this turn (CR 121.2b)"
+            );
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert!(state.active_ability_continuation().is_none());
+        }
+
+        /// CR 118.12 + CR 608.2c: the queued head is unconditional. The root's condition held when
+        /// payment began, so a condition that no longer holds does not skip the latched head, and the
+        /// independent tail stays a fresh choice.
+        ///
+        /// Revert probe: keeping the root's condition on the remainder skips the head. The skipped head
+        /// takes its latch with it, so the tail is still a fresh choice, but it is now P0's first draw this
+        /// turn and Spirit admits it (flag false).
+        #[test]
+        fn an_unconditional_latched_head_runs_even_if_its_root_condition_no_longer_holds() {
+            let (mut runner, source) = board(Restriction::Spirit, false);
+            let mut root = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+            root.condition = Some(at_least_opponents(5));
+            let mut tail = ResolvedAbility::new(pay_cost(draw_cost(1)), vec![], source, P0);
+            // An unconditional next instruction, so a skipped head would not also skip it.
+            tail.sub_link = SubAbilityLink::SequentialSibling;
+            root.sub_ability = Some(Box::new(tail));
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            crate::game::effects::prepend_remaining_pay_cost_continuation(
+                state,
+                &root,
+                P0,
+                draw_cost(1),
+            );
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert_eq!(
+                hand_size(state),
+                hand_before + 1,
+                "the head paid latched and drew"
+            );
+            assert!(
+                state.cost_payment_failed_flag,
+                "the independent tail is a fresh choice and is refused"
+            );
+        }
+
+        /// CR 118.12 + CR 608.2c: `prepend_remaining_pay_cost_before_parked_rider` queues its suffix
+        /// latched ahead of an already-parked fresh rider. The rider record is fresh, so the suffix is spliced
+        /// onto it, and the rider still runs exactly once.
+        ///
+        /// Revert probe: queueing the suffix `FreshChoice` refuses it before the Draw arm.
+        #[test]
+        fn a_remainder_before_a_parked_rider_is_latched_and_the_rider_runs_once() {
+            let (mut runner, source) = board(Restriction::Maralen, true);
+            let ability = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+            let life_before = runner.life(P0);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            let rider = ResolvedAbility::new(gain_life(3), vec![], source, P0);
+            let parked = PendingContinuation::new(Box::new(rider), state);
+            state.park_ability_continuation(parked);
+            crate::game::effects::prepend_remaining_pay_cost_before_parked_rider(
+                state,
+                &ability,
+                P0,
+                draw_cost(1),
+            );
+
+            let records: Vec<&PendingContinuation> =
+                state.resolution_stack.ability_continuations().collect();
+            assert_eq!(
+                records.len(),
+                1,
+                "the suffix is spliced onto the fresh rider record"
+            );
+            assert_eq!(
+                records[0].head_payment_origin,
+                ResolutionPaymentOrigin::LatchedSuffix
+            );
+            assert_eq!(records[0].chain.effect, pay_cost(draw_cost(1)));
+            assert_eq!(
+                records[0]
+                    .chain
+                    .sub_ability
+                    .as_ref()
+                    .map(|rider| &rider.effect),
+                Some(&gain_life(3))
+            );
+
+            state.cost_payment_failed_flag = true;
+            let mut events = Vec::new();
+            crate::game::effects::drain_pending_continuation(state, &mut events);
+            assert_dredge_not_offered(state);
+            assert!(
+                !state.cost_payment_failed_flag,
+                "the latched suffix is paid"
+            );
+            assert_eq!(
+                hand_size(state),
+                hand_before,
+                "the draw is clamped by Maralen"
+            );
+            assert!(state.active_ability_continuation().is_none());
+            assert_eq!(
+                runner.life(P0),
+                life_before + 3,
+                "the parked rider runs exactly once"
+            );
+        }
+
+        /// CR 118.12 + CR 608.2c: a latched head survives the forwarded-result prune. The
+        /// remainder inherits the root's empty forwarded result, and its tail depends on it, so the drain
+        /// prunes the tail; the head itself does not depend on it, so the latch travels with it.
+        ///
+        /// Revert probe: not installing the latch in the prune arm gates the head fresh (no prompt, flag
+        /// true).
+        #[test]
+        fn a_latched_head_survives_the_forwarded_result_prune() {
+            let (mut runner, source) = board(Restriction::Maralen, true);
+            let mut root = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+            root.context.forwarded_result_context = Some(Box::new(ForwardedResultContext {
+                targets: vec![],
+                object_incarnations: vec![],
+            }));
+            root.sub_ability = Some(Box::new(ResolvedAbility::new(
+                Effect::Destroy {
+                    target: TargetFilter::ParentTarget,
+                    cant_regenerate: false,
+                },
+                vec![],
+                source,
+                P0,
+            )));
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            crate::game::effects::prepend_remaining_pay_cost_continuation(
+                state,
+                &root,
+                P0,
+                draw_cost(1),
+            );
+
+            // Reach guard: the drain takes the prune arm, and the head survives the prune.
+            let chain = state
+                .active_ability_continuation()
+                .expect("the remainder is queued")
+                .chain
+                .clone();
+            assert!(crate::game::effects::bound_result_is_empty(&chain));
+            assert!(crate::game::effects::ability_chain_depends_on_missing_forward_result(&chain));
+            assert!(
+                !crate::game::effects::effect_chain_depends_on_missing_forward_result(
+                    &chain.effect
+                )
+            );
+
+            state.cost_payment_failed_flag = true;
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert_dredge_not_offered(state);
+            assert!(!state.cost_payment_failed_flag, "the latched head is paid");
+            assert_eq!(
+                hand_size(state),
+                hand_before,
+                "the draw is clamped by Maralen"
+            );
+            assert!(state.active_ability_continuation().is_none());
+        }
+
+        /// CR 118.12 + CR 608.2c: a later instruction prepended while a latched record is the
+        /// active continuation is parked as its own record above it, never spliced ahead of the latched head.
+        /// It still resolves first; the latched record drains right after it, still latched.
+        ///
+        /// Revert probe: splicing onto the latched record hands its latch to the new head, so the PayCost
+        /// tail is gated fresh (flag true).
+        #[test]
+        fn a_later_prepend_parks_above_a_latched_record() {
+            let (mut runner, source) = board(Restriction::Maralen, true);
+            let ability = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+            let life_before = runner.life(P0);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            crate::game::effects::prepend_remaining_pay_cost_continuation(
+                state,
+                &ability,
+                P0,
+                draw_cost(1),
+            );
+            crate::game::effects::prepend_to_pending_continuation(
+                state,
+                ResolvedAbility::new(gain_life(10), vec![], source, P0),
+            );
+
+            let records: Vec<&PendingContinuation> =
+                state.resolution_stack.ability_continuations().collect();
+            assert_eq!(records.len(), 2, "the later head is its own record");
+            let (latched, later) = (records[0], records[1]);
+            assert_eq!(later.chain.effect, gain_life(10));
+            assert_eq!(
+                later.head_payment_origin,
+                ResolutionPaymentOrigin::FreshChoice
+            );
+            assert_eq!(latched.chain.effect, pay_cost(draw_cost(1)));
+            assert_eq!(
+                latched.head_payment_origin,
+                ResolutionPaymentOrigin::LatchedSuffix
+            );
+
+            state.cost_payment_failed_flag = true;
+            let mut events = Vec::new();
+            crate::game::effects::drain_pending_continuation(state, &mut events);
+            let first_life_change = events
+                .iter()
+                .find(|event| matches!(event, GameEvent::LifeChanged { .. }));
+            assert!(
+                matches!(
+                    first_life_change,
+                    Some(GameEvent::LifeChanged { amount: 10, .. })
+                ),
+                "the later head resolves first, got {first_life_change:?}"
+            );
+            assert_dredge_not_offered(state);
+            assert!(!state.cost_payment_failed_flag, "the latched head is paid");
+            assert_eq!(
+                hand_size(state),
+                hand_before,
+                "the draw is clamped by Maralen"
+            );
+            assert_eq!(runner.life(P0), life_before + 10);
+            assert!(runner.state().active_ability_continuation().is_none());
+        }
+
+        /// A latched remainder whose root carries an "instead" override that holds on this board: the
+        /// override resolves `override_effect` in place of the head, then its own `override_tail`.
+        fn queue_remainder_replaced_by_an_override(
+            state: &mut GameState,
+            source: ObjectId,
+            override_effect: Effect,
+            override_tail: Effect,
+        ) {
+            let mut root = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+            let mut override_clause = ResolvedAbility::new(override_effect, vec![], source, P0);
+            override_clause.condition = Some(AbilityCondition::ConditionInstead {
+                inner: Box::new(at_least_opponents(1)),
+            });
+            override_clause.sub_ability = Some(Box::new(ResolvedAbility::new(
+                override_tail,
+                vec![],
+                source,
+                P0,
+            )));
+            root.sub_ability = Some(Box::new(override_clause));
+            crate::game::effects::prepend_remaining_pay_cost_continuation(
+                state,
+                &root,
+                P0,
+                draw_cost(1),
+            );
+        }
+
+        /// CR 118.12 + CR 614.17b (skipped head): the latch binds to the queued head node, not to
+        /// the first `PayCost` the walker reaches. Here the walker's live "instead" swap replaces the head,
+        /// so the head pays nothing, and the `PayCost` in the override's tail is a separate, fresh choice
+        /// that Maralen refuses. Scope: the root's own not-swap verdict is not carried onto the remainder
+        /// (a recorded gap); this row pins only that a head the walker replaces keeps its latch from the
+        /// tail.
+        ///
+        /// Revert probe: reading the latch at chain-body entry without taking it leaves it for the tail,
+        /// which then pays latched: the draw is clamped and the flag stays false.
+        #[test]
+        fn a_replaced_latched_head_does_not_latch_the_pay_cost_in_its_tail() {
+            // Reach guard: the walker swaps the head and reaches the tail. P0 has not drawn this turn, so
+            // Spirit admits the tail's fresh choice.
+            let (mut runner, source) = board(Restriction::Spirit, false);
+            let life_before = runner.life(P0);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            queue_remainder_replaced_by_an_override(
+                state,
+                source,
+                gain_life(3),
+                pay_cost(draw_cost(1)),
+            );
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert_eq!(hand_size(state), hand_before + 1, "the tail drew");
+            assert!(!state.cost_payment_failed_flag);
+            assert_eq!(
+                runner.life(P0),
+                life_before + 3,
+                "the override replaced the head"
+            );
+
+            let (mut runner, source) = board(Restriction::Maralen, false);
+            let life_before = runner.life(P0);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            queue_remainder_replaced_by_an_override(
+                state,
+                source,
+                gain_life(3),
+                pay_cost(draw_cost(1)),
+            );
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert!(
+                state.cost_payment_failed_flag,
+                "the tail's PayCost is a fresh choice, and Maralen refuses it"
+            );
+            assert_eq!(hand_size(state), hand_before);
+            assert!(state.active_ability_continuation().is_none());
+            assert_eq!(
+                runner.life(P0),
+                life_before + 3,
+                "the override replaced the head"
+            );
+        }
+
+        /// CR 118.12 + CR 614.17b (paying override; helper-contract fixture mirroring
+        /// `a_replaced_latched_head_does_not_latch_the_pay_cost_in_its_tail`): when the "instead" override
+        /// that replaces a latched head pays a cost itself, that payment takes the head's place in the node
+        /// but not its latch. Nobody chose to pay it, so it is a fresh choice that Maralen refuses.
+        ///
+        /// Revert probe: dropping `!head_was_swapped` from the effect loop's hand-back hands the latch to
+        /// the swapped-in `PayCost`, which then pays latched: the draw is clamped and the flag stays false.
+        #[test]
+        fn a_paying_override_of_a_latched_head_does_not_inherit_its_latch() {
+            // Reach guard: the walker swaps the head for the paying override and runs its tail. P0 has not
+            // drawn this turn, so Spirit admits the override's fresh choice.
+            let (mut runner, source) = board(Restriction::Spirit, false);
+            let life_before = runner.life(P0);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            queue_remainder_replaced_by_an_override(
+                state,
+                source,
+                pay_cost(draw_cost(1)),
+                gain_life(3),
+            );
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert_eq!(hand_size(state), hand_before + 1, "the override drew");
+            assert!(!state.cost_payment_failed_flag);
+            assert_eq!(runner.life(P0), life_before + 3, "the override's tail ran");
+
+            let (mut runner, source) = board(Restriction::Maralen, false);
+            let life_before = runner.life(P0);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            queue_remainder_replaced_by_an_override(
+                state,
+                source,
+                pay_cost(draw_cost(1)),
+                gain_life(3),
+            );
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert!(
+                state.cost_payment_failed_flag,
+                "the override's PayCost is a fresh choice, and Maralen refuses it"
+            );
+            assert_eq!(hand_size(state), hand_before);
+            assert!(state.active_ability_continuation().is_none());
+            assert_eq!(
+                runner.life(P0),
+                life_before + 3,
+                "the override replaced the head and its tail ran"
+            );
+        }
+
+        /// CR 118.12 + CR 608.2c (root-only gates): the remainder is one already-admitted
+        /// instruction. The root's repeat count and repeat-until loop belong to their own parked frames, so
+        /// the drained remainder resolves once: its latched draw is P0's only draw, and nothing re-runs it.
+        ///
+        /// Revert probe: keeping either repeat on the remainder re-runs it; each repeat is a fresh choice
+        /// Spirit refuses (flag true).
+        #[test]
+        fn a_remainder_does_not_inherit_its_roots_repeat() {
+            type AddRepeat = fn(&mut ResolvedAbility);
+            let repeats: [(&str, AddRepeat); 2] = [
+                ("repeat_for", |root| {
+                    root.repeat_for = Some(QuantityExpr::Fixed { value: 3 });
+                }),
+                ("repeat_until", |root| {
+                    root.repeat_until = Some(RepeatContinuation::WhileCondition {
+                        condition: Box::new(at_least_opponents(1)),
+                        max_iterations: Some(2),
+                    });
+                }),
+            ];
+            for (label, add_repeat) in repeats {
+                let (mut runner, source) = board(Restriction::Spirit, false);
+                let mut root = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+                add_repeat(&mut root);
+                let state = runner.state_mut();
+                let hand_before = hand_size(state);
+                crate::game::effects::prepend_remaining_pay_cost_continuation(
+                    state,
+                    &root,
+                    P0,
+                    draw_cost(1),
+                );
+                crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+                assert_eq!(
+                    hand_size(state),
+                    hand_before + 1,
+                    "{label}: the head drew once"
+                );
+                assert!(
+                    !state.cost_payment_failed_flag,
+                    "{label}: the remainder was not re-run as a fresh choice"
+                );
+                assert!(state.active_ability_continuation().is_none());
+            }
+        }
+
+        /// CR 118.12 + CR 608.2c (root-only gates): the root's player fan-out is not inherited. The
+        /// remainder is the head node itself, so it pays latched and reaches the Draw arm under Maralen.
+        ///
+        /// Revert probe: keeping `player_scope` fans the remainder out into per-player legs, each a node of
+        /// its own; the head's latch stays with the head, so the leg is gated fresh (flag true).
+        #[test]
+        fn a_remainder_does_not_inherit_its_roots_player_fan_out() {
+            let (mut runner, source) = board(Restriction::Maralen, true);
+            let mut root = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+            root.player_scope = Some(PlayerFilter::Controller);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            crate::game::effects::prepend_remaining_pay_cost_continuation(
+                state,
+                &root,
+                P0,
+                draw_cost(1),
+            );
+            state.cost_payment_failed_flag = true;
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert_dredge_not_offered(state);
+            assert!(!state.cost_payment_failed_flag, "the latched head is paid");
+            assert_eq!(
+                hand_size(state),
+                hand_before,
+                "the draw is clamped by Maralen"
+            );
+            assert!(state.active_ability_continuation().is_none());
+        }
+    }
+}
+
+/// Tests for the resolution-time per-unit payment ceiling
+/// (`casting::effect_payment_ceiling`) against printed mana producers.
+#[cfg(test)]
+mod ceiling_tests {
+    use super::*;
+    use crate::game::game_object::AttachTarget;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+    use crate::types::ability::ChosenAttribute;
+    use crate::types::mana::{ManaColor, ManaCostShard};
+    use crate::types::phase::Phase;
+    use crate::types::zones::Zone;
+
+    const VIRTUE_OF_STRENGTH: &str =
+        "If you tap a basic land for mana, it produces three times as much of that mana instead.";
+
+    fn red_unit() -> ManaCost {
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        }
+    }
+
+    /// Builds a P0 board of `cards` (printed cards from the shared fixture;
+    /// "Mountain" / "Island" are the scenario basics; "Virtue of Strength" is
+    /// absent from the fixture and is built from its verbatim Oracle text).
+    /// Caged Sun's chosen colour is Red and Fertile Ground is attached to the
+    /// first Mountain. Returns the state and a source object for the payment.
+    fn board(cards: &[&str], sun_color: ManaColor) -> (GameState, ObjectId) {
+        let db = crate::test_support::shared_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut first_mountain = None;
+        let mut sun = None;
+        let mut aura = None;
+        for &name in cards {
+            match name {
+                "Mountain" => {
+                    let id = scenario.add_basic_land(P0, ManaColor::Red);
+                    first_mountain.get_or_insert(id);
+                }
+                "Island" => {
+                    scenario.add_basic_land(P0, ManaColor::Blue);
+                }
+                "Virtue of Strength" => {
+                    scenario.add_enchantment_from_oracle(P0, name, VIRTUE_OF_STRENGTH);
+                }
+                _ => {
+                    let id = scenario.add_real_card(P0, name, Zone::Battlefield, db);
+                    match name {
+                        "Caged Sun" => sun = Some(id),
+                        "Fertile Ground" => aura = Some(id),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let source = scenario.add_creature(P0, "Payment Source", 1, 1).id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        if let Some(sun) = sun {
+            // The as-enters choice is abandoned by `add_real_card`; set it.
+            let obj = state.objects.get_mut(&sun).expect("Caged Sun");
+            obj.chosen_attributes
+                .retain(|a| !matches!(a, ChosenAttribute::Color(_)));
+            obj.chosen_attributes
+                .push(ChosenAttribute::Color(sun_color));
+        }
+        if let (Some(aura), Some(land)) = (aura, first_mountain) {
+            state
+                .objects
+                .get_mut(&aura)
+                .expect("Fertile Ground")
+                .attached_to = Some(AttachTarget::Object(land));
+            state
+                .objects
+                .get_mut(&land)
+                .expect("Mountain")
+                .attachments
+                .push(aura);
+        }
+        state.layers_dirty.mark_full();
+        (runner.state().clone(), source)
+    }
+
+    fn exact(state: &GameState, source: ObjectId, n: u32) -> bool {
+        per_unit_scaled_checked(&red_unit(), n).is_some_and(|cost| {
+            casting::can_pay_effect_mana_cost_after_auto_tap(
+                state,
+                P0,
+                source,
+                &cost,
+                casting::PausedManaPayment::Unresumable,
+            )
+        })
+    }
+
+    /// The BASE algorithm: largest N <= the capacity bound the exact check
+    /// accepts.
+    fn base_offer(state: &GameState, source: ObjectId) -> u32 {
+        let mut n = casting::effect_payment_mana_ceiling(state, P0);
+        while n > 0 && !exact(state, source, n) {
+            n -= 1;
+        }
+        n
+    }
+
+    fn offered(state: &GameState, source: ObjectId) -> u32 {
+        resolution_mana_per_unit_max(state, P0, source, &red_unit())
+    }
+
+    fn simulated(state: &GameState, source: ObjectId) -> Option<u32> {
+        casting::effect_payment_simulated_ceiling(state, P0, source, |n| {
+            per_unit_scaled_checked(&red_unit(), n)
+        })
+    }
+
+    const TABLE: &[&[&str]] = &[
+        &["Mountain"],
+        &["Nyxbloom Ancient", "Mountain"],
+        &["Nyxbloom Ancient", "Mountain", "Mountain"],
+        &["Virtue of Strength", "Mountain"],
+        &["Virtue of Strength", "Great Furnace"],
+        &["Mana Flare", "Mountain"],
+        &["Caged Sun", "Mountain"],
+        &["Lotus Petal", "Mountain"],
+        &["Nyxbloom Ancient", "Mountain", "Fertile Ground"],
+        &["Rugged Prairie", "Mountain"],
+        &["Prophetic Prism", "Mountain"],
+        &["Mountain", "Arena of Glory"],
+        &["Nyxbloom Ancient", "Prophetic Prism", "Mountain"],
+        &["Nyxbloom Ancient", "Rugged Prairie", "Mountain"],
+        &["Island"],
+    ];
+
+    /// K1: the offered maximum is never below what the capacity-only (BASE)
+    /// algorithm offered. Asserts the floor property only.
+    #[test]
+    fn offered_max_is_never_below_the_capacity_floor() {
+        for cards in TABLE {
+            let (state, source) = board(cards, ManaColor::Red);
+            let base = base_offer(&state, source);
+            let now = offered(&state, source);
+            assert!(now >= base, "{cards:?}: offered {now} < BASE offer {base}");
+        }
+    }
+
+    /// K2: on the table boards the offered maximum is the largest N the exact
+    /// check accepts (completeness), with reach guards.
+    #[test]
+    fn offered_max_is_the_largest_exactly_payable_amount_on_table_boards() {
+        for cards in TABLE {
+            let (state, source) = board(cards, ManaColor::Red);
+            let legacy = casting::effect_payment_mana_ceiling(&state, P0);
+            let scan_to = simulated(&state, source).unwrap_or(0).max(legacy) + 8;
+            let largest = (0..=scan_to)
+                .rev()
+                .find(|&n| n == 0 || exact(&state, source, n))
+                .expect("zero is always payable");
+            assert!(largest < scan_to, "{cards:?}: the scan was truncated");
+            assert_eq!(offered(&state, source), largest, "{cards:?}");
+            if !matches!(cards, ["Island"]) {
+                assert!(largest >= 1, "{cards:?}: reach guard, a red source exists");
+            }
+            let plain_multiplier_board = matches!(
+                cards,
+                [
+                    "Nyxbloom Ancient",
+                    "Mountain",
+                    "Mountain" | "Fertile Ground"
+                ] | ["Nyxbloom Ancient", "Mountain"]
+            );
+            if plain_multiplier_board {
+                assert!(
+                    largest > legacy,
+                    "{cards:?}: reach guard, the multiplier is beyond the capacity bound \
+                     (largest {largest}, legacy {legacy})"
+                );
+            }
+        }
+    }
+
+    /// K3: the simulation fires and sees the Nyxbloom multiplier.
+    #[test]
+    fn simulated_ceiling_sees_the_nyxbloom_multiplier() {
+        let (state, source) = board(&["Nyxbloom Ancient", "Mountain"], ManaColor::Red);
+        let legacy = casting::effect_payment_mana_ceiling(&state, P0);
+        let v = simulated(&state, source).expect("the probe completes");
+        assert!(v >= 3, "Mountain taps for three red under Nyxbloom: {v}");
+        assert!(
+            v > legacy,
+            "simulated {v} exceeds the capacity bound {legacy}"
+        );
+    }
+
+    /// K4: `max_payable_units` is the threshold of a monotone predicate;
+    /// scaling overflow is `None` rather than a wrapped or huge cost.
+    #[test]
+    fn max_payable_units_finds_the_threshold_and_scaling_is_checked() {
+        for threshold in [0u32, 1, 7, 20] {
+            assert_eq!(
+                casting::max_payable_units(20, |n| n <= threshold),
+                threshold
+            );
+        }
+        assert_eq!(casting::max_payable_units(0, |_| false), 0);
+        assert_eq!(casting::max_payable_units(u32::MAX, |n| n <= 5), 5);
+
+        let wide = ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 1,
+        };
+        assert!(per_unit_scaled_checked(&wide, u32::MAX).is_none());
+        assert!(per_unit_scaled_checked(&wide, 3).is_some());
+    }
+
+    /// K4b: `x_concrete_checked` concretizes every `{X}` like
+    /// `ManaCost::concretize_x`, and returns `None` rather than a wrapped or
+    /// panicking cost when the generic amount does not fit in `u32`.
+    #[test]
+    fn x_concrete_checked_scales_every_x_and_detects_overflow() {
+        let double_x = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::X, ManaCostShard::Red],
+            generic: 1,
+        };
+        assert_eq!(
+            x_concrete_checked(&double_x, 3),
+            Some(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 7,
+            })
+        );
+        assert!(x_concrete_checked(&double_x, u32::MAX).is_none());
+        // The multiplication fits but the added fixed generic does not.
+        let single_x = ManaCost::Cost {
+            shards: vec![ManaCostShard::X],
+            generic: 1,
+        };
+        assert!(x_concrete_checked(&single_x, u32::MAX).is_none());
+        assert_eq!(
+            x_concrete_checked(&single_x, u32::MAX - 1),
+            Some(ManaCost::Cost {
+                shards: vec![],
+                generic: u32::MAX,
+            })
+        );
+        // No `{X}`: the cost is unchanged whatever `x` is.
+        let fixed = red_unit();
+        assert_eq!(x_concrete_checked(&fixed, u32::MAX), Some(fixed));
     }
 }

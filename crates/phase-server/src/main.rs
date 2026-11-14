@@ -1350,6 +1350,7 @@ struct SocketIdentity {
 struct ClientHelloInfo {
     client_version: String,
     build_commit: String,
+    lobby_protocol_version: Option<u32>,
     wire_format: Option<WireFormat>,
     state_codec: Option<StateCodec>,
 }
@@ -1469,6 +1470,7 @@ fn classify_hello_gate(
                 HelloGateOutcome::Accept(ClientHelloInfo {
                     client_version: client_version.clone(),
                     build_commit: build_commit.clone(),
+                    lobby_protocol_version: *lobby_protocol_version,
                     wire_format: wire_formats
                         .contains(&WireFormat::GzipEnvelopeV1)
                         .then_some(WireFormat::GzipEnvelopeV1),
@@ -1690,6 +1692,7 @@ impl SocketIdentity {
                 .map(|h| lobby_broker::ClientHelloInfo {
                     client_version: h.client_version.clone(),
                     build_commit: h.build_commit.clone(),
+                    lobby_protocol_version: h.lobby_protocol_version,
                 }),
             subscribed: self.lobby_subscribed,
             host_game: self.lobby_host_game.clone(),
@@ -7759,19 +7762,7 @@ impl DeckResolver for ServerDeckResolver<'_> {
         // that caused it. Validating here causes the reducer to return `Err`,
         // which phase-server then surfaces to the client.
         server_core::resolve_deck(self.db, &deck)?;
-        Ok(engine::game::deck_loading::PlayerDeckList {
-            main_deck: deck.main_deck,
-            sideboard: deck.sideboard,
-            commander: deck.commander,
-            companion: deck.companion,
-            planar_deck: deck.planar_deck,
-            scheme_deck: deck.scheme_deck,
-            attraction_deck: deck.attraction_deck,
-            contraption_deck: deck.contraption_deck,
-            sticker_sheets: deck.sticker_sheets,
-            signature_spell: deck.signature_spell,
-            bracket_tier: deck.bracket_tier,
-        })
+        Ok(engine::game::deck_loading::PlayerDeckList::from(deck))
     }
 }
 
@@ -17058,6 +17049,127 @@ mod issue_4548_full_create_tests {
         );
     }
 
+    /// Sends the Dandan empty-host-deck create of
+    /// `full_mode_create_accepts_an_empty_host_deck_for_dandan`, with
+    /// `data.deck.printings` replaced by `printings`, as one text frame through a real
+    /// socket to a Full-mode server, and returns the server's reply.
+    async fn create_with_printings(printings: serde_json::Value) -> ServerMessage {
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(url)
+                .await
+                .expect("connect");
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::ServerHello { .. }
+            ));
+            let hello = ClientMessage::ClientHello {
+                client_version: env!("CARGO_PKG_VERSION").to_string(),
+                build_commit: build_commit().to_string(),
+                protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
+            };
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&hello).expect("hello json").into(),
+                ))
+                .await
+                .expect("send hello");
+            let create = ClientMessage::CreateGameWithSettings {
+                deck: empty_deck(),
+                display_name: "Alice".to_string(),
+                public: true,
+                password: None,
+                timer_seconds: None,
+                player_count: 2,
+                match_config: Default::default(),
+                ai_seats: Vec::new(),
+                format_config: Some(engine::types::format::FormatConfig::dandan()),
+                room_name: None,
+                host_peer_id: None,
+                draft_metadata: None,
+                start_when_full: true,
+                ranked: false,
+                requested_code: None,
+                booster_pack_pool: None,
+            };
+            let mut frame = serde_json::to_value(&create).expect("create value");
+            frame["data"]["deck"]["printings"] = printings;
+            let frame = frame.to_string();
+            assert!(frame.len() <= MAX_WS_MESSAGE_BYTES);
+            socket
+                .send(WsMessage::Text(frame.into()))
+                .await
+                .expect("send create");
+            recv_server_message(&mut socket).await
+        })
+        .await;
+        server.abort();
+        result.expect("full-mode create with printings timed out")
+    }
+
+    /// P2-V5 (N1): more than the entry cap of raw elements, all of them malformed
+    /// (so lenient decoding would drop every one), is refused at decode time through
+    /// the native `#[serde(flatten)]` envelope, with the reply naming the field.
+    #[tokio::test]
+    async fn full_mode_create_refuses_a_sidecar_over_the_entry_cap() {
+        let reply = create_with_printings(serde_json::json!(vec![0; 2049])).await;
+        let ServerMessage::Error { message, .. } = reply else {
+            panic!("expected an error, got {reply:?}");
+        };
+        assert!(
+            message.contains("printings must contain at most 2048 entries"),
+            "{message}"
+        );
+    }
+
+    /// P2-V5 (N2): an in-count sidecar with an oversized string is refused by the
+    /// server guard, naming the field.
+    #[tokio::test]
+    async fn full_mode_create_refuses_an_oversized_sidecar_name() {
+        let printings = serde_json::json!([{
+            "section": "main_deck",
+            "name": "x".repeat(257),
+            "count": 1,
+            "printing": { "set_code": "M21", "collector_number": "1" },
+        }]);
+        let reply = create_with_printings(printings).await;
+        let ServerMessage::Error { message, .. } = reply else {
+            panic!("expected an error, got {reply:?}");
+        };
+        assert!(message.contains("deck.printings[0].name"), "{message}");
+    }
+
+    /// P2-V5 (N3): a sidecar of merely invalid annotations plus one valid element
+    /// is admitted; the same create without the sidecar is accepted at base.
+    #[tokio::test]
+    async fn full_mode_create_admits_a_sidecar_of_invalid_annotations() {
+        let printings = serde_json::json!([
+            { "section": "main_deck", "name": "Plains", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "mystery_zone", "name": "Plains", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            0,
+            { "section": "main_deck", "name": "Plains", "count": "one",
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "main_deck", "name": "", "count": 1,
+              "printing": { "set_code": "", "collector_number": "" } },
+            { "section": "main_deck", "name": "Bad\nName", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "main_deck", "name": "No Such Card Anywhere", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "main_deck", "name": "Plains", "count": 0,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+        ]);
+        let reply = create_with_printings(printings).await;
+        assert!(
+            matches!(reply, ServerMessage::GameCreated { .. }),
+            "expected GameCreated, got {reply:?}"
+        );
+    }
+
     #[tokio::test]
     async fn full_mode_accepts_native_multi_ai_setup_larger_than_eight_kib() {
         let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
@@ -18257,7 +18369,13 @@ mod issue_4548_full_create_tests {
             {
                 let session = lock_session(&app.sessions, &code).await.expect("session");
                 assert!(session.game_started);
-                assert!(session.state.turn_number >= 1);
+                assert!(
+                    matches!(
+                        session.state.waiting_for,
+                        engine::types::game_state::WaitingFor::ChooseStartingPlayer { .. }
+                    ),
+                    "the join started the game at the CR 103.1 choice"
+                );
             }
             assert!(matches!(
                 fresh_attempt(
@@ -19755,19 +19873,64 @@ mod game_submission_tests {
             .expect("send create");
 
         let mut created = None;
-        let mut started = false;
-        while created.is_none() || !started {
+        let mut started = None;
+        while created.is_none() || started.is_none() {
             match recv_server_message(socket).await {
                 ServerMessage::GameCreated {
                     game_code,
                     player_token,
                     full_key: Some(full_key),
                 } => created = Some((game_code, player_token, full_key)),
-                ServerMessage::GameStarted { .. } => started = true,
+                ServerMessage::GameStarted { state, .. } => started = Some(state.waiting_for),
                 ServerMessage::Error { message, .. } => {
                     panic!("AI game creation failed: {message}")
                 }
                 _ => {}
+            }
+        }
+        // CR 103.1: when the host won the roll it names the AI seat, and an AI
+        // chooser names itself (`first_turn_election`), so every run starts with
+        // the AI seat on the play. Read through the batch's final,
+        // decision-carrying `StateUpdate`, so no AI follow-up frame is left queued.
+        if matches!(
+            started,
+            Some(
+                engine::types::game_state::WaitingFor::ChooseStartingPlayer {
+                    player: PlayerId(0),
+                    ..
+                }
+            )
+        ) {
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::Action {
+                        action: GameAction::ChooseStartingPlayer {
+                            player: PlayerId(1),
+                        },
+                    })
+                    .expect("choice json")
+                    .into(),
+                ))
+                .await
+                .expect("send choice");
+            loop {
+                match recv_server_message(socket).await {
+                    ServerMessage::StateUpdate { legal_actions, .. }
+                        if !legal_actions.is_empty() =>
+                    {
+                        break
+                    }
+                    ServerMessage::ActionRejected { rejection } => {
+                        panic!("the host's choice was rejected: {rejection:?}")
+                    }
+                    ServerMessage::ActionFailed { message } => {
+                        panic!("the host's choice failed: {message}")
+                    }
+                    ServerMessage::Error { message, .. } => {
+                        panic!("the host's choice failed: {message}")
+                    }
+                    _ => {}
+                }
             }
         }
         created.expect("Full game identity")
@@ -20617,7 +20780,7 @@ mod game_submission_tests {
 
     fn oversized_submission() -> InteractionSubmission {
         submission(InteractionResponse::Text {
-            value: "x".repeat(MAX_INTERACTION_STRING_LEN + 1),
+            values: vec!["x".repeat(MAX_INTERACTION_STRING_LEN + 1)],
         })
     }
 
@@ -21699,6 +21862,62 @@ mod handshake_tests {
         }
     }
 
+    /// The native LobbyOnly shell carries the accepted hello's lobby version
+    /// into the broker's `ConnState`, where the create gate reads it.
+    #[test]
+    fn native_lobby_hello_version_reaches_the_broker_gate() {
+        use lobby_broker::{LobbyClientMessage, LobbyServerMessage};
+        let mut frame = serde_json::to_value(LobbyClientMessage::CreateGameWithSettings {
+            deck: DeckData::default(),
+            display_name: "Host".into(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            match_config: Default::default(),
+            format_config: Some(engine::types::format::FormatConfig::brawl()),
+            room_name: None,
+            host_peer_id: Some("peer-1".into()),
+            draft_metadata: None,
+            start_when_full: true,
+            ranked: false,
+            requested_code: None,
+        })
+        .unwrap();
+        frame["data"]["format_config"]["commander_damage_threshold"] = 21.into();
+
+        let create = |declared: u32| {
+            let hello = ClientMessage::ClientHello {
+                client_version: "0.1.11".into(),
+                build_commit: "abc1234".into(),
+                protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version: Some(declared),
+                wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
+            };
+            let HelloGateOutcome::Accept(info) =
+                classify_hello_gate(false, &hello, hello_acceptance(ServerMode::LobbyOnly))
+            else {
+                panic!("the LobbyOnly gate accepts lobby version {declared}");
+            };
+            let mut identity = empty_identity();
+            identity.client_hello = Some(info);
+            let msg: LobbyClientMessage = serde_json::from_value(frame.clone()).unwrap();
+            Broker::new().handle(&mut identity.to_conn_state(), msg, &SysEnv)
+        };
+
+        match create(LOBBY_PROTOCOL_VERSION).as_slice() {
+            [Outbound::ToSelf(LobbyServerMessage::Error { message, .. })] => {
+                assert!(message.contains("commander_damage_threshold"), "{message}");
+            }
+            other => panic!("expected the strict refusal, got {other:?}"),
+        }
+        assert!(matches!(
+            create(LOBBY_PROTOCOL_VERSION - 1).first(),
+            Some(Outbound::ToSelf(LobbyServerMessage::GameCreated { .. }))
+        ));
+    }
+
     #[test]
     fn accepts_matching_client_hello() {
         let outcome = classify_hello_gate(
@@ -21720,6 +21939,7 @@ mod handshake_tests {
             HelloGateOutcome::Accept(ClientHelloInfo {
                 client_version: "0.1.11".into(),
                 build_commit: "abc1234".into(),
+                lobby_protocol_version: None,
                 wire_format: None,
                 state_codec: None,
             })
@@ -21812,6 +22032,7 @@ mod handshake_tests {
             HelloGateOutcome::Accept(ClientHelloInfo {
                 client_version: "zone-choice-peer".into(),
                 build_commit: "zone-choice-build".into(),
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                 wire_format: None,
                 state_codec: None,
             })
@@ -21837,6 +22058,7 @@ mod handshake_tests {
             HelloGateOutcome::Accept(ClientHelloInfo {
                 client_version: "0.1.11".into(),
                 build_commit: "abc1234".into(),
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                 wire_format: Some(WireFormat::GzipEnvelopeV1),
                 state_codec: None,
             })
@@ -22279,6 +22501,7 @@ mod handshake_tests {
                 seat: 0,
                 main_deck: vec![],
                 commanders: vec![],
+                printings: vec![],
             },
             draft_core::types::DraftAction::ReportMatchResult {
                 match_id: "m1".into(),

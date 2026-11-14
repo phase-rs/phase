@@ -31,6 +31,7 @@ type TriggerTargetSelectionWaitingFor = Extract<
   WaitingFor,
   { type: "TriggerTargetSelection" }
 >;
+type HeroEventChoiceWaitingFor = Extract<WaitingFor, { type: "HeroEventChoice" }>;
 type ChooseXValueWaitingFor = Extract<WaitingFor, { type: "ChooseXValue" }>;
 type PayAmountChoiceWaitingFor = Extract<WaitingFor, { type: "PayAmountChoice" }>;
 type ManaSourceSelectionWaitingFor = Extract<WaitingFor, { type: "ManaSourceSelection" }>;
@@ -146,6 +147,7 @@ export const formatConfigFactory = Factory.define<FormatConfig>(() => ({
   singleton: false,
   command_zone: false,
   commander_damage_threshold: null,
+  poison_counter_threshold: 10,
   range_of_influence: null,
   team_based: false,
   sideboard_policy: { type: "Limited", data: 15 },
@@ -337,6 +339,27 @@ export const buildTargetSelectionWaitingFor = (
   overrides: Partial<TargetSelectionWaitingFor> = {},
 ): TargetSelectionWaitingFor => {
   return targetSelectionWaitingForFactory.withData(overrides.data ?? {}).build();
+};
+
+export class HeroEventChoiceWaitingForFactory extends PlayerWaitingForFactory<HeroEventChoiceWaitingFor> {}
+
+export const heroEventChoiceWaitingForFactory =
+  HeroEventChoiceWaitingForFactory.define((): HeroEventChoiceWaitingFor => ({
+    type: "HeroEventChoice",
+    data: {
+      player: 0,
+      event: { type: "ChromeOverload" },
+      event_id: 1,
+      cards: [],
+      count: 1,
+      copies_pending: 0,
+    },
+  }));
+
+export const buildHeroEventChoiceWaitingFor = (
+  overrides: Partial<HeroEventChoiceWaitingFor> = {},
+): HeroEventChoiceWaitingFor => {
+  return heroEventChoiceWaitingForFactory.withData(overrides.data ?? {}).build();
 };
 
 export class TriggerTargetSelectionWaitingForFactory extends PlayerWaitingForFactory<TriggerTargetSelectionWaitingFor> {}
@@ -703,6 +726,10 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
     return this.variant(targetSelectionWaitingForFactory.withData(data).build());
   }
 
+  heroEventChoice(data: Partial<HeroEventChoiceWaitingFor["data"]> = {}) {
+    return this.variant(heroEventChoiceWaitingForFactory.withData(data).build());
+  }
+
   triggerTargetSelection(
     data: Partial<TriggerTargetSelectionWaitingFor["data"]> = {},
   ) {
@@ -984,6 +1011,10 @@ export class GameStateFactory extends Factory<GameState> {
 
   targetSelection(data: Partial<TargetSelectionWaitingFor["data"]> = {}) {
     return this.waitingFor(waitingForFactory.targetSelection(data).build());
+  }
+
+  heroEventChoice(data: Partial<HeroEventChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.heroEventChoice(data).build());
   }
 
   triggerTargetSelection(

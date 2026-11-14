@@ -848,6 +848,18 @@ pub struct DraftPlayerView {
     pub tournament_format: TournamentFormat,
     /// Pod policy from config.
     pub pod_policy: PodPolicy,
+    /// What the session does once every seat has submitted a deck: an
+    /// in-session tournament, or completion with play arranged outside it
+    /// (CR 903.13a: Commander Draft). Published for the same reason as
+    /// [`Self::launch_capability`]: it is a PROCEDURE fact a display layer
+    /// needs (whether a submitted deck faces rounds at all) and must not
+    /// infer from the kind label.
+    pub post_draft_play: PostDraftPlay,
+    /// Whether the viewer may submit (or revise) a deck now. Engine-derived from
+    /// `DraftSession::deck_submission_open` so clients never re-derive it from
+    /// `status` + `pod_policy`. Defaulted for views from hosts predating it.
+    #[serde(default)]
+    pub deck_submission_open: bool,
     /// Pairings for the current round.
     pub pairings: Vec<PairingView>,
     /// Resolved match configuration owned by the draft engine.
@@ -884,24 +896,12 @@ pub struct DraftPlayerView {
     /// withdraw it exactly when it becomes usable. It is read from the same
     /// retained latch either way.
     ///
-    /// **ADVISORY, NOT ENFORCED -- and the boundary is measured, not assumed.**
-    /// Game one's starting player comes from `engine::game::engine::start_game`'s
-    /// CR 103.1 contest, reached through
-    /// `server_core::session::GameSession::start_game`.
-    /// `start_game_with_starting_player` DOES exist and is public -- but it
-    /// takes a DECIDED starting player, not a chooser, and there is no pre-game
-    /// venue in which to ask the question: `GameState::next_game_chooser` is set
-    /// BY that function, and `GameAction::ChoosePlayDraw` must clear TWO gates,
-    /// not one: it is admissible only against
-    /// `WaitingFor::BetweenGamesChoosePlayDraw`, which `match_flow::start_next_game`
-    /// sets BETWEEN games, and `match_flow::handle_choose_play_draw`
-    /// independently refuses it whenever `state.match_phase !=
-    /// MatchPhase::BetweenGames`. Binding this seat to game one's starting
-    /// player therefore needs a NEW game-one play/draw election -- a new
-    /// `WaitingFor`, a widened action guard, a widened `MatchPhase`
-    /// admissibility rule, a protocol bump and a UI -- which is a match-flow
-    /// feature, not part of a draft kind. Until then the players apply it as
-    /// they do at a physical table, and the UI says so in words.
+    /// **ADVISORY, NOT ENFORCED.** Game one's CR 103.1 chooser is the d20
+    /// contest winner, who answers `WaitingFor::ChooseStartingPlayer`
+    /// (`engine::game::engine::start_game`, reached through
+    /// `server_core::session::GameSession::start_game`). Binding this seat as
+    /// that chooser is not done, so the field stays advisory and the players
+    /// apply it as they do at a physical table, and the UI says so in words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub play_first_chooser: Option<u8>,
 }
@@ -1617,6 +1617,8 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         next_pairing_round: session.next_pairing_round(),
         tournament_format: session.config.tournament_format,
         pod_policy: session.config.pod_policy,
+        post_draft_play: session.kind.procedure().post_draft_play,
+        deck_submission_open: session.deck_submission_open(),
         pairings,
         match_config: session.kind.match_config(),
         shared_stack: shared_stack_view_for(session, is_drafting, Some(seat_index)),
@@ -3237,6 +3239,11 @@ mod tests {
                 seat: 0,
                 main_deck: main_deck.clone(),
                 commanders: Vec::new(),
+                printings: serde_json::from_value(serde_json::json!([{
+                    "section":"main_deck", "name":"Secret annotation", "count":1,
+                    "printing":{"set_code":"secret-set","collector_number":"001"}
+                }]))
+                .unwrap(),
             },
             None,
         )
@@ -3253,6 +3260,23 @@ mod tests {
             !json.contains("main_deck"),
             "view should not contain submitted deck contents"
         );
+        assert_eq!(session.submitted_decks[&PlayerId(0)].printings.len(), 1);
+        let spectator = filter_for_spectator(&session, SpectatorVisibility::Public);
+        assert!(spectator.seats[0].has_submitted_deck);
+        for json in [json, serde_json::to_string(&spectator).unwrap()] {
+            assert!(
+                !json.contains("Secret annotation"),
+                "another seat's annotation name is private"
+            );
+            assert!(
+                !json.contains("secret-set"),
+                "another seat's owner printing is private"
+            );
+            assert!(
+                !json.contains("\"printings\""),
+                "submissions are not a public carrier"
+            );
+        }
     }
 
     #[test]
@@ -3875,6 +3899,43 @@ mod tests {
                 .pick_steps_per_pack(15),
             8
         );
+    }
+
+    #[test]
+    fn player_view_publishes_the_procedure_owned_post_draft_play() {
+        let (mut session, _) = test_session(4);
+        session.kind = DraftKind::CommanderDraft;
+        session.config.kind = DraftKind::CommanderDraft;
+        assert_eq!(
+            filter_for_player(&session, 0).post_draft_play,
+            PostDraftPlay::CompleteImmediately,
+            "CR 903.13a: a Commander Draft pod plays no in-session rounds"
+        );
+
+        session.kind = DraftKind::Premier;
+        session.config.kind = DraftKind::Premier;
+        assert_eq!(
+            filter_for_player(&session, 0).post_draft_play,
+            PostDraftPlay::TournamentPairings
+        );
+    }
+
+    #[test]
+    fn player_view_publishes_the_deck_submission_window() {
+        let (mut session, _) = test_session(4);
+        let mut open_at = |policy, status| {
+            session.config.pod_policy = policy;
+            session.status = status;
+            filter_for_player(&session, 0).deck_submission_open
+        };
+
+        assert!(open_at(PodPolicy::Casual, DraftStatus::RoundComplete));
+        assert!(open_at(PodPolicy::Competitive, DraftStatus::Deckbuilding));
+        assert!(
+            !open_at(PodPolicy::Competitive, DraftStatus::RoundComplete),
+            "MTR 7.3: a Competitive pod's submitted deck is final"
+        );
+        assert!(!open_at(PodPolicy::Casual, DraftStatus::MatchInProgress));
     }
 
     #[test]

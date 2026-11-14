@@ -259,33 +259,38 @@ Then invoke the `$engine-implementer` skill with this prompt, substituting `<NAM
 
 > Implement full engine support for the card "<NAME>". Prepare it for a PR to `phase-rs/phase` targeting `main`, including the skill's final upstream synchronization and verification handoff after implementation. Follow `CLAUDE.md` and `AGENTS.md` design principles without exception: build for the class not the card, nom combinators on first pass, CR annotations verified against `docs/MagicCompRules.txt` (and for each cited rule, also read its adjacent rules in the same section — cite the *authorizing* rule for the effect, not just the *layering* rule), idiomatic Rust, engine owns all logic, frontend is display-only. Reuse existing building blocks before writing new ones. Do not ask for clarification — on ordinary implementation ambiguity, take the architecturally idiomatic path. If the card requires protected architecture scope, stop without opening a PR unless a maintainer explicitly appointed you to that work beforehand or the PR closes an issue labeled `accepted`.
 
-`$engine-implementer`'s published contract is: plan with `engine-planner` → review the plan with `$review-engine-plan` until clean → implement → checkpoint the candidate commit → verify the committed candidate → review it with `$review-engine-impl` → accept the clean candidate. Findings return through the skill's fix/checkpoint/verify/review loop. Follow the [skill](../.claude/skills/engine-implementer/SKILL.md) for its stop and escalation rules. Then complete the PR preparation handoff and validate the resulting committed branch next.
+`$engine-implementer`'s published contract is: plan with `engine-planner` → review the plan with `$review-engine-plan` until clean → implement → checkpoint the candidate commit → verify the committed candidate → review it with `$review-engine-impl` → accept the candidate under the skill's Step 7 and decline rules. Findings return through the skill's fix/checkpoint/verify/review loop. Follow the [skill](../.claude/skills/engine-implementer/SKILL.md) for its stop and escalation rules. Then complete the PR preparation handoff and validate the resulting committed branch next.
 
-**Budget.** The skill's [run limits](../.claude/skills/engine-implementer/SKILL.md#run-limits) take `budget=tight|standard|until-clean` (default `standard`), which decides who approves spending past a review-loop limit or on verification machinery. An autonomous run under `standard` cannot ask, so the skill's decline path decides: listed residuals ship, and anything else stops with status `partial` and no PR. Add `budget=until-clean` only if you accept bounded autonomous diagnosis, correction and verification under the skill's [recovery procedure](../.claude/skills/engine-implementer/SKILL.md#verification-recovery-until-clean-only): complete expansion cases, preserved failed outcomes, a default total of 12 remote verification/generation runs (`remote-dispatch-limit=N` configures it), and a stop after two recovery attempts on the same blocker make no evidence progress. Explicit user ceilings and stops take precedence. Product/test defects still use the normal fix/review pipeline and design convergence limits; recovery never waives required checks or PR gates.
+**Budget.** The skill's [run limits](../.claude/skills/engine-implementer/SKILL.md#run-limits) take `budget=tight|standard|until-clean` (default `standard`), which decides who approves spending past a review-loop limit or on verification machinery. An autonomous run under `standard` cannot ask, so the skill's decline path decides: a `text` finding or a LOW finding that reports no wrong behavior may be listed as unresolved under `## Validation Failures`, with no clean review claimed (§5), and anything else stops with status `partial` and no PR. Add `budget=until-clean` only if you accept bounded autonomous diagnosis, correction and verification under the skill's [recovery procedure](../.claude/skills/engine-implementer/SKILL.md#verification-recovery-until-clean-only): complete expansion cases, preserved failed outcomes, a default total of 12 remote verification/generation runs (`remote-dispatch-limit=N` configures it), and a stop after two recovery attempts on the same blocker make no evidence progress. Explicit user ceilings and stops take precedence. Product/test defects still use the normal fix/review pipeline and design convergence limits; recovery never waives required checks or PR gates.
 
-**All tiers:** Gate B and its anchors must exist before implementation. After `$engine-implementer` completes its PR preparation handoff, run the final read-only review in §5 against the resulting committed head and complete diff from the fetched upstream commit, then run Gate A. This is one post-commit loop: if the review finds anything other than listed residuals, or any later change creates a commit, address it and rerun both the final review and Gate A against the new head. If either gate fails, do NOT continue to §7 — return to fix the violations, or stop per §0.1.3 if they cannot be fixed.
+**All tiers:** Gate B and its anchors must exist before implementation. After `$engine-implementer` completes its PR preparation handoff, run the final read-only review in §5 against the resulting committed head and complete diff from the fetched upstream commit, then run Gate A. This is one post-commit loop: if the review finds anything other than items §5 lets you list under `## Validation Failures`, or any later change creates a commit, address it and rerun both the final review and Gate A against the new head. If either gate fails, do NOT continue to §7 — return to fix the violations, or stop per §0.1.3 if they cannot be fixed.
 
 ---
 
 ## 5. Validate the review actually happened and was addressed
 
-> This is the most important step. `$engine-implementer` must actually run `$review-engine-impl` against the committed candidate and address findings before accepting it. The outside caller (you, the LLM reading this) must verify.
+> This is the most important step. `$engine-implementer` must actually run `$review-engine-impl` against the committed candidate and handle findings under Step 6 and the decline path before accepting it. The outside caller (you, the LLM reading this) must verify.
 
-**A final read-only `$review-engine-impl` pass is mandatory against the committed head before Gate A and before the PR opens.** Address findings with code, amend or add the final commit, and rerun until the reviewer reports clean — or, when the skill's decline path applies, until its only findings are residuals that path allows, each listed under `## Validation Failures`. Then run Gate A against that same committed head. Record the exact line `Final review-impl PASS head=<40-hex-sha>` under `## Final review-impl`; that SHA must equal the PR's current head. Acknowledgement without a diff, a dirty-tree review, or a later push does not satisfy the gate. Any later commit invalidates both records and requires rerunning the final review followed by Gate A.
+**A final read-only `$review-engine-impl` pass is mandatory against the committed head before Gate A and before the PR opens.** Address findings with code, amend or add the final commit, and rerun until the reviewer reports clean. If the skill's decline path leaves only findings it lets a PR list as unresolved, list each under `## Validation Failures` with its evidence and claim no clean review for it: under `## Final review-impl` write `Final review-impl UNRESOLVED head=<40-hex-sha>`, naming the PR's current head, instead of the PASS line, and leave the Verification box `Final review-impl below is clean for the current committed head.` unchecked. Then run Gate A against that same committed head. For a clean review, record the exact line `Final review-impl PASS head=<40-hex-sha>` under `## Final review-impl`; that SHA must equal the PR's current head. Acknowledgement without a diff, a dirty-tree review, or a later push does not satisfy the gate. Any later commit invalidates both records and requires rerunning the final review followed by Gate A.
 
 Apply **all three** checks:
 
 1. **Review section exists with concrete findings.** The final report must contain an explicit `$review-engine-impl` section enumerating findings with file:line references, or a clear clean-review result that states an implementation review ran against the full diff.
-2. **Findings were addressed with code.** For every finding classified as a defect, gap, or missing case, there must be a corresponding change in `git diff HEAD~ HEAD` (or the working tree if not yet committed). An acknowledgement without a diff is a failure. A residual the skill's decline path allows, listed under `## Validation Failures` with evidence and follow-up, satisfies this check without a diff.
+2. **Findings were addressed with code.** For every finding classified as a defect, gap, or missing case, there must be a corresponding change in `git diff HEAD~ HEAD` (or the working tree if not yet committed). An acknowledgement without a diff is a failure. A finding the skill's decline path lets you list as unresolved under `## Validation Failures`, with its evidence, does not fail this check; it stays open, and no clean review is claimed for it.
+
+<!-- deferral-rule -->
+A deferral inside the PR's own claimed scope (a case, sibling or outcome the PR claims) is an incomplete claim: the PR delivers it or narrows its claim wherever the claim is made, and it is never left as a follow-up. Narrowing applies only to an incomplete claim: a defect in code the PR adds or changes is cleared only by correcting, removing or fencing that code, and editing the description never clears it. A finding the PR introduces is never a clean residual, at any severity: where a PR is opened with one still open, it is listed as unresolved, no clean review is claimed for it, and the PR is not approved until its fix is verified. A deferral outside the claimed scope is not the PR's obligation: it never blocks the PR and is recorded once as a follow-up. A pre-existing defect may be listed as a disclosed item; it is logged and never blocks.
+<!-- /deferral-rule -->
+
 3. **Clean-review cross-check (fresh context).** If the report claims zero findings, run an independent pass when your environment supports it; otherwise note the limitation in the PR body. Hand the reviewer ONLY the complete PR diff (`git diff <fetched-target-commit> HEAD`, using the upstream commit retained by the PR preparation handoff), `CLAUDE.md`, and the relevant skills under `.claude/skills/`. Do not use `HEAD~`: after a merge or follow-up fix it does not represent the complete submitted change. No prior conversation. The reviewer must explicitly check: (a) **correct seam / location** — is the change at the layer/module/function the design says owns this responsibility, or a symptom-patch at the wrong seam that merely makes a test pass? A wrong-location fix is debt even when green; flag it as disqualifying and name the correct seam; (b) **most idiomatic change at the seam** — given the right location, is this the implementation a principal engineer steeped in this repo would write (established building-block reuse over re-implementation, combinator composition over string dispatch, enum parameterization over a new bool/sibling)? A correct-but-unidiomatic change is a finding, not a nit; (c) **nom-mandate compliance** — flag any `match` over a stringified parser-text variable with string-literal arms, any chained `if let Ok(..) = tag(..)` blocks, and any string-method dispatch (`.contains("…")`, `.find("…")`, `.rfind("…")`, `.split(`, `.split_once`, `.splitn`, etc. — the gate checks overlapping string-method patterns; `.rsplit(` and non-string-literal arguments to `.find`/`.rfind`/`.split` need supplementary inspection using the structural-use exemptions in `oracle-parser`); (d) **CR-citation completeness** — for each cited rule, did the implementation also cite the *authorizing* rule, not just the *layering* rule? (e) **pattern coverage** — does this work for ≥10 cards or just one? (f) **logic placement** — engine vs frontend per `CLAUDE.md`; (g) **building-block reuse** — did the implementation duplicate logic an existing helper already handles? Re-implementing what `oracle_util.rs`, `oracle_quantity.rs`, `game/filter.rs`, `game/zones.rs`, etc. already provide is a defect even if the new code works; (h) **bool-flag avoidance** — any new `bool` field/parameter where a typed enum (`ControllerRef`, `Comparator`, `Option<T>`, etc.) would express the design space better is a defect; (i) **test discrimination** — does at least one test drive the real pipeline (`apply()` / scenario runner / cast harness) and FAIL if the fix were reverted? A test that only asserts parsed AST shape — an `assert_eq!` on a parsed `Effect` / `StaticMode` / `AbilityDefinition` without resolving it — is a shape test, not a regression test, and is the single most common gap on keyword and parser PRs; name it as a defect and require a discriminating runtime test before the PR opens. Negative assertions (`!detector(...)`, "does not parse to X") are vacuous unless the same test carries a positive reach-guard proving the input got past upstream short-circuits (e.g. `check_swallowed_clauses` early-returns on `Effect::Unimplemented`) — flag any bare negative as a defect; If the cross-check produces findings, feed them back into `$engine-implementer` and loop.
 
-**If any check fails:** rerun `$engine-implementer` or continue the same skill workflow with explicit instructions to execute `$review-engine-impl` and address every finding with code changes. Do **not** proceed to Step 6 until validation passes. Retry at most 2 times; on a third failure, abort the run and record the gap in the PR body under a "Validation Failures" heading so the maintainer can triage.
+**If any check fails:** rerun `$engine-implementer` or continue the same skill workflow with explicit instructions to execute `$review-engine-impl` and address every finding with code changes. Do **not** proceed to Step 6 until validation passes. Retry at most 2 times; on a third failure, stop with status `partial` and do not open a PR. Items the decline path lets you list under `## Validation Failures` are not failures of these checks.
 
 ---
 
 ## 6. Record verification and run Gate A (track-specific)
 
-**Developer track** — the implementation workflow must run the mechanical checks below against its committed candidate before acceptance. On any failure, fix in-loop, commit the fix, and verify the new candidate. The mechanical-check limit is max 2 retries except under `budget=until-clean`, which instead uses the skill's [verification recovery procedure](../.claude/skills/engine-implementer/SKILL.md#verification-recovery-until-clean-only), resource ceiling and no-progress stop; product/design review limits still apply. If checks remain failing, follow the skill's decline path: missing required evidence or a blocking defect stops with no PR; only permitted residuals may be listed under "Validation Failures" or "CI Failures". After §5's clean read-only review, run only the Gate A command shown after the mechanical checks; if it finds a problem, change and commit the fix, rerun §5, and then rerun Gate A.
+**Developer track** — the implementation workflow must run the mechanical checks below against its committed candidate before acceptance. On any failure, fix in-loop, commit the fix, and verify the new candidate. The mechanical-check limit is max 2 retries except under `budget=until-clean`, which instead uses the skill's [verification recovery procedure](../.claude/skills/engine-implementer/SKILL.md#verification-recovery-until-clean-only), resource ceiling and no-progress stop; product/design review limits still apply. If checks remain failing, follow the skill's decline path: missing required evidence or a blocking defect stops with no PR; only items the decline path permits (§5) may be listed under "Validation Failures" or "CI Failures". After §5's final read-only review, run only the Gate A command shown after the mechanical checks; if it finds a problem, change and commit the fix, rerun §5, and then rerun Gate A.
 
 **Avoid redundant confirmation builds.** Reuse evidence from the same candidate and build configuration instead of adding a one-off build merely to reproduce it for the PR body. Changing Cargo features, profile, or target can trigger additional compilation. Run extra checks when they answer a specific unresolved correctness question or are required by the changed surface; this guidance does not waive required tests, coverage, semantic audits, or parser measurements. Prefer existing production-path tests and required audit output as evidence. For Markdown-only policy changes, inspect the diff, scope, and referenced workflow contracts; Cargo, Tilt, and frontend builds provide no additional signal.
 
@@ -383,7 +388,7 @@ Thinking: <high | max>
 
 - `<exact command or CI check>` — <exact result>
 
-<commands and exact results; every fixed required box must appear exactly once and be checked>
+<commands and exact results; every fixed required box must appear exactly once and be checked; the Final review-impl box stays unchecked when a finding is listed as unresolved under Validation Failures>
 
 ## Gate A
 Gate A PASS head=<40-hex-sha> base=<40-hex-sha>
@@ -394,6 +399,7 @@ Gate A PASS head=<40-hex-sha> base=<40-hex-sha>
 
 ## Final review-impl
 Final review-impl PASS head=<40-hex-sha>
+<!-- With a finding listed as unresolved under Validation Failures (AI-CONTRIBUTOR.md §5), write instead: Final review-impl UNRESOLVED head=<40-hex-sha> -->
 
 ## Claimed parse impact
 None.
@@ -405,7 +411,7 @@ None.
 
 ## Validation Failures
 None.
-<!-- Replace with each unresolved validation failure or shipped residual finding, with its evidence and follow-up. -->
+<!-- Replace with each unresolved finding or disclosed item, with its evidence. -->
 
 ## CI Failures
 None.
@@ -422,12 +428,19 @@ Print the PR URL. Print a one-line status: `success`, `partial`, or `aborted`. E
 
 ---
 
+## 9. When the maintainer review arrives
+
+A review that requests changes lists numbered findings `F1…Fn`. Address them with `$address-review`: every finding fixed, narrowed or disputed in one batch, the §5 final review and Gate A run again at the new head, one push, the PR body's records updated for the pushed head, and one reply mapping each finding to its disposition. Each additional push to a PR with an open review costs another review round.
+
+---
+
 ## Appendix A — Skill equivalents
 
 Use skills when the runtime supports them:
 
 - **Invoking `$engine-implementer`:** load `.claude/skills/engine-implementer/SKILL.md` and follow its full plan → review → implement → verify → review → commit pipeline.
 - **Invoking `$review-engine-impl`:** load `.claude/skills/review-engine-impl/SKILL.md` and execute its checklist against the uncommitted diff or commit diff.
+- **Invoking `$address-review`:** load `.claude/skills/address-review/SKILL.md` and follow it when a maintainer review requests changes (§9).
 - **Invoking `commit-push-pr`:** run the raw `git` + `gh` sequence shown in Step 7.
 
 Every other step (quality floor, track selection, clone, card pick, validation, verify, report) is tool-agnostic.
@@ -521,16 +534,18 @@ Steps:
    take the idiomatic path, and stop without opening a PR if the work expands
    protected architecture without a prior maintainer appointment or a linked
    issue labeled `accepted`. Review the
-   implementation with $review-engine-impl until clean, then commit.
-5. Validate $engine-implementer actually ran $review-engine-impl AND addressed every
-   finding with code changes. If not, send it a follow-up to do so (max 2
+   implementation with $review-engine-impl under the skill's Step 6 and decline rules, then commit. An allowed unresolved finding carries no clean-review claim.
+5. Validate $engine-implementer actually ran $review-engine-impl and closed each
+   finding, except items its decline path permits to be listed as unresolved
+   without a clean-review claim. If not, send it a follow-up to do so (max 2
    retries). If the review claims zero findings, use an independent reviewer
    or fresh context when available and hand it only the diff + CLAUDE.md.
 6. Skip local verification (I don't have a Rust toolchain).
 7. git push to my fork and open a PR with title "Add <Card Name>" (use
    "Fix <Card Name>" for a misparse fix (§3.1) or an issue (§3.2), and
    add "Closes #<number>" to the body for an issue; "Partial: <Card Name>"
-   only if validation or CI failures were unresolved).
+   only if the body lists an unresolved finding under Validation Failures
+   or a CI failure under CI Failures).
    Body must use the repository's .github/PULL_REQUEST_TEMPLATE.md exactly;
    fill every section rather than writing an ad-hoc body. Do NOT pass
    --label flags — the upstream auto-labeler may apply needs-maintainer
@@ -539,7 +554,10 @@ Steps:
 
 All-tier gates: after the final commit and before pushing, run the final
 $review-engine-impl and then Gate A against that exact HEAD; include their SHA-bound PASS lines,
-at least two file:line anchors and no unchecked required verification boxes.
+at least two file:line anchors and no unchecked required verification boxes,
+except that a finding listed as unresolved under Validation Failures
+replaces the final review's PASS line with
+"Final review-impl UNRESOLVED head=<40-hex-sha>" and leaves its box unchecked.
 A later commit invalidates both PASS
 lines. Tier cannot satisfy these gates. If protected architecture lacks a prior
 maintainer appointment or linked issue labeled `accepted`, do not open the PR.
