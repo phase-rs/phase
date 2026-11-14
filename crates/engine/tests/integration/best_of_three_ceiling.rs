@@ -2,7 +2,7 @@
 //! config above the ceiling plays as Bo1 and never enters the between-games path.
 
 use engine::game::deck_loading::{load_and_hydrate_decks, DeckPayload, MOMIR_SNOW_BASICS};
-use engine::game::engine::{start_game, start_game_with_starting_player};
+use engine::game::engine::{start_game_winner_plays_first, start_game_with_starting_player};
 use engine::game::scenario::GameRunner;
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
@@ -46,7 +46,7 @@ fn dandan_bo3_runner() -> GameRunner {
     let mut state = GameState::new(FormatConfig::dandan(), 2, 7);
     state.match_config.match_type = MatchType::Bo3;
     load_and_hydrate_decks(&mut state, &DeckPayload::default(), Some(db));
-    let result = start_game(&mut state);
+    let result = start_game_winner_plays_first(&mut state);
     assert!(started(&result.events), "reach: the game started");
     GameRunner::from_state(state)
 }
@@ -73,7 +73,7 @@ fn r2_momir_keeps_bo3_and_restarts_between_games() {
     state.match_config.match_type = MatchType::Bo3;
     let db = install_synthetic_card_db(&mut state, &faces);
     load_and_hydrate_decks(&mut state, &DeckPayload::default(), Some(&db));
-    let result = start_game(&mut state);
+    let result = start_game_winner_plays_first(&mut state);
     assert!(started(&result.events));
     assert_eq!(state.match_config.match_type, MatchType::Bo3);
 

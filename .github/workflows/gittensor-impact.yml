@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: matthewevans/gittensor-impact-action@v1
+      - uses: matthewevans/gittensor-impact-action@cc83f449b75cbfbd3f7c70f796ad79f0f1d5d593 # v1.1.4
         with:
           repo: phase-rs/phase
           since: ${{ inputs.since || '30 days ago' }}

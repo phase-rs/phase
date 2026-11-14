@@ -170,6 +170,7 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
         bracket_lists: Default::default(),
         bracket_signals_by_name,
         creature_type_vocabulary,
+        valid_subtypes: Default::default(),
     })
 }
 

@@ -2,7 +2,7 @@ import { memo, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
-import type { MultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
+import { type MultiplayerBoardLayout, usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../../hooks/usePlayerId.ts";
@@ -50,6 +50,7 @@ export const GameBoard = memo(function GameBoard({
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
+  const showOwnerPrintings = usePreferencesStore((s) => s.showOwnerPrintings);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const localPlayerId = usePlayerId();
   const myId = usePerspectivePlayerId();
@@ -64,21 +65,21 @@ export const GameBoard = memo(function GameBoard({
 
   const focusedId = resolveFocusedOpponent(focusedOpponent, opponents);
   const playerBattlefieldView = useMemo(
-    () => buildPlayerBattlefieldView(gameState, myId),
-    [gameState, myId],
+    () => buildPlayerBattlefieldView(gameState, myId, showOwnerPrintings),
+    [gameState, myId, showOwnerPrintings],
   );
   const focusedBattlefieldView = useMemo(
-    () => (focusedId == null ? null : buildPlayerBattlefieldView(gameState, focusedId)),
-    [gameState, focusedId],
+    () => (focusedId == null ? null : buildPlayerBattlefieldView(gameState, focusedId, showOwnerPrintings)),
+    [gameState, focusedId, showOwnerPrintings],
   );
   const opponentBattlefieldViews = useMemo(() => {
     return new Map(
       opponents.map((opponentId) => [
         opponentId,
-        buildPlayerBattlefieldView(gameState, opponentId),
+        buildPlayerBattlefieldView(gameState, opponentId, showOwnerPrintings),
       ]),
     );
-  }, [gameState, opponents]);
+  }, [gameState, opponents, showOwnerPrintings]);
   const splitBoardActive = isSplitBoardActive(effectiveMultiplayerBoardLayout, getSeatCount(gameState));
 
   const sortedPlayerCreatures = useMemo(() => {
@@ -269,7 +270,7 @@ export const GameBoard = memo(function GameBoard({
                     playerId={opponentId}
                     battlefieldView={
                       opponentBattlefieldViews.get(opponentId)
-                      ?? buildPlayerBattlefieldView(gameState, opponentId)
+                      ?? buildPlayerBattlefieldView(gameState, opponentId, showOwnerPrintings)
                     }
                     onKickPlayer={onKickPlayer}
                     onViewZone={onViewZone}

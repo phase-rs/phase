@@ -22,7 +22,10 @@ vi.mock("../../game/dispatch", () => ({
   dispatchAction: vi.fn(), processRemoteUpdate: vi.fn(async () => {}),
   abandonPendingDispatches: vi.fn(),
 }));
-vi.mock("../../adapter/wasm-adapter", () => ({ WasmAdapter: class {}, getSharedAdapter: vi.fn() }));
+vi.mock("../../adapter/wasm-adapter", () => ({
+  WasmAdapter: class {},
+  getSharedAdapter: vi.fn(() => ({ openStateCodecSession: async () => null })),
+}));
 vi.mock("../../services/nativeEngine", () => ({
   canAttemptNativeEngine: () => false, nativeEngineKeyForCurrentOrigin: () => null,
 }));

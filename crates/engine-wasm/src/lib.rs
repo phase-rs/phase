@@ -46,6 +46,7 @@ use engine::game::{
     PlayerDeckList, ReplayPlayer,
 };
 use engine::types::actions::{DebugAction, DebugCardCreationKind};
+use engine::types::card_printing::{deserialize_deck_printings, validate_deck_printings_bounds};
 use engine::types::custom_format::{CustomFormatDef, CustomFormatRules};
 use engine::types::events::GameEvent;
 use engine::types::format::{
@@ -264,6 +265,24 @@ fn resolve_and_validate_initialize_format_config(
     Ok(format_config)
 }
 
+/// A local or P2P-host start may reuse a config persisted by an earlier engine,
+/// so it takes the persisted migration.
+fn decode_initialize_format_config(mut config: serde_json::Value) -> Result<FormatConfig, String> {
+    FormatConfig::migrate_persisted(&mut config);
+    serde_json::from_value(config).map_err(|error| error.to_string())
+}
+
+/// The P2P host's saved pregame seat state may carry a format persisted by an
+/// earlier engine, so its `format` takes the persisted migration.
+fn decode_persisted_seat_state(json: &str) -> Result<SeatState, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    if let Some(format) = value.get_mut("format") {
+        FormatConfig::migrate_persisted(format);
+    }
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
 fn parse_initialize_format_config(
     decoded: Result<FormatConfig, String>,
 ) -> Result<FormatConfig, serde_json::Value> {
@@ -280,8 +299,11 @@ mod external_format_config_tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use engine::types::custom_format::CustomFormatId;
+    use engine::types::custom_format::{
+        CommandZoneMode, CommanderEligibilityRule, CustomFormatDef, CustomFormatId,
+    };
     use engine::types::format::RangeOfInfluenceConfig;
+    use seat_reducer::types::SeatKind;
 
     #[test]
     fn best_of_three_ceiling_reads_the_format_axis_and_fails_closed() {
@@ -399,6 +421,7 @@ mod external_format_config_tests {
                     team_based: false,
                     sideboard_policy: SideboardPolicy::Unlimited,
                     default_deck_copy_limit: DeckCopyLimit::UpTo(4),
+                    poison_counter_threshold: 10,
                 },
                 legality: LegalityRules {
                     legal_sets: None,
@@ -460,6 +483,104 @@ mod external_format_config_tests {
             resolve_and_validate_initialize_format_config(Some(commander_draft), 2)
                 .expect_err("2 players is outside CommanderDraft's 3-8 registry range")
                 .contains("player_count")
+        );
+    }
+
+    fn with_damage_threshold(config: FormatConfig) -> serde_json::Value {
+        let mut value = serde_json::to_value(config).expect("config serializes");
+        value["commander_damage_threshold"] = serde_json::json!(21);
+        value
+    }
+
+    /// A Custom config with Standard eligibility and no threshold, stored with the
+    /// `uses_commander: false` an earlier engine derived for it.
+    fn legacy_custom_config() -> (FormatConfig, serde_json::Value) {
+        let mut rules =
+            CustomFormatDef::from_lobby_config("Legacy".to_string(), &FormatConfig::commander())
+                .expect("Commander saves as a custom format")
+                .rules;
+        rules.structural.command_zone_mode = CommandZoneMode::Enabled {
+            commander_damage_threshold: None,
+            eligibility_rule: CommanderEligibilityRule::Standard,
+        };
+        let current = FormatConfig::for_custom_rules(&rules);
+        assert!(current.uses_commander);
+        let mut legacy = serde_json::to_value(&current).expect("config serializes");
+        legacy["uses_commander"] = false.into();
+        (current, legacy)
+    }
+
+    /// Each persisted config paired with the config today's rules install for it.
+    fn legacy_config_rows() -> Vec<(serde_json::Value, FormatConfig)> {
+        let (custom, legacy_custom) = legacy_custom_config();
+        let mut commander = FormatConfig::commander();
+        commander.commander_damage_threshold = Some(21);
+        vec![
+            (
+                with_damage_threshold(FormatConfig::brawl()),
+                FormatConfig::brawl(),
+            ),
+            (
+                with_damage_threshold(FormatConfig::historic_brawl()),
+                FormatConfig::historic_brawl(),
+            ),
+            (legacy_custom, custom),
+            (with_damage_threshold(FormatConfig::commander()), commander),
+        ]
+    }
+
+    #[test]
+    fn public_initializer_starts_a_legacy_config_under_current_rules() {
+        for (persisted, expected) in legacy_config_rows() {
+            let label = expected.format;
+            clear_game_state();
+            initialize_game_inner(
+                None,
+                42,
+                Some(Ok(persisted)),
+                MatchConfig::default(),
+                2,
+                Some(0),
+                InitSessionKind::Local,
+            )
+            .unwrap_or_else(|error| panic!("{label:?}: {error}"));
+            let installed = with_installed_state(|state| state.format_config.clone())
+                .unwrap_or_else(|error| panic!("{label:?}: {error}"));
+            let recorded = REPLAY_LOG.with(|cell| {
+                let log = cell.take();
+                let recorded = log.as_ref().map(|log| log.header.format_config.clone());
+                cell.set(log);
+                recorded
+            });
+            assert_eq!(installed, expected, "{label:?}");
+            assert_eq!(recorded, Some(expected), "{label:?}");
+        }
+        clear_game_state();
+    }
+
+    #[test]
+    fn persisted_seat_state_decodes_a_legacy_format_under_current_rules() {
+        for (persisted, expected) in legacy_config_rows() {
+            let label = expected.format;
+            let mut seat_state = serde_json::to_value(SeatState {
+                seats: vec![SeatKind::HostHuman, SeatKind::WaitingHuman],
+                tokens: vec!["host-token".to_string(), String::new()],
+                format: FormatConfig::standard(),
+                game_started: false,
+            })
+            .expect("seat state serializes");
+            seat_state["format"] = persisted;
+            let decoded = decode_persisted_seat_state(&seat_state.to_string())
+                .unwrap_or_else(|error| panic!("{label:?}: {error}"));
+            assert_eq!(decoded.format, expected, "{label:?}");
+        }
+    }
+
+    #[test]
+    fn direct_format_config_decode_still_rejects_a_brawl_damage_threshold() {
+        assert!(
+            serde_json::from_value::<FormatConfig>(with_damage_threshold(FormatConfig::brawl()))
+                .is_err()
         );
     }
 
@@ -1381,6 +1502,13 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
             GameFormat::TinyLeaders => is_tiny_leader_eligible(face),
             GameFormat::Oathbreaker => face.is_oathbreaker,
             GameFormat::Brawl | GameFormat::HistoricBrawl => is_brawl_commander_eligible(face),
+            // Horde is per-config (Commander-format survivors designate a
+            // standard-EDH-eligible commander; Constructed survivors have no
+            // commander slot and never consult this). Answer the EDH
+            // predicate: the only caller that can exist is the Commander
+            // horde's deck builder, and `false` here would silently tell it
+            // no card can be its commander.
+            GameFormat::Horde => is_commander_eligible(face),
             // CR 903.3's commander eligibility test applies unchanged —
             // planar doesn't change eligibility.
             GameFormat::PlanechaseCommander => is_commander_eligible(face),
@@ -1590,6 +1718,16 @@ pub fn get_format_registry() -> JsValue {
     to_js(&GameFormat::registry())
 }
 
+/// Return the authoritative list of selectable Horde challenge decks as a typed
+/// array. The Horde deck picker renders this directly, so adding a new challenge
+/// deck is a single engine-side change — the client never maintains a mirrored
+/// deck list. Each entry bundles the deck's `HordeRuleset`, so the client can
+/// build the complete `FormatConfig` for the picked deck without a second call.
+#[wasm_bindgen(js_name = getChallengeDeckRegistry)]
+pub fn get_challenge_deck_registry() -> JsValue {
+    to_js(&engine::types::format::ChallengeDeck::registry())
+}
+
 /// Evaluate deck compatibility and format legality using the loaded card database.
 /// Returns strict Standard/Commander checks, BO3 readiness, and selected-format compatibility.
 #[wasm_bindgen]
@@ -1640,6 +1778,50 @@ pub fn evaluate_deck_format_gate_js(request: JsValue) -> Result<JsValue, JsValue
         };
         Ok(to_js(&evaluate_deck_format_gate(db, &request)))
     })
+}
+
+/// Resource bounds on one deck list's printings sidecar, for the P2P host's guest
+/// admission (`handleNewGuest` in `client/src/adapter/p2p-adapter.ts`). Takes the
+/// guest deck's `printings` value as received. Decodes it with the one sidecar decoder
+/// (which refuses more than `MAX_DECK_PRINTING_ENTRIES` elements of any shape) and applies
+/// `validate_deck_printings_bounds`; throws the reason on abuse. Needs no card database.
+#[wasm_bindgen(js_name = checkDeckPrintingsBounds)]
+pub fn check_deck_printings_bounds_js(printings: JsValue) -> Result<(), JsValue> {
+    check_printings_bounds(serde_wasm_bindgen::Deserializer::from(printings)).map_err(|e| match e {
+        // The decoder's own error is already a JS `Error` whose `.message` is the bare
+        // reason; its `Display` would prefix "Error: " (`String(error)`).
+        PrintingsRefusal::Decode(e) => JsValue::from(e),
+        PrintingsRefusal::Bounds(reason) => JsValue::from_str(&reason),
+    })
+}
+
+/// Why `check_printings_bounds` refused a guest deck's `printings` value.
+#[derive(Debug)]
+enum PrintingsRefusal<E> {
+    /// The sidecar decoder refused it (the entry cap).
+    Decode(E),
+    /// `validate_deck_printings_bounds` refused it (the byte caps).
+    Bounds(String),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for PrintingsRefusal<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Decode(e) => e.fmt(f),
+            Self::Bounds(reason) => f.write_str(reason),
+        }
+    }
+}
+
+/// The P2P admission half of D8: decodes a guest deck's `printings` value with the one
+/// sidecar decoder (the entry cap) and applies `validate_deck_printings_bounds` (the byte
+/// caps). Native-testable body of `checkDeckPrintingsBounds`; the two refusal sources stay
+/// distinct so the export can surface each in its native JS form.
+fn check_printings_bounds<'de, D: serde::Deserializer<'de>>(
+    printings: D,
+) -> Result<(), PrintingsRefusal<D::Error>> {
+    let printings = deserialize_deck_printings(printings).map_err(PrintingsRefusal::Decode)?;
+    validate_deck_printings_bounds("printings", &printings).map_err(PrintingsRefusal::Bounds)
 }
 
 /// Axis A: capture a lobby's live, fully-resolved `FormatConfig` as a saved
@@ -1900,6 +2082,35 @@ pub fn initialize_multiplayer_host_game(
     )
 }
 
+/// Every seat of a `DeckList` with the label its refusal reasons carry: the local
+/// player, the AI opponent, then each further AI player.
+fn labelled_seats(deck_list: &DeckList) -> impl Iterator<Item = (String, &PlayerDeckList)> {
+    [
+        ("Player".to_string(), &deck_list.player),
+        ("AI opponent".to_string(), &deck_list.opponent),
+    ]
+    .into_iter()
+    .chain(
+        deck_list
+            .ai_decks
+            .iter()
+            .enumerate()
+            .map(|(idx, deck)| (format!("AI player {}", idx + 2), deck)),
+    )
+}
+
+/// The WASM initialize half of the printings sidecar's resource bound (A3/D8):
+/// applies the engine's single `validate_deck_printings_bounds` to every seat's
+/// sidecar, returning `Some(reasons)` at the first refusal and `None` when every
+/// seat is in bounds. Native-testable for the same reason as `validate_deck_list_seats`.
+fn deck_list_printings_violations(deck_list: &DeckList) -> Option<Vec<String>> {
+    labelled_seats(deck_list).find_map(|(seat, deck)| {
+        validate_deck_printings_bounds("printings", &deck.printings)
+            .err()
+            .map(|reason| vec![format!("{seat} deck: {reason}")])
+    })
+}
+
 /// Validate every seat's deck in a `DeckList` against the selected format,
 /// returning `Some(reasons)` at the first refusal and `None` when every seat
 /// passes. Each reason is labelled with the seat it came from, because the
@@ -1917,19 +2128,17 @@ fn validate_deck_list_seats(
     match_type: Option<MatchType>,
     player_count: usize,
 ) -> Option<Vec<String>> {
-    let seats = [
-        ("Player".to_string(), &deck_list.player),
-        ("AI opponent".to_string(), &deck_list.opponent),
-    ]
-    .into_iter()
-    .chain(
-        deck_list
-            .ai_decks
-            .iter()
-            .enumerate()
-            .map(|(idx, deck)| (format!("AI player {}", idx + 2), deck)),
-    );
-    for (seat, deck) in seats {
+    // Horde seats run the engine-supplied challenge library, never a
+    // player-built deck: the local path submits an empty seat for them, which
+    // must not face the survivor deck-shape check (an empty submission is
+    // only exempt for non-`PlayerBuilt` supplies, and Horde is `PlayerBuilt`
+    // for its survivors). Skip the designated Horde seats; every survivor
+    // seat is still validated. Empty for non-Horde formats — a no-op there.
+    let horde_seats = format_config.horde_designated_seats();
+    for (seat_idx, (seat, deck)) in labelled_seats(deck_list).enumerate() {
+        if horde_seats.contains(&PlayerId(seat_idx as u8)) {
+            continue;
+        }
         if let Err(reasons) = validate_name_deck_for_format_full(
             db,
             &deck.main_deck,
@@ -1967,30 +2176,59 @@ fn initialize_game_impl(
     first_player: Option<u8>,
     kind: InitSessionKind,
 ) -> JsValue {
-    let seed = seed.map(|s| s as u64).unwrap_or(42);
-
-    // Resolved before the format config: an undeclared config's default must
-    // be chosen FOR this seat count (see
-    // `resolve_and_validate_initialize_format_config`), so `count` has to be
-    // known first.
-    let count = player_count.unwrap_or(2);
-
-    let decoded_format_config = if !format_config_js.is_null() && !format_config_js.is_undefined() {
-        match parse_initialize_format_config(
-            serde_wasm_bindgen::from_value::<FormatConfig>(format_config_js)
-                .map_err(|error| error.to_string()),
-        ) {
-            Ok(config) => Some(config),
-            Err(error) => return to_js(&error),
-        }
+    let deck_data = (!deck_data.is_null() && !deck_data.is_undefined()).then(|| {
+        serde_wasm_bindgen::from_value::<DeckList>(deck_data).map_err(|error| error.to_string())
+    });
+    let format_config =
+        (!format_config_js.is_null() && !format_config_js.is_undefined()).then(|| {
+            serde_wasm_bindgen::from_value::<serde_json::Value>(format_config_js)
+                .map_err(|error| error.to_string())
+        });
+    let match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
+        serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
+            .unwrap_or_else(|_| MatchConfig::default())
     } else {
-        None
+        MatchConfig::default()
+    };
+    match initialize_game_inner(
+        deck_data,
+        seed.map(|s| s as u64).unwrap_or(42),
+        format_config,
+        match_config,
+        player_count.unwrap_or(2),
+        first_player,
+        kind,
+    ) {
+        Ok(result) => to_js(&result),
+        Err(error) => to_js(&error),
+    }
+}
+
+/// Natively callable body of `initialize_game_impl`, after the
+/// `restore_game_state_inner` precedent.
+fn initialize_game_inner(
+    deck_data: Option<Result<DeckList, String>>,
+    seed: u64,
+    format_config: Option<Result<serde_json::Value, String>>,
+    match_config: MatchConfig,
+    count: u8,
+    first_player: Option<u8>,
+    kind: InitSessionKind,
+) -> Result<ActionResult, serde_json::Value> {
+    // `count` is resolved before the format config: an undeclared config's
+    // default must be chosen FOR this seat count (see
+    // `resolve_and_validate_initialize_format_config`).
+    let decoded_format_config = match format_config {
+        Some(config) => Some(parse_initialize_format_config(
+            config.and_then(decode_initialize_format_config),
+        )?),
+        None => None,
     };
     let format_config =
         match resolve_and_validate_initialize_format_config(decoded_format_config, count) {
             Ok(config) => config,
             Err(reason) => {
-                return to_js(&serde_json::json!({
+                return Err(serde_json::json!({
                     "error": true,
                     "reasons": [reason],
                 }));
@@ -2003,12 +2241,6 @@ fn initialize_game_impl(
     // thread-local is still clear here and a host game would otherwise be given
     // local debug permissions.
     initialize_debug_permissions(&mut state, kind == InitSessionKind::MultiplayerHost);
-    let match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
-        serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
-            .unwrap_or_else(|_| MatchConfig::default())
-    } else {
-        MatchConfig::default()
-    };
     // CR 732.2a: project the immutable match config (incl. the combo-detector opt-in)
     // onto the runtime `loop_detection` gate via the single engine authority shared
     // with the server path. The detector is player-count-agnostic, so it carries
@@ -2031,21 +2263,29 @@ fn initialize_game_impl(
     // (wasm-adapter.ts:701) already throws on `{ error: true, reasons }`, so
     // returning that envelope here gives the user a real failure message
     // instead of a silently-broken match.
-    if !deck_data.is_null() && !deck_data.is_undefined() {
-        let deck_list = match serde_wasm_bindgen::from_value::<DeckList>(deck_data) {
+    if let Some(deck_data) = deck_data {
+        let deck_list = match deck_data {
             Ok(d) => d,
             Err(e) => {
-                return to_js(&serde_json::json!({
+                return Err(serde_json::json!({
                     "error": true,
                     "reasons": [format!("Deck payload deserialization failed: {e}")],
                 }));
             }
         };
+        // Resource bound on every seat's printings sidecar (the decoder has already
+        // refused more than the entry cap): refused before the list is recorded.
+        if let Some(reasons) = deck_list_printings_violations(&deck_list) {
+            return Err(serde_json::json!({
+                "error": true,
+                "reasons": reasons,
+            }));
+        }
         recorded_deck_list = Some(deck_list.clone());
 
         let card_db_missing = CARD_DB.with(|cell| cell.borrow().is_none());
         if card_db_missing {
-            return to_js(&serde_json::json!({
+            return Err(serde_json::json!({
                 "error": true,
                 "reasons": [
                     "Card database not loaded in engine worker. \
@@ -2088,7 +2328,7 @@ fn initialize_game_impl(
         });
 
         if let Some(reasons) = validation_error {
-            return to_js(&serde_json::json!({
+            return Err(serde_json::json!({
                 "error": true,
                 "reasons": reasons,
             }));
@@ -2116,7 +2356,7 @@ fn initialize_game_impl(
                     .map(|e| vec![e.to_string()])
             });
             if let Some(reasons) = cedh_error {
-                return to_js(&serde_json::json!({
+                return Err(serde_json::json!({
                     "error": true,
                     "cedh_bracket_violation": true,
                     "reasons": reasons,
@@ -2138,7 +2378,7 @@ fn initialize_game_impl(
             .map(|seat| seat.0)
             .collect();
         if !empty_seats.is_empty() {
-            return to_js(&serde_json::json!({
+            return Err(serde_json::json!({
                 "error": true,
                 "reasons": [format!(
                     "Empty library after deck load for seat(s): {empty_seats:?}. \
@@ -2183,7 +2423,7 @@ fn initialize_game_impl(
     invalidate_ai_proposals();
     reset_hand_disclosure();
 
-    to_js(&result)
+    Ok(result)
 }
 
 /// Submit a game action on behalf of `actor` and return the ActionResult
@@ -4070,6 +4310,13 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
     // A contest's timestamps belong to the host clock that stamped them; this restore
     // may be an import from another page or worker (see the engine function).
     engine::game::contest::cancel_contest_after_restore(&mut state);
+    // A restore over a live game replaces it in place (undo, developer restore, recovery):
+    // continue the replaced state's revision and advance it, so the restored snapshot never
+    // repeats a revision already used with different rules state (the clients' staleness key).
+    if let Ok(replaced_revision) = with_installed_state(|replaced| replaced.state_revision) {
+        state.state_revision = replaced_revision;
+        engine::game::public_state::bump_state_revision(&mut state);
+    }
     install_game_state(Some(state));
     // Restoring (undo, or resuming a save from a fresh worker that never saw
     // `initialize_game`) invalidates any in-progress recording — the restored
@@ -4273,6 +4520,77 @@ mod restored_card_db_requirements_tests {
         assert!(error.contains("card database"));
         assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
         assert!(!is_multiplayer_mode());
+    }
+
+    #[test]
+    fn restore_continues_live_revision_and_preserves_fresh_decode_revision() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let json = serde_json::to_string(&GameState::new_two_player(17)).unwrap();
+        let decoded_revision = decode_and_rehydrate_restored_game_state(&json, |state| {
+            state.rehydrate_rng();
+            Ok(())
+        })
+        .expect("independent decode succeeds")
+        .state
+        .state_revision;
+        let mut live = GameState::new_two_player(17);
+        live.state_revision = 41;
+        GAME_STATE.with(|cell| cell.set(Some(live)));
+        for expected in [42, 43] {
+            restore_game_state_inner(&json).expect("live restore succeeds");
+            assert_eq!(with_state(|state| state.state_revision).unwrap(), expected);
+        }
+        for _ in 0..2 {
+            clear_game_state();
+            restore_game_state_inner(&json).expect("fresh restore succeeds");
+            assert_eq!(
+                with_state(|state| state.state_revision).unwrap(),
+                decoded_revision
+            );
+        }
+        clear_game_state();
+    }
+
+    #[test]
+    fn restore_revokes_proposals_independently_of_revision() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let json = serde_json::to_string(&GameState::new_two_player(17)).unwrap();
+        let decoded_revision = decode_and_rehydrate_restored_game_state(&json, |state| {
+            state.rehydrate_rng();
+            Ok(())
+        })
+        .expect("independent decode succeeds")
+        .state
+        .state_revision;
+        for live_revision in [None, Some(41)] {
+            clear_game_state();
+            if let Some(revision) = live_revision {
+                let mut live = GameState::new_two_player(17);
+                live.state_revision = revision;
+                GAME_STATE.with(|cell| cell.set(Some(live)));
+            }
+            let token = AI_PROPOSALS.with(|registry| {
+                registry.borrow_mut().insert(AiDecisionContract {
+                    semantic_owner: PlayerId(0),
+                    authorized_actor: PlayerId(0),
+                    state_revision: decoded_revision,
+                    candidates: Vec::new(),
+                })
+            });
+            assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_some()));
+            restore_game_state_inner(&json).expect("restore succeeds");
+            let expected_revision = live_revision.map_or(decoded_revision, |revision| revision + 1);
+            assert_eq!(
+                with_state(|state| state.state_revision).unwrap(),
+                expected_revision
+            );
+            assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_none()));
+        }
+        clear_game_state();
     }
 
     /// Pins the legacy-compatible generic restore boundary: rounds 4-6 tried,
@@ -4497,6 +4815,397 @@ mod restored_card_db_requirements_tests {
             );
         });
 
+        clear_game_state();
+    }
+
+    /// CR 118.12 + CR 614.17a: a staged payment parked on a recovery checkpoint
+    /// carries a second executable board, and settling the payment installs
+    /// it. The restore refreshes printed faces on that board as on the live
+    /// one: the saved discard prompt is answered and the refreshed face is
+    /// still there afterwards.
+    ///
+    /// The board is the one of the engine's
+    /// `a_recovered_payment_reopens_through_checked_restore_and_settles`
+    /// (verbatim Oracle texts): P0's draw is a Dredge prompt (Stinkweed Imp),
+    /// Maralen of the Mornsong is muted by P2's Humility, and P2 concedes after
+    /// the draw leg. Synthetic: the `Composite[draw, discard]` cost is no
+    /// printed card's; "Test Card" is the test database's printed face, saved
+    /// with Vigilance and printed with Trample.
+    #[test]
+    fn restore_refreshes_printed_faces_on_a_parked_payments_checkpoint() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::ability::{
+            AbilityCost, CardSelectionMode, DiscardSelfScope, Effect, QuantityExpr,
+            ResolvedAbility, TargetFilter,
+        };
+        use engine::types::keywords::Keyword;
+        use engine::types::zones::Zone;
+
+        let face = |keyword| engine::types::card::CardFace {
+            name: "Test Card".to_string(),
+            card_type: engine::types::card_type::CardType {
+                supertypes: vec![],
+                core_types: vec![engine::types::card_type::CoreType::Creature],
+                subtypes: vec!["Bear".to_string()],
+            },
+            power: Some(engine::types::ability::PtValue::Fixed(2)),
+            toughness: Some(engine::types::ability::PtValue::Fixed(2)),
+            keywords: vec![keyword],
+            scryfall_oracle_id: Some("oracle-1".to_string()),
+            ..Default::default()
+        };
+        let stale = face(Keyword::Vigilance);
+        let printed_faces =
+            std::collections::HashMap::from([("test card".to_string(), face(Keyword::Trample))]);
+        let db = std::sync::Arc::new(
+            CardDatabase::from_json_str(
+                &serde_json::to_string(&printed_faces).expect("the face serializes"),
+            )
+            .expect("the test card database deserializes"),
+        );
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(std::sync::Arc::clone(&db)));
+
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        // Dredge 5 needs five cards to mill.
+        let library = [
+            "Library 1",
+            "Library 2",
+            "Library 3",
+            "Library 4",
+            "Library 5",
+            "Library 6",
+        ];
+        for player in 0..3 {
+            scenario.with_library_top(PlayerId(player), &library);
+        }
+        let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+        scenario
+            .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+            .from_oracle_text(
+                "Flying\nWhenever this creature deals combat damage to a creature, destroy \
+                 that creature.\nDredge 5 (If you would draw a card, you may mill five cards \
+                 instead. If you do, return this card from your graveyard to your hand.)",
+            );
+        scenario.add_creature_from_oracle(
+            P1,
+            "Maralen of the Mornsong",
+            2,
+            3,
+            "Players can't draw cards.\nAt the beginning of each player's draw step, that \
+             player loses 3 life, searches their library for a card, puts it into their hand, \
+             then shuffles.",
+        );
+        scenario.add_enchantment_from_oracle(
+            PlayerId(2),
+            "Humility",
+            "All creatures lose all abilities and have base power and toughness 1/1.",
+        );
+        scenario.add_card_to_hand(P0, "Hand A");
+        scenario.add_card_to_hand(P0, "Hand B");
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        let printed = engine::game::deck_loading::create_object_from_card_face(state, &stale, P0);
+        engine::game::zones::move_to_zone(state, printed, Zone::Battlefield, &mut Vec::new());
+        engine::game::layers::evaluate_layers(state);
+
+        let root = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::EffectCost {
+                            effect: Box::new(Effect::Draw {
+                                count: QuantityExpr::Fixed { value: 1 },
+                                target: TargetFilter::Controller,
+                            }),
+                        },
+                        AbilityCost::Discard {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            filter: None,
+                            selection: CardSelectionMode::Chosen,
+                            self_scope: DiscardSelfScope::FromHand,
+                        },
+                    ],
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            P0,
+        );
+        engine::game::effects::resolve_ability_chain(state, &root, &mut Vec::new(), 0)
+            .expect("the staged payment resolves");
+        apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+            .expect("declining Dredge accepts the draw");
+        apply(
+            state,
+            PlayerId(2),
+            GameAction::Concede {
+                player_id: PlayerId(2),
+            },
+        )
+        .expect("a player can concede at any time");
+        let checkpoint = state
+            .payment_transaction
+            .as_ref()
+            .and_then(|transaction| transaction.recovered.as_ref())
+            .expect("reach: the concession parks the payment on a recovery checkpoint");
+        assert!(matches!(
+            checkpoint.state.waiting_for,
+            WaitingFor::DiscardChoice { .. }
+        ));
+        assert!(
+            checkpoint.state.objects[&printed]
+                .base_keywords
+                .contains(&Keyword::Vigilance),
+            "reach: the checkpoint holds the face as saved"
+        );
+        let drawn = checkpoint
+            .events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::CardDrawn {
+                    player_id,
+                    object_id,
+                    ..
+                } if *player_id == P0 => Some(*object_id),
+                _ => None,
+            })
+            .expect("the accepted prefix drew a card");
+
+        let json = serde_json::to_string(&PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("the state serializes");
+        let mut restored = decode_and_rehydrate_restored_game_state(&json, |_| Ok(()))
+            .expect("the recovered payment restores")
+            .state;
+        assert!(
+            restored.objects[&printed]
+                .base_keywords
+                .contains(&Keyword::Trample),
+            "reach: the restore refreshed the live board"
+        );
+
+        apply(
+            &mut restored,
+            P0,
+            GameAction::SelectCards { cards: vec![drawn] },
+        )
+        .expect("the restored prompt is answered with the prefix-drawn card");
+        assert!(
+            restored.payment_transaction.is_none(),
+            "the payment settled"
+        );
+        assert!(
+            restored.players[0].graveyard.contains(&drawn),
+            "the drawn card was discarded"
+        );
+        let settled = &restored.objects[&printed];
+        assert_eq!(
+            (
+                settled.base_keywords.contains(&Keyword::Trample),
+                settled.base_keywords.contains(&Keyword::Vigilance),
+            ),
+            (true, false),
+            "settlement keeps the refreshed face"
+        );
+        clear_game_state();
+    }
+
+    /// CR 613.1f + CR 616.1: a recovery checkpoint parked on a replacement
+    /// choice is checked after its refreshed faces went through the layers.
+    /// Humility and Hullbreacher are printed objects of the test database
+    /// (verbatim Oracle texts): the face refresh gives Hullbreacher its
+    /// printed replacement back until Humility is applied again, and a restore
+    /// that checked the prompt before that refused the valid Dredge-only
+    /// choice as leaving Hullbreacher out.
+    ///
+    /// Synthetic: the `Composite[draw, draw]` cost is no printed card's.
+    #[test]
+    fn restore_applies_layers_to_a_checkpoint_before_checking_its_prompt() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::ability::{
+            AbilityCost, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
+        };
+        use engine::types::card::{CardFace, PrintedCardRef};
+        use engine::types::zones::Zone;
+
+        let mut scenario = GameScenario::new_n_player(4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        // Dredge 5 needs five cards to mill.
+        let library = [
+            "Library 1",
+            "Library 2",
+            "Library 3",
+            "Library 4",
+            "Library 5",
+            "Library 6",
+            "Library 7",
+        ];
+        for player in 0..4 {
+            scenario.with_library_top(PlayerId(player), &library);
+        }
+        let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+        scenario
+            .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+            .from_oracle_text(
+                "Flying\nWhenever this creature deals combat damage to a creature, destroy \
+                 that creature.\nDredge 5 (If you would draw a card, you may mill five cards \
+                 instead. If you do, return this card from your graveyard to your hand.)",
+            );
+        let hullbreacher = scenario
+            .add_creature_from_oracle(
+                P1,
+                "Hullbreacher",
+                3,
+                2,
+                "Flash\nIf an opponent would draw a card except the first one they draw in \
+                 each of their draw steps, instead you create a Treasure token. (It's an \
+                 artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")",
+            )
+            .id();
+        let humility = scenario
+            .add_enchantment_from_oracle(
+                PlayerId(2),
+                "Humility",
+                "All creatures lose all abilities and have base power and toughness 1/1.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+
+        // Make the two interacting permanents printed objects of the database.
+        let mut printed_faces = std::collections::HashMap::new();
+        for (id, oracle_id) in [
+            (hullbreacher, "oracle-hullbreacher"),
+            (humility, "oracle-humility"),
+        ] {
+            let object = state.objects.get_mut(&id).expect("the permanent exists");
+            let face = CardFace {
+                name: object.name.clone(),
+                card_type: object.base_card_types.clone(),
+                power: object
+                    .base_power
+                    .map(engine::types::ability::PtValue::Fixed),
+                toughness: object
+                    .base_toughness
+                    .map(engine::types::ability::PtValue::Fixed),
+                keywords: object.base_keywords.clone(),
+                abilities: (*object.base_abilities).clone(),
+                triggers: (*object.base_trigger_definitions).clone(),
+                static_abilities: (*object.base_static_definitions).clone(),
+                replacements: (*object.base_replacement_definitions).clone(),
+                scryfall_oracle_id: Some(oracle_id.to_string()),
+                ..Default::default()
+            };
+            object.printed_ref = Some(PrintedCardRef {
+                oracle_id: oracle_id.to_string(),
+                face_name: face.name.clone(),
+            });
+            object.base_printed_ref = object.printed_ref.clone();
+            printed_faces.insert(face.name.to_lowercase(), face);
+        }
+        let db = std::sync::Arc::new(
+            CardDatabase::from_json_str(
+                &serde_json::to_string(&printed_faces).expect("the faces serialize"),
+            )
+            .expect("the test card database deserializes"),
+        );
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(std::sync::Arc::clone(&db)));
+        engine::game::layers::evaluate_layers(state);
+
+        let draw_leg = || AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            }),
+        };
+        let root = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Composite {
+                    costs: vec![draw_leg(), draw_leg()],
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            P0,
+        );
+        engine::game::effects::resolve_ability_chain(state, &root, &mut Vec::new(), 0)
+            .expect("the staged payment resolves");
+        apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+            .expect("declining leg 1's Dredge accepts the draw");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == P0),
+            "reach: leg 2's Dredge is offered, got {:?}",
+            state.waiting_for
+        );
+        apply(
+            state,
+            PlayerId(3),
+            GameAction::Concede {
+                player_id: PlayerId(3),
+            },
+        )
+        .expect("a player can concede at any time");
+        let checkpoint = state
+            .payment_transaction
+            .as_ref()
+            .and_then(|transaction| transaction.recovered.as_ref())
+            .expect("reach: the concession parks the payment on a recovery checkpoint");
+        assert!(
+            matches!(
+                checkpoint.state.waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ),
+            "reach: the checkpoint is parked on leg 2's Dredge choice"
+        );
+        // Reach: on the checkpoint Humility mutes Hullbreacher, and the face
+        // refresh alone gives it its printed replacement back.
+        let mut refreshed = (*checkpoint.state).clone();
+        let functioning = |state: &GameState| {
+            state.objects[&hullbreacher]
+                .replacement_definitions
+                .iter_all()
+                .count()
+        };
+        assert_eq!(functioning(&refreshed), 0);
+        rehydrate_game_from_card_db_with_finalization(
+            &mut refreshed,
+            &db,
+            CardDbRehydrationFinalization::Defer,
+        );
+        assert_eq!(functioning(&refreshed), 1);
+        let hand_before = state.players[0].hand.len();
+
+        let json = serde_json::to_string(&PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("the state serializes");
+        let mut restored = decode_and_rehydrate_restored_game_state(&json, |_| Ok(()))
+            .expect("the Dredge-only prompt is the one the game offers under Humility")
+            .state;
+        apply(
+            &mut restored,
+            P0,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("the restored prompt is answered");
+        assert!(
+            restored.payment_transaction.is_none(),
+            "the payment settled"
+        );
+        assert_eq!(
+            restored.players[0].hand.len(),
+            hand_before + 2,
+            "both legs' cards were drawn"
+        );
+        assert!(
+            !restored
+                .objects
+                .values()
+                .any(|object| object.zone == Zone::Battlefield && object.name == "Treasure"),
+            "Hullbreacher stayed muted"
+        );
         clear_game_state();
     }
 }
@@ -6027,25 +6736,15 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
             // Stay at the name-only layer — `wasm.initialize_game` re-resolves
             // against `CARD_DB` when the game actually starts, so resolving
             // here would be wasted work and would force a name-vs-resolved
-            // shape coercion at every JS boundary. The declared bracket_tier is
-            // carried through so a cEDH seat's declaration survives the round-trip.
-            Ok(PlayerDeckList {
-                main_deck: deck_data.main_deck,
-                sideboard: deck_data.sideboard,
-                commander: deck_data.commander,
-                companion: deck_data.companion,
-                attraction_deck: deck_data.attraction_deck,
-                planar_deck: deck_data.planar_deck,
-                scheme_deck: deck_data.scheme_deck,
-                contraption_deck: deck_data.contraption_deck,
-                sticker_sheets: deck_data.sticker_sheets,
-                signature_spell: deck_data.signature_spell,
-                bracket_tier: deck_data.bracket_tier,
-            })
+            // shape coercion at every JS boundary. Every field, the declared
+            // bracket tier (so a cEDH seat's declaration survives the round-trip)
+            // and the printings sidecar included, is carried by the engine's
+            // conversion.
+            Ok(PlayerDeckList::from(deck_data))
         }
     }
 
-    let mut state: SeatState = serde_json::from_str(state_json)
+    let mut state = decode_persisted_seat_state(state_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid SeatState: {e}")))?;
     let mutation: SeatMutation = serde_json::from_str(mutation_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid SeatMutation: {e}")))?;
@@ -6072,7 +6771,7 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
 /// need to understand format topology details.
 #[wasm_bindgen]
 pub fn project_seat_view(state_json: &str) -> Result<JsValue, JsValue> {
-    let state: SeatState = serde_json::from_str(state_json)
+    let state = decode_persisted_seat_state(state_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid SeatState: {e}")))?;
     Ok(to_js(&state.to_view()))
 }
@@ -6783,9 +7482,31 @@ mod tests {
             "stale"
         );
 
-        let token = install_issued_candidate(priority_state(player), player, &action);
-        let state_json = export_game_state_json().expect("live state exports");
-        restore_game_state(&state_json).expect("same-revision restore succeeds");
+        load_minimal_test_card_database();
+        set_multiplayer_mode(false);
+        let seed_json = serde_json::to_string(&priority_state(player)).unwrap();
+        let prepared = decode_and_rehydrate_restored_game_state(&seed_json, |state| {
+            state.rehydrate_rng();
+            Ok(())
+        })
+        .expect("prepared state decodes")
+        .state;
+        let token = install_issued_candidate(prepared, player, &action);
+        let issued_revision = AI_PROPOSALS.with(|registry| {
+            registry
+                .borrow()
+                .proposal(&token)
+                .expect("issued token exists")
+                .contract
+                .state_revision
+        });
+        let state_json = export_game_state_json().expect("prepared live state exports");
+        GAME_STATE.with(|cell| cell.take());
+        restore_game_state(&state_json).expect("same-revision fresh restore succeeds");
+        assert_eq!(
+            with_state(|state| state.state_revision).expect("restored state exists"),
+            issued_revision
+        );
         assert_eq!(proposal_outcome(&token, player, &action)["status"], "stale");
         clear_game_state();
     }
@@ -7749,6 +8470,7 @@ mod tests {
 #[cfg(test)]
 mod replay_bridge_tests {
     use super::*;
+    use engine::game::start_game_winner_plays_first;
     use engine::types::game_state::WaitingFor;
 
     #[test]
@@ -7799,7 +8521,7 @@ mod replay_bridge_tests {
         clear_replay_playback();
 
         let mut state = GameState::new_two_player(99);
-        let start_result = start_game(&mut state);
+        let start_result = start_game_winner_plays_first(&mut state);
         let _ = start_result;
 
         let header = ReplayHeader {
@@ -7856,6 +8578,82 @@ mod replay_bridge_tests {
             0,
             "clear_replay_playback should drop the loaded replay"
         );
+        clear_game_state();
+    }
+
+    /// CR 103.1: a local game started by the engine's own contest rests at the
+    /// choice; the chooser's answer starts it, is recorded like any other
+    /// action, and a reloaded recording replays it to the same start.
+    #[test]
+    fn wasm_local_game_records_the_starting_player_choice() {
+        clear_game_state();
+        clear_replay_playback();
+
+        // Mirrors `initialize_game_impl`'s `first_player: None` start with no
+        // deck data: `start_game`, the replay header, the interaction bind and
+        // the install.
+        let mut state = GameState::new_two_player(99);
+        let _ = start_game(&mut state);
+        let WaitingFor::ChooseStartingPlayer { player: winner, .. } = state.waiting_for else {
+            panic!("the start rests at the CR 103.1 choice");
+        };
+        let starter = PlayerId(1 - winner.0);
+        let header = ReplayHeader {
+            format_config: state.format_config.clone(),
+            match_config: state.match_config,
+            player_count: state.players.len() as u8,
+            first_player: None,
+            seed: state.rng_seed,
+            deck_data: None,
+        };
+        REPLAY_LOG.with(|cell| cell.set(Some(ReplayLog::new(header))));
+        bind_interaction_session(&mut state);
+        install_game_state(Some(state));
+        assert!(
+            matches!(
+                with_installed_state(|state| state.waiting_for.clone()),
+                Ok(WaitingFor::ChooseStartingPlayer { .. })
+            ),
+            "reach: the installed game waits on the choice"
+        );
+
+        let submitted =
+            submit_action_inner(winner, GameAction::ChooseStartingPlayer { player: starter })
+                .expect("a game is installed");
+        assert!(
+            matches!(submitted, SubmittedAction::Applied { .. }),
+            "the chooser's answer applies"
+        );
+        let live = with_installed_state(GameState::clone).expect("a game is installed");
+        assert_eq!(live.turn_number, 1);
+        assert_eq!(live.current_starting_player, starter);
+        assert!(!matches!(
+            live.waiting_for,
+            WaitingFor::ChooseStartingPlayer { .. }
+        ));
+
+        let replay_json = export_replay_log().expect("the recording survives the answer");
+        assert!(
+            replay_json.contains("ChooseStartingPlayer"),
+            "the answer is a recorded action"
+        );
+        let length =
+            load_replay_for_playback(&replay_json).expect("exported replay should load back");
+        let replayed = REPLAY_PLAYER.with(|cell| {
+            let mut player = cell.take().expect("a replay is loaded");
+            let replayed = player
+                .seek(length)
+                .expect("the recorded answer replays")
+                .clone();
+            cell.set(Some(player));
+            replayed
+        });
+        assert_eq!(replayed.current_starting_player, starter);
+        assert_eq!(replayed.turn_number, live.turn_number);
+        assert_eq!(replayed.phase, live.phase);
+        assert_eq!(replayed.waiting_for, live.waiting_for);
+
+        clear_replay_playback();
         clear_game_state();
     }
 
@@ -7956,25 +8754,43 @@ mod replay_bridge_tests {
             "the engine source-bound creator owns the audit event"
         );
         assert_eq!(
-            result.log_entries.len(),
+            result
+                .log_entries
+                .iter()
+                .filter(|entry| entry.category == engine::types::log::LogCategory::Debug)
+                .count(),
             1,
             "the engine source-bound creator resolves the local audit log entry"
         );
+        assert_eq!(
+            result.log_entries.len(),
+            1 + 2 * 2,
+            "each forced token narrates its entry (a `from: None` ZoneChanged and a \
+             TokenCreated), on top of the single Debug audit entry"
+        );
         with_state(|state| {
+            let created: Vec<&engine::game::GameObject> = state
+                .objects
+                .values()
+                .filter(|object| object.name == "Test Card")
+                .collect();
             assert_eq!(
-                state
-                    .objects
-                    .values()
-                    .filter(|object| object.name == "Test Card")
-                    .count(),
+                created.len(),
                 2,
                 "a raw battlefield debug CreateCard batch materializes each token"
             );
-            let card = state
-                .objects
-                .values()
-                .find(|object| object.name == "Test Card")
-                .expect("debug-created card should exist");
+            for object in &created {
+                assert_eq!(
+                    object.zone,
+                    engine::types::zones::Zone::Battlefield,
+                    "CR 111.1: a battlefield token is created ON the battlefield"
+                );
+                assert!(
+                    state.battlefield.contains(&object.id),
+                    "the created token is on the battlefield list"
+                );
+            }
+            let card = created.first().expect("debug-created card should exist");
             assert!(card.is_token, "the WASM boundary must preserve Token");
             assert!(!card
                 .card_types
@@ -8830,6 +9646,7 @@ mod deck_list_seat_validation_tests {
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType, Supertype};
     use engine::types::custom_format::CustomFormatId;
+    use engine::types::format::ChallengeDeck;
     use engine::types::mana::ManaColor;
     use std::collections::BTreeMap;
 
@@ -9018,6 +9835,62 @@ mod deck_list_seat_validation_tests {
         )
         .expect("Standard refuses an empty deck");
         assert!(refused[0].starts_with("Player deck:"), "{refused:?}");
+    }
+
+    /// Commander-survivor Hordes initialize: the full local payload carries a
+    /// 100-card EDH deck on the survivor seat and an EMPTY seat for the
+    /// designated Horde seat (seat 1, the engine-supplied challenge library).
+    /// The Horde seat must not face the survivor deck-shape check.
+    ///
+    /// Revert guard: validating every seat refuses the empty Horde seat for
+    /// the 100-card Commander shape — the `None` flips to `Some`.
+    #[test]
+    fn horde_skips_designated_seats_and_validates_survivors() {
+        let db = test_db();
+        let mut config = FormatConfig::horde(ChallengeDeck::SauronHorde.default_ruleset());
+        // Production anchors the Horde at seat 1 (the `opponent` slot).
+        config.archenemy_player = Some(PlayerId(1));
+        assert_eq!(
+            config.horde_designated_seats(),
+            vec![PlayerId(1)],
+            "reach-guard: Sauron designates exactly the Horde seat"
+        );
+
+        let mut main_deck = n_plains(99);
+        let _ = main_deck.pop();
+        main_deck.push(LEGEND_B.to_string());
+        let survivor = PlayerDeckList {
+            main_deck,
+            commander: vec![LEGEND_A.to_string()],
+            ..Default::default()
+        };
+        let list = DeckList {
+            player: survivor,
+            opponent: PlayerDeckList::default(),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_deck_list_seats(&db, &list, &config, None, 2),
+            None,
+            "a valid survivor deck plus an empty Horde seat initializes"
+        );
+
+        // The skip is seat-scoped: a 60-card survivor is still refused.
+        let bad = DeckList {
+            player: plains_seat(60),
+            opponent: PlayerDeckList::default(),
+            ..Default::default()
+        };
+        let refused = validate_deck_list_seats(&db, &bad, &config, None, 2)
+            .expect("a 60-card survivor deck is refused for Sauron");
+        assert!(
+            refused[0].starts_with("Player deck:"),
+            "the SURVIVOR seat refuses, got {refused:?}"
+        );
+        assert!(
+            refused.iter().any(|r| r.contains("exactly 100 cards")),
+            "the Commander shape check fires, got {refused:?}"
+        );
     }
 
     #[test]
@@ -9232,6 +10105,139 @@ mod deck_list_seat_validation_tests {
                  being a commander: Plains"
                     .to_string()
             ]),
+        );
+    }
+
+    fn printing_entry(set_code: &str) -> engine::types::card_printing::DeckPrinting {
+        use engine::types::card_printing::{CardPrinting, DeckPrinting, DeckSection};
+        DeckPrinting {
+            section: DeckSection::MainDeck,
+            name: "Plains".to_string(),
+            count: 1,
+            printing: CardPrinting {
+                set_code: set_code.to_string(),
+                collector_number: "1".to_string(),
+            },
+        }
+    }
+
+    fn seat_with_printings(
+        printings: Vec<engine::types::card_printing::DeckPrinting>,
+    ) -> PlayerDeckList {
+        PlayerDeckList {
+            printings,
+            ..Default::default()
+        }
+    }
+
+    /// P2-V6 (D8): the WASM initialize half applies the engine's printings bound to
+    /// EVERY seat, labelling the refusal with the seat it came from.
+    #[test]
+    fn printings_bound_is_applied_to_every_seat_with_its_label() {
+        let oversized = || seat_with_printings(vec![printing_entry(&"s".repeat(33))]);
+        // Invalid but in-bounds annotations: the reach guard that the `None` below is
+        // a real acceptance of a non-empty sidecar, not a loop over empty seats.
+        let invalid_in_bounds = || {
+            seat_with_printings(vec![
+                printing_entry(""),
+                printing_entry("M\u{0}21"),
+                printing_entry("ZZZ"),
+            ])
+        };
+        let all_in_bounds = DeckList {
+            player: invalid_in_bounds(),
+            opponent: invalid_in_bounds(),
+            ai_decks: vec![invalid_in_bounds(), invalid_in_bounds()],
+            ..Default::default()
+        };
+        assert_eq!(deck_list_printings_violations(&all_in_bounds), None);
+
+        let violation = |reason_seat: &str| {
+            Some(vec![format!(
+                "{reason_seat} deck: printings[0].printing.set_code must be at most 32 bytes"
+            )])
+        };
+        let on_ai_player_3 = DeckList {
+            ai_decks: vec![invalid_in_bounds(), oversized()],
+            ..all_in_bounds.clone()
+        };
+        assert_eq!(
+            deck_list_printings_violations(&on_ai_player_3),
+            violation("AI player 3")
+        );
+        let on_opponent = DeckList {
+            opponent: oversized(),
+            ..all_in_bounds.clone()
+        };
+        assert_eq!(
+            deck_list_printings_violations(&on_opponent),
+            violation("AI opponent")
+        );
+        let on_player = DeckList {
+            player: oversized(),
+            ..all_in_bounds.clone()
+        };
+        assert_eq!(
+            deck_list_printings_violations(&on_player),
+            violation("Player")
+        );
+    }
+
+    /// A valid element followed by invalid annotations, the array `lobby-broker`'s
+    /// frame tests (P2-V4) use too: none of them is resource abuse.
+    fn invalid_annotations() -> serde_json::Value {
+        serde_json::json!([
+            { "section": "main_deck", "name": "Plains", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "mystery_zone", "name": "Plains", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            0,
+            { "section": "main_deck", "name": "Plains", "count": "one",
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "main_deck", "name": "", "count": 1,
+              "printing": { "set_code": "", "collector_number": "" } },
+            { "section": "main_deck", "name": "Bad\nName", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "main_deck", "name": "No Such Card Anywhere", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "main_deck", "name": "Plains", "count": 0,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+        ])
+    }
+
+    /// P2-V13: the P2P admission export's engine verdict applies the decode-time
+    /// entry cap and the byte caps, and admits a guest deck with no sidecar.
+    #[test]
+    fn admission_check_applies_the_entry_cap_and_the_byte_caps() {
+        let check = check_printings_bounds::<serde_json::Value>;
+
+        // Reach guards: the same helper admits invalid annotations (the decoder ran
+        // and the check passed them) and a deck with no `printings` key (`null`).
+        assert!(check(invalid_annotations()).is_ok());
+        assert!(check(serde_json::Value::Null).is_ok());
+        assert!(check(serde_json::json!(vec![0; 2048])).is_ok());
+
+        // Decode-time cap: 2049 elements the lenient decoder would drop. It surfaces as
+        // the decoder's own error (a JS `Error` object on the real path), not a string.
+        let err = check(serde_json::json!(vec![0; 2049])).unwrap_err();
+        assert!(matches!(err, PrintingsRefusal::Decode(_)), "{err}");
+        assert!(
+            err.to_string()
+                .contains("printings must contain at most 2048 entries"),
+            "{err}"
+        );
+
+        // Byte cap: fails if the `validate_deck_printings_bounds` line is removed,
+        // because the decoder alone admits it.
+        let long_code = serde_json::json!([{
+            "section": "main_deck", "name": "Plains", "count": 1,
+            "printing": { "set_code": "s".repeat(33), "collector_number": "1" },
+        }]);
+        let err = check(long_code).unwrap_err();
+        assert!(
+            matches!(&err, PrintingsRefusal::Bounds(reason)
+                if reason == "printings[0].printing.set_code must be at most 32 bytes"),
+            "{err}"
         );
     }
 }

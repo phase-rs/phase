@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Doubling Cube's ability is now a stackless mana ability (CR 605.1a + CR 701.10f), offered in payment windows and closing the land-mana undo window; pool doubling now includes colorless"
+}

@@ -1612,6 +1612,23 @@ fn main() {
     }
 
     gate_unmaterializable_name_copies_in_export(&mut face_index);
+    let misparses = engine::types::confirmed_misparse::ConfirmedMisparses::committed();
+    let stamped = misparses.stamp_all(
+        face_index
+            .iter_mut()
+            .map(|(key, entry)| (key.as_str(), &mut entry.face)),
+    );
+    eprintln!(
+        "Confirmed misparses: marked {} exported face(s)",
+        stamped.marked
+    );
+    if filter_names.is_empty() && !stamped.unmatched_keys.is_empty() {
+        eprintln!(
+            "Confirmed misparses: {} listed key(s) absent from export; sample: {:?}",
+            stamped.unmatched_keys.len(),
+            &stamped.unmatched_keys[..stamped.unmatched_keys.len().min(10)]
+        );
+    }
 
     let json = serde_json::to_string(&face_index).expect("Failed to serialize card data");
     if let (Some(trace), Some(manifest)) = (&trace_args, trace_manifest) {

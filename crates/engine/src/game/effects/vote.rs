@@ -830,6 +830,7 @@ mod tests {
         let token_def = AbilityDefinition::new(AbilityKind::Spell, Effect::Investigate); // simple stand-in
 
         let ability = ResolvedAbility {
+            coin_branches: None,
             declares_chosen_group: None,
             reads_chosen_group: None,
             declares_return_result: None,
@@ -964,6 +965,7 @@ mod tests {
             })
             .collect();
         ResolvedAbility {
+            coin_branches: None,
             declares_chosen_group: None,
             reads_chosen_group: None,
             declares_return_result: None,
@@ -1463,6 +1465,7 @@ mod tests {
 
         // Build a ResolvedAbility from the parsed AbilityDefinition.
         let ability = ResolvedAbility {
+            coin_branches: None,
             declares_chosen_group: None,
             reads_chosen_group: None,
             declares_return_result: None,
@@ -1646,6 +1649,7 @@ mod tests {
             })
             .collect();
         let ability = ResolvedAbility {
+            coin_branches: None,
             declares_chosen_group: None,
             reads_chosen_group: None,
             declares_return_result: None,
