@@ -5239,9 +5239,7 @@ mod tests {
     #[test]
     fn is_source_blocked_reads_blocked_flag_not_assignments() {
         // CR 509.1h: `is_source_blocked` must read the attacker's `blocked` flag,
-        // so a creature made blocked by an effect (with NO blocker_assignments)
-        // reads true. This assertion fails if the body is reverted to the old
-        // `blocker_assignments`-non-empty check.
+        // so a creature made blocked by an effect reads true without assignments.
         use crate::game::combat::{
             mark_attacker_blocked, place_blocking, AttackTarget, AttackerInfo, CombatState,
         };
@@ -5269,6 +5267,15 @@ mod tests {
             Zone::Battlefield,
         );
         state.objects.get_mut(&blocker).unwrap().controller = PlayerId(1);
+        for id in [effect_blocked, normally_blocked, blocker] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
 
         let mut combat = CombatState::default();
         combat.attackers.push(AttackerInfo::new(
@@ -5292,7 +5299,12 @@ mod tests {
 
         // Reach-guard: a normally place_blocking-blocked attacker also reads true,
         // proving the assertion above is not vacuous.
-        assert!(place_blocking(&mut state, blocker, normally_blocked));
+        assert!(place_blocking(
+            &mut state,
+            blocker,
+            normally_blocked,
+            &mut Vec::new()
+        ));
         assert!(is_source_blocked(&state, normally_blocked));
     }
 
