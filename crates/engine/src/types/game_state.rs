@@ -38684,6 +38684,7 @@ impl GameState {
             last_effect_excess_amount: _,
             die_result_this_resolution: _,
             last_effect_count: _,
+            resolving_head_payment_origin: _,
             last_effect_counts_by_player: _,
             clause_minimum_snapshot: _,
             control_change_captures: _,
