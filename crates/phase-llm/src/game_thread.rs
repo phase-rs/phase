@@ -26,16 +26,18 @@
 //!   and a reply id can be continued only once, so the thread cannot go on
 //!   from its last answered turn and the seat's next decision starts a new one.
 //! - **Start over.** A new thread is created, with the full request, when the
-//!   match moves on to its next game, when the endpoint or model changes, when the system prompt changes (difficulty,
-//!   format, or the table itself), when the last reply reported more context
-//!   than [`THREAD_CONTEXT_BUDGET_TOKENS`] or no usage at all, when the log
-//!   was rewound under the thread, and when more was logged since the seat's
-//!   last answer than its history window shows (the full request summarizes
-//!   older turns, which a continue cannot).
+//!   match moves on to its next game, when the endpoint or model changes,
+//!   when the system prompt changes (difficulty, format, or the table itself),
+//!   when the last reply reported more context than
+//!   [`THREAD_CONTEXT_BUDGET_TOKENS`] or no usage at all, when the log was
+//!   rewound under the thread, and when a continue cannot carry everything
+//!   since the seat's last answer: more was logged than its history window
+//!   shows, or the log handed over no longer reaches back that far (the full
+//!   request summarizes older turns, which a continue cannot).
 //! - **No thread at all.** The two lowest difficulties never use one: they
 //!   deliberately reason from a near-term window, which a thread would undo.
-//!   Neither does a decision between games (sideboarding, the play/draw
-//!   choice), which belongs to no game ([`GameDecisionRequest::thread_game`]).
+//!   Neither does a decision between games (the play/draw choice), which
+//!   belongs to no game ([`GameDecisionRequest::thread_game`]).
 //! - **Thread errors.** A thread is best effort: the API drops one after five
 //!   idle minutes, among other reasons. On a thread error the seat's thread is
 //!   dropped ([`LlmThreadMemory::record_reply`]) and the caller asks the same
@@ -195,7 +197,7 @@ impl LlmThreadMemory {
     /// not opt in, and every protocol but Anthropic Messages — and a seat whose
     /// decision may not use one ([`GameDecisionRequest::thread_game`]) get
     /// exactly [`build_chat_request`]'s request, and any thread the seat held
-    /// is forgotten. Otherwise the request continues the seat's thread when it
+    /// is forgotten (an endpoint's refusal of threads is kept). Otherwise the request continues the seat's thread when it
     /// can and creates a new one when it cannot, and is remembered as pending
     /// until [`Self::record_reply`].
     ///
@@ -219,7 +221,12 @@ impl LlmThreadMemory {
         let game_number = match decision.thread_game() {
             Some(game_number) if endpoint.uses_message_threads() => game_number,
             _ => {
-                self.seats.remove(&seat);
+                // The seat's thread is forgotten; an endpoint's refusal of
+                // threads is not, because it outlasts any one thread.
+                if let Some(thread) = self.seats.get_mut(&seat) {
+                    thread.open = None;
+                    thread.pending = None;
+                }
                 return build_chat_request(endpoint, &decision.prompt).map(full);
             }
         };
@@ -1146,6 +1153,44 @@ mod tests {
             .unwrap()
             .request;
         assert!(is_create(&next_game));
+    }
+
+    /// An endpoint's refusal of threads outlasts the game it was learned in:
+    /// a decision between games that uses no thread does not forget it.
+    #[test]
+    fn a_refused_endpoint_stays_self_contained_across_a_decision_between_games() {
+        let mut memory = LlmThreadMemory::new();
+        let first = decision_in_game(1, AiDifficulty::Medium, 1);
+        memory
+            .decision_request(SEAT, &threaded(), &first, &log(2))
+            .unwrap();
+        lose_thread(
+            &mut memory,
+            &first.fingerprint,
+            ThreadErrorCode::UnsupportedRequest,
+        );
+
+        let mut between = GameState::default();
+        between.game_number = 2;
+        between.match_phase = engine::types::match_config::MatchPhase::BetweenGames;
+        memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision_on(&between, 2, AiDifficulty::Medium),
+                &log(3),
+            )
+            .unwrap();
+
+        let next_game = decision_in_game(3, AiDifficulty::Medium, 2);
+        let sent = memory
+            .decision_request(SEAT, &threaded(), &next_game, &log(4))
+            .unwrap()
+            .request;
+        assert_eq!(
+            sent,
+            build_chat_request(&threaded(), &next_game.prompt).unwrap()
+        );
     }
 
     /// The thread setting off, or any protocol but Anthropic Messages, sends
