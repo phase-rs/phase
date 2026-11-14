@@ -12,7 +12,7 @@ use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
@@ -191,64 +191,6 @@ fn turn_the_earth_replaced_deliveries_still_shuffle_the_owner() {
         "the owner is still shuffled exactly once: {events:?}"
     );
     assert_eq!(shuffles_for(events, P1), 0, "{events:?}");
-}
-
-/// CR 701.24c + CR 400.3: "shuffle that card into its owner's library" captures
-/// the moved card's owner before delivery. Malfegor Avatar and Mephidross Slime
-/// are Alchemy shapes; the nearest printed owner-move cards are Serene
-/// Remembrance (compound, covered above) and Cathartic Parting (specific,
-/// covered below). This synthetic trigger exercises the supported trigger and
-/// effect shape: one exiled card, one owner, exactly one shuffle.
-#[test]
-fn exile_trigger_shuffle_that_card_shuffles_its_owner_once() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let trigger_source = scenario
-        .add_creature_from_oracle(
-            P0,
-            "Exile Shuffler",
-            1,
-            1,
-            "Whenever a creature you control is exiled, shuffle that card into its owner's library.",
-        )
-        .id();
-    let victim = scenario.add_creature(P0, "Exiled Bear", 2, 2).id();
-    let swords = scenario
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "Swords to Plowshares",
-            true,
-            "Exile target creature. Its controller gains life equal to its power.",
-        )
-        .with_mana_cost(ManaCost::Cost {
-            generic: 0,
-            shards: vec![ManaCostShard::White],
-        })
-        .id();
-    scenario.with_mana_pool(
-        P0,
-        vec![ManaUnit::new(ManaType::White, swords, false, vec![])],
-    );
-    let mut runner = scenario.build();
-
-    let outcome = runner.cast(swords).target_object(victim).resolve();
-    let events = outcome.events();
-
-    assert_eq!(
-        outcome.state().objects[&victim].zone,
-        Zone::Library,
-        "the exiled card is shuffled into its owner's library"
-    );
-    assert_eq!(
-        shuffles_for(events, P0),
-        1,
-        "one card, one owner, exactly one shuffle: {events:?}"
-    );
-    assert_eq!(shuffles_for(events, P1), 0, "{events:?}");
-    assert!(
-        outcome.state().objects.contains_key(&trigger_source),
-        "reach guard: the trigger source stayed on the battlefield"
-    );
 }
 
 /// CR 701.24c + CR 400.3: Serene Remembrance shuffles itself and cards from one

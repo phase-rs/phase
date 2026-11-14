@@ -784,72 +784,6 @@ pub(crate) fn until_event_already_occurred(
         })
 }
 
-/// CR 400.7 + CR 603.2: the zone a move expects its object to be in — the
-/// effect's origin, or for an event referent the zone the trigger event put it
-/// in.
-/// CR 400.7 + CR 701.24c: "shuffle this creature/permanent" acts only on the
-/// source while it is the permanent it was on the battlefield; a source that
-/// left (sacrificed as a cost, destroyed in response) must not be moved out of
-/// its graveyard. A spell source ("shuffle ~ into its owner's library") is the
-/// object on the stack. The parser cannot see the card type at this seam, so
-/// derive the expected zone from the exact source incarnation.
-fn self_ref_owner_move_origin(
-    state: &GameState,
-    ability: &ResolvedAbility,
-    origin: Option<Zone>,
-    target_filter: &TargetFilter,
-    owner_library: bool,
-) -> Option<Zone> {
-    if origin.is_some() || !owner_library || !matches!(target_filter, TargetFilter::SelfRef) {
-        return origin;
-    }
-    let Some(source) = state.objects.get(&ability.source_id) else {
-        return origin;
-    };
-    // CR 400.7j: a cost that moved the source to a public zone followed by the
-    // ability can find that exact successor. This is the Assemble from Parts
-    // "Exile this card from your graveyard: Shuffle it …" path, and also the
-    // dies-trigger's recorded graveyard successor.
-    if let Some(binding) = ability.self_ref_binding(state) {
-        if let Some(bound) = state.objects.get(&binding) {
-            return Some(bound.zone);
-        }
-    }
-    if let Some(paid) = ability.cost_paid_object.as_ref() {
-        if paid.object_id == ability.source_id {
-            if let Some(bound) = state.objects.get(&paid.object_id) {
-                if bound.zone.is_public() {
-                    return Some(bound.zone);
-                }
-            }
-        }
-    }
-    use crate::types::card_type::CoreType;
-    let is_permanent = source.card_types.core_types.iter().any(|core| {
-        matches!(
-            core,
-            CoreType::Artifact
-                | CoreType::Battle
-                | CoreType::Creature
-                | CoreType::Enchantment
-                | CoreType::Land
-                | CoreType::Planeswalker
-        )
-    });
-    if is_permanent {
-        Some(Zone::Battlefield)
-    } else if source
-        .card_types
-        .core_types
-        .iter()
-        .any(|core| matches!(core, CoreType::Instant | CoreType::Sorcery))
-    {
-        Some(Zone::Stack)
-    } else {
-        origin
-    }
-}
-
 fn expected_move_origin(
     state: &GameState,
     origin: Option<Zone>,
@@ -1197,7 +1131,6 @@ pub fn resolve(
     }
     let target_filter = &effective_target_filter;
     let origin = expected_move_origin(state, origin, target_filter);
-    let origin = self_ref_owner_move_origin(state, ability, origin, target_filter, owner_library);
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(state, ability, target_filter);
     let performer = instruction_performer(state, ability, filter_controller);

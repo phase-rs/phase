@@ -332,17 +332,21 @@ fn parser_produces_compound_shuffle_chain() {
         "shuffle ~ and target creature with a stun counter on it into their owners' libraries",
     );
 
-    // Primary effect should be ChangeZone to Library with SelfRef
+    // CR 608.2f: self+target is one grouped Or move so both members share a
+    // single logical zone-change group.
     match &effect {
         Effect::ChangeZone {
             destination: Zone::Library,
-            target: TargetFilter::SelfRef,
+            target: TargetFilter::Or { filters },
             owner_library: true,
-            enter_transformed: false,
+            library_shuffle: engine::types::ability::LibraryShuffleMode::TerminalShuffle,
             ..
-        } => {} // expected
+        } => assert!(
+            filters.iter().any(|f| matches!(f, TargetFilter::SelfRef)) && filters.len() == 2,
+            "grouped Or pairs the source and the stun-counter target: {filters:?}"
+        ),
         other => panic!(
-            "expected ChangeZone(SelfRef, Library, owner_library=true), got {:?}",
+            "expected grouped ChangeZone(Or(SelfRef, target), Library), got {:?}",
             other
         ),
     }
