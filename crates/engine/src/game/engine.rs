@@ -26,7 +26,7 @@ use crate::types::game_state::{
     PostReplacementDrainStack, ResolveAllConsentParticipant, ResolveAllConsentRun,
     ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind,
     StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
-    StackResolutionPolicy, StackResolutionSession, WaitingFor,
+    StackResolutionPolicy, StackResolutionSession, UntapStepProgress, WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -12926,11 +12926,15 @@ fn apply_action(
 /// the step is left when the players next pass priority. CR 502.4 gives no
 /// player priority during the untap step; this window is the handler's
 /// departure from it.
-/// The resume repeats no CR 502.1/502.2 action: `begin_untap_step` already ran
-/// them, and CR 502.4 admits nothing in between.
+/// The answered prompt's `progress` says where the step continues. A current
+/// prompt's resume repeats no CR 502.1/502.2 action: `begin_untap_step` already
+/// ran them, and CR 502.4 admits nothing in between. A prompt an earlier build
+/// raised before those actions restarts the step instead; its answer is
+/// discarded, so its callers pass no declines.
 fn untap_completion_waiting_for(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
+    progress: UntapStepProgress,
     chosen_not_to_untap: HashSet<ObjectId>,
 ) -> WaitingFor {
     // CR 500.1 + CR 500.8: the untap step's leave can end the turn, and the
@@ -12947,7 +12951,21 @@ fn untap_completion_waiting_for(
             player: state.active_player,
         },
     );
-    match turns::resume_untap_step(state, events, chosen_not_to_untap) {
+    let completion = match progress {
+        UntapStepProgress::AfterTurnBasedActions => {
+            turns::resume_untap_step(state, events, chosen_not_to_untap)
+        }
+        // CR 502.1 + CR 502.2 + CR 502.3: the determination was offered on the board before
+        // phasing, so its answer is not a CR 502.3 determination of the board the untap acts
+        // on. Begin the step from its first action; it offers fresh determinations. A
+        // main-era save carries no previous-turn record (that build checked day and night at
+        // the previous cleanup step), so the restarted CR 502.2 check changes nothing.
+        UntapStepProgress::BeforeTurnBasedActions => {
+            state.pending_untap_declines.clear();
+            turns::begin_untap_step(state, events)
+        }
+    };
+    match completion {
         turns::UntapCompletion::Determination(prompt) => *prompt,
         // CR 500.8 + CR 500.9: a later step the interpreter reaches without
         // priority (another added untap step, or the cleanup step after a
@@ -16070,6 +16088,7 @@ fn apply_non_priority_pass_action(
                 player,
                 candidates,
                 chosen_not_to_untap,
+                progress,
             },
             GameAction::ChooseUntap { object_id, untap },
         ) => {
@@ -16094,18 +16113,28 @@ fn apply_non_priority_pass_action(
                 declined.push(object_id);
             }
 
-            if !remaining.is_empty() {
-                WaitingFor::UntapChoice {
-                    player: *player,
-                    candidates: remaining,
-                    chosen_not_to_untap: declined,
+            match progress {
+                // CR 502.3: the next optional decline of this determination.
+                UntapStepProgress::AfterTurnBasedActions if !remaining.is_empty() => {
+                    WaitingFor::UntapChoice {
+                        player: *player,
+                        candidates: remaining,
+                        chosen_not_to_untap: declined,
+                        progress: *progress,
+                    }
                 }
-            } else {
-                // CR 502.3: Declines are recorded; now either surface the
-                // required bounded `ChooseUntapSubset` prompt (a MaxUntapPerType
-                // cap is over its limit after declines) or untap + advance.
-                let skipped: std::collections::HashSet<ObjectId> = declined.into_iter().collect();
-                untap_completion_waiting_for(state, &mut events, skipped)
+                UntapStepProgress::AfterTurnBasedActions => {
+                    // CR 502.3: Declines are recorded; now either surface the
+                    // required bounded `ChooseUntapSubset` prompt (a MaxUntapPerType
+                    // cap is over its limit after declines) or untap + advance.
+                    let skipped: std::collections::HashSet<ObjectId> =
+                        declined.into_iter().collect();
+                    untap_completion_waiting_for(state, &mut events, *progress, skipped)
+                }
+                // CR 502.1 + CR 502.3: a prompt raised before phasing restarts the step.
+                UntapStepProgress::BeforeTurnBasedActions => {
+                    untap_completion_waiting_for(state, &mut events, *progress, HashSet::new())
+                }
             }
         }
         // CR 502.3: The active player directly determines which permanents untap
@@ -16116,7 +16145,12 @@ fn apply_non_priority_pass_action(
         // advances. The enforcement clamp inside `execute_untap_with_choices`
         // remains as a safety net for any selection that slips past validation.
         (
-            WaitingFor::ChooseUntapSubset { player, group, max },
+            WaitingFor::ChooseUntapSubset {
+                player,
+                group,
+                max,
+                progress,
+            },
             GameAction::SelectCards { cards: chosen },
         ) => {
             if state.priority_player
@@ -16141,19 +16175,27 @@ fn apply_non_priority_pass_action(
                     "Untap subset object {bad:?} is not in the over-cap group"
                 )));
             }
-            // CR 502.3: the complement of the chosen set within the prompted
-            // group stays tapped. Combine with the declines stashed from the
-            // preceding optional-decline prompt.
-            let mut skipped: std::collections::HashSet<ObjectId> =
-                std::mem::take(&mut state.pending_untap_declines)
-                    .into_iter()
-                    .collect();
-            for id in group {
-                if !chosen_set.contains(id) {
-                    skipped.insert(*id);
+            let skipped = match progress {
+                // CR 502.3: the complement of the chosen set within the prompted
+                // group stays tapped. Combine with the declines stashed from the
+                // preceding optional-decline prompt.
+                UntapStepProgress::AfterTurnBasedActions => {
+                    let mut skipped: std::collections::HashSet<ObjectId> =
+                        std::mem::take(&mut state.pending_untap_declines)
+                            .into_iter()
+                            .collect();
+                    for id in group {
+                        if !chosen_set.contains(id) {
+                            skipped.insert(*id);
+                        }
+                    }
+                    skipped
                 }
-            }
-            untap_completion_waiting_for(state, &mut events, skipped)
+                // CR 502.1 + CR 502.3: a prompt raised before phasing restarts the step,
+                // which discards this answer and the stashed declines.
+                UntapStepProgress::BeforeTurnBasedActions => HashSet::new(),
+            };
+            untap_completion_waiting_for(state, &mut events, *progress, skipped)
         }
         // CR 508.1g + CR 701.43d: the active player decides whether to pay the
         // optional "exert as it attacks" cost for the prompted attacker, one

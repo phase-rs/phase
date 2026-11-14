@@ -17207,6 +17207,30 @@ pub struct PendingAttackExert {
     pub permission: TriggerDefinitionRef,
 }
 
+/// CR 502.1 + CR 502.2 + CR 502.3: how far the untap step had run when one of its CR 502.3
+/// determinations (`WaitingFor::UntapChoice`, `WaitingFor::ChooseUntapSubset`) was raised.
+/// Serialized unconditionally (no `skip_serializing_if`) by every writer, so its absence on
+/// the wire is a fact about the writer, as with `AbilityOnsetRecord`: a build that offered
+/// the determinations before phasing and the day/night check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UntapStepProgress {
+    /// Phasing (CR 502.1) and the day/night check (CR 502.2) had not run when the
+    /// determination was offered. Only a game saved by an earlier build carries it; its answer
+    /// restarts the step from its first action (`engine::untap_completion_waiting_for`).
+    BeforeTurnBasedActions,
+    /// CR 502.1 and CR 502.2 ran exactly once before the determination
+    /// (`turns::begin_untap_step`); its answer resumes at the untap.
+    AfterTurnBasedActions,
+}
+
+impl UntapStepProgress {
+    /// Serde default for a prompt saved without the field. Every deployed build that wrote
+    /// one raised it before the untap step's turn-based actions.
+    fn absent_on_wire() -> Self {
+        Self::BeforeTurnBasedActions
+    }
+}
+
 // clippy::large_enum_variant: Intentional. `WaitingFor` is stored inline in
 // `GameState`; the stack budget that matters is the `GameState` ceiling in
 // `types/game_state_size.rs`, and this enum's inline size is already inside
@@ -17489,6 +17513,9 @@ pub enum WaitingFor {
         candidates: Vec<ObjectId>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         chosen_not_to_untap: Vec<ObjectId>,
+        /// Where the untap step stood when this prompt was raised; the answer resumes there.
+        #[serde(default = "UntapStepProgress::absent_on_wire")]
+        progress: UntapStepProgress,
     },
     /// CR 502.3: "the active player determines which permanents they control
     /// will untap." When a `StaticMode::MaxUntapPerType` cap (Smoke /
@@ -17511,6 +17538,9 @@ pub enum WaitingFor {
         group: Vec<ObjectId>,
         /// CR 502.3 cap: the player may untap at most this many of `group`.
         max: usize,
+        /// Where the untap step stood when this prompt was raised; the answer resumes there.
+        #[serde(default = "UntapStepProgress::absent_on_wire")]
+        progress: UntapStepProgress,
     },
     /// CR 508.1g + CR 701.43d: As attackers are declared, the active player may
     /// pay the optional "exert this creature as it attacks" cost on each
@@ -39130,6 +39160,7 @@ mod forced_cascade_window_tests {
                     player: PlayerId(0),
                     candidates: vec![ObjectId(6)],
                     chosen_not_to_untap: Vec::new(),
+                    progress: UntapStepProgress::AfterTurnBasedActions,
                 },
             ),
             (
@@ -39138,6 +39169,7 @@ mod forced_cascade_window_tests {
                     player: PlayerId(0),
                     group: vec![ObjectId(6), ObjectId(7)],
                     max: 1,
+                    progress: UntapStepProgress::AfterTurnBasedActions,
                 },
             ),
             (
@@ -54826,11 +54858,47 @@ mod tests {
             player: PlayerId(0),
             group: vec![ObjectId(2), ObjectId(3), ObjectId(4)],
             max: 1,
+            progress: UntapStepProgress::AfterTurnBasedActions,
         };
         let json = serde_json::to_string(&wf).unwrap();
         let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
         assert_eq!(wf, deserialized);
         assert!(json.contains("\"ChooseUntapSubset\""));
+    }
+
+    /// CR 502.1 + CR 502.3: a current untap prompt writes its progress, and one saved
+    /// without it decodes as raised before the untap step's turn-based actions.
+    #[test]
+    fn unmarked_untap_prompts_decode_as_raised_before_the_turn_based_actions() {
+        for current in [
+            WaitingFor::UntapChoice {
+                player: PlayerId(1),
+                candidates: vec![ObjectId(7)],
+                chosen_not_to_untap: vec![ObjectId(8)],
+                progress: UntapStepProgress::AfterTurnBasedActions,
+            },
+            WaitingFor::ChooseUntapSubset {
+                player: PlayerId(1),
+                group: vec![ObjectId(2), ObjectId(3)],
+                max: 1,
+                progress: UntapStepProgress::AfterTurnBasedActions,
+            },
+        ] {
+            let mut value = serde_json::to_value(&current).unwrap();
+            assert_eq!(value["data"]["progress"], "AfterTurnBasedActions");
+            assert_eq!(
+                serde_json::from_value::<WaitingFor>(value.clone()).unwrap(),
+                current
+            );
+            value["data"].as_object_mut().unwrap().remove("progress");
+            let unmarked = serde_json::from_value::<WaitingFor>(value).unwrap();
+            let progress = match unmarked {
+                WaitingFor::UntapChoice { progress, .. }
+                | WaitingFor::ChooseUntapSubset { progress, .. } => progress,
+                other => panic!("decoded {other:?}"),
+            };
+            assert_eq!(progress, UntapStepProgress::BeforeTurnBasedActions);
+        }
     }
 
     // ---------------------------------------------------------------------

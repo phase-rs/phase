@@ -27,7 +27,7 @@ use engine::types::game_state::{
     AlternativeCastKeyword, AutoPassMode, CastPaymentMode, GameState, ManaChoice, ManaChoicePrompt,
     MulliganBottomEntry, MulliganDecisionEntry, MulliganDecisionPhase, OpeningHandBottomReason,
     PendingTriggerSummary, PlayerDeckPool, ResolutionOptionalPaymentOption, TurnBoundary,
-    WaitingFor, ZoneOpponentChooserPurpose,
+    UntapStepProgress, WaitingFor, ZoneOpponentChooserPurpose,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::interaction::{
@@ -419,6 +419,7 @@ fn attachment_fans_are_per_interaction_filtered_and_direct() {
             player: P0,
             group: vec![attachment, unrelated],
             max: 1,
+            progress: UntapStepProgress::AfterTurnBasedActions,
         };
         bind(state, "attachment-fan");
     }
@@ -510,6 +511,7 @@ fn attachment_views_publish_the_whole_subtree_whatever_is_pickable() {
             player: P0,
             group: vec![nested],
             max: 1,
+            progress: UntapStepProgress::AfterTurnBasedActions,
         };
         bind(state, "attachment-view");
     }
@@ -995,6 +997,7 @@ fn attachment_views_follow_visibility_while_fans_follow_authorization() {
             player: P0,
             group: vec![attachment],
             max: 1,
+            progress: UntapStepProgress::AfterTurnBasedActions,
         };
         bind(state, "attachment-view-links");
     }
@@ -7387,6 +7390,7 @@ fn untap_choice_direct_authority_includes_accept_and_decline() {
         player: P0,
         candidates: vec![permanent],
         chosen_not_to_untap: Vec::new(),
+        progress: UntapStepProgress::AfterTurnBasedActions,
     };
     bind(runner.state_mut(), "untap-both");
     let view = priority_view(runner.state());

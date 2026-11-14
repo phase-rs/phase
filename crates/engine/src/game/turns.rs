@@ -13,7 +13,7 @@ use crate::types::format::GameFormat;
 use crate::types::game_state::{
     AutoPassMode, EmptyPoolLifeLossCause, ExtraPhase, ExtraTurn, GameState, InsertedPhaseResume,
     LoopCollapseAxis, PayableResource, PendingCounterAddition, PendingEffectResolved,
-    PendingEmptyPoolLifeLoss, TurnBoundary, WaitingFor,
+    PendingEmptyPoolLifeLoss, TurnBoundary, UntapStepProgress, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
@@ -2256,6 +2256,7 @@ pub enum UntapCompletion {
 /// phased in, or that the designation turned over, is the one the active player determines
 /// about (CR 502.3). A determination's answer resumes at [`resume_untap_step`], which does
 /// not repeat them.
+/// Both determinations it can raise record `UntapStepProgress::AfterTurnBasedActions`.
 pub fn begin_untap_step(state: &mut GameState, events: &mut Vec<GameEvent>) -> UntapCompletion {
     perform_untap_step_turn_based_actions(state, events);
     let candidates = untap_choice_candidates(state, state.active_player);
@@ -2264,6 +2265,7 @@ pub fn begin_untap_step(state: &mut GameState, events: &mut Vec<GameEvent>) -> U
             player: state.active_player,
             candidates,
             chosen_not_to_untap: Vec::new(),
+            progress: UntapStepProgress::AfterTurnBasedActions,
         }));
     }
     resume_untap_step(state, events, HashSet::new())
@@ -2293,6 +2295,7 @@ pub fn resume_untap_step(
             player: active,
             group,
             max,
+            progress: UntapStepProgress::AfterTurnBasedActions,
         }));
     }
     untap_permanents(state, events, &chosen_not_to_untap);
@@ -2498,6 +2501,8 @@ fn untap_permanents(
         }
     }
 
+    // CR 502.3 + CR 702.26b: a permanent that phased out earlier in this step (CR 502.1) is
+    // treated as though it does not exist, so it is not untapped and stays tapped.
     let to_untap: Vec<_> = state
         .battlefield
         .iter()
@@ -2506,7 +2511,7 @@ fn untap_permanents(
             state
                 .objects
                 .get(id)
-                .map(|obj| obj.controller == active && obj.tapped)
+                .map(|obj| obj.controller == active && obj.tapped && !obj.is_phased_out())
                 .unwrap_or(false)
         })
         .collect();
@@ -4206,8 +4211,9 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // CR 614.1b + CR 614.10a: Skip the untap step if a static or
             // one-shot "skip your next untap step" replacement applies.
             if !should_skip_step_now(state, Phase::Untap) {
-                // CR 502.1 + CR 502.2 + CR 502.3: a standing determination means the
-                // turn-based actions ran; re-entry must not phase the permanents again
+                // CR 502.1 + CR 502.2 + CR 502.3: a standing determination is answered by
+                // the reducer, which resumes from the point the prompt records
+                // (`UntapStepProgress`); re-entry must not phase the permanents again
                 // (CR 702.26a). Mirrors the pending_phase_transition_progress guard above.
                 if matches!(
                     state.waiting_for,
@@ -8074,7 +8080,9 @@ card into your hand at the beginning of your next end step.";
             panic!("expected ChooseUntapSubset prompt, got {prompt:?}");
         };
         match *prompt {
-            WaitingFor::ChooseUntapSubset { player, group, max } => {
+            WaitingFor::ChooseUntapSubset {
+                player, group, max, ..
+            } => {
                 assert_eq!(player, PlayerId(0));
                 assert_eq!(max, 1);
                 let mut g = group;
@@ -11467,6 +11475,7 @@ card into your hand at the beginning of your next end step.";
             player: PlayerId(0),
             candidates: vec![optional],
             chosen_not_to_untap: Vec::new(),
+            progress: UntapStepProgress::AfterTurnBasedActions,
         };
         apply(
             state,

@@ -78,7 +78,8 @@ use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::format::{ChallengeDeck, FormatConfig, WaveTermination};
 use engine::types::game_state::{
-    CastOfferKind, CastPaymentMode, DayNight, GameState, ReplacementChoiceKind, StackEntryKind,
+    CastOfferKind, CastPaymentMode, DayNight, GameState, PersistedGameState,
+    PersistedRestoreFinalization, ReplacementChoiceKind, StackEntryKind, UntapStepProgress,
     WaitingFor,
 };
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -239,6 +240,9 @@ const GHOSTLY_PILFERER_ORACLE: &str = "Whenever this creature becomes untapped, 
 
 const HEDGE_WHISPERER: &str = "Hedge Whisperer";
 const HEDGE_WHISPERER_ORACLE: &str = "You may choose not to untap this creature during your untap step.\n{3}{G}, {T}, Collect evidence 4: Target land you control becomes a 5/5 green Plant Boar creature with haste for as long as this creature remains tapped. It's still a land. Activate only as a sorcery. (To collect evidence 4, exile cards with total mana value 4 or greater from your graveyard.)";
+const SEEDBORN_MUSE: &str = "Seedborn Muse";
+const SEEDBORN_MUSE_ORACLE: &str =
+    "Untap all permanents you control during each other player's untap step.";
 
 const SULFURIC_VORTEX: &str = "Sulfuric Vortex";
 const SULFURIC_VORTEX_ORACLE: &str = "At the beginning of each player's upkeep, this enchantment deals 2 damage to that player.\nIf a player would gain life, that player gains no life instead.";
@@ -6688,7 +6692,7 @@ fn untap_determinations_resume_without_repeating_phasing() {
                 .events,
         );
         assert!(
-            matches!(&runner.state().waiting_for, WaitingFor::ChooseUntapSubset { player: P1, group, max: 1 } if sorted(group.clone()) == sorted(vec![a,b]))
+            matches!(&runner.state().waiting_for, WaitingFor::ChooseUntapSubset { player: P1, group, max: 1, .. } if sorted(group.clone()) == sorted(vec![a,b]))
         );
         events.extend(
             runner
@@ -6767,6 +6771,590 @@ fn untap_determination_offers_a_whisperer_that_just_phased_in() {
     assert_eq!(runner.state().phase, Phase::Upkeep);
     assert!(runner.state().objects[&whisperer].tapped);
     assert_settled(&runner);
+}
+
+/// Saves written by a main build (`f2fde9eab`, this PR's base on upstream main), whose untap
+/// step offered its determinations before phasing and the day/night check. Each board was set
+/// up with `GameScenario` and driven to P1's untap step through public actions only, then
+/// written with `serde_json::to_string(&PersistedGameState::capture(state))`, the trusted
+/// envelope the WASM export and server-core persist. Regeneration needs a build of
+/// `f2fde9eab`.
+const MAIN_BUILD_UNTAP_CHOICE: &str =
+    include_str!("../fixtures/legacy_untap_prompts/untap_choice.json");
+const MAIN_BUILD_UNTAP_SUBSET: &str =
+    include_str!("../fixtures/legacy_untap_prompts/untap_subset.json");
+const MAIN_BUILD_PHASED_OUT_CANDIDATE: &str =
+    include_str!("../fixtures/legacy_untap_prompts/phased_out_candidate.json");
+
+/// Restore through the persisted pipeline every load uses (the WASM restore and
+/// server-core's `from_persisted` call this chokepoint).
+fn restore_save(save: serde_json::Value) -> GameRunner {
+    let state = serde_json::from_value::<PersistedGameState>(save)
+        .expect("persisted state decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+        .expect("persisted state is admissible")
+        .finalize_after_rehydration(|_| Ok(()))
+        .expect("restored state is publishable");
+    GameRunner::from_state(state)
+}
+
+/// Capture the same trusted envelope that production persistence writes.
+fn save_of(runner: &GameRunner) -> serde_json::Value {
+    serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("state serializes")
+}
+
+/// The battlefield objects named `name`, by id.
+fn named(runner: &GameRunner, name: &str) -> Vec<ObjectId> {
+    sorted(
+        runner
+            .state()
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| runner.state().objects[id].name == name)
+            .collect(),
+    )
+}
+
+/// `(phased out, phased in)` events for `id`.
+fn phasings(events: &[GameEvent], id: ObjectId) -> (usize, usize) {
+    (
+        events.iter().filter(|e| matches!(e, GameEvent::PermanentPhasedOut { object_id, .. } if *object_id == id)).count(),
+        events.iter().filter(|e| matches!(e, GameEvent::PermanentPhasedIn { object_id } if *object_id == id)).count(),
+    )
+}
+
+/// Phase and untap events for `id`, preserving event order.
+fn phase_and_untap(events: &[GameEvent], id: ObjectId) -> Vec<&'static str> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PermanentPhasedOut { object_id, .. } if *object_id == id => Some("out"),
+            GameEvent::PermanentPhasedIn { object_id } if *object_id == id => Some("in"),
+            GameEvent::PermanentUntapped { object_id } if *object_id == id => Some("untap"),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 502.1 + CR 502.2 + CR 502.3 + CR 702.26a + CR 702.26b: a save from a build that
+/// offered Hedge Whisperer's determination before phasing restarts the step: the tapped Teferi's Imp phases out
+/// once and stays tapped, day stays as that build's cleanup check left it, and the Whisperer is offered again.
+#[test]
+fn a_main_build_save_at_the_untap_choice_restarts_the_untap_step() {
+    let db = load_db().expect("card db");
+    for (name, oracle) in [
+        (HEDGE_WHISPERER, HEDGE_WHISPERER_ORACLE),
+        (TEFERIS_IMP, TEFERIS_IMP_ORACLE),
+        (SMOKE, SMOKE_ORACLE),
+    ] {
+        assert_oracle(db, name, oracle);
+    }
+    let save: serde_json::Value = serde_json::from_str(MAIN_BUILD_UNTAP_CHOICE).expect("main save");
+    assert!(!save["state"]["waiting_for"]["data"]
+        .as_object()
+        .unwrap()
+        .contains_key("progress"));
+    let mut runner = restore_save(save);
+    let w = named(&runner, HEDGE_WHISPERER)[0];
+    let bear = named(&runner, BEARS)[0];
+    let imp = named(&runner, TEFERIS_IMP)[0];
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::UntapChoice {
+            player: P1,
+            candidates: vec![w],
+            chosen_not_to_untap: vec![],
+            progress: UntapStepProgress::BeforeTurnBasedActions,
+        }
+    );
+    assert_eq!(runner.state().phase, Phase::Untap);
+    assert_eq!(runner.state().active_player, P1);
+    assert!(runner.state().objects[&imp].is_phased_in() && runner.state().objects[&imp].tapped);
+    assert_eq!(runner.state().day_night, Some(DayNight::Day));
+    assert_eq!(
+        runner
+            .state()
+            .most_spells_cast_by_one_previous_active_player,
+        None
+    );
+    let mut events = runner
+        .act(GameAction::ChooseUntap {
+            object_id: w,
+            untap: true,
+        })
+        .expect("answer old choice")
+        .events;
+    assert_eq!(phasings(&events, imp), (1, 0));
+    assert!(!events.iter().any(|e| matches!(
+        e,
+        GameEvent::PermanentUntapped { .. } | GameEvent::DayNightChanged { .. }
+    )));
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::UntapChoice {
+            player: P1,
+            candidates: vec![w],
+            chosen_not_to_untap: vec![],
+            progress: UntapStepProgress::AfterTurnBasedActions,
+        }
+    );
+    assert!(runner.state().objects[&imp].is_phased_out());
+    let answer = runner
+        .act(GameAction::ChooseUntap {
+            object_id: w,
+            untap: false,
+        })
+        .expect("decline fresh choice")
+        .events;
+    assert_eq!(runner.state().phase, Phase::Upkeep);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+    assert_eq!(
+        answer
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::PermanentUntapped { object_id } => Some(*object_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![bear]
+    );
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].source_id, imp);
+    events.extend(answer);
+    assert_eq!(phasings(&events, imp), (1, 0));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, GameEvent::DayNightChanged { .. })));
+    assert!(runner.state().objects[&w].tapped);
+    assert!(!runner.state().objects[&bear].tapped);
+    assert!(runner.state().objects[&imp].tapped && runner.state().objects[&imp].is_phased_out());
+    assert_eq!(runner.state().day_night, Some(DayNight::Day));
+    resolve_stack(&mut runner);
+    assert_settled(&runner);
+}
+
+/// CR 502.1 + CR 502.3 + CR 702.26a + CR 702.26b: a save at Smoke's untap choice from that
+/// build restarts the step: the answer and the stashed declines are discarded, the Imp phases out once and stays
+/// tapped, and the Whisperer's determination is offered again; the stale group is not.
+#[test]
+fn a_main_build_save_at_the_untap_subset_restarts_the_untap_step() {
+    let db = load_db().expect("card db");
+    for (name, oracle) in [
+        (HEDGE_WHISPERER, HEDGE_WHISPERER_ORACLE),
+        (TEFERIS_IMP, TEFERIS_IMP_ORACLE),
+        (SMOKE, SMOKE_ORACLE),
+    ] {
+        assert_oracle(db, name, oracle);
+    }
+    let save: serde_json::Value = serde_json::from_str(MAIN_BUILD_UNTAP_SUBSET).expect("main save");
+    assert!(!save["state"]["waiting_for"]["data"]
+        .as_object()
+        .unwrap()
+        .contains_key("progress"));
+    let mut runner = restore_save(save);
+    let w = named(&runner, HEDGE_WHISPERER)[0];
+    let bear = named(&runner, BEARS)[0];
+    let imp = named(&runner, TEFERIS_IMP)[0];
+    let WaitingFor::ChooseUntapSubset {
+        player,
+        group,
+        max,
+        progress,
+    } = &runner.state().waiting_for
+    else {
+        panic!("expected old subset")
+    };
+    assert_eq!(
+        (*player, *max, *progress),
+        (P1, 1, UntapStepProgress::BeforeTurnBasedActions)
+    );
+    assert_eq!(sorted(group.clone()), sorted(vec![bear, imp]));
+    assert_eq!(runner.state().phase, Phase::Untap);
+    assert_eq!(runner.state().active_player, P1);
+    assert_eq!(runner.state().pending_untap_declines, vec![w]);
+    assert!(runner.state().objects[&imp].is_phased_in() && runner.state().objects[&imp].tapped);
+    assert_eq!(runner.state().day_night, Some(DayNight::Day));
+    assert_eq!(
+        runner
+            .state()
+            .most_spells_cast_by_one_previous_active_player,
+        None
+    );
+    let mut events = runner
+        .act(GameAction::SelectCards { cards: vec![imp] })
+        .expect("answer old subset")
+        .events;
+    assert!(runner.state().pending_untap_declines.is_empty());
+    assert_eq!(phasings(&events, imp), (1, 0));
+    assert!(!events.iter().any(|e| matches!(
+        e,
+        GameEvent::PermanentUntapped { .. } | GameEvent::DayNightChanged { .. }
+    )));
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::UntapChoice {
+            player: P1,
+            candidates: vec![w],
+            chosen_not_to_untap: vec![],
+            progress: UntapStepProgress::AfterTurnBasedActions,
+        }
+    );
+    let answer = runner
+        .act(GameAction::ChooseUntap {
+            object_id: w,
+            untap: false,
+        })
+        .expect("decline fresh choice")
+        .events;
+    assert_eq!(runner.state().phase, Phase::Upkeep);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+    assert_eq!(
+        answer
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::PermanentUntapped { object_id } => Some(*object_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![bear]
+    );
+    events.extend(answer);
+    assert!(runner.state().objects[&imp].tapped && runner.state().objects[&imp].is_phased_out());
+    assert!(runner.state().objects[&w].tapped);
+    assert!(!runner.state().objects[&bear].tapped);
+    assert!(runner.state().pending_untap_declines.is_empty());
+    assert_eq!(phasings(&events, imp), (1, 0));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, GameEvent::DayNightChanged { .. })));
+    assert_eq!(runner.state().day_night, Some(DayNight::Day));
+    resolve_stack(&mut runner);
+    assert_settled(&runner);
+}
+
+/// CR 502.1 + CR 502.3 + CR 702.26c: a save from that build whose Reality Rippled Hedge
+/// Whisperer was not offered: the first answer restarts the step, the Whisperer phases in, and all three are
+/// offered.
+#[test]
+fn a_main_build_save_offers_the_determinations_phasing_produces() {
+    let db = load_db().expect("card db");
+    assert_oracle(db, HEDGE_WHISPERER, HEDGE_WHISPERER_ORACLE);
+    assert_oracle(db, REALITY_RIPPLE, REALITY_RIPPLE_ORACLE);
+    let save: serde_json::Value =
+        serde_json::from_str(MAIN_BUILD_PHASED_OUT_CANDIDATE).expect("main save");
+    assert!(!save["state"]["waiting_for"]["data"]
+        .as_object()
+        .unwrap()
+        .contains_key("progress"));
+    let mut runner = restore_save(save);
+    let ws = named(&runner, HEDGE_WHISPERER);
+    assert_eq!(ws.len(), 3);
+    let w1 = ws
+        .iter()
+        .copied()
+        .find(|id| runner.state().objects[id].is_phased_out())
+        .expect("Rippled Whisperer");
+    let others: Vec<_> = ws.iter().copied().filter(|id| *id != w1).collect();
+    let (w2, w3) = (others[0], others[1]);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::UntapChoice {
+            player: P1,
+            candidates: vec![w2, w3],
+            chosen_not_to_untap: vec![],
+            progress: UntapStepProgress::BeforeTurnBasedActions,
+        }
+    );
+    let mut events = runner
+        .act(GameAction::ChooseUntap {
+            object_id: w2,
+            untap: true,
+        })
+        .expect("answer old choice with candidates remaining")
+        .events;
+    assert_eq!(phasings(&events, w1), (0, 1));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, GameEvent::PermanentUntapped { .. })));
+    let WaitingFor::UntapChoice {
+        player,
+        candidates,
+        chosen_not_to_untap,
+        progress,
+    } = &runner.state().waiting_for
+    else {
+        panic!("expected fresh determinations")
+    };
+    assert_eq!(
+        (*player, *progress),
+        (P1, UntapStepProgress::AfterTurnBasedActions)
+    );
+    assert_eq!(sorted(candidates.clone()), sorted(vec![w1, w2, w3]));
+    assert!(chosen_not_to_untap.is_empty());
+    for _ in 0..3 {
+        let WaitingFor::UntapChoice {
+            candidates,
+            progress,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("each Whisperer must be offered")
+        };
+        assert_eq!(*progress, UntapStepProgress::AfterTurnBasedActions);
+        let id = candidates[0];
+        events.extend(
+            runner
+                .act(GameAction::ChooseUntap {
+                    object_id: id,
+                    untap: false,
+                })
+                .expect("decline fresh choice")
+                .events,
+        );
+    }
+    assert_eq!(runner.state().phase, Phase::Upkeep);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+    for id in ws {
+        assert!(runner.state().objects[&id].tapped && runner.state().objects[&id].is_phased_in());
+    }
+    assert_eq!(phasings(&events, w1), (0, 1));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, GameEvent::PermanentUntapped { .. })));
+    assert_settled(&runner);
+}
+
+/// CR 502.1 + CR 502.3 + CR 702.26a: a save from this build at either untap determination
+/// resumes without phasing again.
+#[test]
+fn current_untap_determinations_resume_after_a_save_at_each_prompt() {
+    let (mut runner, (w, a, b, imp)) = board(Phase::PreCombatMain, |s, db| {
+        for (name, oracle) in [
+            (SMOKE, SMOKE_ORACLE),
+            (HEDGE_WHISPERER, HEDGE_WHISPERER_ORACLE),
+            (TEFERIS_IMP, TEFERIS_IMP_ORACLE),
+        ] {
+            assert_oracle(db, name, oracle);
+        }
+        s.add_real_card(P0, SMOKE, Zone::Battlefield, db);
+        (
+            s.add_real_card(P1, HEDGE_WHISPERER, Zone::Battlefield, db),
+            s.add_real_card(P1, BEARS, Zone::Battlefield, db),
+            s.add_real_card(P1, BEARS, Zone::Battlefield, db),
+            s.add_real_card(P1, TEFERIS_IMP, Zone::Battlefield, db),
+        )
+    });
+    for id in [w, a, b] {
+        runner.state_mut().objects.get_mut(&id).unwrap().tapped = true;
+    }
+    settle(&mut runner);
+    let mut events = pass_into_next_upkeep(&mut runner, |_, _| {});
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::UntapChoice {
+            player: P1,
+            candidates: vec![w],
+            chosen_not_to_untap: vec![],
+            progress: UntapStepProgress::AfterTurnBasedActions,
+        }
+    );
+    assert!(runner.state().objects[&imp].is_phased_out());
+    assert_eq!(phasings(&events, imp), (1, 0));
+    let save = save_of(&runner);
+    assert_eq!(
+        save["state"]["waiting_for"]["data"]["progress"],
+        "AfterTurnBasedActions"
+    );
+    runner = restore_save(save);
+    let answer = runner
+        .act(GameAction::ChooseUntap {
+            object_id: w,
+            untap: false,
+        })
+        .expect("decline after restore")
+        .events;
+    assert_eq!(phasings(&answer, imp), (0, 0));
+    events.extend(answer);
+    let WaitingFor::ChooseUntapSubset {
+        player,
+        group,
+        max,
+        progress,
+    } = &runner.state().waiting_for
+    else {
+        panic!("expected subset after decline")
+    };
+    assert_eq!(
+        (*player, *max, *progress),
+        (P1, 1, UntapStepProgress::AfterTurnBasedActions)
+    );
+    assert_eq!(sorted(group.clone()), sorted(vec![a, b]));
+    let save = save_of(&runner);
+    assert_eq!(
+        save["state"]["waiting_for"]["data"]["progress"],
+        "AfterTurnBasedActions"
+    );
+    runner = restore_save(save);
+    let answer = runner
+        .act(GameAction::SelectCards { cards: vec![a] })
+        .expect("choose subset after restore")
+        .events;
+    assert_eq!(phasings(&answer, imp), (0, 0));
+    events.extend(answer);
+    assert_eq!(runner.state().phase, Phase::Upkeep);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+    assert!(runner.state().objects[&w].tapped && runner.state().objects[&b].tapped);
+    assert!(!runner.state().objects[&a].tapped);
+    assert!(runner.state().objects[&imp].is_phased_out());
+    assert_eq!(phasings(&events, imp), (1, 0));
+    resolve_stack(&mut runner);
+    assert_settled(&runner);
+}
+
+/// CR 502.1 + CR 502.3 + CR 702.26a + CR 702.26b: Teferi's Imp that attacked phases out
+/// tapped at its controller's next untap step and stays tapped; at the one after, it phases in and then
+/// untaps.
+#[test]
+fn teferis_imp_that_attacked_stays_tapped_while_phased_out() {
+    let (mut runner, imp) = board(Phase::PreCombatMain, |s, db| {
+        assert_oracle(db, TEFERIS_IMP, TEFERIS_IMP_ORACLE);
+        s.add_real_card(P0, TEFERIS_IMP, Zone::Battlefield, db)
+    });
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&imp)
+        .unwrap()
+        .summoning_sick = false;
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(imp, AttackTarget::Player(P1))])
+        .expect("Imp attacks");
+    assert!(runner.state().objects[&imp].tapped);
+    let mut first = pass_until(&mut runner, |r| {
+        r.state().active_player == P1 && r.state().phase == Phase::Upkeep
+    });
+    assert_eq!(
+        (runner.state().active_player, runner.state().phase),
+        (P1, Phase::Upkeep)
+    );
+    first.extend(pass_until(&mut runner, |r| {
+        r.state().active_player == P0 && r.state().phase == Phase::Upkeep
+    }));
+    assert_eq!(
+        (runner.state().active_player, runner.state().phase),
+        (P0, Phase::Upkeep)
+    );
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    );
+    assert_eq!(phase_and_untap(&first, imp), vec!["out"]);
+    assert!(runner.state().objects[&imp].tapped && runner.state().objects[&imp].is_phased_out());
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].source_id, imp);
+    let mut second = pass_until(&mut runner, |r| {
+        r.state().active_player == P1 && r.state().phase == Phase::Upkeep
+    });
+    assert_eq!(
+        (runner.state().active_player, runner.state().phase),
+        (P1, Phase::Upkeep)
+    );
+    second.extend(pass_until(&mut runner, |r| {
+        r.state().active_player == P0 && r.state().phase == Phase::Upkeep
+    }));
+    assert_eq!(
+        (runner.state().active_player, runner.state().phase),
+        (P0, Phase::Upkeep)
+    );
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    );
+    assert_eq!(phase_and_untap(&second, imp), vec!["in", "untap"]);
+    assert!(!runner.state().objects[&imp].tapped && runner.state().objects[&imp].is_phased_in());
+}
+
+/// CR 502.3 + CR 702.26b: Seedborn Muse untaps its controller's permanents during another
+/// player's untap step, but not one that is phased out.
+#[test]
+fn seedborn_muse_leaves_a_phased_out_permanent_tapped() {
+    let (mut runner, (a, b, ripple)) = board(Phase::PreCombatMain, |s, db| {
+        assert_oracle(db, SEEDBORN_MUSE, SEEDBORN_MUSE_ORACLE);
+        assert_oracle(db, REALITY_RIPPLE, REALITY_RIPPLE_ORACLE);
+        s.add_real_card(P0, SEEDBORN_MUSE, Zone::Battlefield, db);
+        (
+            s.add_real_card(P0, BEARS, Zone::Battlefield, db),
+            s.add_real_card(P0, BEARS, Zone::Battlefield, db),
+            s.add_real_card(P1, REALITY_RIPPLE, Zone::Hand, db),
+        )
+    });
+    for id in [a, b] {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .summoning_sick = false;
+    }
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(a, AttackTarget::Player(P1)), (b, AttackTarget::Player(P1))])
+        .expect("Bears attack");
+    assert!(runner.state().objects[&a].tapped && runner.state().objects[&b].tapped);
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    assert_eq!(runner.state().phase, Phase::DeclareAttackers);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+    fund_player(&mut runner, P1, ManaType::Blue, 2);
+    runner.cast(ripple).target_object(a).resolve();
+    assert!(runner.state().objects[&a].is_phased_out() && runner.state().objects[&a].tapped);
+    let p1_untap = pass_until(&mut runner, |r| {
+        r.state().active_player == P1 && r.state().phase == Phase::Upkeep
+    });
+    assert_eq!(
+        (runner.state().active_player, runner.state().phase),
+        (P1, Phase::Upkeep)
+    );
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+    assert_settled(&runner);
+    assert!(runner.state().objects[&a].tapped && runner.state().objects[&a].is_phased_out());
+    assert!(phase_and_untap(&p1_untap, a).is_empty());
+    assert!(!runner.state().objects[&b].tapped);
+    assert_eq!(phase_and_untap(&p1_untap, b), vec!["untap"]);
+    let p0_untap = pass_until(&mut runner, |r| {
+        r.state().active_player == P0 && r.state().phase == Phase::Upkeep
+    });
+    assert_eq!(
+        (runner.state().active_player, runner.state().phase),
+        (P0, Phase::Upkeep)
+    );
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    );
+    assert_settled(&runner);
+    assert_eq!(phase_and_untap(&p0_untap, a), vec!["in", "untap"]);
+    assert!(!runner.state().objects[&a].tapped && runner.state().objects[&a].is_phased_in());
 }
 
 /// CR 502.2 + CR 603.10 + CR 610.3b: Cathar's "transforms into" exile triggers

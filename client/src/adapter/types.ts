@@ -3016,6 +3016,12 @@ export type HeroEventKind =
 /** One hero's recorded answer. Mirrors `engine::types::game_state::HeroEventAnswer`. */
 export type HeroEventAnswer = { hero: PlayerId; cards: ObjectId[] };
 
+/**
+ * Engine-owned (CR 502.1–502.3): where the untap step stood when an untap determination was
+ * raised. Mirrors `engine::types::game_state::UntapStepProgress`; the UI never reads it.
+ */
+export type UntapStepProgress = "BeforeTurnBasedActions" | "AfterTurnBasedActions";
+
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
   | { type: "ResolveAllConsent"; data: { epoch: number; representative: PlayerId } }
@@ -3195,8 +3201,8 @@ export type WaitingFor =
   | { type: "BattleProtectorChoice"; data: { player: PlayerId; battle_id: ObjectId; candidates: PlayerId[] } }
   | { type: "TributeChoice"; data: { player: PlayerId; source_id: ObjectId; count: number } }
   | { type: "CombatTaxPayment"; data: { player: PlayerId; context: CombatTaxContext; total_cost: ManaCost; per_creature: [ObjectId, ManaCost][]; pending: CombatTaxPending } }
-  | { type: "UntapChoice"; data: { player: PlayerId; candidates: ObjectId[]; chosen_not_to_untap?: ObjectId[] } }
-  | { type: "ChooseUntapSubset"; data: { player: PlayerId; group: ObjectId[]; max: number } }
+  | { type: "UntapChoice"; data: { player: PlayerId; candidates: ObjectId[]; chosen_not_to_untap?: ObjectId[]; progress?: UntapStepProgress } }
+  | { type: "ChooseUntapSubset"; data: { player: PlayerId; group: ObjectId[]; max: number; progress?: UntapStepProgress } }
   | { type: "ExertChoice"; data: { player: PlayerId; attacker: ObjectId; permission: TriggerDefinitionRef; remaining?: { attacker: ObjectId; permission: TriggerDefinitionRef }[] } }
   | { type: "EnlistChoice"; data: { player: PlayerId; attacker: ObjectId; eligible: ObjectId[]; remaining?: ObjectId[] } }
   | { type: "PhyrexianPayment"; data: { player: PlayerId; spell_object: ObjectId; shards: PhyrexianShard[] } }

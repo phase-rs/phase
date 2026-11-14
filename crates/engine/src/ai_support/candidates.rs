@@ -1146,7 +1146,9 @@ pub fn candidate_actions_broad_with_probe(
         // never advantageous to the AI, and the engine validates `len() <= max`.
         // Search may still enumerate alternative subsets via legal-actions if a
         // richer policy is wired later; this guarantees the AI never wedges.
-        WaitingFor::ChooseUntapSubset { player, group, max } => {
+        WaitingFor::ChooseUntapSubset {
+            player, group, max, ..
+        } => {
             let chosen: Vec<ObjectId> = group.iter().copied().take(*max).collect();
             vec![candidate(
                 GameAction::SelectCards { cards: chosen },
