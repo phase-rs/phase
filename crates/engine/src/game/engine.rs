@@ -5555,8 +5555,8 @@ pub struct LoopEntryPointVerdicts {
     pub strict: bool,
     /// CR 732.2a: the recorded period's equality cover, on the raw frames its replay reached.
     pub recorded_period: bool,
-    /// CR 104.4b + CR 732.4: the recurrence a mandatory replay's winner reads across its two
-    /// raw cycle ends.
+    /// CR 104.4b + CR 732.4: the recurrence `mandatory_reading`'s winner gate
+    /// (`live_mandatory_loop_winner`) reads across its two raw cycle ends.
     pub mandatory_replay: bool,
 }
 
@@ -8024,7 +8024,8 @@ fn extend_shorten_run(
     let take =
         super::period_confirm::TakeRun::resumed(state, &proposal.period, controller, related);
     let declared = proposal.template.as_ref();
-    // `run.next` reads `Stopped` until the loop leaves a frontier, so it counts places reached.
+    // `run.next` reads `Stopped` until the loop leaves a frontier, so every early return stops
+    // the run; `run.refused` counts places reached.
     while let Some(i) = u32::try_from(run.refused.len() - 1)
         .ok()
         .filter(|&reached| reached < place)
@@ -26753,7 +26754,7 @@ mod damage_history_priority_cost_tests {
                 ..Default::default()
             });
         }
-        // The recurrence a mandatory replay's winner reads across its two cycle ends: one
+        // The recurrence `live_mandatory_loop_winner` reads across its two cycle ends: one
         // reduction pass per projected side plus a bounded witness rank. A strict normal form
         // would add its own two journal passes per side, so the bound discriminates that revert.
         let recurs = |prior: &GameState, current: &GameState| {
