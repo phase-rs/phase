@@ -234,6 +234,7 @@ mod tamiyo_inquisitive_student_flip;
 mod tangleweave_armor_commander_any_zone;
 mod tap_cost_another_self_exclusion;
 mod target_choice_kind_7692;
+mod target_controller_control_condition;
 mod target_controller_population;
 mod target_incarnation_revalidation;
 mod target_occurrence_authority;
