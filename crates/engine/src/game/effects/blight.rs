@@ -66,6 +66,7 @@ pub fn resolve(
     // `count` (in EffectZoneChoice) is the number of creatures chosen (1);
     // `count_param` carries N — the number of -1/-1 counters to place.
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: blighting_player,
         cards: eligible,
         count: 1,

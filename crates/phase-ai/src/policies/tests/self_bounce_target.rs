@@ -194,6 +194,7 @@ fn eval(
 
     let decision = AiDecisionContext {
         waiting_for: WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: AI,
             cards: pool,
             count: 1,

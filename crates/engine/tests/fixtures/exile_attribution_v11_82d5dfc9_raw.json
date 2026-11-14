@@ -1,0 +1,4182 @@
+{
+  "ability_onset_record": "Recorded",
+  "active_player": 0,
+  "all_creature_types": [],
+  "allows_cancel_cast": false,
+  "alt_cost_grant_permissions_used": [],
+  "attacked_defenders_this_turn": {},
+  "attacking_creatures_this_turn": {},
+  "attribution": {
+    "4": {
+      "by_layer": {
+        "Control": [
+          {
+            "data": {
+              "id": 1,
+              "mod_index": 0
+            },
+            "type": "Transient"
+          }
+        ]
+      }
+    }
+  },
+  "battlefield": [
+    3
+  ],
+  "cancelled_casts": [],
+  "cards_discarded_this_turn_by_player": {},
+  "combat": null,
+  "combat_phase_skip_next_turn": [
+    {
+      "active": false,
+      "pending": 0
+    },
+    {
+      "active": false,
+      "pending": 0
+    },
+    {
+      "active": false,
+      "pending": 0
+    }
+  ],
+  "command_zone": [],
+  "commander_cast_count": {},
+  "commander_damage": [],
+  "creature_attacked_defenders_this_turn": {},
+  "creature_blocked_attackers_this_turn": [],
+  "creatures_attacked_this_turn": [],
+  "creatures_blocked_this_turn": [],
+  "crew_activated_this_turn": [],
+  "crew_resolved_this_turn": [],
+  "current_combat_attacker_restriction": null,
+  "current_combat_attacker_restriction_source": null,
+  "current_starting_player": 0,
+  "damage_dealt_this_turn": [],
+  "day_night": null,
+  "debug_mode": false,
+  "debug_permitted": [],
+  "deck_pools": [],
+  "delayed_triggers": [],
+  "eliminated_players": [],
+  "exerted_this_turn": [],
+  "exile": [],
+  "exile_cast_permissions_used": [],
+  "exile_links": [],
+  "exile_play_permissions_used": [],
+  "exile_play_single_use_consumed": [],
+  "extra_loyalty_activations_this_turn": {},
+  "extra_phase_resume": [],
+  "extra_phases": [],
+  "extra_turn_sequence_anchor": null,
+  "extra_turns": [],
+  "format_config": {
+    "allow_debug_actions": false,
+    "command_zone": false,
+    "commander_damage_threshold": null,
+    "deck_size": {
+      "data": 60,
+      "type": "Minimum"
+    },
+    "default_deck_copy_limit": {
+      "data": 4,
+      "type": "UpTo"
+    },
+    "format": "Standard",
+    "max_players": 2,
+    "min_players": 2,
+    "range_of_influence": null,
+    "sideboard_policy": {
+      "data": 15,
+      "type": "Limited"
+    },
+    "singleton": false,
+    "starting_life": 20,
+    "supplies_fixed_deck": false,
+    "team_based": false,
+    "uses_commander": false
+  },
+  "game_number": 1,
+  "graveyard_cast_permissions_used": [],
+  "graveyard_cast_permissions_used_per_type": [],
+  "hand_cast_free_permissions_used": [],
+  "has_pending_cast": false,
+  "lands_played_this_turn": 0,
+  "lands_played_this_turn_by_player": {},
+  "last_vote_ballots": [],
+  "lki_by_incarnation": {
+    "5": {
+      "1": {
+        "attachments": [],
+        "base_power": null,
+        "base_toughness": null,
+        "card_types": [
+          "Instant"
+        ],
+        "chosen_attributes": [],
+        "colors": [
+          "Blue"
+        ],
+        "controller": 2,
+        "counters": {},
+        "intensity": 0,
+        "is_suspected": false,
+        "keywords": [],
+        "mana_value": 6,
+        "name": "Aethersnatch",
+        "owner": 2,
+        "power": null,
+        "subtypes": [],
+        "supertypes": [],
+        "tapped": false,
+        "toughness": null,
+        "was_prepared": false
+      }
+    }
+  },
+  "lki_cache": {
+    "5": {
+      "attachments": [],
+      "base_power": null,
+      "base_toughness": null,
+      "card_types": [
+        "Instant"
+      ],
+      "chosen_attributes": [],
+      "colors": [
+        "Blue"
+      ],
+      "controller": 2,
+      "counters": {},
+      "intensity": 0,
+      "is_suspected": false,
+      "keywords": [],
+      "mana_value": 6,
+      "name": "Aethersnatch",
+      "owner": 2,
+      "power": null,
+      "subtypes": [],
+      "supertypes": [],
+      "tapped": false,
+      "toughness": null,
+      "was_prepared": false
+    }
+  },
+  "lki_copiable_values": {
+    "5": {
+      "abilities": [
+        {
+          "condition": null,
+          "cost": null,
+          "description": "Gain control of target spell. You may choose new targets for it.",
+          "duration": null,
+          "effect": {
+            "target": {
+              "type": "StackSpell"
+            },
+            "type": "GainControl"
+          },
+          "forward_result": false,
+          "kind": "Spell",
+          "optional": false,
+          "optional_targeting": false,
+          "sub_ability": {
+            "condition": null,
+            "cost": null,
+            "description": null,
+            "duration": null,
+            "effect": {
+              "forced_to": null,
+              "scope": {
+                "type": "All"
+              },
+              "target": {
+                "type": "ParentTarget"
+              },
+              "type": "ChangeTargets"
+            },
+            "forward_result": false,
+            "kind": "Spell",
+            "optional": true,
+            "optional_targeting": false,
+            "sub_ability": null,
+            "sub_link": "SequentialSibling",
+            "target_prompt": null
+          },
+          "target_prompt": null
+        }
+      ],
+      "card_types": {
+        "core_types": [
+          "Instant"
+        ],
+        "subtypes": [],
+        "supertypes": []
+      },
+      "color": [
+        "Blue"
+      ],
+      "keywords": [],
+      "loyalty": null,
+      "mana_cost": {
+        "generic": 4,
+        "shards": [
+          "Blue",
+          "Blue"
+        ],
+        "type": "Cost"
+      },
+      "name": "Aethersnatch",
+      "name_origin": "Source",
+      "power": null,
+      "replacement_definitions": [],
+      "static_definitions": [],
+      "toughness": null,
+      "trigger_definitions": [],
+      "trigger_printed_origins": []
+    }
+  },
+  "lki_copiable_values_by_incarnation": {
+    "5": {
+      "1": {
+        "abilities": [
+          {
+            "condition": null,
+            "cost": null,
+            "description": "Gain control of target spell. You may choose new targets for it.",
+            "duration": null,
+            "effect": {
+              "target": {
+                "type": "StackSpell"
+              },
+              "type": "GainControl"
+            },
+            "forward_result": false,
+            "kind": "Spell",
+            "optional": false,
+            "optional_targeting": false,
+            "sub_ability": {
+              "condition": null,
+              "cost": null,
+              "description": null,
+              "duration": null,
+              "effect": {
+                "forced_to": null,
+                "scope": {
+                  "type": "All"
+                },
+                "target": {
+                  "type": "ParentTarget"
+                },
+                "type": "ChangeTargets"
+              },
+              "forward_result": false,
+              "kind": "Spell",
+              "optional": true,
+              "optional_targeting": false,
+              "sub_ability": null,
+              "sub_link": "SequentialSibling",
+              "target_prompt": null
+            },
+            "target_prompt": null
+          }
+        ],
+        "card_types": {
+          "core_types": [
+            "Instant"
+          ],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "color": [
+          "Blue"
+        ],
+        "keywords": [],
+        "loyalty": null,
+        "mana_cost": {
+          "generic": 4,
+          "shards": [
+            "Blue",
+            "Blue"
+          ],
+          "type": "Cost"
+        },
+        "name": "Aethersnatch",
+        "name_origin": "Source",
+        "power": null,
+        "replacement_definitions": [],
+        "static_definitions": [],
+        "toughness": null,
+        "trigger_definitions": [],
+        "trigger_printed_origins": []
+      }
+    }
+  },
+  "loop_detection": {
+    "type": "Off"
+  },
+  "loyalty_abilities_activated_this_turn": {},
+  "mana_spent_on_spells_this_turn": {
+    "0": 3,
+    "2": 6
+  },
+  "match_config": {
+    "match_type": "Bo1"
+  },
+  "match_phase": "InGame",
+  "match_score": {
+    "draws": 0,
+    "p0_wins": 0,
+    "p1_wins": 0
+  },
+  "max_lands_per_turn": 1,
+  "modal_modes_chosen_this_game": [],
+  "modal_modes_chosen_this_turn": [],
+  "next_continuous_effect_id": 2,
+  "next_control_change_observation_id": 1,
+  "next_delayed_trigger_instance": 1,
+  "next_delayed_trigger_token": 1,
+  "next_end_effect_group_id": 1,
+  "next_extra_phase_id": 1,
+  "next_game_chooser": null,
+  "next_logical_zone_change_group_id": 2,
+  "next_object_id": 6,
+  "next_pip_id": 10,
+  "next_resolution_cast_offer_id": 1,
+  "next_resolve_all_consent_epoch": 1,
+  "next_return_result_occurrence_id": 1,
+  "next_spell_announcement": 2,
+  "next_timestamp": 3,
+  "next_tracked_set_id": 1,
+  "objects": {
+    "1": {
+      "abilities": [],
+      "attached_to": null,
+      "attachments": [],
+      "base_card_types": {
+        "core_types": [
+          "Land"
+        ],
+        "subtypes": [],
+        "supertypes": []
+      },
+      "base_color": [],
+      "base_controller": 1,
+      "base_keywords": [],
+      "base_name": "Captured graveyard land A",
+      "base_power": null,
+      "base_toughness": null,
+      "card_id": 1,
+      "card_types": {
+        "core_types": [
+          "Land"
+        ],
+        "subtypes": [],
+        "supertypes": []
+      },
+      "color": [],
+      "controller": 1,
+      "counters": {},
+      "damage_marked": 0,
+      "dealt_deathtouch_damage": false,
+      "entered_battlefield_turn": null,
+      "face_down": false,
+      "flipped": false,
+      "id": 1,
+      "keywords": [],
+      "loyalty": null,
+      "mana_cost": {
+        "generic": 0,
+        "shards": [],
+        "type": "Cost"
+      },
+      "name": "Captured graveyard land A",
+      "owner": 1,
+      "power": null,
+      "replacement_definitions": [],
+      "static_definitions": [],
+      "tapped": false,
+      "timestamp": 0,
+      "toughness": null,
+      "transformed": false,
+      "trigger_definitions": [],
+      "zone": "Graveyard"
+    },
+    "2": {
+      "abilities": [],
+      "attached_to": null,
+      "attachments": [],
+      "base_card_types": {
+        "core_types": [
+          "Land"
+        ],
+        "subtypes": [],
+        "supertypes": []
+      },
+      "base_color": [],
+      "base_controller": 1,
+      "base_keywords": [],
+      "base_name": "Captured graveyard land B",
+      "base_power": null,
+      "base_toughness": null,
+      "card_id": 2,
+      "card_types": {
+        "core_types": [
+          "Land"
+        ],
+        "subtypes": [],
+        "supertypes": []
+      },
+      "color": [],
+      "controller": 1,
+      "counters": {},
+      "damage_marked": 0,
+      "dealt_deathtouch_damage": false,
+      "entered_battlefield_turn": null,
+      "face_down": false,
+      "flipped": false,
+      "id": 2,
+      "keywords": [],
+      "loyalty": null,
+      "mana_cost": {
+        "generic": 0,
+        "shards": [],
+        "type": "Cost"
+      },
+      "name": "Captured graveyard land B",
+      "owner": 1,
+      "power": null,
+      "replacement_definitions": [],
+      "static_definitions": [],
+      "tapped": false,
+      "timestamp": 0,
+      "toughness": null,
+      "transformed": false,
+      "trigger_definitions": [],
+      "zone": "Graveyard"
+    },
+    "3": {
+      "abilities": [],
+      "attached_to": null,
+      "attachments": [],
+      "base_card_types": {
+        "core_types": [
+          "Creature"
+        ],
+        "subtypes": [],
+        "supertypes": []
+      },
+      "base_characteristics_initialized": true,
+      "base_color": [],
+      "base_controller": 2,
+      "base_keywords": [],
+      "base_name": "Synthetic exile redirect",
+      "base_power": 1,
+      "base_replacement_definitions": [
+        {
+          "condition": null,
+          "description": null,
+          "destination_zone": "Exile",
+          "event": "Moved",
+          "execute": {
+            "condition": null,
+            "cost": null,
+            "description": null,
+            "duration": null,
+            "effect": {
+              "destination": "Graveyard",
+              "enter_tapped": false,
+              "enter_transformed": false,
+              "enters_attacking": false,
+              "origin": null,
+              "owner_library": false,
+              "target": {
+                "type": "SelfRef"
+              },
+              "type": "ChangeZone"
+            },
+            "forward_result": false,
+            "kind": "Spell",
+            "optional": false,
+            "optional_targeting": false,
+            "sub_ability": null,
+            "target_prompt": null
+          },
+          "mode": {
+            "decline": null,
+            "type": "Optional"
+          },
+          "valid_card": null
+        }
+      ],
+      "base_toughness": 1,
+      "card_id": 3,
+      "card_types": {
+        "core_types": [
+          "Creature"
+        ],
+        "subtypes": [],
+        "supertypes": []
+      },
+      "color": [],
+      "controller": 2,
+      "counters": {},
+      "damage_marked": 0,
+      "dealt_deathtouch_damage": false,
+      "entered_battlefield_turn": 1,
+      "face_down": false,
+      "flipped": false,
+      "id": 3,
+      "keywords": [],
+      "layer_base_power": 1,
+      "layer_base_toughness": 1,
+      "loyalty": null,
+      "mana_cost": {
+        "generic": 0,
+        "shards": [],
+        "type": "Cost"
+      },
+      "name": "Synthetic exile redirect",
+      "owner": 2,
+      "power": 1,
+      "replacement_definitions": [
+        {
+          "condition": null,
+          "description": null,
+          "destination_zone": "Exile",
+          "event": "Moved",
+          "execute": {
+            "condition": null,
+            "cost": null,
+            "description": null,
+            "duration": null,
+            "effect": {
+              "destination": "Graveyard",
+              "enter_tapped": false,
+              "enter_transformed": false,
+              "enters_attacking": false,
+              "origin": null,
+              "owner_library": false,
+              "target": {
+                "type": "SelfRef"
+              },
+              "type": "ChangeZone"
+            },
+            "forward_result": false,
+            "kind": "Spell",
+            "optional": false,
+            "optional_targeting": false,
+            "sub_ability": null,
+            "target_prompt": null
+          },
+          "mode": {
+            "decline": null,
+            "type": "Optional"
+          },
+          "valid_card": null
+        }
+      ],
+      "static_definitions": [],
+      "tapped": false,
+      "timestamp": 1,
+      "toughness": 1,
+      "transformed": false,
+      "trigger_definitions": [],
+      "zone": "Battlefield"
+    },
+    "4": {
+      "abilities": [
+        {
+          "condition": null,
+          "cost": null,
+          "declares_chosen_group": 0,
+          "description": "Target player exiles all land cards from their graveyard.",
+          "duration": null,
+          "effect": {
+            "target": {
+              "type": "Player"
+            },
+            "type": "TargetOnly"
+          },
+          "forward_result": false,
+          "kind": "Spell",
+          "optional": false,
+          "optional_targeting": false,
+          "sub_ability": {
+            "condition": null,
+            "cost": null,
+            "description": null,
+            "duration": null,
+            "effect": {
+              "destination": "Exile",
+              "origin": "Graveyard",
+              "target": {
+                "controller": null,
+                "properties": [
+                  {
+                    "controller": "ScopedPlayer",
+                    "type": "Owned"
+                  },
+                  {
+                    "type": "InZone",
+                    "zone": "Graveyard"
+                  }
+                ],
+                "type": "Typed",
+                "type_filters": [
+                  "Land"
+                ]
+              },
+              "type": "ChangeZoneAll"
+            },
+            "forward_result": false,
+            "kind": "Spell",
+            "optional": false,
+            "optional_targeting": false,
+            "sub_ability": {
+              "condition": null,
+              "cost": null,
+              "description": null,
+              "duration": null,
+              "effect": {
+                "amount": {
+                  "type": "Fixed",
+                  "value": 3
+                },
+                "player": {
+                  "id": 2,
+                  "type": "SpecificPlayer"
+                },
+                "type": "GainLife"
+              },
+              "forward_result": false,
+              "kind": "Spell",
+              "optional": false,
+              "optional_targeting": false,
+              "sub_ability": null,
+              "target_prompt": null
+            },
+            "target_choice_timing": "Resolution",
+            "target_prompt": null
+          },
+          "target_prompt": null
+        }
+      ],
+      "attached_to": null,
+      "attachments": [],
+      "base_abilities": [
+        {
+          "condition": null,
+          "cost": null,
+          "declares_chosen_group": 0,
+          "description": "Target player exiles all land cards from their graveyard.",
+          "duration": null,
+          "effect": {
+            "target": {
+              "type": "Player"
+            },
+            "type": "TargetOnly"
+          },
+          "forward_result": false,
+          "kind": "Spell",
+          "optional": false,
+          "optional_targeting": false,
+          "sub_ability": {
+            "condition": null,
+            "cost": null,
+            "description": null,
+            "duration": null,
+            "effect": {
+              "destination": "Exile",
+              "origin": "Graveyard",
+              "target": {
+                "controller": null,
+                "properties": [
+                  {
+                    "controller": "ScopedPlayer",
+                    "type": "Owned"
+                  },
+                  {
+                    "type": "InZone",
+                    "zone": "Graveyard"
+                  }
+                ],
+                "type": "Typed",
+                "type_filters": [
+                  "Land"
+                ]
+              },
+              "type": "ChangeZoneAll"
+            },
+            "forward_result": false,
+            "kind": "Spell",
+            "optional": false,
+            "optional_targeting": false,
+            "sub_ability": {
+              "condition": null,
+              "cost": null,
+              "description": null,
+              "duration": null,
+              "effect": {
+                "amount": {
+                  "type": "Fixed",
+                  "value": 3
+                },
+                "player": {
+                  "id": 2,
+                  "type": "SpecificPlayer"
+                },
+                "type": "GainLife"
+              },
+              "forward_result": false,
+              "kind": "Spell",
+              "optional": false,
+              "optional_targeting": false,
+              "sub_ability": null,
+              "target_prompt": null
+            },
+            "target_choice_timing": "Resolution",
+            "target_prompt": null
+          },
+          "target_prompt": null
+        }
+      ],
+      "base_card_types": {
+        "core_types": [
+          "Instant"
+        ],
+        "subtypes": [],
+        "supertypes": []
+      },
+      "base_characteristics_initialized": true,
+      "base_color": [
+        "Red"
+      ],
+      "base_controller": 0,
+      "base_keywords": [],
+      "base_mana_cost": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      },
+      "base_name": "Mudhole",
+      "base_power": null,
+      "base_toughness": null,
+      "card_id": 4,
+      "card_types": {
+        "core_types": [
+          "Instant"
+        ],
+        "subtypes": [],
+        "supertypes": []
+      },
+      "cast_controller": 0,
+      "cast_from_zone": "Hand",
+      "cast_occurrence": {
+        "caster": 0,
+        "turn_journal_index": 0
+      },
+      "color": [
+        "Red"
+      ],
+      "colors_spent_to_cast": {
+        "red": 1
+      },
+      "controller": 2,
+      "counters": {},
+      "damage_marked": 0,
+      "dealt_deathtouch_damage": false,
+      "entered_battlefield_turn": null,
+      "face_down": false,
+      "flipped": false,
+      "id": 4,
+      "incarnation": 1,
+      "keywords": [],
+      "loyalty": null,
+      "mana_cost": {
+        "generic": 2,
+        "shards": [
+          "Red"
+        ],
+        "type": "Cost"
+      },
+      "mana_spent_to_cast_amount": 3,
+      "name": "Mudhole",
+      "owner": 0,
+      "power": null,
+      "replacement_definitions": [],
+      "spell_announcement": 1,
+      "static_definitions": [],
+      "tapped": false,
+      "timestamp": 0,
+      "toughness": null,
+      "transformed": false,
+      "trigger_definitions": [],
+      "zone": "Stack"
+    },
+    "5": {
+      "abilities": [
+        {
+          "condition": null,
+          "cost": null,
+          "description": "Gain control of target spell. You may choose new targets for it.",
+          "duration": null,
+          "effect": {
+            "target": {
+              "type": "StackSpell"
+            },
+            "type": "GainControl"
+          },
+          "forward_result": false,
+          "kind": "Spell",
+          "optional": false,
+          "optional_targeting": false,
+          "sub_ability": {
+            "condition": null,
+            "cost": null,
+            "description": null,
+            "duration": null,
+            "effect": {
+              "forced_to": null,
+              "scope": {
+                "type": "All"
+              },
+              "target": {
+                "type": "ParentTarget"
+              },
+              "type": "ChangeTargets"
+            },
+            "forward_result": false,
+            "kind": "Spell",
+            "optional": true,
+            "optional_targeting": false,
+            "sub_ability": null,
+            "sub_link": "SequentialSibling",
+            "target_prompt": null
+          },
+          "target_prompt": null
+        }
+      ],
+      "attached_to": null,
+      "attachments": [],
+      "base_abilities": [
+        {
+          "condition": null,
+          "cost": null,
+          "description": "Gain control of target spell. You may choose new targets for it.",
+          "duration": null,
+          "effect": {
+            "target": {
+              "type": "StackSpell"
+            },
+            "type": "GainControl"
+          },
+          "forward_result": false,
+          "kind": "Spell",
+          "optional": false,
+          "optional_targeting": false,
+          "sub_ability": {
+            "condition": null,
+            "cost": null,
+            "description": null,
+            "duration": null,
+            "effect": {
+              "forced_to": null,
+              "scope": {
+                "type": "All"
+              },
+              "target": {
+                "type": "ParentTarget"
+              },
+              "type": "ChangeTargets"
+            },
+            "forward_result": false,
+            "kind": "Spell",
+            "optional": true,
+            "optional_targeting": false,
+            "sub_ability": null,
+            "sub_link": "SequentialSibling",
+            "target_prompt": null
+          },
+          "target_prompt": null
+        }
+      ],
+      "base_card_types": {
+        "core_types": [
+          "Instant"
+        ],
+        "subtypes": [],
+        "supertypes": []
+      },
+      "base_characteristics_initialized": true,
+      "base_color": [
+        "Blue"
+      ],
+      "base_controller": 2,
+      "base_keywords": [],
+      "base_mana_cost": {
+        "generic": 4,
+        "shards": [
+          "Blue",
+          "Blue"
+        ],
+        "type": "Cost"
+      },
+      "base_name": "Aethersnatch",
+      "base_power": null,
+      "base_toughness": null,
+      "card_id": 5,
+      "card_types": {
+        "core_types": [
+          "Instant"
+        ],
+        "subtypes": [],
+        "supertypes": []
+      },
+      "cast_controller": 2,
+      "color": [
+        "Blue"
+      ],
+      "colors_spent_to_cast": {
+        "blue": 2
+      },
+      "controller": 2,
+      "counters": {},
+      "damage_marked": 0,
+      "dealt_deathtouch_damage": false,
+      "entered_battlefield_turn": null,
+      "face_down": false,
+      "flipped": false,
+      "id": 5,
+      "incarnation": 2,
+      "keywords": [],
+      "loyalty": null,
+      "mana_cost": {
+        "generic": 4,
+        "shards": [
+          "Blue",
+          "Blue"
+        ],
+        "type": "Cost"
+      },
+      "mana_spent_to_cast_amount": 6,
+      "name": "Aethersnatch",
+      "owner": 2,
+      "power": null,
+      "replacement_definitions": [],
+      "static_definitions": [],
+      "tapped": false,
+      "timestamp": 0,
+      "toughness": null,
+      "transformed": false,
+      "trigger_definitions": [],
+      "zone": "Graveyard"
+    }
+  },
+  "pending_combat_phase_skips": [],
+  "pending_replacement": {
+    "candidates": [
+      {
+        "index": 0,
+        "source": 3
+      }
+    ],
+    "choice_player": 1,
+    "depth": 0,
+    "excess_recipient": null,
+    "exile_controller": 2,
+    "exile_duration": null,
+    "exile_tracking": "None",
+    "is_optional": true,
+    "library_placement": null,
+    "lifelink_bonus": 0,
+    "proposed": {
+      "ZoneChange": {
+        "applied": [],
+        "cause": 4,
+        "enter_tapped": "Unspecified",
+        "enter_transformed": false,
+        "enters_attacking": false,
+        "from": "Graveyard",
+        "object_id": 1,
+        "performed_by": 2,
+        "to": "Exile"
+      }
+    },
+    "unrepresentable_life_change": "Reject"
+  },
+  "pending_trigger": null,
+  "phase": "PreCombatMain",
+  "players": [
+    {
+      "attraction_deck": [],
+      "bending_types_this_turn": [],
+      "can_look_at_top_of_library": false,
+      "cards_drawn_this_step": 0,
+      "cards_drawn_this_turn": 0,
+      "commander_color_identity": [],
+      "contraption_crank_sprocket": 3,
+      "contraption_deck": [],
+      "crimes_committed_this_turn": 1,
+      "descended_this_turn": false,
+      "drew_from_empty_library": false,
+      "energy": 0,
+      "graveyard": [],
+      "hand": [],
+      "has_drawn_this_turn": false,
+      "id": 0,
+      "is_eliminated": false,
+      "lands_played_this_turn": 0,
+      "library": [],
+      "life": 20,
+      "life_gained_this_turn": 0,
+      "life_lost_last_turn": 0,
+      "life_lost_this_turn": 0,
+      "mana_pool": {
+        "mana": []
+      },
+      "opponent_spells_cast_since_own_last_turn": 1,
+      "poison_counters": 0,
+      "speed_trigger_used_this_turn": false,
+      "status": {
+        "type": "Active"
+      },
+      "turns_taken": 0
+    },
+    {
+      "attraction_deck": [],
+      "bending_types_this_turn": [],
+      "can_look_at_top_of_library": false,
+      "cards_drawn_this_step": 0,
+      "cards_drawn_this_turn": 0,
+      "commander_color_identity": [],
+      "contraption_crank_sprocket": 3,
+      "contraption_deck": [],
+      "crimes_committed_this_turn": 0,
+      "descended_this_turn": false,
+      "drew_from_empty_library": false,
+      "energy": 0,
+      "graveyard": [
+        1,
+        2
+      ],
+      "hand": [],
+      "has_drawn_this_turn": false,
+      "id": 1,
+      "is_eliminated": false,
+      "lands_played_this_turn": 0,
+      "library": [],
+      "life": 20,
+      "life_gained_this_turn": 0,
+      "life_lost_last_turn": 0,
+      "life_lost_this_turn": 0,
+      "mana_pool": {
+        "mana": []
+      },
+      "opponent_spells_cast_since_own_last_turn": 2,
+      "poison_counters": 0,
+      "speed_trigger_used_this_turn": false,
+      "status": {
+        "type": "Active"
+      },
+      "turns_taken": 0
+    },
+    {
+      "attraction_deck": [],
+      "bending_types_this_turn": [],
+      "can_look_at_top_of_library": false,
+      "cards_drawn_this_step": 0,
+      "cards_drawn_this_turn": 0,
+      "commander_color_identity": [],
+      "contraption_crank_sprocket": 3,
+      "contraption_deck": [],
+      "crimes_committed_this_turn": 1,
+      "descended_this_turn": false,
+      "drew_from_empty_library": false,
+      "energy": 0,
+      "graveyard": [
+        5
+      ],
+      "hand": [],
+      "has_drawn_this_turn": false,
+      "id": 2,
+      "is_eliminated": false,
+      "lands_played_this_turn": 0,
+      "library": [],
+      "life": 20,
+      "life_gained_this_turn": 0,
+      "life_lost_last_turn": 0,
+      "life_lost_this_turn": 0,
+      "mana_pool": {
+        "mana": []
+      },
+      "opponent_spells_cast_since_own_last_turn": 1,
+      "poison_counters": 0,
+      "speed_trigger_used_this_turn": false,
+      "status": {
+        "type": "Active"
+      },
+      "turns_taken": 0
+    }
+  ],
+  "players_attacked_this_step": [],
+  "players_attacked_this_turn": [],
+  "players_who_created_token_this_turn": [],
+  "players_who_discarded_card_this_turn": [],
+  "players_who_flipped_coins_this_turn": [],
+  "players_who_sacrificed_artifact_this_turn": [],
+  "players_who_searched_library_this_turn": [],
+  "priority_pass_count": 0,
+  "priority_passes": [],
+  "priority_player": 1,
+  "public_revealed_cards": [],
+  "resolution_frames": {
+    "frames": [
+      {
+        "data": {
+          "pending": {
+            "chain": {
+              "cast_occurrence": {
+                "caster": 0,
+                "turn_journal_index": 0
+              },
+              "chosen_target_slots": [],
+              "condition": null,
+              "context": {
+                "additional_cost_paid": false,
+                "alternative_mana_cost_paid": false,
+                "cast_active_player": 0,
+                "cast_controller": 0,
+                "cast_from_zone": "Hand",
+                "cast_phase": "PreCombatMain",
+                "optional_effect_performed": false
+              },
+              "controller": 2,
+              "description": "Target player exiles all land cards from their graveyard.",
+              "detached_remainder": "NoProducer",
+              "duration": null,
+              "effect": {
+                "amount": {
+                  "type": "Fixed",
+                  "value": 3
+                },
+                "player": {
+                  "id": 2,
+                  "type": "SpecificPlayer"
+                },
+                "type": "GainLife"
+              },
+              "forward_result": false,
+              "kind": "Spell",
+              "optional": false,
+              "optional_targeting": false,
+              "scoped_player": 1,
+              "source_id": 4,
+              "sub_ability": null,
+              "targets": [
+                {
+                  "Player": 1
+                }
+              ]
+            }
+          }
+        },
+        "type": "AbilityContinuation"
+      },
+      {
+        "data": {
+          "pending": {
+            "controller": 2,
+            "destination": "Exile",
+            "effect_kind": "ChangeZoneAll",
+            "enter_transformed": false,
+            "logical_zone_change_group": {
+              "all_origin_occurrences": [],
+              "immediately_after_batched_triggers": [],
+              "immediately_after_latched": false,
+              "immediately_after_suppress_triggers": [],
+              "immediately_before_batched_triggers": [],
+              "immediately_before_latched": true,
+              "immediately_before_suppress_triggers": [],
+              "logical_group_id": 1,
+              "post_event_member_contexts": [],
+              "prospective_battlefield_members": [],
+              "terminal_outcomes": []
+            },
+            "moved_count": 0,
+            "origin": null,
+            "paused_current": {
+              "count": "NeedsCount",
+              "delivery_events": [],
+              "expected_event": {
+                "ZoneChange": {
+                  "applied": [],
+                  "cause": 4,
+                  "enter_tapped": "Unspecified",
+                  "enter_transformed": false,
+                  "enters_attacking": false,
+                  "from": "Graveyard",
+                  "object_id": 1,
+                  "performed_by": 2,
+                  "to": "Exile"
+                }
+              },
+              "member": {
+                "incarnation": 0,
+                "object_id": 1
+              },
+              "terminal_completion": null
+            },
+            "remaining": [
+              {
+                "enters_attacking": false,
+                "object_id": 2
+              }
+            ],
+            "source_id": 4,
+            "track_exiled_by_source": false
+          }
+        },
+        "type": "ChangeZone"
+      }
+    ],
+    "last_post_replacement_frame_id": 0,
+    "next_discard_frame_id": 0,
+    "next_draw_sequence_frame_id": 0
+  },
+  "resolution_state_version": 11,
+  "resolved_rules_journal": {
+    "entries": [
+      {
+        "node": {
+          "Proposal": 0
+        },
+        "ordinal": 0
+      },
+      {
+        "command": {
+          "ManaInsert": {
+            "player": 0,
+            "producer": {
+              "Proposal": 0
+            },
+            "unit": {
+              "color": "Colorless",
+              "pip_id": 1,
+              "restrictions": [],
+              "snow": false,
+              "source_id": 0
+            }
+          }
+        },
+        "node": {
+          "Proposal": 0
+        },
+        "ordinal": 1
+      },
+      {
+        "node": {
+          "Proposal": 2
+        },
+        "ordinal": 2
+      },
+      {
+        "command": {
+          "ManaInsert": {
+            "player": 0,
+            "producer": {
+              "Proposal": 2
+            },
+            "unit": {
+              "color": "Colorless",
+              "pip_id": 2,
+              "restrictions": [],
+              "snow": false,
+              "source_id": 0
+            }
+          }
+        },
+        "node": {
+          "Proposal": 2
+        },
+        "ordinal": 3
+      },
+      {
+        "node": {
+          "Proposal": 4
+        },
+        "ordinal": 4
+      },
+      {
+        "command": {
+          "ManaInsert": {
+            "player": 0,
+            "producer": {
+              "Proposal": 4
+            },
+            "unit": {
+              "color": "Red",
+              "pip_id": 3,
+              "restrictions": [],
+              "snow": false,
+              "source_id": 0
+            }
+          }
+        },
+        "node": {
+          "Proposal": 4
+        },
+        "ordinal": 5
+      },
+      {
+        "node": {
+          "Proposal": 6
+        },
+        "ordinal": 6
+      },
+      {
+        "command": {
+          "ManaInsert": {
+            "player": 2,
+            "producer": {
+              "Proposal": 6
+            },
+            "unit": {
+              "color": "Colorless",
+              "pip_id": 4,
+              "restrictions": [],
+              "snow": false,
+              "source_id": 0
+            }
+          }
+        },
+        "node": {
+          "Proposal": 6
+        },
+        "ordinal": 7
+      },
+      {
+        "node": {
+          "Proposal": 8
+        },
+        "ordinal": 8
+      },
+      {
+        "command": {
+          "ManaInsert": {
+            "player": 2,
+            "producer": {
+              "Proposal": 8
+            },
+            "unit": {
+              "color": "Colorless",
+              "pip_id": 5,
+              "restrictions": [],
+              "snow": false,
+              "source_id": 0
+            }
+          }
+        },
+        "node": {
+          "Proposal": 8
+        },
+        "ordinal": 9
+      },
+      {
+        "node": {
+          "Proposal": 10
+        },
+        "ordinal": 10
+      },
+      {
+        "command": {
+          "ManaInsert": {
+            "player": 2,
+            "producer": {
+              "Proposal": 10
+            },
+            "unit": {
+              "color": "Colorless",
+              "pip_id": 6,
+              "restrictions": [],
+              "snow": false,
+              "source_id": 0
+            }
+          }
+        },
+        "node": {
+          "Proposal": 10
+        },
+        "ordinal": 11
+      },
+      {
+        "node": {
+          "Proposal": 12
+        },
+        "ordinal": 12
+      },
+      {
+        "command": {
+          "ManaInsert": {
+            "player": 2,
+            "producer": {
+              "Proposal": 12
+            },
+            "unit": {
+              "color": "Colorless",
+              "pip_id": 7,
+              "restrictions": [],
+              "snow": false,
+              "source_id": 0
+            }
+          }
+        },
+        "node": {
+          "Proposal": 12
+        },
+        "ordinal": 13
+      },
+      {
+        "node": {
+          "Proposal": 14
+        },
+        "ordinal": 14
+      },
+      {
+        "command": {
+          "ManaInsert": {
+            "player": 2,
+            "producer": {
+              "Proposal": 14
+            },
+            "unit": {
+              "color": "Blue",
+              "pip_id": 8,
+              "restrictions": [],
+              "snow": false,
+              "source_id": 0
+            }
+          }
+        },
+        "node": {
+          "Proposal": 14
+        },
+        "ordinal": 15
+      },
+      {
+        "node": {
+          "Proposal": 16
+        },
+        "ordinal": 16
+      },
+      {
+        "command": {
+          "ManaInsert": {
+            "player": 2,
+            "producer": {
+              "Proposal": 16
+            },
+            "unit": {
+              "color": "Blue",
+              "pip_id": 9,
+              "restrictions": [],
+              "snow": false,
+              "source_id": 0
+            }
+          }
+        },
+        "node": {
+          "Proposal": 16
+        },
+        "ordinal": 17
+      },
+      {
+        "node": {
+          "Proposal": 18
+        },
+        "ordinal": 18
+      },
+      {
+        "command": {
+          "StackPush": {
+            "cause": {
+              "Proposal": 18
+            },
+            "entry": {
+              "controller": 0,
+              "id": 4,
+              "kind": {
+                "data": {
+                  "actual_mana_spent": 0,
+                  "card_id": 4,
+                  "casting_variant": "Normal"
+                },
+                "type": "Spell"
+              },
+              "source_id": 4
+            },
+            "origin": "Put",
+            "resulting_position": 0,
+            "spell_announcement": 1
+          }
+        },
+        "node": {
+          "Proposal": 18
+        },
+        "ordinal": 19
+      },
+      {
+        "node": {
+          "Payment": 10
+        },
+        "ordinal": 20
+      },
+      {
+        "command": {
+          "ManaSpend": {
+            "payer": 0,
+            "payment": {
+              "Payment": 10
+            },
+            "recipient": {
+              "Object": {
+                "incarnation": 0,
+                "object_id": 4
+              }
+            },
+            "units": [
+              {
+                "producer": {
+                  "Proposal": 4
+                },
+                "unit": {
+                  "color": "Red",
+                  "pip_id": 3,
+                  "restrictions": [],
+                  "snow": false,
+                  "source_id": 0
+                }
+              },
+              {
+                "producer": {
+                  "Proposal": 0
+                },
+                "unit": {
+                  "color": "Colorless",
+                  "pip_id": 1,
+                  "restrictions": [],
+                  "snow": false,
+                  "source_id": 0
+                }
+              },
+              {
+                "producer": {
+                  "Proposal": 2
+                },
+                "unit": {
+                  "color": "Colorless",
+                  "pip_id": 2,
+                  "restrictions": [],
+                  "snow": false,
+                  "source_id": 0
+                }
+              }
+            ]
+          }
+        },
+        "node": {
+          "Payment": 10
+        },
+        "ordinal": 21
+      },
+      {
+        "node": {
+          "Proposal": 22
+        },
+        "ordinal": 22
+      },
+      {
+        "command": {
+          "LedgerEdit": {
+            "cause": {
+              "Proposal": 22
+            },
+            "edit": {
+              "CrimeCommitted": {
+                "expected_turn_count": 0,
+                "player": 0
+              }
+            }
+          }
+        },
+        "node": {
+          "Proposal": 22
+        },
+        "ordinal": 23
+      },
+      {
+        "node": {
+          "Proposal": 24
+        },
+        "ordinal": 24
+      },
+      {
+        "command": {
+          "LedgerEdit": {
+            "cause": {
+              "Proposal": 24
+            },
+            "edit": {
+              "SpellCast": {
+                "expected_game_count": 0,
+                "expected_game_history_len": 0,
+                "expected_turn_count": 0,
+                "expected_turn_history_len": 0,
+                "player": 0,
+                "record": {
+                  "cast_variant": "Normal",
+                  "colors": [
+                    "Red"
+                  ],
+                  "core_types": [
+                    "Instant"
+                  ],
+                  "from_zone": "Hand",
+                  "keywords": [],
+                  "mana_value": 3,
+                  "name": "Mudhole",
+                  "spell_object_id": 4,
+                  "subtypes": [],
+                  "supertypes": []
+                }
+              }
+            }
+          }
+        },
+        "node": {
+          "Proposal": 24
+        },
+        "ordinal": 25
+      },
+      {
+        "node": {
+          "Proposal": 26
+        },
+        "ordinal": 26
+      },
+      {
+        "command": {
+          "StackEntryFinalize": {
+            "cause": {
+              "Proposal": 26
+            },
+            "entry_position": 0,
+            "expected_old_kind": {
+              "data": {
+                "actual_mana_spent": 0,
+                "card_id": 4,
+                "casting_variant": "Normal"
+              },
+              "type": "Spell"
+            },
+            "expected_old_paid_facts": null,
+            "object": 4,
+            "resulting_cast_occurrence": {
+              "caster": 0,
+              "turn_journal_index": 0
+            },
+            "resulting_kind": {
+              "data": {
+                "ability": {
+                  "cast_occurrence": {
+                    "caster": 0,
+                    "turn_journal_index": 0
+                  },
+                  "chosen_target_slots": [
+                    0
+                  ],
+                  "condition": null,
+                  "context": {
+                    "additional_cost_paid": false,
+                    "alternative_mana_cost_paid": false,
+                    "cast_active_player": 0,
+                    "cast_controller": 0,
+                    "cast_from_zone": "Hand",
+                    "cast_phase": "PreCombatMain",
+                    "optional_effect_performed": false
+                  },
+                  "controller": 0,
+                  "declares_chosen_group": 0,
+                  "description": "Target player exiles all land cards from their graveyard.",
+                  "detached_remainder": "NoProducer",
+                  "duration": null,
+                  "effect": {
+                    "target": {
+                      "type": "Player"
+                    },
+                    "type": "TargetOnly"
+                  },
+                  "forward_result": false,
+                  "kind": "Spell",
+                  "optional": false,
+                  "optional_targeting": false,
+                  "source_id": 4,
+                  "sub_ability": {
+                    "cast_occurrence": {
+                      "caster": 0,
+                      "turn_journal_index": 0
+                    },
+                    "chosen_target_slots": [],
+                    "condition": null,
+                    "context": {
+                      "additional_cost_paid": false,
+                      "alternative_mana_cost_paid": false,
+                      "optional_effect_performed": false
+                    },
+                    "controller": 0,
+                    "description": "Target player exiles all land cards from their graveyard.",
+                    "detached_remainder": "NoProducer",
+                    "duration": null,
+                    "effect": {
+                      "destination": "Exile",
+                      "origin": "Graveyard",
+                      "target": {
+                        "controller": null,
+                        "properties": [
+                          {
+                            "controller": "ScopedPlayer",
+                            "type": "Owned"
+                          },
+                          {
+                            "type": "InZone",
+                            "zone": "Graveyard"
+                          }
+                        ],
+                        "type": "Typed",
+                        "type_filters": [
+                          "Land"
+                        ]
+                      },
+                      "type": "ChangeZoneAll"
+                    },
+                    "forward_result": false,
+                    "kind": "Spell",
+                    "optional": false,
+                    "optional_targeting": false,
+                    "source_id": 4,
+                    "sub_ability": {
+                      "cast_occurrence": {
+                        "caster": 0,
+                        "turn_journal_index": 0
+                      },
+                      "chosen_target_slots": [],
+                      "condition": null,
+                      "context": {
+                        "additional_cost_paid": false,
+                        "alternative_mana_cost_paid": false,
+                        "optional_effect_performed": false
+                      },
+                      "controller": 0,
+                      "description": "Target player exiles all land cards from their graveyard.",
+                      "detached_remainder": "NoProducer",
+                      "duration": null,
+                      "effect": {
+                        "amount": {
+                          "type": "Fixed",
+                          "value": 3
+                        },
+                        "player": {
+                          "id": 2,
+                          "type": "SpecificPlayer"
+                        },
+                        "type": "GainLife"
+                      },
+                      "forward_result": false,
+                      "kind": "Spell",
+                      "optional": false,
+                      "optional_targeting": false,
+                      "source_id": 4,
+                      "sub_ability": null,
+                      "targets": []
+                    },
+                    "target_choice_timing": "Resolution",
+                    "targets": []
+                  },
+                  "targets": [
+                    {
+                      "Player": 1
+                    }
+                  ]
+                },
+                "actual_mana_spent": 3,
+                "card_id": 4,
+                "casting_variant": "Normal"
+              },
+              "type": "Spell"
+            },
+            "resulting_paid_facts": {
+              "actual_mana_spent": 3,
+              "distinct_colors_spent": 1
+            }
+          }
+        },
+        "node": {
+          "Proposal": 26
+        },
+        "ordinal": 27
+      },
+      {
+        "node": {
+          "Proposal": 28
+        },
+        "ordinal": 28
+      },
+      {
+        "command": {
+          "StackPush": {
+            "cause": {
+              "Proposal": 28
+            },
+            "entry": {
+              "controller": 2,
+              "id": 5,
+              "kind": {
+                "data": {
+                  "actual_mana_spent": 0,
+                  "card_id": 5,
+                  "casting_variant": "Normal"
+                },
+                "type": "Spell"
+              },
+              "source_id": 5
+            },
+            "origin": "Put",
+            "resulting_position": 1,
+            "spell_announcement": 2
+          }
+        },
+        "node": {
+          "Proposal": 28
+        },
+        "ordinal": 29
+      },
+      {
+        "node": {
+          "Payment": 15
+        },
+        "ordinal": 30
+      },
+      {
+        "command": {
+          "ManaSpend": {
+            "payer": 2,
+            "payment": {
+              "Payment": 15
+            },
+            "recipient": {
+              "Object": {
+                "incarnation": 0,
+                "object_id": 5
+              }
+            },
+            "units": [
+              {
+                "producer": {
+                  "Proposal": 14
+                },
+                "unit": {
+                  "color": "Blue",
+                  "pip_id": 8,
+                  "restrictions": [],
+                  "snow": false,
+                  "source_id": 0
+                }
+              },
+              {
+                "producer": {
+                  "Proposal": 16
+                },
+                "unit": {
+                  "color": "Blue",
+                  "pip_id": 9,
+                  "restrictions": [],
+                  "snow": false,
+                  "source_id": 0
+                }
+              },
+              {
+                "producer": {
+                  "Proposal": 6
+                },
+                "unit": {
+                  "color": "Colorless",
+                  "pip_id": 4,
+                  "restrictions": [],
+                  "snow": false,
+                  "source_id": 0
+                }
+              },
+              {
+                "producer": {
+                  "Proposal": 12
+                },
+                "unit": {
+                  "color": "Colorless",
+                  "pip_id": 7,
+                  "restrictions": [],
+                  "snow": false,
+                  "source_id": 0
+                }
+              },
+              {
+                "producer": {
+                  "Proposal": 10
+                },
+                "unit": {
+                  "color": "Colorless",
+                  "pip_id": 6,
+                  "restrictions": [],
+                  "snow": false,
+                  "source_id": 0
+                }
+              },
+              {
+                "producer": {
+                  "Proposal": 8
+                },
+                "unit": {
+                  "color": "Colorless",
+                  "pip_id": 5,
+                  "restrictions": [],
+                  "snow": false,
+                  "source_id": 0
+                }
+              }
+            ]
+          }
+        },
+        "node": {
+          "Payment": 15
+        },
+        "ordinal": 31
+      },
+      {
+        "node": {
+          "Proposal": 32
+        },
+        "ordinal": 32
+      },
+      {
+        "command": {
+          "LedgerEdit": {
+            "cause": {
+              "Proposal": 32
+            },
+            "edit": {
+              "CrimeCommitted": {
+                "expected_turn_count": 0,
+                "player": 2
+              }
+            }
+          }
+        },
+        "node": {
+          "Proposal": 32
+        },
+        "ordinal": 33
+      },
+      {
+        "node": {
+          "Proposal": 34
+        },
+        "ordinal": 34
+      },
+      {
+        "command": {
+          "LedgerEdit": {
+            "cause": {
+              "Proposal": 34
+            },
+            "edit": {
+              "SpellCast": {
+                "expected_game_count": 0,
+                "expected_game_history_len": 0,
+                "expected_turn_count": 1,
+                "expected_turn_history_len": 0,
+                "player": 2,
+                "record": {
+                  "cast_variant": "Normal",
+                  "colors": [
+                    "Blue"
+                  ],
+                  "core_types": [
+                    "Instant"
+                  ],
+                  "from_zone": "Hand",
+                  "keywords": [],
+                  "mana_value": 6,
+                  "name": "Aethersnatch",
+                  "spell_object_id": 5,
+                  "subtypes": [],
+                  "supertypes": []
+                }
+              }
+            }
+          }
+        },
+        "node": {
+          "Proposal": 34
+        },
+        "ordinal": 35
+      },
+      {
+        "node": {
+          "Proposal": 36
+        },
+        "ordinal": 36
+      },
+      {
+        "command": {
+          "StackEntryFinalize": {
+            "cause": {
+              "Proposal": 36
+            },
+            "entry_position": 1,
+            "expected_old_kind": {
+              "data": {
+                "actual_mana_spent": 0,
+                "card_id": 5,
+                "casting_variant": "Normal"
+              },
+              "type": "Spell"
+            },
+            "expected_old_paid_facts": null,
+            "object": 5,
+            "resulting_cast_occurrence": {
+              "caster": 2,
+              "turn_journal_index": 0
+            },
+            "resulting_kind": {
+              "data": {
+                "ability": {
+                  "cast_occurrence": {
+                    "caster": 2,
+                    "turn_journal_index": 0
+                  },
+                  "chosen_target_slots": [
+                    0
+                  ],
+                  "condition": null,
+                  "context": {
+                    "additional_cost_paid": false,
+                    "alternative_mana_cost_paid": false,
+                    "cast_active_player": 0,
+                    "cast_controller": 2,
+                    "cast_from_zone": "Hand",
+                    "cast_phase": "PreCombatMain",
+                    "chain_root_targets": [
+                      {
+                        "Object": 4
+                      }
+                    ],
+                    "optional_effect_performed": false
+                  },
+                  "controller": 2,
+                  "description": "Gain control of target spell. You may choose new targets for it.",
+                  "detached_remainder": "NoProducer",
+                  "duration": null,
+                  "effect": {
+                    "target": {
+                      "type": "StackSpell"
+                    },
+                    "type": "GainControl"
+                  },
+                  "forward_result": false,
+                  "kind": "Spell",
+                  "optional": false,
+                  "optional_targeting": false,
+                  "source_id": 5,
+                  "sub_ability": {
+                    "cast_occurrence": {
+                      "caster": 2,
+                      "turn_journal_index": 0
+                    },
+                    "chosen_target_slots": [],
+                    "condition": null,
+                    "context": {
+                      "additional_cost_paid": false,
+                      "alternative_mana_cost_paid": false,
+                      "optional_effect_performed": false
+                    },
+                    "controller": 2,
+                    "description": "Gain control of target spell. You may choose new targets for it.",
+                    "detached_remainder": "NoProducer",
+                    "duration": null,
+                    "effect": {
+                      "forced_to": null,
+                      "scope": {
+                        "type": "All"
+                      },
+                      "target": {
+                        "type": "ParentTarget"
+                      },
+                      "type": "ChangeTargets"
+                    },
+                    "forward_result": false,
+                    "kind": "Spell",
+                    "optional": true,
+                    "optional_targeting": false,
+                    "source_id": 5,
+                    "sub_ability": null,
+                    "sub_link": "SequentialSibling",
+                    "targets": []
+                  },
+                  "target_pins": [
+                    {
+                      "incarnation": 1,
+                      "object_id": 4
+                    }
+                  ],
+                  "targets": [
+                    {
+                      "Object": 4
+                    }
+                  ]
+                },
+                "actual_mana_spent": 6,
+                "card_id": 5,
+                "casting_variant": "Normal"
+              },
+              "type": "Spell"
+            },
+            "resulting_paid_facts": {
+              "actual_mana_spent": 6,
+              "distinct_colors_spent": 1
+            }
+          }
+        },
+        "node": {
+          "Proposal": 36
+        },
+        "ordinal": 37
+      },
+      {
+        "node": {
+          "Proposal": 38
+        },
+        "ordinal": 38
+      },
+      {
+        "command": {
+          "StackRemoval": {
+            "cause": {
+              "Proposal": 38
+            },
+            "entry": {
+              "controller": 2,
+              "id": 5,
+              "kind": {
+                "data": {
+                  "ability": {
+                    "cast_occurrence": {
+                      "caster": 2,
+                      "turn_journal_index": 0
+                    },
+                    "chosen_target_slots": [
+                      0
+                    ],
+                    "condition": null,
+                    "context": {
+                      "additional_cost_paid": false,
+                      "alternative_mana_cost_paid": false,
+                      "cast_active_player": 0,
+                      "cast_controller": 2,
+                      "cast_from_zone": "Hand",
+                      "cast_phase": "PreCombatMain",
+                      "chain_root_targets": [
+                        {
+                          "Object": 4
+                        }
+                      ],
+                      "optional_effect_performed": false
+                    },
+                    "controller": 2,
+                    "description": "Gain control of target spell. You may choose new targets for it.",
+                    "detached_remainder": "NoProducer",
+                    "duration": null,
+                    "effect": {
+                      "target": {
+                        "type": "StackSpell"
+                      },
+                      "type": "GainControl"
+                    },
+                    "forward_result": false,
+                    "kind": "Spell",
+                    "optional": false,
+                    "optional_targeting": false,
+                    "source_id": 5,
+                    "sub_ability": {
+                      "cast_occurrence": {
+                        "caster": 2,
+                        "turn_journal_index": 0
+                      },
+                      "chosen_target_slots": [],
+                      "condition": null,
+                      "context": {
+                        "additional_cost_paid": false,
+                        "alternative_mana_cost_paid": false,
+                        "optional_effect_performed": false
+                      },
+                      "controller": 2,
+                      "description": "Gain control of target spell. You may choose new targets for it.",
+                      "detached_remainder": "NoProducer",
+                      "duration": null,
+                      "effect": {
+                        "forced_to": null,
+                        "scope": {
+                          "type": "All"
+                        },
+                        "target": {
+                          "type": "ParentTarget"
+                        },
+                        "type": "ChangeTargets"
+                      },
+                      "forward_result": false,
+                      "kind": "Spell",
+                      "optional": true,
+                      "optional_targeting": false,
+                      "source_id": 5,
+                      "sub_ability": null,
+                      "sub_link": "SequentialSibling",
+                      "targets": []
+                    },
+                    "target_pins": [
+                      {
+                        "incarnation": 1,
+                        "object_id": 4
+                      }
+                    ],
+                    "targets": [
+                      {
+                        "Object": 4
+                      }
+                    ]
+                  },
+                  "actual_mana_spent": 6,
+                  "card_id": 5,
+                  "casting_variant": "Normal"
+                },
+                "type": "Spell"
+              },
+              "source_id": 5
+            },
+            "index": 1,
+            "resulting_depth": 1
+          }
+        },
+        "node": {
+          "Proposal": 38
+        },
+        "ordinal": 39
+      },
+      {
+        "node": {
+          "Proposal": 40
+        },
+        "ordinal": 40
+      },
+      {
+        "command": {
+          "ContinuousEffect": {
+            "Install": {
+              "cause": {
+                "Proposal": 40
+              },
+              "effect": {
+                "affected": {
+                  "id": 4,
+                  "type": "SpecificObject"
+                },
+                "controller": 2,
+                "duration": "Permanent",
+                "id": 1,
+                "modifications": [
+                  {
+                    "type": "ChangeController"
+                  }
+                ],
+                "source_id": 5,
+                "source_name": "Aethersnatch",
+                "timestamp": 2
+              },
+              "expected_installed_count": 0,
+              "resulting_next_continuous_effect_id": 2,
+              "resulting_next_end_effect_group_id": 1,
+              "resulting_next_timestamp": 3
+            }
+          }
+        },
+        "node": {
+          "Proposal": 40
+        },
+        "ordinal": 41
+      },
+      {
+        "node": {
+          "Proposal": 42
+        },
+        "ordinal": 42
+      },
+      {
+        "command": {
+          "FrameTransition": {
+            "cause": {
+              "Proposal": 42
+            },
+            "transition": {
+              "Push": {
+                "frame": {
+                  "data": {
+                    "ability": {
+                      "cast_occurrence": {
+                        "caster": 2,
+                        "turn_journal_index": 0
+                      },
+                      "chosen_target_slots": [],
+                      "condition": null,
+                      "context": {
+                        "additional_cost_paid": false,
+                        "alternative_mana_cost_paid": false,
+                        "cast_active_player": 0,
+                        "cast_controller": 2,
+                        "cast_from_zone": "Hand",
+                        "cast_phase": "PreCombatMain",
+                        "chain_root_targets": [
+                          {
+                            "Object": 4
+                          }
+                        ],
+                        "optional_effect_performed": false
+                      },
+                      "controller": 2,
+                      "description": "Gain control of target spell. You may choose new targets for it.",
+                      "detached_remainder": "NoProducer",
+                      "duration": null,
+                      "effect": {
+                        "forced_to": null,
+                        "scope": {
+                          "type": "All"
+                        },
+                        "target": {
+                          "type": "ParentTarget"
+                        },
+                        "type": "ChangeTargets"
+                      },
+                      "forward_result": false,
+                      "kind": "Spell",
+                      "optional": true,
+                      "optional_targeting": false,
+                      "source_id": 5,
+                      "sub_ability": null,
+                      "sub_link": "SequentialSibling",
+                      "target_pins": [
+                        {
+                          "incarnation": 1,
+                          "object_id": 4
+                        }
+                      ],
+                      "targets": [
+                        {
+                          "Object": 4
+                        }
+                      ]
+                    }
+                  },
+                  "type": "OptionalEffect"
+                }
+              }
+            }
+          }
+        },
+        "node": {
+          "Proposal": 42
+        },
+        "ordinal": 43
+      },
+      {
+        "node": {
+          "Proposal": 44
+        },
+        "ordinal": 44
+      },
+      {
+        "command": {
+          "TriggerCollection": {
+            "cause": {
+              "Proposal": 44
+            },
+            "collection": {
+              "ConsumeBeforePriority": {
+                "occurrences": [
+                  {
+                    "event": {
+                      "data": {
+                        "from": "Stack",
+                        "object_id": 5,
+                        "record": {
+                          "arrival": {
+                            "controller": 2,
+                            "owner": 2
+                          },
+                          "attached_to": null,
+                          "attachments": [],
+                          "base_power": null,
+                          "base_toughness": null,
+                          "cast_from_zone": "Hand",
+                          "co_departed": [],
+                          "colors": [
+                            "Blue"
+                          ],
+                          "combat_status": {
+                            "attack_target": null,
+                            "attack_target_identity": null,
+                            "attacking": false,
+                            "attacking_alone": false,
+                            "blocked": false,
+                            "blocking": false,
+                            "blocking_alone": false,
+                            "defending_player": null
+                          },
+                          "controller": 2,
+                          "core_types": [
+                            "Instant"
+                          ],
+                          "entered_incarnation": null,
+                          "from_zone": "Stack",
+                          "is_suspected": false,
+                          "is_token": false,
+                          "keywords": [],
+                          "linked_exile_snapshot": [],
+                          "mana_value": 6,
+                          "name": "Aethersnatch",
+                          "object_id": 5,
+                          "owner": 2,
+                          "played_from_zone": null,
+                          "power": null,
+                          "recorded_turn_number": 2,
+                          "subtypes": [],
+                          "supertypes": [],
+                          "to_zone": "Graveyard",
+                          "toughness": null,
+                          "trigger_source_context": {
+                            "card_id": 5,
+                            "cast_controller": 2,
+                            "cast_from_zone": "Hand",
+                            "colors_spent_to_cast": {
+                              "blue": 2
+                            },
+                            "combat_status": {
+                              "attack_target": null,
+                              "attack_target_identity": null,
+                              "attacking": false,
+                              "attacking_alone": false,
+                              "blocked": false,
+                              "blocking": false,
+                              "blocking_alone": false,
+                              "defending_player": null
+                            },
+                            "face_down": false,
+                            "identity": {
+                              "expected_zone": "Stack",
+                              "reference": {
+                                "incarnation": 1,
+                                "object_id": 5
+                              }
+                            },
+                            "is_renowned": false,
+                            "is_saddled": false,
+                            "is_token": false,
+                            "lki": {
+                              "attachments": [],
+                              "base_power": null,
+                              "base_toughness": null,
+                              "card_types": [
+                                "Instant"
+                              ],
+                              "chosen_attributes": [],
+                              "colors": [
+                                "Blue"
+                              ],
+                              "controller": 2,
+                              "counters": {},
+                              "intensity": 0,
+                              "is_suspected": false,
+                              "keywords": [],
+                              "mana_value": 6,
+                              "name": "Aethersnatch",
+                              "owner": 2,
+                              "power": null,
+                              "subtypes": [],
+                              "supertypes": [],
+                              "tapped": false,
+                              "toughness": null,
+                              "was_prepared": false
+                            },
+                            "mana_cost": {
+                              "generic": 4,
+                              "shards": [
+                                "Blue",
+                                "Blue"
+                              ],
+                              "type": "Cost"
+                            },
+                            "mana_spent_to_cast": false,
+                            "mana_spent_to_cast_amount": 6,
+                            "phase_status": {
+                              "status": "PhasedIn"
+                            },
+                            "timestamp": 0,
+                            "transformed": false
+                          },
+                          "turn_zone_change_index": 2,
+                          "was_prepared": false
+                        },
+                        "to": "Graveyard"
+                      },
+                      "type": "ZoneChanged"
+                    },
+                    "occurrence": 0,
+                    "scope": "OrdinaryCollectorsOnly"
+                  },
+                  {
+                    "event": {
+                      "data": {
+                        "object_id": 5
+                      },
+                      "type": "StackResolved"
+                    },
+                    "occurrence": 0,
+                    "scope": "OrdinaryCollectorsOnly"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "node": {
+          "Proposal": 44
+        },
+        "ordinal": 45
+      },
+      {
+        "node": {
+          "Proposal": 46
+        },
+        "ordinal": 46
+      },
+      {
+        "command": {
+          "StackRemoval": {
+            "cause": {
+              "Proposal": 46
+            },
+            "entry": {
+              "controller": 0,
+              "id": 4,
+              "kind": {
+                "data": {
+                  "ability": {
+                    "cast_occurrence": {
+                      "caster": 0,
+                      "turn_journal_index": 0
+                    },
+                    "chosen_target_slots": [
+                      0
+                    ],
+                    "condition": null,
+                    "context": {
+                      "additional_cost_paid": false,
+                      "alternative_mana_cost_paid": false,
+                      "cast_active_player": 0,
+                      "cast_controller": 0,
+                      "cast_from_zone": "Hand",
+                      "cast_phase": "PreCombatMain",
+                      "optional_effect_performed": false
+                    },
+                    "controller": 0,
+                    "declares_chosen_group": 0,
+                    "description": "Target player exiles all land cards from their graveyard.",
+                    "detached_remainder": "NoProducer",
+                    "duration": null,
+                    "effect": {
+                      "target": {
+                        "type": "Player"
+                      },
+                      "type": "TargetOnly"
+                    },
+                    "forward_result": false,
+                    "kind": "Spell",
+                    "optional": false,
+                    "optional_targeting": false,
+                    "source_id": 4,
+                    "sub_ability": {
+                      "cast_occurrence": {
+                        "caster": 0,
+                        "turn_journal_index": 0
+                      },
+                      "chosen_target_slots": [],
+                      "condition": null,
+                      "context": {
+                        "additional_cost_paid": false,
+                        "alternative_mana_cost_paid": false,
+                        "optional_effect_performed": false
+                      },
+                      "controller": 0,
+                      "description": "Target player exiles all land cards from their graveyard.",
+                      "detached_remainder": "NoProducer",
+                      "duration": null,
+                      "effect": {
+                        "destination": "Exile",
+                        "origin": "Graveyard",
+                        "target": {
+                          "controller": null,
+                          "properties": [
+                            {
+                              "controller": "ScopedPlayer",
+                              "type": "Owned"
+                            },
+                            {
+                              "type": "InZone",
+                              "zone": "Graveyard"
+                            }
+                          ],
+                          "type": "Typed",
+                          "type_filters": [
+                            "Land"
+                          ]
+                        },
+                        "type": "ChangeZoneAll"
+                      },
+                      "forward_result": false,
+                      "kind": "Spell",
+                      "optional": false,
+                      "optional_targeting": false,
+                      "source_id": 4,
+                      "sub_ability": {
+                        "cast_occurrence": {
+                          "caster": 0,
+                          "turn_journal_index": 0
+                        },
+                        "chosen_target_slots": [],
+                        "condition": null,
+                        "context": {
+                          "additional_cost_paid": false,
+                          "alternative_mana_cost_paid": false,
+                          "optional_effect_performed": false
+                        },
+                        "controller": 0,
+                        "description": "Target player exiles all land cards from their graveyard.",
+                        "detached_remainder": "NoProducer",
+                        "duration": null,
+                        "effect": {
+                          "amount": {
+                            "type": "Fixed",
+                            "value": 3
+                          },
+                          "player": {
+                            "id": 2,
+                            "type": "SpecificPlayer"
+                          },
+                          "type": "GainLife"
+                        },
+                        "forward_result": false,
+                        "kind": "Spell",
+                        "optional": false,
+                        "optional_targeting": false,
+                        "source_id": 4,
+                        "sub_ability": null,
+                        "targets": []
+                      },
+                      "target_choice_timing": "Resolution",
+                      "targets": []
+                    },
+                    "targets": [
+                      {
+                        "Player": 1
+                      }
+                    ]
+                  },
+                  "actual_mana_spent": 3,
+                  "card_id": 4,
+                  "casting_variant": "Normal"
+                },
+                "type": "Spell"
+              },
+              "source_id": 4
+            },
+            "index": 0,
+            "resulting_depth": 0
+          }
+        },
+        "node": {
+          "Proposal": 46
+        },
+        "ordinal": 47
+      },
+      {
+        "node": {
+          "Proposal": 48
+        },
+        "ordinal": 48
+      },
+      {
+        "command": {
+          "FrameTransition": {
+            "cause": {
+              "Proposal": 48
+            },
+            "transition": {
+              "InsertParentOfActive": {
+                "frame": {
+                  "data": {
+                    "pending": {
+                      "chain": {
+                        "cast_occurrence": {
+                          "caster": 0,
+                          "turn_journal_index": 0
+                        },
+                        "chosen_target_slots": [],
+                        "condition": null,
+                        "context": {
+                          "additional_cost_paid": false,
+                          "alternative_mana_cost_paid": false,
+                          "cast_active_player": 0,
+                          "cast_controller": 0,
+                          "cast_from_zone": "Hand",
+                          "cast_phase": "PreCombatMain",
+                          "optional_effect_performed": false
+                        },
+                        "controller": 2,
+                        "description": "Target player exiles all land cards from their graveyard.",
+                        "detached_remainder": "NoProducer",
+                        "duration": null,
+                        "effect": {
+                          "amount": {
+                            "type": "Fixed",
+                            "value": 3
+                          },
+                          "player": {
+                            "id": 2,
+                            "type": "SpecificPlayer"
+                          },
+                          "type": "GainLife"
+                        },
+                        "forward_result": false,
+                        "kind": "Spell",
+                        "optional": false,
+                        "optional_targeting": false,
+                        "scoped_player": 1,
+                        "source_id": 4,
+                        "sub_ability": null,
+                        "targets": [
+                          {
+                            "Player": 1
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "type": "AbilityContinuation"
+                }
+              }
+            }
+          }
+        },
+        "node": {
+          "Proposal": 48
+        },
+        "ordinal": 49
+      }
+    ],
+    "next_command_ordinal": 50,
+    "next_settlement_node_ordinal": 25,
+    "nodes": [
+      {
+        "identity": {
+          "Proposal": 0
+        },
+        "journal_ordinals": [
+          0,
+          1
+        ],
+        "kind": "Proposal",
+        "ordinal": 0,
+        "produced_pips": [
+          1
+        ]
+      },
+      {
+        "identity": {
+          "Proposal": 2
+        },
+        "journal_ordinals": [
+          2,
+          3
+        ],
+        "kind": "Proposal",
+        "ordinal": 1,
+        "produced_pips": [
+          2
+        ]
+      },
+      {
+        "identity": {
+          "Proposal": 4
+        },
+        "journal_ordinals": [
+          4,
+          5
+        ],
+        "kind": "Proposal",
+        "ordinal": 2,
+        "produced_pips": [
+          3
+        ]
+      },
+      {
+        "identity": {
+          "Proposal": 6
+        },
+        "journal_ordinals": [
+          6,
+          7
+        ],
+        "kind": "Proposal",
+        "ordinal": 3,
+        "produced_pips": [
+          4
+        ]
+      },
+      {
+        "identity": {
+          "Proposal": 8
+        },
+        "journal_ordinals": [
+          8,
+          9
+        ],
+        "kind": "Proposal",
+        "ordinal": 4,
+        "produced_pips": [
+          5
+        ]
+      },
+      {
+        "identity": {
+          "Proposal": 10
+        },
+        "journal_ordinals": [
+          10,
+          11
+        ],
+        "kind": "Proposal",
+        "ordinal": 5,
+        "produced_pips": [
+          6
+        ]
+      },
+      {
+        "identity": {
+          "Proposal": 12
+        },
+        "journal_ordinals": [
+          12,
+          13
+        ],
+        "kind": "Proposal",
+        "ordinal": 6,
+        "produced_pips": [
+          7
+        ]
+      },
+      {
+        "identity": {
+          "Proposal": 14
+        },
+        "journal_ordinals": [
+          14,
+          15
+        ],
+        "kind": "Proposal",
+        "ordinal": 7,
+        "produced_pips": [
+          8
+        ]
+      },
+      {
+        "identity": {
+          "Proposal": 16
+        },
+        "journal_ordinals": [
+          16,
+          17
+        ],
+        "kind": "Proposal",
+        "ordinal": 8,
+        "produced_pips": [
+          9
+        ]
+      },
+      {
+        "identity": {
+          "Proposal": 18
+        },
+        "journal_ordinals": [
+          18,
+          19
+        ],
+        "kind": "Proposal",
+        "ordinal": 9
+      },
+      {
+        "depends_on": [
+          {
+            "Proposal": 4
+          },
+          {
+            "Proposal": 0
+          },
+          {
+            "Proposal": 2
+          }
+        ],
+        "identity": {
+          "Payment": 10
+        },
+        "journal_ordinals": [
+          20,
+          21
+        ],
+        "kind": {
+          "Payment": {
+            "payer": 0,
+            "recipient": {
+              "Object": {
+                "incarnation": 0,
+                "object_id": 4
+              }
+            }
+          }
+        },
+        "ordinal": 10,
+        "spent_pips": [
+          3,
+          1,
+          2
+        ]
+      },
+      {
+        "identity": {
+          "Proposal": 22
+        },
+        "journal_ordinals": [
+          22,
+          23
+        ],
+        "kind": "Proposal",
+        "ordinal": 11
+      },
+      {
+        "identity": {
+          "Proposal": 24
+        },
+        "journal_ordinals": [
+          24,
+          25
+        ],
+        "kind": "Proposal",
+        "ordinal": 12
+      },
+      {
+        "identity": {
+          "Proposal": 26
+        },
+        "journal_ordinals": [
+          26,
+          27
+        ],
+        "kind": "Proposal",
+        "ordinal": 13
+      },
+      {
+        "identity": {
+          "Proposal": 28
+        },
+        "journal_ordinals": [
+          28,
+          29
+        ],
+        "kind": "Proposal",
+        "ordinal": 14
+      },
+      {
+        "depends_on": [
+          {
+            "Proposal": 14
+          },
+          {
+            "Proposal": 16
+          },
+          {
+            "Proposal": 6
+          },
+          {
+            "Proposal": 12
+          },
+          {
+            "Proposal": 10
+          },
+          {
+            "Proposal": 8
+          }
+        ],
+        "identity": {
+          "Payment": 15
+        },
+        "journal_ordinals": [
+          30,
+          31
+        ],
+        "kind": {
+          "Payment": {
+            "payer": 2,
+            "recipient": {
+              "Object": {
+                "incarnation": 0,
+                "object_id": 5
+              }
+            }
+          }
+        },
+        "ordinal": 15,
+        "spent_pips": [
+          8,
+          9,
+          4,
+          7,
+          6,
+          5
+        ]
+      },
+      {
+        "identity": {
+          "Proposal": 32
+        },
+        "journal_ordinals": [
+          32,
+          33
+        ],
+        "kind": "Proposal",
+        "ordinal": 16
+      },
+      {
+        "identity": {
+          "Proposal": 34
+        },
+        "journal_ordinals": [
+          34,
+          35
+        ],
+        "kind": "Proposal",
+        "ordinal": 17
+      },
+      {
+        "identity": {
+          "Proposal": 36
+        },
+        "journal_ordinals": [
+          36,
+          37
+        ],
+        "kind": "Proposal",
+        "ordinal": 18
+      },
+      {
+        "identity": {
+          "Proposal": 38
+        },
+        "journal_ordinals": [
+          38,
+          39
+        ],
+        "kind": "Proposal",
+        "ordinal": 19
+      },
+      {
+        "identity": {
+          "Proposal": 40
+        },
+        "journal_ordinals": [
+          40,
+          41
+        ],
+        "kind": "Proposal",
+        "ordinal": 20
+      },
+      {
+        "identity": {
+          "Proposal": 42
+        },
+        "journal_ordinals": [
+          42,
+          43
+        ],
+        "kind": "Proposal",
+        "ordinal": 21
+      },
+      {
+        "identity": {
+          "Proposal": 44
+        },
+        "journal_ordinals": [
+          44,
+          45
+        ],
+        "kind": "Proposal",
+        "ordinal": 22
+      },
+      {
+        "identity": {
+          "Proposal": 46
+        },
+        "journal_ordinals": [
+          46,
+          47
+        ],
+        "kind": "Proposal",
+        "ordinal": 23
+      },
+      {
+        "identity": {
+          "Proposal": 48
+        },
+        "journal_ordinals": [
+          48,
+          49
+        ],
+        "kind": "Proposal",
+        "ordinal": 24
+      }
+    ],
+    "produced_mana": [
+      {
+        "producer": {
+          "Proposal": 0
+        },
+        "unit": {
+          "color": "Colorless",
+          "pip_id": 1,
+          "restrictions": [],
+          "snow": false,
+          "source_id": 0
+        }
+      },
+      {
+        "producer": {
+          "Proposal": 2
+        },
+        "unit": {
+          "color": "Colorless",
+          "pip_id": 2,
+          "restrictions": [],
+          "snow": false,
+          "source_id": 0
+        }
+      },
+      {
+        "producer": {
+          "Proposal": 4
+        },
+        "unit": {
+          "color": "Red",
+          "pip_id": 3,
+          "restrictions": [],
+          "snow": false,
+          "source_id": 0
+        }
+      },
+      {
+        "producer": {
+          "Proposal": 6
+        },
+        "unit": {
+          "color": "Colorless",
+          "pip_id": 4,
+          "restrictions": [],
+          "snow": false,
+          "source_id": 0
+        }
+      },
+      {
+        "producer": {
+          "Proposal": 8
+        },
+        "unit": {
+          "color": "Colorless",
+          "pip_id": 5,
+          "restrictions": [],
+          "snow": false,
+          "source_id": 0
+        }
+      },
+      {
+        "producer": {
+          "Proposal": 10
+        },
+        "unit": {
+          "color": "Colorless",
+          "pip_id": 6,
+          "restrictions": [],
+          "snow": false,
+          "source_id": 0
+        }
+      },
+      {
+        "producer": {
+          "Proposal": 12
+        },
+        "unit": {
+          "color": "Colorless",
+          "pip_id": 7,
+          "restrictions": [],
+          "snow": false,
+          "source_id": 0
+        }
+      },
+      {
+        "producer": {
+          "Proposal": 14
+        },
+        "unit": {
+          "color": "Blue",
+          "pip_id": 8,
+          "restrictions": [],
+          "snow": false,
+          "source_id": 0
+        }
+      },
+      {
+        "producer": {
+          "Proposal": 16
+        },
+        "unit": {
+          "color": "Blue",
+          "pip_id": 9,
+          "restrictions": [],
+          "snow": false,
+          "source_id": 0
+        }
+      }
+    ],
+    "spent_mana": [
+      {
+        "payment": {
+          "Payment": 10
+        },
+        "producer": {
+          "Proposal": 4
+        },
+        "recipient": {
+          "Object": {
+            "incarnation": 0,
+            "object_id": 4
+          }
+        },
+        "unit": {
+          "color": "Red",
+          "pip_id": 3,
+          "restrictions": [],
+          "snow": false,
+          "source_id": 0
+        }
+      },
+      {
+        "payment": {
+          "Payment": 10
+        },
+        "producer": {
+          "Proposal": 0
+        },
+        "recipient": {
+          "Object": {
+            "incarnation": 0,
+            "object_id": 4
+          }
+        },
+        "unit": {
+          "color": "Colorless",
+          "pip_id": 1,
+          "restrictions": [],
+          "snow": false,
+          "source_id": 0
+        }
+      },
+      {
+        "payment": {
+          "Payment": 10
+        },
+        "producer": {
+          "Proposal": 2
+        },
+        "recipient": {
+          "Object": {
+            "incarnation": 0,
+            "object_id": 4
+          }
+        },
+        "unit": {
+          "color": "Colorless",
+          "pip_id": 2,
+          "restrictions": [],
+          "snow": false,
+          "source_id": 0
+        }
+      },
+      {
+        "payment": {
+          "Payment": 15
+        },
+        "producer": {
+          "Proposal": 14
+        },
+        "recipient": {
+          "Object": {
+            "incarnation": 0,
+            "object_id": 5
+          }
+        },
+        "unit": {
+          "color": "Blue",
+          "pip_id": 8,
+          "restrictions": [],
+          "snow": false,
+          "source_id": 0
+        }
+      },
+      {
+        "payment": {
+          "Payment": 15
+        },
+        "producer": {
+          "Proposal": 16
+        },
+        "recipient": {
+          "Object": {
+            "incarnation": 0,
+            "object_id": 5
+          }
+        },
+        "unit": {
+          "color": "Blue",
+          "pip_id": 9,
+          "restrictions": [],
+          "snow": false,
+          "source_id": 0
+        }
+      },
+      {
+        "payment": {
+          "Payment": 15
+        },
+        "producer": {
+          "Proposal": 6
+        },
+        "recipient": {
+          "Object": {
+            "incarnation": 0,
+            "object_id": 5
+          }
+        },
+        "unit": {
+          "color": "Colorless",
+          "pip_id": 4,
+          "restrictions": [],
+          "snow": false,
+          "source_id": 0
+        }
+      },
+      {
+        "payment": {
+          "Payment": 15
+        },
+        "producer": {
+          "Proposal": 12
+        },
+        "recipient": {
+          "Object": {
+            "incarnation": 0,
+            "object_id": 5
+          }
+        },
+        "unit": {
+          "color": "Colorless",
+          "pip_id": 7,
+          "restrictions": [],
+          "snow": false,
+          "source_id": 0
+        }
+      },
+      {
+        "payment": {
+          "Payment": 15
+        },
+        "producer": {
+          "Proposal": 10
+        },
+        "recipient": {
+          "Object": {
+            "incarnation": 0,
+            "object_id": 5
+          }
+        },
+        "unit": {
+          "color": "Colorless",
+          "pip_id": 6,
+          "restrictions": [],
+          "snow": false,
+          "source_id": 0
+        }
+      },
+      {
+        "payment": {
+          "Payment": 15
+        },
+        "producer": {
+          "Proposal": 8
+        },
+        "recipient": {
+          "Object": {
+            "incarnation": 0,
+            "object_id": 5
+          }
+        },
+        "unit": {
+          "color": "Colorless",
+          "pip_id": 5,
+          "restrictions": [],
+          "snow": false,
+          "source_id": 0
+        }
+      }
+    ]
+  },
+  "resolving_spell_final_part": {
+    "spell": 4
+  },
+  "resolving_stack_entry": {
+    "controller": 0,
+    "id": 4,
+    "kind": {
+      "data": {
+        "ability": {
+          "cast_occurrence": {
+            "caster": 0,
+            "turn_journal_index": 0
+          },
+          "chosen_target_slots": [
+            0
+          ],
+          "condition": null,
+          "context": {
+            "additional_cost_paid": false,
+            "alternative_mana_cost_paid": false,
+            "cast_active_player": 0,
+            "cast_controller": 0,
+            "cast_from_zone": "Hand",
+            "cast_phase": "PreCombatMain",
+            "optional_effect_performed": false
+          },
+          "controller": 0,
+          "declares_chosen_group": 0,
+          "description": "Target player exiles all land cards from their graveyard.",
+          "detached_remainder": "NoProducer",
+          "duration": null,
+          "effect": {
+            "target": {
+              "type": "Player"
+            },
+            "type": "TargetOnly"
+          },
+          "forward_result": false,
+          "kind": "Spell",
+          "optional": false,
+          "optional_targeting": false,
+          "source_id": 4,
+          "sub_ability": {
+            "cast_occurrence": {
+              "caster": 0,
+              "turn_journal_index": 0
+            },
+            "chosen_target_slots": [],
+            "condition": null,
+            "context": {
+              "additional_cost_paid": false,
+              "alternative_mana_cost_paid": false,
+              "optional_effect_performed": false
+            },
+            "controller": 0,
+            "description": "Target player exiles all land cards from their graveyard.",
+            "detached_remainder": "NoProducer",
+            "duration": null,
+            "effect": {
+              "destination": "Exile",
+              "origin": "Graveyard",
+              "target": {
+                "controller": null,
+                "properties": [
+                  {
+                    "controller": "ScopedPlayer",
+                    "type": "Owned"
+                  },
+                  {
+                    "type": "InZone",
+                    "zone": "Graveyard"
+                  }
+                ],
+                "type": "Typed",
+                "type_filters": [
+                  "Land"
+                ]
+              },
+              "type": "ChangeZoneAll"
+            },
+            "forward_result": false,
+            "kind": "Spell",
+            "optional": false,
+            "optional_targeting": false,
+            "source_id": 4,
+            "sub_ability": {
+              "cast_occurrence": {
+                "caster": 0,
+                "turn_journal_index": 0
+              },
+              "chosen_target_slots": [],
+              "condition": null,
+              "context": {
+                "additional_cost_paid": false,
+                "alternative_mana_cost_paid": false,
+                "optional_effect_performed": false
+              },
+              "controller": 0,
+              "description": "Target player exiles all land cards from their graveyard.",
+              "detached_remainder": "NoProducer",
+              "duration": null,
+              "effect": {
+                "amount": {
+                  "type": "Fixed",
+                  "value": 3
+                },
+                "player": {
+                  "id": 2,
+                  "type": "SpecificPlayer"
+                },
+                "type": "GainLife"
+              },
+              "forward_result": false,
+              "kind": "Spell",
+              "optional": false,
+              "optional_targeting": false,
+              "source_id": 4,
+              "sub_ability": null,
+              "targets": []
+            },
+            "target_choice_timing": "Resolution",
+            "targets": []
+          },
+          "targets": [
+            {
+              "Player": 1
+            }
+          ]
+        },
+        "actual_mana_spent": 3,
+        "card_id": 4,
+        "casting_variant": "Normal"
+      },
+      "type": "Spell"
+    },
+    "source_id": 4
+  },
+  "resolving_stack_object": {
+    "incarnation": 1,
+    "object_id": 4
+  },
+  "revealed_cards": [],
+  "ring_bearer": {},
+  "ring_level": {},
+  "rng_seed": 42,
+  "rng_word_pos": 0,
+  "scheduled_turn_controls": [],
+  "seat_order": [
+    0,
+    1,
+    2
+  ],
+  "sideboard_submitted": [],
+  "spells_cast_last_turn": null,
+  "spells_cast_this_game": {
+    "0": 1,
+    "2": 1
+  },
+  "spells_cast_this_game_by_player": {
+    "0": [
+      {
+        "cast_variant": "Normal",
+        "colors": [
+          "Red"
+        ],
+        "core_types": [
+          "Instant"
+        ],
+        "from_zone": "Hand",
+        "keywords": [],
+        "mana_value": 3,
+        "name": "Mudhole",
+        "spell_object_id": 4,
+        "subtypes": [],
+        "supertypes": []
+      }
+    ],
+    "2": [
+      {
+        "cast_variant": "Normal",
+        "colors": [
+          "Blue"
+        ],
+        "core_types": [
+          "Instant"
+        ],
+        "from_zone": "Hand",
+        "keywords": [],
+        "mana_value": 6,
+        "name": "Aethersnatch",
+        "spell_object_id": 5,
+        "subtypes": [],
+        "supertypes": []
+      }
+    ]
+  },
+  "spells_cast_this_turn": 2,
+  "spells_cast_this_turn_by_player": {
+    "0": [
+      {
+        "cast_variant": "Normal",
+        "colors": [
+          "Red"
+        ],
+        "core_types": [
+          "Instant"
+        ],
+        "from_zone": "Hand",
+        "keywords": [],
+        "mana_value": 3,
+        "name": "Mudhole",
+        "spell_object_id": 4,
+        "subtypes": [],
+        "supertypes": []
+      }
+    ],
+    "2": [
+      {
+        "cast_variant": "Normal",
+        "colors": [
+          "Blue"
+        ],
+        "core_types": [
+          "Instant"
+        ],
+        "from_zone": "Hand",
+        "keywords": [],
+        "mana_value": 6,
+        "name": "Aethersnatch",
+        "spell_object_id": 5,
+        "subtypes": [],
+        "supertypes": []
+      }
+    ]
+  },
+  "stack": [],
+  "steps_to_skip": [
+    {},
+    {},
+    {}
+  ],
+  "top_of_library_cast_permissions_used": [],
+  "tracked_object_sets": {},
+  "transient_continuous_effects": [
+    {
+      "affected": {
+        "id": 4,
+        "type": "SpecificObject"
+      },
+      "controller": 2,
+      "duration": "Permanent",
+      "id": 1,
+      "modifications": [
+        {
+          "type": "ChangeController"
+        }
+      ],
+      "source_id": 5,
+      "source_name": "Aethersnatch",
+      "timestamp": 2
+    }
+  ],
+  "trigger_indicated_actions_this_turn": [],
+  "triggered_abilities_added_mana_this_turn": [],
+  "triggers_fired_this_game": [],
+  "triggers_fired_this_turn": [],
+  "triggers_fired_this_turn_per_opponent": [],
+  "turn_direction": "Normal",
+  "turn_number": 2,
+  "turns_to_skip": [
+    0,
+    0,
+    0
+  ],
+  "waiting_for": {
+    "data": {
+      "candidate_count": 2,
+      "candidates": [
+        {
+          "description": "Accept",
+          "source_id": 3,
+          "source_name": "Synthetic exile redirect"
+        },
+        {
+          "description": "Decline",
+          "source_id": 3,
+          "source_name": "Synthetic exile redirect"
+        }
+      ],
+      "kind": {
+        "type": "OptionalBranch"
+      },
+      "last_applied_decides": false,
+      "player": 1,
+      "remember_identity": {
+        "candidates": [
+          {
+            "data": {
+              "definition": {
+                "condition": null,
+                "description": null,
+                "destination_zone": "Exile",
+                "event": "Moved",
+                "execute": {
+                  "condition": null,
+                  "cost": null,
+                  "description": null,
+                  "duration": null,
+                  "effect": {
+                    "destination": "Graveyard",
+                    "enter_tapped": false,
+                    "enter_transformed": false,
+                    "enters_attacking": false,
+                    "origin": null,
+                    "owner_library": false,
+                    "target": {
+                      "type": "SelfRef"
+                    },
+                    "type": "ChangeZone"
+                  },
+                  "forward_result": false,
+                  "kind": "Spell",
+                  "optional": false,
+                  "optional_targeting": false,
+                  "sub_ability": null,
+                  "target_prompt": null
+                },
+                "mode": {
+                  "decline": null,
+                  "type": "Optional"
+                },
+                "valid_card": null
+              },
+              "index": 0,
+              "source": {
+                "incarnation": 0,
+                "object_id": 3
+              }
+            },
+            "type": "Definition"
+          }
+        ],
+        "event": "ChangeZone",
+        "kind": {
+          "type": "OptionalBranch"
+        },
+        "player": 1
+      }
+    },
+    "type": "ReplacementChoice"
+  },
+  "zone_changes_this_turn": [
+    {
+      "arrival": {
+        "controller": 0,
+        "owner": 0
+      },
+      "attached_to": null,
+      "attachments": [],
+      "base_power": null,
+      "base_toughness": null,
+      "cast_from_zone": "Hand",
+      "co_departed": [],
+      "colors": [
+        "Red"
+      ],
+      "combat_status": {
+        "attack_target": null,
+        "attack_target_identity": null,
+        "attacking": false,
+        "attacking_alone": false,
+        "blocked": false,
+        "blocking": false,
+        "blocking_alone": false,
+        "defending_player": null
+      },
+      "controller": 0,
+      "core_types": [
+        "Instant"
+      ],
+      "entered_incarnation": null,
+      "from_zone": "Hand",
+      "is_suspected": false,
+      "is_token": false,
+      "keywords": [],
+      "linked_exile_snapshot": [],
+      "mana_value": 3,
+      "name": "Mudhole",
+      "object_id": 4,
+      "owner": 0,
+      "played_from_zone": null,
+      "power": null,
+      "recorded_turn_number": 2,
+      "subtypes": [],
+      "supertypes": [],
+      "to_zone": "Stack",
+      "toughness": null,
+      "trigger_source_context": {
+        "card_id": 4,
+        "cast_controller": 0,
+        "cast_from_zone": "Hand",
+        "colors_spent_to_cast": {
+          "red": 1
+        },
+        "combat_status": {
+          "attack_target": null,
+          "attack_target_identity": null,
+          "attacking": false,
+          "attacking_alone": false,
+          "blocked": false,
+          "blocking": false,
+          "blocking_alone": false,
+          "defending_player": null
+        },
+        "face_down": false,
+        "identity": {
+          "expected_zone": "Hand",
+          "reference": {
+            "incarnation": 0,
+            "object_id": 4
+          }
+        },
+        "is_renowned": false,
+        "is_saddled": false,
+        "is_token": false,
+        "lki": {
+          "attachments": [],
+          "base_power": null,
+          "base_toughness": null,
+          "card_types": [
+            "Instant"
+          ],
+          "chosen_attributes": [],
+          "colors": [
+            "Red"
+          ],
+          "controller": 0,
+          "counters": {},
+          "intensity": 0,
+          "is_suspected": false,
+          "keywords": [],
+          "mana_value": 3,
+          "name": "Mudhole",
+          "owner": 0,
+          "power": null,
+          "subtypes": [],
+          "supertypes": [],
+          "tapped": false,
+          "toughness": null,
+          "was_prepared": false
+        },
+        "mana_cost": {
+          "generic": 2,
+          "shards": [
+            "Red"
+          ],
+          "type": "Cost"
+        },
+        "mana_spent_to_cast": true,
+        "mana_spent_to_cast_amount": 3,
+        "phase_status": {
+          "status": "PhasedIn"
+        },
+        "timestamp": 0,
+        "transformed": false
+      },
+      "turn_zone_change_index": 0,
+      "was_prepared": false
+    },
+    {
+      "arrival": {
+        "controller": 2,
+        "owner": 2
+      },
+      "attached_to": null,
+      "attachments": [],
+      "base_power": null,
+      "base_toughness": null,
+      "cast_from_zone": "Hand",
+      "co_departed": [],
+      "colors": [
+        "Blue"
+      ],
+      "combat_status": {
+        "attack_target": null,
+        "attack_target_identity": null,
+        "attacking": false,
+        "attacking_alone": false,
+        "blocked": false,
+        "blocking": false,
+        "blocking_alone": false,
+        "defending_player": null
+      },
+      "controller": 2,
+      "core_types": [
+        "Instant"
+      ],
+      "entered_incarnation": null,
+      "from_zone": "Hand",
+      "is_suspected": false,
+      "is_token": false,
+      "keywords": [],
+      "linked_exile_snapshot": [],
+      "mana_value": 6,
+      "name": "Aethersnatch",
+      "object_id": 5,
+      "owner": 2,
+      "played_from_zone": null,
+      "power": null,
+      "recorded_turn_number": 2,
+      "subtypes": [],
+      "supertypes": [],
+      "to_zone": "Stack",
+      "toughness": null,
+      "trigger_source_context": {
+        "card_id": 5,
+        "cast_controller": 2,
+        "cast_from_zone": "Hand",
+        "colors_spent_to_cast": {
+          "blue": 2
+        },
+        "combat_status": {
+          "attack_target": null,
+          "attack_target_identity": null,
+          "attacking": false,
+          "attacking_alone": false,
+          "blocked": false,
+          "blocking": false,
+          "blocking_alone": false,
+          "defending_player": null
+        },
+        "face_down": false,
+        "identity": {
+          "expected_zone": "Hand",
+          "reference": {
+            "incarnation": 0,
+            "object_id": 5
+          }
+        },
+        "is_renowned": false,
+        "is_saddled": false,
+        "is_token": false,
+        "lki": {
+          "attachments": [],
+          "base_power": null,
+          "base_toughness": null,
+          "card_types": [
+            "Instant"
+          ],
+          "chosen_attributes": [],
+          "colors": [
+            "Blue"
+          ],
+          "controller": 2,
+          "counters": {},
+          "intensity": 0,
+          "is_suspected": false,
+          "keywords": [],
+          "mana_value": 6,
+          "name": "Aethersnatch",
+          "owner": 2,
+          "power": null,
+          "subtypes": [],
+          "supertypes": [],
+          "tapped": false,
+          "toughness": null,
+          "was_prepared": false
+        },
+        "mana_cost": {
+          "generic": 4,
+          "shards": [
+            "Blue",
+            "Blue"
+          ],
+          "type": "Cost"
+        },
+        "mana_spent_to_cast": true,
+        "mana_spent_to_cast_amount": 6,
+        "phase_status": {
+          "status": "PhasedIn"
+        },
+        "timestamp": 0,
+        "transformed": false
+      },
+      "turn_zone_change_index": 1,
+      "was_prepared": false
+    },
+    {
+      "arrival": {
+        "controller": 2,
+        "owner": 2
+      },
+      "attached_to": null,
+      "attachments": [],
+      "base_power": null,
+      "base_toughness": null,
+      "cast_from_zone": "Hand",
+      "co_departed": [],
+      "colors": [
+        "Blue"
+      ],
+      "combat_status": {
+        "attack_target": null,
+        "attack_target_identity": null,
+        "attacking": false,
+        "attacking_alone": false,
+        "blocked": false,
+        "blocking": false,
+        "blocking_alone": false,
+        "defending_player": null
+      },
+      "controller": 2,
+      "core_types": [
+        "Instant"
+      ],
+      "entered_incarnation": null,
+      "from_zone": "Stack",
+      "is_suspected": false,
+      "is_token": false,
+      "keywords": [],
+      "linked_exile_snapshot": [],
+      "mana_value": 6,
+      "name": "Aethersnatch",
+      "object_id": 5,
+      "owner": 2,
+      "played_from_zone": null,
+      "power": null,
+      "recorded_turn_number": 2,
+      "subtypes": [],
+      "supertypes": [],
+      "to_zone": "Graveyard",
+      "toughness": null,
+      "trigger_source_context": {
+        "card_id": 5,
+        "cast_controller": 2,
+        "cast_from_zone": "Hand",
+        "colors_spent_to_cast": {
+          "blue": 2
+        },
+        "combat_status": {
+          "attack_target": null,
+          "attack_target_identity": null,
+          "attacking": false,
+          "attacking_alone": false,
+          "blocked": false,
+          "blocking": false,
+          "blocking_alone": false,
+          "defending_player": null
+        },
+        "face_down": false,
+        "identity": {
+          "expected_zone": "Stack",
+          "reference": {
+            "incarnation": 1,
+            "object_id": 5
+          }
+        },
+        "is_renowned": false,
+        "is_saddled": false,
+        "is_token": false,
+        "lki": {
+          "attachments": [],
+          "base_power": null,
+          "base_toughness": null,
+          "card_types": [
+            "Instant"
+          ],
+          "chosen_attributes": [],
+          "colors": [
+            "Blue"
+          ],
+          "controller": 2,
+          "counters": {},
+          "intensity": 0,
+          "is_suspected": false,
+          "keywords": [],
+          "mana_value": 6,
+          "name": "Aethersnatch",
+          "owner": 2,
+          "power": null,
+          "subtypes": [],
+          "supertypes": [],
+          "tapped": false,
+          "toughness": null,
+          "was_prepared": false
+        },
+        "mana_cost": {
+          "generic": 4,
+          "shards": [
+            "Blue",
+            "Blue"
+          ],
+          "type": "Cost"
+        },
+        "mana_spent_to_cast": false,
+        "mana_spent_to_cast_amount": 6,
+        "phase_status": {
+          "status": "PhasedIn"
+        },
+        "timestamp": 0,
+        "transformed": false
+      },
+      "turn_zone_change_index": 2,
+      "was_prepared": false
+    }
+  ]
+}

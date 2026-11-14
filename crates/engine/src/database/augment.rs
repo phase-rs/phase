@@ -192,6 +192,7 @@ fn rewrite_strutting_turkey(face: &mut CardFace) {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Exile,
@@ -229,6 +230,7 @@ fn rewrite_strutting_turkey(face: &mut CardFace) {
                 .with_else_ability(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         origin: Some(Zone::Exile),
                         destination: Zone::Battlefield,

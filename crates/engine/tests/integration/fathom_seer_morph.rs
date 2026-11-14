@@ -775,6 +775,7 @@ fn skirk_volcanist_turn_face_up_sacrifice_replacement_pause() {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: engine::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Exile,
@@ -3096,6 +3097,7 @@ fn turn_face_up_sacrifice_preserves_delivered_observer_prefix_across_second_repl
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: engine::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Exile,
@@ -3396,6 +3398,7 @@ fn turn_face_up_sacrifice_preserves_delivered_delayed_trigger_prefix_across_seco
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
@@ -3619,6 +3622,7 @@ fn blood_artist_co_departure_runner(
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: engine::types::ability::LibraryInstructionActor::Controller,
                             library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,

@@ -7784,6 +7784,7 @@ fn stamp_self_return_origin_skips_nested_parent_target_return() {
     let mut head = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
@@ -7803,6 +7804,7 @@ fn stamp_self_return_origin_skips_nested_parent_target_return() {
     head.sub_ability = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Hand,

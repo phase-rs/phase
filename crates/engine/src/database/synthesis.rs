@@ -762,6 +762,7 @@ pub fn synthesize_craft(face: &mut CardFace) {
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: Some(Zone::Exile),
                     destination: Zone::Battlefield,
@@ -1950,6 +1951,7 @@ pub fn cycling_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefinitio
             let mut put_in_hand_def = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: Some(Zone::Library),
                     destination: Zone::Hand,
@@ -2035,6 +2037,7 @@ pub fn synthesize_transmute(face: &mut CardFace) {
                 let mut put_in_hand_def = AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         origin: Some(Zone::Library),
                         destination: Zone::Hand,
@@ -2132,6 +2135,7 @@ pub fn synthesize_transfigure(face: &mut CardFace) {
             let mut put_on_battlefield_def = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: Some(Zone::Library),
                     destination: Zone::Battlefield,
@@ -3056,6 +3060,7 @@ pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
         replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Exile,
@@ -3149,6 +3154,7 @@ pub(crate) fn dredge_replacement_definition(n: u32) -> ReplacementDefinition {
     let return_to_hand = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Hand,
@@ -4542,6 +4548,7 @@ fn build_soulshift_trigger(n: u32) -> TriggerDefinition {
     // from your graveyard to your hand" shape (oracle_effect's Graveyard→Hand
     // ChangeZone). Default flags (no counters, no transform, owner's control).
     let return_to_hand = Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination: Zone::Hand,
@@ -6380,6 +6387,7 @@ fn build_dethrone_trigger() -> TriggerDefinition {
 /// (`Zone::Hand` for the pay branch, `Zone::Exile` for the otherwise branch).
 fn build_recover_self_change_zone(destination: Zone) -> Effect {
     Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination,
@@ -6681,6 +6689,7 @@ fn build_dies_return_with_counter_trigger(
     // the object enters the battlefield, via the existing
     // `Effect::ChangeZone.enter_with_counters` plumbing.
     let return_effect = Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination: Zone::Battlefield,
@@ -8038,6 +8047,7 @@ fn build_champion_etb_trigger(type_str: &str) -> TriggerDefinition {
     let exile_branch = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
@@ -8099,6 +8109,7 @@ fn build_champion_ltb_return_trigger() -> TriggerDefinition {
     let return_ability = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
@@ -9933,6 +9944,7 @@ pub fn synthesize_partner_with(face: &mut CardFace) {
     let put_in_hand = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Hand,
@@ -10073,6 +10085,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         let exile_then_cast = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,

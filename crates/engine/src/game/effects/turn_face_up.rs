@@ -140,6 +140,7 @@ mod tests {
         let (source, exiled) = linked_face_down_creature(&mut state);
         let put_creature = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Exile),
                 destination: Zone::Battlefield,

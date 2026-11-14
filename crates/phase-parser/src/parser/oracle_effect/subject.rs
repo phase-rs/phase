@@ -4071,7 +4071,19 @@ fn parse_subject_application_for(
                     is_optional,
                 });
             } else if ctx.subject.is_some() {
-                ctx_filter
+                // CR 608.2c: in a trigger effect, "that player" names the player
+                // the effect itself declared before the trigger event's player —
+                // "look at target opponent's hand. … that player exiles that card"
+                // (Salt Vampire). `declared_player_scope` is the chain walk the
+                // carried subject and "that player controls" already read.
+                match &ctx.declared_player_scope {
+                    Some(ControllerRef::DeclaredPlayer { group })
+                        if matches!(subject_anaphor, PlayerSubjectAnaphor::Player) =>
+                    {
+                        TargetFilter::DeclaredPlayer { group: *group }
+                    }
+                    _ => ctx_filter,
+                }
             } else {
                 // CR 608.2c + CR 109.4: Outside trigger context, a bare "that player"
                 // subject is an anaphor to the controller of the object/player target

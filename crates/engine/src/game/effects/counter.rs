@@ -625,6 +625,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
@@ -833,6 +834,7 @@ mod tests {
 
         let exile_rider = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 destination: Zone::Exile,
                 origin: Some(Zone::Graveyard),

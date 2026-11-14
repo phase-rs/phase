@@ -5673,6 +5673,7 @@ mod arena_tests {
 
     fn zone_change(destination: Zone, target: TargetFilter) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination,

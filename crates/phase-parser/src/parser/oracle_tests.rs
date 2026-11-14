@@ -35024,6 +35024,7 @@ fn choice_of_fortunes_shuffles_the_sought_set_into_the_library() {
     assert_eq!(
         *optional.effect,
         Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Library,
             target: TargetFilter::TrackedSet {
@@ -35920,4 +35921,47 @@ fn corpus_oracle_text(name: &str) -> String {
         other => panic!("no corpus oracle text recorded for {other}"),
     }
     .to_string()
+}
+
+/// CR 607.2a + CR 608.2c: promoting a linked LTB return to the return of every
+/// card this object exiled keeps the move's performer. Synthetic actor: no
+/// printed linked return names a subject today.
+#[test]
+fn ltb_return_promotion_keeps_the_actor() {
+    use crate::types::ability::LibraryInstructionActor;
+    use crate::types::identifiers::TrackedSetId;
+    let actor = LibraryInstructionActor::Player {
+        player: TargetFilter::ParentTargetController,
+    };
+    let unpromoted = Effect::ChangeZone {
+        actor: actor.clone(),
+        origin: Some(Zone::Exile),
+        destination: Zone::Battlefield,
+        target: TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        },
+        owner_library: false,
+        enter_transformed: false,
+        enters_under: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+        up_to: false,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
+        face_down_profile: None,
+        enters_modified_if: None,
+        library_shuffle: Default::default(),
+    };
+    let promoted = ltb_return_of_exiled_by_source(&unpromoted).expect("promoted");
+    let Effect::ChangeZoneAll {
+        actor: promoted_actor,
+        target,
+        ..
+    } = &promoted
+    else {
+        panic!("expected ChangeZoneAll, got {promoted:?}");
+    };
+    assert_eq!(promoted_actor, &actor);
+    assert_eq!(*target, TargetFilter::ExiledBySource);
+    assert!(ltb_return_of_exiled_by_source(&promoted).is_none());
 }

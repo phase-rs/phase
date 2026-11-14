@@ -696,6 +696,7 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
         // an object out of it (an unrestricted or battlefield origin) and sends
         // it somewhere else.
         Effect::ChangeZone {
+            actor: _,
             origin,
             destination,
             target,
@@ -712,6 +713,7 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
             enters_modified_if: _,
         }
         | Effect::ChangeZoneAll {
+            actor: _,
             origin,
             destination,
             target,
@@ -6663,6 +6665,7 @@ mod tests {
     fn resolved_ability_duration_roundtrips() {
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
@@ -7095,6 +7098,7 @@ mod tests {
         ) -> ResolvedAbility {
             let mut ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
