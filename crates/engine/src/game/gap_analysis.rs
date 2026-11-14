@@ -320,8 +320,9 @@ pub enum GapArgsError {
     Load(PathBuf, Box<dyn std::error::Error>),
 }
 
-/// `parser-gap-analyzer`'s argv (`<data-root> [--format F] [--category C]`, root defaulting to
-/// `PHASE_CARDS_PATH`) run against `<data-root>/card-data.json`.
+/// Runs `parser-gap-analyzer` against `<data-root>/card-data.json`.
+/// Pass an explicit data root before `--format` or `--category`.
+/// With no arguments after the program name, reads the data root from `PHASE_CARDS_PATH`.
 pub fn gap_report_from_args(
     args: impl IntoIterator<Item = String>,
 ) -> Result<GapReport, GapArgsError> {
