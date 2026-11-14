@@ -21,9 +21,10 @@ use crate::types::ability::{
     ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRecipient, Duration,
     EachDamageRecipient, Effect, EffectScope, FilterProp, MultiTargetSpec, ObjectScope,
     PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr, StaticCondition,
-    StaticDefinition, TargetFilter, TypedFilter,
+    StaticDefinition, TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::game_state_kinds::DayNight;
+use crate::types::identifiers::TrackedSetId;
 use crate::types::keywords::Keyword;
 use crate::types::phase::Phase;
 use crate::types::statics::{ProhibitionScope, StaticMode};
@@ -37,7 +38,8 @@ use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_nom::target::{
-    parse_event_context_ref, parse_object_exclusion_list, parse_supertype_word, ObjectExclusion,
+    parse_declared_target_prefix, parse_event_context_ref, parse_object_exclusion_list,
+    parse_supertype_word, ObjectExclusion,
 };
 use super::super::oracle_quantity;
 use super::super::oracle_static::{
@@ -1836,10 +1838,44 @@ fn try_parse_source_and_other_restriction_clause(
         return None;
     }
 
-    // The subject must be a two-part conjunction "<primary> and <secondary>".
+    let mut tentative = ctx.clone();
     let subject_lower = subject.to_lowercase();
-    let subject_pair = TextPair::new(subject, &subject_lower);
-    let (primary_tp, secondary_tp) = subject_pair.split_around(" and ")?;
+    let (primary_application, secondary_application) =
+        parse_source_and_target_subjects(TextPair::new(subject, &subject_lower), &mut tentative)?;
+    let secondary_multi = secondary_application.multi_target.clone();
+
+    let primary_clause = build_restriction_clause(primary_application.clone(), predicate)?;
+    let mut secondary_clause = build_restriction_clause(secondary_application, predicate)?;
+    secondary_clause.multi_target = secondary_multi;
+    let secondary_def = super::ability_definition_from_clause(AbilityKind::Spell, secondary_clause);
+    *ctx = tentative;
+
+    Some(ClauseAst::SubjectPredicate {
+        subject: Box::new(SubjectPhraseAst {
+            affected: Some(primary_application.affected),
+            target: primary_application.target,
+            multi_target: None,
+            inherits_parent: primary_application.inherits_parent,
+            is_optional: primary_application.is_optional,
+            player_anaphor: primary_application.player_anaphor,
+        }),
+        predicate: Box::new(PredicateAst::Restriction {
+            effect: primary_clause.effect,
+            duration: primary_clause.duration,
+            sub_ability: Some(Box::new(secondary_def)),
+        }),
+    })
+}
+
+/// Two independently bound conjuncts: an untargeted subject and an announced
+/// object. Callers commit their tentative context only after the predicate fits.
+fn parse_source_and_target_subjects(
+    subject: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<(SubjectApplication, SubjectApplication)> {
+    let (primary_tp, secondary_tp) = subject.split_around(" and ")?;
+    let (declared_text, _) = super::strip_optional_target_prefix(secondary_tp.lower.trim());
+    parse_declared_target_prefix.parse(declared_text).ok()?;
     let primary_application = parse_subject_application_for(
         primary_tp.original.trim(),
         ctx,
@@ -1859,28 +1895,77 @@ fn try_parse_source_and_other_restriction_clause(
     if primary_application.target.is_some() || primary_application.multi_target.is_some() {
         return None;
     }
-    let secondary_multi = secondary_application.multi_target.clone();
+    Some((primary_application, secondary_application))
+}
 
-    let primary_clause = build_restriction_clause(primary_application.clone(), predicate)?;
-    let mut secondary_clause = build_restriction_clause(secondary_application, predicate)?;
-    secondary_clause.multi_target = secondary_multi;
-    let secondary_def = super::ability_definition_from_clause(AbilityKind::Spell, secondary_clause);
-
-    Some(ClauseAst::SubjectPredicate {
-        subject: Box::new(SubjectPhraseAst {
-            affected: Some(primary_application.affected),
-            target: primary_application.target,
-            multi_target: None,
-            inherits_parent: primary_application.inherits_parent,
-            is_optional: primary_application.is_optional,
-            player_anaphor: primary_application.player_anaphor,
-        }),
-        predicate: Box::new(PredicateAst::Restriction {
-            effect: primary_clause.effect,
-            duration: primary_clause.duration,
-            sub_ability: Some(Box::new(secondary_def)),
-        }),
-    })
+/// CR 702.26h: resolve source-plus-object phasing in one batch so attachments
+/// phase indirectly with their host. CR 115.10a: an event-context subject is
+/// not a target; only a declared second subject uses an announced target slot.
+pub(super) fn try_parse_source_and_target_phase_out(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let predicate_start = find_predicate_start(text)?;
+    let predicate = text[predicate_start..].trim();
+    let lower = predicate.to_lowercase();
+    all_consuming(terminated(
+        alt((tag::<_, _, OracleError<'_>>("phase out"), tag("phases out"))),
+        opt(tag(".")),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    let mut tentative = ctx.clone();
+    let subject = text[..predicate_start].trim();
+    let subject_lower = subject.to_lowercase();
+    let Some((source, selected)) =
+        parse_source_and_target_subjects(TextPair::new(subject, &subject_lower), &mut tentative)
+    else {
+        // The declared-target grammar deliberately declines contextual anaphors.
+        // Reuse the subject authority without routing the event through ParentTarget.
+        let (source, partner) = TextPair::new(subject, &subject_lower).split_around(" and ")?;
+        let mut contextual = ctx.clone();
+        let source = parse_subject_application(source.original.trim(), &mut contextual)?;
+        let partner = parse_subject_application(partner.original.trim(), &mut contextual)?;
+        if source.affected != TargetFilter::SelfRef
+            || source.target.is_some()
+            || source.multi_target.is_some()
+            || partner.target != Some(TargetFilter::TriggeringSource)
+            || partner.multi_target.is_some()
+        {
+            return None;
+        }
+        let clause = super::parsed_clause(Effect::PhaseOut {
+            target: TargetFilter::Or {
+                filters: vec![TargetFilter::SelfRef, TargetFilter::TriggeringSource],
+            },
+        });
+        *ctx = contextual;
+        return Some(clause);
+    };
+    if source.affected != TargetFilter::SelfRef
+        || super::target_filter_can_target_player(&selected.affected)
+    {
+        return None;
+    }
+    let ImperativeFamilyAst::GainKeyword(Effect::PhaseOut { .. }) =
+        imperative::parse_imperative_family_ast(predicate, &lower, &mut tentative)?
+    else {
+        return None;
+    };
+    let mut clause = super::parsed_clause(Effect::TargetOnly {
+        target: selected.target?,
+    });
+    clause.multi_target = selected.multi_target;
+    clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PhaseOut {
+            target: TargetFilter::Or {
+                filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
+            },
+        },
+    )));
+    *ctx = tentative;
+    Some(clause)
 }
 
 /// CR 611.2 + CR 201.2a + CR 115.1: "target &lt;T&gt; and all other &lt;T&gt;s with the same
@@ -1964,7 +2049,18 @@ fn try_parse_target_and_same_name_pump_clause(
             toughness,
             target: mass_target,
         },
-        duration: duration.clone().or(Some(Duration::UntilEndOfTurn)),
+        // CR 611.2a: emit the parsed window VERBATIM. This link states no window
+        // of its own unless its own predicate printed one, and `None` is the only
+        // value that says so: an injected `UntilEndOfTurn` is byte-identical to a
+        // printed one, so neither the sentence-window distribution
+        // (`oracle_ir::ast::with_clause_chain_duration`,
+        // `oracle_effect::assembly`'s sentence-scoped stamp) nor the resolver would
+        // be able to tell that this link printed nothing. The end-of-turn fallback
+        // for a windowless link already exists downstream and is the single
+        // authority for it (`game/effects/pump.rs`'s `.unwrap_or`). Measured
+        // corpus-neutral: no card reaching this recognizer prints a window that
+        // this site had been overriding — see issue #7962.
+        duration: duration.clone(),
         sub_ability: None,
         distribute: None,
         multi_target: None,
@@ -1986,7 +2082,8 @@ fn try_parse_target_and_same_name_pump_clause(
         }),
         predicate: Box::new(PredicateAst::Continuous {
             effect: primary_effect,
-            duration: duration.or(Some(Duration::UntilEndOfTurn)),
+            // CR 611.2a: verbatim, for the reason stated on the mass link above.
+            duration,
             sub_ability: Some(Box::new(mass_def)),
             // CR 608.2c: "get -N/-M" is not an "is/has" statement.
             onset: ContinuousEffectOnset::WhenFollowed,
@@ -2683,11 +2780,11 @@ fn try_parse_can_block_additional(
     ))
     .parse(predicate_lower)
     .ok()?;
-    let duration = if subject_text.trim().is_empty() {
-        duration.or(Some(Duration::UntilEndOfTurn))
-    } else {
-        duration
-    };
+    // CR 611.2a: the parsed window stands alone — a suffix-free grant (the
+    // subjectless, inherited-subject form) states NO window and must stay `None`
+    // so an enclosing printed window can distribute onto it. The end-of-turn
+    // fallback for a genuinely windowless grant lives in the resolver
+    // (`game/effects/effect.rs`), which already applies `.unwrap_or`.
     let mode = StaticMode::ExtraBlockers { count };
     let affected = static_affected_for_application(&application);
     Some(ParsedEffectClause {
@@ -2878,6 +2975,13 @@ pub(super) fn chosen_player_anaphor_filter(scope: Option<&ControllerRef>) -> Opt
 /// player: each member is the antecedent in turn, so no declared slot can stand
 /// for it.
 pub(super) fn subject_player_antecedent(subject: &SubjectPhraseAst) -> Option<ControllerRef> {
+    if let Some((actor, _)) = declared_owner_subject_seed(
+        subject.affected.as_ref(),
+        subject.target.as_ref(),
+        subject.multi_target.as_ref(),
+    ) {
+        return Some(actor);
+    }
     if subject.multi_target.is_some() {
         return None;
     }
@@ -2935,6 +3039,11 @@ pub(super) fn subject_player_antecedent(subject: &SubjectPhraseAst) -> Option<Co
 /// the actor filters this grammar's possessor produces, so the pronoun names
 /// `ParentTarget` — the same referent those two actors resolve through at
 /// runtime (`ability_utils::parent_target_controller` / `parent_target_owner`).
+///
+/// An explicitly declared single-object owner subject is projected first by
+/// `declared_owner_subject_seed`. Its declared slot proves the pin, including
+/// zero-to-one cardinality; it does not need the controller-anaphor proxy below.
+/// The following conditions govern every other possessive route.
 ///
 /// # Two conditions, and the second is a safety property, not a nicety
 ///
@@ -3027,7 +3136,7 @@ pub(super) fn subject_player_antecedent(subject: &SubjectPhraseAst) -> Option<Co
 /// `ParentTargetOwner` stays in the accepted set because it is the same printed
 /// grammar, and a future card arriving with the discriminant should bind.
 ///
-/// Declines a multi-target subject for the same reason
+/// Outside the declared-owner projection, declines a multi-target subject for the same reason
 /// [`subject_player_antecedent`] does: each announced object is the antecedent
 /// in turn, so no single `ParentTarget` can stand for them. No route that
 /// yields either actor filter builds a `multi_target` today, so that guard
@@ -3041,6 +3150,13 @@ pub(super) fn subject_player_antecedent(subject: &SubjectPhraseAst) -> Option<Co
 pub(super) fn subject_possessive_object_antecedent(
     subject: &SubjectPhraseAst,
 ) -> Option<TargetFilter> {
+    if let Some((_, object)) = declared_owner_subject_seed(
+        subject.affected.as_ref(),
+        subject.target.as_ref(),
+        subject.multi_target.as_ref(),
+    ) {
+        return Some(object);
+    }
     if subject.multi_target.is_some() {
         return None;
     }
@@ -3052,6 +3168,60 @@ pub(super) fn subject_possessive_object_antecedent(
         Some(TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner)
     )
     .then_some(TargetFilter::ParentTarget)
+}
+
+/// CR 108.3 + CR 608.2c: an explicitly declared single object's owner is the
+/// actor, and that same object is the predicate's object antecedent. Optional
+/// one still declares a slot; plural and unpinned possessors do not prove one.
+pub(super) fn declared_owner_subject_seed(
+    affected: Option<&TargetFilter>,
+    target: Option<&TargetFilter>,
+    multi_target: Option<&MultiTargetSpec>,
+) -> Option<(ControllerRef, TargetFilter)> {
+    if affected != Some(&TargetFilter::ParentTargetOwner) {
+        return None;
+    }
+    let target = target?;
+    if super::target_filter_can_target_player(target) || matches!(target, TargetFilter::Any) {
+        return None;
+    }
+    if let Some(multi) = multi_target {
+        if !matches!(multi.min, QuantityExpr::Fixed { value: 0 | 1 })
+            || !matches!(multi.max, Some(QuantityExpr::Fixed { value: 1 }))
+        {
+            return None;
+        }
+    }
+    Some((ControllerRef::ParentTargetOwner, TargetFilter::ParentTarget))
+}
+
+/// CR 115.1 + CR 608.2c: an owner anaphor can also name the object declared
+/// by the preceding instruction. Owner wording alone is not an object pin.
+pub(super) fn owner_subject_seed(
+    subject: &SubjectPhraseAst,
+    ctx: &ParseContext,
+) -> Option<(ControllerRef, TargetFilter)> {
+    declared_owner_subject_seed(
+        subject.affected.as_ref(),
+        subject.target.as_ref(),
+        subject.multi_target.as_ref(),
+    )
+    .or_else(|| {
+        if subject.affected != Some(TargetFilter::ParentTargetOwner)
+            || subject.target.is_some()
+            || subject.multi_target.is_some()
+            || ctx.token_created_in_chain
+        {
+            return None;
+        }
+        let target = ctx.chain_declared_object_target.as_ref()?;
+        if !matches!(target, TargetFilter::Typed(_))
+            || super::target_filter_can_target_player(target)
+        {
+            return None;
+        }
+        Some((ControllerRef::ParentTargetOwner, TargetFilter::ParentTarget))
+    })
 }
 
 /// Which player-subject anaphor a standalone "that/the player" clause names.
@@ -3085,6 +3255,57 @@ enum AnaphorConsumer {
     /// Every other reader (the imperative fallback, damage source and recipient
     /// stamps): keeps the trigger-source stamp.
     Other,
+}
+
+/// CR 108.3 + CR 608.2c: the owner-subject roles this parser recognizes,
+/// classified ONCE through the typed subject authority so the source-owner
+/// shuffle branch and the selected-owner placement route cannot drift.
+pub(super) enum OwnerSubject {
+    /// "~'s owner" names the ability source's owner (Cerulean Sphinx); it
+    /// declares no target.
+    Source,
+    /// "the owner of target X" / "target X's owner" carries the announced
+    /// object whose owner acts.
+    Selected(TargetFilter),
+    /// "that creature's owner" / "Enchanted creature's owner" is a possessive
+    /// noun anaphor: no declared target, and the moved object is the printed
+    /// noun phrase.
+    Anaphoric(TargetFilter),
+}
+
+pub(super) fn parse_owner_subject(subject: &str, ctx: &mut ParseContext) -> Option<OwnerSubject> {
+    let mut trial = ctx.clone();
+    if let Some(application) = parse_subject_application(subject, &mut trial) {
+        if application.multi_target.is_none() {
+            if application.affected == TargetFilter::Owner && application.target.is_none() {
+                *ctx = trial;
+                return Some(OwnerSubject::Source);
+            }
+            if application.affected == TargetFilter::ParentTargetOwner {
+                if let Some(target) = application.target {
+                    *ctx = trial;
+                    return Some(OwnerSubject::Selected(target));
+                }
+            }
+        }
+    }
+    // A possessive-anaphor actor declares no target of its own; the moved
+    // object is the printed noun phrase, parsed through the shared type-phrase
+    // entry point so attached-host and parent-anaphor nouns keep their filters.
+    let idx = subject
+        .find("'s owner") // allow-noncombinator: possessive boundary scan on an already-tokenized subject
+        .or_else(|| subject.find("\u{2019}s owner"))?; // allow-noncombinator: the same scan for the typographic apostrophe
+    let noun = subject[..idx].trim();
+    if nom_primitives::scan_contains(&noun.to_ascii_lowercase(), "target ") {
+        return None;
+    }
+    let (filter, remainder) = ctx.with_player_antecedents(|scoped| {
+        crate::parser::oracle_target::parse_target_with_ctx(noun, scoped)
+    });
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    Some(OwnerSubject::Anaphoric(filter))
 }
 
 pub(super) fn parse_subject_application(
@@ -3122,6 +3343,35 @@ fn parse_subject_application_for(
     }
 
     let lower = subject.to_lowercase();
+
+    // CR 108.3 + CR 115.1: the owner is the actor, while the printed object
+    // (including its optional cardinality) is the only announced target.
+    if let Some(((), object_text)) = nom_on_lower(subject, &lower, |i| {
+        value((), tag::<_, _, OracleError<'_>>("the owner of ")).parse(i)
+    }) {
+        let (object_text, multi_target) = super::strip_optional_target_prefix(object_text);
+        let object_lower = object_text.to_lowercase();
+        parse_declared_target_prefix
+            .parse(object_lower.as_str())
+            .ok()?;
+        let mut trial = ctx.clone();
+        let (filter, remainder) = parse_target_with_ctx(object_text, &mut trial);
+        if !remainder.trim().is_empty()
+            || super::target_filter_can_target_player(&filter)
+            || matches!(filter, TargetFilter::Any)
+        {
+            return None;
+        }
+        *ctx = trial;
+        return Some(SubjectApplication {
+            affected: TargetFilter::ParentTargetOwner,
+            target: Some(filter),
+            multi_target,
+            inherits_parent: false,
+            is_optional: false,
+            player_anaphor: None,
+        });
+    }
 
     // NOTE (issue #6965): the literal `"you" + " and " + "permanents you
     // control"` arm that used to sit here is now handled by the general
@@ -3950,6 +4200,28 @@ fn parse_subject_application_for(
             player_anaphor: None,
         });
     }
+    // CR 108.3: "~'s owner" names the owner of the ability's SOURCE object
+    // (Cerulean Sphinx, Etrata, Fblthp), the owner-side sibling of "~'s
+    // controller" above. Distinct from the anaphoric "its owner" / "[the|that]
+    // <noun>'s owner", which resolve to the PARENT TARGET's owner
+    // (`TargetFilter::ParentTargetOwner`). Lowered to `TargetFilter::Owner`,
+    // whose resolver reads the owner of the object referenced by the source id
+    // — the same filter the source-owner shuffle/put recognizers emit. Modeling
+    // it here keeps the source-owner and selected-object-owner subject grammar
+    // on one typed authority instead of a text-tagged branch beside it.
+    if tag::<_, _, OracleError<'_>>("~'s owner")
+        .parse(lower.as_str())
+        .is_ok_and(|(rest, _)| rest.trim().is_empty())
+    {
+        return Some(SubjectApplication {
+            affected: TargetFilter::Owner,
+            target: None,
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+            player_anaphor: None,
+        });
+    }
     // CR 608.2c + CR 608.2d: "its controller" / "their controller" as anaphoric
     // subject, optionally carrying a "may" modal ("its controller may search
     // their library" — Assassin's Trophy, Path to Exile, Oblation, etc.). When
@@ -4325,7 +4597,25 @@ fn parse_subject_application_for(
             );
             let binds_declared_target =
                 consumer == AnaphorConsumer::AffectedObject && names_declared_target;
-            if ctx.subject.is_some() && !binds_declared_target {
+            // CR 608.2c: an earlier "exile cards … until you exile a <type> card"
+            // loop of this chain introduces the card it found as the antecedent of
+            // a later "that <type> card" (Q, Stacking the Deck: "That nonland card
+            // gains …"), which the runtime hands to the next instruction as its
+            // targets. The anaphor names that card, never the trigger source, when
+            // every type it names is one the loop's stop filter requires.
+            let names_exile_until_hit = matches!(
+                (ctx.chain_prior_exile_until_match.as_ref(), &filter),
+                (Some(TargetFilter::Typed(found)), TargetFilter::Typed(anaphor))
+                    if anaphor
+                        .type_filters
+                        .iter()
+                        .any(|t| !matches!(t, TypeFilter::Card))
+                        && anaphor
+                            .type_filters
+                            .iter()
+                            .all(|t| matches!(t, TypeFilter::Card) || found.type_filters.contains(t))
+            );
+            if ctx.subject.is_some() && !binds_declared_target && !names_exile_until_hit {
                 return Some(SubjectApplication {
                     affected: filter,
                     target: Some(TargetFilter::TriggeringSource),
@@ -4383,7 +4673,17 @@ fn parse_subject_application_for(
     .parse(lower.as_str())
     .is_ok()
     {
-        return subject_filter_application(TargetFilter::ParentTarget, false);
+        // CR 608.2c + CR 508.5: "that player" is the player the trigger's own
+        // condition named, so bind the possessive through the shared
+        // condition-anaphor authority. An attack trigger ("attacks a player",
+        // Master of Cruelties) names the DEFENDING player: the bare
+        // `ParentTarget` default resolved to the trigger event's attacker — the
+        // ATTACKING player — and set the wrong player's life total. A condition
+        // that names no player (or no trigger context at all) keeps the CR 608.2c
+        // "previously named target" reading.
+        let affected =
+            relative_player_scope_anaphor_filter(ctx).unwrap_or(TargetFilter::ParentTarget);
+        return subject_filter_application(affected, false);
     }
 
     // CR 611.2c: a single effect may name SEVERAL subjects sharing one
@@ -4727,6 +5027,45 @@ fn declared_player_slot_indexes(ctx: &ParseContext) -> Vec<usize> {
         .collect()
 }
 
+/// CR 608.2c + CR 109.4: Share the existing bare-player pronoun grammar's
+/// supported scope bindings with possessive life-total subjects.
+///
+/// `None` when no relative-player scope is present or its binding is not
+/// handled here; callers retain their established fallback. `ScopedPlayer` is
+/// the each-player / iterated frame; its continuous-modification escape
+/// (`resolve_they_pronoun`'s object-set rule) remains owned by that caller.
+fn relative_player_scope_anaphor_filter(ctx: &ParseContext) -> Option<TargetFilter> {
+    match ctx.relative_player_scope.as_ref()? {
+        // CR 506.2 + CR 508.5: an attack trigger's player is the DEFENDING player
+        // — the player (or the attacked planeswalker's controller) the source is
+        // attacking — not the attacking player carried by the attack event.
+        ControllerRef::DefendingPlayer => Some(TargetFilter::DefendingPlayer),
+        // CR 120.3: the damaged / acting player the trigger event
+        // carries ("deals [combat] damage to a player", Unstoppable Slasher).
+        ControllerRef::TargetPlayer | ControllerRef::TriggeringPlayer => {
+            Some(TargetFilter::TriggeringPlayer)
+        }
+        // CR 608.2c: the iterating player of an each-player / each-upkeep frame.
+        ControllerRef::ScopedPlayer => Some(TargetFilter::ScopedPlayer),
+        // CR 115.1d + CR 608.2c: the parent instruction's named target.
+        ControllerRef::ParentTargetController => Some(TargetFilter::ParentTargetController),
+        ControllerRef::ParentTargetOwner => Some(TargetFilter::ParentTargetOwner),
+        // CR 608.2c + CR 109.4: "that player" after a `Choose(Player)` clause
+        // refers to the chosen player — a player-only `Typed` filter carrying the
+        // chosen scope (Gluntch's "choose a player. They put two +1/+1 counters …").
+        scope @ ControllerRef::ChosenPlayer { .. } => chosen_player_anaphor_filter(Some(scope)),
+        ControllerRef::You
+        | ControllerRef::Opponent
+        | ControllerRef::TargetOpponent
+        | ControllerRef::EventTargetController
+        | ControllerRef::DeclaredPlayer { .. }
+        | ControllerRef::SourceChosenPlayer
+        | ControllerRef::EnchantedPlayer
+        | ControllerRef::ActivePlayer
+        | ControllerRef::SpecificPlayer { .. } => None,
+    }
+}
+
 fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> TargetFilter {
     // CR 608.2c + CR 611.2c: an iterated-player frame (a fan-out vote body, an
     // each-player or each-upkeep scope) is the referent of a bare "they" unless
@@ -4746,55 +5085,16 @@ fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> Ta
                 return TargetFilter::ScopedPlayer;
             }
         }
-    }
-    // CR 608.2c + CR 109.4 (issue #1670, #3659): "they" after body "its
-    // controller may … if they do, they draw" refers to that creature's
-    // controller, not the damaged opponent from the trigger condition.
-    if matches!(
-        ctx.relative_player_scope,
-        Some(ControllerRef::ParentTargetController)
-    ) {
-        return TargetFilter::ParentTargetController;
-    }
-    if matches!(
-        ctx.relative_player_scope,
-        Some(ControllerRef::ParentTargetOwner)
-    ) {
-        return TargetFilter::ParentTargetOwner;
-    }
-    // CR 506.2 + CR 508.5: An attack-trigger intervening-if that names
-    // "defending player" (`condition_introduces_defending_player`) stamps
-    // `relative_player_scope = DefendingPlayer` — the nonactive player being
-    // attacked, not a chosen or previously-targeted player. "They" inside
-    // such an effect ("they may reveal their hand" — Smart Ass) refers to
-    // that combat-relative player. Without this arm, "they" fell through to
-    // the generic `ParentTarget` default, which has no defending-player
-    // referent to inherit and left the effect unbound.
-    if matches!(
-        ctx.relative_player_scope,
-        Some(ControllerRef::DefendingPlayer)
-    ) {
-        return TargetFilter::DefendingPlayer;
-    }
-    // CR 120.3 + CR 506.2: A "deals [combat] damage to a player" or
-    // "attacks a player" trigger introduces the damaged/attacked player as the
-    // event referent (the parser stamps `relative_player_scope = TargetPlayer`).
-    // "They" inside such an effect ("they lose half their life") refers to that
-    // event player, which auto-resolves from the triggering event
-    // (`TriggeringPlayer`) — NOT a chosen target. Without this, "they" fell
-    // through to `ParentTarget`, leaving the effect with no player to act on
-    // (Unstoppable Slasher's half-life loss silently resolved as "lose 0").
-    if matches!(
-        ctx.relative_player_scope,
-        Some(ControllerRef::TargetPlayer | ControllerRef::TriggeringPlayer)
-    ) {
-        return TargetFilter::TriggeringPlayer;
-    }
-    // CR 608.2c + CR 109.4: "They" after a `Choose(Player)` clause refers to
-    // the chosen player — a player-only `Typed` filter carrying the chosen
-    // scope (Gluntch's "choose a player. They put two +1/+1 counters …").
-    if let Some(filter) = chosen_player_anaphor_filter(ctx.relative_player_scope.as_ref()) {
-        return filter;
+    } else if let Some(anaphor) = relative_player_scope_anaphor_filter(ctx) {
+        // CR 608.2c + CR 109.4 (issue #1670, #3659): "they" after a body "its
+        // controller may … if they do, they draw" names that creature's
+        // controller; an attack trigger's names the DEFENDING player (Smart
+        // Ass); a damage trigger's names the damaged player (Unstoppable
+        // Slasher). The condition→anaphor binding is the shared authority, so
+        // the possessive subject grammar ("that player's life total") binds the
+        // same player instead of falling through to `ParentTarget`, which has
+        // no player referent to inherit.
+        return anaphor;
     }
     // CR 608.2c: after a multi-target declaration, a bare "They" can name the
     // unique earlier player slot even when a later object slot intervenes.
@@ -8432,27 +8732,25 @@ pub(super) fn try_parse_each_source_deals_damage(
     // The recipient phrase: everything after the "deals N damage to " marker.
     let recipient_phrase = damage_recipient_phrase(&predicate_lower);
 
-    // CR 120.1 + CR 608.2c (DEFERRED §9): two unrepresentable rider shapes the
+    // CR 120.1 + CR 608.2c (DEFERRED §9): an unrepresentable rider shape the
     // filter model cannot express, which would otherwise SILENTLY DEGRADE to a
-    // supported-but-wrong `EachSourceDealsDamage`:
-    //   * a damage predicate carrying "random" — "another random creature that
-    //     player controls" (Season's Beatings) degrades to `Typed{Another}` with
-    //     the random selection AND the "that player controls" scope dropped;
-    //   * a source subject ending in "tapped this way" — "Each Wolf tapped this
-    //     way" (Master of the Wild Hunt) carries a per-source tapped-by-this-
-    //     ability rider the source filter cannot hold, degrading to bare `Typed{Wolf}`.
-    // In both cases fail CLOSED to an honest `Unimplemented` — the same precedent
-    // as the Aura-Barbs attached-host check below. Detection is structural
-    // (word-boundary scan / all_consuming end-anchor), never substring dispatch.
+    // supported-but-wrong `EachSourceDealsDamage`: a damage predicate carrying
+    // "random" — "another random creature that player controls" (Season's
+    // Beatings) degrades to `Typed{Another}` with the random selection AND the
+    // "that player controls" scope dropped. Fail CLOSED to an honest
+    // `Unimplemented` — the same precedent as the Aura-Barbs attached-host
+    // check below. Detection is structural (word-boundary scan), never
+    // substring dispatch. A "<verb> this way" source subject ("Each Wolf
+    // tapped this way", Master of the Wild Hunt) is typed below as the chain
+    // tracked set (CR 608.2c + CR 701.26a), and fails closed there when its
+    // population is untypable or its verb is off the verb axis.
     // The random scan is on the whole damage predicate (not `damage_recipient_phrase`,
     // which only fires on the fixed-"N damage to" form — the own-power recipient is
     // introduced by "to " after the amount, so no clean recipient slice exists); the
     // own-power each-source grammar is the only predicate kind that reaches here, and
     // "random" never appears in a supported damage amount, so a word-boundary match is
     // always a random RECIPIENT.
-    if nom_primitives::scan_contains(&predicate_lower, "random")
-        || subject_sources_tapped_this_way(&subject.to_lowercase())
-    {
+    if nom_primitives::scan_contains(&predicate_lower, "random") {
         return Some(super::parsed_clause(Effect::unimplemented(
             "each_source_unrepresentable_rider",
             text,
@@ -8471,27 +8769,63 @@ pub(super) fn try_parse_each_source_deals_damage(
         )));
     }
 
-    // Require a usable non-player object-class source. The one context-set
-    // exception is an exact pairwise relation: "each of those ... to the
-    // other" reads the previously announced object pair through ParentTarget.
-    // Only `TwoTargets` publishes this two-slot registry; a single multi-target
-    // producer therefore fails closed without typed per-member provenance.
-    let sources = parse_subject_application(subject, ctx)?.affected;
-    let pairwise_filters = match (&sources, ctx.declared_target_slots.as_slice()) {
-        (TargetFilter::ParentTarget, [first, second])
-            if has_pairwise_other_recipient(&predicate_lower)
-                && matches!(first, TargetFilter::Typed(typed)
-                    if !typed.type_filters.is_empty() || !typed.properties.is_empty())
-                && matches!(second, TargetFilter::Typed(typed)
-                    if !typed.type_filters.is_empty() || !typed.properties.is_empty()) =>
-        {
-            Some([Box::new(first.clone()), Box::new(second.clone())])
+    // CR 608.2c + CR 701.26a: "each <type> <verb> this way" — the sources are
+    // exactly the chain tracked set's members stamped with that producer action
+    // (Master of the Wild Hunt: "Each Wolf tapped this way"). An untypable
+    // this-way population fails CLOSED rather than degrading to a bare class.
+    let subject_lower = subject.to_lowercase();
+    let (sources, pairwise_filters) = match split_each_this_way_subject(&subject_lower) {
+        Some((type_phrase, cause)) => match this_way_tracked_sources(type_phrase, cause) {
+            Some(tracked) => (tracked, None),
+            None => {
+                return Some(super::parsed_clause(Effect::unimplemented(
+                    "each_source_unrepresentable_rider",
+                    text,
+                )))
+            }
+        },
+        None => {
+            // CR 608.2c: a "<verb> this way" subject whose verb is off the verb
+            // axis ("each Wolf untapped this way") names a population we cannot
+            // type — fail CLOSED rather than let `parse_subject_application`
+            // drop the rider to a bare class. End-anchored, so an interior
+            // "tapped this way you control" is untouched (Pattern 2).
+            if all_consuming(terminated(
+                take_until::<_, _, OracleError<'_>>(" this way"),
+                tag(" this way"),
+            ))
+            .parse(subject_lower.as_str())
+            .is_ok()
+            {
+                return Some(super::parsed_clause(Effect::unimplemented(
+                    "each_source_unrepresentable_rider",
+                    text,
+                )));
+            }
+            // Require a usable non-player object-class source. The one context-set
+            // exception is an exact pairwise relation: "each of those ... to the
+            // other" reads the previously announced object pair through ParentTarget.
+            // Only `TwoTargets` publishes this two-slot registry; a single multi-target
+            // producer therefore fails closed without typed per-member provenance.
+            let sources = parse_subject_application(subject, ctx)?.affected;
+            let pairwise_filters = match (&sources, ctx.declared_target_slots.as_slice()) {
+                (TargetFilter::ParentTarget, [first, second])
+                    if has_pairwise_other_recipient(&predicate_lower)
+                        && matches!(first, TargetFilter::Typed(typed)
+                            if !typed.type_filters.is_empty() || !typed.properties.is_empty())
+                        && matches!(second, TargetFilter::Typed(typed)
+                            if !typed.type_filters.is_empty() || !typed.properties.is_empty()) =>
+                {
+                    Some([Box::new(first.clone()), Box::new(second.clone())])
+                }
+                _ => None,
+            };
+            if !is_object_class_source(&sources) && pairwise_filters.is_none() {
+                return None;
+            }
+            (sources, pairwise_filters)
         }
-        _ => None,
     };
-    if !is_object_class_source(&sources) && pairwise_filters.is_none() {
-        return None;
-    }
 
     // Delegate the predicate to the shared damage parser so the amount and the
     // recipient anaphora (`ParentTarget`, `TriggeringSource`, `Any`) resolve
@@ -8551,22 +8885,49 @@ fn damage_recipient_phrase(predicate_lower: &str) -> Option<&str> {
     Some(after.trim_end_matches('.').trim())
 }
 
-/// CR 120.1 + CR 608.2c (DEFERRED §9): the source subject ends in
-/// "tapped this way" ("Each Wolf tapped this way deals damage ..." — Master of
-/// the Wild Hunt), a per-source tapped-by-this-ability rider the filter model
-/// cannot hold. `parse_subject_application` degrades it to a bare `Typed{Wolf}`,
-/// dropping the tapped restriction, so the each-source intercept must fail
-/// CLOSED to `Unimplemented`. Pattern 2 (`oracle_nom/PATTERNS.md`): the whole
-/// subject is parsed and the trailing phrase consumed LAST via `all_consuming`,
-/// anchoring the tag to the END so an interior/non-terminal "tapped this way"
-/// is not matched (mirrors `ends_with_of_your_choice`).
-fn subject_sources_tapped_this_way(subject_lower: &str) -> bool {
-    all_consuming(terminated(
-        take_until::<_, _, OracleError<'_>>("tapped this way"),
-        tag("tapped this way"),
-    ))
-    .parse(subject_lower)
-    .is_ok()
+/// CR 608.2c + CR 701.26a: the keyword-action verb of a "<verb> this way"
+/// each-source subject rider, mapped to the producer-action cause the chain
+/// tracked set stamps on its members. This is the verb axis's single
+/// authority; "tapped" is the only verb attested on an each-source damage
+/// subject. A newly attested verb is one more `value(ThisWayCause::X,
+/// tag("<verb>"))` arm under an `alt(..)`.
+fn parse_this_way_verb(input: &str) -> OracleResult<'_, ThisWayCause> {
+    value(ThisWayCause::Tapped, tag("tapped")).parse(input)
+}
+
+/// Pattern 2 (`oracle_nom/PATTERNS.md`): "<verb> this way" consumed as the
+/// END of the subject via `all_consuming`, so an interior rider ("each
+/// creature tapped this way you control") never matches.
+fn parse_this_way_rider_suffix(input: &str) -> OracleResult<'_, ThisWayCause> {
+    all_consuming(terminated(parse_this_way_verb, tag(" this way"))).parse(input)
+}
+
+/// CR 608.2c: split "each <type phrase> <verb> this way" into the type
+/// phrase and the producer cause. `None` when the subject does not end in a
+/// this-way rider on the verb axis (the caller's ordinary each-source subject
+/// path, behind its generic "this way" fail-closed, applies).
+fn split_each_this_way_subject(subject_lower: &str) -> Option<(&str, ThisWayCause)> {
+    let (body, _) = tag::<_, _, OracleError<'_>>("each ")
+        .parse(subject_lower)
+        .ok()?;
+    let (type_phrase, cause, _) = nom_primitives::scan_preceded(body, parse_this_way_rider_suffix)?;
+    Some((type_phrase.trim_end(), cause))
+}
+
+/// CR 120.1 + CR 608.2c: type the this-way population as the chain tracked
+/// set restricted to `cause` members. `None` when the type phrase is empty,
+/// does not fully consume, or is not an object class. The caller then fails
+/// CLOSED instead of degrading to an unrestricted source class.
+fn this_way_tracked_sources(type_phrase: &str, cause: ThisWayCause) -> Option<TargetFilter> {
+    let (filter, remainder) = parse_type_phrase_folding(type_phrase);
+    let typed_nonempty = filter != TargetFilter::Typed(TypedFilter::default());
+    (remainder.trim().is_empty() && typed_nonempty && is_object_class_source(&filter)).then(|| {
+        TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter: Box::new(filter),
+            caused_by: Some(cause),
+        }
+    })
 }
 
 /// CR 109.4 + CR 120.3a: the recipient phrase is exactly "its controller".
@@ -8798,6 +9159,7 @@ pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
             // before the bare "the player " arm.
             value((), tag("the attacking player ")),
             value((), tag("the player ")),
+            value((), tag("the owner of ")),
             // CR 102.2 + CR 608.2c: "the opponent with/who has the most
             // <property>" as an effect subject — the sibling of the "the
             // player " superlative arm above, routed through the same
@@ -9072,11 +9434,182 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::AttackerBlockStatus;
+
+    #[test]
+    fn r2_owner_anaphor_requires_prior_object_declaration() {
+        let app = parse_subject_application("its owner", &mut ParseContext::default())
+            .expect("owner subject");
+        let subject = subject_phrase_ast(Some(app));
+        let mut ctx = ParseContext::default();
+        assert_eq!(owner_subject_seed(&subject, &ctx), None);
+        ctx.chain_declared_object_target = Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Card],
+            ..Default::default()
+        }));
+        assert_eq!(
+            owner_subject_seed(&subject, &ctx),
+            Some((ControllerRef::ParentTargetOwner, TargetFilter::ParentTarget))
+        );
+        ctx.token_created_in_chain = true;
+        assert_eq!(owner_subject_seed(&subject, &ctx), None);
+        ctx.token_created_in_chain = false;
+        ctx.chain_declared_object_target = Some(TargetFilter::Player);
+        assert_eq!(owner_subject_seed(&subject, &ctx), None);
+    }
+
+    /// SHAPE: owner actor, object exclusion, and optional count are independent
+    /// axes of the declared-target subject grammar.
+    #[test]
+    fn declared_owner_subject_seed_accepts_only_one_pinned_object() {
+        for (phrase, expected_multi, another) in [
+            ("the owner of target creature", None, false),
+            (
+                "the owner of up to one target creature",
+                Some(MultiTargetSpec::fixed(0, 1)),
+                false,
+            ),
+            (
+                "the owner of up to one other target nonland permanent",
+                Some(MultiTargetSpec::fixed(0, 1)),
+                true,
+            ),
+            ("the owner of another target creature", None, true),
+            ("target creature's owner", None, false),
+        ] {
+            let app =
+                parse_subject_application(phrase, &mut ParseContext::default()).expect(phrase);
+            assert_eq!(app.affected, TargetFilter::ParentTargetOwner);
+            assert_eq!(app.player_anaphor, None);
+            assert_eq!(app.multi_target, expected_multi, "{phrase}");
+            let Some(TargetFilter::Typed(filter)) = app.target.as_ref() else {
+                panic!("{phrase}: expected a typed object target: {:?}", app.target);
+            };
+            assert_eq!(
+                filter.properties.contains(&FilterProp::Another),
+                another,
+                "{phrase}"
+            );
+            let mut subject = subject_phrase_ast(Some(app));
+            assert_eq!(
+                subject_player_antecedent(&subject),
+                Some(ControllerRef::ParentTargetOwner)
+            );
+            assert_eq!(
+                subject_possessive_object_antecedent(&subject),
+                Some(TargetFilter::ParentTarget)
+            );
+            for multi in [
+                MultiTargetSpec::fixed(0, 0),
+                MultiTargetSpec::fixed(0, 2),
+                MultiTargetSpec::fixed(2, 1),
+                MultiTargetSpec::unlimited(0),
+                MultiTargetSpec::up_to(QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::Power {
+                        scope: ObjectScope::Source,
+                    },
+                }),
+            ] {
+                subject.multi_target = Some(multi);
+                assert_eq!(subject_player_antecedent(&subject), None);
+                assert_eq!(subject_possessive_object_antecedent(&subject), None);
+            }
+        }
+        for phrase in [
+            "the owner of target player",
+            "the owner of up to one other target player",
+            "the owner of target creature nonsense",
+            "the owner of another target creature nonsense",
+            "the owner of target",
+            "the owner of any target",
+        ] {
+            assert!(
+                parse_subject_application(phrase, &mut ParseContext::default()).is_none(),
+                "{phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn compound_phase_out_has_one_target_slot_and_one_batch() {
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_source_and_target_phase_out(
+            "~ and up to one target creature you control phase out.",
+            &mut ctx,
+        )
+        .expect("compound subject");
+        assert!(matches!(clause.effect, Effect::TargetOnly { .. }));
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+        let child = clause.sub_ability.expect("one phasing batch");
+        assert_eq!(
+            *child.effect,
+            Effect::PhaseOut {
+                target: TargetFilter::Or {
+                    filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget]
+                }
+            }
+        );
+        assert!(child.multi_target.is_none() && child.sub_ability.is_none());
+        for text in [
+            "~ and target creature phase out and draw a card",
+            "target creature and target creature phase out",
+            "~ and target player phase out",
+        ] {
+            assert!(
+                try_parse_source_and_target_phase_out(text, &mut ctx).is_none(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn compound_phase_out_preserves_event_context_instead_of_declaring_it() {
+        for secondary in [
+            "target creature",
+            "up to one target creature",
+            "up to one other target creature",
+            "another target creature",
+        ] {
+            let text = format!("~ and {secondary} phase out.");
+            assert!(
+                try_parse_source_and_target_phase_out(&text, &mut ParseContext::default())
+                    .is_some(),
+                "{text}"
+            );
+        }
+
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..ParseContext::default()
+        };
+        let application =
+            parse_subject_application("that creature", &mut ctx).expect("event-context creature");
+        assert_eq!(application.target, Some(TargetFilter::TriggeringSource));
+        assert!(
+            parse_source_and_target_subjects(
+                TextPair::new("~ and that creature", "~ and that creature"),
+                &mut ctx,
+            )
+            .is_none(),
+            "an event-context binding is not an announced target"
+        );
+        let clause = super::super::parse_effect_clause("~ and that creature phase out.", &mut ctx);
+        assert_eq!(
+            clause.effect,
+            Effect::PhaseOut {
+                target: TargetFilter::Or {
+                    filters: vec![TargetFilter::SelfRef, TargetFilter::TriggeringSource],
+                },
+            },
+            "declining the declared-target route must retain both contextual subjects"
+        );
+        assert!(clause.multi_target.is_none());
+        assert!(clause.sub_ability.is_none());
+    }
     use crate::types::ability::{
         AbilityKind, BasicLandType, ChoiceType, Comparator, ContinuousModification, ControllerRef,
         Effect, PtStat, PtValueScope, QuantityRef, TypeFilter,
     };
+    use crate::types::ability::{AttackerBlockStatus, ThisWayCause};
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::identifiers::TrackedSetId;
     use crate::types::statics::BlockExceptionKind;
@@ -9938,12 +10471,13 @@ mod tests {
     // captures a 10-card class — Bartz and Boko, Judgment of
     // Alexander, Kamahl's Will, Master of the Wild Hunt, Moonlight Hunt, Nissa's
     // Judgment, Sarkhan the Mad, Season's Beatings, Signature Slam, and The Bears
-    // of Littjara. Two of those ten (Master of the Wild Hunt's "tapped this way"
-    // source rider and Season's Beatings' "random" recipient) carry riders the
-    // filter model cannot express and are pinned to fail CLOSED as `Unimplemented`
-    // (see `each_master_of_the_wild_hunt_tapped_this_way_fails_closed` /
-    // `each_seasons_beatings_random_recipient_fails_closed`), leaving EIGHT clean
-    // BatchSource members; the tests below pin each distinct source-filter shape
+    // of Littjara. Master of the Wild Hunt's "tapped this way" source rider now
+    // parses with `TrackedSetFiltered{Wolf, caused_by: Some(Tapped)}` sources
+    // (see `each_tapped_this_way_subject_parses_tracked_set_sources`), leaving
+    // Season's Beatings' "random" recipient as the only rider the filter model
+    // cannot express, pinned to fail CLOSED as `Unimplemented` (see
+    // `each_seasons_beatings_random_recipient_fails_closed`). EIGHT members are
+    // clean filter-class BatchSource members; the tests below pin each distinct source-filter shape
     // (own-power "any target", "each other", composed amount, union subtype,
     // +1/+1-counter property). The "any target" recipient
     // stays `Shared(Any)` (pinned by `each_source_deals_damage_any_target_recipient`
@@ -10297,24 +10831,151 @@ mod tests {
         }
     }
 
-    // CR 120.1 + CR 608.2c (DEFERRED §9): Master of the Wild Hunt's source rider
-    // ("Each Wolf tapped this way") is a per-source tapped-by-this-ability
-    // constraint the source filter cannot hold — fail CLOSED to `Unimplemented`
-    // rather than degrade the sources to bare `Typed{Wolf}`.
+    // CR 608.2c + CR 701.26a + CR 120.1: Master of the Wild Hunt clause 2 — the
+    // sources are the chain tracked set's Tapped-cause Wolves, each dealing its
+    // own power to the announced target creature.
     #[test]
-    fn each_master_of_the_wild_hunt_tapped_this_way_fails_closed() {
+    fn each_tapped_this_way_subject_parses_tracked_set_sources() {
         let effect = super::super::parse_effect(
             "Each Wolf tapped this way deals damage equal to its power to target creature",
         );
-        const RIDER_KEY: &str = "each_source_unrepresentable_rider";
-        match &effect {
-            Effect::Unimplemented { name, .. } if name.as_str() == RIDER_KEY => {}
-            other => panic!(
-                "Master of the Wild Hunt tapped-this-way source rider must fail closed to \
-                 each_source_unrepresentable_rider (per-source tapped-by-this-ability is \
-                 unmodeled, not a degradation to bare Typed{{Wolf}}), got {other:?}"
+        let Effect::EachSourceDealsDamage {
+            sources,
+            amount,
+            recipient,
+        } = effect
+        else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert_eq!(
+            sources,
+            TargetFilter::TrackedSetFiltered {
+                id: crate::types::identifiers::TrackedSetId(0),
+                filter: Box::new(TargetFilter::Typed(
+                    TypedFilter::default().subtype("Wolf".to_string())
+                )),
+                caused_by: Some(crate::types::ability::ThisWayCause::Tapped),
+            }
+        );
+        assert_eq!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::BatchSource
+                }
+            }
+        );
+        assert!(
+            matches!(
+                &recipient,
+                EachDamageRecipient::Shared(TargetFilter::Typed(t))
+                    if t.type_filters == vec![crate::types::ability::TypeFilter::Creature]
             ),
-        }
+            "recipient must be the announced target creature, got {recipient:?}"
+        );
+    }
+
+    // Building-block rows for the splitter (verb axis + end anchor).
+    #[test]
+    fn each_this_way_subject_splitter_rows() {
+        assert_eq!(
+            split_each_this_way_subject("each wolf tapped this way"),
+            Some(("wolf", ThisWayCause::Tapped))
+        );
+        assert_eq!(
+            split_each_this_way_subject("each creature you control tapped this way"),
+            Some(("creature you control", ThisWayCause::Tapped))
+        );
+        assert_eq!(split_each_this_way_subject("each wolf"), None);
+        assert_eq!(
+            split_each_this_way_subject("each creature tapped this way you control"),
+            None
+        );
+        assert_eq!(
+            split_each_this_way_subject("each wolf untapped this way"),
+            None
+        );
+        assert_eq!(split_each_this_way_subject("wolf tapped this way"), None);
+    }
+
+    // Negative (c): an untypable this-way population fails CLOSED.
+    #[test]
+    fn each_untypable_this_way_subject_fails_closed() {
+        let effect = super::super::parse_effect(
+            "Each of them tapped this way deals damage equal to its power to target creature",
+        );
+        const RIDER_KEY: &str = "each_source_unrepresentable_rider";
+        assert!(
+            matches!(&effect, Effect::Unimplemented { name, .. }
+                if name.as_str() == RIDER_KEY),
+            "got {effect:?}"
+        );
+    }
+
+    // Negative (e): an off-axis this-way verb keeps BASE's fail-closed — the
+    // splitter returns None ("untapped" is not on the verb axis), and the
+    // generic end-anchored " this way" guard in the None branch catches it.
+    #[test]
+    fn each_off_axis_this_way_verb_fails_closed() {
+        let effect = super::super::parse_effect(
+            "Each Wolf untapped this way deals damage equal to its power to target creature",
+        );
+        const RIDER_KEY: &str = "each_source_unrepresentable_rider";
+        assert!(
+            matches!(&effect, Effect::Unimplemented { name, .. }
+                if name.as_str() == RIDER_KEY),
+            "got {effect:?}"
+        );
+    }
+
+    // Negative (b): an interior (non-terminal) rider never yields tracked sources.
+    #[test]
+    fn interior_tapped_this_way_is_not_tracked_source() {
+        let effect = super::super::parse_effect(
+            "each creature tapped this way you control deals 1 damage to target creature",
+        );
+        assert!(
+            !matches!(
+                &effect,
+                Effect::EachSourceDealsDamage {
+                    sources: TargetFilter::TrackedSetFiltered { .. },
+                    ..
+                }
+            ),
+            "got {effect:?}"
+        );
+    }
+
+    // Negative (a): the random rider still fails closed on a this-way subject.
+    #[test]
+    fn tapped_this_way_random_recipient_still_fails_closed() {
+        let effect = super::super::parse_effect(
+            "Each Wolf tapped this way deals 2 damage to another random creature",
+        );
+        const RIDER_KEY: &str = "each_source_unrepresentable_rider";
+        assert!(
+            matches!(&effect, Effect::Unimplemented { name, .. }
+                if name.as_str() == RIDER_KEY),
+            "got {effect:?}"
+        );
+    }
+
+    // Negative (d): the plain each-source sibling keeps ordinary typed sources.
+    #[test]
+    fn plain_each_source_subject_keeps_typed_sources() {
+        let effect = super::super::parse_effect(
+            "each creature you control deals 1 damage to target creature",
+        );
+        assert!(
+            matches!(
+                &effect,
+                Effect::EachSourceDealsDamage {
+                    sources: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "got {effect:?}"
+        );
     }
 
     // Negative: the targeted own-power team-up shape still routes to
@@ -11419,6 +12080,20 @@ mod tests {
         assert!(!app.is_optional, "no 'may' modal → not optional");
     }
 
+    // CR 108.3: "~'s owner" is the SOURCE's owner, not the parent target's
+    // owner — the shared typed subject authority models it as
+    // `TargetFilter::Owner` so the source-owner shuffle recognizer no longer
+    // needs a text-tagged route beside it.
+    #[test]
+    fn parse_subject_source_owner_routes_to_source_owner_filter() {
+        let mut ctx = ParseContext::default();
+        let app = parse_subject_application("~'s owner", &mut ctx)
+            .expect("should recognize \"~'s owner\"");
+        assert_eq!(app.affected, TargetFilter::Owner);
+        assert_eq!(app.target, None);
+        assert!(!app.is_optional);
+    }
+
     #[test]
     fn parse_subject_their_owner_bare_routes_to_owner() {
         let mut ctx = ParseContext::default();
@@ -11642,6 +12317,52 @@ mod tests {
         let result = parse_subject_application("that player", &mut ctx);
         assert!(result.is_some());
         assert_eq!(result.unwrap().affected, TargetFilter::TriggeringPlayer);
+    }
+
+    /// CR 508.5 + CR 119.5: an attack trigger's "that player's life total" is
+    /// the DEFENDING player. Issue #8082: the possessive bound the bare
+    /// `ParentTarget` anaphor, which resolved to the trigger event's attacker —
+    /// the attacking player — so Master of Cruelties set its own controller's
+    /// life total to 1.
+    #[test]
+    fn parse_subject_that_player_life_total_binds_attack_defender() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            relative_player_scope: Some(ControllerRef::DefendingPlayer),
+            ..ParseContext::default()
+        };
+        let application = parse_subject_application("that player's life total", &mut ctx)
+            .expect("the possessive life-total subject must parse");
+        assert_eq!(
+            application.affected,
+            TargetFilter::DefendingPlayer,
+            "the attacked player's life total, not the trigger event's attacker"
+        );
+    }
+
+    /// Sibling scope: a damage trigger's "their life total" is the damaged player
+    /// carried by the trigger event, through the same condition→anaphor authority.
+    #[test]
+    fn parse_subject_their_life_total_binds_triggering_player() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            relative_player_scope: Some(ControllerRef::TriggeringPlayer),
+            ..ParseContext::default()
+        };
+        let application = parse_subject_application("their life total", &mut ctx)
+            .expect("the possessive life-total subject must parse");
+        assert_eq!(application.affected, TargetFilter::TriggeringPlayer);
+    }
+
+    /// Control: with no relative player established by the condition (and no
+    /// trigger context at all) the possessive keeps its CR 608.2c reading — a
+    /// previously named target — so the fix widens nothing outside trigger bodies.
+    #[test]
+    fn parse_subject_that_player_life_total_without_scope_stays_parent_target() {
+        let mut ctx = ParseContext::default();
+        let application = parse_subject_application("that player's life total", &mut ctx)
+            .expect("the possessive life-total subject must parse");
+        assert_eq!(application.affected, TargetFilter::ParentTarget);
     }
 
     #[test]

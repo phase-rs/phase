@@ -13,6 +13,7 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::format::FormatConfig;
 use engine::types::game_state::{
     CastPaymentMode, PersistedGameState, PersistedRestoreFinalization, ShardChoice, StackEntryKind,
     WaitingFor,
@@ -73,6 +74,12 @@ fn board() -> GameScenario {
 
 fn three_player_board() -> GameScenario {
     let mut sc = GameScenario::new_n_player(3, 9691);
+    sc.at_phase(Phase::PreCombatMain);
+    sc
+}
+
+fn two_headed_giant_board() -> GameScenario {
+    let mut sc = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 10834);
     sc.at_phase(Phase::PreCombatMain);
     sc
 }
@@ -366,6 +373,68 @@ fn ward_counters_an_interactively_paid_spell_when_unpaid() {
         )) > stack_position(&runner, |_, id| id == spell),
         "ward goes on the stack above the spell it targets"
     );
+
+    resolve_all(&mut runner, false);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&ward].damage_marked,
+        0,
+        "Shock was countered"
+    );
+}
+
+/// CR 702.21a + CR 102.3: a 2HG teammate is not an opponent, so the
+/// teammate's spell does not trigger ward and resolves.
+#[test]
+fn ward_does_not_trigger_for_a_teammates_spell() {
+    let mut sc = two_headed_giant_board();
+    let ward = ward_creature(&mut sc, P1);
+    let spell = shock(&mut sc, P0);
+    sc.with_mana_pool(P0, pool(&[ManaType::Red]));
+    let mut runner = sc.build();
+
+    cast(&mut runner, spell, CastPaymentMode::Manual);
+    drive(
+        &mut runner,
+        &Answers {
+            target: Some(ward),
+            ..Default::default()
+        },
+    );
+    assert!(
+        spell_on_stack(&runner, spell),
+        "reach guard: the cast targeted"
+    );
+    assert_eq!(triggers_from(&runner, ward), 0);
+
+    resolve_all(&mut runner, false);
+    assert_eq!(
+        runner.state().objects[&ward].zone,
+        Zone::Graveyard,
+        "Shock resolved and killed the 3/1"
+    );
+}
+
+/// CR 702.21a: on the same 2HG board, an opponent's spell triggers ward and is
+/// countered when unpaid.
+#[test]
+fn ward_triggers_for_an_opposing_teams_spell_in_two_headed_giant() {
+    let mut sc = two_headed_giant_board();
+    let ward = ward_creature(&mut sc, P2);
+    let spell = shock(&mut sc, P0);
+    sc.with_mana_pool(P0, pool(&[ManaType::Red]));
+    let mut runner = sc.build();
+
+    cast(&mut runner, spell, CastPaymentMode::Manual);
+    drive(
+        &mut runner,
+        &Answers {
+            target: Some(ward),
+            ..Default::default()
+        },
+    );
+    assert!(spell_on_stack(&runner, spell));
+    assert_eq!(triggers_from(&runner, ward), 1);
 
     resolve_all(&mut runner, false);
     assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);

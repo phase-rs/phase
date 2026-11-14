@@ -476,6 +476,12 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             cmp_val(a0, b0)
         }
+        GameAction::ChooseStartingPlayer { player: a0 } => {
+            let GameAction::ChooseStartingPlayer { player: b0 } = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+        }
         GameAction::ChooseOption { choice: a0 } => {
             let GameAction::ChooseOption { choice: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
@@ -830,6 +836,12 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
         }
         GameAction::HarmonizeTap { creature_id: a0 } => {
             let GameAction::HarmonizeTap { creature_id: b0 } = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+        }
+        GameAction::ChooseSecretAgendaNames { names: a0 } => {
+            let GameAction::ChooseSecretAgendaNames { names: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
             cmp_val(a0, b0)

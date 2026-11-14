@@ -149,8 +149,15 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     // replacement when the battle enters the battlefield.
     obj.defense = defense;
     obj.card_types = card_face.card_type.clone();
+    if card_face
+        .card_type
+        .core_types
+        .contains(&crate::types::card_type::CoreType::Conspiracy)
+    {
+        obj.is_conspiracy = true;
+    }
     obj.mana_cost = card_face.mana_cost.clone();
-    obj.keywords = keywords.clone();
+    obj.replace_keywords(keywords.clone());
     let mut abilities = card_face.abilities.clone();
     for ability in &mut abilities {
         ability.normalize_parsed_replacement_flags();
@@ -330,7 +337,7 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.defense = back_face.defense;
     obj.card_types = back_face.card_types.clone();
     obj.mana_cost = back_face.mana_cost.clone();
-    obj.keywords = back_face.keywords.clone();
+    obj.replace_keywords(back_face.keywords.clone());
     obj.abilities = Arc::new(back_face.abilities.clone());
     obj.replacement_definitions = back_face.replacement_definitions.clone();
     obj.static_definitions = back_face.static_definitions.clone();
@@ -867,7 +874,7 @@ pub fn apply_copiable_values(
     obj.layer_base_toughness = values.toughness;
     obj.loyalty = values.loyalty;
     obj.printed_loyalty = values.printed_loyalty;
-    obj.keywords = values.keywords.clone();
+    obj.replace_keywords(values.keywords.clone());
     // All four ability sets are Arc-shared — refcount bumps, no deep copy.
     obj.abilities = Arc::clone(&values.abilities);
     obj.trigger_definitions = values
@@ -935,7 +942,7 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
     obj.toughness = values.toughness;
     obj.loyalty = values.loyalty;
     obj.printed_loyalty = values.printed_loyalty;
-    obj.keywords = values.keywords.clone();
+    obj.replace_keywords(values.keywords.clone());
     obj.abilities = Arc::clone(&values.abilities);
     obj.replacement_definitions = Arc::clone(&values.replacement_definitions).into();
     obj.static_definitions = Arc::clone(&values.static_definitions).into();
@@ -1623,6 +1630,17 @@ pub fn rehydrate_game_from_card_db_with_finalization(
     finalization: CardDbRehydrationFinalization,
 ) {
     rehydrate_card_db_metadata(state, db);
+    rehydrate_printed_faces(state, db, finalization);
+    rehydrate_recovery_checkpoint_faces(state, db);
+}
+
+/// The printed-face restore of one executable board: the live game, or the
+/// recovery checkpoint a parked payment settles onto.
+fn rehydrate_printed_faces(
+    state: &mut GameState,
+    db: &CardDatabase,
+    finalization: CardDbRehydrationFinalization,
+) {
     restore_legacy_swap_snapshot_provenance(state);
     let (changed_any, changed_battlefield) = reapply_printed_faces_from_card_db(state, db);
     repair_battlefield_trigger_index_after_face_reapply(state, changed_battlefield);
@@ -1634,6 +1652,27 @@ pub fn rehydrate_game_from_card_db_with_finalization(
             finalize_public_state(state);
         }
     }
+}
+
+/// A staged payment's recovery checkpoint is a second executable board: its
+/// prompt is answered on it and settlement installs it as the game. It takes
+/// the same printed-face restore as the board that carries it, so settling the
+/// payment cannot put back the characteristics the host just refreshed. Its
+/// zones, payment state and prompt are kept as accepted; the registries it
+/// reads are the live state's (`payment_transaction::hydrated_checkpoint`).
+fn rehydrate_recovery_checkpoint_faces(state: &mut GameState, db: &CardDatabase) {
+    let Some(checkpoint) = state
+        .payment_transaction
+        .as_deref_mut()
+        .and_then(|transaction| transaction.recovered.as_deref_mut())
+    else {
+        return;
+    };
+    rehydrate_printed_faces(
+        &mut checkpoint.state,
+        db,
+        CardDbRehydrationFinalization::Defer,
+    );
 }
 
 /// Populate Conjure registry and card-name validation lists on first rehydrate.
@@ -2246,6 +2285,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Battlefield),
                     destination: Zone::Exile,
                     target: TargetFilter::SelfRef,

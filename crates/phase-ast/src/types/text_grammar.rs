@@ -769,6 +769,17 @@ pub fn starts_with_type_phrase_lead(text: &str) -> bool {
         || parse_color_prefix(text).is_some()
         || parse_color_quality_prefix(text).is_some()
         || parse_combat_status_prefix(text).is_some()
+        // CR 406.3: "face-up "/"face-down "/"exiled " are the exile-visibility
+        // adjective run consumed by `parse_type_phrase_folding_unbound`'s
+        // modifier loop. Recursing lets an article-led generic phrase
+        // ("a face-up exiled card", "an exiled card") pass the indefinite
+        // article guard and reach that loop. Without this arm the article is
+        // never stripped, so the run is unreachable and the phrase collapses to
+        // a match-anything filter (Binding Negotiation's "a face-up exiled card
+        // they own").
+        || parse_exile_visibility_prefix(text).is_ok_and(|(rest, _)| {
+            rest.len() < text.len() && starts_with_type_phrase_lead(rest)
+        })
         // CR 208.1 (#2912): "1/1 creature" leads a type phrase (the P/T
         // designation is followed by a type word).
         || parse_leading_pt_designation(text).is_some()
@@ -928,6 +939,29 @@ pub fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usize)> {
     }
 
     None
+}
+
+/// CR 406.3: The exile-visibility adjective run that leads a type phrase naming
+/// a card in exile: "face-up " (not face down), "face-down ", and the "exiled "
+/// zone qualifier. Returns the property plus the remainder.
+///
+/// Single authority for these three adjectives: `starts_with_type_phrase_lead`
+/// (the indefinite-article guard) and `parse_type_phrase_folding_unbound`'s
+/// modifier loop both compose it, so an article-led generic phrase
+/// ("a face-up exiled card they own", "an exiled card") can never be admitted
+/// by one and dropped by the other.
+pub fn parse_exile_visibility_prefix(input: &str) -> OracleResult<'_, FilterProp> {
+    alt((
+        value(
+            FilterProp::Not {
+                prop: Box::new(FilterProp::FaceDown),
+            },
+            tag::<_, _, OracleError<'_>>("face-up "),
+        ),
+        value(FilterProp::FaceDown, tag("face-down ")),
+        value(FilterProp::InZone { zone: Zone::Exile }, tag("exiled ")),
+    ))
+    .parse(input)
 }
 
 /// A keyword-list separator followed by something other than a keyword, where

@@ -1276,6 +1276,36 @@ fn snapshot_transient_modifications(
                     value: resolve_quantity_with_targets(state, value, ability),
                 }
             }
+            // CR 702.16k + CR 608.2c + CR 608.2h: "you gain protection from that
+            // player" (Eon Frolicker) names the player targeted by the enclosing
+            // ability. The declared-target anaphor is fixed to that concrete
+            // player when the effect is applied, so the grant stops depending on
+            // the resolving ability's target list afterwards. No player target
+            // (or a player target that was illegal on resolution, CR 608.2b)
+            // leaves the payload unchanged: it matches nothing, per CR 609.3.
+            ContinuousModification::AddKeyword {
+                keyword:
+                    crate::types::keywords::Keyword::Protection(
+                        crate::types::keywords::ProtectionTarget::FromPlayer(
+                            crate::types::ability::ControllerRef::TargetPlayer
+                            | crate::types::ability::ControllerRef::TargetOpponent,
+                        ),
+                    ),
+            } => {
+                match crate::game::filter::target_player_from_ability_or_root(state, Some(ability))
+                {
+                    Some(player_id) => ContinuousModification::AddKeyword {
+                        keyword: crate::types::keywords::Keyword::Protection(
+                            crate::types::keywords::ProtectionTarget::FromPlayer(
+                                crate::types::ability::ControllerRef::SpecificPlayer {
+                                    id: player_id,
+                                },
+                            ),
+                        ),
+                    },
+                    None => modification.clone(),
+                }
+            }
             // CR 613.1f + CR 608.2c: the reanimator-Aura's granted Enchant restriction
             // ("enchant creature put onto the battlefield with this Aura") is a layer-6
             // ability grant (CR 613.1f) whose anaphoric ParentTarget must bind to the
@@ -1562,6 +1592,9 @@ fn defended_scope_uses_source_controller_anchor(
         | AttackTargetFilter::PlayerOrPermanents => true,
         AttackTargetFilter::Owner
         | AttackTargetFilter::OwnerOrPlaneswalker
+        // CR 508.6: source-OBJECT relative like `Owner` — the history belongs to
+        // the permanent carrying the restriction, not to its controller.
+        | AttackTargetFilter::PlayerAttackedBySourceThisTurn
         | AttackTargetFilter::Monarch => false,
     }
 }
@@ -1573,15 +1606,55 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         BasicLandType, ChoiceValue, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-        Duration, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
+        Duration, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TargetRef,
+        TypedFilter,
     };
     use crate::types::card_type::{CoreType, SubtypeSet};
     use crate::types::events::GameEvent;
     use crate::types::game_state::{StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectIncarnationRef, TrackedSetId};
-    use crate::types::keywords::Keyword;
+    use crate::types::keywords::{Keyword, ProtectionTarget};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    /// CR 702.16k + CR 608.2c + CR 608.2h: "you gain protection from that
+    /// player" is fixed to the declared player target when the effect is
+    /// applied; with no player target (or only an object target) the payload is
+    /// left unchanged and matches nothing (CR 609.3).
+    #[test]
+    fn player_protection_from_that_player_latches_the_declared_target() {
+        let state = GameState::new_two_player(42);
+        let modifications = [ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::FromPlayer(ControllerRef::TargetPlayer)),
+        }];
+
+        let mut ability = ResolvedAbility::new(
+            Effect::NoOp,
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let latched = snapshot_transient_modifications(&state, &ability, &modifications);
+        assert!(matches!(
+            latched[0],
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::FromPlayer(
+                    ControllerRef::SpecificPlayer { id: PlayerId(1) }
+                ))
+            }
+        ));
+
+        ability.targets = vec![TargetRef::Object(ObjectId(7))];
+        let unchanged = snapshot_transient_modifications(&state, &ability, &modifications);
+        assert!(matches!(
+            unchanged[0],
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::FromPlayer(
+                    ControllerRef::TargetPlayer
+                ))
+            }
+        ));
+    }
 
     #[test]
     fn quantity_quality_static_condition_for_ability_resolves_targets() {
@@ -2193,6 +2266,103 @@ mod tests {
         assert_eq!(
             state.transient_continuous_effects[0].affected,
             TargetFilter::SpecificObject { id: paid }
+        );
+    }
+
+    /// CR 611.2c + CR 109.5 + CR 608.2k: a top-level `Or` affected union is SPLIT and each
+    /// member is recursed as its own transient effect, so the set the effect applies to is
+    /// fixed member by member when it begins. This executes the `bind_transient_effect` split
+    /// the recipient-read gate is built on: the player member ("you", CR 109.5) binds to the
+    /// controller, and the `EventTarget` member resolves against the trigger event's damage
+    /// recipient (CR 608.2k).
+    ///
+    /// SYNTHETIC FIXTURE: no printed card grants one keyword to "you and that creature". The
+    /// nearest printed text is Shalai, Voice of Plenty's "You, planeswalkers you control, and
+    /// other creatures you control have hexproof.", whose separate "You ... have hexproof"
+    /// member is the player half (CR 702.11c) and whose permanent members are the object
+    /// half (CR 702.11b). The fixture keeps that keyword and replaces the object members with
+    /// the event recipient, which isolates the one thing under test: the split binds BOTH
+    /// members instead of dropping either.
+    #[test]
+    fn transient_effect_split_binds_each_union_member_including_event_target() {
+        use crate::types::game_state::DamageRecord;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Union Source".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Union Recipient".to_string(),
+            Zone::Battlefield,
+        );
+        for _ in 0..3 {
+            state.objects.get_mut(&source).unwrap().bump_incarnation();
+        }
+        let source_epoch = state.objects[&source].incarnation;
+        let recipient_epoch = state.objects[&recipient].incarnation;
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: source,
+            source_incarnation: Some(source_epoch),
+            target: TargetRef::Object(recipient),
+            target_incarnation: Some(recipient_epoch),
+            amount: 2,
+            is_combat: true,
+            ..Default::default()
+        });
+        state.current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Object(recipient),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+            source_incarnation: Some(source_epoch),
+        });
+
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::Or {
+                filters: vec![TargetFilter::Controller, TargetFilter::EventTarget],
+            })
+            // CR 702.11b + CR 702.11c: hexproof is a keyword both a player and a permanent
+            // can have, so one payload is meaningful for both members of the union.
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Hexproof,
+            }]);
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let affected: Vec<_> = state
+            .transient_continuous_effects
+            .iter()
+            .map(|effect| effect.affected.clone())
+            .collect();
+        assert!(
+            affected.contains(&TargetFilter::SpecificPlayer { id: PlayerId(0) }),
+            "the controller member binds through its player arm: {affected:?}"
+        );
+        assert!(
+            affected.contains(&TargetFilter::SpecificObject { id: recipient }),
+            "the event-recipient member binds through the split to the damage recipient: \
+             {affected:?}"
         );
     }
 
