@@ -1181,6 +1181,58 @@ describe("LLM seats on a message thread", () => {
     controller.dispose();
   });
 
+  it("asks a decision for a seat another seat controls as the controlling seat, with its profile", async () => {
+    // CR 723.5: while P2 controls P1's turn, P2 makes P1's decisions, and the
+    // engine names P2 as the seat that submits them (`priority_player`).
+    const owner = useLlmStore.getState().addProfile({
+      name: "Owner", model: "gpt-5", apiKey: "owner-key", enabled: true,
+    });
+    // A profile id is minted from the clock, which the fake timers hold still.
+    vi.setSystemTime(Date.now() + 1_000);
+    const controlling = useLlmStore.getState().addProfile({
+      name: "Controller", model: "gpt-5-mini", apiKey: "controller-key", enabled: true,
+    });
+    useLlmStore.getState().bindSeat(0, owner);
+    useLlmStore.getState().bindSeat(1, controlling);
+    storeState.gameState = buildGameState({
+      waiting_for: { type: "Priority", data: { player: 1 } } as WaitingFor,
+      priority_player: 2,
+      turn_decision_controller: 2,
+      stack: [],
+    });
+    storeState.waitingFor = storeState.gameState.waiting_for;
+    const adapter = threadedAdapter(() => ({ proposal: proposal(CAST, "llm-controlled") }));
+    endGameOnDispatch();
+
+    const controller = createAIController({
+      seats: [
+        { playerId: 1, difficulty: "Medium", llmSeatIndex: 0 },
+        { playerId: 2, difficulty: "Medium", llmSeatIndex: 1 },
+      ],
+    });
+    controller.start();
+    await runOnce();
+
+    expect(adapter.buildLlmDecisionRequest).toHaveBeenCalledTimes(1);
+    expect(adapter.buildLlmDecisionRequest).toHaveBeenCalledWith(
+      "Medium",
+      2,
+      expect.stringContaining('"apiKey":"controller-key"'),
+      expect.any(String),
+      expect.any(Number),
+    );
+    expect(adapter.getAiActionProposalFromLlmResponse).toHaveBeenCalledWith(
+      2,
+      "fp-1",
+      THREAD_TURN,
+      "OpenAi",
+      200,
+      "{}",
+      expect.any(Number),
+    );
+    controller.dispose();
+  });
+
   it("never counts a recovered thread error toward giving up on the provider", async () => {
     bindSeatToProvider();
     const llmProposal = proposal(CAST, "llm-recovered");

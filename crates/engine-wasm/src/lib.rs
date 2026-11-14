@@ -5630,37 +5630,169 @@ mod restored_card_db_requirements_tests {
         clear_game_state();
     }
 
-    /// CR 723.5: while another player controls the seat's turn, they make the
-    /// seat's decisions. Those go out as today's request, so the controller
-    /// neither reads nor adds to the seat's conversation, and once control
-    /// ends the seat starts a new thread.
+    /// Mindslaver's verbatim Oracle text.
+    const MINDSLAVER: &str = "{4}, {T}, Sacrifice Mindslaver: You control target player during \
+        that player's next turn. (You see all cards that player could see and make all decisions \
+        for them.)";
+
+    /// The seat the client's AI controller asks the game's next decision as:
+    /// the engine's authorized submitter, `priority_player`, which is what
+    /// `authorizedAiPlayer` in `aiController.ts` reads.
+    fn authorized_seat() -> PlayerId {
+        with_state(|state| state.priority_player).expect("the game is installed")
+    }
+
+    /// Pass priority as the authorized seat until `reached` holds of the game.
+    fn pass_until(
+        log: &mut Vec<engine::types::log::GameLogEntry>,
+        reached: impl Fn(&GameState) -> bool,
+    ) {
+        for _ in 0..100 {
+            if with_state(&reached).expect("the game is installed") {
+                return;
+            }
+            submit_logged(log, authorized_seat(), GameAction::PassPriority);
+        }
+        panic!("the game never reached the expected point");
+    }
+
+    /// CR 723.1 + CR 723.5, on the printed card. In a three-player game P2
+    /// activates Mindslaver targeting P1, whose LLM seat has an open thread.
+    /// During P1's next turn P2 makes P1's decisions: the client asks them as
+    /// P2, the seat the engine authorizes to submit, and they go out as
+    /// today's request, so P2 neither reads nor adds to P1's conversation.
+    /// Once control ends with that turn, P1's own next decision creates a new
+    /// thread. Both AI seats use one endpoint, account and model, the case in
+    /// which their requests could otherwise land in one conversation.
     #[test]
-    fn a_turn_another_player_controls_uses_no_thread() {
-        let seat = PlayerId(1);
-        let controller = PlayerId(0);
-        install_llm_decision(seat);
-        let choice = non_pass_choice(seat);
-        let first = build_llm_decision(seat, &[]);
-        resolve_llm_reply(seat, &first, 200, &anthropic_reply("msg_1", choice));
+    fn a_turn_mindslaver_controls_uses_no_thread_and_its_owner_then_creates_one() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::ability::TargetRef;
+        use engine::types::mana::ManaColor;
+        let p2 = PlayerId(2);
 
-        let set_controller = |turn_controller: Option<PlayerId>| {
-            with_installed_state_mut(|state| {
-                state.turn_decision_controller = turn_controller;
-                state.priority_player = turn_controller.unwrap_or(seat);
-            })
-            .expect("the game is installed");
-        };
-        set_controller(Some(controller));
-        let controlled = build_llm_decision(seat, &[]);
-        assert_eq!(
-            thread_of(&controlled),
-            serde_json::Value::Null,
-            "{controlled}"
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        // Enough to draw through the turns the test plays.
+        for seat in [P0, P1, p2] {
+            scenario.with_library_top(seat, &["Forest"; 10]);
+        }
+        // P1 can cast Lightning Bolt, so each of its decisions offers more
+        // than a pass and is put to the provider.
+        scenario.add_bolt_to_hand(P1);
+        scenario.add_basic_land(P1, ManaColor::Red);
+        let mindslaver = scenario
+            .add_artifact_from_oracle(p2, "Mindslaver", MINDSLAVER)
+            .id();
+        for _ in 0..4 {
+            scenario.add_basic_land(p2, ManaColor::White);
+        }
+        install_game_state(Some(scenario.build().state().clone()));
+        let mut log = Vec::new();
+
+        // P0 passes, and P1 opens its thread.
+        submit_logged(&mut log, authorized_seat(), GameAction::PassPriority);
+        assert_eq!(authorized_seat(), P1);
+        let opened = build_llm_decision(P1, &log);
+        assert_eq!(thread_of(&opened), serde_json::json!({ "type": "create" }));
+        let answered = resolve_llm_reply(
+            P1,
+            &opened,
+            200,
+            &anthropic_reply("msg_1", non_pass_choice(P1)),
         );
-        assert!(controlled["threadTurn"].is_null(), "{controlled}");
+        assert!(answered["proposal"].is_object(), "{answered}");
+        submit_logged(&mut log, P1, GameAction::PassPriority);
 
-        set_controller(None);
-        let own = build_llm_decision(seat, &[]);
+        // P2 activates Mindslaver targeting P1, and it resolves.
+        assert_eq!(authorized_seat(), p2);
+        submit_logged(
+            &mut log,
+            p2,
+            GameAction::ActivateAbility {
+                source_id: mindslaver,
+                ability_index: 0,
+                payment_mode: Default::default(),
+            },
+        );
+        submit_logged(
+            &mut log,
+            p2,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1)],
+            },
+        );
+        pass_until(&mut log, |state| state.stack.is_empty());
+        let scheduled = with_state(|state| state.scheduled_turn_controls.clone())
+            .expect("the game is installed");
+        assert!(
+            matches!(
+                scheduled.as_slice(),
+                [control] if control.target_player == P1 && control.controller == p2
+            ),
+            "P2 controls P1's next turn: {scheduled:?}"
+        );
+
+        // Until then P1's thread is open: its next decision continues it.
+        pass_until(&mut log, |state| state.priority_player == P1);
+        let continued = build_llm_decision(P1, &log);
+        assert_eq!(
+            thread_of(&continued),
+            serde_json::json!({ "type": "continue", "previous_message_id": "msg_1" })
+        );
+        resolve_llm_reply(
+            P1,
+            &continued,
+            200,
+            &anthropic_reply("msg_2", non_pass_choice(P1)),
+        );
+
+        // P1's next turn, which the engine hands to P2 (CR 723.1).
+        pass_until(&mut log, |state| state.active_player == P1);
+        let (controller, waiting_for) =
+            with_state(|state| (state.turn_decision_controller, state.waiting_for.clone()))
+                .expect("the game is installed");
+        assert_eq!(controller, Some(p2));
+        assert!(
+            matches!(waiting_for, WaitingFor::Priority { player } if player == P1),
+            "{waiting_for:?}"
+        );
+
+        // The client asks P1's decision as P2, and it is today's request.
+        assert_eq!(authorized_seat(), p2);
+        let delegated = build_llm_decision(p2, &log);
+        assert_eq!(
+            thread_of(&delegated),
+            serde_json::Value::Null,
+            "{delegated}"
+        );
+        assert!(delegated["threadTurn"].is_null(), "{delegated}");
+        // Asked as P1's own seat instead, it is still P2's decision to make.
+        let as_owner = build_llm_decision(P1, &log);
+        assert_eq!(thread_of(&as_owner), serde_json::Value::Null, "{as_owner}");
+        // The reply binds to P1's decision, submitted by P2.
+        let made = resolve_llm_reply(
+            p2,
+            &delegated,
+            200,
+            &anthropic_reply("msg_3", non_pass_choice(P1)),
+        );
+        assert_eq!(made["proposal"]["semanticOwner"], P1.0, "{made}");
+        assert_eq!(made["proposal"]["actor"], p2.0, "{made}");
+
+        // Control ends with that turn. P1's own next decision, in P2's turn,
+        // starts a new thread.
+        pass_until(&mut log, |state| {
+            state.active_player == p2 && state.priority_player == P1
+        });
+        assert_eq!(
+            with_state(|state| state.turn_decision_controller).expect("the game is installed"),
+            None
+        );
+        let own = build_llm_decision(P1, &log);
         assert_eq!(thread_of(&own), serde_json::json!({ "type": "create" }));
 
         clear_game_state();
