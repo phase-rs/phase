@@ -41,13 +41,13 @@ use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastManaObjectScope,
     CastManaSpentMetric, CastingPermission, ChooseFromZoneConstraint, CoinFlipRun,
-    CombatRelationSubject, Comparator, ContinuousModification, CopyRetargetPermission,
-    DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, ManaProduction,
-    ModalSelectionConstraint, OpponentMayScope, ParsedCondition, PerPlayerScope, PlayerFilter,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    RestrictionExpiry, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayScaling,
-    ZoneOwner,
+    CombatRelationSubject, Comparator, ContinuousModification, CopyManaValueLimit,
+    CopyRetargetPermission, DamageModification, DelayedTriggerCondition, Duration, Effect,
+    FilterProp, ManaProduction, ModalSelectionConstraint, OpponentMayScope, ParsedCondition,
+    PerPlayerScope, PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, RestrictionExpiry, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, UnlessPayScaling, ZoneOwner,
 };
 use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
@@ -2963,6 +2963,65 @@ fn ward_power_life_payments_cover_all_equal_to_markers(
     raised > 0 && represented >= raised
 }
 
+/// CR 614.1c + CR 601.2h: the number of copy mana-value ceilings `def`'s tree
+/// represents that read a dynamic amount, one per `BecomeCopy` whose
+/// `mana_value_limit` names one.
+///
+/// "You may have ~ enter as a copy of any creature on the battlefield with mana
+/// value less than or equal to the amount of mana spent to cast ~" (Mockingbird)
+/// stores its ceiling as the typed `CopyManaValueLimit`, not as a `QuantityExpr`,
+/// so the generic quantity probes cannot see it.
+///
+/// EXHAUSTIVE on purpose: a future `CopyManaValueLimit` variant must decide whether
+/// it represents a dynamic amount.
+fn def_tree_copy_mana_value_limit_count(def: &AbilityDefinition) -> usize {
+    let mut count = 0usize;
+    let _ = visit_ability_def(def, &mut |effect| {
+        if let Effect::BecomeCopy {
+            mana_value_limit: Some(limit),
+            ..
+        } = effect
+        {
+            count += match limit {
+                CopyManaValueLimit::AmountSpentToCastSource => 1,
+            };
+        }
+        ControlFlow::Continue(())
+    });
+    count
+}
+
+/// CR 614.1c + CR 601.2h: true when every dynamic-quantity marker the line raises
+/// is an `" equal to "` occurrence that opens "the amount of mana spent to cast",
+/// each discharged by its own represented copy ceiling.
+///
+/// Occurrence-counted, not set-like (as
+/// [`ward_power_life_payments_cover_all_equal_to_markers`]): one ceiling consumes
+/// one raised occurrence, and any other `" equal to "` clause in the unit fails
+/// the gate, so an unrepresented quantity beside the ceiling still warns.
+fn copy_mana_value_limits_cover_all_equal_to_markers(
+    cleaned: &str,
+    markers: &[&'static str],
+    scoped: &ParsedAbilities,
+) -> bool {
+    if markers.len() != 1 || markers[0] != " equal to " {
+        return false;
+    }
+    let mut raised = 0usize;
+    // allow-noncombinator: swallow detector marker scan on classified text
+    for (idx, _) in cleaned.match_indices(" equal to ") {
+        let rest = &cleaned[idx + " equal to ".len()..];
+        if tag::<_, _, nom::error::Error<&str>>("the amount of mana spent to cast ")
+            .parse(rest)
+            .is_err()
+        {
+            return false;
+        }
+        raised += 1;
+    }
+    raised > 0 && root_aware_count(scoped, def_tree_copy_mana_value_limit_count) >= raised
+}
+
 /// CR 205.2 + CR 608.2c/d: the number of card-type iterations `def`'s tree
 /// represents, one per `DistinctCardTypes` `ChooseFromZone` constraint.
 ///
@@ -3332,6 +3391,13 @@ fn detect_dynamic_qty(
     //              same unit still warns. Cards: Raubahn, Bull of Ala Mhigo;
     //              Phyrexian Fleshgorger.
     if ward_power_life_payments_cover_all_equal_to_markers(cleaned, &markers, evidence) {
+        return;
+    }
+    //   CR 614.1c + CR 601.2h  "with mana value less than or equal to the amount of
+    //              mana spent to cast ~" (Mockingbird) is the typed
+    //              `CopyManaValueLimit` on `BecomeCopy`; each ceiling discharges one
+    //              raised " equal to " (`copy_mana_value_limits_cover_all_equal_to_markers`).
+    if copy_mana_value_limits_cover_all_equal_to_markers(cleaned, &markers, scoped) {
         return;
     }
     // Slot-shaped carriers: the fact IS "the parser filled this slot", and the slot's
@@ -6861,11 +6927,11 @@ mod tests {
         CardPlayMode, CardSelectionMode, CastFromZoneDriver, CastManaObjectScope,
         CastManaSpentMetric, ChooseFromZoneConstraint, ChooseOneOfKind, Chooser,
         CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator,
-        ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
-        EffectOutcomeSignal, FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition,
-        PlayerFilter, QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
-        StaticDefinition, TargetFilter, TriggerCondition, TypedFilter, UnlessPayModifier,
-        ZoneChoiceCandidateSource, ZoneOwner,
+        ContinuousModification, CopyManaValueLimit, CopyRetargetPermission, DamageModification,
+        Effect, EffectOutcomeSignal, FilterProp, ManaProduction, OutsideGameSourcePool,
+        ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement,
+        StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TypedFilter,
+        UnlessPayModifier, ZoneChoiceCandidateSource, ZoneOwner,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
@@ -12246,6 +12312,143 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             "the DistinctCardTypes constraint IS the per-card-type iteration: {diagnostics:?}"
         );
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    const MOCKINGBIRD_ORACLE: &str = "Flying\nYou may have this creature enter as a copy of \
+        any creature on the battlefield with mana value less than or equal to the amount of \
+        mana spent to cast this creature, except it's a Bird in addition to its other types and \
+        it has flying.";
+
+    fn parse_mockingbird() -> crate::parser::oracle::ParsedAbilities {
+        parse_oracle_text(
+            MOCKINGBIRD_ORACLE,
+            "Mockingbird",
+            &["Flying".to_string()],
+            &["Creature".to_string()],
+            &["Bird".to_string(), "Bard".to_string()],
+        )
+    }
+
+    /// CR 614.1c + CR 601.2h: Mockingbird's copy ceiling ("mana value less than or
+    /// equal to the amount of mana spent to cast this creature") is represented by
+    /// `CopyManaValueLimit::AmountSpentToCastSource`, so its " equal to " is not a
+    /// swallowed quantity.
+    #[test]
+    fn dynamic_qty_accepts_mockingbird_copy_mana_value_limit() {
+        // Detector-liveness control, same run.
+        let dropped = parse_named(
+            "Choose one \u{2014}\n\
+             \u{2022} Counter target spell with mana value less than or equal to the number of \
+             cards in its controller's graveyard.\n\
+             \u{2022} Destroy target creature with mana value less than or equal to the number of \
+             cards in its controller's graveyard.",
+            "Drown in the Loch",
+            &["Instant"],
+        );
+        assert!(
+            has_swallowed_detector(&dropped, "DynamicQty"),
+            "control: the DynamicQty detector must be live in this test"
+        );
+
+        let parsed = parse_mockingbird();
+        // Reach guard: the ceiling is the typed carrier this leg counts.
+        assert!(
+            parsed.replacements.iter().any(|r| matches!(
+                r.execute.as_deref().map(|d| &*d.effect),
+                Some(Effect::BecomeCopy {
+                    mana_value_limit: Some(CopyManaValueLimit::AmountSpentToCastSource),
+                    ..
+                })
+            )),
+            "Mockingbird must parse its copy ceiling: {:#?}",
+            parsed.replacements
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "DynamicQty"),
+            "the represented copy ceiling must not warn: {:#?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// Occurrence-counted: one copy ceiling discharges ONE " equal to ". The same
+    /// evidence with a second, unrepresented " equal to " clause still warns, and so
+    /// does a second copy-ceiling phrase the one carrier cannot cover.
+    ///
+    /// SYNTHETIC: no printed card pairs a copy ceiling with a second " equal to "
+    /// clause; the nearest printed card is Mockingbird, whose parse is the evidence.
+    #[test]
+    fn dynamic_qty_still_warns_for_a_second_equal_to_beside_a_copy_ceiling() {
+        let parsed = parse_mockingbird();
+        let evidence = UnitEvidence::of(&parsed);
+        // Reach guard: the root-aware count sees exactly one ceiling carrier.
+        assert_eq!(
+            super::root_aware_count(&parsed, super::def_tree_copy_mana_value_limit_count),
+            1,
+            "Mockingbird must expose exactly one represented copy ceiling"
+        );
+
+        let ceiling_only = "you may have ~ enter as a copy of any creature on the battlefield \
+                            with mana value less than or equal to the amount of mana spent to \
+                            cast ~, except it's a bird in addition to its other types and it \
+                            has flying.";
+        assert_eq!(
+            super::active_dynamic_markers(ceiling_only, &evidence),
+            vec![" equal to "],
+            "fixture must raise exactly the marker this leg can discharge"
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            ceiling_only,
+            ceiling_only,
+            &parsed,
+            &evidence,
+            &mut diagnostics,
+        );
+        assert!(
+            dynamic_qty_descriptions(&diagnostics).is_empty(),
+            "one occurrence, one ceiling: {diagnostics:?}"
+        );
+
+        let second_equal_to = "you may have ~ enter as a copy of any creature on the battlefield \
+                               with mana value less than or equal to the amount of mana spent to \
+                               cast ~. whenever ~ attacks, it deals damage equal to its power to \
+                               any target.";
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            second_equal_to,
+            second_equal_to,
+            &parsed,
+            &evidence,
+            &mut diagnostics,
+        );
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "a second unrepresented \" equal to \" clause must warn: {diagnostics:?}"
+        );
+
+        let two_ceilings = "you may have ~ enter as a copy of any creature on the battlefield \
+                            with mana value less than or equal to the amount of mana spent to \
+                            cast ~, or of any artifact with mana value less than or equal to \
+                            the amount of mana spent to cast ~.";
+        assert_eq!(
+            super::active_dynamic_markers(two_ceilings, &evidence),
+            vec![" equal to "],
+            "fixture must raise exactly the marker this leg can discharge"
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            two_ceilings,
+            two_ceilings,
+            &parsed,
+            &evidence,
+            &mut diagnostics,
+        );
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "two ceiling phrases, one represented ceiling: {diagnostics:?}"
+        );
     }
 
     /// A minimal `ParsedAbilities` carrying exactly the given extracted keywords and
