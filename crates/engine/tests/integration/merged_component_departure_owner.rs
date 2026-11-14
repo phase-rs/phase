@@ -1625,6 +1625,72 @@ fn a_forged_record_of_departures_collected_before_a_player_left_is_rejected_on_l
     );
 }
 
+/// CR 603.10a + CR 800.4a: a batched observer that left before anything
+/// happened cannot trigger for what happens afterwards. P0 controls P2's
+/// Nefarious Imp and P1's commander Karn, Silver Golem (two Turn Against) and
+/// casts Totally Lost on Karn; Karn's CR 903.9b prompt parks the batch before
+/// any permanent has left. P2 concedes: the Imp leaves the game, which is one
+/// permanent P0 controlled leaving, so the Imp triggers once for P0. P1 then
+/// answers and Karn leaves the battlefield with the Imp already gone: no second
+/// Imp trigger, for either answer.
+#[test]
+fn a_departed_batched_observer_does_not_trigger_for_a_later_departure() {
+    for answer_index in [0, 1] {
+        let db = shared_card_db().expect("integration card fixture must load");
+        let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let karn = scenario.add_real_card(P1, "Karn, Silver Golem", Zone::Battlefield, db);
+        let imp = scenario.add_real_card(P2, "Nefarious Imp", Zone::Battlefield, db);
+        let take_imp = scenario.add_real_card(P0, "Turn Against", Zone::Hand, db);
+        let take_karn = scenario.add_real_card(P0, "Turn Against", Zone::Hand, db);
+        let lost = scenario.add_real_card(P0, "Totally Lost", Zone::Hand, db);
+        scenario.with_library_top(P1, &["Library Card A"]);
+        let mut pool = mana(ManaType::Blue, 5);
+        pool.extend(mana(ManaType::Red, 10));
+        scenario.with_mana_pool(P0, pool);
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&karn)
+            .expect("commander exists")
+            .is_commander = true;
+        let label = format!("answer {answer_index}");
+        steal_for(&mut runner, P0, take_imp, imp);
+        steal_for(&mut runner, P0, take_karn, karn);
+
+        cast_until_resolved_or_asked(&mut runner, lost, &[karn]);
+        assert_commander_prompt(runner.state(), P1, karn);
+        assert_eq!(
+            runner.state().objects[&karn].zone,
+            Zone::Battlefield,
+            "{label}: reach guard: nothing has left yet"
+        );
+        concede(&mut runner, P2);
+        assert_eq!(runner.state().objects[&imp].zone, Zone::Exile, "{label}");
+        assert_commander_prompt(runner.state(), P1, karn);
+
+        answer(&mut runner, answer_index);
+        assert!(runner.state().resolution_stack.is_empty(), "{label}");
+        assert_ne!(
+            runner.state().objects[&karn].zone,
+            Zone::Battlefield,
+            "{label}"
+        );
+        let imp_controllers: Vec<PlayerId> = waiting_triggers(runner.state())
+            .into_iter()
+            .filter(|(_, text)| text.contains("one or more permanents you control leave"))
+            .map(|(controller, _)| controller)
+            .collect();
+        assert_eq!(
+            imp_controllers,
+            vec![P0],
+            "{label}: only the Imp's own departure triggered it: {:?}",
+            runner.state().waiting_for
+        );
+    }
+}
+
 /// CR 603.10a + CR 603.3a + CR 800.4d: a second player leaves the same turn.
 /// In a four-player game P3 concedes first, so an earlier departure is already
 /// recorded this turn. P2 then steals P0's Extractor Demon, P0's Rebuking
