@@ -507,12 +507,12 @@ pub(crate) fn move_merged_permanent_on_leave(
 /// Hand/Library replacement, only that component's request changes to Command;
 /// noncommander components remain routed to their appropriate zones.
 ///
-/// CR 701.24a + CR 730.3: a library position reaches the components only when
-/// the move is the move component of a terminal-shuffle operation, where the
-/// position is transient and the chained `Shuffle` randomizes the library
-/// once. Any other library placement leaves each component at the zone
-/// default; the owner's CR 730.3a arrangement of an ordered placement is not
-/// modeled here.
+/// CR 701.24a + CR 730.3: every component inherits the approved library
+/// position together with the move's shuffle mode. Under a terminal shuffle
+/// the position is transient and the chained `Shuffle` randomizes the library
+/// once. Under an ordinary placement the components arrive at that position
+/// as one group, which their owner arranges (CR 730.3a + CR 401.4) through
+/// the staged batch.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn move_merged_permanent_for_parent(
     state: &mut GameState,
