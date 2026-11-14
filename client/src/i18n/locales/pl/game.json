@@ -1241,6 +1241,7 @@
       "draw": "REMIS",
       "victory": "ZWYCIĘSTWO",
       "defeat": "PORAŻKA",
+      "complete": "KONIEC GRY",
       "lifeSummary": "Ty: <player>{{playerLife}}</player> <sep>/</sep> Przeciwnik: <opponent>{{opponentLife}}</opponent>",
       "turns": "Tury: {{count}}",
       "duration": "Czas trwania: {{time}}",

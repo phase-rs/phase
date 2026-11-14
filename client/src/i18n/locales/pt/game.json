@@ -1241,6 +1241,7 @@
       "draw": "EMPATE",
       "victory": "VITÓRIA",
       "defeat": "DERROTA",
+      "complete": "FIM DE JOGO",
       "lifeSummary": "Você: <player>{{playerLife}}</player> <sep>/</sep> Oponente: <opponent>{{opponentLife}}</opponent>",
       "turns": "Turnos: {{count}}",
       "duration": "Duração: {{time}}",

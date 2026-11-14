@@ -207,6 +207,12 @@ vi.mock("../../stores/gameStore", async () => {
     canExportAuthoritativeState: (
       await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")
     ).canExportAuthoritativeState,
+    // The real census key: seat derivation must not be re-derived as a mode
+    // list here, or the test would pass while production classified a mode
+    // differently.
+    seatSource: (
+      await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")
+    ).seatSource,
     loadActiveGame: vi.fn(() => null),
     saveActiveGame: vi.fn(),
     clearActiveGame: vi.fn(),
@@ -2071,6 +2077,45 @@ describe("GamePage — rematch preserves the format the game was played with", (
 
     expect(await screen.findByText("Commander victory")).toBeInTheDocument();
     expect(screen.queryByText(/You:/)).toBeNull();
+  });
+
+  it("omits seat-relative labels and totals for a legacy guest recovery with no authoritative seat", async () => {
+    mockSetGameState.mockImplementation((update: Record<string, unknown>) => {
+      Object.assign(storeOverrides, update);
+    });
+    storeOverrides.gameState = null;
+    storeOverrides.waitingFor = null;
+    // An older online save omitted the player id, so the seat is unknown.
+    mockMultiplayerState.activePlayerId = null;
+    renderGamePage("/game/legacy-guest?mode=join");
+
+    act(() => {
+      capturedOnWsEvent?.({
+        type: "terminalDelivery",
+        delivery: {
+          key: { game_code: "LEGCY1", generation: 1 },
+          terminalRevision: 1,
+          deliveryId: "del-legacy",
+          credential: "cred-legacy",
+          display: { winner: 1, reason: "Life reduction victory (CR 704.5a)" },
+          finalView: gameStateFactory.withPlayers(
+            { id: 0, life: 0 },
+            { id: 1, life: 12 },
+          ).build({
+            waiting_for: { type: "GameOver", data: { winner: 1 } },
+          }),
+        },
+      });
+    });
+
+    expect(await screen.findByText("Life reduction victory (CR 704.5a)")).toBeInTheDocument();
+    // CR 704.5a: the result names a winner, but which seat this client held is
+    // unknown — neither VICTORY nor DEFEAT is this player's outcome yet.
+    expect(screen.getByText("GAME OVER")).toBeInTheDocument();
+    expect(screen.queryByText("VICTORY")).toBeNull();
+    expect(screen.queryByText("DEFEAT")).toBeNull();
+    expect(screen.queryByText(/You:/)).toBeNull();
+    expect(screen.queryByText(/Opponent:/)).toBeNull();
   });
 });
 

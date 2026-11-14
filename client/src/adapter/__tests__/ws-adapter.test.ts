@@ -1445,6 +1445,27 @@ describe("WebSocketAdapter", () => {
       ["a delivery with a null key", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, key: null } } }],
       ["a delivery with a null display", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, display: null } } }],
       ["a delivery with a null finalView", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, finalView: null } } }],
+      ["a delivery with an empty finalView", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, finalView: {} } } }],
+      ["a delivery with untyped player records", {
+        type: "TerminalResult",
+        data: {
+          delivery: {
+            ...nativeDelivery,
+            finalView: {
+              players: [{ id: 0, life: "20" }],
+              objects: {},
+              battlefield: [],
+              stack: [],
+              exile: [],
+              turn_number: 1,
+              active_player: 0,
+              priority_player: 0,
+              phase: "PreCombatMain",
+              waiting_for: { type: "GameOver", data: { winner: 0 } },
+            },
+          },
+        },
+      }],
       ["another generation's delivery", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, key: { game_code: "NATIVE", generation: 2 } } } }],
       ["another game's delivery", { type: "TerminalResult", data: { delivery: { ...nativeDelivery, key: { game_code: "OTHER", generation: 1 } } } }],
     ])("leaves the live session's error and reconnect paths intact after %s", async (_case, frame) => {
@@ -1606,8 +1627,15 @@ describe("WebSocketAdapter", () => {
         credential: "recipient-credential",
         display: { winner: 0, reason: "Finished" },
         finalView: {
-          players: [],
+          players: [{ id: 0, life: 20, is_eliminated: false }],
           objects: {},
+          battlefield: [],
+          stack: [],
+          exile: [],
+          turn_number: 4,
+          active_player: 0,
+          priority_player: 0,
+          phase: "PreCombatMain",
           waiting_for: { type: "GameOver", data: { winner: 0 } },
         } as unknown as GameState,
       };
@@ -9562,7 +9590,18 @@ describe("WebSocketAdapter — initialization-owned fallback (salvaged and held 
     deliveryId: "episode-delivery",
     credential: "episode-credential",
     display: { winner: 0, reason: "Finished" },
-    finalView: { players: [], objects: {}, waiting_for: { type: "GameOver", data: { winner: 0 } } } as unknown as GameState,
+    finalView: {
+      players: [{ id: 0, life: 20, is_eliminated: false }],
+      objects: {},
+      battlefield: [],
+      stack: [],
+      exile: [],
+      turn_number: 9,
+      active_player: 0,
+      priority_player: 0,
+      phase: "PreCombatMain",
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    } as unknown as GameState,
   };
   /**
    * The inbound messages the episode router fails the join on beyond a refusal, with the single

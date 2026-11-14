@@ -1274,6 +1274,7 @@
       "draw": "引き分け",
       "victory": "勝利",
       "defeat": "敗北",
+      "complete": "ゲーム終了",
       "lifeSummary": "あなた：<player>{{playerLife}}</player> <sep>/</sep> 対戦相手：<opponent>{{opponentLife}}</opponent>",
       "turns": "ターン数：{{count}}",
       "duration": "対戦時間：{{time}}",

@@ -619,8 +619,19 @@ export function clearActiveGame(): void {
   }
 }
 
-/** The stored pointer exactly as written: game cleanup's compare-and-delete token. */
-function activeGamePointerToken(): string | null {
+/**
+ * Clears the active pointer only while it is still the one a consumer read.
+ * A pointer written while an async validation was in flight — another game, or
+ * this game with a new session — is newer authority and survives. A denied
+ * read yields a null token: ownership is then unknown, so nothing is cleared.
+ */
+export function clearActiveGameIfUnchanged(token: string | null): void {
+  if (token === null || activeGamePointerToken() !== token) return;
+  clearActiveGame();
+}
+
+/** The stored pointer exactly as written: a compare-and-delete token. */
+export function activeGamePointerToken(): string | null {
   try {
     return localStorage.getItem(ACTIVE_GAME_KEY);
   } catch {

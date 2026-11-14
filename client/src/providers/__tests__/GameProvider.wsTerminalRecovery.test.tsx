@@ -410,5 +410,22 @@ describe("ordinary WebSocket terminal routing across real persistence and remoun
       // The authoritative recipient seat 1 is restored before identity event
       expect(useMultiplayerStore.getState().activePlayerId).toBe(1);
     });
+
+    it("leaves the seat unknown when a legacy save has no player id", async () => {
+      // Legacy online saves recorded no `playerId`; the terminal-only recovery
+      // never runs `playerIdentity`, so no seat may be assumed for the labels.
+      saveWsSession({ ...session, terminalOnly: true });
+      await commitFullTerminalDelivery(delivery);
+      useMultiplayerStore.getState().setActivePlayerId(1 as never);
+
+      const { events } = mountProvider();
+      await waitFor(() => expect(events).toHaveBeenCalledWith({
+        type: "terminalDelivery",
+        delivery: { ...delivery, finalView: undefined },
+      }));
+
+      // A previous game's seat must not label this recovered result.
+      expect(useMultiplayerStore.getState().activePlayerId).toBeNull();
+    });
   });
 });

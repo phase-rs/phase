@@ -1455,9 +1455,11 @@ export function GameProvider({
           return;
         }
         if (reconnectSession) {
-          if (reconnectSession.playerId !== undefined) {
-            useMultiplayerStore.getState().setActivePlayerId(reconnectSession.playerId);
-          }
+          // A legacy save predates the recorded player id. It is not seat 0: the
+          // only authority for this client's seat is the wire, so leave the seat
+          // unknown until `playerIdentity` delivers it (a terminal-only recovery
+          // never does).
+          useMultiplayerStore.getState().setActivePlayerId(reconnectSession.playerId ?? null);
           const outcome = await recoverFullTerminal(
             {
               serverUrl: reconnectSession.serverUrl,

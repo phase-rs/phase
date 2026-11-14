@@ -33,14 +33,46 @@ function recordKey(key: FullTerminalDelivery["key"]): string {
   return `${FULL_TERMINAL_PREFIX}${key.game_code}:${key.generation}`;
 }
 
-/** Validates that a finalView has the required structure of a GameState to prevent crashes. */
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A player record the result screen reads: seat identity, life, elimination. */
+function isTerminalPlayerRecord(value: unknown): boolean {
+  if (!isObjectRecord(value)) return false;
+  return typeof value.id === "number"
+    && Number.isInteger(value.id)
+    && value.id >= 0
+    && typeof value.life === "number"
+    && Number.isFinite(value.life)
+    && (value.is_eliminated === undefined || typeof value.is_eliminated === "boolean");
+}
+
+/**
+ * Validates the final Full state a terminal delivery carries: the typed player
+ * records the result screen labels and the top-level collections GamePage
+ * renders behind it. A delivery whose view fails this contract is rejected as
+ * a whole by `isValidFullTerminalDelivery`, so it can never be retained,
+ * acknowledged, or installed as the live game state.
+ */
 export function isValidFinalView(value: unknown): value is GameState {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (!isObjectRecord(value)) return false;
   const state = value as Partial<GameState>;
+  const waitingFor = state.waiting_for;
   return Array.isArray(state.players)
-    && state.objects !== null
-    && typeof state.objects === "object"
-    && !Array.isArray(state.objects);
+    && state.players.length > 0
+    && state.players.every(isTerminalPlayerRecord)
+    && typeof state.turn_number === "number"
+    && Number.isInteger(state.turn_number)
+    && typeof state.active_player === "number"
+    && typeof state.priority_player === "number"
+    && typeof state.phase === "string"
+    && Array.isArray(state.battlefield)
+    && Array.isArray(state.stack)
+    && Array.isArray(state.exile)
+    && isObjectRecord(state.objects)
+    && isObjectRecord(waitingFor)
+    && typeof waitingFor.type === "string";
 }
 
 /** A legacy state snapshot is never a terminal delivery capability. */

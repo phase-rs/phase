@@ -183,7 +183,14 @@ import { usePriorityAttentionController } from "../hooks/usePriorityAttention.ts
 import { usePriorityChime } from "../hooks/usePriorityChime.ts";
 import { usePriorityTabTitle } from "../hooks/usePriorityTabTitle.ts";
 import { clearPromptOverlayState } from "../game/sessionCleanup.ts";
-import { clearGame, hasRemoteHumans, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
+import {
+  clearGame,
+  hasRemoteHumans,
+  loadActiveGame,
+  seatSource,
+  useGameStore,
+} from "../stores/gameStore.ts";
+import { PLAYER_ID } from "../constants/game";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
 import {
@@ -275,6 +282,16 @@ const TAKEBACK_RESOLUTION_TOAST_KEYS = {
   withdrawn: "takebackDialog.withdrawnToast",
 } as const satisfies Record<TakebackResolution, ParseKeys<"multiplayer"> | null>;
 
+/** The route's normalized game mode — the census key `seatSource` classifies. */
+type GamePageMode =
+  | "ai"
+  | "online"
+  | "local"
+  | "p2p-host"
+  | "p2p-join"
+  | "draft-match"
+  | "spectate";
+
 export function GamePage() {
   const { t } = useTranslation(["game", "multiplayer"]);
   const navigate = useNavigate();
@@ -365,7 +382,7 @@ export function GamePage() {
   );
 
   // Map URL modes to GameProvider modes
-  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" | "spectate" =
+  const mode: GamePageMode =
     rawMode === "p2p-host"
       ? "p2p-host"
       : rawMode === "p2p-join"
@@ -898,6 +915,7 @@ export function GamePage() {
       <GamePageContent
         gameId={gameId}
         mode={rawMode}
+        seatMode={mode}
         isOnlineMode={isOnlineMode}
         receivesAdapterEvents={routesWsEvents || routesP2PEvents}
         hostGameCode={hostGameCode}
@@ -934,6 +952,8 @@ export function GamePage() {
 interface GamePageContentProps {
   gameId: string;
   mode: string | null;
+  /** The normalized mode, for seat derivation a raw route mode cannot answer. */
+  seatMode: GamePageMode;
   isOnlineMode: boolean;
   /** Whether this page routes its adapter's events to a handler. */
   receivesAdapterEvents: boolean;
@@ -971,6 +991,7 @@ interface GamePageContentProps {
 function GamePageContent({
   gameId,
   mode,
+  seatMode,
   isOnlineMode,
   receivesAdapterEvents,
   hostGameCode,
@@ -2468,6 +2489,7 @@ function GamePageContent({
             <GameOverScreen
               winner={waitingFor.data.winner}
               mode={mode}
+              seatMode={seatMode}
               isOnlineMode={isOnlineMode}
               gameStartedAt={gameStartedAt}
               terminalReason={terminalReason}
@@ -3104,12 +3126,14 @@ function VictoryParticles() {
 function GameOverScreen({
   winner,
   mode,
+  seatMode,
   isOnlineMode = false,
   gameStartedAt,
   terminalReason,
 }: {
   winner: number | null;
   mode: string | null;
+  seatMode: GamePageMode;
   isOnlineMode?: boolean;
   gameStartedAt?: number | null;
   terminalReason?: string | null;
@@ -3122,15 +3146,29 @@ function GameOverScreen({
   const players = gameState?.players;
   const [buttonsVisible, setButtonsVisible] = useState(false);
 
-  const activePlayerId = useMultiplayerStore((s) => s.activePlayerId) ?? 0;
+  // Which seat this client holds is the mode census's answer, never a default:
+  // a wire-assigned seat is authoritative only once the wire has delivered it.
+  // A legacy online save carries no player id, so a recovered result must not be
+  // labelled from seat 0's perspective while the seat is unknown.
+  const assignedSeat = useMultiplayerStore((s) => s.activePlayerId);
+  const seatOrigin = seatSource(seatMode);
+  const localSeat = seatOrigin === "seat-zero" ? PLAYER_ID : assignedSeat;
+  const seatKnown = localSeat !== null;
+  const activePlayerId = localSeat ?? PLAYER_ID;
 
-  const playerLife = gameState ? formatLifeReadout(lifeReadout(gameState, activePlayerId)) : null;
-  const opponentId = players?.find((p) => p.id !== activePlayerId)?.id;
+  const playerLife = gameState && seatKnown
+    ? formatLifeReadout(lifeReadout(gameState, activePlayerId))
+    : null;
+  const opponentId = seatKnown ? players?.find((p) => p.id !== activePlayerId)?.id : undefined;
   const opponentLife =
-    gameState && opponentId !== undefined ? formatLifeReadout(lifeReadout(gameState, opponentId)) : null;
+    gameState && seatKnown && opponentId !== undefined
+      ? formatLifeReadout(lifeReadout(gameState, opponentId))
+      : null;
 
-  const isVictory = winner === activePlayerId;
+  const isVictory = seatKnown && winner === activePlayerId;
   const isDraw = winner == null;
+  // A winner with no known seat is neither this client's victory nor its defeat.
+  const outcomeUnknown = winner != null && !seatKnown;
 
   const turnCount = gameState?.turn_number ?? 0;
   const gameDuration = gameStartedAt
@@ -3139,12 +3177,14 @@ function GameOverScreen({
 
   const titleText = isDraw
     ? t("gamePage.gameOver.draw")
-    : isVictory
-      ? t("gamePage.gameOver.victory")
-      : t("gamePage.gameOver.defeat");
-  const titleColor = isDraw ? "#B0B0B0" : isVictory ? "#C9B037" : "#991B1B";
+    : outcomeUnknown
+      ? t("gamePage.gameOver.complete")
+      : isVictory
+        ? t("gamePage.gameOver.victory")
+        : t("gamePage.gameOver.defeat");
+  const titleColor = isDraw || outcomeUnknown ? "#B0B0B0" : isVictory ? "#C9B037" : "#991B1B";
 
-  const glowColor = isDraw
+  const glowColor = isDraw || outcomeUnknown
     ? "rgba(176,176,176,0.5)"
     : isVictory
       ? "rgba(201,176,55,0.8)"
@@ -3152,7 +3192,7 @@ function GameOverScreen({
 
   const textShadow = `0 0 20px ${glowColor}, 0 0 40px ${glowColor.replace(/[\d.]+\)$/, "0.5)")}, 0 0 80px ${glowColor.replace(/[\d.]+\)$/, "0.3)")}`;
 
-  const bgGradient = isDraw
+  const bgGradient = isDraw || outcomeUnknown
     ? "radial-gradient(ellipse at center, rgba(50,50,50,0.6) 0%, rgba(0,0,0,0.95) 70%)"
     : isVictory
       ? "radial-gradient(ellipse at center, rgba(60,50,10,0.6) 0%, rgba(0,0,0,0.95) 70%)"
@@ -3168,17 +3208,17 @@ function GameOverScreen({
   const [runOver, setRunOver] = useState(false);
 
   useEffect(() => {
-    if (!isDraft || !gameId || resultRecorded) return;
+    if (!isDraft || !gameId || resultRecorded || !seatKnown) return;
     const result: DraftMatchResult = isDraw ? "draw" : isVictory ? "win" : "loss";
     useDraftStore.getState().recordMatchResult(gameId, result).then(() => {
       setResultRecorded(true);
       const meta = loadActiveQuickDraft();
       if (meta?.phase === "complete") setRunOver(true);
     });
-  }, [isDraft, gameId, isDraw, isVictory, resultRecorded]);
+  }, [isDraft, gameId, isDraw, isVictory, resultRecorded, seatKnown]);
 
   useEffect(() => {
-    if (!isDraftPodMatch || resultRecorded) return;
+    if (!isDraftPodMatch || resultRecorded || !seatKnown) return;
     void useMultiplayerDraftStore
       .getState()
       .reportActiveMatchGameResult(winner)
@@ -3186,7 +3226,7 @@ function GameOverScreen({
       .catch((err) => {
         console.error("[GameOverScreen] failed to report draft pod match result:", err);
       });
-  }, [isDraftPodMatch, resultRecorded, winner]);
+  }, [isDraftPodMatch, resultRecorded, winner, seatKnown]);
 
   const handleRematch = () => {
     const newId = crypto.randomUUID();
@@ -3263,7 +3303,7 @@ function GameOverScreen({
             transition={{ duration: 0.4 }}
           >
             {terminalReason && <p className="mb-2 text-sm text-slate-300">{terminalReason}</p>}
-            {gameState && playerLife !== null && opponentLife !== null && (
+            {gameState && seatKnown && playerLife !== null && opponentLife !== null && (
               <p className="text-base text-gray-200 sm:text-lg">
                 <Trans
                   i18nKey="gamePage.gameOver.lifeSummary"

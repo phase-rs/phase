@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import { act, cleanup, render, renderHook, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GameProvider } from "../GameProvider";
 import { useResumables } from "../../hooks/useResumables";
@@ -270,15 +270,19 @@ describe("native solo terminal recovery across real persistence and reopen", () 
     unmount();
 
     // Mount the real resume consumer in the Menu while ACK is still in flight.
-    const menuConsumer = renderHook(() => useResumables(), {
-      wrapper: ({ children }) => <MemoryRouter>{children}</MemoryRouter>,
-    });
+    const menuConsumer = renderHook(
+      () => ({ resumables: useResumables(), location: useLocation() }),
+      { wrapper: ({ children }) => <MemoryRouter>{children}</MemoryRouter> },
+    );
 
     if (replacement) {
-      await waitFor(() => expect(menuConsumer.result.current.match?.id).toBe(replacement.id));
+      await waitFor(() => expect(menuConsumer.result.current.resumables.match?.id).toBe(replacement.id));
+      expect(menuConsumer.result.current.resumables.retainedResult).toBeNull();
     } else {
-      // Terminal-only pointer is never offered as a playable resume match.
-      await waitFor(() => expect(menuConsumer.result.current.match).toBeNull());
+      // A terminal-only pointer is not playable, but its retained result stays
+      // reachable from the Menu until the acknowledgement lands.
+      await waitFor(() => expect(menuConsumer.result.current.resumables.retainedResult?.id).toBe(GAME_ID));
+      expect(menuConsumer.result.current.resumables.match).toBeNull();
     }
 
     await act(async () => {
@@ -287,15 +291,19 @@ describe("native solo terminal recovery across real persistence and reopen", () 
     // Matching pointer is cleared after navigation; replacement pointer is kept.
     await waitFor(() => expect(pointer()).toEqual(replacement));
 
-    // After a successful ACK, expired action cannot start a fresh match.
     if (!replacement) {
-      expect(menuConsumer.result.current.match).toBeNull();
+      // The acknowledged result's Menu action is gone, and neither stale action
+      // can start a fresh match.
+      await waitFor(() => expect(menuConsumer.result.current.resumables.retainedResult).toBeNull());
+      expect(menuConsumer.result.current.resumables.match).toBeNull();
       act(() => {
-        menuConsumer.result.current.resumeMatch();
+        menuConsumer.result.current.resumables.viewRetainedResult();
+        menuConsumer.result.current.resumables.resumeMatch();
       });
       expect(pointer()).toBeNull();
+      expect(menuConsumer.result.current.location.pathname).toBe("/");
     } else {
-      expect(menuConsumer.result.current.match?.id).toBe(replacement.id);
+      expect(menuConsumer.result.current.resumables.match?.id).toBe(replacement.id);
     }
   });
 
@@ -321,6 +329,25 @@ describe("native solo terminal recovery across real persistence and reopen", () 
     expect(pointer()).toEqual({
       id: GAME_ID, mode: "ai", difficulty: "Medium", nativeSession: { ...session, terminalOnly: true },
     });
+
+    // The Menu still offers the retained result after the failed acknowledgement,
+    // and following it re-opens the same game so recovery retries the ACK.
+    const menuConsumer = renderHook(
+      () => ({ resumables: useResumables(), location: useLocation() }),
+      { wrapper: ({ children }) => <MemoryRouter>{children}</MemoryRouter> },
+    );
+    await waitFor(() => expect(menuConsumer.result.current.resumables.retainedResult?.id).toBe(GAME_ID));
+    expect(menuConsumer.result.current.resumables.match).toBeNull();
+    act(() => menuConsumer.result.current.resumables.viewRetainedResult());
+    expect(menuConsumer.result.current.location.pathname).toBe(`/game/${GAME_ID}`);
+    expect(menuConsumer.result.current.location.search).toBe("?mode=ai&difficulty=Medium");
+    menuConsumer.unmount();
+
+    ackOutcome = "success";
+    const reopened = await reopen();
+    await waitFor(() => expect(reopened.events).toHaveBeenCalledWith({ type: "terminalDelivery", delivery }));
+    await waitFor(() => expect(pointer()).toBeNull());
+    expect(reopened.after()).toEqual(["ReadTerminalResult", "AckTerminalDelivery"]);
   });
 
   describe("terminal response identity binding", () => {

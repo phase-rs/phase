@@ -77,8 +77,38 @@ describe("full terminal result persistence", () => {
     expect(isValidFullTerminalDelivery(legacySnapshot)).toBe(false);
     expect(isValidFullTerminalDelivery({ ...delivery, finalView: {} as never })).toBe(false);
     expect(isValidFinalView({})).toBe(false);
-    expect(isValidFinalView({ players: [], objects: {} })).toBe(true);
-    expect(isValidFinalView({ players: [], stack: [], battlefield: [], turn_number: 1, objects: {} })).toBe(true);
+    // The result screen labels players; a view without typed player records
+    // cannot be retained, acknowledged, or installed.
+    expect(isValidFinalView({ players: [], objects: {} })).toBe(false);
+    expect(isValidFinalView({
+      players: [{ id: 0, life: "20" }],
+      objects: {},
+      battlefield: [],
+      stack: [],
+      exile: [],
+      turn_number: 1,
+      active_player: 0,
+      priority_player: 0,
+      phase: "PreCombatMain",
+      waiting_for: { type: "GameOver" },
+    })).toBe(false);
+    expect(isValidFinalView({
+      players: [{ id: 0, life: 20, is_eliminated: false }, { id: 1, life: 0, is_eliminated: true }],
+      objects: {},
+      battlefield: [],
+      stack: [],
+      exile: [],
+      turn_number: 12,
+      active_player: 0,
+      priority_player: 0,
+      phase: "PreCombatMain",
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    })).toBe(true);
+    expect(isValidFinalView(finalView)).toBe(true);
+    expect(isValidFullTerminalDelivery({
+      ...delivery,
+      finalView: { ...finalView, players: [{ id: 0, life: "12" }] } as never,
+    })).toBe(false);
     await expect(loadFullTerminalDelivery(delivery.key)).resolves.toBeNull();
     await expect(commitFullTerminalDelivery(legacySnapshot as never)).resolves.toBe(false);
   });

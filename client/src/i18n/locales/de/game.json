@@ -1241,6 +1241,7 @@
       "draw": "UNENTSCHIEDEN",
       "victory": "SIEG",
       "defeat": "NIEDERLAGE",
+      "complete": "SPIEL VORBEI",
       "lifeSummary": "Du: <player>{{playerLife}}</player> <sep>/</sep> Gegner: <opponent>{{opponentLife}}</opponent>",
       "turns": "Züge: {{count}}",
       "duration": "Dauer: {{time}}",
