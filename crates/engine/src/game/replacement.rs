@@ -2674,7 +2674,8 @@ pub(crate) fn accumulate_batch_prevention(
     // tally on first accumulation, through the shared authority above.
     hydrate_parked_batch_prevention_tally(state);
     let accumulated = if let Some(tally) = state.combat_prevention_tally.as_mut() {
-        *tally.entry((applied_key, recipient.clone())).or_insert(0) += prevented_amount as i32;
+        *tally.entry((applied_key, recipient.clone())).or_insert(0) +=
+            u32_to_i32_saturating(prevented_amount);
         true
     } else {
         false
@@ -3250,7 +3251,7 @@ fn damage_done_applier(
                         }
                         // CR 615.5: the prevented-amount handoff for follow-up
                         // continuations — identical to Branch 2's stamp.
-                        state.last_effect_count = Some(prevented as i32);
+                        state.last_effect_count = Some(u32_to_i32_saturating(prevented));
                     }
                 }
             }
@@ -3589,7 +3590,7 @@ fn damage_done_applier(
                 // trigger-resolution window, so `current_trigger_event` is None
                 // and `last_effect_count` is the documented fallback slot
                 // (see `quantity.rs` resolver).
-                state.last_effect_count = Some(prevented_amount as i32);
+                state.last_effect_count = Some(u32_to_i32_saturating(prevented_amount));
             }
 
             return result;
@@ -3662,7 +3663,7 @@ fn damage_done_applier(
             // from the shield's resolved source filter, without emitting a
             // second, sentinel-source prevention event at the rider boundary.
             if !accumulated_in_batch || shield_has_per_event_execute_followup(state, rid) {
-                state.last_effect_count = Some(dmg as i32);
+                state.last_effect_count = Some(u32_to_i32_saturating(dmg));
             }
             return ApplyResult::Prevented;
         }
@@ -5209,7 +5210,7 @@ fn gain_life_applier(
     // amount so "draw that many" sees the prevented life-gain quantity.
     if gain_life_execute_substitutes_event_type(state, rid) {
         if let ProposedEvent::LifeGain { amount, .. } = event {
-            state.last_effect_count = Some(amount as i32);
+            state.last_effect_count = Some(u32_to_i32_saturating(amount));
         }
         return ApplyResult::Prevented;
     }
@@ -5389,7 +5390,7 @@ fn lose_life_applier(
         Effect::LoseLife { .. } | Effect::Unimplemented { .. }
     ) {
         if let ProposedEvent::LifeLoss { amount, .. } = event {
-            state.last_effect_count = Some(amount as i32);
+            state.last_effect_count = Some(u32_to_i32_saturating(amount));
         }
         return ApplyResult::Prevented;
     }
@@ -7476,10 +7477,9 @@ fn evaluate_replacement_condition(
         // life". Each player's life reads the team total in a team format, so
         // the OR over players is "any team total <= N".
         ReplacementCondition::UnlessPlayerLifeAtMost { amount } => {
-            let any_player_low = state
-                .players
-                .iter()
-                .any(|p| crate::game::players::team_life_total(state, p.id) <= *amount as i32);
+            let any_player_low = state.players.iter().any(|p| {
+                crate::game::players::team_life_total(state, p.id) <= u32_to_i32_saturating(*amount)
+            });
             !any_player_low
         }
         // CR 614.1d: Battlebond lands — "unless you have two or more opponents"
@@ -9406,7 +9406,12 @@ pub fn find_applicable_replacements(
         ..
     } = event
     {
-        if *amount > 0 {
+        // Skullcrack ruling + CR 615.12: while prevention is disabled the
+        // prevention parts of applicable effects have no effect — draw no
+        // virtual protection candidates, mirroring the definition-matcher
+        // `is_prevention_disabled` suppression (no riders are lost: protection
+        // carries no riders).
+        if *amount > 0 && !is_prevention_disabled(state, event) {
             let applicable = match target {
                 TargetRef::Object(object_id) => {
                     match state.objects.get(object_id) {
@@ -14486,11 +14491,16 @@ fn continue_replacement_impl(
     // CR 616.1: the chooser chooses among the effects that apply now: a stored
     // candidate that no longer applies is not one of them, and an effect that
     // began to apply while the prompt was parked is. Re-propose the event so the
-    // prompt, if any remains, offers exactly those. Scoped to the
-    // owners whose prompt a departure can outlive while it stays parked: a draw
-    // payment's prompt and a staged payment's prompt (live or replayed); every
-    // other prompt keeps its answer as before.
-    if prompt_belongs_to_a_payment(state) && !pending_candidates_are_current(state, &pending) {
+    // prompt, if any remains, offers exactly those. Scoped to the prompts a
+    // departure can outlive while parked: a draw payment's prompt, a staged
+    // payment's prompt (live or replayed), and a parked Damage ordering prompt
+    // (CR 800.4a: a concession can remove a protection grant mid-ordering, so a
+    // retired protection candidate must drop out via live re-discovery).
+    // Every other prompt keeps its answer as before.
+    if (prompt_belongs_to_a_payment(state)
+        || matches!(pending.proposed, ProposedEvent::Damage { .. }))
+        && !pending_candidates_are_current(state, &pending)
+    {
         return pipeline_loop(state, pending.proposed, pending.depth + 1, registry, events);
     }
 
@@ -23390,6 +23400,48 @@ mod tests {
             )],
             "the prevented amount must accumulate into the batch tally keyed by \
              (shield, recipient), carrying the recipient the damage was headed at"
+        );
+    }
+
+    /// T18: huge damage/prevention amounts must saturate — not wrap — when
+    /// tallied into the `i32` batch ledger. `u32::MAX` accumulates as
+    /// `i32::MAX`; with a bare `as i32` cast it would wrap to `-1`.
+    #[test]
+    fn batch_prevention_tally_saturates_huge_amounts() {
+        let key = AppliedReplacementKey::object(ObjectId(10), 0);
+        let mut state = GameState::new_two_player(42);
+        state.combat_prevention_tally = Some(HashMap::new());
+        assert!(accumulate_batch_prevention(
+            &mut state,
+            key,
+            &TargetRef::Player(PlayerId(1)),
+            u32::MAX
+        ));
+        assert_eq!(
+            state
+                .combat_prevention_tally
+                .as_ref()
+                .unwrap()
+                .get(&(key, TargetRef::Player(PlayerId(1)))),
+            Some(&i32::MAX),
+            "a u32::MAX prevention amount must saturate the i32 tally, not wrap to -1"
+        );
+        // Reach-guard: small values still accumulate exactly.
+        let mut state = GameState::new_two_player(42);
+        state.combat_prevention_tally = Some(HashMap::new());
+        assert!(accumulate_batch_prevention(
+            &mut state,
+            key,
+            &TargetRef::Player(PlayerId(1)),
+            3
+        ));
+        assert_eq!(
+            state
+                .combat_prevention_tally
+                .as_ref()
+                .unwrap()
+                .get(&(key, TargetRef::Player(PlayerId(1)))),
+            Some(&3)
         );
     }
 

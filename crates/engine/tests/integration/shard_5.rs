@@ -138,6 +138,7 @@ mod sin_spiras_punishment_repeat;
 mod single_graveyard_cast_grant_9334;
 mod siphon_insight_mana_rider;
 mod skitterfang_reflexive_without_counter;
+mod skullcrack_unpreventable_damage_halo_suppression;
 mod skullspore_nexus_dynamic_pt;
 mod skullwinder_chosen_opponent;
 mod slaughter_the_strong_total_power_4380;

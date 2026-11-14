@@ -6718,7 +6718,6 @@ fn try_parse_during_that_turn_powerup_prohibition(tp: TextPair<'_>) -> Option<Pa
 /// single `AttackTargetFilter` authority, shared with static `CantAttack`.
 fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     use crate::parser::oracle_static::parse_cant_attack_defended_scope_nom;
-    use crate::types::triggers::AttackTargetFilter;
 
     // Orzhov Advokist: this bounded form must precede the legacy anaphor branch.
     // Unlike the latter, its "creatures that player controls" subject carries
@@ -6794,8 +6793,13 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
         let (input, _) =
             preceded(alt((tag("can't"), tag("cannot"))), tag(" attack")).parse(input)?;
         let (input, defended) = parse_cant_attack_defended_scope_nom(input)?;
-        // A bare "can't attack" with no scope defends the player only.
-        Ok((input, defended.unwrap_or(AttackTargetFilter::Player)))
+        // A bare "can't attack" with no defended scope is a blanket ban, not
+        // a player-only ban — fail closed like the Advokist arm above so a
+        // missing scope never narrows the prohibition.
+        let Some(defended) = defended else {
+            return Err(oracle_err(input));
+        };
+        Ok((input, defended))
     })?;
     let rest_lower = &rest_lower[rest_lower.len() - rest_orig.len()..];
 

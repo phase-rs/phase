@@ -4555,6 +4555,24 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 113.7a + CR 602.2a + CR 608.2h + CR 400.7: pin the activation-time
+    /// source incarnation over this entire ability chain WITHOUT touching the
+    /// actor. Unlike [`Self::set_trigger_source_recursive`], this never
+    /// writes `controller` / `original_controller`: for an activated ability
+    /// the controller is the activating player (CR 602.2a), not the source's
+    /// live controller, so every `Controller`-relative consumer keeps the
+    /// activator binding while `source_id` / `source_incarnation` /
+    /// `trigger_source` carry the announcement-time incarnation (exit-LKI
+    /// preferred after departure, CR 400.7).
+    pub fn set_departure_pin_recursive(&mut self, source: TriggerSourceContext) {
+        self.source_id = source.identity.reference.object_id;
+        self.source_incarnation = Some(source.identity.reference.incarnation);
+        self.trigger_source = Some(source.clone());
+        for (_, child) in self.child_links_mut() {
+            child.set_departure_pin_recursive(source.clone());
+        }
+    }
+
     /// CR 400.7 + CR 113.7a: carry a random-result branch's source identity
     /// without changing its actor, targets, pins, or other resolution context.
     /// Different-source nodes bound the traversal, including their descendants;

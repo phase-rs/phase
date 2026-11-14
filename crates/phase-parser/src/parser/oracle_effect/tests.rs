@@ -43222,6 +43222,121 @@ fn scoped_cant_attack_prohibition_fails_closed_without_its_complete_grammar() {
     }
 }
 
+/// T6 SHAPE: a bare "can't attack" with a duration but NO defended scope is a
+/// blanket ban, not a player-only ban — the recognizer must fail closed (None)
+/// so the clause stays honestly Unimplemented instead of emitting a narrowed
+/// `ProhibitActivity::Attack`. No printed card reaches this branch (all 20
+/// that-player attack cards carry explicit scopes); the lines are synthetic.
+#[test]
+fn that_player_cant_attack_bare_scope_fails_closed() {
+    use crate::types::triggers::AttackTargetFilter;
+    for text in [
+        "that player can't attack during their next turn",
+        "they can't attack during their next turn",
+        "that player cannot attack during that player's next turn",
+        "they can't attack this turn",
+        "that player cannot attack this turn",
+    ] {
+        assert!(
+            try_parse_that_player_cant_attack_prohibition(TextPair::new(text, text)).is_none(),
+            "bare-scope {text:?} must not parse (revert-flip: the old \
+             unwrap_or(Player) default emitted a player-only ban)"
+        );
+        // Full-pipeline honesty: no `ProhibitActivity::Attack` anywhere in the
+        // parsed chain for the bare line.
+        let parsed = parse_effect_chain(text, AbilityKind::Spell);
+        let mut node = Some(&parsed);
+        while let Some(d) = node {
+            if let Effect::AddRestriction {
+                restriction:
+                    GameRestriction::ProhibitActivity {
+                        activity:
+                            ProhibitedActivity::Attack {
+                                defended: AttackTargetFilter::Player,
+                                ..
+                            },
+                        ..
+                    },
+                ..
+            } = d.effect.as_ref()
+            {
+                panic!("bare-scope {text:?} must not emit a player-only attack ban");
+            }
+            node = d.sub_ability.as_deref();
+        }
+    }
+}
+
+/// T6: Willie Lumpkin's verbatim predicate shape keeps its explicit defended
+/// scope through the legacy anaphor arm — the fail-closed fix must not narrow
+/// or drop scoped prohibitions. (Full Oracle text: "Whenever Willie Lumpkin
+/// deals combat damage to an opponent, you draw a card and that player may
+/// draw a card. If they do, that player can't attack you or permanents you
+/// control during their next turn.")
+#[test]
+fn willie_lumpkin_verbatim_scope_parses() {
+    use crate::types::triggers::AttackTargetFilter;
+    let text = "that player can't attack you or permanents you control during their next turn.";
+    let parsed = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        matches!(
+            parsed.effect.as_ref(),
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::ParentTargetedPlayer,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::Attack {
+                        defended: AttackTargetFilter::PlayerOrPermanents,
+                        protected_player: None,
+                        protected_scope: None,
+                    },
+                    ..
+                }
+            }
+        ),
+        "Willie predicate must keep the you-or-permanents scope, got {parsed:?}"
+    );
+    assert!(
+        matches!(parsed.duration, Some(Duration::UntilEndOfNextTurnOf { .. })),
+        "Willie predicate must carry the next-turn duration (got {:?})",
+        parsed.duration
+    );
+}
+
+/// T6: Sandswirl Wanderglyph's verbatim predicate shape keeps its explicit
+/// defended scope on the "this turn" branch. (Full Oracle text: "Whenever an
+/// opponent casts a spell during their turn, they can't attack you or
+/// planeswalkers you control this turn.")
+#[test]
+fn sandswirl_wanderglyph_verbatim_scope_parses() {
+    use crate::types::triggers::AttackTargetFilter;
+    let text = "they can't attack you or planeswalkers you control this turn.";
+    let parsed = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        matches!(
+            parsed.effect.as_ref(),
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::ParentTargetedPlayer,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::Attack {
+                        defended: AttackTargetFilter::PlayerOrPlaneswalker,
+                        protected_player: None,
+                        protected_scope: None,
+                    },
+                    ..
+                }
+            }
+        ),
+        "Sandswirl predicate must keep the you-or-planeswalkers scope, got {parsed:?}"
+    );
+    assert!(
+        parsed.duration.is_none(),
+        "Sandswirl predicate must not carry a next-turn duration (got {:?})",
+        parsed.duration
+    );
+}
+
 /// CR 508.1c + CR 109.5 + CR 608.2c: Call for Aid's inverse-voice rider
 /// emits a scope-SELECTING restriction — the restricted player is the source's
 /// controller while the protected player is the already-chosen target.
