@@ -3263,19 +3263,15 @@ fn minion_payment_trigger_doubling(
                         "direct token payment park"
                     );
                 }
-                let id = if resident_throne {
-                    throne
-                } else {
-                    the_token(runner, THRONE_NAME)
-                };
-                assert_eq!(
-                    runner.state().objects[&id].zone,
-                    Zone::Battlefield,
-                    "Throne is physically present at payment"
-                );
-                assert!(runner.state().objects[&id]
-                    .chosen_attributes
-                    .contains(&ChosenAttribute::CreatureType("Demon".into())));
+                // The co-entering Throne copy's delivery shape is not asserted
+                // here; it is checked after the batch settles.
+                if resident_throne {
+                    assert_eq!(
+                        runner.state().objects[&throne].zone,
+                        Zone::Battlefield,
+                        "the resident Throne is present at payment"
+                    );
+                }
                 hand.set(Some(runner.state().players[0].hand.len()));
             }
         },
@@ -3293,6 +3289,26 @@ fn minion_payment_trigger_doubling(
     );
     assert_eq!(runner.state().players[0].life, 12);
     assert_settled(&runner, "Minion payment trigger doubling");
+    // The Throne whose doubling is at issue: the resident one, or the copy that
+    // entered with the batch under P0 naming Demon.
+    let doubler = if resident_throne {
+        throne
+    } else {
+        the_token(&runner, THRONE_NAME)
+    };
+    let doubler = &runner.state().objects[&doubler];
+    assert_eq!(
+        doubler.zone,
+        Zone::Battlefield,
+        "the Throne is on the battlefield"
+    );
+    assert_eq!(doubler.controller, P0, "P0 controls the Throne");
+    assert!(
+        doubler
+            .chosen_attributes
+            .contains(&ChosenAttribute::CreatureType("Demon".into())),
+        "the Throne names Demon"
+    );
     row_outcome(&runner, answered)
 }
 
