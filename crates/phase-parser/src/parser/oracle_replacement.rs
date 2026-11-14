@@ -15610,6 +15610,26 @@ fn rewrite_parent_target_to_post_replacement_damage_target(def: &mut AbilityDefi
     // unrelated cards (Thada Adel, Acquisitor; Earwig Squad — both carry
     // `Shuffle { target: TriggeringPlayer }`). The `Shuffle.target` anaphor is
     // therefore rewritten LOCALLY below, scoped to this prevention follow-up.
+    // CR 615.5 + CR 108.3: a prevention follow-up has one damage recipient, so
+    // the owner-routed ChangeZone settles through that recipient's owner rather
+    // than the generic tracked-owner scope used for multi-owner moves.
+    if matches!(
+        &*def.effect,
+        Effect::ChangeZone {
+            target: TargetFilter::PostReplacementDamageTarget | TargetFilter::ParentTarget,
+            owner_library: true,
+            ..
+        }
+    ) {
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            if let Effect::Shuffle { target } = sub.effect.as_mut() {
+                if matches!(target, TargetFilter::ScopedPlayer) {
+                    *target = TargetFilter::PostReplacementDamageTargetOwner;
+                    sub.player_scope = None;
+                }
+            }
+        }
+    }
     super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| match f {
         TargetFilter::ParentTarget => *f = TargetFilter::PostReplacementDamageTarget,
         // CR 108.3 + CR 400.3: owner anaphor on a walker-visited effect

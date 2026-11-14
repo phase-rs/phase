@@ -23292,22 +23292,27 @@ fn serene_remembrance_second_subject_recovers_up_to_three() {
         "Shuffle ~ and up to three target cards from a single graveyard into their owners' libraries.",
         AbilityKind::Spell,
     );
-    // The head is SelfRef: a context reference, so it is never stamped.
-    assert_eq!(def.multi_target, None, "{def:#?}");
+    // The grouped root carries the second subject's multi-target spec.
+    assert_eq!(
+        def.multi_target,
+        Some(MultiTargetSpec::fixed(0, 3)),
+        "{def:#?}"
+    );
     assert_eq!(
         def.target_constraints,
         vec![TargetSelectionConstraint::SameZoneOwner {
             zone: Zone::Graveyard,
         }]
     );
-    let sub = def
-        .sub_ability
-        .as_deref()
-        .expect("second subject sub-ability");
-    assert_eq!(
-        sub.multi_target,
-        Some(MultiTargetSpec::fixed(0, 3)),
-        "{sub:#?}"
+    let terminal = def.sub_ability.as_deref().expect("terminal owner shuffle");
+    assert!(
+        matches!(
+            &*terminal.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            }
+        ),
+        "{terminal:#?}"
     );
 }
 
@@ -28303,20 +28308,29 @@ fn shuffle_compound_subject_into_owners_libraries() {
     match &clause.effect {
         Effect::ChangeZone {
             destination: Zone::Library,
-            target: TargetFilter::SelfRef,
+            target: TargetFilter::Or { filters },
             owner_library: true,
-            enter_transformed: false,
-            enters_under: None,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             ..
-        } => {}
+        } => assert!(
+            filters.iter().any(|f| matches!(f, TargetFilter::SelfRef)) && filters.len() == 2,
+            "one grouped Or pairs the source with the second subject: {filters:?}"
+        ),
         other => panic!(
-            "expected ChangeZone {{ SelfRef, Library, owner_library: true }}, got {:?}",
+            "expected one grouped ChangeZone {{ Or(SelfRef, target), Library }}, got {:?}",
             other
         ),
     }
+    let terminal = clause.sub_ability.as_deref().expect("terminal shuffle");
     assert!(
-        clause.sub_ability.is_some(),
-        "should have sub_ability for second subject"
+        matches!(
+            &*terminal.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            }
+        ),
+        "the grouped move settles both owners through ScopedPlayer: {:?}",
+        terminal.effect
     );
 }
 
@@ -47017,6 +47031,357 @@ fn reveal_until_passive_has_chosen_name_tv_pattern() {
         ),
         "expected RevealUntil filter=HasChosenName, got: {:?}",
         def.effect
+    );
+}
+
+/// CR 608.2c + CR 400.3: the source-owner anchor is for the following Draw/
+/// Reveal anaphor only. A later caster-defaulted "search your library … then
+/// shuffle" must keep the activator.
+#[test]
+fn owner_anchor_does_not_leak_into_following_search_or_shuffle() {
+    let def = parse_effect_chain(
+        "This creature's owner shuffles it into their library. Search your library for a basic land card, reveal it, put it into your hand, then shuffle.",
+        AbilityKind::Activated,
+    );
+    let mut node = Some(&def);
+    let mut checked = 0;
+    while let Some(def) = node {
+        if let Effect::SearchLibrary { target_player, .. } = &*def.effect {
+            assert!(
+                matches!(*target_player, None | Some(TargetFilter::Controller)),
+                "the caster's search keeps the activator: {target_player:?}"
+            );
+            checked += 1;
+        }
+        node = def.sub_ability.as_deref();
+    }
+    assert!(checked > 0, "reach guard: the search parsed");
+}
+
+/// CR 608.2c + CR 121.1: a source-owner anchor is not a resolvable Draw actor
+/// in this PR. The shared anchor applier must leave a subjectless Draw on its
+/// controller; only RevealUntil resolves Owner (through the live-or-LKI seam).
+#[test]
+fn owner_anchor_binds_draw_through_the_shared_resolver() {
+    let mut draw = Effect::Draw {
+        count: QuantityExpr::Fixed { value: 1 },
+        target: TargetFilter::Controller,
+    };
+    super::apply_anchor_subject(&mut draw, &TargetFilter::Owner, true, false, false);
+    assert_eq!(
+        draw,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Owner,
+        },
+        "the owner anchor binds Draw now that the shared resolver supports Owner"
+    );
+
+    // Full parser chain: the carried subject is injected at the shared seam,
+    // which must apply the same guard, not only the anchor applier.
+    let def = parse_effect_chain(
+        "This creature's owner shuffles it into their library, then draws a card.",
+        AbilityKind::Activated,
+    );
+    let mut node = Some(&def);
+    let mut found = false;
+    while let Some(def) = node {
+        if let Effect::Draw { target, .. } = &*def.effect {
+            found = true;
+            assert_eq!(
+                *target,
+                TargetFilter::ScopedPlayer,
+                "the carried owner subject binds Draw through the shared scoped actor"
+            );
+        }
+        node = def.sub_ability.as_deref();
+    }
+    assert!(found, "reach guard: the carried Draw continuation parsed");
+}
+
+/// CR 109.5 + CR 608.2c: a subjectless conjugated continuation can inherit a
+/// prior actor, but an explicit "your library" possession must survive that
+/// carry. Pair it with "their library" in the same conjugated fixture.
+#[test]
+fn conjugated_reveal_keeps_explicit_library_possessor() {
+    for (possessive, expected) in [
+        ("your", TargetFilter::Controller),
+        ("their", TargetFilter::ParentTargetOwner),
+    ] {
+        let def = parse_effect_chain(
+            &format!(
+                "This creature's owner shuffles it into their library. That player draws a card, then reveals cards from the top of {possessive} library until they reveal a creature card."
+            ),
+            AbilityKind::Activated,
+        );
+        let mut node = Some(&def);
+        let mut reveal = None;
+        while let Some(def) = node {
+            if matches!(&*def.effect, Effect::RevealUntil { .. }) {
+                reveal = Some(def);
+                break;
+            }
+            node = def.sub_ability.as_deref();
+        }
+        let reveal = reveal.expect("the conjugated reveal is present");
+        let Effect::RevealUntil { player, .. } = &*reveal.effect else {
+            unreachable!()
+        };
+        assert_eq!(
+            *player, expected,
+            "the {possessive} library possession must survive the conjugated carry"
+        );
+    }
+}
+
+/// CR 109.5 + CR 608.2c: the reveal's printed library possessor controls the
+/// actor. "your library" forces the activator even under an owner anchor;
+/// "their library" keeps the owner antecedent.
+#[test]
+fn reveal_library_possessor_survives_the_owner_anchor() {
+    for (possessive, expected) in [
+        ("your", TargetFilter::Controller),
+        ("their", TargetFilter::ParentTargetOwner),
+    ] {
+        let def = parse_effect_chain(
+            &format!(
+                "This creature's owner shuffles it into their library. They reveal cards from the top of {possessive} library until they reveal a creature card."
+            ),
+            AbilityKind::Activated,
+        );
+        let mut node = def.sub_ability.as_deref();
+        let mut reveal = None;
+        while let Some(def) = node {
+            if matches!(&*def.effect, Effect::RevealUntil { .. }) {
+                reveal = Some(def);
+                break;
+            }
+            node = def.sub_ability.as_deref();
+        }
+        let reveal = reveal.expect("the reveal is present");
+        let Effect::RevealUntil { player, .. } = &*reveal.effect else {
+            unreachable!()
+        };
+        assert_eq!(
+            *player, expected,
+            "the {possessive} library possessor must survive lowering"
+        );
+    }
+}
+
+/// CR 115.1c + CR 608.2d: Teferi, Temporal Pilgrim's −12 "target opponent
+/// chooses a permanent they control and returns it" needs a resolution-time
+/// choice by the announced opponent. Until that lowering lands, both the choice
+/// and the following quantified shuffle must be explicit gaps, with no
+/// announced permanent target or battlefield-wide ChangeZoneAll.
+#[test]
+fn teferi_minus_twelve_resolution_choice_is_explicitly_unsupported() {
+    let parsed = crate::parser::parse_oracle_text(
+        "Whenever you draw a card, put a loyalty counter on Teferi.\n0: Draw a card.\n−2: Create a 2/2 blue Spirit creature token with vigilance and \"Whenever you draw a card, put a +1/+1 counter on this token.\"\n−12: Target opponent chooses a permanent they control and returns it to its owner's hand. Then they shuffle each nonland permanent they control into its owner's library.",
+        "Teferi, Temporal Pilgrim",
+        &[],
+        &["Planeswalker".to_string()],
+        &["Teferi".to_string()],
+    );
+    let minus_twelve = parsed
+        .abilities
+        .iter()
+        .find(|ability| {
+            ability
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains("−12"))
+        })
+        .expect("the −12 ability parsed");
+    assert!(
+        matches!(&*minus_twelve.effect, Effect::Unimplemented { .. }),
+        "the choice clause must be an explicit gap: {:?}",
+        minus_twelve.effect
+    );
+    let mut node = Some(minus_twelve);
+    let mut gaps: Vec<(&str, &str)> = Vec::new();
+    while let Some(ability) = node {
+        if let Effect::Unimplemented { name, description } = &*ability.effect {
+            gaps.push((name.as_str(), description.as_deref().unwrap_or("")));
+        }
+        assert!(
+            !matches!(
+                &*ability.effect,
+                Effect::TargetOnly { .. } | Effect::ChangeZoneAll { .. } | Effect::Bounce { .. }
+            ),
+            "no announced permanent target, executable return, or mass shuffle may remain: {:?}",
+            ability.effect
+        );
+        node = ability.sub_ability.as_deref();
+    }
+    assert_eq!(gaps.len(), 2, "two clause-specific gaps: {gaps:?}");
+    assert_eq!(gaps[0].0, "target-opponent permanent choice");
+    assert!(
+        gaps[0]
+            .1
+            .contains("chooses a permanent they control and returns it"),
+        "first gap names the choice-and-return: {gaps:?}"
+    );
+    assert_eq!(gaps[1].0, "shuffle");
+    assert!(
+        gaps[1]
+            .1
+            .contains("shuffle each nonland permanent they control"),
+        "second gap names the quantified shuffle: {gaps:?}"
+    );
+}
+
+/// CR 608.2c: the refusal drops only the unsupported choice-and-return
+/// instruction; a later independent instruction remains in the chain.
+#[test]
+fn teferi_refusal_retains_a_later_independent_instruction() {
+    let def = parse_effect_chain(
+        "Target opponent chooses a permanent they control and returns it to its owner's hand. Draw a card.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::Unimplemented { .. }),
+        "the choice-and-return is a gap: {:?}",
+        def.effect
+    );
+    let later = def.sub_ability.as_deref().expect("later sibling retained");
+    assert!(
+        matches!(&*later.effect, Effect::Draw { .. }),
+        "the later independent Draw survives the refusal: {:?}",
+        later.effect
+    );
+    let mut node = Some(later);
+    while let Some(ability) = node {
+        assert!(
+            !matches!(&*ability.effect, Effect::Bounce { .. }),
+            "the executable return must be removed"
+        );
+        node = ability.sub_ability.as_deref();
+    }
+}
+
+/// CR 701.24c + CR 400.6: "each card not put onto the battlefield this way" is
+/// a partial looked-at population. It must not widen to a battlefield-wide
+/// ChangeZoneAll; the clause fails closed.
+#[test]
+fn guess_who_partial_quantified_shuffle_is_explicitly_unsupported() {
+    let def = parse_effect_chain(
+        "Shuffle each card not put onto the battlefield this way into its owner's library.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::Unimplemented { .. }),
+        "the partial quantified shuffle must be an explicit gap: {:?}",
+        def.effect
+    );
+    assert!(
+        !matches!(&*def.effect, Effect::ChangeZoneAll { .. }),
+        "the clause must not become a battlefield-wide sweep"
+    );
+}
+
+/// CR 608.2c: an explicit "You reveal" after an owner shuffle keeps the
+/// activator; the owner anchor must not overwrite a printed subject.
+#[test]
+fn explicit_you_reveal_after_owner_shuffle_keeps_the_controller() {
+    let def = parse_effect_chain(
+        "This creature's owner shuffles it into their library. You reveal cards from the top of your library until you reveal a creature card.",
+        AbilityKind::Activated,
+    );
+    let mut node = Some(&def);
+    let mut reveal = None;
+    while let Some(def) = node {
+        if matches!(&*def.effect, Effect::RevealUntil { .. }) {
+            reveal = Some(def);
+            break;
+        }
+        node = def.sub_ability.as_deref();
+    }
+    let reveal = reveal.expect("the reveal follows the owner shuffle");
+    assert!(
+        matches!(
+            &*reveal.effect,
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                ..
+            }
+        ),
+        "an explicit you reveal keeps the controller, got {:?}",
+        reveal.effect
+    );
+}
+
+/// CR 608.2c: a distinct intervening player becomes the nearer antecedent, so
+/// the owner anchor from the earlier shuffle does not capture the reveal.
+#[test]
+fn intervening_player_reveal_does_not_inherit_the_owner_anchor() {
+    let def = parse_effect_chain(
+        "This creature's owner shuffles it into their library. Target player draws a card. They reveal cards from the top of their library until they reveal a creature card.",
+        AbilityKind::Activated,
+    );
+    let mut node = def.sub_ability.as_deref();
+    let mut reveal = None;
+    while let Some(def) = node {
+        if matches!(&*def.effect, Effect::RevealUntil { .. }) {
+            reveal = Some(def);
+            break;
+        }
+        node = def.sub_ability.as_deref();
+    }
+    let reveal = reveal.expect("the reveal is present");
+    let Effect::RevealUntil { player, .. } = &*reveal.effect else {
+        unreachable!()
+    };
+    assert_ne!(
+        *player,
+        TargetFilter::Owner,
+        "the nearer player must win over the earlier owner anchor: {player:?}"
+    );
+}
+
+/// CR 608.2c + CR 400.3: Mirror-Mad's reflexive "that player" reveal binds to
+/// the source-owner shuffle through the chain's player anchor, not to the
+/// activator.
+#[test]
+fn mirror_mad_reveal_uses_the_owner_chain_anchor() {
+    let def = parse_effect_chain(
+        "This creature's owner shuffles it into their library. If that player does, they reveal cards from the top of that library until a card named Mirror-Mad Phantasm is revealed.",
+        AbilityKind::Activated,
+    );
+    let mut node = Some(&def);
+    let mut shuffle = None;
+    while let Some(def) = node {
+        if matches!(&*def.effect, Effect::Shuffle { .. }) {
+            shuffle = Some(def);
+            break;
+        }
+        node = def.sub_ability.as_deref();
+    }
+    let shuffle = shuffle.expect("the terminal owner shuffle");
+    assert!(
+        matches!(
+            &*shuffle.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            }
+        ),
+        "the source-owner shuffle is the scoped actor: {:?}",
+        shuffle.effect
+    );
+    let reveal = shuffle
+        .sub_ability
+        .as_deref()
+        .expect("the reflexive reveal");
+    assert!(
+        matches!(
+            &*reveal.effect,
+            Effect::RevealUntil {
+                player: TargetFilter::ParentTargetOwner,
+                ..
+            }
+        ),
+        "expected the reveal actor to inherit the owner anchor, got {:?}",
+        reveal.effect
     );
 }
 

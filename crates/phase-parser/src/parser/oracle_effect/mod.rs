@@ -16689,36 +16689,51 @@ fn parse_threshold_comparator(input: &str) -> Option<Comparator> {
     .map(|(c, _)| c)
 }
 
+/// CR 109.5: the library possessor is a printed part of the reveal instruction.
+/// "your" fixes the activator; "their/that/..." leaves the actor to the
+/// subject/antecedent context.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RevealLibraryPossessor {
+    Controller,
+    Context,
+}
+
 /// CR 701.20a: Shared prefix `"reveal[s] cards from the top of <possessive> library until "`.
-/// Returns the input positioned at the first token after `"until "`.
+/// Returns the possessor and the input positioned at the first token after
+/// `"until "`.
 /// Used by both the active-form and passive-form `RevealUntil` parsers so that
 /// any future possessive arm addition only needs to be made in one place.
-fn parse_reveal_cards_from_library_until(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+fn parse_reveal_cards_from_library_until(
+    input: &str,
+) -> nom::IResult<&str, RevealLibraryPossessor, OracleError<'_>> {
     // CR 701.20a: verb form — bare imperative ("reveal") or third-person ("reveals")
     let (input, _) = alt((tag("reveals "), tag("reveal "))).parse(input)?;
     let (input, _) = tag("cards from the top of ").parse(input)?;
     // CR 109.5: possessive determiner identifying the library owner. Both English
     // possessive forms ("your"/"their"/"his"/"her"/"its") map to the same parsed
     // structure; the actual player is supplied by the caller via subject context.
-    let (input, _) = alt((
-        tag("your "),
-        tag("their "),
-        tag("his "),
-        tag("her "),
-        tag("its "),
+    let (input, possessor) = alt((
+        value(RevealLibraryPossessor::Controller, tag("your ")),
+        value(RevealLibraryPossessor::Context, tag("their ")),
+        value(RevealLibraryPossessor::Context, tag("his ")),
+        value(RevealLibraryPossessor::Context, tag("her ")),
+        value(RevealLibraryPossessor::Context, tag("its ")),
         // CR 109.5: "top of that library" — Mirror-Mad Phantasm class
-        tag("that "),
+        value(RevealLibraryPossessor::Context, tag("that ")),
     ))
     .parse(input)?;
-    value((), tag("library until ")).parse(input)
+    let (input, _) = tag("library until ").parse(input)?;
+    Ok((input, possessor))
 }
 
 /// CR 701.20a: Parse the active-voice prefix `"reveal[s] cards from the top of
 /// <possessive> library until <pronoun> reveal[s] "`, stopping *before* the
 /// count/article. The caller parses the count (article → `Fixed(1)`, or a
 /// number / `X` for "reveal X [filter] cards") and the filter phrase.
-fn parse_reveal_until_prefix(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
-    let (input, _) = parse_reveal_cards_from_library_until(input)?;
+fn parse_reveal_until_prefix(
+    input: &str,
+) -> nom::IResult<&str, RevealLibraryPossessor, OracleError<'_>> {
+    let (input, possessor) = parse_reveal_cards_from_library_until(input)?;
     // Active-voice pronoun + matching verb form.
     let (input, _) = alt((
         tag("you reveal "),
@@ -16728,7 +16743,7 @@ fn parse_reveal_until_prefix(input: &str) -> nom::IResult<&str, (), OracleError<
         tag("it reveals "),
     ))
     .parse(input)?;
-    Ok((input, ()))
+    Ok((input, possessor))
 }
 
 /// CR 701.20a + CR 608.2c: Parse the count phrase that follows
@@ -16779,7 +16794,9 @@ fn parse_reveal_until_count(input: &str) -> OracleResult<'_, QuantityExpr> {
 /// the function body.
 ///
 /// Covers: Indomitable Creativity, Blessed Reincarnation, Tunnel Vision.
-fn parse_reveal_until_passive_prefix(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+fn parse_reveal_until_passive_prefix(
+    input: &str,
+) -> nom::IResult<&str, RevealLibraryPossessor, OracleError<'_>> {
     parse_reveal_cards_from_library_until(input)
 }
 
@@ -17066,6 +17083,16 @@ fn distribute_shared_card_qualifier(disjuncts: &[&str], filters: &mut [TargetFil
 /// in both active voice (`"until <pronoun> reveal[s] a <filter>"`) and
 /// passive voice (`"until a/an <filter> [card] is revealed [and exiles that card]"`).
 /// Builds [`Effect::RevealUntil`] with `player` identifying whose library is revealed.
+fn reveal_player_for_possessor(
+    player: TargetFilter,
+    possessor: RevealLibraryPossessor,
+) -> TargetFilter {
+    match possessor {
+        RevealLibraryPossessor::Controller => TargetFilter::Controller,
+        RevealLibraryPossessor::Context => player,
+    }
+}
+
 fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEffectClause> {
     // CR 701.20a + CR 608.2c: strip a trailing "where X is …" binding first so a
     // dynamic count ("reveal X [filter] cards, where X is the number of colors
@@ -17077,7 +17104,8 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
     // CR 701.20a: Active-voice form — "…until they reveal a <filter>" (count =
     // Fixed(1)) or "…until you reveal X [filter] cards" (dynamic count).
     let active_result = nom_on_lower(count_tp.original, count_tp.lower, parse_reveal_until_prefix);
-    if let Some((_, rest_orig)) = active_result {
+    if let Some((possessor, rest_orig)) = active_result {
+        let player = reveal_player_for_possessor(player, possessor);
         let rest_lower = &count_tp.lower[count_tp.lower.len() - rest_orig.len()..];
         let (after_count_lower, raw_count) = parse_reveal_until_count(rest_lower).ok()?;
         let (_, filter_text) = parse_reveal_until_active_filter_text(after_count_lower).ok()?;
@@ -17113,7 +17141,9 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
     // [and exiles that card]" (Indomitable Creativity, Blessed Reincarnation,
     // Tunnel Vision). Passive prefix stops before the article; extract article,
     // filter phrase, and optional exile suffix here.
-    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, parse_reveal_until_passive_prefix)?;
+    let (possessor, rest_orig) =
+        nom_on_lower(tp.original, tp.lower, parse_reveal_until_passive_prefix)?;
+    let player = reveal_player_for_possessor(player, possessor);
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
 
     // Consume the article ("a" / "an").
@@ -25715,6 +25745,12 @@ fn try_split_compound_subject(text: &str) -> Option<(TargetFilter, &str, TargetF
 /// Parse "shuffle X and Y into their owners' libraries" as a compound ChangeZone chain.
 /// Returns a ParsedEffectClause with a ChangeZone for the first subject and a sub_ability
 /// for the second subject, both with owner_library: true.
+///
+/// CR 608.2f: a self+target compound ("this creature and target …") lowers to
+/// one grouped ChangeZone over `Or { SelfRef, target }`, so both members share
+/// one logical zone-change group and the tracked-owner terminal still settles
+/// each owner's shuffle. Other compound shapes retain sequential ChangeZone
+/// nodes.
 fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     tag::<_, _, OracleError<'_>>("shuffle ")
@@ -25756,9 +25792,15 @@ fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<Pars
         actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: None,
         destination: Zone::Library,
-        target: second,
+        target: second.clone(),
         owner_library,
-        library_shuffle: Default::default(),
+        // CR 701.24c: the compound instruction settles both legs through one
+        // terminal owner population; neither leg may shuffle its own delivery.
+        library_shuffle: if owner_library {
+            crate::types::ability::LibraryShuffleMode::TerminalShuffle
+        } else {
+            Default::default()
+        },
         enter_transformed: false,
         enters_under: None,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -25772,6 +25814,17 @@ fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<Pars
     let sub_clause = imperative::with_shuffle_sub_ability(sub_effect);
     let mut sub_def = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
     sub_def.sub_ability = sub_clause.sub_ability;
+    if owner_library {
+        // The second leg's terminal constructor would scope a typed target to a
+        // single owner; the compound instruction must settle every owner from
+        // both legs, so replace it with the tracked-owner ScopedPlayer shuffle.
+        if let Some(terminal) = sub_def.sub_ability.as_deref_mut() {
+            *terminal.effect = Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            };
+            terminal.player_scope = Some(imperative::owner_library_shuffle_scope());
+        }
+    }
     // CR 115.6 + CR 701.24a: the SECOND subject is a clause of its own ("up to
     // three target cards from a single graveyard" — Serene Remembrance), but the
     // compound-shuffle producer builds its `AbilityDefinition` directly from the
@@ -25782,14 +25835,61 @@ fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<Pars
         sub_def.multi_target = extract_optional_target_multi_target(second_text, &sub_def.effect);
     }
 
-    // Build ChangeZone for the first subject as the primary effect
+    // Build ChangeZone for the first subject as the primary effect. A
+    // "this creature/permanent" source names a permanent only while it is on
+    // the battlefield (CR 400.7); a sacrificed/removed source must not be moved
+    // from its graveyard. A "~" source can be a spell still on the stack (Serene
+    // Remembrance), so it keeps the unconstrained origin.
+    let first_origin = if matches!(first, TargetFilter::SelfRef)
+        && (scan_contains_phrase(&lower, "this creature")
+            || scan_contains_phrase(&lower, "this permanent"))
+    {
+        Some(Zone::Battlefield)
+    } else {
+        None
+    };
+    // CR 608.2f: a self+target compound is one simultaneous action. A single
+    // ChangeZone over `Or { SelfRef, second }` keeps both members in one
+    // logical zone-change group (Dour Port-Mage sees one departure), while the
+    // tracked-owner terminal still settles each affected owner's shuffle.
+    if owner_library && matches!(first, TargetFilter::SelfRef) {
+        let effect = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            origin: first_origin,
+            destination: Zone::Library,
+            target: TargetFilter::Or {
+                filters: vec![TargetFilter::SelfRef, second.clone()],
+            },
+            owner_library,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::TerminalShuffle,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        };
+        let mut clause = imperative::with_shuffle_sub_ability(effect);
+        if clause.multi_target.is_none() {
+            clause.multi_target = extract_optional_target_multi_target(second_text, &clause.effect);
+        }
+        return Some(clause);
+    }
+
     let primary_effect = Effect::ChangeZone {
         actor: crate::types::ability::LibraryInstructionActor::Controller,
-        origin: None,
+        origin: first_origin,
         destination: Zone::Library,
         target: first,
         owner_library,
-        library_shuffle: Default::default(),
+        library_shuffle: if owner_library {
+            crate::types::ability::LibraryShuffleMode::TerminalShuffle
+        } else {
+            Default::default()
+        },
         enter_transformed: false,
         enters_under: None,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -31929,6 +32029,14 @@ fn extract_player_anchor(
             target_player: Some(filter),
             ..
         } => (filter, true),
+        // CR 400.3 + CR 608.2c: a source-owner shuffle ("this creature's owner
+        // shuffles it …") establishes the owner as the actor for a following
+        // "that player"/"they" clause. `Owner` is not a targetable player filter,
+        // but it is a valid antecedent, so register it before the player-slot
+        // predicate below.
+        Effect::Shuffle {
+            target: TargetFilter::Owner,
+        } => return Some(TargetFilter::Owner),
         Effect::Shuffle { target } => (target, false),
         Effect::ChangeZoneAll { target, .. } => (target, false),
         _ => return None,
@@ -32362,39 +32470,63 @@ fn repeat_for_each_this_way_suffix(pred_lower: &str) -> Option<QuantityExpr> {
 /// (`Controller`), a bare "that player" placeholder (`Player`), or the generic
 /// subject-parser default (`ParentTargetController`). Does not touch effects
 /// that already carry an explicit owner anaphor (`ParentTargetOwner`).
-fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter, draw_inherits_anchor: bool) {
+fn apply_anchor_subject(
+    effect: &mut Effect,
+    anchor: &TargetFilter,
+    draw_inherits_anchor: bool,
+    preserve_reveal_controller: bool,
+    preserve_search_controller: bool,
+) {
     // `ParentTarget` reaches this chain-local applier only from
     // `bind_player_anchor_in_chain`'s player-only `TargetOnly` wrapper
     // branch. It is a player reference there, but remains excluded from the
     // shared predicate because it can otherwise name an object.
     if !matches!(
         anchor,
-        TargetFilter::ParentTarget | TargetFilter::DeclaredPlayer { .. }
+        TargetFilter::ParentTarget | TargetFilter::DeclaredPlayer { .. } | TargetFilter::Owner
     ) && !target_filter_can_target_player(anchor)
     {
         return;
     }
     let slot_anchor = matches!(anchor, TargetFilter::DeclaredPlayer { .. });
+    let owner_anchor = matches!(anchor, TargetFilter::Owner);
     match effect {
         Effect::Shuffle { target }
-            if matches!(
-                *target,
-                TargetFilter::Controller
-                    | TargetFilter::Player
-                    | TargetFilter::ParentTargetController
-            ) || (slot_anchor
-                && matches!(
+            if !owner_anchor
+                && !preserve_search_controller
+                && (matches!(
                     *target,
-                    TargetFilter::TriggeringPlayer | TargetFilter::ParentTarget
-                )) =>
+                    TargetFilter::Controller
+                        | TargetFilter::Player
+                        | TargetFilter::ParentTargetController
+                ) || (slot_anchor
+                    && matches!(
+                        *target,
+                        TargetFilter::TriggeringPlayer | TargetFilter::ParentTarget
+                    ))) =>
         {
             *target = anchor.clone();
         }
         Effect::SearchLibrary {
             target_player: tp @ None,
             ..
-        } => {
+        } if !owner_anchor && !preserve_search_controller => {
             *tp = Some(anchor.clone());
+        }
+        // CR 608.2c: "If that player does, they reveal …" after a source-owner
+        // shuffle names the same owner. The chain anchor is the parser's shared
+        // actor authority; bind it here, at the clause that resolves the
+        // subject, instead of rewriting the completed ability tree.
+        Effect::RevealUntil { player, .. }
+            if !preserve_reveal_controller
+                && (matches!(*player, TargetFilter::ParentTarget | TargetFilter::Player)
+                    || (draw_inherits_anchor
+                        && matches!(
+                            *player,
+                            TargetFilter::Controller | TargetFilter::ParentTargetController
+                        ))) =>
+        {
+            *player = anchor.clone();
         }
         // A `ParentTarget` anchor is provenance-safe only for the nested mass
         // library move that established it. Search result collection uses a
@@ -32405,11 +32537,12 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter, draw_inherit
             destination: Zone::Library,
             target,
             ..
-        } if *target == TargetFilter::Controller => {
+        } if !owner_anchor && *target == TargetFilter::Controller => {
             *target = anchor.clone();
         }
         Effect::ChangeZoneAll { target, .. }
-            if !matches!(anchor, TargetFilter::ParentTarget)
+            if !owner_anchor
+                && !matches!(anchor, TargetFilter::ParentTarget)
                 && *target == TargetFilter::Controller =>
         {
             *target = anchor.clone();
@@ -32452,13 +32585,47 @@ fn apply_anchor_subject_to_clause(
     text_lower: &str,
 ) {
     let draw_inherits_anchor = chunk_continues_anchored_subject(text_lower);
+    // CR 109.5: an explicit "your library" possession is printed, not an
+    // inherited actor; never let the previous clause's anchor overwrite it.
+    let preserve_reveal_controller = scan_contains_phrase(text_lower, "your library");
+    // CR 109.5 + CR 701.23: "search your library" is printed to the ability's
+    // controller, not the preceding owner anchor.
+    let preserve_search_controller = scan_contains_phrase(text_lower, "search your library");
+    let preserve_caster_shuffle =
+        preserve_search_controller || scan_contains_phrase(text_lower, "then shuffle");
     apply_their_library_reveal_anchor(&mut clause.effect, anchor, text_lower);
-    apply_anchor_subject(&mut clause.effect, anchor, draw_inherits_anchor);
+    apply_anchor_subject(
+        &mut clause.effect,
+        anchor,
+        draw_inherits_anchor,
+        preserve_reveal_controller,
+        preserve_search_controller,
+    );
     let mut sub = clause.sub_ability.as_deref_mut();
     while let Some(def) = sub {
         apply_their_library_reveal_anchor(def.effect.as_mut(), anchor, text_lower);
-        apply_anchor_subject(def.effect.as_mut(), anchor, draw_inherits_anchor);
+        apply_anchor_subject(
+            def.effect.as_mut(),
+            anchor,
+            draw_inherits_anchor,
+            preserve_reveal_controller,
+            preserve_search_controller,
+        );
         sub = def.sub_ability.as_deref_mut();
+    }
+    // CR 701.23 + CR 109.5: "Search your library …, then shuffle" is the
+    // caster's own shuffle; a preceding owner anchor must not retarget it.
+    if preserve_caster_shuffle {
+        if let Effect::Shuffle { target } = &mut clause.effect {
+            *target = TargetFilter::Controller;
+        }
+        let mut node = clause.sub_ability.as_deref_mut();
+        while let Some(def) = node {
+            if let Effect::Shuffle { target } = def.effect.as_mut() {
+                *target = TargetFilter::Controller;
+            }
+            node = def.sub_ability.as_deref_mut();
+        }
     }
 }
 
@@ -33788,6 +33955,13 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
     let Some(subject_filter) = subject.target.clone().or_else(|| subject.affected.clone()) else {
         return;
     };
+    // CR 109.5 + CR 608.2c: the source-owner anchor is resolvable only by the
+    // reveal path (live-or-LKI). Do not inject it into Draw/other recipients
+    // whose shared resolver has no Owner arm and would fall back to the
+    // activator.
+    if subject_filter == TargetFilter::Owner && !matches!(effect, Effect::RevealUntil { .. }) {
+        return;
+    }
     // CR 115.1 + CR 701.21a (R1 honest gap): a Sacrifice/ChangeZone whose
     // subject is a bare, unproven `ParentTarget` anaphor (no
     // `inherits_parent` proof — My Forces Are Innumerable's collective
