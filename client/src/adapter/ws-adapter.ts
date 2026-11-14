@@ -3262,13 +3262,25 @@ export class WebSocketAdapter implements EngineAdapter {
       case "TerminalResult": {
         const delivery = (msg.data as { delivery?: FullTerminalDelivery }).delivery;
         if (!delivery) break;
+        // Claim terminal ownership at frame acceptance, before any await. A
+        // transport error or close that lands while the delivery is being
+        // persisted must not surface as a session failure (whose consumers
+        // dispose this adapter and its listeners before the result is
+        // published) or start a reconnect.
+        this.gameEnded = true;
+        this.emit({ type: "actionPendingChanged", pending: false });
         if (this.options.nativePregame?.callerManagedTerminalDelivery) {
-          this.gameEnded = true;
-          this.emit({ type: "actionPendingChanged", pending: false });
           this.emit({ type: "sessionChanged", session: null });
           this.emit({ type: "terminalDelivery", delivery });
           break;
         }
+        // The resumable session is kept until the delivery is durably committed
+        // and acknowledged: `dispose()` leaves it alone while cleanup is pending.
+        // On retention failure nothing is acknowledged and the session is never
+        // cleared, so the server-side result is not discarded; the failure is
+        // surfaced as `terminalUnavailable`.
+        this.terminalCleanupPending = true;
+        const terminalSession = this.currentSession();
         void (async () => {
           if (!(await commitFullTerminalDelivery(delivery))) {
             this.emit({
@@ -3277,10 +3289,6 @@ export class WebSocketAdapter implements EngineAdapter {
             });
             return;
           }
-          this.gameEnded = true;
-          this.emit({ type: "actionPendingChanged", pending: false });
-          const terminalSession = this.currentSession();
-          this.terminalCleanupPending = true;
           if (terminalSession) {
             this.emit({ type: "sessionChanged", session: { ...terminalSession, terminalOnly: true } });
           }

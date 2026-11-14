@@ -16,7 +16,11 @@ type NativeAdapterEvent =
   // Non-terminal: the server refused a fire-and-forget request. Listed here
   // alongside the two terminal events precisely because `handleNativeEvent`
   // must treat it differently from both.
-  | { type: "requestRejected"; reason: string };
+  | { type: "requestRejected"; reason: string }
+  // Terminal events from the native engine (mirrors WsAdapterEvent)
+  | { type: "terminalDelivery"; delivery: { key: { game_code: string; generation: number }; terminalRevision: number; deliveryId: string; credential: string; display: { winner: number | null; reason: string }; finalView?: unknown } }
+  | { type: "gameOver"; winner: number | null; reason: string }
+  | { type: "terminalUnavailable"; message: string };
 
 const {
   NativeEngineVersionMismatchError,
@@ -141,6 +145,7 @@ const {
     adapter: null as unknown,
     gameId: null as string | null,
     gameState: null,
+    waitingFor: null as unknown,
     initGame: vi.fn(async (gameId: string, adapter: { initialize: () => Promise<void> }, ..._payload: unknown[]) => {
       gameStoreState.gameId = gameId;
       gameStoreState.adapter = adapter;
@@ -446,6 +451,7 @@ describe("GameProvider native AI routing", () => {
     loadActiveGame.mockReturnValue(null);
     gameStoreState.resumeNativeSolo.mockClear();
     gameStoreState.initGame.mockClear();
+    gameStoreState.waitingFor = null;
     nativeAdapters.splice(0);
     wasmAdapters.splice(0);
     multiplayerDraftGetState.mockReset();

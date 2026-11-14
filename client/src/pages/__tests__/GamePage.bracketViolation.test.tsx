@@ -48,6 +48,7 @@ let capturedOnP2PEvent: ((event: P2PAdapterEvent) => void) | undefined;
 // The join/spectate origin the route carried, handed down as a provider prop.
 let capturedServerUrl: string | undefined;
 let capturedPile: string | undefined;
+let capturedGameId: string | undefined;
 
 const {
   mockCanActForWaitingState,
@@ -114,6 +115,7 @@ const { mockMultiplayerState, mockUseMultiplayerStore } = vi.hoisted(() => {
 vi.mock("../../providers/GameProvider", () => ({
   GameProvider: ({
     children,
+    gameId,
     onNoDeck,
     onWsEvent,
     onP2PEvent,
@@ -122,6 +124,7 @@ vi.mock("../../providers/GameProvider", () => ({
     pile,
   }: {
     children: React.ReactNode;
+    gameId: string;
     onNoDeck?: (reason?: string, bracketViolation?: boolean) => void;
     onWsEvent?: (event: WsAdapterEvent) => void;
     onP2PEvent?: (event: P2PAdapterEvent) => void;
@@ -129,6 +132,7 @@ vi.mock("../../providers/GameProvider", () => ({
     serverUrl?: string;
     pile?: string;
   }) => {
+    capturedGameId = gameId;
     capturedOnNoDeck = onNoDeck;
     capturedOnWsEvent = onWsEvent;
     capturedOnP2PEvent = onP2PEvent;
@@ -457,6 +461,7 @@ beforeEach(() => {
   capturedOnWsEvent = undefined;
   capturedOnP2PEvent = undefined;
   capturedServerUrl = undefined;
+  capturedGameId = undefined;
   capturedGameMenuProps = undefined;
   storeOverrides.adapter = null;
   storeOverrides.gameState = null;
@@ -1831,6 +1836,42 @@ describe("GamePage — rematch preserves the format the game was played with", (
     // `FORMAT_DEFAULTS` is a Proxy in this suite, so a lost hand-over surfaces
     // as `undefined` here rather than as the real 40.
     expect(capturedFormatConfig?.starting_life).toBe(25);
+  });
+
+  it("surfaces a transport failure of the rematched game after the previous game ended", async () => {
+    const user = userEvent.setup();
+    storeOverrides.waitingFor = { type: "GameOver", data: { winner: 0 } };
+    renderGamePage("/game/old-game-id?mode=ai");
+
+    act(() => {
+      capturedOnWsEvent?.({
+        type: "terminalDelivery",
+        delivery: {
+          key: { game_code: "GAME01", generation: 1 },
+          terminalRevision: 1,
+          deliveryId: "del-1",
+          credential: "cred-1",
+          display: { winner: 0, reason: "Victory" },
+        },
+      });
+    });
+    // Within the finished game a late transport error stays suppressed.
+    act(() => {
+      capturedOnWsEvent?.({ type: "error", message: "WebSocket connection failed" });
+    });
+    expect(screen.queryByText("Connection lost")).toBeNull();
+
+    await user.click(await screen.findByRole("button", { name: "Rematch" }));
+    storeOverrides.waitingFor = null;
+    await waitFor(() => expect(capturedGameId).not.toBe("old-game-id"));
+    expect(capturedGameId).toEqual(expect.any(String));
+
+    act(() => {
+      capturedOnWsEvent?.({ type: "error", message: "WebSocket connection failed" });
+    });
+
+    expect(screen.getByText("Connection lost")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Return to Menu" })).toBeInTheDocument();
   });
 });
 

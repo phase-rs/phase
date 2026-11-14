@@ -53,7 +53,7 @@ class MockWebSocket extends EventTarget {
   }
   // Deliver raw observers and the IDL handler once each; happy-dom would
   // otherwise invoke the same IDL handler again through dispatchEvent.
-  dispatchSynthetic(type: "message" | "close", data?: string, closeEvent = new CloseEvent("close")) {
+  dispatchSynthetic(type: "message" | "close" | "error", data?: string, closeEvent = new CloseEvent("close")) {
     if (type === "message" && data !== undefined) {
       const handler = this.onmessage;
       this.onmessage = null;
@@ -63,6 +63,12 @@ class MockWebSocket extends EventTarget {
     } else if (type === "close") {
       this.onclose?.(closeEvent);
       this.dispatchEvent(closeEvent);
+    } else if (type === "error") {
+      const handler = this.onerror;
+      this.onerror = null;
+      this.dispatchEvent(new Event("error"));
+      this.onerror = handler;
+      handler?.();
     }
   }
 }
@@ -841,7 +847,7 @@ describe("WebSocketAdapter", () => {
   });
 
   describe("native AI transport", () => {
-    const nativeAiOptions = (socketFactory: () => PhaseSocketTransport) => ({
+    const nativeAiOptions = (socketFactory: (url: string) => PhaseSocketTransport) => ({
       nativeAi: {
         socketFactory,
         aiSeats: [{
@@ -1211,53 +1217,22 @@ describe("WebSocketAdapter", () => {
       );
     });
 
-    it("suppresses transport error after gameEnded", async () => {
-      const socketFactory = vi.fn(
-        () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
-      );
-      const nativeAdapter = new WebSocketAdapter(
-        "native-engine",
-        "host",
-        { main_deck: [], sideboard: [] },
-        undefined,
-        undefined,
-        undefined,
-        "Player",
-        nativeAiOptions(socketFactory),
-      );
-      const initPromise = nativeAdapter.initialize();
-      const nativeSocket = await completeHandshake(nativeAdapter);
-      nativeSocket.dispatchSynthetic("message", JSON.stringify({
-        type: "GameStarted",
-        data: { state: createMockState(), your_player: 0 },
-      }));
-      await initPromise;
+    const NATIVE_FULL_KEY = { game_code: "NATIVE", generation: 1 };
+    const nativeDelivery: FullTerminalDelivery = {
+      key: NATIVE_FULL_KEY,
+      terminalRevision: 5,
+      deliveryId: "del-123",
+      credential: "cred-456",
+      display: { winner: 0, reason: "Victory" },
+    };
 
-      const events: unknown[] = [];
-      nativeAdapter.onEvent((event) => events.push(event));
-
-      nativeSocket.dispatchSynthetic("message", JSON.stringify({
-        type: "GameOver",
-        data: { winner: 0, reason: "victory" },
-      }));
-
-      expect(events).toContainEqual(expect.objectContaining({ type: "gameOver", winner: 0 }));
-
-      // Socket error after game over should be suppressed and not emit "error"
-      nativeSocket.dispatchSynthetic("error");
-      expect(events).not.toContainEqual(expect.objectContaining({ type: "error" }));
-
-      nativeAdapter.dispose();
-    });
-
-    it("uses the native socket factory to acknowledge terminal delivery and suppresses post-terminal errors", async () => {
-      let ackSocket: MockWebSocket | null = null;
+    /** Starts a live native solo game whose resumable session is established. */
+    async function liveNativeGame() {
+      const sockets: MockWebSocket[] = [];
       const socketFactory = vi.fn((url: string) => {
-        const sock = new MockWebSocket(url);
-        if (socketFactory.mock.calls.length === 2) {
-          ackSocket = sock;
-        }
-        return sock as unknown as PhaseSocketTransport;
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket as unknown as PhaseSocketTransport;
       });
       const nativeAdapter = new WebSocketAdapter(
         "native-engine",
@@ -1271,54 +1246,125 @@ describe("WebSocketAdapter", () => {
       );
       const initPromise = nativeAdapter.initialize();
       const nativeSocket = await completeHandshake(nativeAdapter);
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "GameCreated",
+        data: { game_code: "NATIVE", player_token: "native-token", full_key: NATIVE_FULL_KEY },
+      }));
       nativeSocket.dispatchSynthetic("message", JSON.stringify({
         type: "GameStarted",
         data: {
           state: createMockState(),
           your_player: 0,
+          player_token: "native-token",
+          full_key: NATIVE_FULL_KEY,
         },
       }));
       await initPromise;
-
-      const events: unknown[] = [];
+      const events: Array<{ type: string } & Record<string, unknown>> = [];
       nativeAdapter.onEvent((event) => events.push(event));
+      return { nativeAdapter, nativeSocket, socketFactory, sockets, events };
+    }
 
-      const delivery: FullTerminalDelivery = {
-        key: { game_code: "", generation: 1 },
-        terminalRevision: 5,
-        deliveryId: "del-123",
-        credential: "cred-456",
-        display: { winner: 0, reason: "Victory" },
-      };
+    it("surfaces a transport error during a live native game", async () => {
+      // Positive control for the suppression tests below: the same fixture and
+      // the same error dispatch reach the production `onerror` handler.
+      const { nativeAdapter, nativeSocket, events } = await liveNativeGame();
+
+      nativeSocket.dispatchSynthetic("error");
+
+      expect(events).toContainEqual({ type: "error", message: "WebSocket connection failed" });
+      nativeAdapter.dispose();
+    });
+
+    it("suppresses a transport error after GameOver", async () => {
+      const { nativeAdapter, nativeSocket, events } = await liveNativeGame();
+
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "GameOver",
+        data: { winner: 0, reason: "victory" },
+      }));
+      expect(events).toContainEqual(expect.objectContaining({ type: "gameOver", winner: 0 }));
+
+      nativeSocket.dispatchSynthetic("error");
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "error" }));
+      nativeAdapter.dispose();
+    });
+
+    it("claims a native terminal delivery before persistence and acknowledges it through the bridge", async () => {
+      let releaseCommit!: (retained: boolean) => void;
+      terminalStore.commit.mockImplementationOnce(
+        () => new Promise<boolean>((resolve) => { releaseCommit = resolve; }),
+      );
+      const { nativeAdapter, nativeSocket, socketFactory, sockets, events } = await liveNativeGame();
 
       nativeSocket.dispatchSynthetic("message", JSON.stringify({
         type: "TerminalResult",
-        data: { delivery },
+        data: { delivery: nativeDelivery },
       }));
+      expect(terminalStore.commit).toHaveBeenCalledWith(nativeDelivery);
 
+      // The bridge fails while the delivery is still being persisted.
+      nativeSocket.dispatchSynthetic("error");
+      nativeSocket.dispatchSynthetic("close", undefined, new CloseEvent("close", { code: 1006, wasClean: false }));
+      await Promise.resolve();
+
+      const types = () => events.map((event) => event.type);
+      expect(types()).not.toContain("error");
+      expect(types()).not.toContain("reconnecting");
+      expect(types()).not.toContain("reconnectFailed");
+      expect(types()).not.toContain("terminalDelivery");
+      expect(socketFactory).toHaveBeenCalledOnce();
+
+      releaseCommit(true);
       await vi.waitFor(() => {
-        expect(events).toContainEqual(expect.objectContaining({ type: "terminalDelivery", delivery }));
+        expect(events).toContainEqual({ type: "terminalDelivery", delivery: nativeDelivery });
         expect(socketFactory).toHaveBeenCalledTimes(2);
       });
+      // The resumable session survives the transport loss as a terminal-only
+      // recovery pointer until the acknowledgement lands.
+      expect(events).toContainEqual({
+        type: "sessionChanged",
+        session: expect.objectContaining({ gameCode: "NATIVE", fullKey: NATIVE_FULL_KEY, terminalOnly: true }),
+      });
+      expect(events).not.toContainEqual({ type: "sessionChanged", session: null });
 
-      expect(ackSocket).not.toBeNull();
-      // Complete handshake on ackSocket and acknowledge delivery
-      ackSocket!.dispatchSynthetic("message", SERVER_HELLO);
-      await Promise.resolve();
-      ackSocket!.dispatchSynthetic("message", JSON.stringify({ type: "TerminalDeliveryAcknowledged" }));
+      const ackSocket = sockets[1]!;
+      expect(ackSocket.url).toBe("native-engine");
+      ackSocket.dispatchSynthetic("message", SERVER_HELLO);
+      await vi.waitFor(() => expect(ackSocket.send).toHaveBeenCalledWith(JSON.stringify({
+        type: "AckTerminalDelivery",
+        data: { delivery_id: nativeDelivery.deliveryId, credential: nativeDelivery.credential },
+      })));
+      ackSocket.dispatchSynthetic("message", JSON.stringify({ type: "TerminalDeliveryAcknowledged" }));
 
       await vi.waitFor(() => {
         expect(events).toContainEqual({ type: "sessionChanged", session: null });
       });
+      expect(types()).not.toContain("terminalUnavailable");
+      expect(types()).not.toContain("error");
+      nativeAdapter.dispose();
+    });
 
-      // It must not fail with terminalUnavailable ("The URL 'native-engine' is invalid")
-      expect(events).not.toContainEqual(expect.objectContaining({ type: "terminalUnavailable" }));
+    it("keeps the session and skips the acknowledgement when a native terminal delivery cannot be retained", async () => {
+      terminalStore.commit.mockResolvedValueOnce(false);
+      const { nativeAdapter, nativeSocket, socketFactory, events } = await liveNativeGame();
 
-      // Error on socket after gameEnded must not emit error
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "TerminalResult",
+        data: { delivery: nativeDelivery },
+      }));
+      await vi.waitFor(() => {
+        expect(events).toContainEqual({ type: "terminalUnavailable", message: "Failed to retain terminal delivery" });
+      });
       nativeSocket.dispatchSynthetic("error");
-      expect(events).not.toContainEqual(expect.objectContaining({ type: "error" }));
+
+      const types = events.map((event) => event.type);
+      expect(types).not.toContain("terminalDelivery");
+      expect(types).not.toContain("error");
+      expect(socketFactory).toHaveBeenCalledOnce();
 
       nativeAdapter.dispose();
+      expect(events).not.toContainEqual({ type: "sessionChanged", session: null });
     });
   });
 
