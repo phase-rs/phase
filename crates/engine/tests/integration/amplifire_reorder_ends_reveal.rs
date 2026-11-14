@@ -23,9 +23,12 @@ use engine::game::triggers::process_triggers;
 use engine::game::visibility::{
     filter_state_for_unseated_viewer, filter_state_for_viewer, HIDDEN_CARD_NAME,
 };
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -372,5 +375,173 @@ fn amplifire_full_library_permutation_hides_every_reordered_card() {
     assert!(
         shifted_witness_seen,
         "some seed must deliver Hill Giant first so its position is only shifted"
+    );
+}
+
+const CALIBRATED_BLAST_ORACLE: &str = "Reveal cards from the top of your library until you reveal a nonland card. Put the revealed cards on the bottom of your library in a random order. When you reveal a nonland card this way, Calibrated Blast deals damage equal to that card's mana value to any target.";
+const SOLDIER_OF_FORTUNE_ORACLE: &str = "{R}, {T}: Target player shuffles their library.";
+
+/// CR 701.24a + CR 701.20d: A shuffle of a multi-card library retires active reveal
+/// leases (such as Calibrated Blast's stack-bound reflexive trigger lease) even when
+/// the shuffle samples the unchanged permutation (identity shuffle).
+///
+/// In a two-player scenario, P0 casts Calibrated Blast. It reveals a nonland card C
+/// and bottoms it, leaving P0's library as [L, C] while the reflexive trigger waits
+/// on the stack with an active reveal lease on C.
+///
+/// While the reflexive waits, P0 activates Soldier of Fortune targeting P0.
+/// Across seeds, we find a run where the 2-card shuffle samples the unchanged
+/// permutation [L, C]. CR 701.24a governs the shuffle, and CR 701.20d governs reveal
+/// retirement. The test asserts that C's reveal lease is retired, its incarnation is
+/// bumped, and its name is concealed from both P1 and unseated spectators.
+/// The test would fail if retirement required a changed permutation.
+#[test]
+fn multi_card_identity_shuffle_retires_reveal_lease_and_conceals_library() {
+    let mut identity_witness_seen = false;
+
+    for seed in 0..100u64 {
+        let mut scenario = GameScenario::new_n_player(2, seed);
+        scenario.at_phase(Phase::PreCombatMain);
+
+        let blast = scenario
+            .add_spell_to_hand_from_oracle(P0, "Calibrated Blast", true, CALIBRATED_BLAST_ORACLE)
+            .id();
+        let soldier = scenario
+            .add_creature_from_oracle(P0, "Soldier of Fortune", 1, 1, SOLDIER_OF_FORTUNE_ORACLE)
+            .id();
+
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ],
+        );
+
+        // Nonland C over land L: top is nonland, second is land.
+        let land = scenario
+            .add_spell_to_library_top(P0, "Forest", false)
+            .as_land()
+            .id();
+        let nonland = scenario
+            .add_spell_to_library_top(P0, "Three Drop", false)
+            .with_mana_cost(ManaCost::generic(3))
+            .id();
+
+        let mut runner = scenario.build();
+
+        // Cast Calibrated Blast: reveals C, bottoms it (singleton), puts reflexive on stack.
+        runner.cast(blast).commit();
+
+        // Pass priority until TriggerTargetSelection prompt for the reflexive trigger opens.
+        for _ in 0..8 {
+            match runner.state().waiting_for.clone() {
+                WaitingFor::TriggerTargetSelection { .. } => break,
+                WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                    runner.act(GameAction::PassPriority).expect("pass priority");
+                }
+                _ => break,
+            }
+        }
+
+        let WaitingFor::TriggerTargetSelection { .. } = runner.state().waiting_for.clone() else {
+            panic!(
+                "expected TriggerTargetSelection, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+
+        // Choose P1 as the target for the reflexive trigger
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P1)),
+            })
+            .expect("choose reflexive target");
+
+        // Reach guard: Calibrated Blast reflexive trigger holds a lease on C's occurrence.
+        assert!(
+            runner.state().holds_stack_bound_reveal(nonland),
+            "reach guard: C's occurrence held by stack-bound reveal"
+        );
+
+        let library_before: Vec<ObjectId> =
+            runner.state().players[0].library.iter().copied().collect();
+        assert_eq!(
+            library_before,
+            vec![land, nonland],
+            "library must be [L, C] before shuffle"
+        );
+        let nonland_incarnation_before = runner.state().objects[&nonland].incarnation;
+
+        // Activate Soldier of Fortune targeting P0 while the reflexive trigger waits.
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: soldier,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("activate Soldier of Fortune");
+
+        if let WaitingFor::TargetSelection { .. } = runner.state().waiting_for.clone() {
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Player(P0)),
+                })
+                .expect("select P0 as target player for Soldier of Fortune");
+        }
+
+        assert_eq!(
+            runner.state().stack.len(),
+            2,
+            "Soldier of Fortune ability on stack above reflexive"
+        );
+
+        // Pass priority to resolve Soldier of Fortune's ability
+        runner.act(GameAction::PassPriority).expect("P0 passes");
+        runner.act(GameAction::PassPriority).expect("P1 passes");
+
+        let library_after: Vec<ObjectId> =
+            runner.state().players[0].library.iter().copied().collect();
+
+        // Check if the shuffle sampled the identity (unchanged) permutation
+        if library_after == library_before {
+            identity_witness_seen = true;
+
+            // CR 701.24a + CR 701.20d: Even with an unchanged multi-card permutation,
+            // the shuffle MUST retire reveals and make cards new objects.
+            let state = runner.state();
+            assert!(
+                !state.revealed_cards.contains(&nonland)
+                    && !state.public_revealed_cards.contains(&nonland)
+                    && !state.holds_stack_bound_reveal(nonland),
+                "seed {seed}: identity shuffle must retire reveal lease on C (order {library_after:?})"
+            );
+            assert!(
+                state.objects[&nonland].incarnation > nonland_incarnation_before,
+                "seed {seed}: identity shuffle must bump incarnation of C"
+            );
+
+            // Concealment from opponent (P1) and unseated spectators
+            let p1_view = filter_state_for_viewer(state, P1);
+            let spectator_view = filter_state_for_unseated_viewer(state);
+            assert_eq!(
+                p1_view.objects[&nonland].name, HIDDEN_CARD_NAME,
+                "seed {seed}: P1 must not see concealed card after identity shuffle"
+            );
+            assert_eq!(
+                spectator_view.objects[&nonland].name, HIDDEN_CARD_NAME,
+                "seed {seed}: spectator must not see concealed card after identity shuffle"
+            );
+            break;
+        }
+    }
+
+    assert!(
+        identity_witness_seen,
+        "a multi-card identity shuffle witness must be observed within 100 seeds"
     );
 }

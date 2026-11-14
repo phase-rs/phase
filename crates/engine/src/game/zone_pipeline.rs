@@ -1503,7 +1503,15 @@ fn deliver_batch(
     while let Some(req) = queue.next() {
         let destination = req.to;
         let face_down_in_exile = req.face_down_in_exile;
-        let anticipated_pause = anticipated_zone_change_delivery(state, &req);
+        // CR 701.20b + CR 400.6: In-library reorders are not moves between zones;
+        // classify same-library placement before anticipated capture.
+        let from_zone = state.objects.get(&req.object_id).map(|o| o.zone);
+        let is_same_library = from_zone == Some(Zone::Library) && destination == Zone::Library;
+        let anticipated_pause = if is_same_library {
+            None
+        } else {
+            anticipated_zone_change_delivery(state, &req)
+        };
         let delivery_start = events.len();
         let object_id = req.object_id;
         match move_object_with_terminal(state, req, events) {
@@ -1658,6 +1666,11 @@ fn anticipated_zone_change_delivery(
     request: &ZoneMoveRequest,
 ) -> Option<PendingZoneChangeDelivery> {
     let object = state.objects.get(&request.object_id)?;
+    // CR 701.20b + CR 400.6: In-library reorders are not moves between zones;
+    // they construct no zone-change proposal.
+    if object.zone == Zone::Library && request.to == Zone::Library {
+        return None;
+    }
     let mut expected_event =
         ProposedEvent::zone_change(request.object_id, object.zone, request.to, request.source());
     if let ProposedEvent::ZoneChange {

@@ -588,6 +588,11 @@ pub(crate) fn anticipated_zone_change_delivery(
     face_down_in_exile: crate::types::ability::ExileConcealment,
 ) -> Option<PendingZoneChangeDelivery> {
     let object = state.objects.get(&object_id)?;
+    // CR 701.20b + CR 400.6: In-library reorders are not moves between zones;
+    // they construct no zone-change proposal.
+    if object.zone == Zone::Library && destination == Zone::Library {
+        return None;
+    }
     let mut expected_event =
         ProposedEvent::zone_change(object_id, object.zone, destination, Some(source_id));
     if let ProposedEvent::ZoneChange {
@@ -3248,13 +3253,20 @@ pub fn resolve_all(
         // control" effects.
         // CR 122.1 + CR 122.1h: each object enters with the resolved counters
         // (e.g. a finality counter on Shilgengar's mass return).
-        let anticipated_pause = anticipated_zone_change_delivery(
-            state,
-            obj_id,
-            dest_zone,
-            ability.source_id,
-            ability.context.face_down_in_exile,
-        );
+        // CR 701.20b + CR 400.6: In-library reorders are not moves between zones;
+        // classify same-library placement before anticipated capture.
+        let is_same_library = per_object_origin == Zone::Library && dest_zone == Zone::Library;
+        let anticipated_pause = if is_same_library {
+            None
+        } else {
+            anticipated_zone_change_delivery(
+                state,
+                obj_id,
+                dest_zone,
+                ability.source_id,
+                ability.context.face_down_in_exile,
+            )
+        };
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
         match crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
