@@ -25849,9 +25849,11 @@ fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<Pars
         None
     };
     // CR 608.2f: a self+target compound is one simultaneous action. A single
-    // ChangeZone over `Or { SelfRef, second }` keeps both members in one
-    // logical zone-change group (Dour Port-Mage sees one departure), while the
+    // ChangeZone over `Or { SelfRef, second }` keeps both members in one logical
+    // zone-change group (Dour Port-Mage sees one departure), while the
     // tracked-owner terminal still settles each affected owner's shuffle.
+    // CR 115.1c: SelfRef is a context reference, so the targeting layer excludes
+    // it from the declared target candidates; only `second` is announced.
     if owner_library && matches!(first, TargetFilter::SelfRef) {
         let effect = Effect::ChangeZone {
             actor: crate::types::ability::LibraryInstructionActor::Controller,

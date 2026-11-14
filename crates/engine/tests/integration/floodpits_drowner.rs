@@ -333,7 +333,8 @@ fn parser_produces_compound_shuffle_chain() {
     );
 
     // CR 608.2f: self+target is one grouped Or move so both members share a
-    // single logical zone-change group.
+    // single logical zone-change group. CR 115.1c: only the stunned creature is
+    // a declared target; SelfRef is a context branch excluded by targeting.
     match &effect {
         Effect::ChangeZone {
             destination: Zone::Library,

@@ -426,6 +426,39 @@ fn exiled_cost_self_shuffle_finds_the_public_successor() {
 /// CR 701.24c: Floodpits Drowner can be destroyed in response while its other
 /// owner's target remains legal. The stale source does not move, but its known
 /// owner still shuffles; the legal target's owner also shuffles.
+/// CR 115.1c + CR 115.10a: the Drowner's source is moved by the grouped action
+/// but is not itself a declared target. With no stunned creature, activation
+/// must be rejected rather than offering the unstunned Drowner as its own target.
+#[test]
+fn drowner_requires_a_stunned_creature_to_target() {
+    const DROWNER: &str = "Flash\nVigilance\nWhen this creature enters, tap target creature an opponent controls and put a stun counter on it.\n{1}{U}, {T}: Shuffle this creature and target creature with a stun counter on it into their owners' libraries.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let drowner = scenario
+        .add_creature_from_oracle(P0, "Floodpits Drowner", 2, 1, DROWNER)
+        .id();
+    scenario.add_creature(P0, "Unstunned Creature", 1, 1).id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, drowner, false, vec![]),
+            ManaUnit::new(ManaType::Blue, drowner, false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+
+    let result = runner.act(GameAction::ActivateAbility {
+        source_id: drowner,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    });
+    assert!(
+        result.is_err(),
+        "no stunned creature means no legal target for the Drowner activation"
+    );
+    assert!(runner.state().stack.is_empty());
+}
+
 /// CR 608.2f: Floodpits Drowner's "shuffle this creature and target creature
 /// with a stun counter on it" is one simultaneous action. Dour Port-Mage's
 /// "one or more other creatures you control leave the battlefield without
