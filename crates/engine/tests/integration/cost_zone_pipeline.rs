@@ -980,6 +980,7 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         .description("Prevent the staged mana cost move".to_string())]
     .into();
     state.pending_replacement = Some(PendingReplacement {
+        settled_damage_guards: Vec::new(),
         proposed: ProposedEvent::Destroy {
             object_id: source,
             source: None,
@@ -5322,6 +5323,7 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         .description("Prevent the staged cost move".to_string())]
     .into();
     runner.state_mut().pending_replacement = Some(PendingReplacement {
+        settled_damage_guards: Vec::new(),
         proposed: ProposedEvent::Destroy {
             object_id: source,
             source: None,

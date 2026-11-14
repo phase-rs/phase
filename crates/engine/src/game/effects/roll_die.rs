@@ -559,6 +559,18 @@ pub(crate) fn publish_completed_result_to_parent(state: &mut GameState) {
     }
 }
 
+/// CR 706.3a + CR 608.2c: whether the stack top is a die-roll frame re-parked
+/// mid-loop, after a results-table branch suspended, whose remaining dice a
+/// priority-time drain may resume. A frame still at its first die is a pending
+/// CR 706.6 keep prompt, which stays parked for `GameAction::SelectDieRolls`,
+/// the only thing that knows the roller's picks.
+pub(crate) fn active_die_roll_is_resumable(state: &GameState) -> bool {
+    matches!(
+        state.resolution_stack.active_die_roll(),
+        Some(pending) if pending.next_index > 0
+    )
+}
+
 /// CR 706.3a + CR 608.2c: Continue a die-roll instruction whose results-table
 /// branch suspended for its own interactive choice.
 ///
@@ -581,14 +593,7 @@ pub(crate) fn publish_completed_result_to_parent(state: &mut GameState) {
 /// or an explicit clear. Replay is not publication; errors restore both entry
 /// scalar and publication authority.
 pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    // Only a mid-loop re-park drains here; a pending CR 706.6 keep prompt must
-    // stay parked for its own action handler, which is the only thing that knows
-    // the roller's picks.
-    let resumable = matches!(
-        state.resolution_stack.active_die_roll(),
-        Some(pending) if pending.next_index > 0
-    );
-    if !resumable {
+    if !active_die_roll_is_resumable(state) {
         return;
     }
     let Ok(Some(pending)) = state.take_active_die_roll_frame() else {

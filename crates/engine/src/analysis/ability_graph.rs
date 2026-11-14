@@ -970,6 +970,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
         | Effect::Regenerate { .. }

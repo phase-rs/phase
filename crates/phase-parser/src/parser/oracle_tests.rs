@@ -26606,12 +26606,7 @@ fn crumbling_sanctuary_parses_as_replacement_without_swallowed_clause() {
 
     let replacement = &parsed.replacements[0];
     assert_eq!(replacement.event, ReplacementEvent::DamageDone);
-    assert_eq!(
-        replacement.shield_kind,
-        ShieldKind::Prevention {
-            amount: PreventionAmount::All
-        }
-    );
+    assert_eq!(replacement.shield_kind, ShieldKind::Substitution);
     let execute = replacement.execute.as_ref().expect("execute present");
     assert!(matches!(
         *execute.effect,

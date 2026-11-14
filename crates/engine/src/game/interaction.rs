@@ -4300,6 +4300,7 @@ fn target_intent(effect_kind: EffectKind, detail: TargetEffectDetail) -> Interac
         | EffectKind::DamageAll
         | EffectKind::DamageEachPlayer
         | EffectKind::ApplyPostReplacementDamage
+        | EffectKind::ResumeDamageBatch
         | EffectKind::EachDealsDamageEqualToPower
         | EffectKind::EachSourceDealsDamage => InteractionIntentCode::Damage,
         // CR 701.8: destroy.

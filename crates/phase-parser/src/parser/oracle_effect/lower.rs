@@ -2593,8 +2593,9 @@ pub(super) fn target_choice_timing_for_parsed(
         // `Effect::unimplemented("plural_attachment_anaphor")` before any
         // `Effect::Attach` exists. Every measured plural-anaphor attachment
         // clause THAT REACHES THE EFFECT PARSER (Fumble, Helm of Kaldra) lowers
-        // through that arm; Outfitted Jouster's tail is swallowed upstream by its
-        // conjure clause and never becomes a clause at all (its own defect). The
+        // through that arm; Outfitted Jouster's tail is handled by its conjure
+        // clause (`try_parse_conjure`), which builds the `Attach` over the
+        // determined `LastCreated` set itself, so it never reaches this arm. The
         // sibling fallback arms cannot match a plural anaphor phrase either: the
         // token arm lists only singular anaphors and the Cass/Zack-Fair arm
         // requires the literal `equipment that was/were attached to`. The
@@ -3218,6 +3219,7 @@ impl ReflexiveGateParent {
             | Effect::ChangeSpeed { .. }
             | Effect::DealDamage { .. }
             | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ResumeDamageBatch { .. }
             | Effect::EachDealsDamageEqualToPower { .. }
             | Effect::EachSourceDealsDamage { .. }
             | Effect::Draw { .. }

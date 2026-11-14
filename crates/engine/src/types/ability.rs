@@ -730,6 +730,7 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
@@ -1804,10 +1805,108 @@ pub struct PendingForwardedZoneResult {
     pub group: Option<crate::types::identifiers::LogicalZoneChangeGroupId>,
 }
 
+/// CR 608.2f + CR 700.1: what a printed damage guard read when its simultaneous batch
+/// opened. Keyed on the object and the condition, not on a registry index, so the record
+/// survives the layer pass a CR 616.1 pause runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettledDamageGuard {
+    pub source: ObjectIncarnationRef,
+    pub condition: ReplacementCondition,
+    pub reading: DamageGuardReading,
+}
+
+/// CR 608.2f + CR 700.1: the one reading a guard gives a simultaneous batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DamageGuardReading {
+    Holds,
+    Fails,
+}
+
+/// CR 616.1 + CR 101.4: a damage portion's replacement choice that a redirect handed to a player
+/// later in APNAP order than another outstanding choice of the same batch. The batch asks it once
+/// every earlier player's outstanding choice is answered. The event keeps the replacements
+/// already applied to it, so none applies twice (CR 614.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredDamageChoice {
+    pub chooser: PlayerId,
+    pub source: ObjectId,
+    pub target: TargetRef,
+    pub amount: u32,
+    #[serde(default)]
+    pub is_combat: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applied: Vec<AppliedReplacementKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excess_recipient: Option<ExcessRecipient>,
+    #[serde(default)]
+    pub lifelink_bonus: u32,
+}
+
+/// CR 616.1 + CR 615.5: a parked two-phase damage batch's outstanding work besides its
+/// portions. Owned by the batch's continuation, so it goes wherever that continuation goes
+/// (resumed, or abandoned with it).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParkedDamageBatch {
+    /// CR 616.1 + CR 101.4: choices deferred behind an earlier player's outstanding choice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred: Vec<DeferredDamageChoice>,
+    /// CR 614.6 + CR 615.5: substitution actions and prevention riders held until the batch's
+    /// damage is dealt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<crate::types::game_state::HeldBatchRider>,
+    /// CR 614.9 + CR 120.4b: portions a capped redirect split off during replacement, still to go
+    /// through the batch's replacement.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub split: Vec<SplitDamagePortion>,
+    /// CR 104.4a + CR 614.6: `Some` while the batch's simultaneous event (its damage and
+    /// substitution actions) is under way: the effect-stated wins and losses in it so far, which
+    /// settle together when it ends (`elimination::settle_event_outcomes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcomes: Option<EventOutcomes>,
+}
+
+/// CR 104.3e + CR 104.3f + CR 104.4a: the effect-stated wins and losses of one simultaneous
+/// event, kept apart until it ends: a player who would both win and lose loses (CR 104.3f), so a
+/// win counts only for a winner who doesn't also lose.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventOutcomes {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub losers: Vec<PlayerId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub winners: Vec<PlayerId>,
+}
+
+/// CR 614.9 + CR 614.5: the part of a portion a capped redirect ("The next 1 damage that would be
+/// dealt to this creature this turn is dealt to target creature you control instead.") sends to
+/// its new recipient. It is a portion of the same simultaneous batch, keeping the replacements
+/// already applied to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SplitDamagePortion {
+    pub source: ObjectId,
+    pub target: TargetRef,
+    pub amount: u32,
+    #[serde(default)]
+    pub is_combat: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applied: Vec<AppliedReplacementKey>,
+}
+
 /// Casting-time facts that flow with a spell from casting through resolution.
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
+    /// CR 608.2f + CR 700.1: guards read for the simultaneous damage batch this node is a
+    /// remaining portion of. Node-local: a later instruction reads live (CR 700.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settled_damage_guards: Vec<SettledDamageGuard>,
+    /// CR 616.1 + CR 101.4 + CR 615.5: what a parked two-phase damage batch
+    /// (`Effect::ResumeDamageBatch`) carries besides its portions: the choices it deferred behind
+    /// earlier players' outstanding ones, and the riders it holds until its damage is dealt.
+    /// Node-local, like `settled_damage_guards`. Boxed so the common empty case keeps every
+    /// `ResolvedAbility` one pointer wider (deep resolution chains carry many of them on the
+    /// stack).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked_damage_batch: Option<Box<ParkedDamageBatch>>,
     /// Typed SearchLibrary intent for a face-down Exile destination.
     /// This is carried in the existing resolution context so it survives
     /// ordinary ability-chain handoffs without widening every ability literal.
@@ -4072,6 +4171,7 @@ impl ResolvedAbility {
             | Effect::ChangeSpeed { .. }
             | Effect::DealDamage { .. }
             | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ResumeDamageBatch { .. }
             | Effect::EachDealsDamageEqualToPower { .. }
             | Effect::EachSourceDealsDamage { .. }
             | Effect::Draw { .. }

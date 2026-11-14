@@ -1957,6 +1957,7 @@ mod paused_search_audience_tests {
         let original =
             ProposedEvent::zone_change(entrant, Zone::Graveyard, Zone::Battlefield, None);
         state.pending_replacement = Some(PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: original.clone(),
             sacrifice_provenance: None,
             candidates: Vec::new(),

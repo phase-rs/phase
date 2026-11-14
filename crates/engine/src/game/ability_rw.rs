@@ -3955,6 +3955,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::ManifestDread
         | Effect::Choose { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::HordePlayCard { .. } => false,
         | Effect::Unimplemented { .. } => false,
     }
@@ -6555,6 +6556,12 @@ fn rw_effect(
             target: _,
             amount: _,
             is_combat: _,
+        }
+        | Effect::ResumeDamageBatch {
+            kind: _,
+            replaced: _,
+            remaining: _,
+            awaiting: _,
         }
         | Effect::Cleanup {
             clear_remembered: _,
