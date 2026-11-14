@@ -52,14 +52,15 @@
 //!   continue of its replacement, with no idle time to explain the loss by
 //!   the time the loss is reported, is one the API cannot store: its
 //!   decisions are self-contained from then on, while any other conversation
-//!   still uses threads.
+//!   still uses threads. The seat remembers every conversation it lost or
+//!   could not store, so switching to another one and back changes neither.
 //!
 //! A thread belongs to one seat of one game. Nothing in it reaches another seat
 //! or the shared game log. The owner of this memory clears it when a new game
 //! is installed or the game is restored; the next game of a match replaces the
 //! game in place without a clear, and the game number keeps its threads apart.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -186,18 +187,21 @@ struct SeatThread {
     /// The threaded request in flight, committed only when its own reply is
     /// accepted.
     pending: Option<PendingTurn>,
-    /// The conversation whose thread the API lost (`thread_not_found`) and
-    /// that no accepted reply has replaced yet. The seat's next create for
-    /// that same conversation is a recovery ([`ThreadOrigin::Recovery`]); a
-    /// create for any other conversation (another account, game or system
-    /// prompt) is an ordinary one, with a first recovery of its own to come.
-    lost: Option<Conversation>,
-    /// A conversation the API could not store: it lost the thread replacing a
-    /// lost one at its first continue, within the thread's lifetime
-    /// ([`Idle::WithinExpiry`]). The seat's decisions in it are
-    /// self-contained, as Anthropic advises ("Send it without `thread`");
+    /// Every conversation whose thread the API lost (`thread_not_found`) and
+    /// that no accepted reply in that conversation has replaced yet. The
+    /// seat's next create for one of them is a recovery
+    /// ([`ThreadOrigin::Recovery`]); a create for any other conversation
+    /// (another account, model, game or system prompt) is an ordinary one,
+    /// with a first recovery of its own to come. A seat that switches to
+    /// another conversation and back still owes the first one its recovery.
+    lost: HashSet<Conversation>,
+    /// Every conversation the API could not store: it lost the thread
+    /// replacing a lost one at its first continue, within the thread's
+    /// lifetime ([`Idle::WithinExpiry`]). The seat's decisions in each of them
+    /// are self-contained from then on, as Anthropic advises ("Send it without
+    /// `thread`"), however often the seat switches between conversations;
     /// every other conversation still uses threads.
-    unstored: Option<Conversation>,
+    unstored: HashSet<Conversation>,
     /// The endpoint and account whose API refused threads
     /// (`thread_unsupported_request`), which the seat sends self-contained
     /// requests to, since a fresh create would only be refused again. The seat
@@ -210,7 +214,7 @@ struct SeatThread {
 /// account that created it and keeps one model, so a different endpoint, key
 /// or model is a different thread, and an account's refusal of threads says
 /// nothing about another account's.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ThreadEndpoint {
     base_url: String,
     model: String,
@@ -232,7 +236,7 @@ impl ThreadEndpoint {
 /// The conversation a thread carries: one game of the match, on one endpoint
 /// and account, under one system prompt. A thread is continued only within
 /// its conversation, and a recovery belongs to the conversation it replaces.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Conversation {
     /// The game of the match ([`GameDecisionRequest::thread_game`]). A thread
     /// never continues into the next game.
@@ -383,7 +387,7 @@ impl LlmThreadMemory {
                 if let Some(thread) = self.seats.get_mut(&seat) {
                     thread.open = None;
                     thread.pending = None;
-                    thread.lost = None;
+                    thread.lost.clear();
                 }
                 return build_chat_request(endpoint, &decision.prompt).map(full);
             }
@@ -400,11 +404,11 @@ impl LlmThreadMemory {
             endpoint: target,
             system: fingerprint_of([decision.prompt.system.as_str()]),
         };
-        if thread.unstored.as_ref() == Some(&conversation) {
+        if thread.unstored.contains(&conversation) {
             thread.pending = None;
             return build_chat_request(endpoint, &decision.prompt).map(full);
         }
-        let create_origin = if thread.lost.as_ref() == Some(&conversation) {
+        let create_origin = if thread.lost.contains(&conversation) {
             ThreadOrigin::Recovery
         } else {
             ThreadOrigin::Fresh
@@ -515,9 +519,10 @@ impl LlmThreadMemory {
                     PendingShape::Create(origin) => origin,
                     PendingShape::Continue { .. } => ThreadOrigin::Continued,
                 };
-                // The seat has an answered turn again: no conversation is
-                // waiting on a recovery any more.
-                thread.lost = None;
+                // The conversation has an answered turn again, so it no longer
+                // waits on a recovery. Any other conversation the seat lost
+                // still does.
+                thread.lost.remove(&answered.conversation);
                 thread.open =
                     continuable_message_id(reply.provider, reply.body).map(|message_id| {
                         OpenThread {
@@ -544,12 +549,14 @@ impl LlmThreadMemory {
                     ThreadErrorCode::NotFound
                         if answered.lost_an_unstorable_conversation(now_ms) =>
                     {
-                        thread.unstored = Some(answered.conversation);
+                        thread.unstored.insert(answered.conversation);
                     }
                     // Any other lost thread, an expired replacement included:
                     // the create that replaces it, in the same conversation,
                     // is a recovery.
-                    ThreadErrorCode::NotFound => thread.lost = Some(answered.conversation),
+                    ThreadErrorCode::NotFound => {
+                        thread.lost.insert(answered.conversation);
+                    }
                     // The API still holds this thread, or holds it with other
                     // fixed fields. Nothing was lost, so the create that
                     // replaces it is an ordinary one.
@@ -1802,6 +1809,117 @@ mod tests {
         assert_eq!(
             after,
             build_chat_request(&threaded(), &game_one(3).prompt).unwrap()
+        );
+    }
+
+    /// Make `config`'s conversation one the API cannot store: its thread is
+    /// answered and lost, and the create recovering it is lost at its first
+    /// continue right away. `revision` numbers the first of the three
+    /// decisions this takes.
+    fn make_unstorable(memory: &mut LlmThreadMemory, config: &LlmEndpointConfig, revision: u64) {
+        let medium = |revision| decision(revision, AiDifficulty::Medium);
+        answer(memory, config, &medium(revision), &log(2), "msg_1");
+        memory
+            .decision_request(SEAT, config, &medium(revision + 1), &log(3), NOW_MS)
+            .unwrap();
+        lose_thread(memory, ThreadErrorCode::NotFound);
+        answer(memory, config, &medium(revision + 1), &log(3), "msg_2");
+        let first_continue = memory
+            .decision_request(SEAT, config, &medium(revision + 2), &log(4), NOW_MS)
+            .unwrap()
+            .request;
+        assert_eq!(continued_from(&first_continue), Some("msg_2".to_string()));
+        lose_thread(memory, ThreadErrorCode::NotFound);
+    }
+
+    /// The seat keeps every conversation the API could not store. Model A's
+    /// conversation becomes self-contained, then model B's; switching back to
+    /// A keeps A's decisions self-contained instead of starting its
+    /// create-and-fail cycle again, and B's stay self-contained too.
+    #[test]
+    fn every_conversation_the_api_cannot_store_stays_self_contained() {
+        let model_a = threaded();
+        let mut model_b = threaded();
+        model_b.model = "claude-other".to_string();
+
+        let mut memory = LlmThreadMemory::new();
+        make_unstorable(&mut memory, &model_a, 1);
+        make_unstorable(&mut memory, &model_b, 4);
+        for config in [&model_a, &model_b, &model_a] {
+            let decision = decision(7, AiDifficulty::Medium);
+            let sent = memory
+                .decision_request(SEAT, config, &decision, &log(5), NOW_MS)
+                .unwrap()
+                .request;
+            assert_eq!(
+                sent,
+                build_chat_request(config, &decision.prompt).unwrap(),
+                "{}",
+                config.model
+            );
+        }
+    }
+
+    /// A recovery is owed to its conversation until that conversation has an
+    /// answered turn again. Model A's thread is lost and the create replacing
+    /// it fails before the API stores anything; the seat then switches to
+    /// model B, whose thread is answered and then lost too. Back on A, the
+    /// create is still A's recovery, so losing it at its first continue right
+    /// away makes A self-contained, without one more create-and-fail cycle.
+    #[test]
+    fn a_conversation_still_owes_its_recovery_after_the_seat_switches_away_and_back() {
+        let model_a = threaded();
+        let mut model_b = threaded();
+        model_b.model = "claude-other".to_string();
+        let medium = |revision| decision(revision, AiDifficulty::Medium);
+
+        let mut memory = LlmThreadMemory::new();
+        answer(&mut memory, &model_a, &medium(1), &log(2), "msg_1");
+        memory
+            .decision_request(SEAT, &model_a, &medium(2), &log(3), NOW_MS)
+            .unwrap();
+        lose_thread(&mut memory, ThreadErrorCode::NotFound);
+        let failed_recovery = memory
+            .decision_request(SEAT, &model_a, &medium(2), &log(3), NOW_MS)
+            .unwrap()
+            .request;
+        assert!(is_create(&failed_recovery));
+        let unavailable = LlmReply {
+            provider: LlmProvider::Anthropic,
+            status: 503,
+            body: "{}",
+        };
+        let error = LlmError::Provider {
+            detail: "overloaded".to_string(),
+        };
+        memory.record_reply(
+            SEAT,
+            pending_turn(&memory),
+            unavailable,
+            Err(&error),
+            NOW_MS,
+        );
+
+        answer(&mut memory, &model_b, &medium(3), &log(4), "msg_2");
+        memory
+            .decision_request(SEAT, &model_b, &medium(4), &log(5), NOW_MS)
+            .unwrap();
+        lose_thread(&mut memory, ThreadErrorCode::NotFound);
+
+        answer(&mut memory, &model_a, &medium(5), &log(6), "msg_3");
+        let first_continue = memory
+            .decision_request(SEAT, &model_a, &medium(6), &log(7), NOW_MS)
+            .unwrap()
+            .request;
+        assert_eq!(continued_from(&first_continue), Some("msg_3".to_string()));
+        lose_thread(&mut memory, ThreadErrorCode::NotFound);
+        let after = memory
+            .decision_request(SEAT, &model_a, &medium(6), &log(7), NOW_MS)
+            .unwrap()
+            .request;
+        assert_eq!(
+            after,
+            build_chat_request(&model_a, &medium(6).prompt).unwrap()
         );
     }
 
