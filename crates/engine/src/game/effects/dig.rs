@@ -223,7 +223,7 @@ pub fn resolve(
         for &card_id in &cards {
             state.revealed_cards.insert(card_id);
         }
-        state.last_revealed_ids = cards.clone();
+        super::record_revealed_result(state, cards.clone());
         let card_names: Vec<String> = cards
             .iter()
             .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))

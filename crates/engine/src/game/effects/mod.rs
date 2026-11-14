@@ -11264,6 +11264,22 @@ fn target_filter_for_last_revealed_sub(effect: &Effect) -> Option<&TargetFilter>
     }
 }
 
+/// CR 118.12 + CR 701.20e + CR 608.2c: whether `sub` is a resolution-time
+/// payment ("you may pay 2 life") whose immediate continuation acts on the
+/// card the preceding look produced through a bare `ParentTarget` ("If you do,
+/// put it into that player's graveyard"). The payment itself takes no object,
+/// so the look's result must be bound to it for the gated move to inherit.
+fn payment_gates_look_result_consumer(sub: &ResolvedAbility) -> bool {
+    matches!(sub.effect, Effect::PayCost { .. })
+        && sub.sub_ability.as_deref().is_some_and(|consumer| {
+            consumer.targets.is_empty()
+                && matches!(
+                    target_filter_for_last_revealed_sub(&consumer.effect),
+                    Some(TargetFilter::ParentTarget)
+                )
+        })
+}
+
 fn inject_last_revealed_targets(
     state: &GameState,
     parent_ability: &ResolvedAbility,
@@ -16101,7 +16117,18 @@ pub(crate) fn publish_fresh_tracked_set(
 /// sees an earlier producer's cards.
 pub(crate) fn publish_reveal_result(state: &mut GameState, ids: Vec<ObjectId>) {
     publish_fresh_tracked_set(state, ids.clone());
+    record_revealed_result(state, ids);
+}
+
+/// CR 608.2c + CR 701.20: the single writer through which a look/reveal
+/// instruction records the cards it looked at or revealed into
+/// `last_revealed_ids`. Counting each publication lets the chain walker tell
+/// the resolving instruction's own result, an empty one included, apart from
+/// an earlier instruction's entry that a producer which found nothing left in
+/// place (`revealed_publications`).
+pub(crate) fn record_revealed_result(state: &mut GameState, ids: Vec<ObjectId>) {
     state.last_revealed_ids = ids;
+    state.revealed_publications += 1;
 }
 
 /// CR 608.2c + CR 608.2d: An immutable capability for one reciprocal producer
@@ -23972,6 +23999,9 @@ fn resolve_chain_body(
 
     // CR 608.2c: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
+    // CR 608.2c: and the reveal-ledger publication count, so a look/reveal
+    // instruction's own result is told apart from an earlier one's entry.
+    let revealed_publications_before = state.revealed_publications;
     // CR 608.2e: a generated seat leg of a paused player-scope token clause
     // begins that seat's instruction. Its entry becomes the seat in progress
     // before the node acts, so a pause inside it re-parks the sidecar (cloned
@@ -26361,6 +26391,52 @@ fn resolve_chain_body(
             );
             stamp_parent_target_iteration_members(&mut sub_with_targets);
             progress = resolve_ability_chain_step(state, &sub_with_targets, events, depth + 1)?;
+        } else if sub.targets.is_empty()
+            && effect_writes_last_revealed_ids(&ability.effect)
+            && payment_gates_look_result_consumer(sub)
+        {
+            // CR 701.20e + CR 608.2c + CR 400.7: a resolution-time payment
+            // between a look and the move it gates takes no object of its own,
+            // yet the move's "it" still names the looked-at card (Wand of
+            // Denial: "Look at the top card of target player's library. If it's
+            // a nonland card, you may pay 2 life. If you do, put it into that
+            // player's graveyard."). "It" is exactly what THIS instruction
+            // produced: the ledger only if this step published into it, else
+            // nothing (CR 609.3), never an earlier instruction's entry nor an
+            // object target the instruction merely inherited.
+            let produced: Vec<ObjectId> =
+                if state.revealed_publications != revealed_publications_before {
+                    state.last_revealed_ids.clone()
+                } else {
+                    Vec::new()
+                };
+            let result = ForwardedResultContext::from_object_ids(state, &produced);
+            let mut payment = sub.as_ref().clone();
+            // The payment keeps only the player context it inherits ("that
+            // player"); the object result rides separately, below.
+            payment.replace_target_occurrences(
+                inherited_parent_occurrences(ability, sub)
+                    .into_iter()
+                    .filter(|(target, _)| matches!(target, TargetRef::Player(_)))
+                    .collect(),
+            );
+            apply_parent_chain_context(
+                &mut payment,
+                ability,
+                effect_context_object.as_ref(),
+                state,
+            );
+            // Bind the result onto the gated move itself, pinned to the
+            // incarnations produced, so it rides the payment through its
+            // optional prompt. A completed-but-empty `Some([])` result makes
+            // the payment's hand-off prune the move instead of letting it
+            // inherit anything else.
+            if let Some(consumer) = payment.sub_ability.as_deref_mut() {
+                consumer.context.forwarded_result_context = Some(Box::new(result.clone()));
+                bind_forwarded_result_targets_for_legacy_effect(consumer);
+            }
+            payment.context.forwarded_result_context = Some(Box::new(result));
+            progress = resolve_ability_chain_step(state, &payment, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_zone_changed_ids.is_empty()
             && matches!(ability.effect, Effect::Draw { .. })

@@ -52,7 +52,7 @@ pub fn resolve(
     }
 
     if !turned_ids.is_empty() {
-        state.last_revealed_ids = turned_ids;
+        super::record_revealed_result(state, turned_ids);
     }
 
     // CR 613: a turned-up card's restored characteristics require a layer
