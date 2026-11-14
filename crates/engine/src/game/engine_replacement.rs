@@ -246,6 +246,7 @@ pub(crate) fn pre_entry_rules_view(
         return None;
     }
     let mut view = state.clone();
+    // allow-raw-zone: drops co-entrants from the battlefield list of a detached scratch state used only to recompute layers for the pre-entry population read; the live game is untouched and no zone change occurs (CR 614.12).
     view.battlefield.retain(|id| snapshot.contains(id));
     for id in co_entrants {
         if let Some(obj) = view.objects.get_mut(&id) {
