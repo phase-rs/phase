@@ -54918,8 +54918,8 @@ mod tests {
         );
     }
 
-    /// Row 6 — CR 700.2 + CR 603.10a: modal no-repeat history is ranked, and the mode
-    /// ordinal is not absorbed by the ranking.
+    /// Row 6 — CR 700.2b: the chosen mode is recorded. Ranking the modal
+    /// no-repeat history preserves the mode ordinal.
     #[test]
     fn normalize_for_loop_ranks_modal_mode_history() {
         for kind in [CarrierKind::ModalTurn, CarrierKind::ModalGame] {
@@ -54939,8 +54939,8 @@ mod tests {
             !normalized_equal(&modal(3, 3, 1), &modal(3, 3, 2)),
             "the mode ordinal is not absorbed"
         );
-        // CR 603.10a: a mode chosen for a source that has since departed is never pruned,
-        // so it still ranks.
+        // CR 400.7 distinguishes a departed source from a new incarnation. The
+        // retained history entry still ranks.
         let departed = |live: u64, named: u64| {
             let mut state = modal(live, named, 1);
             for (_, object) in state.objects.iter_mut() {
