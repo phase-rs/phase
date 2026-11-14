@@ -2786,10 +2786,12 @@ pub(crate) fn departing_owner_after_authority(
             .collect(),
         suppress_triggers: suppress
             .into_iter()
-            // CR 800.4a: the objects a leaving player owns leave the game, and
-            // the ones they control but do not own are exiled, so both
-            // suppress no longer.
-            .filter(|latch| latch.source_context.leaves_with(player))
+            // CR 800.4a: the sources the leaving player owned or controlled
+            // before they left are the candidates whose suppression of the
+            // completed occurrences is retained; whether one actually leaves
+            // (control effects end first, then only objects still controlled
+            // by the leaver are exiled) is settled by the departure.
+            .filter(|latch| latch.source_context.owned_or_controlled_by(player))
             .collect(),
     }
 }
@@ -9333,8 +9335,10 @@ pub(crate) fn handle_order_triggers(
         .take()
         .expect("pending_trigger_order populated above");
     let resume_after_ordering = order_state.resume_after_ordering.map(|wf| *wf);
+    // CR 117.3b + CR 800.4j: the active player, or once they have left the game
+    // the next player in turn order still in it, receives priority.
     state.waiting_for = WaitingFor::Priority {
-        player: state.active_player,
+        player: super::engine::living_priority_seat(state),
     };
     // CR 603.3b: register an ephemeral coverage marker for each genuinely-prompted
     // (order-DEPENDENT) group, so a parked-tail re-drain auto-applies the chosen order
@@ -9384,7 +9388,7 @@ pub(crate) fn handle_order_triggers(
         state.clear_ephemeral_trigger_order_templates();
     }
     Ok(resume_after_ordering.unwrap_or(WaitingFor::Priority {
-        player: state.active_player,
+        player: super::engine::living_priority_seat(state),
     }))
 }
 

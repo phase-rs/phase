@@ -878,9 +878,11 @@ impl std::fmt::Debug for TriggerSourceContext {
 }
 
 impl TriggerSourceContext {
-    /// CR 800.4a: whether the source leaves the game with `player`: one they
-    /// own leaves it, and one they control but do not own is exiled.
-    pub fn leaves_with(&self, player: PlayerId) -> bool {
+    /// Whether the pre-departure source was owned or controlled by `player`.
+    /// This is a conservative retention-candidate test for CR 800.4a, not proof
+    /// that the source leaves: a control-changing effect ends first, and only an
+    /// object still controlled by the leaver is exiled.
+    pub fn owned_or_controlled_by(&self, player: PlayerId) -> bool {
         self.lki.owner == player || self.lki.controller == player
     }
 
@@ -4447,7 +4449,7 @@ impl LogicalZoneChangeGroup {
             .retain_mut(retained_latch);
         self.immediately_before_suppress_triggers
             .retain_mut(|suppress| {
-                if !suppress.source_context.leaves_with(player) {
+                if !suppress.source_context.owned_or_controlled_by(player) {
                     return true;
                 }
                 if completed.is_empty() {
@@ -4460,7 +4462,7 @@ impl LogicalZoneChangeGroup {
             });
         self.immediately_after_suppress_triggers
             .retain_mut(|suppress| {
-                if !suppress.source_context.leaves_with(player) {
+                if !suppress.source_context.owned_or_controlled_by(player) {
                     return true;
                 }
                 if completed.is_empty() {

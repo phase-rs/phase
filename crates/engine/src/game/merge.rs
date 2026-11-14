@@ -484,12 +484,10 @@ pub fn split_merged_permanent_on_leave(
 /// Hand/Library replacement, only that component's request changes to Command;
 /// noncommander components remain routed to their appropriate zones.
 ///
-/// CR 701.24a + CR 730.3: a library position reaches the components only when
-/// the move is the move component of a terminal-shuffle operation, where the
-/// position is transient and the chained `Shuffle` randomizes the library
-/// once. Any other library placement leaves each component at the zone
-/// default; the owner's CR 730.3a arrangement of an ordered placement is not
-/// modeled here.
+/// CR 701.24a + CR 730.3: every component inherits the approved library
+/// position. For a terminal-shuffle operation the position is transient and
+/// the chained `Shuffle` randomizes the library once. The owner's CR 730.3a
+/// arrangement of the components is not modeled here.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn move_merged_permanent_on_leave(

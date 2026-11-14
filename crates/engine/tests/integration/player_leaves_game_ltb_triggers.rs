@@ -1948,8 +1948,7 @@ fn an_earlier_checks_departure_trigger_is_ordered_with_the_combat_damage_trigger
 /// Skyfisher ("When this creature enters, return a permanent you control to its
 /// owner's hand.") choosing Karn. P1, the commander's owner, concedes at its
 /// command-zone replacement prompt.
-#[test]
-fn a_concession_by_the_active_player_mid_resolution_gives_priority_to_a_living_player() {
+fn concede_the_active_player_mid_skyfisher(with_imp: bool) {
     let db = shared_card_db().expect("integration card fixture must load");
     let mut scenario =
         GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 3, 7);
@@ -1958,6 +1957,7 @@ fn a_concession_by_the_active_player_mid_resolution_gives_priority_to_a_living_p
     scenario.add_real_card(P0, "Control Magic", Zone::Battlefield, db);
     let patrol = scenario.add_real_card(P0, "Ninth Bridge Patrol", Zone::Battlefield, db);
     scenario.add_real_card(P0, "Leyline of Anticipation", Zone::Battlefield, db);
+    let imp = with_imp.then(|| scenario.add_real_card(P0, "Nefarious Imp", Zone::Battlefield, db));
     let skyfisher = scenario.add_real_card(P0, "Kor Skyfisher", Zone::Hand, db);
     let mut pool = (0..3)
         .map(|_| ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]))
@@ -2010,16 +2010,24 @@ fn a_concession_by_the_active_player_mid_resolution_gives_priority_to_a_living_p
         .act(GameAction::Concede { player_id: P1 })
         .expect("P1 concedes");
     assert!(runner.state().players[1].is_eliminated);
-    assert_eq!(
+    // Patrol's counter and the Imp's scry differ, so P0 orders them (CR 603.3b).
+    if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+        assert!(with_imp, "only the Imp's second trigger needs ordering");
+        engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+    }
+    let on_stack = |source: ObjectId| {
         runner
             .state()
             .stack
             .iter()
-            .filter(|entry| entry.source_id == patrol)
-            .count(),
-        1,
-        "the Patrol trigger is on the stack"
-    );
+            .filter(|entry| entry.source_id == source)
+            .count()
+    };
+    assert_eq!(on_stack(patrol), 1, "the Patrol trigger is on the stack");
+    if let Some(imp) = imp {
+        // Karn leaves, and P0's Control Magic goes with it: two events.
+        assert!(on_stack(imp) >= 1, "the Imp trigger is on the stack");
+    }
     let holder = runner.state().waiting_for.acting_player();
     assert!(
         holder.is_some_and(|player| player != P1),
@@ -2029,6 +2037,20 @@ fn a_concession_by_the_active_player_mid_resolution_gives_priority_to_a_living_p
     runner
         .act(GameAction::PassPriority)
         .expect("the player holding priority can act");
+}
+
+#[test]
+fn a_concession_by_the_active_player_mid_resolution_gives_priority_to_a_living_player() {
+    concede_the_active_player_mid_skyfisher(false);
+}
+
+/// The same board with P0's Nefarious Imp ("Whenever one or more permanents you
+/// control leave the battlefield, scry 1."): Karn's departure triggers two
+/// different abilities, so P0 is asked to order them, and priority after that
+/// answer still goes to a living player.
+#[test]
+fn an_ordering_prompt_after_the_active_players_concession_returns_priority_to_a_living_player() {
+    concede_the_active_player_mid_skyfisher(true);
 }
 
 /// Welcoming Vampire ("Whenever one or more other creatures you control with
