@@ -606,6 +606,7 @@ fn a_delayed_mass_zone_move_keeps_its_creation_event_referent() {
         };
 
         *delayed.effect = Effect::ChangeZoneAll {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Battlefield),
             destination: Zone::Graveyard,
             target: TargetFilter::EventTarget,
@@ -802,6 +803,7 @@ fn a_delayed_mass_move_does_not_affect_a_blinked_and_returned_referent() {
             panic!("Ohran Viper's body must be a CreateDelayedTrigger");
         };
         *delayed.effect = Effect::ChangeZoneAll {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Battlefield),
             destination: Zone::Graveyard,
             target: TargetFilter::EventTarget,

@@ -792,7 +792,7 @@ fn coin_branch_stack_persistence_is_strict_and_current_bindings_execute() {
         // CR 601.2c + CR 608.2b: every pre-current wire version (<= 10) cannot
         // prove the outcome bindings announced at cast, so a carrier-less coin
         // ability is refused as incompatible; the current version is malformed.
-        let expected = if version < RESOLUTION_STATE_WIRE_VERSION {
+        let expected = if version <= 10 {
             "RESTORE_INCOMPATIBLE_COIN_BRANCH_BINDINGS:"
         } else {
             "INVALID_COIN_BRANCH_BINDINGS:"

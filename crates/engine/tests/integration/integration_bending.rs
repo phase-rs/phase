@@ -989,6 +989,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
 
     let change_zone_ability = ResolvedAbility {
         effect: Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
@@ -1007,6 +1008,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
         sub_ability: Some(Box::new(shuffle_ability)),
         ..ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
@@ -1332,6 +1334,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
 
     let change_zone_ability = ResolvedAbility {
         effect: Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
@@ -1350,6 +1353,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
         sub_ability: Some(Box::new(shuffle_ability)),
         ..ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
@@ -2038,6 +2042,7 @@ fn earthbend_return_skips_shock_land_pay_life_prompt() {
         enter_with_choices: None,
         discard_frame: None,
         performed_by: None,
+        ownership_actor: engine::types::proposed_event::EntryOwnershipActor::NoPlayer,
         library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
         applied: std::collections::HashSet::new(),
     };
@@ -2122,6 +2127,7 @@ fn plain_shock_land_etb_still_prompts_for_life_payment() {
         enter_with_choices: None,
         discard_frame: None,
         performed_by: None,
+        ownership_actor: engine::types::proposed_event::EntryOwnershipActor::NoPlayer,
         library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
         applied: std::collections::HashSet::new(),
     };
@@ -2179,6 +2185,7 @@ fn build_earthbend_ability(
     let return_effect_def = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
@@ -2570,6 +2577,7 @@ fn earthbended_land_returns_tapped_after_exile() {
     );
     let exile_ability = ResolvedAbility::new(
         Effect::ChangeZoneAll {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: TargetFilter::SpecificObject { id: land_id },

@@ -27651,6 +27651,7 @@ mod tests {
     fn a_stack_entry_reads_a_grown_member_only_through_a_filter_admitting_it() {
         use crate::types::ability::{Effect, TargetFilter, TypedFilter};
         let particular_move = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,

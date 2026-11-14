@@ -9114,6 +9114,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let cards: Vec<ObjectId> = (1..=20).map(ObjectId).collect();
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards,
             count: 20,
@@ -10637,6 +10638,7 @@ mod tests {
         let mut ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
