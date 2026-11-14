@@ -662,7 +662,15 @@ fn etb_trigger_has_valid_targets(
         // Shroud/Hexproof/Protection.
         let mut node = Some(execute.as_ref());
         while let Some(def) = node {
-            if let Some(filter) = extract_target_filter(&def.effect) {
+            // CR 115.1: a `TargetOnly` node declares the target a later
+            // instruction acts on ("choose target face-up exiled card. Its
+            // owner shuffles it into their library", Riftsweeper); the bound
+            // move after it declares nothing of its own.
+            let declared = match def.effect.as_ref() {
+                Effect::TargetOnly { target } => Some(target),
+                effect => extract_target_filter(effect),
+            };
+            if let Some(filter) = declared {
                 if !find_legal_targets(ctx.state, filter, ctx.ai_player, source_id).is_empty() {
                     return true;
                 }
@@ -9261,6 +9269,38 @@ mod tests {
             let id = etb_creature(&mut state, execute);
             assert_eq!(pre_cast_score_for_spell(&state, id), 0.0);
         }
+    }
+
+    /// CR 115.1: Riftsweeper's printed ETB ("choose target face-up exiled card.
+    /// Its owner shuffles it into their library.") declares its target on a
+    /// `TargetOnly` node. With a face-up exiled card to choose there is no ETB
+    /// whiff; with an empty exile zone the whiff stays.
+    #[test]
+    fn riftsweeper_etb_whiffs_only_without_an_exiled_card() {
+        let execute = engine::parser::oracle_effect::parse_effect_chain(
+            "Choose target face-up exiled card. Its owner shuffles it into their library.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(execute.effect.as_ref(), Effect::TargetOnly { .. }),
+            "reach guard: the root only declares the target"
+        );
+
+        let mut empty = make_state();
+        let id = etb_creature(&mut empty, execute.clone());
+        let score = pre_cast_score_for_spell(&empty, id);
+        assert!(score <= -8.0, "expected the ETB whiff, got {score}");
+
+        let mut with_card = make_state();
+        let id = etb_creature(&mut with_card, execute);
+        engine::game::zones::create_object(
+            &mut with_card,
+            engine::types::identifiers::CardId(9801),
+            PlayerId(1),
+            "Exiled Card".to_string(),
+            Zone::Exile,
+        );
+        assert_eq!(pre_cast_score_for_spell(&with_card, id), 0.0);
     }
 
     /// Reach guards on the ETB whiff: a targeted +1/+1 ETB with no creature
