@@ -8358,4 +8358,155 @@ mod library_reorder_carrier_tests {
             "a member the completion did not touch is retired too"
         );
     }
+
+    /// Library `[A, B]` owned by player 0. A's position is public
+    /// (`revealed_cards`); B is revealed only by a stack-bound lease (CR 701.20a),
+    /// which publishes its identity but not its library position.
+    struct LeasedPile {
+        state: GameState,
+        source: ObjectId,
+        a: ObjectId,
+        b: ObjectId,
+        incarnations: [u64; 2],
+    }
+
+    fn leased_pile() -> LeasedPile {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(92010),
+            PlayerId(0),
+            "Placement source".to_string(),
+            Zone::Battlefield,
+        );
+        let a = create_object(
+            &mut state,
+            CardId(92011),
+            PlayerId(0),
+            "Pile A".to_string(),
+            Zone::Library,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(92012),
+            PlayerId(0),
+            "Pile B".to_string(),
+            Zone::Library,
+        );
+        state.library_of_mut(PlayerId(0)).clear();
+        state.library_of_mut(PlayerId(0)).push_back(a);
+        state.library_of_mut(PlayerId(0)).push_back(b);
+        state.revealed_cards.insert(a);
+        state.grant_stack_bound_reveal(ObjectId(92019), &[b]);
+        let incarnations = [state.objects[&a].incarnation, state.objects[&b].incarnation];
+        LeasedPile {
+            state,
+            source,
+            a,
+            b,
+            incarnations,
+        }
+    }
+
+    /// The pile's bottom placement in the order `[B, A]`: B is already at the
+    /// bottom, so its own delivery leaves it in place; A's delivery then shifts
+    /// B up one slot. The per-card reorder retires the moved A but spares the
+    /// shifted B, whose lease publishes no position — only the whole-arrangement
+    /// settlement knows B was one of the cards this instruction reordered.
+    fn bottom_requests(pile: &LeasedPile) -> Vec<ZoneMoveRequest> {
+        [pile.b, pile.a]
+            .into_iter()
+            .map(|id| {
+                ZoneMoveRequest::effect(id, Zone::Library, pile.source)
+                    .at_library_position(LibraryPosition::Bottom)
+            })
+            .collect()
+    }
+
+    /// CR 701.20d: both members were reordered by the one instruction, so each
+    /// stops being revealed — lease included — and becomes exactly one new
+    /// object.
+    fn assert_pile_settled(pile: &LeasedPile) {
+        let state = &pile.state;
+        assert_eq!(
+            state
+                .library_of(PlayerId(0))
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![pile.b, pile.a],
+            "reach guard: the chosen bottom order was delivered"
+        );
+        for ((id, label), before) in [(pile.a, "A"), (pile.b, "B")]
+            .into_iter()
+            .zip(pile.incarnations)
+        {
+            assert_eq!(
+                state.objects[&id].incarnation,
+                before + 1,
+                "{label} becomes exactly one new object"
+            );
+            assert!(
+                !state.revealed_cards.contains(&id) && !state.holds_stack_bound_reveal(id),
+                "{label} stops being revealed"
+            );
+        }
+    }
+
+    /// CR 701.20d: the synchronous delivery path settles the whole-arrangement
+    /// reorder itself. Without that settlement B keeps its lease and its old
+    /// occurrence.
+    #[test]
+    fn synchronous_placement_settles_a_member_only_the_arrangement_reordered() {
+        let mut pile = leased_pile();
+        let reorder = LibraryReorderOperation::begin(&pile.state, &[pile.b, pile.a]);
+        let requests = bottom_requests(&pile);
+        let mut events = Vec::new();
+        let result = move_objects_simultaneously_settling_then(
+            &mut pile.state,
+            requests,
+            Some(reorder),
+            None,
+            &mut events,
+        );
+        assert!(matches!(result, BatchMoveResult::Done));
+        assert_pile_settled(&pile);
+    }
+
+    /// CR 701.20d + CR 616.1: the same arrangement resumed from its parked
+    /// carrier. The drain delivers the remaining members one at a time and its
+    /// terminal settlement retires B; without it B keeps its lease and its old
+    /// occurrence.
+    #[test]
+    fn drained_placement_settles_a_member_only_the_arrangement_reordered() {
+        let mut pile = leased_pile();
+        let reorder = LibraryReorderOperation::begin(&pile.state, &[pile.b, pile.a]);
+        let logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+            &mut pile.state,
+            &[pile.b, pile.a],
+        );
+        pile.state.push_batch_delivery(PendingBatchDeliveries {
+            library_reorder: Some(reorder),
+            logical_zone_change_group,
+            paused_current: None,
+            remaining: vec![pile.b, pile.a],
+            destination: Zone::Library,
+            source_id: Some(pile.source),
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: Some(LibraryPosition::Bottom),
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: vec![pile.b, pile.a],
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+        });
+
+        let mut events = Vec::new();
+        drain_pending_batch_deliveries(&mut pile.state, &mut events);
+
+        assert!(pile.state.active_batch_delivery().is_none());
+        assert_pile_settled(&pile);
+    }
 }

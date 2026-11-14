@@ -9768,10 +9768,11 @@ fn effect_zone_library_placement_order(
 /// so a non-empty restored set is exactly an old mixed-origin arrangement.
 /// Reconstruct each affected library with the newly delivered cards removed,
 /// replay the original placement order using the selected members that actually
-/// landed in a library, then settle the complete arrangement atomically at
-/// the library placement authority. Those in-library moves are reorders, not
-/// zone changes (CR 401.4 + CR 614.1), and `settle_library_arrangement`
-/// retires occurrences whose positions changed (CR 701.20d).
+/// landed in a library, then settle that complete arrangement in one step at
+/// the library placement authority. Replaying it as one-card moves instead lets
+/// a later move shift an already-delivered member off its chosen slot. Those
+/// in-library moves are reorders, not zone changes (CR 401.4 + CR 614.1), and
+/// `settle_library_arrangement` retires the reordered reveals (CR 701.20d).
 fn reposition_library_origins_after_batch_delivery(
     state: &mut GameState,
     chosen: &[ObjectId],
@@ -9788,6 +9789,10 @@ fn reposition_library_origins_after_batch_delivery(
                 .is_some_and(|object| object.zone == Zone::Library)
         })
         .collect();
+    // CR 701.20d: the same whole-arrangement reorder the current batch path
+    // settles, so a placement that leaves the library image unchanged still
+    // reorders its library-origin members.
+    let library_reorder = zones::LibraryReorderOperation::begin(state, library_origin);
     for holder in library_holders_of(state, library_origin) {
         let library = state
             .library_of(holder)
@@ -9803,10 +9808,17 @@ fn reposition_library_origins_after_batch_delivery(
             &library_placed,
             library_position,
         );
+        let placed: Vec<ObjectId> = library_placed
+            .iter()
+            .copied()
+            .filter(|card_id| {
+                state.zone_storage_seat(Zone::Library, state.objects[card_id].owner) == holder
+            })
+            .collect();
         // allow-raw-zone: in-library reposition is not a zone-change event (CR 401.4 + CR 614.1).
-        // Settle the computed complete arrangement atomically at the library placement authority.
-        zones::settle_library_arrangement(state, holder, &desired);
+        zones::settle_library_arrangement(state, holder, &desired, &placed);
     }
+    library_reorder.finish(state);
 }
 
 /// Every library that holds one of `cards`, in first-seen order.
@@ -16682,19 +16694,28 @@ mod random_result_resolution_context_tests {
         }).unwrap().join().unwrap();
     }
 
-    /// CR 401.4 + CR 400.3 + CR 608.2c: A completion parked by the base build
-    /// queued only the selected non-library members and serialized the
-    /// library-origin set for its tail to reposition. Restoring that shape and
-    /// resuming the batch must produce the complete chosen arrangement and run
-    /// the completion exactly once — not drain the non-library moves and leave
-    /// the library-origin members in their old order.
+    /// The library cards `A`, `B`, `C` and the hand card `H` of a legacy restore.
+    struct LegacyArrangementCards {
+        a: ObjectId,
+        b: ObjectId,
+        c: ObjectId,
+        hand: ObjectId,
+        /// A's and B's incarnations as staged, before the restore.
+        staged_incarnations: [u64; 2],
+    }
+
+    /// Stage the exact record the base build parked for a mixed-origin owner
+    /// arrangement — its `move_objects_simultaneously_then` call queued only the
+    /// non-library member and serialized the library-origin set on the
+    /// completion, with no reorder carrier — round-trip it through a persisted
+    /// save, and drain the restored batch.
     ///
-    /// Exercises a non-bottom (Top) mixed-origin arrangement: library `[A, B, C]`,
-    /// hand card `H`, submitted top order `[A, B, H]`. The base delivery placed
-    /// `H` on top (`[H, A, B, C]`); settling atomically produces exact final order
-    /// `[A, B, H, C]`, emits no unintended shuffle, and runs one continuation.
-    #[test]
-    fn restored_legacy_mixed_origin_completion_repositions_library_members() {
+    /// Library `[A, B, C]` (all three revealed), hand card `H`; `chosen(cards)`
+    /// is the owner's submitted order over `{A, B, H}`.
+    fn restore_and_drain_legacy_arrangement(
+        library_position: LibraryPosition,
+        chosen: impl Fn(&LegacyArrangementCards) -> Vec<ObjectId>,
+    ) -> (GameState, Vec<GameEvent>, LegacyArrangementCards) {
         use crate::types::game_state::{
             BatchCompletion, PendingBatchDeliveries, PersistedGameState, ZoneDeliveryExileTracking,
         };
@@ -16707,59 +16728,56 @@ mod random_result_resolution_context_tests {
             "Arrangement source".to_string(),
             Zone::Battlefield,
         );
-        let library_a = create_object(
-            &mut state,
-            CardId(2),
-            PlayerId(0),
-            "Library A".to_string(),
-            Zone::Library,
-        );
-        let library_b = create_object(
-            &mut state,
-            CardId(3),
-            PlayerId(0),
-            "Library B".to_string(),
-            Zone::Library,
-        );
-        let library_c = create_object(
-            &mut state,
-            CardId(4),
-            PlayerId(0),
-            "Library C".to_string(),
-            Zone::Library,
-        );
-        let hand_card = create_object(
-            &mut state,
-            CardId(5),
-            PlayerId(0),
-            "Hand Card".to_string(),
-            Zone::Hand,
-        );
+        let library_card = |state: &mut GameState, card: u64, name: &str| {
+            create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Library,
+            )
+        };
+        let a = library_card(&mut state, 2, "Library A");
+        let b = library_card(&mut state, 3, "Library B");
+        let cards = LegacyArrangementCards {
+            a,
+            b,
+            c: library_card(&mut state, 4, "Library C"),
+            hand: create_object(
+                &mut state,
+                CardId(5),
+                PlayerId(0),
+                "Hand Card".to_string(),
+                Zone::Hand,
+            ),
+            staged_incarnations: [state.objects[&a].incarnation, state.objects[&b].incarnation],
+        };
         state.library_of_mut(PlayerId(0)).clear();
-        for card in [library_a, library_b, library_c] {
+        for card in [cards.a, cards.b, cards.c] {
             state.library_of_mut(PlayerId(0)).push_back(card);
+            state.revealed_cards.insert(card);
         }
         let logical_zone_change_group =
-            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[hand_card]);
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[cards.hand]);
         state.push_batch_delivery(PendingBatchDeliveries {
             logical_zone_change_group,
             paused_current: None,
-            remaining: vec![hand_card],
+            remaining: vec![cards.hand],
             destination: Zone::Library,
             source_id: Some(source),
             enter_tapped: EtbTapState::Unspecified,
             exile_tracking: ZoneDeliveryExileTracking::None,
-            library_placement: Some(LibraryPosition::Top),
+            library_placement: Some(library_position.clone()),
             completion: Some(BatchCompletion::EffectZonePutAtLibraryPositionComplete {
                 player: PlayerId(0),
                 source_id: source,
-                chosen: vec![library_a, library_b, hand_card],
-                library_origin: vec![library_a, library_b],
-                library_position: LibraryPosition::Top,
+                chosen: chosen(&cards),
+                library_origin: vec![cards.a, cards.b],
+                library_position,
             }),
             replacement_applied: Default::default(),
             requests: Vec::new(),
-            attempted: vec![hand_card],
+            attempted: vec![cards.hand],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
             library_reorder: None,
@@ -16778,15 +16796,25 @@ mod random_result_resolution_context_tests {
 
         let mut events = Vec::new();
         crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut restored, &mut events);
+        (restored, events, cards)
+    }
 
+    /// The outcome every restored legacy arrangement must reach: the exact
+    /// chosen library, no shuffle, one completion, back to priority, and every
+    /// library-origin member a new unrevealed object (CR 701.20d). `C` was not
+    /// placed, so it stays revealed exactly when the arrangement left it in its
+    /// slot.
+    fn assert_legacy_arrangement_settled(
+        state: &GameState,
+        events: &[GameEvent],
+        cards: &LegacyArrangementCards,
+        expected_library: &[ObjectId],
+        c_keeps_its_slot: bool,
+    ) {
         assert_eq!(
-            restored.players[0]
-                .library
-                .iter()
-                .copied()
-                .collect::<Vec<_>>(),
-            vec![library_a, library_b, hand_card, library_c],
-            "every selected member must occupy the complete chosen top order atomically"
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            expected_library,
+            "every selected member must occupy the complete chosen order"
         );
         assert!(
             !events.iter().any(|event| matches!(
@@ -16799,7 +16827,7 @@ mod random_result_resolution_context_tests {
                     ..
                 }
             )),
-            "repositioning legacy library members must not trigger an unintended shuffle"
+            "repositioning legacy library members must not shuffle"
         );
         assert_eq!(
             events
@@ -16816,9 +16844,88 @@ mod random_result_resolution_context_tests {
             "the restored completion must run exactly once"
         );
         assert!(matches!(
-            restored.waiting_for,
+            state.waiting_for,
             WaitingFor::Priority { player } if player == PlayerId(0)
         ));
-        assert!(restored.active_batch_delivery().is_none());
+        assert!(state.active_batch_delivery().is_none());
+        for ((id, label), staged) in [(cards.a, "A"), (cards.b, "B")]
+            .into_iter()
+            .zip(cards.staged_incarnations)
+        {
+            assert_eq!(
+                state.objects[&id].incarnation,
+                staged + 1,
+                "library-origin member {label} becomes exactly one new object"
+            );
+            assert!(
+                !state.revealed_cards.contains(&id),
+                "library-origin member {label} stops being revealed"
+            );
+        }
+        assert_eq!(
+            state.revealed_cards.contains(&cards.c),
+            c_keeps_its_slot,
+            "C was not placed: it is reordered only if the arrangement moved it"
+        );
+    }
+
+    /// CR 401.4 + CR 400.3 + CR 608.2c: A completion parked by the base build
+    /// queued only the selected non-library members and serialized the
+    /// library-origin set for its tail to reposition. Restoring that shape must
+    /// settle the complete chosen arrangement and run the completion once.
+    ///
+    /// Top is the counterexample to one-card replay: library `[A, B, C]`, top
+    /// order `[A, B, H]`. The restored delivery puts H on top (`[H, A, B, C]`);
+    /// moving B then A to their indices yields `[A, H, B, C]`, leaving H off its
+    /// chosen slot. The settled arrangement is `[A, B, H, C]`.
+    #[test]
+    fn restored_legacy_top_arrangement_settles_the_exact_chosen_order() {
+        let (state, events, cards) =
+            restore_and_drain_legacy_arrangement(LibraryPosition::Top, |cards| {
+                vec![cards.a, cards.b, cards.hand]
+            });
+        assert_legacy_arrangement_settled(
+            &state,
+            &events,
+            &cards,
+            &[cards.a, cards.b, cards.hand, cards.c],
+            true,
+        );
+    }
+
+    /// The bottom sibling: `[A, H, B]` on the bottom of `[A, B, C]` settles as
+    /// `[C, A, H, B]`, which moves C as well.
+    #[test]
+    fn restored_legacy_bottom_arrangement_settles_the_exact_chosen_order() {
+        let (state, events, cards) =
+            restore_and_drain_legacy_arrangement(LibraryPosition::Bottom, |cards| {
+                vec![cards.a, cards.hand, cards.b]
+            });
+        assert_legacy_arrangement_settled(
+            &state,
+            &events,
+            &cards,
+            &[cards.c, cards.a, cards.hand, cards.b],
+            false,
+        );
+    }
+
+    /// The Nth-from-top sibling: `[A, B, H]` second from the top of `[A, B, C]`
+    /// settles as `[A, H, B, C]` — the same image the restored H delivery
+    /// already produced. The arrangement still reorders A and B (CR 701.20d), so
+    /// an unchanged image must not skip their retirement.
+    #[test]
+    fn restored_legacy_nth_from_top_arrangement_settles_the_exact_chosen_order() {
+        let (state, events, cards) =
+            restore_and_drain_legacy_arrangement(LibraryPosition::NthFromTop { n: 2 }, |cards| {
+                vec![cards.a, cards.b, cards.hand]
+            });
+        assert_legacy_arrangement_settled(
+            &state,
+            &events,
+            &cards,
+            &[cards.a, cards.hand, cards.b, cards.c],
+            true,
+        );
     }
 }

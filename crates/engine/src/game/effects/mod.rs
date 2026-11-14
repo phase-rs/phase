@@ -67979,9 +67979,10 @@ mod parser_oracle_effect_tests {
 mod library_reorder_iteration_carrier_tests {
     use super::*;
     use crate::game::zones::{create_object, LibraryReorderOperation};
-    use crate::types::ability::ExileConcealment;
-    use crate::types::game_state::PendingChangeZoneIteration;
+    use crate::types::ability::{ExileConcealment, LibraryPosition};
+    use crate::types::game_state::{ChangeZoneMemberEntry, PendingChangeZoneIteration};
     use crate::types::identifiers::CardId;
+    use crate::types::zones::EtbTapState;
 
     /// CR 701.20d + CR 616.1: the ChangeZoneAll resume carrier owns the
     /// whole-library reorder it paused on, so the drain that completes the
@@ -68063,6 +68064,95 @@ mod library_reorder_iteration_carrier_tests {
                 .any(|event| matches!(event, GameEvent::EffectResolved { .. })),
             "reach guard: the instruction reached its terminal resolution event"
         );
+    }
+
+    /// CR 701.20d + CR 616.1: the resumed ChangeZoneAll tail delivers its
+    /// members one at a time. Library `[A, B]`, bottom order `[B, A]`: B's own
+    /// delivery leaves it in place and A's then shifts it. B is revealed only by
+    /// a stack-bound lease (CR 701.20a), which the per-card reorder spares
+    /// because it publishes no position, so only the drain's terminal
+    /// settlement retires it.
+    #[test]
+    fn drained_iteration_settles_a_member_only_the_arrangement_reordered() {
+        let mut state = GameState::new_two_player(42);
+        let a = create_object(
+            &mut state,
+            CardId(93011),
+            PlayerId(0),
+            "Pile A".to_string(),
+            Zone::Library,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(93012),
+            PlayerId(0),
+            "Pile B".to_string(),
+            Zone::Library,
+        );
+        state.library_of_mut(PlayerId(0)).clear();
+        state.library_of_mut(PlayerId(0)).push_back(a);
+        state.library_of_mut(PlayerId(0)).push_back(b);
+        state.revealed_cards.insert(a);
+        state.grant_stack_bound_reveal(ObjectId(93019), &[b]);
+        let incarnations = [state.objects[&a].incarnation, state.objects[&b].incarnation];
+
+        let reorder = LibraryReorderOperation::begin(&state, &[b, a]);
+        let logical_zone_change_group =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[b, a]);
+        state.push_change_zone_iteration(PendingChangeZoneIteration {
+            library_reorder: Some(reorder),
+            logical_zone_change_group,
+            pending_return_result_producer: None,
+            paused_current: None,
+            remaining: [b, a]
+                .into_iter()
+                .map(|object_id| ChangeZoneMemberEntry {
+                    object_id,
+                    enter_with_counters: Vec::new(),
+                    enter_tapped: EtbTapState::Unspecified,
+                    enters_attacking: false,
+                })
+                .collect(),
+            source_id: a,
+            controller: PlayerId(0),
+            origin: None,
+            destination: Zone::Library,
+            enter_transformed: false,
+            enters_under_player: None,
+            duration: None,
+            track_exiled_by_source: false,
+            face_down_in_exile: ExileConcealment::Public,
+            moved_count: None,
+            face_down_profile: None,
+            library_placement: Some(LibraryPosition::Bottom),
+            library_shuffle: Default::default(),
+            enter_attached_to: None,
+            effect_kind: EffectKind::ChangeZoneAll,
+        });
+
+        let mut events = Vec::new();
+        drain_pending_change_zone_iteration(&mut state, &mut events);
+
+        assert_eq!(
+            state
+                .library_of(PlayerId(0))
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![b, a],
+            "reach guard: the chosen bottom order was delivered"
+        );
+        for ((id, label), before) in [(a, "A"), (b, "B")].into_iter().zip(incarnations) {
+            assert_eq!(
+                state.objects[&id].incarnation,
+                before + 1,
+                "{label} becomes exactly one new object"
+            );
+            assert!(
+                !state.revealed_cards.contains(&id) && !state.holds_stack_bound_reveal(id),
+                "{label} stops being revealed"
+            );
+        }
     }
 }
 

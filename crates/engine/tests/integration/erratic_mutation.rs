@@ -1553,7 +1553,11 @@ fn proteus_staff_paused_owner_order_still_settles_reorder() {
     assert!(state.stack.is_empty());
     // CR 701.20d: the two selected members that stayed in the library are
     // reordered occurrences, so each becomes exactly one new object and stops
-    // being revealed once the arrangement settles before the continuation.
+    // being revealed before the continuation. In a bottom pile delivered one
+    // card at a time every member that stays is moved or shifted by a later
+    // delivery, so the per-card reorder retires these two; the terminal
+    // settlement is pinned separately by a member only it can retire
+    // (`zone_pipeline::library_reorder_carrier_tests`).
     for (id, label, incarnation_before) in [
         (miss_a, "Miss A", incarnations_before[0]),
         (miss_b, "Miss B", incarnations_before[1]),

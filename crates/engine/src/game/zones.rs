@@ -2826,14 +2826,37 @@ pub(crate) fn reorder_within_library(
     ordered: &[ObjectId],
     index: Option<usize>,
 ) {
+    let mut arrangement: Vec<ObjectId> = state
+        .library_of(player)
+        .iter()
+        .copied()
+        .filter(|id| !ordered.contains(id))
+        .collect();
+    let insert_index = index.unwrap_or(arrangement.len()).min(arrangement.len());
+    arrangement.splice(insert_index..insert_index, ordered.iter().copied());
+    settle_library_arrangement(state, player, &arrangement, ordered);
+}
+
+/// CR 401.4 + CR 701.20d: The library placement authority. Replace `player`'s
+/// library with the complete `arrangement` in one step — `placed` names the
+/// cards this instruction put there — and retire every revealed card the
+/// arrangement reordered.
+///
+/// Settling the whole arrangement at once is what keeps a multi-card placement
+/// exact: replaying it as one-card moves lets a later move shift an earlier
+/// card off its chosen slot.
+pub(crate) fn settle_library_arrangement(
+    state: &mut GameState,
+    player: PlayerId,
+    arrangement: &[ObjectId],
+    placed: &[ObjectId],
+) {
     let old_order: Vec<ObjectId> = state.library_of(player).iter().copied().collect();
-    let library = state.library_of_mut(player);
-    library.retain(|id| !ordered.contains(id));
-    let insert_index = index.unwrap_or(library.len()).min(library.len());
-    for (offset, &object_id) in ordered.iter().enumerate() {
-        library.insert(insert_index + offset, object_id);
-    }
-    let new_order: Vec<ObjectId> = state.library_of(player).iter().copied().collect();
+    debug_assert!(
+        placed.iter().all(|id| arrangement.contains(id)),
+        "every placed card occupies a slot in the settled arrangement"
+    );
+    *state.library_of_mut(player) = arrangement.iter().copied().collect();
     state.advance_library_knowledge_epoch(player);
 
     // CR 701.20d: An effect that reveals multiple cards may state that the cards
@@ -2850,7 +2873,7 @@ pub(crate) fn reorder_within_library(
     // A card that keeps its position was not reordered and stays revealed:
     // Calibrated Blast bottoming the only card of a 1-card library leaves it
     // exactly where it already was.
-    if !ordered.is_empty() && old_order != new_order {
+    if !placed.is_empty() && old_order != arrangement {
         let old_positions: HashMap<ObjectId, usize> = old_order
             .iter()
             .enumerate()
@@ -2861,16 +2884,15 @@ pub(crate) fn reorder_within_library(
         // leaves one of them in place; a lone card is reordered only when it
         // actually moved (Calibrated Blast bottoming the only card of a 1-card
         // library leaves it exactly where it already was).
-        let mut reordered_cards: Vec<ObjectId> = if ordered.len() > 1 {
-            ordered.to_vec()
+        let mut reordered_cards: Vec<ObjectId> = if placed.len() > 1 {
+            placed.to_vec()
         } else {
-            ordered
+            placed
                 .first()
                 .copied()
                 .filter(|id| {
-                    !state.is_active_library_reorder_member(*id)
-                        && old_positions.get(id).copied()
-                            != new_order.iter().position(|candidate| candidate == id)
+                    old_positions.get(id).copied()
+                        != arrangement.iter().position(|candidate| candidate == id)
                 })
                 .into_iter()
                 .collect()
@@ -2882,14 +2904,13 @@ pub(crate) fn reorder_within_library(
         // revealed. A stack-bound reveal lease (CR 701.20a) publishes only the
         // card's identity, never its library position, and lasts until its
         // trigger leaves the stack — an unrelated insertion does not end it.
-        // Members of an in-flight whole-library reorder are settled by its terminal
-        // finish, not piecemeal during intermediate deliveries.
-        for (position, &object_id) in new_order.iter().enumerate() {
+        // A member of a multi-card instruction delivered one card at a time is
+        // still owed that retirement: `LibraryReorderOperation::finish` settles it.
+        for (position, &object_id) in arrangement.iter().enumerate() {
             let Some(old_position) = old_positions.get(&object_id).copied() else {
                 continue;
             };
             if old_position == position
-                || state.is_active_library_reorder_member(object_id)
                 || !(state.revealed_cards.contains(&object_id)
                     || state.public_revealed_cards.contains(&object_id))
             {
@@ -2907,48 +2928,6 @@ pub(crate) fn reorder_within_library(
     // CR 401.5 + CR 611.3a: A library reorder can change its top card without
     // creating a ZoneChanged event, so invalidate the dependent static directly
     // (self-gated).
-    crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
-}
-
-/// CR 401.4 + CR 400.3 + CR 701.20d: Settle a complete library arrangement
-/// atomically at the library placement authority. Updates the library to
-/// `desired` in one operation, advances the player's library knowledge epoch,
-/// and retires revealed cards whose library position changed or which were
-/// part of a multi-card arrangement.
-pub(crate) fn settle_library_arrangement(
-    state: &mut GameState,
-    player: PlayerId,
-    desired: &[ObjectId],
-) {
-    let old_order: Vec<ObjectId> = state.library_of(player).iter().copied().collect();
-    let library = state.library_of_mut(player);
-    library.clear();
-    library.extend(desired.iter().copied());
-    let new_order: Vec<ObjectId> = state.library_of(player).iter().copied().collect();
-    state.advance_library_knowledge_epoch(player);
-
-    if old_order != new_order {
-        let old_positions: HashMap<ObjectId, usize> = old_order
-            .iter()
-            .enumerate()
-            .map(|(position, &id)| (id, position))
-            .collect();
-        let mut reordered_cards: Vec<ObjectId> = Vec::new();
-        let mut reordered_seen: HashSet<ObjectId> = HashSet::new();
-        for (new_pos, &id) in new_order.iter().enumerate() {
-            if old_positions.get(&id).copied() != Some(new_pos)
-                && (state.revealed_cards.contains(&id)
-                    || state.public_revealed_cards.contains(&id)
-                    || state.holds_stack_bound_reveal(id))
-                && reordered_seen.insert(id)
-            {
-                reordered_cards.push(id);
-            }
-        }
-        if !reordered_cards.is_empty() {
-            retire_reordered_library_reveals(state, &reordered_cards);
-        }
-    }
     crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
 }
 
