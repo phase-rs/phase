@@ -5542,6 +5542,44 @@ pub(crate) fn shortcut_validated_range(
     }
 }
 
+/// What the expression each loop comparator entry point evaluates answers for one frame
+/// pair, each side put through the production normalization that entry point applies. These
+/// are the same expressions as the call sites, not the call sites: `recorded_period` is the
+/// equality arm alone of the recorded period's no-mint cover (which also ORs in counter,
+/// history and growth covers). The sample form and the comparators are crate-private;
+/// integration tests reach them through [`loop_entry_point_verdicts_for_tests`].
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoopEntryPointVerdicts {
+    /// CR 104.4b: the strict comparator of the auto-pass window, on two sample forms.
+    pub strict: bool,
+    /// CR 732.2a: the recorded period's equality cover, on the raw frames its replay reached.
+    pub recorded_period: bool,
+    /// CR 104.4b + CR 732.4: the recurrence a mandatory replay's winner reads across its two
+    /// raw cycle ends.
+    pub mandatory_replay: bool,
+}
+
+/// See [`LoopEntryPointVerdicts`].
+#[cfg(any(test, feature = "test-support"))]
+pub fn loop_entry_point_verdicts_for_tests(
+    prior: &GameState,
+    current: &GameState,
+) -> LoopEntryPointVerdicts {
+    use crate::analysis::resource::{
+        loop_states_cover_modulo_growth, loop_states_equal_modulo_resources,
+    };
+    let recorded_period = loop_states_equal_modulo_resources(prior, current);
+    LoopEntryPointVerdicts {
+        strict: crate::types::game_state::loop_states_equal(
+            &prior.normalize_for_loop_sample(),
+            &current.normalize_for_loop_sample(),
+        ),
+        recorded_period,
+        mandatory_replay: recorded_period || loop_states_cover_modulo_growth(prior, current),
+    }
+}
+
 /// CR 608.2b + CR 114.4 + CR 113.6p: does this SLOT's source identify the ability instance
 /// that raised the prompt carrying `source_id`?
 ///
@@ -9921,6 +9959,12 @@ fn priority_pass_will_close_window(state: &GameState) -> bool {
     !participants.is_empty() && state.priority_passes.len().saturating_add(1) >= participants.len()
 }
 
+#[cfg(test)]
+thread_local! {
+    static AUTO_PASS_WINDOW_SAMPLES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// Auto-pass loop: when a player has an auto-pass flag and receives priority,
 /// automatically pass for them until the goal condition is met or interrupted.
 ///
@@ -10067,8 +10111,10 @@ fn run_auto_pass_loop(
                         if mandatory_iters >= FINGERPRINT_AFTER_ITERS
                             && matches!(result.waiting_for, WaitingFor::Priority { .. })
                         {
+                            #[cfg(test)]
+                            AUTO_PASS_WINDOW_SAMPLES.with(|samples| samples.set(samples.get() + 1));
                             let fingerprint = state.loop_fingerprint();
-                            let normalized = state.normalize_for_loop();
+                            let normalized = state.normalize_for_loop_sample();
                             // CR 732.5: the out verdict is read only for a repeat; it needs each
                             // beat's live state.
                             if loop_window.iter().enumerate().any(|(at, (fp, prior))| {
@@ -26546,5 +26592,223 @@ At the beginning of combat on your turn, you may choose two. Each mode must targ
             remembered.state().waiting_for
         );
         assert_eq!(remembered.state().loop_decision_tally.optional, 1);
+    }
+}
+
+#[cfg(test)]
+mod damage_history_priority_cost_tests {
+    use super::*;
+    use crate::types::ability::{QuantityExpr, TargetFilter};
+    use crate::types::game_state::{DamageRecord, LoopDetectionMode, LOOP_DAMAGE_JOURNAL_VISITS};
+
+    #[test]
+    fn loop_relational_mandatory_recurrence_reads_history_once_per_projected_side() {
+        use crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS;
+
+        const ROWS: usize = 512;
+        let mut state = GameState::new_two_player(7);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Boundary history source".to_string(),
+            Zone::Battlefield,
+        );
+        let incarnation = state.objects[&source].incarnation;
+        let recipient = crate::game::zones::create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Boundary recipient".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient_incarnation = state.objects[&recipient].incarnation;
+        // A REAL recipient reader, so the journal reduction actually runs on both projected
+        // sides; without it the fixture would measure the empty-request early return.
+        state.stack.push_back(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::SetTapState {
+                        target: TargetFilter::EventTarget,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
+                    vec![],
+                    source,
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: Some(GameEvent::DamageDealt {
+                    source_id: source,
+                    source_incarnation: Some(incarnation),
+                    target: TargetRef::Object(recipient),
+                    amount: 1,
+                    is_combat: false,
+                    excess: 0,
+                }),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        for _ in 0..ROWS {
+            state.damage_dealt_this_turn.push_back(DamageRecord {
+                source_id: source,
+                source_incarnation: Some(incarnation),
+                target: TargetRef::Object(recipient),
+                target_incarnation: Some(recipient_incarnation),
+                amount: 1,
+                ..Default::default()
+            });
+        }
+        // The recurrence a mandatory replay's winner reads across its two cycle ends: one
+        // reduction pass per projected side plus a bounded witness rank. A strict normal form
+        // would add its own two journal passes per side, so the bound discriminates that revert.
+        let recurs = |prior: &GameState, current: &GameState| {
+            crate::analysis::resource::loop_states_equal_modulo_resources(prior, current)
+                || crate::analysis::resource::loop_states_cover_modulo_growth(prior, current)
+        };
+        LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let settled = recurs(&state, &state);
+        let whole_path = LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
+        assert!(
+            settled,
+            "the frame recurs against itself through the public comparator"
+        );
+        assert!(
+            whole_path <= 2 * ROWS + 16,
+            "{whole_path} visits through one recurrence comparison for {ROWS} rows; a strict \
+             normal form would add two more passes"
+        );
+        // A REAL board modification must not settle: the comparison is not vacuous.
+        let mut modified = state.clone();
+        modified
+            .objects
+            .get_mut(&recipient)
+            .expect("the fixture keeps its recipient")
+            .tapped = true;
+        assert!(
+            !recurs(&state, &modified),
+            "tapping the recipient is a real change the recurrence comparison must observe"
+        );
+    }
+
+    #[test]
+    fn loop_relational_auto_pass_window_defers_unread_damage_history() {
+        const RESOLUTIONS: usize = 40;
+        let caster = PlayerId(0);
+        let opponent = PlayerId(1);
+        for prefix in [32, 256, 2_048] {
+            let mut state = GameState::new_two_player(7);
+            state.phase = Phase::PreCombatMain;
+            state.active_player = caster;
+            state.priority_player = caster;
+            state.waiting_for = WaitingFor::Priority { player: caster };
+            // Isolate the automatic mandatory window from the user-enabled detector.
+            state.loop_detection = LoopDetectionMode::Off;
+            for player in state.players.iter_mut() {
+                player.life = 1_000;
+            }
+            let source = crate::game::zones::create_object(
+                &mut state,
+                CardId(1),
+                caster,
+                "Damage history work source".to_string(),
+                Zone::Battlefield,
+            );
+            let source_incarnation = state.objects[&source].incarnation;
+            for _ in 0..prefix {
+                state.damage_dealt_this_turn.push_back(DamageRecord {
+                    source_id: source,
+                    source_incarnation: Some(source_incarnation),
+                    target: TargetRef::Player(opponent),
+                    amount: 1,
+                    ..Default::default()
+                });
+            }
+            for index in 0..RESOLUTIONS {
+                state.stack.push_back(StackEntry {
+                    id: ObjectId(100 + index as u64),
+                    source_id: source,
+                    controller: caster,
+                    kind: StackEntryKind::TriggeredAbility {
+                        source_id: source,
+                        ability: Box::new(ResolvedAbility::new(
+                            Effect::DealDamage {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                                target: TargetFilter::Any,
+                                damage_source: None,
+                                excess: None,
+                            },
+                            vec![TargetRef::Player(opponent)],
+                            source,
+                            caster,
+                        )),
+                        condition: None,
+                        trigger_event: None,
+                        description: None,
+                        source_name: String::new(),
+                        subject_match_count: None,
+                        die_result: None,
+                        provenance: None,
+                    },
+                });
+            }
+            for player in [caster, opponent] {
+                state.auto_pass.insert(
+                    player,
+                    AutoPassMode::UntilStackEmpty {
+                        initial_stack_len: RESOLUTIONS,
+                        policy: StackResolutionPolicy::Committed,
+                    },
+                );
+            }
+            // Positive work-observer control, outside the measured drive.
+            LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+            let _strict = state.normalize_for_loop();
+            assert!(
+                LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get) >= 2 * prefix,
+                "strict journal collection/rewrite must be observable"
+            );
+            LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+            AUTO_PASS_WINDOW_SAMPLES.with(|samples| samples.set(0));
+            let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
+            assert!(
+                run_auto_pass_loop(&mut state, &mut result)
+                    .expect("the finite damage stack resolves"),
+                "the automatic route must advance"
+            );
+            assert!(
+                state.stack.is_empty(),
+                "all pending damage consumers finish"
+            );
+            assert_eq!(state.players[1].life, 1_000 - RESOLUTIONS as i32);
+            assert_eq!(
+                state.damage_dealt_this_turn.len(),
+                prefix + RESOLUTIONS,
+                "actual damage resolution grows history inside the automatic window"
+            );
+            assert!(
+                AUTO_PASS_WINDOW_SAMPLES.with(std::cell::Cell::get) > 0,
+                "the separate post-threshold window must actually sample"
+            );
+            assert_eq!(
+                LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get),
+                0,
+                "auto-pass sampling must defer unread full-history ranking"
+            );
+        }
     }
 }

@@ -171,6 +171,9 @@ struct Board {
     synthetic_shield: bool,
     /// Gibbering Fiend on P0's battlefield and Shieldmate's Blessing cast at P1 before kickoff.
     finite_prevention: bool,
+    /// Two Shocks P0 casts at P1 before kickoff, so the turn's damage journal holds two real
+    /// rows when the loop begins.
+    shocks: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -392,12 +395,20 @@ fn build(board: Board, mode: LoopDetectionMode) -> Option<Built> {
     for &name in p1_names.iter().cycle().take(p1_cards) {
         scenario.add_real_card(P1, name, Zone::Library, db);
     }
+    let shocks: Vec<ObjectId> = (0..if board.shocks { 2 } else { 0 })
+        .map(|_| scenario.add_real_card(P0, "Shock", Zone::Hand, db))
+        .collect();
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = mode;
     runner.state_mut().players[0].poison_counters = board.p0_poison;
     runner.state_mut().players[1].life = board.p1_life;
     if let Some(seed) = board.seed {
         runner.state_mut().rng = GameRng::seed_from_u64(seed);
+    }
+    for shock in shocks {
+        add_mana(&mut runner, P0, &[ManaType::Red]);
+        drop(runner.cast(shock).target_player(P1).commit());
+        settle(&mut runner, |state| holds_priority(state, P0));
     }
     // CR 111.7: a token that dies ceases to exist, leaving no card for Animate Dead to enchant.
     if let Some(token) = token {
@@ -780,6 +791,7 @@ const PLAIN: Board = Board {
     p1_life: 20,
     synthetic_shield: false,
     finite_prevention: false,
+    shocks: false,
 };
 
 const ANCHOR: Board = Board {
@@ -4018,6 +4030,27 @@ fn a_shuffle_is_offered(board: Board) {
 #[test]
 fn a_shuffle_no_player_observes_is_offered() {
     a_shuffle_is_offered(WOOD_ELVES);
+}
+
+/// CR 701.24a + CR 732.2a + CR 732.4: the same shuffle over damage history play wrote earlier
+/// in the turn: P0 cast Shock ("Shock deals 2 damage to any target.") at P1 twice before the
+/// loop began. The mandatory replay settles the same performing take, over a journal of real
+/// rows.
+#[test]
+fn a_shuffle_over_real_damage_history_is_offered() {
+    let board = Board {
+        shocks: true,
+        ..WOOD_ELVES
+    };
+    let Some(offered) = run(board, LoopDetectionMode::Interactive, Drive::Pass, 60) else {
+        return;
+    };
+    assert_eq!(
+        offered.state().damage_dealt_this_turn.len(),
+        2,
+        "reach: both Shocks wrote their journal rows"
+    );
+    a_shuffle_is_offered(board);
 }
 
 /// CR 701.24a + CR 732.2a: P1's Lightning Bolt beside the shuffle is an out, so the period is
