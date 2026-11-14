@@ -5731,8 +5731,8 @@ fn collect_pending_triggers_with_collection(
                 }
             }
 
-            // CR 702.21a: Ward triggers when this permanent becomes the target
-            // of a spell or ability an opponent controls. Each ward instance
+            // CR 702.21a + CR 102.3: Ward triggers when this permanent becomes the
+            // target of a spell or ability an opponent (not a teammate) controls. Each ward instance
             // triggers independently. Only fires for permanents (battlefield scan).
             if !ward_costs.is_empty() {
                 if let GameEvent::BecomesTarget {
@@ -5764,7 +5764,9 @@ fn collect_pending_triggers_with_collection(
                             &active_suppress_triggers,
                         );
                         if let Some(src_ctrl) = source_controller {
-                            if src_ctrl != controller && !ward_suppressed {
+                            if super::players::is_opponent(state, controller, src_ctrl)
+                                && !ward_suppressed
+                            {
                                 for ward in &ward_costs {
                                     // CR 702.21a + CR 118.12: Ward generates a counter
                                     // effect with an unless-pay modifier. Post-fold, the
@@ -7579,32 +7581,38 @@ fn collect_ring_emblem_triggers(
                 // times, it has "Whenever your Ring-bearer becomes blocked by
                 // a creature, the blocking creature's controller sacrifices it
                 // at end of combat."
-                if let GameEvent::BlockersDeclared { assignments } = event {
-                    for (blocker_id, attacker_id) in assignments {
-                        if *attacker_id != bearer_id {
-                            continue;
-                        }
-                        let Some(blocker) = state.objects.get(blocker_id) else {
-                            continue;
-                        };
-                        if !blocker.card_types.core_types.contains(&CoreType::Creature) {
-                            continue;
-                        }
-                        pending.push(ring_pending_trigger(
-                            state,
-                            bearer_id,
-                            player,
-                            player,
-                            event,
-                            ring_level_three_ability(
-                                bearer_id,
-                                blocker.id,
-                                player,
-                                blocker.controller,
-                            ),
-                            "The Ring level 3",
-                        ));
+                let mut collect_blocker = |blocker_id, attacker_id| {
+                    if attacker_id != bearer_id {
+                        return;
                     }
+                    let Some(blocker) = state.objects.get(&blocker_id) else {
+                        return;
+                    };
+                    if !blocker.card_types.core_types.contains(&CoreType::Creature) {
+                        return;
+                    }
+                    pending.push(ring_pending_trigger(
+                        state,
+                        bearer_id,
+                        player,
+                        player,
+                        event,
+                        ring_level_three_ability(bearer_id, blocker.id, player, blocker.controller),
+                        "The Ring level 3",
+                    ));
+                };
+                match event {
+                    GameEvent::BlockersDeclared { assignments } => {
+                        for &(blocker, attacker) in assignments {
+                            collect_blocker(blocker, attacker);
+                        }
+                    }
+                    // CR 509.3d: entering blocking is also a creature-bound
+                    // attacker occurrence; the bare transition event is not.
+                    GameEvent::AttackerBecameBlockedByFilteredBlocker { attacker, blocker } => {
+                        collect_blocker(*blocker, *attacker);
+                    }
+                    _ => {}
                 }
             }
 
@@ -9547,18 +9555,117 @@ pub(crate) fn park_observer_triggers_if_paused(
     // CR 601.2h + CR 602.2b + CR 603.3: under a live announcement these events
     // wait in its carrier; only the span it does not own is parked here.
     let owned = super::announcement_triggers::take_inline_trigger_span(state, events, slice_start);
-    // CR 603.2c: logical zone-change owners can queue observers without claiming
-    // the consumed ledger; honor their queued contexts as collection witnesses.
-    let candidates = filter_already_collected_trigger_events_from(
-        state,
-        &events[..owned.end],
-        slice_start,
+    collect_unclaimed_ordinary_observers(state, &events[..owned.end], slice_start);
+    // CR 603.7 + CR 603.3: an action that pauses here is not scanned by the
+    // post-action pipeline, and the answer runs on a new event buffer, so a
+    // delayed trigger watching these events ("When that creature dies this
+    // turn") is collected now, by the paused-exit collector's delayed half.
+    collect_unclaimed_delayed_observers(state, &events[..owned.end], slice_start);
+}
+
+/// CR 603.2c + CR 603.3b: the paused-exit collector. An action that ends at a
+/// further prompt inside a payment leaves its events to no later scan, so their
+/// ordinary and delayed triggers are queued here, once: occurrences another
+/// collector already claimed are skipped, and the ones collected here are
+/// claimed in turn, so no later collector over the same buffer repeats them.
+pub(crate) fn collect_paused_exit_triggers(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+) {
+    collect_unclaimed_ordinary_observers(state, events, event_start);
+    collect_unclaimed_delayed_observers(state, events, event_start);
+}
+
+/// CR 603.2c + CR 603.7: the delayed half of every paused exit: the delayed
+/// triggers of `events[event_start..]` that no collector has claimed and no
+/// live owner retains.
+fn collect_unclaimed_delayed_observers(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+) {
+    let retained = paused_exit_retained_events(state);
+    let mut delayed = unclaimed_trigger_events_from(
+        events,
+        event_start,
+        TriggerCollectionRequester::Delayed,
         &state.consumed_before_priority_trigger_events,
     );
-    let trigger_events = paused_observer_trigger_events(state, candidates);
-    if !trigger_events.is_empty() {
-        collect_triggers_into_deferred(state, &trigger_events);
+    delayed.retain(|event| !retained.contains(event));
+    collect_unclaimed_delayed_triggers_into_deferred(state, events, &delayed);
+}
+
+/// Events a live owner still holds and collects itself: logical zone moves,
+/// parked entries and cost events (CR 603.2c + CR 603.10a + CR 614.12a).
+fn paused_exit_retained_events(state: &GameState) -> Vec<GameEvent> {
+    let mut retained = super::engine_priority::retained_logical_zone_events(state);
+    retained.extend(state.deferred_entry_events.iter().cloned());
+    retained.extend(super::engine_priority::retained_cost_events(state));
+    retained
+}
+
+/// CR 603.2c: the ordinary half of every paused exit. Collects the observer
+/// triggers of `events[event_start..]` that no collector has claimed and no
+/// live owner retains, then claims exactly those occurrences for ordinary
+/// collectors. Logical zone-change owners can queue observers without claiming
+/// the ledger, so their queued contexts are honored as collection witnesses.
+fn collect_unclaimed_ordinary_observers(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+) {
+    let retained = paused_exit_retained_events(state);
+    let mut zone_change_witnesses: Vec<GameEvent> = state
+        .deferred_triggers
+        .iter()
+        .flat_map(|context| context.trigger_events.iter())
+        .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+        .cloned()
+        .collect();
+    let mut ordinary = unclaimed_trigger_events_from(
+        events,
+        event_start,
+        TriggerCollectionRequester::Ordinary,
+        &state.consumed_before_priority_trigger_events,
+    );
+    ordinary.retain(|event| {
+        // CR 707.10: `copy_spell` collects `SpellCopied` observers at
+        // announcement and drains them after CopyRetarget finalization.
+        if matches!(
+            event,
+            GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
+        ) || retained.contains(event)
+        {
+            return false;
+        }
+        if let Some(index) = zone_change_witnesses
+            .iter()
+            .position(|witness| witness == event)
+        {
+            zone_change_witnesses.remove(index);
+            return false;
+        }
+        true
+    });
+    if ordinary.events.is_empty() {
+        return;
     }
+    collect_triggers_into_deferred(state, &ordinary.events);
+    let occurrences = ordinary
+        .positions
+        .iter()
+        .map(|&position| ConsumedTriggerEventOccurrence {
+            event: events[position].clone(),
+            occurrence: trigger_event_occurrence(events, position),
+            scope: ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+        })
+        .collect();
+    resolve_and_apply_trigger_collection(
+        state,
+        ResolvedTriggerCollection::ConsumeBeforePriority { occurrences },
+    )
+    .expect("a paused-exit claim must have a live journal cause");
 }
 
 /// CR 603.2 + CR 603.7: Park delayed observer triggers if the action paused
@@ -9591,7 +9698,10 @@ pub(crate) fn park_delayed_observer_triggers_if_paused(
 /// `flush_deferred_entry_events_into_priority_scan`), which scans it against the
 /// realized post-choice object (CR 603.10); collecting it here too would trigger
 /// the observer twice. Mirrors `engine_priority::run_post_action_pipeline`.
-fn paused_observer_trigger_events(state: &GameState, candidates: Vec<GameEvent>) -> Vec<GameEvent> {
+pub(crate) fn paused_observer_trigger_events(
+    state: &GameState,
+    candidates: Vec<GameEvent>,
+) -> Vec<GameEvent> {
     candidates
         .into_iter()
         .filter(|ev| {
@@ -9833,6 +9943,11 @@ pub(crate) fn seed_event_context_parent_targets(
     let Some(event) = trigger_event else {
         return;
     };
+    if timing == EventContextSeedTiming::StackPush {
+        // CR 400.7 + CR 608.2k: non-targeted event operands need their original
+        // identities before opponents can respond, not a resolution-time lookup.
+        super::effects::phase_out::seed_event_context_pins(state, ability, event);
+    }
     if !effect_uses_parent_target(&ability.effect) || parent_target_seeding_blocked(ability) {
         return;
     }
@@ -46027,10 +46142,24 @@ pub mod tests {
                 collected, 1,
                 "settled={settled}: exactly the unclaimed second occurrence is collected"
             );
+            // The settled helper borrows the journal. The paused exit claims
+            // exactly the occurrence it collected, so no later collector over
+            // the same buffer repeats it.
+            let mut expected = vec![ConsumedTriggerEventOccurrence {
+                event: repeated.clone(),
+                occurrence: trigger_event_occurrence(&events, 0),
+                scope: ConsumedTriggerEventScope::AllCollectors,
+            }];
+            if !settled {
+                expected.push(ConsumedTriggerEventOccurrence {
+                    event: repeated.clone(),
+                    occurrence: trigger_event_occurrence(&events, events.len() - 1),
+                    scope: ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+                });
+            }
             assert_eq!(
-                state.consumed_before_priority_trigger_events.len(),
-                1,
-                "settled={settled}: the helper borrows the journal, it never takes it"
+                state.consumed_before_priority_trigger_events, expected,
+                "settled={settled}: the journal holds the prior claim and only what this exit collected"
             );
         }
     }
@@ -52599,6 +52728,7 @@ pub mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
