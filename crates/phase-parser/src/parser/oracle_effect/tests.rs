@@ -100952,7 +100952,7 @@ fn each_player_search_then_shuffle_anchors_the_scoped_players_library() {
     );
 }
 
-/// CR 608.2c + CR 118.12a + CR 120.1: an accepting player is the recipient of
+/// CR 608.2c + CR 118.12 + CR 120.1: an accepting player is the recipient of
 /// a self-named damage instruction that says "to that player". The generic
 /// accepting-player binder must see the player anaphor as dependent, so the
 /// recipient changes under its seeded parse.

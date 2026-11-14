@@ -16,7 +16,7 @@ use engine::types::zones::Zone;
 const SIN_PRODDER_ORACLE: &str = "Menace\nAt the beginning of your upkeep, reveal the top card of your library. Any opponent may have you put that card into your graveyard. If a player does, this creature deals damage to that player equal to that card's mana value. Otherwise, put that card into your hand.";
 const CRAIG_BOONE_ORACLE: &str = "Reach, lifelink\nOne for My Baby — Whenever you attack with two or more creatures, put two quest counters on Craig Boone. When you do, Craig Boone deals damage equal to the number of quest counters on it to up to one target creature unless that creature's controller has Craig Boone deal that much damage to them.";
 
-/// CR 603.3d + CR 118.12a + CR 608.2c + CR 120.1: the accepting opponent is
+/// CR 603.3d + CR 118.12 + CR 608.2c + CR 120.1: the accepting opponent is
 /// the recipient of Sin Prodder's damage, and Sin Prodder remains its source.
 /// The top card's mana value differs from the source's and the event is an
 /// actual upkeep trigger resolved through public choice actions.
@@ -81,7 +81,7 @@ fn sin_prodder_upkeep_acceptor_receives_source_damage_equal_to_top_mana_value() 
     );
 }
 
-/// CR 603.3d + CR 118.12a + CR 608.2c: if each opponent declines in turn,
+/// CR 603.3d + CR 118.12 + CR 608.2c: if each opponent declines in turn,
 /// the revealed card goes to its owner's hand and no damage is dealt.
 #[test]
 fn sin_prodder_upkeep_prompts_successive_opponents_when_all_decline() {
