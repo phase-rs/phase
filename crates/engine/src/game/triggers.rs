@@ -9624,7 +9624,13 @@ pub(crate) fn park_observer_triggers_if_paused(
     events: &mut Vec<GameEvent>,
     slice_start: usize,
 ) {
-    park_observer_triggers_if_paused_matching(state, events, slice_start, |_| true);
+    park_observer_triggers_if_paused_matching(
+        state,
+        events,
+        slice_start,
+        |_| true,
+        DelayedObservers::Collect,
+    );
 }
 
 /// CR 603.2 + CR 603.6a + CR 616.1f: the park for a replacement or copy-choice
@@ -9640,7 +9646,13 @@ pub(crate) fn park_entry_observer_triggers_if_paused(
     events: &mut Vec<GameEvent>,
     slice_start: usize,
 ) {
-    park_observer_triggers_if_paused_matching(state, events, slice_start, is_battlefield_entry);
+    park_observer_triggers_if_paused_matching(
+        state,
+        events,
+        slice_start,
+        is_battlefield_entry,
+        DelayedObservers::Skip,
+    );
 }
 
 /// CR 603.2 + CR 603.6a + CR 702.104a + CR 303.4f: the entry collector for an
@@ -9659,7 +9671,13 @@ pub(crate) fn collect_and_drain_entry_observer_triggers_if_settled(
     if triggered_mana_sidecar_owns_local_collection(state) {
         return;
     }
-    collect_answer_slice_matching(state, events, slice_start, is_battlefield_entry);
+    collect_answer_slice_matching(
+        state,
+        events,
+        slice_start,
+        is_battlefield_entry,
+        DelayedObservers::Skip,
+    );
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && !state.deferred_triggers.is_empty()
     {
@@ -9682,6 +9700,7 @@ fn park_observer_triggers_if_paused_matching(
     events: &mut Vec<GameEvent>,
     slice_start: usize,
     keep: impl Fn(&GameEvent) -> bool,
+    delayed: DelayedObservers,
 ) {
     if triggered_mana_sidecar_owns_local_collection(state) {
         return;
@@ -9689,7 +9708,7 @@ fn park_observer_triggers_if_paused_matching(
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         return;
     }
-    collect_answer_slice_matching(state, events, slice_start, keep);
+    collect_answer_slice_matching(state, events, slice_start, keep, delayed);
 }
 
 /// The slice an answer emitted, minus what a live announcement owns and what
@@ -9700,6 +9719,7 @@ fn collect_answer_slice_matching(
     events: &mut Vec<GameEvent>,
     slice_start: usize,
     keep: impl Fn(&GameEvent) -> bool,
+    delayed: DelayedObservers,
 ) {
     // A resumed simultaneous move can hand back a buffer the batch drain has
     // already taken into its pending frame, leaving events shorter than the
@@ -9710,13 +9730,34 @@ fn collect_answer_slice_matching(
     // CR 601.2h + CR 602.2b + CR 603.3: under a live announcement these events
     // wait in its carrier; only the span it does not own is parked here.
     let owned = super::announcement_triggers::take_inline_trigger_span(state, events, slice_start);
+    let slice = &events[..owned.end.min(events.len())];
     collect_unclaimed_ordinary_observers_matching(
         state,
-        &events[..owned.end.min(events.len())],
+        slice,
         slice_start,
         keep,
         ObserverCollection::ThroughEntryGate,
     );
+    match delayed {
+        DelayedObservers::Collect => {
+            // CR 603.7 + CR 603.3: an action that pauses here is not scanned by the
+            // post-action pipeline, and the answer runs on a new event buffer, so a
+            // delayed trigger watching these events ("When that creature dies this
+            // turn") is collected now, by the paused-exit collector's delayed half.
+            collect_unclaimed_delayed_observers(state, slice, slice_start);
+        }
+        DelayedObservers::Skip => {}
+    }
+}
+
+/// Whether an answer's paused collection also queues the delayed triggers watching its events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DelayedObservers {
+    /// Every paused observer park: the delayed half is collected beside the ordinary one.
+    Collect,
+    /// The entry-only collectors of the replacement, copy-choice, Tribute and Aura-host
+    /// answers: they own battlefield entries only, as before.
+    Skip,
 }
 
 /// CR 603.2 + CR 603.3b + CR 603.6a: the collect-only seam for a handler that
@@ -10023,6 +10064,17 @@ pub(crate) fn collect_paused_exit_triggers(
     event_start: usize,
 ) {
     collect_unclaimed_ordinary_observers(state, events, event_start);
+    collect_unclaimed_delayed_observers(state, events, event_start);
+}
+
+/// CR 603.2c + CR 603.7: the delayed half of every paused exit: the delayed
+/// triggers of `events[event_start..]` that no collector has claimed and no
+/// live owner retains.
+fn collect_unclaimed_delayed_observers(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+) {
     let retained = paused_exit_retained_events(state);
     let mut delayed = unclaimed_trigger_events_from(
         events,
@@ -10171,7 +10223,10 @@ pub(crate) fn park_delayed_observer_triggers_if_paused(
 /// `flush_deferred_entry_events_into_priority_scan`), which scans it against the
 /// realized post-choice object (CR 603.10); collecting it here too would trigger
 /// the observer twice. Mirrors `engine_priority::run_post_action_pipeline`.
-fn paused_observer_trigger_events(state: &GameState, candidates: Vec<GameEvent>) -> Vec<GameEvent> {
+pub(crate) fn paused_observer_trigger_events(
+    state: &GameState,
+    candidates: Vec<GameEvent>,
+) -> Vec<GameEvent> {
     candidates
         .into_iter()
         .filter(|ev| {

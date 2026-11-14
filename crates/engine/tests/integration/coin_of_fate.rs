@@ -34,10 +34,11 @@
 //!     names no object, the return does as much as possible (nothing), and the
 //!     rest of the printed instruction still happens.
 
+use engine::game::engine::{loop_entry_point_verdicts_for_tests, LoopEntryPointVerdicts};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -659,5 +660,128 @@ fn coin_of_fate_with_no_eligible_cost_exiled_card_still_makes_you_the_monarch() 
             .iter()
             .any(|id| *id == grave_a || *id == grave_b),
         "CR 609.3: with no eligible card, nothing is returned to the battlefield"
+    );
+}
+
+/// The paid-object record the Coin's ability on the stack holds for `card`.
+fn paid_record_incarnation(state: &mut GameState, card: ObjectId) -> &mut u64 {
+    let ability = state
+        .stack
+        .back_mut()
+        .and_then(|entry| entry.ability_mut())
+        .expect("the Coin's ability is on the stack");
+    ability
+        .cost_paid_objects
+        .iter_mut()
+        .filter_map(|record| record.snapshot_mut())
+        .find(|snapshot| snapshot.object_id == card)
+        .map(|snapshot| &mut snapshot.incarnation)
+        .expect("the cost recorded the card it exiled")
+}
+
+/// The cards the opponent is offered once the frame's ability resolves.
+fn candidates_after_resolution(frame: &GameState) -> Vec<ObjectId> {
+    let mut runner = GameRunner::from_state(frame.clone());
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseFromZoneChoice { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority toward the ability's resolution");
+    }
+    let mut cards = open_choice(&runner).1;
+    cards.sort();
+    cards
+}
+
+/// CR 400.7 + CR 400.7j + CR 104.4b: the paid-object identity through its resolution reader
+/// AND through the loop comparators, on one frame pair. Coin of Fate's cost exiles two
+/// creature cards from the graveyard; "An opponent chooses one of the exiled cards" offers a
+/// card only while its cost record still names the live object.
+///
+/// The STALE frame is the real one: the priority window after the cost is paid, with card A
+/// moved out of exile and back, so its record names an object that no longer exists. The LIVE
+/// frame is its twin with only that record re-pointed at the card's current incarnation (the
+/// frame the cost would have produced had it exiled the card after the round trip). The two
+/// resolve to different candidate sets, so every loop comparator entry point must report
+/// them as different positions; the live frame minted later, record and card advanced
+/// together, is the same position.
+#[test]
+fn coin_of_fate_paid_object_identity_reaches_the_loop_comparators() {
+    const ALL: LoopEntryPointVerdicts = LoopEntryPointVerdicts {
+        strict: true,
+        ring_walk: true,
+        settlement: true,
+    };
+    const NONE: LoopEntryPointVerdicts = LoopEntryPointVerdicts {
+        strict: false,
+        ring_walk: false,
+        settlement: false,
+    };
+
+    let mut board = board();
+    let (grave_a, grave_b) = (board.grave_a, board.grave_b);
+    let mut stale = None;
+    activate_until_choice_with_interlude(&mut board, &[grave_a, grave_b], |runner| {
+        round_trip_out_of_exile(runner, grave_a);
+        stale = Some(runner.state().clone());
+    });
+    let stale = stale.expect("reach guard: the post-payment priority window was reached");
+    let current = stale.objects[&grave_a].incarnation;
+
+    let mut live = stale.clone();
+    let record = paid_record_incarnation(&mut live, grave_a);
+    assert_ne!(
+        *record, current,
+        "reach guard: the round trip left the record on a superseded incarnation"
+    );
+    *record = current;
+
+    // The resolution reader: the two frames offer different cards.
+    let mut both = vec![grave_a, grave_b];
+    both.sort();
+    assert_eq!(
+        candidates_after_resolution(&stale),
+        vec![grave_b],
+        "runtime: the card that left exile and returned is not offered"
+    );
+    assert_eq!(
+        candidates_after_resolution(&live),
+        both,
+        "runtime: with the record on the live card, both exiled cards are offered"
+    );
+
+    // The loop comparators: different positions, in either order.
+    for (prior, now, order) in [
+        (&stale, &live, "stale then live"),
+        (&live, &stale, "live then stale"),
+    ] {
+        assert_eq!(
+            loop_entry_point_verdicts_for_tests(prior, now),
+            NONE,
+            "{order}: a record on the live card is not the position of a record on a card \
+             that left and returned"
+        );
+    }
+    // Controls: each frame recurs against itself, and the live relation minted later (the
+    // card and its record three incarnations on) is the same position.
+    for (name, frame) in [("stale", &stale), ("live", &live)] {
+        assert_eq!(
+            loop_entry_point_verdicts_for_tests(frame, &frame.clone()),
+            ALL,
+            "reach guard: the {name} frame recurs against itself"
+        );
+    }
+    let mut later = live.clone();
+    later.objects.get_mut(&grave_a).unwrap().incarnation = current + 3;
+    *paid_record_incarnation(&mut later, grave_a) = current + 3;
+    assert_eq!(
+        loop_entry_point_verdicts_for_tests(&live, &later),
+        ALL,
+        "the same live relation, minted later, is the same position"
     );
 }
