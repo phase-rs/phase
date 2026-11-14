@@ -77,6 +77,7 @@ pub struct PoisonClockPolicy;
 
 /// One poison clock a candidate advances (CR 810.10: teammates share one), the seat that opened
 /// it, the counters credited to it, and whether those counters may claim lethal.
+/// Every reading of a pool (lethal, pressure, choice) goes through `left()`.
 #[derive(Debug, Clone, PartialEq)]
 struct PoisonPool {
     seat: PlayerId,
@@ -91,16 +92,17 @@ enum Delivery {
     /// The engine read the delivery, or the estimate is short of lethal and needs no read.
     Counted,
     /// The delivery was not read, or it did not end with the seat out and the AI in, so its
-    /// estimate stops one counter short of lethal.
+    /// pool is held at least one counter from lethal.
     Unread,
 }
 
 impl PoisonPool {
-    /// The counters that count toward lethal: an unread delivery stops one short of it.
-    fn credited(&self) -> u32 {
+    /// Counters still needed for lethal after this delivery; an unread one leaves at least one.
+    fn left(&self) -> u32 {
+        let left = headroom(self.measure).saturating_sub(self.added);
         match self.delivery {
-            Delivery::Counted => self.added,
-            Delivery::Unread => self.added.min(headroom(self.measure).saturating_sub(1)),
+            Delivery::Counted => left,
+            Delivery::Unread => left.max(1),
         }
     }
 }
@@ -458,7 +460,7 @@ fn confirm_lethal(
     must_resolve: bool,
 ) -> PoisonPool {
     // The delivery clones the state, so only an estimate that would claim lethal pays for one.
-    if !must_resolve && !reaches_lethal(pool.measure, pool.added) {
+    if !must_resolve && pool.left() > 0 {
         return pool;
     }
     let Some(mut after) = deliver(pool.seat) else {
@@ -480,7 +482,7 @@ fn confirm_lethal(
         Some(measure) => {
             pool.added = measure.count.saturating_sub(pool.measure.count);
             // A seat still in the game at its threshold has not lost.
-            if reaches_lethal(pool.measure, pool.added) {
+            if pool.left() == 0 {
                 pool.delivery = Delivery::Unread;
             }
         }
@@ -500,7 +502,7 @@ fn closest_delivered(
         .into_iter()
         .map(|pool| confirm_lethal(ai_player, pool, &deliver, must_resolve))
         .filter(|pool| pool.added > 0)
-        .min_by_key(|pool| headroom(pool.measure).saturating_sub(pool.credited()))
+        .min_by_key(PoisonPool::left)
 }
 
 /// Counters still needed before this measure is lethal.
@@ -639,7 +641,7 @@ impl TacticalPolicy for PoisonClockPolicy {
 /// one tenth of a clock at 10/10, because it is the only way to reach ten.
 const MIN_CLOCK_PROGRESS: f64 = 0.25;
 
-/// Shared scoring for every branch: reaching the measure's threshold is the top
+/// Shared scoring for every branch: a counted pool with nothing left is the top
 /// of the scale, otherwise scaled by how far the clock has run — the last
 /// counters are worth more than the first.
 ///
@@ -659,17 +661,16 @@ fn score_clock(scalar: f64, pool: &PoisonPool, ceiling: f64) -> PolicyVerdict {
             .with_fact("poison_threshold", i64::from(measure.threshold))
     };
 
-    let credited = pool.credited();
+    let left = pool.left();
     // Lethal comes from the clone's confirmed elimination, never from count arithmetic.
-    if pool.delivery == Delivery::Counted && reaches_lethal(measure, credited) {
+    if pool.delivery == Delivery::Counted && left == 0 {
         return PolicyVerdict::score(
             scalar.min(ceiling),
             facts(PolicyReason::new("poison_clock_lethal")),
         );
     }
 
-    let projected = measure.count.saturating_add(credited);
-    let progress = f64::from(projected) / f64::from(measure.threshold);
+    let progress = f64::from(measure.threshold.saturating_sub(left)) / f64::from(measure.threshold);
     PolicyVerdict::score(
         scalar.min(STRONG_MAX) * progress.max(MIN_CLOCK_PROGRESS),
         facts(PolicyReason::new("poison_clock_pressure")),

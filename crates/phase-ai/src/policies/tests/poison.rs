@@ -1637,16 +1637,16 @@ fn each_opponent_poison_reads_the_scoped_actor() {
     }
 }
 
-/// The real Prologue to Phyresis cast in Two-Headed Giant onto opposing heads at `seeded`, the
-/// first head controlling Platinum Angel when `with_angel`: the verdict, then each head's poison
-/// and whether it is still in the game after the cast resolves.
-fn prologue_onto_team(
-    seeded: (u32, u32),
-    with_angel: bool,
-) -> ((f64, PolicyReason), (u32, u32), [bool; 2]) {
-    let heads = [PlayerId(2), PlayerId(3)];
-    let poison = [(heads[0], seeded.0), (heads[1], seeded.1)];
-    let (mut runner, ids) = board(FormatConfig::two_headed_giant(), 4, &poison, |s| {
+/// The real Prologue to Phyresis cast onto opponents seeded with `poison`, `angel` controlling
+/// Platinum Angel: the verdict, then each seeded seat's poison and whether it is still in the game
+/// after the cast resolves.
+fn prologue_onto(
+    format: FormatConfig,
+    players: u8,
+    poison: &[(PlayerId, u32)],
+    angel: Option<PlayerId>,
+) -> ((f64, PolicyReason), Vec<(u32, bool)>) {
+    let (mut runner, ids) = board(format, players, poison, |s| {
         let prologue = s.add_real_card(
             AI,
             "Prologue to Phyresis",
@@ -1655,9 +1655,9 @@ fn prologue_onto_team(
         );
         s.add_basic_land(AI, ManaColor::Blue);
         s.add_basic_land(AI, ManaColor::Blue);
-        if with_angel {
+        if let Some(seat) = angel {
             s.add_real_card(
-                heads[0],
+                seat,
                 "Platinum Angel",
                 Zone::Battlefield,
                 shared_integration_card_db(),
@@ -1668,11 +1668,32 @@ fn prologue_onto_team(
     let verdict = verdict_on(runner.state(), &cast_candidate(ids[0]));
     runner.cast(ids[0]).resolve();
     let state = runner.state();
-    (
-        verdict,
-        (poison_of(state, heads[0]), poison_of(state, heads[1])),
-        heads.map(|seat| engine::game::players::is_alive(state, seat)),
-    )
+    let seats = poison
+        .iter()
+        .map(|&(seat, _)| {
+            (
+                poison_of(state, seat),
+                engine::game::players::is_alive(state, seat),
+            )
+        })
+        .collect();
+    (verdict, seats)
+}
+
+/// `prologue_onto` in Two-Headed Giant onto opposing heads at `seeded`, the first head controlling
+/// Platinum Angel when `with_angel`.
+fn prologue_onto_team(
+    seeded: (u32, u32),
+    with_angel: bool,
+) -> ((f64, PolicyReason), (u32, u32), [bool; 2]) {
+    let heads = [PlayerId(2), PlayerId(3)];
+    let (verdict, seats) = prologue_onto(
+        FormatConfig::two_headed_giant(),
+        4,
+        &[(heads[0], seeded.0), (heads[1], seeded.1)],
+        with_angel.then_some(heads[0]),
+    );
+    (verdict, (seats[0].0, seats[1].0), [seats[0].1, seats[1].1])
 }
 
 /// CR 810.8a + CR 101.2: Platinum Angel keeps its team in the game at fifteen shared poison, so
@@ -1695,6 +1716,34 @@ fn a_team_brought_to_its_threshold_is_a_lethal_target() {
     assert_eq!(alive, [false, false]);
     assert_eq!(fact(&reason, "poison_added"), Some(2));
     assert_eq!(reason.kind, "poison_clock_lethal");
+    assert!(delta > crate::policies::registry::STRONG_MAX);
+}
+
+/// CR 810.8a + CR 101.2: a team Platinum Angel already holds past fifteen is still not a lethal
+/// target, so Prologue onto 8 + 9 stays under the strong band.
+#[test]
+fn a_team_that_cannot_lose_past_its_threshold_scores_under_the_strong_band() {
+    let ((delta, reason), poison, alive) = prologue_onto_team((8, 9), true);
+    assert_eq!(poison, (9, 10));
+    assert_eq!(alive, [true, true]);
+    assert_eq!(fact(&reason, "poison_added"), Some(2));
+    assert_eq!(reason.kind, "poison_clock_pressure");
+    assert!(delta <= crate::policies::registry::STRONG_MAX);
+}
+
+/// CR 704.5c + CR 101.2: in a free-for-all Prologue kills the seat at nine, so an Angel-held seat
+/// at ten does not displace it as the lethal target.
+#[test]
+fn a_seat_that_cannot_lose_does_not_hide_one_that_dies() {
+    let ((delta, reason), seats) = prologue_onto(
+        FormatConfig::standard(),
+        4,
+        &[(PlayerId(1), 10), (PlayerId(2), 9)],
+        Some(PlayerId(1)),
+    );
+    assert_eq!(seats, vec![(11, true), (10, false)]);
+    assert_eq!(reason.kind, "poison_clock_lethal");
+    assert_eq!(fact(&reason, "opponent_poison"), Some(9));
     assert!(delta > crate::policies::registry::STRONG_MAX);
 }
 
