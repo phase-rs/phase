@@ -642,7 +642,7 @@ fn settle_accepted_prefix_after_departure(
         shadow.consumed_before_priority_trigger_events.clear();
     }
     let mut mirrored = Vec::new();
-    crate::game::elimination::concede(&mut shadow, departing, &mut mirrored);
+    crate::game::elimination::concede(&mut shadow, departing, &mut mirrored)?;
     restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
     // A parked prompt that no longer settles on the departed prefix is a failed
     // recovery, as on the checkpoint branch: the caller's failed-recovery
