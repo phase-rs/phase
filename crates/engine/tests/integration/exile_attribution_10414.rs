@@ -446,39 +446,106 @@ fn strategic_betrayal_mass_leg_records_the_subject() {
 }
 
 /// CR 608.2c + CR 730.3 + CR 406.6: Strategic Betrayal when the creature the
-/// opponent exiles is a merged permanent. Each component card is put into
-/// exile, and each records the opponent as its exiler.
-/// The merge is staged with the engine's merge primitive on two vanilla
-/// creatures (mutate casting is not under test; nearest printed analogue: a
-/// creature with a mutate card such as Gemrazer on it).
+/// opponent exiles is a merged permanent made by a printed mutate cast. P1
+/// casts Gemrazer (real card data) for its mutate cost onto P1's own non-Human
+/// creature and accepts the merge placement, then P0 casts Strategic
+/// Betrayal; P1, with a second creature available, selects the merged one.
+/// Both printed component cards reach exile attributed to P1, and the
+/// unchosen creature stays on the battlefield. (CR 702.140c: the creature spell
+/// merges with its target as it resolves.)
 ///
 /// Revert sensitivity: with the component requests built without the
 /// performer, both components reach exile with no exiler recorded.
 #[test]
 fn strategic_betrayal_merged_creature_records_the_subject_on_every_component() {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::game_state::CastingVariant;
+
+    let db = crate::support::shared_card_db().expect("integration card fixture must load");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let host = scenario.add_creature(P1, "Opp Host Beast", 2, 2).id();
-    let rider = scenario.add_creature(P1, "Opp Mutated Rider", 3, 3).id();
+    let gemrazer = scenario.add_real_card(P1, "Gemrazer", Zone::Hand, db);
+    let host = scenario
+        .add_creature(P1, "Opp Host Beast", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .id();
     let other = scenario.add_creature(P1, "Opp Other Beast", 1, 1).id();
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Strategic Betrayal", false, STRATEGIC_BETRAYAL)
         .id();
+    // Gemrazer's mutate cost is {1}{G}{G}.
+    scenario.with_mana_pool(
+        P1,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+            .collect(),
+    );
     let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    // P1 casts Gemrazer for mutate onto P1's own creature (P1's priority).
     {
         let state = runner.state_mut();
-        engine::game::merge::merge_object_onto(
-            state,
-            rider,
-            host,
-            engine::game::merge::MergeSide::Top,
-            &mut Vec::new(),
-        );
-        state.battlefield.retain(|&id| id != rider);
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
     }
-    // Reach-guard: the host is a merged permanent of two cards.
-    assert_eq!(runner.state().objects[&host].merged_components.len(), 2);
+    let offered = engine::ai_support::legal_actions(runner.state())
+        .into_iter()
+        .find(|action| {
+            matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == gemrazer)
+        })
+        .expect("the mutate cast is offered");
+    runner.act(offered).expect("the mutate cast is accepted");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![engine::types::ability::TargetRef::Object(host)],
+        })
+        .expect("P1's own non-Human creature is the mutate target");
+    assert!(
+        runner.state().stack.iter().any(|entry| matches!(
+            &entry.kind,
+            engine::types::game_state::StackEntryKind::Spell {
+                casting_variant: CastingVariant::Mutate,
+                ..
+            } if entry.id == gemrazer
+        )),
+        "Gemrazer is on the stack cast for mutate"
+    );
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::MutateMergeChoice { player, .. } if player == P1
+        ),
+        "the merge placement is P1's choice; got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseMutateMergeSide {
+            side: engine::game::merge::MergeSide::Top,
+        })
+        .expect("the merge placement is accepted");
+    runner.advance_until_stack_empty();
+    // Reach-guard: the host is a merged permanent of the two printed cards.
+    let merged = runner.state().objects[&host].merged_components.clone();
+    assert_eq!(
+        merged.len(),
+        2,
+        "host and Gemrazer are one merged permanent"
+    );
+    assert!(
+        merged.contains(&gemrazer),
+        "Gemrazer is a component: {merged:?}"
+    );
 
+    // P0's turn: Strategic Betrayal targets P1.
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
     let outcome = runner.cast(spell).target_player(P1).resolve();
     match outcome.final_waiting_for() {
         WaitingFor::EffectZoneChoice { player, cards, .. } => {
@@ -492,12 +559,12 @@ fn strategic_betrayal_merged_creature_records_the_subject_on_every_component() {
         .expect("the opponent selects the merged creature");
     drive_to_priority(&mut runner);
 
-    for component in [host, rider] {
+    for component in [host, gemrazer] {
         assert_eq!(zone(&runner, component), Zone::Exile);
         assert_eq!(
             exiled_by(&runner, component),
             Some(P1),
-            "each component of the merged creature records the opponent"
+            "each printed component of the merged creature records the opponent"
         );
     }
     assert_eq!(zone(&runner, other), Zone::Battlefield);
