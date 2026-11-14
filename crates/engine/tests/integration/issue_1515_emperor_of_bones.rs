@@ -369,6 +369,7 @@ fn empty_forward_result_generic_spell(
     let mut root = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
@@ -1108,6 +1109,7 @@ fn empty_forward_result_resolves_independent_sibling_before_dependent_tail() {
 
     let mut forward_result = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
@@ -1217,6 +1219,7 @@ fn empty_forward_result_suppresses_dependent_else_and_resumes_later_sibling() {
 
     let mut forward_result = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,

@@ -22,7 +22,7 @@
 //! never resolved cannot satisfy either assertion vacuously.
 //!
 //! REVERT DISCRIMINATOR: `kavu_titan_kicked_enters_with_trample`. Remove the
-//! `compose_enters_with_keyword_grant` call from `parse_enters_with_counters`
+//! `compose_enters_with_entry_grants` call from `parse_enters_with_counters`
 //! and the trample grant disappears while the counters still land, so the
 //! keyword assertion fails and the counter reach-guard still passes.
 

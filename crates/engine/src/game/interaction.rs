@@ -322,6 +322,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. }
         | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }
         | WaitingFor::DamageSourceChoice { .. }
@@ -589,6 +590,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. }
         | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }
         | WaitingFor::DamageSourceChoice { .. }
@@ -5112,6 +5114,7 @@ fn selection_projection(
         | WaitingFor::TriggerTargetSelection { .. }
         | WaitingFor::BetweenGamesSideboard { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. }
         | WaitingFor::NamedChoice { .. }
         | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }
@@ -6267,6 +6270,9 @@ fn project_action_payload(
         GameAction::ChoosePlayDraw { play_first } => {
             push_value_surface(surfaces, InteractionRoleCode::PlayFirst, play_first)
         }
+        GameAction::ChooseStartingPlayer { player } => {
+            push_player_surface(surfaces, *player, InteractionRoleCode::Player)
+        }
         GameAction::ChooseOption { choice } => {
             push_value_surface(surfaces, InteractionRoleCode::Option, choice)
         }
@@ -6930,6 +6936,7 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::TurnFaceUp { .. } => InteractionActionCode::TurnFaceUp,
         GameAction::SubmitSideboard { .. } => InteractionActionCode::SubmitSideboard,
         GameAction::ChoosePlayDraw { .. } => InteractionActionCode::ChoosePlayDraw,
+        GameAction::ChooseStartingPlayer { .. } => InteractionActionCode::ChooseStartingPlayer,
         GameAction::ChooseOption { .. } => InteractionActionCode::ChooseOption,
         GameAction::SubmitVoteCandidate { .. } => InteractionActionCode::SubmitVoteCandidate,
         GameAction::SubmitSpellbookDraft { .. } => InteractionActionCode::SubmitSpellbookDraft,

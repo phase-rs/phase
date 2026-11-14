@@ -63,11 +63,6 @@ fn turn_the_earth_puts_each_target_into_its_owners_library_then_each_owner_shuff
     assert!(state.players[P0.0 as usize].library.contains(&mine));
     assert_eq!(state.objects[&theirs].zone, Zone::Library);
     assert!(state.players[P1.0 as usize].library.contains(&theirs));
-    // Each owner's library is shuffled. (`ChangeZone` into a library already
-    // auto-shuffles on each move and the shared `ChangeZoneToLibrary` lowering
-    // adds a terminal owner shuffle — the same pre-existing shape as the
-    // Cavalier cycle's "shuffle it into its owner's library" — so this asserts
-    // presence, not an exact count.)
     assert!(shuffles_for(events, P0) >= 1, "{events:?}");
     assert!(shuffles_for(events, P1) >= 1, "{events:?}");
     outcome.assert_life_delta(P0, 2);

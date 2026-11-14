@@ -603,6 +603,7 @@ fn install_exile_redirect(
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 destination,
                 origin: None,
@@ -1088,6 +1089,7 @@ fn merged_commander_library_component_replacement_skips_arrival_shuffle_and_obse
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     AbilEffect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         destination: Zone::Graveyard,
                         origin: None,

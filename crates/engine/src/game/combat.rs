@@ -1397,18 +1397,32 @@ pub fn choose_entry_attack_target_or_enter(
 /// blocking creature for `attacker_id`. Used by effects that create or place a
 /// creature already "blocking that creature" (Mirror Match's copy tokens).
 ///
-/// Per CR 506.3e, the creature only becomes a blocking creature if `attacker_id`
-/// is attacking the blocker's controller (or a planeswalker/battle they control,
-/// captured by `AttackerInfo.defending_player`); otherwise the creature is on
-/// the battlefield but is never considered a blocking creature, so this is a
-/// no-op for the combat bookkeeping. Per CR 509.3a/509.3b, a creature put onto
-/// the battlefield blocking does NOT cause "whenever ~ blocks" abilities to
-/// trigger, so no `BlockersDeclared` event is emitted; combat damage reads the
-/// recorded assignments directly. Returns `true` when the block was established.
-pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: ObjectId) -> bool {
+/// CR 506.3a: a noncreature entrant never becomes a blocking permanent. Per
+/// CR 506.3e, a creature only becomes a blocker if `attacker_id` is attacking its
+/// controller, a planeswalker they control, or a battle they protect (captured
+/// by `AttackerInfo.defending_player`); otherwise it enters without blocking.
+/// CR 509.3a/509.3b + CR 509.4: entering blocking never fires blocker-side
+/// "blocks" abilities, so no `BlockersDeclared`
+/// event is emitted. CR 509.3c/509.3d: attacker-side events distinguish the first
+/// blocked transition from each entering blocker. Returns `true` when the block
+/// was established.
+pub fn place_blocking(
+    state: &mut GameState,
+    blocker_id: ObjectId,
+    attacker_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    // CR 613.1: entry may only have dirtied layers, so settle continuous type
+    // changes before deciding whether the actual entrant is a creature.
+    crate::game::layers::flush_layers(state);
     let Some(blocker) = state.objects.get(&blocker_id) else {
         return false;
     };
+    // CR 506.3a: a noncreature enters without establishing a block. This is not
+    // declaration legality: CR 509.4b still ignores declaration restrictions.
+    if !blocker.card_types.core_types.contains(&CoreType::Creature) {
+        return false;
+    }
     let blocker_controller = blocker.controller;
     let reference = ObjectIncarnationRef::from_object(blocker);
     let Some(combat) = state.combat.as_mut() else {
@@ -1461,6 +1475,19 @@ pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: 
             expected_attacker_blocked,
         },
     );
+    // CR 509.3c: only an unblocked attacker becomes blocked for the bare form.
+    if !expected_attacker_blocked {
+        events.push(GameEvent::AttackerBecameBlockedByEffect {
+            attacker: attacker_id,
+        });
+    }
+    // CR 509.3d + CR 509.4: every entering blocker supplies a creature-bound
+    // attacker-side occurrence, without claiming that the entering creature
+    // itself "blocked". Carry the pair directly for event-context pin capture.
+    events.push(GameEvent::AttackerBecameBlockedByFilteredBlocker {
+        attacker: attacker_id,
+        blocker: blocker_id,
+    });
     true
 }
 
