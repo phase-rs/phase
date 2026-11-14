@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {pathToFileURL} from 'node:url';
+import {resolve} from 'node:path';
+const base=pathToFileURL(resolve(process.argv[2]||'dist/oracle-checker')+'/');
+const {default:init,checkOracleCard}=await import(new URL('checker.js',base));
+await init({module_or_path:await readFile(new URL('checker_bg.wasm',base))});
+const check=text=>JSON.parse(checkOracleCard(JSON.stringify({name:'Probe',oracle_text:text,types:['Sorcery'],subtypes:[]})));
+assert.equal(check('Draw two cards.').parse_complete,true);
+assert.equal(check('Draw two cards. Gobble the moon.').parse_complete,false);
+assert.equal(check("You may play cards from the top of each opponent's library.").status,'needs_review');
+assert.equal(JSON.parse(checkOracleCard('{}')).status,'invalid_input');
+assert.equal(JSON.parse(checkOracleCard('not json')).parse_complete,false);
+assert.equal(JSON.parse(checkOracleCard('x'.repeat(25000))).parse_complete,false);
+console.log('PASS browser WASM entry point, supported text, trailing garbage and invalid inputs');
