@@ -22351,6 +22351,18 @@ mod tests {
                 stamped.granting_object = Some(stamp);
                 stamped
             };
+        // CR 602.5c + CR 113.2c (U1 replace-and-push): a def re-donated via
+        // an intermediate carrier keeps the carrier's stamp on the head and
+        // the prior provider stamp pushed onto `grant_chain`, so it is a
+        // distinct instance from a direct grant of the same body.
+        let chained_with = |def: &AbilityDefinition,
+                            stamp: ObjectIncarnationRef,
+                            chain: Vec<ObjectIncarnationRef>|
+         -> AbilityDefinition {
+            let mut chained = stamped_with(def, stamp);
+            chained.grant_chain = chain;
+            chained
+        };
         let assert_holdings =
             |state: &GameState, id: ObjectId, label: &str, expected: &[AbilityDefinition]| {
                 let held = &state.objects.get(&id).unwrap().abilities;
@@ -22381,10 +22393,31 @@ mod tests {
         expected_a.extend(b_printed.iter().map(|def| stamped_with(def, stamp_b)));
         expected_a.extend(donor_defs.iter().map(|def| stamped_with(def, stamp_d)));
         assert_holdings(&state, bolas_a, "pass 1 bolas_a", &expected_a);
+        // Pass-1 order-split trace (bolas_a expands against pristine
+        // providers; bolas_b expands after bolas_a's grants have applied):
+        // bolas_b's expansion re-donates bolas_a's fresh holdings, so the
+        // b-printed copies arrive via carrier bolas_a with prior provider
+        // bolas_b on the chain, and the donor copies via carrier bolas_a
+        // with prior provider donor on the chain. Tier-2 dedup (full `==`
+        // with head stamp AND `grant_chain` participating) keeps these
+        // chain-distinguished re-donations; only byte-identical
+        // re-expansions collapse. Self-exclusion still holds: no def carries
+        // bolas_b's own stamp on the HEAD (provider==recipient skips the
+        // self-donation); stamp_b appears only as re-donation lineage for
+        // bodies bolas_b originally provided before carrier bolas_a
+        // re-donated them.
         let mut expected_b: Vec<AbilityDefinition> = b_printed.to_vec();
         expected_b.extend(a_printed.iter().map(|def| stamped_with(def, stamp_a)));
-        expected_b.extend(b_printed.iter().map(|def| stamped_with(def, stamp_a)));
-        expected_b.extend(donor_defs.iter().map(|def| stamped_with(def, stamp_a)));
+        expected_b.extend(
+            b_printed
+                .iter()
+                .map(|def| chained_with(def, stamp_a, vec![stamp_b])),
+        );
+        expected_b.extend(
+            donor_defs
+                .iter()
+                .map(|def| chained_with(def, stamp_a, vec![stamp_d])),
+        );
         expected_b.extend(donor_defs.iter().map(|def| stamped_with(def, stamp_d)));
         assert_holdings(&state, bolas_b, "pass 1 bolas_b", &expected_b);
 
