@@ -1413,6 +1413,7 @@ fn library_redirect(
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 destination,
                 origin: None,
                 target: TargetFilter::SelfRef,
@@ -1450,6 +1451,7 @@ fn zone_redirect_for_card(
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 destination,
                 origin: None,
                 target: TargetFilter::SelfRef,
