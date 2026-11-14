@@ -483,6 +483,7 @@ pub(crate) fn move_merged_permanent_on_leave(
         LibraryShuffleMode::PerObject,
         applied,
         None,
+        None,
         events,
     )
 }
@@ -521,6 +522,7 @@ pub(crate) fn move_merged_permanent_for_parent(
     library_placement: Option<&LibraryPosition>,
     library_shuffle: LibraryShuffleMode,
     applied: &HashSet<AppliedReplacementKey>,
+    performed_by: Option<crate::types::player::PlayerId>,
     parent: Option<crate::types::game_state::PendingComponentDeliveryParent>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
@@ -565,6 +567,15 @@ pub(crate) fn move_merged_permanent_for_parent(
             };
             ZoneMoveRequest::merged_component(component_id, dest, placement, library_shuffle)
                 .with_replacement_applied(applied.clone())
+                // CR 608.2c + CR 730.3: every component is moved by the
+                // player who performed the merged permanent's move, so each card
+                // that reaches exile records that player as its exiler. No
+                // ownership input is carried, as before: a component goes to its
+                // own owner's zone.
+                .actors(zone_pipeline::MoveActors {
+                    performed_by,
+                    ownership_actor: None,
+                })
         })
         .collect();
 

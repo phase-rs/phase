@@ -1145,6 +1145,7 @@ fn enter_battlefield_with_etb(
         enter_with_choices: None,
         discard_frame: None,
         performed_by: None,
+        ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
         library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         applied: HashSet::new(),
     };

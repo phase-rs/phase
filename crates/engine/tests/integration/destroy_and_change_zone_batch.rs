@@ -627,6 +627,7 @@ fn d3b_redirected_back_member_is_remained_with_one_creature_destroyed() {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: engine::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Battlefield,
@@ -1333,6 +1334,7 @@ fn c11_random_order_bottom_placement_has_no_prompt_and_exact_region() {
     );
     let ability = ResolvedAbility::new(
         Effect::ChangeZoneAll {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Graveyard),
             destination: Zone::Library,
             target: TargetFilter::Any,
@@ -1395,6 +1397,7 @@ fn c2_structural_mass_entry_applies_counters_and_profile_once() {
     );
     let ability = ResolvedAbility::new(
         Effect::ChangeZoneAll {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -1468,6 +1471,7 @@ fn c13a_mass_hand_exile_counts_only_moved_members() {
     fn mass_hand_exile(source: ObjectId) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Hand),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -1555,6 +1559,7 @@ fn c13a_mass_hand_exile_counts_only_moved_members() {
     state.exiled_from_hand_this_resolution = 0;
     let ability = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Hand),
             destination: Zone::Exile,
@@ -1822,6 +1827,7 @@ fn c12_forwarded_zone_result_binds_staged_arrivals_after_pause() {
     );
     let mut ability = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
@@ -3512,6 +3518,7 @@ fn add_source_authority_optional_replacement(state: &mut GameState, watcher: Obj
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: engine::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Exile,

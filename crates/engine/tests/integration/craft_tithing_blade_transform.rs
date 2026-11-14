@@ -77,6 +77,7 @@ fn craft_ability(cost: ManaCost) -> AbilityDefinition {
     AbilityDefinition::new(
         AbilityKind::Activated,
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,

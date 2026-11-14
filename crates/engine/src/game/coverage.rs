@@ -3413,6 +3413,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("player_b".into(), fmt_target(player_b)));
         }
         Effect::ChangeZone {
+            actor,
             origin,
             destination,
             target,
@@ -3428,6 +3429,11 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             face_down_profile,
             enters_modified_if,
         } => {
+            // CR 608.2c: the instruction's performer, shown only when the parser
+            // bound a subject (the `ExileTop` arm's convention).
+            if !actor.is_controller() {
+                d.push(("actor".into(), format!("{actor:?}")));
+            }
             if let Some(o) = origin {
                 d.push(("from".into(), fmt_zone(o)));
             }
@@ -3481,6 +3487,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
         }
         Effect::ChangeZoneAll {
+            actor,
             origin,
             destination,
             target,
@@ -3493,6 +3500,11 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             library_shuffle,
             random_order,
         } => {
+            // CR 608.2c: the instruction's performer, shown only when the parser
+            // bound a subject (the `ExileTop` arm's convention).
+            if !actor.is_controller() {
+                d.push(("actor".into(), format!("{actor:?}")));
+            }
             if let Some(o) = origin {
                 d.push(("from".into(), fmt_zone(o)));
             }
@@ -15438,6 +15450,7 @@ mod tests {
         let inner = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin,
                 destination: Zone::Battlefield,
@@ -16634,6 +16647,7 @@ mod tests {
 
         // A graveyard self-return: the shape where the collision bites.
         let graveyard_self_return = || Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Hand,
@@ -17308,6 +17322,7 @@ mod tests {
         // parse-diff signature; a plain ChangeZone has no such row.
         let signature_keys = |attacking: bool| -> Vec<String> {
             effect_details(&Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -17339,6 +17354,63 @@ mod tests {
         );
     }
 
+    /// CR 608.2c: a subject the parser bound as a zone move's performer must
+    /// reach the parse-diff signature of both zone-move variants; the default
+    /// controller adds no row, as on `ExileTop`.
+    #[test]
+    fn zone_move_signatures_expose_a_bound_actor() {
+        use crate::types::ability::LibraryInstructionActor;
+        let subject = LibraryInstructionActor::Player {
+            player: TargetFilter::ParentTarget,
+        };
+        let keys = |effect: Effect| -> Vec<String> {
+            effect_details(&effect)
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect()
+        };
+        let pick = |actor| Effect::ChangeZone {
+            actor,
+            library_shuffle: Default::default(),
+            origin: Some(Zone::Hand),
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        };
+        let mass = |actor| Effect::ChangeZoneAll {
+            actor,
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            library_shuffle: Default::default(),
+            random_order: false,
+        };
+        for effect in [pick(subject.clone()), mass(subject.clone())] {
+            assert!(keys(effect).iter().any(|k| k == "actor"));
+        }
+        for effect in [
+            pick(LibraryInstructionActor::Controller),
+            mass(LibraryInstructionActor::Controller),
+        ] {
+            assert!(!keys(effect).iter().any(|k| k == "actor"));
+        }
+    }
+
     /// The parser-owned terminal shuffle changes the library action from
     /// per-object randomization to one chained shuffle. It must therefore reach
     /// coverage signatures, while the default remains absent to avoid churn.
@@ -17346,6 +17418,7 @@ mod tests {
     fn change_zone_all_signature_exposes_terminal_shuffle() {
         let details = |library_shuffle| {
             effect_details(&Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Library,
                 target: TargetFilter::Controller,
@@ -23668,6 +23741,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin,
                 destination,

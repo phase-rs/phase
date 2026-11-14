@@ -112,6 +112,7 @@ fn reveal_until(any_number: bool) -> Effect {
 
 fn to_hand(target: TargetFilter) -> Effect {
     Effect::ChangeZone {
+        actor: engine::types::ability::LibraryInstructionActor::Controller,
         library_shuffle: Default::default(),
         origin: None,
         destination: Zone::Hand,
