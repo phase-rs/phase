@@ -6496,16 +6496,23 @@ fn masked_unless_payment_root_mana_batch_stays_queued_until_the_owner_settles() 
 /// CR 118.12 + CR 603.3 + CR 603.3b + CR 608.2: the non-touch sibling of the
 /// masked `UnlessPayment` control above, at the same **no-successor** boundary.
 ///
-/// The punisher here has no "if you do" rider, so a paid answer ends the
-/// resolution with no further instruction and no post-action pass of its own.
-/// The three deferred contexts are ordinary triggered abilities (A's and B's
-/// reflexive riders, D's `Taps` observer) — none is an Un-card touch — so the
-/// row proves the release belongs to the shared priority-boundary authority and
-/// not to any event-kind discriminator. Placement must be once-only: each
-/// context appears once in the released ordering group, the punisher's -100
-/// never resolves, and each member resolves exactly once.
+/// The punisher here is Rhystic Study's printed trigger: "Whenever an opponent
+/// casts a spell, you may draw a card unless that player pays {1}." The trigger
+/// resolves, hits the UnlessPayment, and a paid answer ends the resolution with
+/// no further instruction and no post-action pass of its own (the draw is
+/// countered). The three deferred contexts are ordinary triggered abilities (A's
+/// and B's reflexive riders, D's `Taps` observer) — none is an Un-card touch —
+/// so the row proves the release belongs to the shared priority-boundary
+/// authority and not to any event-kind discriminator. Placement must be
+/// once-only: each context appears once in the released ordering group, the
+/// draw never happens, and each member resolves exactly once.
 #[test]
 fn rider_free_paid_unless_payment_places_the_parked_batch_once() {
+    // Rhystic Study: "Whenever an opponent casts a spell, you may draw a card
+    // unless that player pays {1}."
+    const RHYSTIC_STUDY: &str =
+        "Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.";
+
     let HostileAbcdFixture {
         mut scenario,
         source_a,
@@ -6515,32 +6522,24 @@ fn rider_free_paid_unless_payment_places_the_parked_batch_once() {
         observer_gain,
     } = hostile_abcd_fixture(HostileObserverAxis::TapsB);
 
-    // "You lose 100 life unless you pay {1}." No rider: paying is the owner's
-    // last instruction, which is exactly the no-successor boundary.
-    let mut punisher = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::LoseLife {
-            amount: QuantityExpr::Fixed { value: 100 },
-            target: Some(TargetFilter::Controller),
-        },
-    );
-    punisher.unless_pay = Some(UnlessPayModifier {
-        cost: AbilityCost::Mana {
-            cost: ManaCost::generic(1),
-        },
-        payer: TargetFilter::Controller,
-    });
+    // P1 controls Rhystic Study; P0 will cast a spell to trigger it.
+    let rhystic_study = scenario
+        .add_enchantment_from_oracle(P1, "Rhystic Study", RHYSTIC_STUDY)
+        .id();
+
+    // P0 needs a spell to cast. Use a zero-cost instant from hand.
     let spell = scenario
-        .add_spell_to_hand(P0, "Bare Paid Unless Witness", true)
+        .add_spell_to_hand(P0, "Zero-Cost Witness", true)
         .with_mana_cost(ManaCost::Cost {
             shards: vec![],
             generic: 0,
         })
-        .with_ability_definition(punisher)
         .id();
+
     let mut runner = scenario.build();
     let life_before = runner.state().players[P0.0 as usize].life;
 
+    // Cast the spell from P0's hand.
     let card_id = runner.state().objects[&spell].card_id;
     runner
         .act(GameAction::CastSpell {
@@ -6550,16 +6549,38 @@ fn rider_free_paid_unless_payment_places_the_parked_batch_once() {
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("the free witness spell is announced");
+    // Rhystic Study triggers when an opponent casts a spell (CR 603.2),
+    // and is placed on the stack above the announced spell.
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { source_id, .. } if source_id == rhystic_study)),
+        "Rhystic Study trigger should be on the stack"
+    );
+    // Pass priority to let the trigger resolve.
     runner.act(GameAction::PassPriority).expect("P0 passes");
-    let owner = runner
+    let may_prompt = runner
         .act(GameAction::PassPriority)
-        .expect("P1 passes and the witness resolves into its unless-payment");
+        .expect("P1 passes and Rhystic Study trigger asks P1 whether to use the 'may' ability");
+    assert!(
+        matches!(
+            may_prompt.waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P1, .. }
+        ),
+        "expected an OptionalEffectChoice for P1, got {:?}",
+        may_prompt.waiting_for
+    );
+    let owner = runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("P1 chooses yes, moving into the unless payment for P0");
     assert!(
         matches!(
             owner.waiting_for,
             WaitingFor::UnlessPayment { player: P0, .. }
         ),
-        "expected a live UnlessPayment resolution owner, got {:?}",
+        "expected a live UnlessPayment resolution owner for P0, got {:?}",
         owner.waiting_for
     );
 
@@ -6607,8 +6628,12 @@ fn rider_free_paid_unless_payment_places_the_parked_batch_once() {
         );
     }
     assert!(
-        runner.state().stack.is_empty(),
-        "reach guard: nothing has reached the stack before the owner settles"
+        runner
+            .state()
+            .stack
+            .iter()
+            .all(|entry| !matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })),
+        "reach guard: no triggered ability has reached the stack before the owner settles"
     );
     assert_eq!(runner.state().players[P0.0 as usize].life, life_before);
 
@@ -6616,7 +6641,7 @@ fn rider_free_paid_unless_payment_places_the_parked_batch_once() {
     // the parked group must be released here, once.
     let settled = runner
         .act(GameAction::PayUnlessCost { pay: true })
-        .expect("the unless cost is paid and the punisher is prevented");
+        .expect("the unless cost is paid and the draw is countered");
     assert_eq!(
         runner.state().players[P0.0 as usize]
             .mana_pool
@@ -6661,7 +6686,7 @@ fn rider_free_paid_unless_payment_places_the_parked_batch_once() {
     assert_eq!(
         runner.state().players[P0.0 as usize].life,
         life_before,
-        "a paid unless cost suppresses the -100 punishment"
+        "a paid unless cost counters the draw (no life change)"
     );
 
     runner
@@ -6682,9 +6707,12 @@ fn rider_free_paid_unless_payment_places_the_parked_batch_once() {
         runner.state().deferred_triggers.is_empty(),
         "normal Priority completion left nothing parked"
     );
+    // The witness spell remaining on the stack resolves.
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    runner.act(GameAction::PassPriority).expect("P1 passes");
     assert!(
         runner.state().stack.is_empty(),
-        "normal Priority completion drained the group"
+        "normal Priority completion drained the group and the witness spell"
     );
 }
 

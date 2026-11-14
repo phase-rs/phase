@@ -29,12 +29,6 @@ pub const MAX_SNAPSHOT_LEGAL_ACTIONS: usize = MAX_ACTION_LIST_LEN;
 pub const MAX_SNAPSHOT_SPELL_COSTS: usize = 1_000;
 /// Max total legal actions across all per-object buckets in one update.
 pub const MAX_SNAPSHOT_LEGAL_ACTIONS_BY_OBJECT_TOTAL: usize = MAX_ACTION_LIST_LEN;
-/// Max deferred triggers in a single `StateUpdate`.
-/// Bounded by MAX_PENDING_TOUCH_TRIGGERS (64) per player × max players (8) + other triggers.
-pub const MAX_SNAPSHOT_DEFERRED_TRIGGERS: usize = 1_000;
-/// Max stack entries in a single `StateUpdate`.
-/// Bounded by similar reasoning.
-pub const MAX_SNAPSHOT_STACK: usize = 1_000;
 
 /// The largest frame the server sends; the desktop bridge's read bound equals it.
 pub const MAX_SERVER_FRAME_BYTES: usize = 256 << 20;
@@ -102,24 +96,13 @@ pub fn guard_state_snapshot_broadcast(parts: StateSnapshotParts<'_>) -> Result<(
         legal_actions_by_object_total(parts.legal_actions_by_object),
         MAX_SNAPSHOT_LEGAL_ACTIONS_BY_OBJECT_TOTAL,
     )?;
-    bound_count(
-        "deferred_triggers",
-        parts.state.deferred_triggers.len(),
-        MAX_SNAPSHOT_DEFERRED_TRIGGERS,
-    )?;
-    bound_count("stack", parts.state.stack.len(), MAX_SNAPSHOT_STACK)?;
     Ok(())
 }
 
 /// Validate a bare `GameState` before spectator `GameStarted` filtering.
 pub fn guard_game_state_for_broadcast(state: &GameState) -> Result<(), String> {
     bound_count("state.objects", state.objects.len(), MAX_SNAPSHOT_OBJECTS)?;
-    bound_count(
-        "deferred_triggers",
-        state.deferred_triggers.len(),
-        MAX_SNAPSHOT_DEFERRED_TRIGGERS,
-    )?;
-    bound_count("stack", state.stack.len(), MAX_SNAPSHOT_STACK)
+    Ok(())
 }
 
 #[cfg(test)]

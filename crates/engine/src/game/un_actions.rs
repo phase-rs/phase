@@ -16,7 +16,7 @@
 //!   the stack through the ordinary trigger pipeline.
 
 use crate::game::game_object::{GameObject, ObjectIdentityBindingExt};
-use crate::game::triggers::PendingTriggerContext;
+use crate::game::triggers::{count_prospective_touch_triggers, PendingTriggerContext};
 use crate::types::ability::{AbilityCost, Effect, TriggerDefinition};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ActionResult, GameState, StackEntryKind, WaitingFor};
@@ -404,9 +404,8 @@ pub fn refresh_menu(state: &mut GameState) {
     let touchable = if state.un_actions.enabled_players.is_empty() {
         Vec::new()
     } else {
-        let mut ids: Vec<ObjectId> = Zone::ALL
-            .iter()
-            .flat_map(|&zone| super::targeting::zone_object_ids(state, zone))
+        let mut ids: Vec<ObjectId> = super::targeting::zone_object_ids(state, Zone::Battlefield)
+            .into_iter()
             .filter(|id| {
                 state
                     .objects
@@ -579,15 +578,20 @@ fn touch_object(
             "Nothing happens when that object is touched".to_string(),
         ));
     }
-    if pending_touch_triggers(state, actor) >= MAX_PENDING_TOUCH_TRIGGERS {
+    // CR 603.2d: determine how many times the ability should trigger (including
+    // doubling from effects like Roaming Throne) before checking the cap.
+    let touch_event = GameEvent::ObjectTouched {
+        player: actor,
+        object_id,
+    };
+    let prospective_touch_triggers = count_prospective_touch_triggers(state, &touch_event, actor);
+    let current_pending = pending_touch_triggers(state, actor);
+    if current_pending + prospective_touch_triggers > MAX_PENDING_TOUCH_TRIGGERS {
         return Err(EngineError::InvalidAction(
             "Too many of your touches are still waiting to resolve".to_string(),
         ));
     }
-    let mut events = vec![GameEvent::ObjectTouched {
-        player: actor,
-        object_id,
-    }];
+    let mut events = vec![touch_event];
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         let settled = settle_triggers_at_priority(state, &mut events)?;
         Ok(ActionResult::applied(events, settled))

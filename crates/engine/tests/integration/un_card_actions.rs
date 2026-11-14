@@ -2566,3 +2566,96 @@ fn a_touch_during_a_cancelled_announcement_still_triggers() {
     assert_eq!(runner.life(P1), 18);
     assert_settled(&runner, "after the touch trigger resolves");
 }
+
+#[test]
+fn touch_trigger_batch_is_admitted_atomically() {
+    let max = engine::game::un_actions::MAX_PENDING_TOUCH_TRIGGERS;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bile = scenario
+        .add_creature_from_oracle(P0, "Vile Bile", 2, 2, VILE_BILE)
+        .with_subtypes(vec!["Ooze"])
+        .id();
+    const ROAMING_THRONE: &str =
+        "Ward {2}\nAs this creature enters, choose a creature type.\nThis \
+creature is the chosen type in addition to its other types.\nIf a triggered \
+ability of another creature you control of the chosen type triggers, it triggers an \
+additional time.";
+    let throne = scenario
+        .add_creature_to_hand_from_oracle(P0, "Roaming Throne", 4, 4, "")
+        .from_oracle_text_with_keywords(&["Ward"], ROAMING_THRONE)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Golem"])
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().all_creature_types = vec!["Ooze".into(), "Golem".into()];
+    runner.state_mut().players[1].life = 1000;
+    un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
+
+    // Cast Roaming Throne and choose "Ooze".
+    let card_id = runner.state().objects[&throne].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: throne,
+            card_id,
+            targets: vec![],
+            payment_mode: Default::default(),
+        })
+        .expect("cast Roaming Throne");
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    runner.act(GameAction::PassPriority).expect("P1 passes");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::NamedChoice { .. }
+    ));
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Ooze".to_string(),
+        })
+        .expect("choose Ooze");
+    assert_settled(&runner, "Throne has entered choosing Ooze");
+
+    // Under Roaming Throne, each touch on Vile Bile triggers twice (CR 603.2d).
+    // Perform (max / 2 - 1) touches, yielding (max - 2) triggers on the stack.
+    let touches_before = max / 2 - 1; // 31 touches = 62 triggers
+    for _ in 0..touches_before {
+        touch(&mut runner, P1, bile);
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        touches_before * 2,
+        "each touch contributed 2 triggers under Roaming Throne"
+    );
+
+    // One more touch adds 2 triggers: 62 + 2 = 64 <= max, so it is admitted.
+    touch(&mut runner, P1, bile);
+    assert_eq!(runner.state().stack.len(), max, "reached exactly the cap");
+
+    // Now current_pending is max (64). The next touch would create 2 triggers (64 + 2 = 66 > 64).
+    // It must be rejected atomically: neither trigger is placed.
+    let rejected = touch_result(&mut runner, P1, bile);
+    assert!(
+        matches!(rejected, Err(EngineError::InvalidAction(_))),
+        "touch that would exceed the cap is rejected: {rejected:?}"
+    );
+    assert_eq!(runner.state().stack.len(), max, "stack length unchanged");
+
+    // Clear one trigger (resolve top). Now pending is 63.
+    // A single touch produces 2 triggers. 63 + 2 = 65 > max (64).
+    // CR 603.2d requires budgeting the whole batch: the touch cannot partially admit 1 trigger.
+    // It must be rejected atomically!
+    runner.resolve_top();
+    assert_eq!(runner.state().stack.len(), max - 1, "pending count is 63");
+    let rejected_batch = touch_result(&mut runner, P1, bile);
+    assert!(
+        matches!(rejected_batch, Err(EngineError::InvalidAction(_))),
+        "CR 603.2d: a batch that would exceed the cap (63 + 2 > 64) is rejected atomically: {rejected_batch:?}"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        max - 1,
+        "atomic batch admission preserves the stack without admitting a partial trigger"
+    );
+}

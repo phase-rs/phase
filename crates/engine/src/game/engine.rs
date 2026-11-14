@@ -2330,32 +2330,6 @@ fn finish_action_boundary_with_lifecycle(
     // closed its window before handing the raw application over.
     let mut prior_window = state.ingress_life_window.take();
     state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
-    // CR 603.3: only once the action's own wait has settled into the state.
-    let settled = state.waiting_for == result.waiting_for;
-    // CR 603.3 + CR 603.3b: an answer that hands a settled `Priority` back
-    // without a post-action pass of its own (a successful unless payment with
-    // no successor instruction) leaves parked triggers in the deferred queue.
-    // The shared priority-boundary authority places whatever is eligible by the
-    // same rule every ordinary pass uses; it names no event kind, so every
-    // parked context converges through one path.
-    let deferred_placement = if settled {
-        super::engine_priority::settle_deferred_triggers_at_priority(state, &mut result.events)
-    } else {
-        Ok(())
-    };
-    if let Err(err) = deferred_placement {
-        let life_failure = close_ingress_window(state, &mut prior_window);
-        lifecycle.discard();
-        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(
-            life_failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                player,
-            }),
-        );
-    }
-    if settled {
-        result.waiting_for = state.waiting_for.clone();
-    }
     if let Err(err) = reconcile_terminal_result_completing_resolution(
         state,
         &mut result,
@@ -2372,7 +2346,6 @@ fn finish_action_boundary_with_lifecycle(
     }
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
-    super::un_actions::refresh_menu(state);
     // A reversed activation (CR 602.2b + CR 601.2h) already had its pre-action
     // state restored by `apply_action_boundary_core`: nothing happened, so it
     // must not let a standing auto-pass consume the restored priority, resolve
