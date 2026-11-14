@@ -157,6 +157,7 @@ type EngineRequest =
       provider: string;
       status: number;
       responseBody: string;
+      nowMs: number;
     }
   | { type: "llmProviderCatalog"; id: number }
   | { type: "restoreState"; id: number; stateJson: string }
@@ -726,6 +727,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
             msg.provider,
             msg.status,
             msg.responseBody,
+            msg.nowMs,
           ) ?? null,
         );
         break;

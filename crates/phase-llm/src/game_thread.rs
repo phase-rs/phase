@@ -49,9 +49,10 @@
 //!   decision once more, which then goes out as a fresh create. An API that
 //!   refuses threads outright is answered with self-contained requests for that
 //!   endpoint and account. A conversation the API lost again at the first
-//!   continue of its replacement, with no idle time to explain the loss, is
-//!   one the API cannot store: its decisions are self-contained from then on,
-//!   while any other conversation still uses threads.
+//!   continue of its replacement, with no idle time to explain the loss by
+//!   the time the loss is reported, is one the API cannot store: its
+//!   decisions are self-contained from then on, while any other conversation
+//!   still uses threads.
 //!
 //! A thread belongs to one seat of one game. Nothing in it reaches another seat
 //! or the shared game log. The owner of this memory clears it when a new game
@@ -119,7 +120,8 @@ enum ThreadOrigin {
     /// continue request still returns a 404 error right after you replay, the
     /// API might be unable to store that conversation … Send it without
     /// `thread`." Losing a recovery thread at its first continue is that case
-    /// only when the thread cannot have expired first ([`Idle`]).
+    /// only when the thread cannot have expired first ([`Idle`]), judged when
+    /// the loss is reported ([`LlmThreadMemory::record_reply`]).
     Recovery,
     /// Continued at least once.
     Continued,
@@ -129,8 +131,9 @@ enum ThreadOrigin {
 /// thread is best-effort. It expires 5 minutes after its last request".
 const THREAD_IDLE_EXPIRY_MS: u64 = 5 * 60 * 1000;
 
-/// How long a thread had been idle when a request continued it, which tells
-/// an ordinary expiry apart from a conversation the API cannot keep.
+/// How long a thread had been idle by the time the API reported it lost,
+/// which tells an ordinary expiry apart from a conversation the API cannot
+/// keep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Idle {
     /// Less than [`THREAD_IDLE_EXPIRY_MS`] since the request whose reply the
@@ -141,6 +144,25 @@ enum Idle {
     /// caller's clock stepped back: a loss is read as ordinary expiry, and the
     /// conversation is recovered again, which costs one more create.
     PastExpiry,
+}
+
+impl Idle {
+    /// How long a thread whose last request was built at `requested_at_ms`
+    /// had idled at `now_ms`, both on the caller's wall clock.
+    ///
+    /// The measure can only run long. The request went out no earlier than it
+    /// was built, and a loss is reported no earlier than the API read the
+    /// continue, so time the machine spent asleep while a request was built or
+    /// in flight is counted, never missed. Erring long costs one more create;
+    /// erring short would end threading for a conversation the API can keep.
+    fn between(requested_at_ms: u64, now_ms: u64) -> Idle {
+        // A wall clock can step back (a clock correction), which leaves the
+        // idle time unknown: that reads as the cheap case.
+        match now_ms.checked_sub(requested_at_ms) {
+            Some(elapsed) if elapsed < THREAD_IDLE_EXPIRY_MS => Idle::WithinExpiry,
+            _ => Idle::PastExpiry,
+        }
+    }
 }
 
 /// Every LLM seat's message thread for the game in progress.
@@ -235,9 +257,9 @@ struct OpenThread {
     /// `None` when it reported no usable usage.
     context_tokens: Option<u64>,
     origin: ThreadOrigin,
-    /// When the request whose reply this is went out, on the caller's wall
-    /// clock: the thread expires [`THREAD_IDLE_EXPIRY_MS`] after it at the
-    /// earliest.
+    /// When the request whose reply this is was built, on the caller's wall
+    /// clock. It went out no earlier, so the thread expires
+    /// [`THREAD_IDLE_EXPIRY_MS`] after this at the earliest.
     requested_at_ms: u64,
 }
 
@@ -259,8 +281,38 @@ struct PendingTurn {
 enum PendingShape {
     /// A create, and the origin the thread it creates will have.
     Create(ThreadOrigin),
-    /// A continue of a thread of this origin, idle this long.
-    Continue(ThreadOrigin, Idle),
+    /// A continue of a thread of this origin.
+    Continue {
+        origin: ThreadOrigin,
+        /// When the thread's last request was built
+        /// ([`OpenThread::requested_at_ms`]), which its idle time runs from.
+        thread_requested_at_ms: u64,
+    },
+}
+
+impl PendingTurn {
+    /// Whether losing this request's thread at `now_ms` shows the API cannot
+    /// store its conversation: the request is the first continue of a
+    /// recovery thread, and the loss is reported before that thread could
+    /// have expired.
+    ///
+    /// The idle time is read as the loss is reported, not when the continue
+    /// was built. A machine can sleep across the expiry while a continue is
+    /// being built or is in flight, and only the later clock counts that
+    /// time.
+    fn lost_an_unstorable_conversation(&self, now_ms: u64) -> bool {
+        match self.shape {
+            PendingShape::Continue {
+                origin: ThreadOrigin::Recovery,
+                thread_requested_at_ms,
+            } => Idle::between(thread_requested_at_ms, now_ms) == Idle::WithinExpiry,
+            PendingShape::Continue {
+                origin: ThreadOrigin::Fresh | ThreadOrigin::Continued,
+                ..
+            }
+            | PendingShape::Create(_) => false,
+        }
+    }
 }
 
 impl OpenThread {
@@ -300,11 +352,11 @@ impl LlmThreadMemory {
     ///
     /// `history` is the log handed to the prompt builder; its newest entry is
     /// what the seat will have seen once this decision is answered. `now_ms`
-    /// is the caller's wall clock, in milliseconds, as the request goes out,
-    /// which tells a thread's ordinary expiry apart from a conversation the API
-    /// cannot keep ([`Idle`]). It is a wall clock because the API's expiry runs
-    /// in real time, through a sleeping machine too, while a monotonic clock
-    /// can stop for as long as the machine sleeps.
+    /// is the caller's wall clock, in milliseconds, as the request is built:
+    /// the request goes out no earlier, and the idle time of the thread its
+    /// reply opens runs from it ([`Idle`]). It is a wall clock because the
+    /// API's expiry runs in real time, through a sleeping machine too, while a
+    /// monotonic clock can stop for as long as the machine sleeps.
     ///
     /// # Errors
     ///
@@ -377,13 +429,10 @@ impl LlmThreadMemory {
             });
         let request = match continuation {
             Some((open, update)) => {
-                // A wall clock can step back (a clock correction), which leaves
-                // the idle time unknown: that reads as the cheap case.
-                let idle = match now_ms.checked_sub(open.requested_at_ms) {
-                    Some(elapsed) if elapsed < THREAD_IDLE_EXPIRY_MS => Idle::WithinExpiry,
-                    _ => Idle::PastExpiry,
+                next.shape = PendingShape::Continue {
+                    origin: open.origin,
+                    thread_requested_at_ms: open.requested_at_ms,
                 };
-                next.shape = PendingShape::Continue(open.origin, idle);
                 DecisionHttpRequest {
                     request: build_thread_request(
                         endpoint,
@@ -429,7 +478,10 @@ impl LlmThreadMemory {
     ///   thread could not yet have expired ([`Idle::WithinExpiry`]), the API
     ///   cannot store that conversation, and its decisions are self-contained
     ///   from then on. Lost after it could have expired, the conversation is
-    ///   recovered again like any other.
+    ///   recovered again like any other. `now_ms` is the caller's wall clock as
+    ///   the reply arrived, which the thread's idle time is measured to: the
+    ///   API read the continue no later, so a machine that slept while the
+    ///   continue was built or in flight reads as idle that long.
     /// - **Any other refusal of a 2xx reply.** The API stored that turn after
     ///   the seat's last answered one, and an id can be continued only once, so
     ///   the seat's next decision starts a new thread instead of sending a
@@ -446,6 +498,7 @@ impl LlmThreadMemory {
         turn: Option<ThreadTurnId>,
         reply: LlmReply<'_>,
         outcome: Result<(), &LlmError>,
+        now_ms: u64,
     ) {
         let Some(turn) = turn else {
             return;
@@ -460,7 +513,7 @@ impl LlmThreadMemory {
             Ok(()) => {
                 let origin = match answered.shape {
                     PendingShape::Create(origin) => origin,
-                    PendingShape::Continue(..) => ThreadOrigin::Continued,
+                    PendingShape::Continue { .. } => ThreadOrigin::Continued,
                 };
                 // The seat has an answered turn again: no conversation is
                 // waiting on a recovery any more.
@@ -489,11 +542,7 @@ impl LlmThreadMemory {
                     // continue, too soon to have expired: Anthropic's "right
                     // after you replay" case.
                     ThreadErrorCode::NotFound
-                        if answered.shape
-                            == PendingShape::Continue(
-                                ThreadOrigin::Recovery,
-                                Idle::WithinExpiry,
-                            ) =>
+                        if answered.lost_an_unstorable_conversation(now_ms) =>
                     {
                         thread.unstored = Some(answered.conversation);
                     }
@@ -692,12 +741,12 @@ mod tests {
             status: 200,
             body,
         };
-        memory.record_reply(SEAT, turn, reply, Ok(()));
+        memory.record_reply(SEAT, turn, reply, Ok(()), NOW_MS);
     }
 
     /// The API refused to continue the thread the seat's pending request was
-    /// sent on.
-    fn lose_thread(memory: &mut LlmThreadMemory, code: ThreadErrorCode) {
+    /// sent on, in a reply that arrived at `now_ms`.
+    fn lose_thread_at(memory: &mut LlmThreadMemory, code: ThreadErrorCode, now_ms: u64) {
         let turn = pending_turn(memory);
         let reply = LlmReply {
             provider: LlmProvider::Anthropic,
@@ -705,7 +754,12 @@ mod tests {
             body: "{}",
         };
         let error = LlmError::ThreadUnavailable { code };
-        memory.record_reply(SEAT, turn, reply, Err(&error));
+        memory.record_reply(SEAT, turn, reply, Err(&error), now_ms);
+    }
+
+    /// [`lose_thread_at`] for a loss whose timing does not matter.
+    fn lose_thread(memory: &mut LlmThreadMemory, code: ThreadErrorCode) {
+        lose_thread_at(memory, code, NOW_MS);
     }
 
     /// Build `decision` for the seat and accept `id` as its answer.
@@ -854,7 +908,13 @@ mod tests {
             status: 200,
             body: &reply("msg_x", 900),
         };
-        memory.record_reply(SEAT, Some(ThreadTurnId(u32::MAX)), elsewhere, Ok(()));
+        memory.record_reply(
+            SEAT,
+            Some(ThreadTurnId(u32::MAX)),
+            elsewhere,
+            Ok(()),
+            NOW_MS,
+        );
 
         let third = decision(3, AiDifficulty::Medium);
         let spec = memory
@@ -897,7 +957,7 @@ mod tests {
             detail: "HTTP 529: Overloaded".to_string(),
         };
         let turn = pending_turn(&memory);
-        memory.record_reply(SEAT, turn, overloaded, Err(&error));
+        memory.record_reply(SEAT, turn, overloaded, Err(&error), NOW_MS);
 
         let retry = memory
             .decision_request(SEAT, &threaded(), &second, &log(6), NOW_MS)
@@ -935,7 +995,7 @@ mod tests {
             option_count: 2,
         };
         let turn = pending_turn(&memory);
-        memory.record_reply(SEAT, turn, stored, Err(&error));
+        memory.record_reply(SEAT, turn, stored, Err(&error), NOW_MS);
         assert!(!memory.has_open_thread(SEAT));
 
         let next = memory
@@ -1501,12 +1561,17 @@ mod tests {
                 &threaded(),
                 &decision(3, AiDifficulty::Medium),
                 &log(4),
-                1_000 + THREAD_IDLE_EXPIRY_MS - 1,
+                1_001,
             )
             .unwrap()
             .request;
         assert_eq!(continued_from(&first_continue), Some("msg_2".to_string()));
-        lose_thread(&mut memory, ThreadErrorCode::NotFound);
+        // Reported lost just before the recovery thread could have expired.
+        lose_thread_at(
+            &mut memory,
+            ThreadErrorCode::NotFound,
+            1_000 + THREAD_IDLE_EXPIRY_MS - 1,
+        );
         for revision in 3..=5 {
             let decision = decision(revision, AiDifficulty::Medium);
             let sent = memory
@@ -1558,7 +1623,7 @@ mod tests {
             .unwrap()
             .request;
         assert_eq!(continued_from(&first_continue), Some("msg_2".to_string()));
-        lose_thread(&mut memory, ThreadErrorCode::NotFound);
+        lose_thread_at(&mut memory, ThreadErrorCode::NotFound, after_the_pause);
         let recovered = memory
             .decision_request(
                 SEAT,
@@ -1583,7 +1648,7 @@ mod tests {
                 after_the_pause + 1,
             )
             .unwrap();
-        lose_thread(&mut memory, ThreadErrorCode::NotFound);
+        lose_thread_at(&mut memory, ThreadErrorCode::NotFound, after_the_pause + 1);
         let after = memory
             .decision_request(
                 SEAT,
@@ -1601,9 +1666,10 @@ mod tests {
     }
 
     /// The caller's clock is a wall clock, which a clock correction can step
-    /// back. A replacement thread lost at a first continue that reads earlier
-    /// than its create has an unknown idle time, which is read as an ordinary
-    /// expiry: the conversation is recovered again, not made self-contained.
+    /// back. A replacement thread reported lost at its first continue at a
+    /// time earlier than its create has an unknown idle time, which is read as
+    /// an ordinary expiry: the conversation is recovered again, not made
+    /// self-contained.
     #[test]
     fn a_recovery_thread_lost_after_the_clock_stepped_back_is_recovered_again() {
         let mut memory = LlmThreadMemory::new();
@@ -1621,7 +1687,7 @@ mod tests {
             .unwrap()
             .request;
         assert_eq!(continued_from(&first_continue), Some("msg_2".to_string()));
-        lose_thread(&mut memory, ThreadErrorCode::NotFound);
+        lose_thread_at(&mut memory, ThreadErrorCode::NotFound, stepped_back);
         let recovered = memory
             .decision_request(
                 SEAT,
@@ -1633,6 +1699,43 @@ mod tests {
             .unwrap()
             .request;
         assert!(is_create(&recovered));
+    }
+
+    /// A machine can sleep while a continue is being built or is in flight.
+    /// The recovery thread's first continue is built a moment after its create,
+    /// well within the API's expiry; the machine then sleeps past the expiry,
+    /// and the loss is reported after the pause. The thread may simply have
+    /// expired, so the conversation gets one fresh create, as any expired
+    /// thread does, and is not made self-contained.
+    #[test]
+    fn a_continue_built_before_a_pause_across_the_expiry_is_recovered_again() {
+        let mut memory = LlmThreadMemory::new();
+        lose_and_recover(&mut memory, 1_000);
+        let first_continue = memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision(3, AiDifficulty::Medium),
+                &log(4),
+                1_001,
+            )
+            .unwrap()
+            .request;
+        assert_eq!(continued_from(&first_continue), Some("msg_2".to_string()));
+
+        let after_the_pause = 1_000 + THREAD_IDLE_EXPIRY_MS;
+        lose_thread_at(&mut memory, ThreadErrorCode::NotFound, after_the_pause);
+        let recovered = memory
+            .decision_request(
+                SEAT,
+                &threaded(),
+                &decision(3, AiDifficulty::Medium),
+                &log(4),
+                after_the_pause,
+            )
+            .unwrap()
+            .request;
+        assert!(is_create(&recovered), "{}", body(&recovered));
     }
 
     /// A recovery belongs to the conversation it replaces. The seat's thread
@@ -1665,7 +1768,7 @@ mod tests {
             let error = LlmError::Provider {
                 detail: "overloaded".to_string(),
             };
-            memory.record_reply(SEAT, pending_turn(memory), unavailable, Err(&error));
+            memory.record_reply(SEAT, pending_turn(memory), unavailable, Err(&error), NOW_MS);
         };
 
         for (config, next) in [(&other_account, game_one(3)), (&threaded(), game_two(3))] {
@@ -1865,7 +1968,7 @@ mod tests {
         let error = LlmError::ThreadUnavailable {
             code: ThreadErrorCode::ContinueInFlight,
         };
-        memory.record_reply(SEAT, cancelled, lost, Err(&error));
+        memory.record_reply(SEAT, cancelled, lost, Err(&error), NOW_MS);
         assert!(
             memory.has_open_thread(SEAT),
             "the late reply dropped the thread"

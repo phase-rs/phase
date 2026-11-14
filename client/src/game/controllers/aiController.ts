@@ -230,6 +230,12 @@ async function llmActionProposal(
       profile.provider,
       status,
       body,
+      // The wall clock as the reply arrived, no earlier than the API read the
+      // request. A thread the reply reports lost is judged by its idle time up
+      // to now, so time the machine slept while the request was built or out
+      // counts toward the thread's expiry, and an expired thread never reads
+      // as a conversation the API cannot store.
+      Date.now(),
     );
     // The call was paid for whether or not its reply is usable.
     recordLlmUsage("game", `seat ${llmSeatIndex}`, built.promptChars, resolved?.usage);

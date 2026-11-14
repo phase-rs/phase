@@ -68,6 +68,7 @@ interface TestAdapter {
     provider: string,
     status: number,
     responseBody: string,
+    nowMs: number,
   ) => Promise<AiLlmProposalResult | null>;
 }
 
@@ -431,7 +432,7 @@ describe("LLM-driven AI seats", () => {
     expect(JSON.parse(endpointJson)).toMatchObject({ provider: "OpenAi", apiKey: "default-key" });
     expect(llmMocks.executeLlmRequest).toHaveBeenCalledWith(HTTP_SPEC, expect.anything());
     expect(getAiActionProposalFromLlmResponse).toHaveBeenCalledWith(
-      1, "default-fp", null, "OpenAi", 200, '{"choice":1}',
+      1, "default-fp", null, "OpenAi", 200, '{"choice":1}', expect.any(Number),
     );
     expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(llmProposal);
     controller.dispose();
@@ -501,6 +502,7 @@ describe("LLM-driven AI seats", () => {
       "OpenAi",
       200,
       '{"choice":1}',
+      expect.any(Number),
     );
     expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(llmProposal);
     controller.dispose();
@@ -740,6 +742,7 @@ describe("LLM-driven AI seats", () => {
       "OpenAi",
       429,
       expect.any(String),
+      expect.any(Number),
     );
     expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(heuristic);
     controller.dispose();
@@ -920,6 +923,7 @@ describe("LLM seats on a message thread", () => {
       "OpenAi",
       200,
       "{}",
+      expect.any(Number),
     );
     controller.dispose();
   });
@@ -960,6 +964,45 @@ describe("LLM seats on a message thread", () => {
     for (const { passed, wall } of clocks) expect(passed).toBe(wall);
     const [first, resend] = clocks;
     expect((resend?.wall ?? 0) - (first?.wall ?? 0)).toBeGreaterThanOrEqual(sleepMs);
+    controller.dispose();
+  });
+
+  it("hands the engine the wall clock as the reply arrives, after a sleep while the request was built", async () => {
+    bindSeatToProvider();
+    const adapter = threadedAdapter(() => ({ proposal: proposal(CAST, "llm-after-sleep") }));
+    // The machine sleeps for ten minutes while the request is being built.
+    const sleepMs = 10 * 60 * 1000;
+    const builtAt: unknown[] = [];
+    adapter.buildLlmDecisionRequest.mockImplementation(async (...args: unknown[]) => {
+      builtAt.push(args[4]);
+      vi.setSystemTime(Date.now() + sleepMs);
+      return {
+        fingerprint: "fp-1",
+        optionCount: 2,
+        promptChars: 100,
+        request: HTTP_SPEC,
+        threadTurn: THREAD_TURN,
+      };
+    });
+    // The reply's clock argument, beside the wall clock as the engine reads it.
+    const repliedAt: Array<{ passed: unknown; wall: number }> = [];
+    adapter.getAiActionProposalFromLlmResponse.mockImplementation(async (...args: unknown[]) => {
+      repliedAt.push({ passed: args[6], wall: Date.now() });
+      return { proposal: proposal(CAST, "llm-after-sleep") };
+    });
+    endGameOnDispatch();
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await runOnce();
+
+    expect(builtAt).toHaveLength(1);
+    expect(repliedAt).toHaveLength(1);
+    const [reply] = repliedAt;
+    expect(reply?.passed).toBe(reply?.wall);
+    expect(Number(reply?.passed) - Number(builtAt[0])).toBeGreaterThanOrEqual(sleepMs);
     controller.dispose();
   });
 

@@ -57,11 +57,11 @@ export function bestOfThreeCeilingForFormat(format: any): any;
  * is the engine-authored game log the caller has accumulated from prior
  * `ActionResult`s — engine data handed back for rendering, not a client
  * derivation. `now_ms` is the caller's wall clock (`Date.now()`) as the
- * request goes out: a message thread expires after five idle minutes of real
- * time, and the time since the seat's last request tells that apart from a
- * conversation the API cannot keep. Returns `null` when the seat has no
- * decision to make; throws only on a malformed argument, which is a
- * programming error rather than a runtime outcome.
+ * request is built: a message thread expires after five idle minutes of real
+ * time, counted from its last request, which goes out no earlier than this.
+ * Returns `null` when the seat has no decision to make; throws only on a
+ * malformed argument, which is a programming error rather than a runtime
+ * outcome.
  */
 export function buildLlmDecisionRequest(difficulty: string, player_id: number, endpoint_json: string, history_json: string, now_ms: number): any;
 
@@ -293,8 +293,12 @@ export function formatConfigForCustomRules(custom_rules: any): any;
  *
  * `thread_turn` is the `threadTurn` the request was built with
  * ([`build_llm_decision_request`]), absent for a self-contained request.
+ * `now_ms` is the caller's wall clock (`Date.now()`) as the reply arrived.
+ * The API read the request no later, so a thread the reply reports lost is
+ * judged by how long it had idled by then, sleep included, whatever the clock
+ * read when the request was built.
  */
-export function getAiActionProposalFromLlmResponse(player_id: number, fingerprint: string, thread_turn: number | null | undefined, provider_label: string, status: number, response_body: string): any;
+export function getAiActionProposalFromLlmResponse(player_id: number, fingerprint: string, thread_turn: number | null | undefined, provider_label: string, status: number, response_body: string, now_ms: number): any;
 
 /**
  * Return the authoritative list of selectable Horde challenge decks as a typed
@@ -880,7 +884,7 @@ export interface InitOutput {
     readonly export_game_state_json: () => [number, number, number, number];
     readonly export_replay_log: () => [number, number, number, number];
     readonly formatConfigForCustomRules: (a: any) => [number, number, number];
-    readonly getAiActionProposalFromLlmResponse: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
+    readonly getAiActionProposalFromLlmResponse: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number];
     readonly getFormatRegistry: () => any;
     readonly get_ai_action_proposal: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_action_proposal_from_scores: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];

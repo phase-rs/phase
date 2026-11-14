@@ -548,6 +548,7 @@ export class EngineWorkerClient {
     provider: string,
     status: number,
     responseBody: string,
+    nowMs: number,
   ): Promise<AiLlmProposalResult | null> {
     return this.request<AiLlmProposalResult | null>(
       {
@@ -558,6 +559,7 @@ export class EngineWorkerClient {
         provider,
         status,
         responseBody,
+        nowMs,
       },
       ENGINE_REQUEST_TIMEOUT_MS,
     );

@@ -4881,7 +4881,7 @@ mod restored_card_db_requirements_tests {
             let built = memory
                 .decision_request(player, &endpoint, &decision, &[], 0)
                 .expect("a threaded request builds");
-            memory.record_reply(player, built.thread_turn, reply, Ok(()));
+            memory.record_reply(player, built.thread_turn, reply, Ok(()), 0);
             assert!(memory.has_open_thread(player));
         });
     }
@@ -4971,12 +4971,14 @@ mod restored_card_db_requirements_tests {
         body["thread"].clone()
     }
 
-    /// Resolve the seat's reply through the production entry point.
-    fn resolve_llm_reply(
+    /// Resolve the seat's reply, arrived at `now_ms` on the caller's wall
+    /// clock, through the production entry point.
+    fn resolve_llm_reply_at(
         seat: PlayerId,
         built: &serde_json::Value,
         status: u16,
         body: &serde_json::Value,
+        now_ms: u64,
     ) -> serde_json::Value {
         let thread_turn = built["threadTurn"]
             .as_u64()
@@ -4988,8 +4990,19 @@ mod restored_card_db_requirements_tests {
             "Anthropic",
             status,
             &body.to_string(),
+            now_ms,
         )
         .expect("the reply resolves")
+    }
+
+    /// [`resolve_llm_reply_at`] for a reply whose timing does not matter.
+    fn resolve_llm_reply(
+        seat: PlayerId,
+        built: &serde_json::Value,
+        status: u16,
+        body: &serde_json::Value,
+    ) -> serde_json::Value {
+        resolve_llm_reply_at(seat, built, status, body, 0)
     }
 
     fn anthropic_reply(id: &str, choice: usize) -> serde_json::Value {
@@ -5078,12 +5091,15 @@ mod restored_card_db_requirements_tests {
 
     /// A message thread expires five idle minutes after its last request
     /// (Anthropic: "It expires 5 minutes after its last request"), timed on the
-    /// caller's wall clock, which the entry point hands on to the seat's thread.
-    /// A recovery thread lost at a first continue sent after that expiry has
-    /// simply expired, and the resend recovers it again. Lost sooner, the API
+    /// caller's wall clock, which both entry points hand on to the seat's
+    /// thread: the build's clock stamps each request, and the reply's clock
+    /// judges a loss. A recovery thread reported lost at its first continue
+    /// after that expiry has simply expired, and the resend recovers it again,
+    /// even when the continue was built well before the expiry, as when the
+    /// machine sleeps while the continue is out. Reported lost sooner, the API
     /// cannot store the conversation, and its next decision is self-contained.
     #[test]
-    fn the_entry_point_times_a_threads_idle_expiry_on_the_callers_clock() {
+    fn the_entry_points_time_a_threads_idle_expiry_on_the_callers_clock() {
         /// Anthropic's idle expiry for a message thread.
         const IDLE_EXPIRY_MS: u64 = 5 * 60 * 1000;
         let seat = PlayerId(1);
@@ -5104,46 +5120,54 @@ mod restored_card_db_requirements_tests {
 
         // The seat's thread is lost, and a create at 1 000 ms recovers it.
         let first = build_at(0);
-        resolve_llm_reply(seat, &first, 200, &anthropic_reply("msg_1", choice));
+        resolve_llm_reply_at(seat, &first, 200, &anthropic_reply("msg_1", choice), 0);
         let second = build_at(500);
-        resolve_llm_reply(seat, &second, 404, &lost);
+        resolve_llm_reply_at(seat, &second, 404, &lost, 500);
         let recovery = build_at(1_000);
         assert_eq!(
             thread_of(&recovery),
             serde_json::json!({ "type": "create" })
         );
-        resolve_llm_reply(seat, &recovery, 200, &anthropic_reply("msg_2", choice));
+        resolve_llm_reply_at(
+            seat,
+            &recovery,
+            200,
+            &anthropic_reply("msg_2", choice),
+            1_000,
+        );
 
-        // Its first continue goes out once the recovery has idled past the
-        // expiry, and is lost: an ordinary expiry, recovered again.
-        let after_expiry = 1_000 + IDLE_EXPIRY_MS;
-        let continued = build_at(after_expiry);
+        // Its first continue is built a moment later, and the machine sleeps
+        // past the expiry before the loss is reported: an ordinary expiry,
+        // recovered again.
+        let continued = build_at(1_001);
         assert_eq!(
             thread_of(&continued),
             serde_json::json!({ "type": "continue", "previous_message_id": "msg_2" })
         );
-        resolve_llm_reply(seat, &continued, 404, &lost);
+        let after_expiry = 1_000 + IDLE_EXPIRY_MS;
+        resolve_llm_reply_at(seat, &continued, 404, &lost, after_expiry);
         let recovered_again = build_at(after_expiry);
         assert_eq!(
             thread_of(&recovered_again),
             serde_json::json!({ "type": "create" })
         );
 
-        // That recovery's first continue is lost a moment later, within the
-        // expiry: the conversation is one the API cannot store.
-        resolve_llm_reply(
+        // That recovery's first continue is reported lost a moment later,
+        // within the expiry: the conversation is one the API cannot store.
+        resolve_llm_reply_at(
             seat,
             &recovered_again,
             200,
             &anthropic_reply("msg_3", choice),
+            after_expiry,
         );
         let soon_after = build_at(after_expiry + 1);
         assert_eq!(
             thread_of(&soon_after),
             serde_json::json!({ "type": "continue", "previous_message_id": "msg_3" })
         );
-        resolve_llm_reply(seat, &soon_after, 404, &lost);
-        let self_contained = build_at(after_expiry + 1);
+        resolve_llm_reply_at(seat, &soon_after, 404, &lost, after_expiry + 2);
+        let self_contained = build_at(after_expiry + 2);
         assert!(
             self_contained["request"].is_object(),
             "a request is built: {self_contained}"
@@ -7189,11 +7213,11 @@ pub fn validate_llm_probe_response(
 /// is the engine-authored game log the caller has accumulated from prior
 /// `ActionResult`s — engine data handed back for rendering, not a client
 /// derivation. `now_ms` is the caller's wall clock (`Date.now()`) as the
-/// request goes out: a message thread expires after five idle minutes of real
-/// time, and the time since the seat's last request tells that apart from a
-/// conversation the API cannot keep. Returns `null` when the seat has no
-/// decision to make; throws only on a malformed argument, which is a
-/// programming error rather than a runtime outcome.
+/// request is built: a message thread expires after five idle minutes of real
+/// time, counted from its last request, which goes out no earlier than this.
+/// Returns `null` when the seat has no decision to make; throws only on a
+/// malformed argument, which is a programming error rather than a runtime
+/// outcome.
 #[wasm_bindgen(js_name = buildLlmDecisionRequest)]
 pub fn build_llm_decision_request(
     difficulty: &str,
@@ -7317,6 +7341,10 @@ fn build_llm_decision_request_inner(
 ///
 /// `thread_turn` is the `threadTurn` the request was built with
 /// ([`build_llm_decision_request`]), absent for a self-contained request.
+/// `now_ms` is the caller's wall clock (`Date.now()`) as the reply arrived.
+/// The API read the request no later, so a thread the reply reports lost is
+/// judged by how long it had idled by then, sleep included, whatever the clock
+/// read when the request was built.
 #[wasm_bindgen(js_name = getAiActionProposalFromLlmResponse)]
 pub fn get_ai_action_proposal_from_llm_response(
     player_id: u8,
@@ -7325,6 +7353,7 @@ pub fn get_ai_action_proposal_from_llm_response(
     provider_label: &str,
     status: u16,
     response_body: &str,
+    now_ms: f64,
 ) -> Result<JsValue, JsValue> {
     get_ai_action_proposal_from_llm_response_inner(
         player_id,
@@ -7333,6 +7362,7 @@ pub fn get_ai_action_proposal_from_llm_response(
         provider_label,
         status,
         response_body,
+        now_ms.max(0.0) as u64,
     )
     .map(|resolved| to_js(&resolved))
     .map_err(|error| JsValue::from_str(&error))
@@ -7346,6 +7376,7 @@ fn get_ai_action_proposal_from_llm_response_inner(
     provider_label: &str,
     status: u16,
     response_body: &str,
+    now_ms: u64,
 ) -> Result<serde_json::Value, String> {
     let reply = phase_llm::LlmReply {
         provider: phase_llm::LlmProvider::from_label(provider_label),
@@ -7369,6 +7400,7 @@ fn get_ai_action_proposal_from_llm_response_inner(
                 thread_turn.map(phase_llm::ThreadTurnId),
                 reply,
                 admitted.as_ref().map(|_| ()),
+                now_ms,
             )
         });
         match admitted {

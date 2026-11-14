@@ -5947,9 +5947,8 @@ export interface EngineAdapter {
    * the AI controller uses the heuristic path. `historyJson` is the
    * engine-authored game log the caller has accumulated, handed back for
    * rendering. `nowMs` is the caller's wall clock (`Date.now()`) as the
-   * request goes out. The engine needs it to tell a message thread's idle
-   * expiry, which runs in real time, apart from a conversation the API cannot
-   * keep.
+   * request is built. A message thread's idle expiry runs in real time from
+   * its last request, which goes out no earlier than this.
    */
   buildLlmDecisionRequest?(
     difficulty: string,
@@ -5960,7 +5959,9 @@ export interface EngineAdapter {
   ): Promise<LlmDecisionRequestResult | null>;
   /**
    * Binds an LLM response to an engine-issued proposal, or reports why it could
-   * not. `threadTurn` is the built request's `threadTurn`.
+   * not. `threadTurn` is the built request's `threadTurn`. `nowMs` is the
+   * caller's wall clock (`Date.now()`) as the reply arrived: the engine judges
+   * a message thread the reply reports lost by how long it had idled by then.
    */
   getAiActionProposalFromLlmResponse?(
     playerId: number,
@@ -5969,6 +5970,7 @@ export interface EngineAdapter {
     provider: string,
     status: number,
     responseBody: string,
+    nowMs: number,
   ): Promise<AiLlmProposalResult | null>;
   /** The engine-owned LLM provider/model catalog for the settings UI. */
   llmProviderCatalog?(): Promise<unknown>;

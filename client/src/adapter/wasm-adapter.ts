@@ -937,6 +937,7 @@ export class WasmAdapter
     provider: string,
     status: number,
     responseBody: string,
+    nowMs: number,
   ): Promise<AiLlmProposalResult | null> {
     this.assertInitialized("getAiActionProposalFromLlmResponse");
     try {
@@ -948,6 +949,7 @@ export class WasmAdapter
           provider,
           status,
           responseBody,
+          nowMs,
         );
       }
       return await this.fallback!.getAiActionProposalFromLlmResponse(
@@ -957,6 +959,7 @@ export class WasmAdapter
         provider,
         status,
         responseBody,
+        nowMs,
       );
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
@@ -1749,6 +1752,7 @@ interface MainThreadFallback {
     provider: string,
     status: number,
     responseBody: string,
+    nowMs: number,
   ): Promise<AiLlmProposalResult | null>;
   llmProviderCatalog(): Promise<unknown>;
   exportState(): Promise<string>;
@@ -1992,6 +1996,7 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       provider: string,
       status: number,
       responseBody: string,
+      nowMs: number,
     ) =>
       enqueue(
         () =>
@@ -2002,6 +2007,7 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
             provider,
             status,
             responseBody,
+            nowMs,
           ) ?? null) as AiLlmProposalResult | null,
       ),
 
