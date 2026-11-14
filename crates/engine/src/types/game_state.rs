@@ -36402,7 +36402,7 @@ impl GameState {
         let carry_source_counters =
             |source: &TriggerSourceContext| self.departed_source_counters_projection(source);
         let clear_identity = |ability: &mut ResolvedAbility, carrier_source: ObjectId| {
-            if crate::game::ability_scan::ability_reads_sibling_mutable(ability) {
+            if crate::game::ability_scan::ability_reads_source_counters(ability) {
                 ability.clear_source_provenance_for_loop_carrying_source(
                     carrier_source,
                     &carry_source_counters,
@@ -51708,13 +51708,24 @@ mod tests {
         assert!(!read(&state.normalize_for_loop()));
     }
 
+    /// What a pending departed-source trigger's effect reads.
+    #[derive(Clone, Copy, Debug)]
+    enum DepartedSourceRead {
+        /// Nothing.
+        Nothing,
+        /// The source's own counters (`CountersOn` at `Source`).
+        SourceCounters,
+        /// A population count of live permanents (`CountersOnObjects`).
+        LiveBoardCensus,
+    }
+
     /// A state whose pending trigger belongs to a source that has since left the
     /// battlefield carrying `counters` +1/+1 counters. The trigger's effect reads
     /// the source's counters when `reads_counters`; otherwise it reads nothing.
     fn pending_departed_source_state(
         spacer_objects: u64,
         counters: u32,
-        reads_counters: bool,
+        read: DepartedSourceRead,
     ) -> GameState {
         use crate::game::zones::move_to_zone;
         use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef, TargetFilter};
@@ -51746,18 +51757,25 @@ mod tests {
             &state,
             &state.objects[&runner],
         );
-        let effect = if reads_counters {
-            Effect::GainLife {
-                amount: QuantityExpr::Ref {
-                    qty: QuantityRef::CountersOn {
-                        scope: ObjectScope::Source,
-                        counter_type: Some(CounterType::Plus1Plus1),
-                    },
-                },
-                player: TargetFilter::Controller,
-            }
-        } else {
-            Effect::NoOp
+        let gain_life = |qty: QuantityRef| Effect::GainLife {
+            amount: QuantityExpr::Ref { qty },
+            player: TargetFilter::Controller,
+        };
+        let effect = match read {
+            DepartedSourceRead::SourceCounters => gain_life(QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(CounterType::Plus1Plus1),
+            }),
+            // A live-board population read: it is mutable by siblings (the
+            // `sibling` scan axis) but names objects by filter, never the source.
+            DepartedSourceRead::LiveBoardCensus => gain_life(QuantityRef::CountersOnObjects {
+                filter: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::creature()
+                        .controller(crate::types::ability::ControllerRef::You),
+                ),
+                counter_type: Some(CounterType::Plus1Plus1),
+            }),
+            DepartedSourceRead::Nothing => Effect::NoOp,
         };
         let mut ability = ResolvedAbility::new(effect, Vec::new(), runner, PlayerId(0));
         ability.trigger_source = Some(context);
@@ -51792,7 +51810,7 @@ mod tests {
     #[test]
     fn normalize_for_loop_carries_the_counters_a_pending_departed_source_trigger_reads() {
         use crate::types::counter::CounterType;
-        let state = pending_departed_source_state(0, 2, true);
+        let state = pending_departed_source_state(0, 2, DepartedSourceRead::SourceCounters);
         let normalized = state.normalize_for_loop();
         let projection = pending_trigger_ability(&normalized)
             .trigger_source
@@ -51816,7 +51834,7 @@ mod tests {
     /// An ability that never reads its source's counters contributes nothing.
     #[test]
     fn normalize_for_loop_drops_a_departed_source_no_pending_ability_reads_counters_of() {
-        let state = pending_departed_source_state(0, 2, false);
+        let state = pending_departed_source_state(0, 2, DepartedSourceRead::Nothing);
         let normalized = state.normalize_for_loop();
         assert!(pending_trigger_ability(&normalized)
             .trigger_source
@@ -51828,10 +51846,14 @@ mod tests {
     /// carried read of a departed source.
     #[test]
     fn normalize_for_loop_is_idempotent_with_a_pending_counter_reading_departed_source() {
-        for reads_counters in [true, false] {
-            let once = pending_departed_source_state(0, 2, reads_counters).normalize_for_loop();
+        for read in [
+            DepartedSourceRead::SourceCounters,
+            DepartedSourceRead::LiveBoardCensus,
+            DepartedSourceRead::Nothing,
+        ] {
+            let once = pending_departed_source_state(0, 2, read).normalize_for_loop();
             let twice = once.normalize_for_loop();
-            assert!(once == twice, "reads_counters = {reads_counters}");
+            assert!(once == twice, "read = {read:?}");
             assert_eq!(
                 pending_trigger_ability(&once),
                 pending_trigger_ability(&twice)
@@ -51844,9 +51866,12 @@ mod tests {
     /// positions whose reads answer different counters do not.
     #[test]
     fn normalize_for_loop_compares_pending_departed_source_reads_by_the_counters_they_answer() {
-        let first = pending_departed_source_state(0, 2, true).normalize_for_loop();
-        let relocated = pending_departed_source_state(3, 2, true).normalize_for_loop();
-        let heavier = pending_departed_source_state(0, 3, true).normalize_for_loop();
+        let first = pending_departed_source_state(0, 2, DepartedSourceRead::SourceCounters)
+            .normalize_for_loop();
+        let relocated = pending_departed_source_state(3, 2, DepartedSourceRead::SourceCounters)
+            .normalize_for_loop();
+        let heavier = pending_departed_source_state(0, 3, DepartedSourceRead::SourceCounters)
+            .normalize_for_loop();
         assert_eq!(
             pending_trigger_ability(&first),
             pending_trigger_ability(&relocated)
@@ -51855,6 +51880,68 @@ mod tests {
             pending_trigger_ability(&first),
             pending_trigger_ability(&heavier)
         );
+    }
+
+    /// CR 104.4b + CR 608.2h: two positions that differ ONLY in the departed
+    /// source's counters are the same position when the pending ability never
+    /// reads them. A live-board population count is a sibling-mutable read but
+    /// names no source counter, so it must not distinguish them; the paired
+    /// control reads the source's own counters, where the same two positions
+    /// differ.
+    #[test]
+    fn departed_source_counters_distinguish_positions_only_for_a_source_counter_read() {
+        let position = |counters: u32, read: DepartedSourceRead| {
+            let mut state = pending_departed_source_state(0, counters, read);
+            // The departure also leaves the source's counters in the id-keyed LKI
+            // cache and the turn's zone-change journal. Those history surfaces are
+            // compared on their own terms; clearing them leaves the pending
+            // ability's carried read as the only place the counters can show.
+            state.lki_cache.clear();
+            state.zone_changes_this_turn.clear();
+            state.normalize_for_loop()
+        };
+        for read in [
+            DepartedSourceRead::LiveBoardCensus,
+            DepartedSourceRead::Nothing,
+        ] {
+            assert!(
+                loop_states_equal(&position(2, read), &position(3, read)),
+                "{read:?} reads no source counter, so the departed counters are not position"
+            );
+        }
+        assert!(
+            !loop_states_equal(
+                &position(2, DepartedSourceRead::SourceCounters),
+                &position(3, DepartedSourceRead::SourceCounters),
+            ),
+            "a real source-counter read answers different counters, a different position"
+        );
+    }
+
+    /// The classifier the projection gates on: a source-counter read, and only
+    /// that, including inside a chained sub-ability.
+    #[test]
+    fn ability_reads_source_counters_is_true_only_for_a_source_counter_read() {
+        use crate::game::ability_scan::{
+            ability_reads_sibling_mutable, ability_reads_source_counters,
+        };
+        let ability = |read: DepartedSourceRead| {
+            let state = pending_departed_source_state(0, 2, read);
+            pending_trigger_ability(&state).clone()
+        };
+        let source = ability(DepartedSourceRead::SourceCounters);
+        let census = ability(DepartedSourceRead::LiveBoardCensus);
+        let nothing = ability(DepartedSourceRead::Nothing);
+        assert!(ability_reads_source_counters(&source));
+        assert!(!ability_reads_source_counters(&census));
+        assert!(!ability_reads_source_counters(&nothing));
+        assert!(
+            ability_reads_sibling_mutable(&census),
+            "the census IS sibling-mutable: the broader axis cannot gate the projection"
+        );
+        let mut chained = ability(DepartedSourceRead::Nothing);
+        chained.sub_ability = Some(Box::new(source));
+        assert!(ability_reads_source_counters(&chained));
     }
 
     fn announced_departure(

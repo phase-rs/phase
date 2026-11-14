@@ -927,6 +927,170 @@ fn copy_acquired_population_replacement_excludes_co_entrants() {
     }
 }
 
+const MARCH_OF_THE_MACHINES: &str = "Each noncreature artifact is an artifact creature with power and toughness each equal to its mana value. (Equipment that's a creature can't equip a creature.)";
+const THE_OZOLITH: &str = "Whenever a creature you control leaves the battlefield, if it had counters on it, put those counters on The Ozolith.
+At the beginning of combat on your turn, if The Ozolith has counters on it, you may move all counters from The Ozolith onto target creature.";
+
+/// A Genesis Ultimatum Dig whose Clone copies a pre-existing Ascendant Acolyte
+/// (one +1/+1 counter) while The Ozolith (an artifact, two +1/+1 counters) sits
+/// on the battlefield. March of the Machines turns The Ozolith into a creature,
+/// and is either delivered by the same Dig (`march_in_batch`) or already on the
+/// battlefield. `second` is the other member of the batch: March itself, or a
+/// plain Bear when March was already in play.
+struct AcolyteCopyBoard {
+    runner: GameRunner,
+    spell: ObjectId,
+    existing_acolyte: ObjectId,
+    ozolith: ObjectId,
+    clone: ObjectId,
+    second: ObjectId,
+}
+
+fn acolyte_copy_board(march_in_batch: bool) -> AcolyteCopyBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let existing_acolyte = scenario
+        .add_creature_from_oracle(P0, "Ascendant Acolyte", 1, 1, ASCENDANT_ACOLYTE)
+        .id();
+    scenario.with_counter(existing_acolyte, CounterType::Plus1Plus1, 1);
+    let ozolith = scenario
+        .add_artifact_from_oracle(P0, "The Ozolith", THE_OZOLITH)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        })
+        .id();
+    scenario.with_counter(ozolith, CounterType::Plus1Plus1, 2);
+    if !march_in_batch {
+        scenario.add_enchantment_from_oracle(P0, "March of the Machines", MARCH_OF_THE_MACHINES);
+    }
+    let mut b = scenario.add_creature_to_graveyard(P0, "Clone", 0, 0);
+    b.from_oracle_text(CLONE);
+    let clone = b.id();
+    let second = if march_in_batch {
+        let mut b = scenario.add_creature_to_graveyard(P0, "March of the Machines", 0, 0);
+        b.as_enchantment().from_oracle_text(MARCH_OF_THE_MACHINES);
+        b.id()
+    } else {
+        scenario
+            .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+            .id()
+    };
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Genesis Ultimatum", false, GENESIS_ULTIMATUM)
+        .with_mana_cost(ManaCost::default())
+        .id();
+    AcolyteCopyBoard {
+        runner: scenario.build(),
+        spell,
+        existing_acolyte,
+        ozolith,
+        clone,
+        second,
+    }
+}
+
+fn is_creature(runner: &GameRunner, id: ObjectId) -> bool {
+    runner.state().objects[&id]
+        .card_types
+        .core_types
+        .contains(&engine::types::card_type::CoreType::Creature)
+}
+
+/// CR 614.12 + CR 614.1c: Genesis Ultimatum puts Clone (copying Ascendant
+/// Acolyte) and March of the Machines onto the battlefield together. The copied
+/// Acolyte's "+1/+1 counter among other creatures you control" count reads the
+/// pre-entry rules view: March's static effect does not exist yet, so The
+/// Ozolith is still a noncreature artifact and its two counters are not
+/// counted. Only the pre-existing Acolyte's counter is. In either delivery
+/// order; afterwards March does apply (The Ozolith is a creature).
+#[test]
+fn copied_acolyte_does_not_count_a_permanent_a_co_entering_march_makes_a_creature() {
+    for clone_first in [true, false] {
+        let board = acolyte_copy_board(true);
+        let order = if clone_first {
+            [board.clone, board.second]
+        } else {
+            [board.second, board.clone]
+        };
+        let label = format!("clone_first={clone_first}");
+        assert!(!is_creature(&board.runner, board.ozolith), "{label}");
+        let run = run_genesis_dig(
+            board.runner,
+            board.spell,
+            &order,
+            &[],
+            Some(board.existing_acolyte),
+        );
+        assert!(run.paused, "Clone's copy choice paused the batch ({label})");
+        let state = run.runner.state();
+        assert_eq!(
+            state.objects[&board.clone].name, "Ascendant Acolyte",
+            "{label}"
+        );
+        assert_eq!(
+            state.objects[&board.second].zone,
+            Zone::Battlefield,
+            "{label}"
+        );
+        assert!(
+            is_creature(&run.runner, board.ozolith),
+            "March applies once it has entered ({label})"
+        );
+        assert_eq!(
+            counters(&run.runner, board.clone, &CounterType::Plus1Plus1),
+            1,
+            "only the pre-existing Acolyte's counter was among creatures before the entry ({label})"
+        );
+        assert!(
+            state.active_pre_entry_battlefield_snapshot().is_none()
+                && state.resolution_stack.is_empty(),
+            "{label}"
+        );
+    }
+}
+
+/// Control for the test above: with March of the Machines ALREADY on the
+/// battlefield, The Ozolith is a creature in the pre-entry population, so its
+/// two counters count together with the pre-existing Acolyte's one (CR 614.12:
+/// "continuous effects that already exist").
+#[test]
+fn copied_acolyte_counts_a_permanent_an_existing_march_made_a_creature() {
+    for clone_first in [true, false] {
+        let board = acolyte_copy_board(false);
+        let order = if clone_first {
+            [board.clone, board.second]
+        } else {
+            [board.second, board.clone]
+        };
+        let label = format!("clone_first={clone_first}");
+        let run = run_genesis_dig(
+            board.runner,
+            board.spell,
+            &order,
+            &[],
+            Some(board.existing_acolyte),
+        );
+        assert!(run.paused, "{label}");
+        let state = run.runner.state();
+        assert_eq!(
+            state.objects[&board.clone].name, "Ascendant Acolyte",
+            "{label}"
+        );
+        assert!(is_creature(&run.runner, board.ozolith), "{label}");
+        assert_eq!(
+            counters(&run.runner, board.clone, &CounterType::Plus1Plus1),
+            3,
+            "the Ozolith's 2 counters + the Acolyte's 1 ({label})"
+        );
+        assert!(
+            state.active_pre_entry_battlefield_snapshot().is_none()
+                && state.resolution_stack.is_empty(),
+            "{label}"
+        );
+    }
+}
+
 /// The object-count class of the same read: a co-entrant is not "another
 /// creature you control" for an as-enters count.
 #[test]

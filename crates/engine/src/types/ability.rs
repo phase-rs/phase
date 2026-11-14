@@ -4785,6 +4785,9 @@ impl ResolvedAbility {
         self.target_incarnations.clear();
         self.target_pins.clear();
         self.legacy_selected_target_incarnations.clear();
+        for (_, child) in self.child_links_mut() {
+            child.clear_trigger_identity_recursive();
+        }
     }
 
     /// The source provenance both structural comparisons erase from one node:

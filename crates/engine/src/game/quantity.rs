@@ -4893,6 +4893,30 @@ fn resolve_ref(
     // entry keeps its own meaning for `targets` and never feeds this.
     ability_targets: Option<ParkedTargets<'_>>,
 ) -> i32 {
+    // CR 614.12 + CR 614.1c: a quantity read for an ENTERING object's replacement
+    // counts the pre-entry rules view, in which a permanent entering in the same
+    // simultaneous event has no static effect yet (a co-entering March of the
+    // Machines has not made an existing artifact a creature). The view has no
+    // co-entrant on its battlefield, so the recursion ends there.
+    if ctx.entering.is_some() {
+        if let Some(view) = state
+            .active_pre_entry_battlefield_snapshot()
+            .and_then(|snapshot| {
+                crate::game::engine_replacement::pre_entry_rules_view(state, snapshot)
+            })
+        {
+            return resolve_ref(
+                &view,
+                qty,
+                controller,
+                ctx,
+                targets,
+                chosen_x,
+                ability,
+                ability_targets,
+            );
+        }
+    }
     let source_id = ctx.source;
     // Build a FilterContext that preserves ability scope (for `chosen_x`/targets
     // in nested filter thresholds) when available, falling back to the controller

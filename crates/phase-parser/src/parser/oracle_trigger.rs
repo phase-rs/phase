@@ -25,8 +25,7 @@ use super::oracle_effect::{
 use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::{
     ConditionObjectAntecedent, ParseContext, ResolvedChainRoot, TriggerConditionObjects,
-    TriggerConditionScope,
-    TriggerZoneChangeProvenance,
+    TriggerConditionScope, TriggerZoneChangeProvenance,
 };
 use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::effect_chain::{
