@@ -567,9 +567,11 @@
     "tournamentEliminationDesc": "Spieler scheiden nach einer Partieniederlage aus, bis ein Sieger übrig bleibt.",
     "podPolicy": "Pod-Richtlinie",
     "policyCompetitive": "Kompetitiv",
-    "policyCompetitiveDesc": "Getimte Picks, automatische Picks bei Zeitablauf und automatisches Vorrücken der Runden.",
+    "policyCompetitiveDesc": "Getimte Picks, automatische Picks bei Zeitablauf und automatisches Vorrücken der Runden. Eingereichte Decks sind endgültig; du kannst nur zwischen den Spielen eines Matches sideboarden.",
+    "policyCompetitiveNoRoundsDesc": "Getimte Picks und automatische Picks bei Zeitablauf.",
     "policyCasual": "Locker",
-    "policyCasualDesc": "Ungetimte Picks, manuelles Vorrücken der Runden und Host-Steuerung zum Lösen von Problemen.",
+    "policyCasualDesc": "Ungetimte Picks, manuelles Vorrücken der Runden, Host-Steuerung zum Lösen von Problemen und Deckänderungen zwischen den Runden.",
+    "policyCasualNoRoundsDesc": "Ungetimte Picks und Host-Steuerung zum Lösen von Problemen.",
     "podSize": "Pod-Größe",
     "podSizeDesc": "{{count}} Plätze insgesamt. Leere Plätze können vor dem Draft-Start aus der Lobby mit Bots gefüllt werden.",
     "playerCount": "{{count}} Spieler",
@@ -615,11 +617,21 @@
     "roundComplete": "Runde abgeschlossen",
     "waitingNextRound": "Warten, bis der Host die nächste Runde startet...",
     "nextRoundShortly": "Die nächste Runde beginnt in Kürze...",
+    "editDeck": "Deck bearbeiten",
+    "backToStandings": "Zurück zur Tabelle",
+    "editDeckHint": "Lockerer Pod: Du kannst dein Deck ändern, bevor die nächste Runde beginnt.",
     "pauseReason": {
       "PlayerDisconnected": "Draft paused — a player disconnected.",
       "PausedByHost": "Draft paused by host.",
       "DisconnectGraceExpired": "A player did not return in time."
     }
+  },
+  "deckSubmitConfirm": {
+    "title": "Dieses Deck einreichen?",
+    "confirm": "Einreichung bestätigen",
+    "competitive": "Dies ist ein kompetitiver Pod: Dein eingereichtes Deck ist für alle Runden endgültig. Zwischen den Spielen eines Bo3-Matches kannst du weiterhin sideboarden.",
+    "casual": "Du kannst dein Deck zwischen den Runden weiterhin ändern.",
+    "final": "Dein eingereichtes Deck ist endgültig."
   },
   "betweenGames": {
     "game": "Spiel {{number}}",

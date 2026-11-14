@@ -179,7 +179,8 @@ pub(crate) fn available_mana(state: &GameState, player: PlayerId) -> u32 {
                     && !obj.tapped
                     && (obj.card_types.core_types.contains(&CoreType::Land)
                         || (!combat::has_summoning_sickness(obj)
-                            && obj.abilities.iter().any(mana_abilities::is_mana_ability)))
+                            // CR 701.10f: a pool doubling is a mana ability but adds no mana by itself.
+                            && obj.abilities.iter().any(mana_abilities::is_mana_source_ability)))
             })
         })
         .count();
@@ -193,6 +194,9 @@ mod tests {
 
     use super::*;
     use engine::game::zones::create_object;
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, DoubleTarget, Effect, TargetFilter,
+    };
     use engine::types::identifiers::CardId;
     use engine::types::mana::ManaCost;
     use engine::types::zones::Zone;
@@ -463,6 +467,51 @@ mod tests {
             !is_intrinsic_mana_source(&state.objects[&id]),
             "…but it is a one-shot conversion, not standing manabase development"
         );
+    }
+
+    /// A1 — CR 701.10f: Doubling Cube ("{3}, {T}: Double the amount of each type
+    /// of unspent mana you have.") is a mana ability, but its yield is the pool
+    /// already present: an untapped Cube adds no available mana and is not a
+    /// development source. Its parsed shape is built directly.
+    #[test]
+    fn doubling_cube_is_neither_available_mana_nor_a_development_source() {
+        let cube_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Double {
+                target_kind: DoubleTarget::ManaPool { color: None },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(3),
+                },
+                AbilityCost::Tap,
+            ],
+        });
+        assert!(
+            mana_abilities::is_mana_ability(&cube_ability),
+            "reach: Doubling Cube's ability is a mana ability"
+        );
+
+        let mut state = make_state();
+        let id = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(0),
+            "Doubling Cube".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        Arc::make_mut(&mut obj.abilities).push(cube_ability);
+
+        assert_eq!(available_mana(&state, PlayerId(0)), 0);
+        assert!(!is_intrinsic_mana_source(&state.objects[&id]));
+
+        state.objects.get_mut(&id).unwrap().tapped = true;
+        assert_eq!(available_mana(&state, PlayerId(0)), 0, "tapped: still none");
     }
 
     /// Row 5's negatives, free from CR 605.1a via `is_mana_ability`'s own guards:

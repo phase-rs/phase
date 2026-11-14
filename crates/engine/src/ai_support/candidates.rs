@@ -891,6 +891,16 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        WaitingFor::ChooseStartingPlayer { player, candidates } => candidates
+            .iter()
+            .map(|seat| {
+                candidate(
+                    GameAction::ChooseStartingPlayer { player: *seat },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 103.5 + 103.5b: For simultaneous mulligan, generate candidates
         // for each pending player. AI search iterates over the cross-product;
         // the engine accepts them in any arrival order. Serum Powder and
@@ -1022,8 +1032,22 @@ pub fn candidate_actions_broad_with_probe(
         } => mana_payment_actions(state, *player, *convoke_mode),
         // CR 605.3a + CR 733.1: activate a mana ability toward the pending one's
         // mana cost, or withdraw the pending activation.
-        WaitingFor::ManaAbilityManaPayment { player, .. } => {
+        WaitingFor::ManaAbilityManaPayment {
+            player,
+            pending_mana_ability,
+        } => {
             let mut actions = mana_tap_actions(state, *player);
+            // CR 601.2h via CR 602.2b: a manual payment is confirmed by passing,
+            // as `mana_payment_actions` does for a spell. Pins are never offered.
+            if crate::game::casting::payment_mode_pays_mana_manually(
+                pending_mana_ability.payment_mode,
+            ) {
+                actions.push(candidate(
+                    GameAction::PassPriority,
+                    TacticalClass::Pass,
+                    Some(*player),
+                ));
+            }
             actions.push(candidate(
                 GameAction::CancelCast,
                 TacticalClass::Pass,
@@ -2924,18 +2948,20 @@ pub fn candidate_actions_broad_with_probe(
             .collect(),
         // CR 118.12: "Counter unless pays" — opponent chooses pay or decline.
         WaitingFor::UnlessPayment { player, .. } => {
-            vec![
-                candidate(
-                    GameAction::PayUnlessCost { pay: true },
-                    TacticalClass::Selection,
-                    Some(*player),
-                ),
-                candidate(
+            let mut answers = vec![candidate(
+                GameAction::PayUnlessCost { pay: true },
+                TacticalClass::Selection,
+                Some(*player),
+            )];
+            // CR 702.24a: a repeated payment already begun only continues.
+            if !crate::game::engine_payment_choices::awaits_payment_continuation(state) {
+                answers.push(candidate(
                     GameAction::PayUnlessCost { pay: false },
                     TacticalClass::Selection,
                     Some(*player),
-                ),
-            ]
+                ));
+            }
+            answers
         }
         // CR 118.12a: Disjunctive unless-cost — paying player chooses **which**
         // sub-cost (by index) or declines all. One `ChooseUnlessCostBranch`
@@ -3780,6 +3806,7 @@ pub fn candidate_actions_broad_with_probe(
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::PhysicalContest { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. }
         | WaitingFor::OrderTriggers { .. }
         | WaitingFor::MulliganDecision { .. }
         | WaitingFor::OpeningHandBottomCards { .. } => Vec::new(),
@@ -6527,6 +6554,8 @@ fn push_object_combo(
     combo: impl IntoIterator<Item = crate::types::identifiers::ObjectId>,
 ) {
     let combo: Vec<_> = combo.into_iter().collect();
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_selection_combinations(1);
     let key: Vec<u64> = combo.iter().map(|id| id.0).collect();
     if seen.insert(key) {
         output.push(combo);
@@ -6624,13 +6653,19 @@ fn bounded_ignore_combinations(ignorable: &[usize], ignore_count: usize) -> Vec<
 }
 
 fn combinations_usize(items: &[usize], k: usize) -> Vec<Vec<usize>> {
+    // Each output combination grows from exactly one base-case vector, so the
+    // base cases record each combination once despite the recursion.
     if k == 0 {
+        #[cfg(feature = "test-support")]
+        crate::game::perf_counters::record_selection_combinations(1);
         return vec![Vec::new()];
     }
     if items.len() < k {
         return Vec::new();
     }
     if items.len() == k {
+        #[cfg(feature = "test-support")]
+        crate::game::perf_counters::record_selection_combinations(1);
         return vec![items.to_vec()];
     }
 
@@ -6709,6 +6744,8 @@ fn combinations_generic<T: Clone>(items: &[T], k: usize) -> Vec<Vec<T>> {
     let mut result = Vec::new();
     let mut current = Vec::with_capacity(k);
     recurse(items, k, 0, &mut current, &mut result);
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_selection_combinations(result.len());
     result
 }
 
@@ -9113,6 +9150,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,

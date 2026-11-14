@@ -845,6 +845,16 @@ pub enum SurvivorDeckFormat {
     Commander,
 }
 
+impl SurvivorDeckFormat {
+    /// Whether survivors play a Commander variant (CR 903).
+    pub fn uses_commander(self) -> bool {
+        match self {
+            SurvivorDeckFormat::Constructed => false,
+            SurvivorDeckFormat::Commander => true,
+        }
+    }
+}
+
 /// Staged boss-deck configuration (Turtle Team-Up class): the Boss team fights
 /// in stages of deployed Bosses sharing one life total per stage, instead of
 /// the classic Horde's life-total-less mill race.
@@ -1545,6 +1555,14 @@ pub struct FormatConfig {
     pub singleton: bool,
     pub command_zone: bool,
     pub commander_damage_threshold: Option<u8>,
+    /// CR 104.3d / CR 704.5c: the poison-counter count at which an individual
+    /// player loses. `None` exactly when CR 704.5c does not apply to the format —
+    /// the Two-Headed Giant family ("Ignore this rule in Two-Headed Giant games"),
+    /// whose team threshold CR 704.6b / CR 810.8d (fifteen) governs instead and
+    /// stays fixed. The magnitude is a house-rule dial like
+    /// `commander_damage_threshold`'s.
+    #[serde(default)]
+    pub poison_counter_threshold: Option<u8>,
     #[serde(default, deserialize_with = "deserialize_range_of_influence")]
     pub range_of_influence: Option<Box<RangeOfInfluenceConfig>>,
     pub team_based: bool,
@@ -1553,11 +1571,10 @@ pub struct FormatConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archenemy_player: Option<PlayerId>,
     /// Engine-derived predicate (mirrors `GameFormat::uses_commander`): true
-    /// when the format uses a commander card and the commander-damage
-    /// state-based action (CR 903.10a / CR 704.6c) — every format whose
-    /// `command_zone` is true and whose `commander_damage_threshold` is
-    /// non-`None`. The frontend consumes this directly — it must never
-    /// re-list commander-style formats client-side.
+    /// when the format is a Commander variant (CR 903), independent of
+    /// `commander_damage_threshold` (CR 903.12h: Brawl keeps the family
+    /// without the CR 704.6c loss). The frontend consumes this directly — it
+    /// must never re-list commander-style formats client-side.
     pub uses_commander: bool,
     /// Engine-derived predicate (mirrors `GameFormat::supplies_fixed_deck`):
     /// true when the engine supplies the format's deck or a default for it, so
@@ -1744,14 +1761,34 @@ pub fn validate_starting_life_bounds(config: &FormatConfig) -> Result<(), String
     Ok(())
 }
 
+/// CR 704.5c playability floor on a resolved `FormatConfig`'s individual
+/// poison-loss threshold: `Some(0)` is rejected because `poison_counters >= 0`
+/// holds for every player — an immediate loss, not a threshold. The single
+/// shared authority, called from both arms of `FormatConfig::deserialize`
+/// (the built-in arm through `built_in_axes_no_looser_than_rules`'s
+/// `poison_counter_threshold` row; the Custom arm directly, because its
+/// blanket equality only proves self-consistency).
+pub fn validate_poison_counter_threshold(config: &FormatConfig) -> Result<(), String> {
+    if config.poison_counter_threshold == Some(0) {
+        return Err(format!(
+            "FormatConfig.poison_counter_threshold is Some(0) for {} — a zero threshold makes \
+             every player an immediate poison loss (CR 704.5c), so the threshold must be at \
+             least 1",
+            config.format,
+        ));
+    }
+    Ok(())
+}
+
 /// CR 100.2a / CR 100.4a / CR 903.5a / CR 903.5b / CR 904.2a: a BUILT-IN
 /// format's rules are fixed by the Comprehensive Rules and the engine
 /// registry except where the CR itself grants a host a choice — CR 103.4's
 /// variant life totals, CR 806's rule-free Free-for-All deck construction,
 /// and the seat count no CR fixes (CR 100.1a / CR 100.1b / CR 800.1 fix only
 /// that a game begins with two players or with more than two). Re-derive the
-/// authoritative config with `FormatConfig::for_format` and check every one
-/// of this struct's 17 fields against it under one of six verdicts:
+/// authoritative config with `FormatConfig::for_format` (for a Horde,
+/// `FormatConfig::horde` of its declared ruleset) and check every one
+/// of this struct's fields against it under one of six verdicts:
 ///
 /// - Locked: must equal the registry value exactly.
 /// - NoLooserThan: must be no more permissive than the registry value,
@@ -1767,13 +1804,15 @@ pub fn validate_starting_life_bounds(config: &FormatConfig) -> Result<(), String
 ///   carries is governed by that row's second verdict, stated alongside.
 ///   Applies to: `deck_size` (bidirectional, the `DeckSizeRule` discriminant),
 ///   `commander_damage_threshold` (bidirectional, the `Option` discriminant),
+///   `poison_counter_threshold` (bidirectional, the `Option` discriminant),
 ///   `archenemy_player` (one-directional, the `Option` discriminant — behavior
 ///   unchanged, this is a relabel of its existing row).
 /// - HostChoiceWithin(set): free inside a stated admissible set; each row
 ///   names its set and the set's source. Applies to: `max_players` (registry
 ///   range `min_players..=max_players`), `deck_size`'s magnitude (the
 ///   registry's closed option list), `commander_damage_threshold`'s magnitude
-///   (`>= 1`, playability), `starting_life` (resolved per-seat total `>= 1`
+///   (`>= 1`, playability), `poison_counter_threshold`'s magnitude (`>= 1`,
+///   playability), `starting_life` (resolved per-seat total `>= 1`
 ///   for playability; raw declared value `<= MAX_STARTING_LIFE` as an engine
 ///   overflow-safety invariant, not a rules bound).
 ///
@@ -1786,7 +1825,13 @@ pub fn validate_starting_life_bounds(config: &FormatConfig) -> Result<(), String
 /// boundary and there are therefore no legacy Custom payloads to keep
 /// compatible with. This function is the built-in half of the same idea.
 fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), String> {
-    let rules = FormatConfig::for_format(config.format).map_err(|e| e.0)?;
+    // A Horde's survivors' deck format decides its deck and commander axes, so
+    // it is held to the config its declared ruleset builds, not the registry's
+    // single Horde default.
+    let rules = match (config.format, &config.horde_ruleset) {
+        (GameFormat::Horde, Some(ruleset)) => FormatConfig::horde(ruleset.clone()),
+        (format, _) => FormatConfig::for_format(format).map_err(|e| e.0)?,
+    };
 
     // format: Locked — discharged by construction. `config.format` is the
     // very key `for_format` was looked up by, so equality is tautological.
@@ -1933,10 +1978,8 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
     // The SHAPE is the rules fact (CR 903.10a / CR 704.6c): either the format
     // has the commander-damage state-based action or it does not. `None` is
     // not a "looser threshold" — it DELETES the SBA (the commander-damage
-    // loss collectors both return early on `None`) and flips the Derived
-    // `uses_commander` row below, so a payload declaring both `None` and
-    // `uses_commander: false` would otherwise be self-consistent and slip
-    // past every other row. A payload may neither invent nor delete it.
+    // loss collectors both return early on `None`). A payload may neither
+    // invent nor delete it.
     //
     // The MAGNITUDE is a house-rule dial, exposed by the shipped host UI
     // whenever the format has a threshold at all and unvalidated on this path
@@ -1975,6 +2018,38 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
             ));
         }
         (Some(_), Some(_)) | (None, None) => {}
+    }
+
+    // poison_counter_threshold: ShapeLocked(bidirectional) on the Option
+    // discriminant, plus HostChoiceWithin `>= 1` on the magnitude.
+    //
+    // The SHAPE is the rules fact: CR 704.5c applies to every format except
+    // the Two-Headed Giant family, which ignores it in favor of the team
+    // rule (CR 704.6b / CR 810.8d). The MAGNITUDE is a house-rule dial like
+    // `commander_damage_threshold`'s; `validate_poison_counter_threshold`
+    // bounds it. A legacy payload's absent field has already been migrated
+    // to the registry value by `FormatConfig::deserialize`.
+    match (
+        config.poison_counter_threshold,
+        rules.poison_counter_threshold,
+    ) {
+        (Some(declared), None) => {
+            return Err(format!(
+                "FormatConfig.poison_counter_threshold is Some({declared}), but {} ignores CR \
+                 704.5c — the Two-Headed Giant family loses to team poison only (CR 704.6b / CR \
+                 810.8d), so this format may not declare an individual threshold",
+                config.format,
+            ));
+        }
+        (None, Some(registry)) => {
+            return Err(format!(
+                "FormatConfig.poison_counter_threshold is null, but {} loses a player at \
+                 {registry} poison counters (CR 704.5c) — a payload may set the threshold but \
+                 never remove it",
+                config.format,
+            ));
+        }
+        (Some(_), Some(_)) | (None, None) => validate_poison_counter_threshold(config)?,
     }
 
     // range_of_influence: Deferred, NOT checked here — a hard equality row
@@ -2030,20 +2105,14 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
         ));
     }
 
-    // uses_commander: Derived — command_zone && commander_damage_threshold
-    // is_some(), both Locked above, so for a built-in the derivation
-    // coincides with registry equality. No serde default, so no legacy
-    // concern.
-    let derived_uses_commander = config.command_zone && config.commander_damage_threshold.is_some();
+    // uses_commander: Derived from format — independent of the threshold
+    // (CR 903.12h: Brawl stays a Commander variant without CR 704.6c).
+    let derived_uses_commander = rules.uses_commander;
     if config.uses_commander != derived_uses_commander {
         return Err(format!(
-            "FormatConfig.uses_commander is {}, but command_zone ({}) and \
-             commander_damage_threshold ({:?}) derive {} — uses_commander must always equal that \
-             derivation",
-            config.uses_commander,
-            config.command_zone,
-            config.commander_damage_threshold,
-            derived_uses_commander,
+            "FormatConfig.uses_commander is {}, but {} derives {} — uses_commander must always \
+             equal that derivation",
+            config.uses_commander, config.format, derived_uses_commander,
         ));
     }
 
@@ -2125,9 +2194,21 @@ impl<'de> Deserialize<'de> for FormatConfig {
     where
         D: Deserializer<'de>,
     {
-        let config = Self::deserialize(deserializer)?;
+        let mut config = Self::deserialize(deserializer)?;
         crate::types::custom_format::validate_custom_rules_consistency(&config)
             .map_err(serde::de::Error::custom)?;
+        // A pre-field payload carries no `poison_counter_threshold`, which serde
+        // defaults to `None`. `None` is never a legal declaration for a format whose
+        // resolver answers `Some` (the row below forbids deleting the SBA), so a
+        // `None` there can only be such a payload: adopt the resolver's value. An
+        // explicit `null` for such a format is migrated the same way, to the
+        // CR 704.5c value.
+        if config.poison_counter_threshold.is_none() {
+            config.poison_counter_threshold = match &config.custom_rules {
+                Some(rules) => Some(rules.structural.poison_counter_threshold),
+                None => config.format.default_poison_counter_threshold(),
+            };
+        }
         // `validate_custom_rules_consistency` has already established the
         // `format == Custom(id) <=> custom_rules == Some(rules with that id)`
         // biconditional, so `Some(_)` here means a Custom config and `None`
@@ -2172,8 +2253,8 @@ impl<'de> Deserialize<'de> for FormatConfig {
                          derives from the declared rules (allow_debug_actions \
                          excepted). Derived: \
                          starting_life {}, players {}-{}, deck_size {:?}, singleton {}, \
-                         command_zone {}, commander_damage_threshold {:?}, uses_commander {}, \
-                         team_based {}, archenemy_player {:?}, supplies_fixed_deck {}, \
+                         command_zone {}, commander_damage_threshold {:?}, \
+                         poison_counter_threshold {:?}, uses_commander {}, team_based {}, archenemy_player {:?}, supplies_fixed_deck {}, \
                          sideboard_policy {:?}, default_deck_copy_limit {:?}, \
                          range_of_influence set {}",
                         config.format,
@@ -2184,6 +2265,7 @@ impl<'de> Deserialize<'de> for FormatConfig {
                         expected.singleton,
                         expected.command_zone,
                         expected.commander_damage_threshold,
+                        expected.poison_counter_threshold,
                         expected.uses_commander,
                         expected.team_based,
                         expected.archenemy_player,
@@ -2202,6 +2284,9 @@ impl<'de> Deserialize<'de> for FormatConfig {
                 // 810.8c) or overflow-prone (`MAX_STARTING_LIFE`) starting
                 // life just because it is internally consistent about it.
                 validate_starting_life_bounds(&config).map_err(serde::de::Error::custom)?;
+                // Likewise for the declared poison threshold: equality admits a
+                // self-consistent `Some(0)`, which this call rejects (CR 704.5c).
+                validate_poison_counter_threshold(&config).map_err(serde::de::Error::custom)?;
             }
             // A built-in format's rules are fixed by the Comprehensive Rules
             // and the engine registry, except where the CR itself grants a
@@ -2210,9 +2295,10 @@ impl<'de> Deserialize<'de> for FormatConfig {
             // NoLooserThan, Derived, HostChoice, ShapeLocked, and
             // HostChoiceWithin). `built_in_axes_no_looser_than_rules`
             // re-derives the authoritative config via `FormatConfig::for_format`
-            // and checks every one of this struct's 18 fields against it —
+            // (for a Horde, `FormatConfig::horde` of its declared ruleset)
+            // and checks every one of this struct's fields against it —
             // absorbing what was previously a single ad hoc
-            // `default_deck_copy_limit` check as one of its 18 rows, rather
+            // `default_deck_copy_limit` check as one of its rows, rather
             // than adding a parallel second check. `range_of_influence`'s row
             // is a documented `Deferred` non-check (see that function's own
             // comment on the field), not an omission.
@@ -2330,6 +2416,9 @@ impl<'de> Deserialize<'de> for SelectedFormat {
         GameFormat::deserialize(deserializer).map(SelectedFormat::Tag)
     }
 }
+
+/// CR 104.3d / CR 704.5c: ten poison counters.
+pub const INDIVIDUAL_POISON_LOSS_THRESHOLD: u8 = 10;
 
 impl GameFormat {
     /// Which authority decides this format's deck-construction card pool —
@@ -2870,6 +2959,16 @@ impl GameFormat {
         )
     }
 
+    /// CR 104.3d / CR 704.5c: ten or more poison counters → loss, except in the
+    /// Two-Headed Giant family, which ignores CR 704.5c (CR 704.6b / CR 810.8d).
+    pub fn default_poison_counter_threshold(self) -> Option<u8> {
+        if self.is_two_headed_giant_family() {
+            None
+        } else {
+            Some(INDIVIDUAL_POISON_LOSS_THRESHOLD)
+        }
+    }
+
     /// Whether this format seats one archenemy against a team of heroes on
     /// shared team turns (CR 904.2) with a single scheme deck (CR 904.3 /
     /// CR 904.13d). Both the 60-card variant and the Commander-composed
@@ -2890,10 +2989,8 @@ impl GameFormat {
         )
     }
 
-    /// Whether this format uses a commander card and the commander-damage
-    /// state-based action (CR 903.10a / CR 704.6c). True for every format
-    /// whose `FormatConfig` has both `command_zone: true` and a non-`None`
-    /// `commander_damage_threshold`. The frontend consumes the derived
+    /// Whether this format is a Commander variant (CR 903), independent of
+    /// its commander-damage threshold (CR 903.12h). The frontend consumes the derived
     /// `FormatConfig::uses_commander` field rather than re-listing the
     /// commander-style variants client-side.
     ///
@@ -2918,9 +3015,6 @@ impl GameFormat {
             | GameFormat::Brawl
             | GameFormat::HistoricBrawl
             | GameFormat::PlanechaseCommander
-            // `command_zone: true` and
-            // `commander_damage_threshold: Some(21)` travel together for this
-            // format — `Derived` in `built_in_axes_no_looser_than_rules`.
             | GameFormat::FreeformCommander
             // CR 903.13g: Commander Draft games follow the same rules as
             // Commander games, so CR 903.10a's commander-damage SBA applies.
@@ -2963,11 +3057,9 @@ impl GameFormat {
     /// `FormatConfig::command_zone`. The three predicates answer different
     /// questions and their answers genuinely differ:
     ///
-    /// - `uses_commander` is `command_zone && commander_damage_threshold`, so
-    ///   it means "CR 903.10a commander damage applies". Tiny Leaders and
-    ///   Oathbreaker put a real card in the command zone but declare no
-    ///   damage threshold, so they answer `false` there while answering
-    ///   `true` here.
+    /// - `uses_commander` marks a CR 903 Commander variant. Tiny Leaders and
+    ///   Oathbreaker put a real card in the command zone but are not CR 903
+    ///   formats, so they answer `false` there while answering `true` here.
     /// - `command_zone` is true for Archenemy (CR 904.3 + CR 904.4: the
     ///   supplementary scheme deck, which remains in the command zone) and
     ///   Momir (its emblem), whose zones hold no decklist card at all, so
@@ -3015,8 +3107,7 @@ impl GameFormat {
             | GameFormat::CommanderDraft
             | GameFormat::FreeformCommander
             // Tiny Leaders and Oathbreaker seat a decklist card in the command
-            // zone without a commander-damage threshold, which is precisely the
-            // case `uses_commander` cannot express.
+            // zone but are not CR 903 formats, so `uses_commander` is false.
             | GameFormat::TinyLeaders
             | GameFormat::Oathbreaker => Ok(true),
             // Archenemy's scheme deck (CR 904.3: the supplementary deck;
@@ -3770,7 +3861,105 @@ fn legality_table_format(table: LegalityFormat) -> GameFormat {
     }
 }
 
+/// A persisted value that an earlier engine derived differently. `None` = not legacy.
+#[derive(Default)]
+struct LegacyFormatFields {
+    commander_damage_threshold: Option<u8>,
+    uses_commander: Option<bool>,
+}
+
 impl FormatConfig {
+    /// Persistence and local game-init ingress: a config an earlier engine wrote
+    /// decodes under today's rules. Network payloads keep the strict validator.
+    pub fn migrate_persisted(config: &mut serde_json::Value) {
+        Self::migrate_legacy_fields(config);
+    }
+
+    /// Ingress for a config an earlier engine wrote and this one must keep: a replay
+    /// header, and a lobby frame relayed to peers of its writer's build.
+    pub fn deserialize_recorded<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<FormatConfig, D::Error> {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        let legacy = Self::migrate_legacy_fields(&mut value);
+        let mut config: FormatConfig =
+            serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        if let Some(threshold) = legacy.commander_damage_threshold {
+            config.commander_damage_threshold = Some(threshold);
+        }
+        if let Some(uses_commander) = legacy.uses_commander {
+            config.uses_commander = uses_commander;
+        }
+        Ok(config)
+    }
+
+    /// `deserialize_recorded` for an optional field.
+    pub fn deserialize_recorded_option<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<FormatConfig>, D::Error> {
+        #[derive(Deserialize)]
+        struct Recorded(
+            #[serde(deserialize_with = "FormatConfig::deserialize_recorded")] FormatConfig,
+        );
+        Ok(Option::<Recorded>::deserialize(deserializer)?.map(|Recorded(config)| config))
+    }
+
+    /// The strict `Deserialize` gate, for a config decoded with `deserialize_recorded`
+    /// that today's engine is about to run.
+    pub fn check_strict_admission(&self) -> Result<(), String> {
+        let value = serde_json::to_value(self).map_err(|error| error.to_string())?;
+        serde_json::from_value::<FormatConfig>(value)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Every persisted ingress and every lobby-frame decode routes here; Full-mode and
+    /// current-client lobby create frames re-check strictly (`check_strict_admission`).
+    /// The one list of values earlier engines derived differently, swapped for today's.
+    fn migrate_legacy_fields(config: &mut serde_json::Value) -> LegacyFormatFields {
+        let mut legacy = LegacyFormatFields::default();
+        let is_brawl = config
+            .get("format")
+            .and_then(|format| GameFormat::deserialize(format).ok())
+            .is_some_and(|format| matches!(format, GameFormat::Brawl | GameFormat::HistoricBrawl));
+        // CR 903.12h: Brawl once carried CR 704.6c's threshold, admitted at any value >= 1.
+        if let Some(slot) = config
+            .get_mut("commander_damage_threshold")
+            .filter(|_| is_brawl)
+        {
+            if let Some(threshold) = slot
+                .as_u64()
+                .and_then(|threshold| u8::try_from(threshold).ok())
+                .filter(|&threshold| threshold >= 1)
+            {
+                legacy.commander_damage_threshold = Some(threshold);
+                *slot = serde_json::Value::Null;
+            }
+        }
+        // A Custom config's uses_commander was once `command_zone && threshold.is_some()`.
+        if let Some(rules) = config
+            .get("custom_rules")
+            .and_then(|rules| CustomFormatRules::deserialize(rules).ok())
+        {
+            let previous = matches!(
+                rules.structural.command_zone_mode,
+                CommandZoneMode::Enabled {
+                    commander_damage_threshold: Some(_),
+                    ..
+                }
+            );
+            let current = Self::for_custom_rules(&rules).uses_commander;
+            if let Some(slot) = config
+                .get_mut("uses_commander")
+                .filter(|stored| previous != current && stored.as_bool() == Some(previous))
+            {
+                legacy.uses_commander = Some(previous);
+                *slot = serde_json::Value::Bool(current);
+            }
+        }
+        legacy
+    }
+
     pub fn topology(&self) -> FormatTopology {
         match self.format {
             GameFormat::TwoHeadedGiant => FormatTopology::FixedTeams {
@@ -4189,6 +4378,7 @@ impl FormatConfig {
             singleton: false,
             command_zone: false,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::Standard.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4212,6 +4402,7 @@ impl FormatConfig {
             singleton: true,
             command_zone: true,
             commander_damage_threshold: Some(21),
+            poison_counter_threshold: GameFormat::Commander.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4252,6 +4443,7 @@ impl FormatConfig {
             command_zone: true,
             // CR 903.10a (via CR 903.13g): 21 combat damage from one commander.
             commander_damage_threshold: Some(21),
+            poison_counter_threshold: GameFormat::CommanderDraft.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4347,6 +4539,7 @@ impl FormatConfig {
             singleton: true,
             command_zone: true,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::TinyLeaders.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4374,6 +4567,7 @@ impl FormatConfig {
             singleton: true,
             command_zone: true,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::Oathbreaker.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4436,6 +4630,8 @@ impl FormatConfig {
             command_zone: true,
             // CR 903.10a: 21 combat damage from one commander.
             commander_damage_threshold: Some(21),
+            poison_counter_threshold: GameFormat::FreeformCommander
+                .default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4460,7 +4656,9 @@ impl FormatConfig {
             deck_size: DeckSizeRule::Exactly(60),
             singleton: true,
             command_zone: true,
-            commander_damage_threshold: Some(21),
+            // CR 903.12h: Brawl games do not use CR 704.6c's commander-damage loss.
+            commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::Brawl.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4495,6 +4693,7 @@ impl FormatConfig {
             singleton: false,
             command_zone: false,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::FreeForAll.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4520,6 +4719,7 @@ impl FormatConfig {
             singleton: false,
             command_zone: false,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::Limited.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4556,6 +4756,7 @@ impl FormatConfig {
             singleton: false,
             command_zone: true,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::Momir.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4582,6 +4783,7 @@ impl FormatConfig {
             singleton: false,
             command_zone: false,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::Dandan.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4605,6 +4807,7 @@ impl FormatConfig {
             singleton: false,
             command_zone: false,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::TwoHeadedGiant.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: true,
             archenemy_player: None,
@@ -4639,6 +4842,8 @@ impl FormatConfig {
             singleton: true,
             command_zone: true,
             commander_damage_threshold: Some(21),
+            poison_counter_threshold: GameFormat::TwoHeadedGiantCommander
+                .default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: true,
             archenemy_player: None,
@@ -4665,6 +4870,7 @@ impl FormatConfig {
             singleton: false,
             command_zone: false,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::Planechase.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4693,6 +4899,8 @@ impl FormatConfig {
             singleton: true,
             command_zone: true,
             commander_damage_threshold: Some(21),
+            poison_counter_threshold: GameFormat::PlanechaseCommander
+                .default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4725,6 +4933,8 @@ impl FormatConfig {
             singleton: true,
             command_zone: true,
             commander_damage_threshold: Some(21),
+            poison_counter_threshold: GameFormat::ArchenemyCommander
+                .default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: Some(PlayerId(0)),
@@ -4750,6 +4960,7 @@ impl FormatConfig {
             singleton: false,
             command_zone: true,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::Archenemy.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: Some(PlayerId(0)),
@@ -4780,28 +4991,22 @@ impl FormatConfig {
         // Theros-block decks want 60-card constructed). `command_zone` stays true
         // regardless — the Horde's own game-start emblem lives in the command zone,
         // independent of whether survivors run commanders.
-        let (
-            deck_size,
-            singleton,
-            uses_commander,
-            commander_damage_threshold,
-            default_deck_copy_limit,
-        ) = match ruleset.survivor_deck_format {
-            SurvivorDeckFormat::Constructed => (
-                DeckSizeRule::Minimum(60),
-                false,
-                false,
-                None,
-                DeckCopyLimit::Unlimited,
-            ),
-            SurvivorDeckFormat::Commander => (
-                DeckSizeRule::Exactly(100),
-                true,
-                true,
-                Some(21),
-                DeckCopyLimit::UpTo(1),
-            ),
-        };
+        let uses_commander = ruleset.survivor_deck_format.uses_commander();
+        let (deck_size, singleton, commander_damage_threshold, default_deck_copy_limit) =
+            match ruleset.survivor_deck_format {
+                SurvivorDeckFormat::Constructed => (
+                    DeckSizeRule::Minimum(60),
+                    false,
+                    None,
+                    DeckCopyLimit::Unlimited,
+                ),
+                SurvivorDeckFormat::Commander => (
+                    DeckSizeRule::Exactly(100),
+                    true,
+                    Some(21),
+                    DeckCopyLimit::UpTo(1),
+                ),
+            };
         FormatConfig {
             format: GameFormat::Horde,
             // Fallback only. The authoritative survivors' combined base life is
@@ -4817,6 +5022,7 @@ impl FormatConfig {
             singleton,
             command_zone: true,
             commander_damage_threshold,
+            poison_counter_threshold: GameFormat::Horde.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             // The Horde occupies seat 0; survivors take the remaining seats and
@@ -4842,10 +5048,8 @@ impl FormatConfig {
     /// the config was actually built with.
     ///
     /// Custom is answered from `CommandZoneMode`, NOT from `uses_commander`.
-    /// `for_custom_rules` derives `uses_commander` from the declared
-    /// `commander_damage_threshold` alone, so a custom format shaped like
-    /// Oathbreaker or Tiny Leaders — `CommandZoneMode::Enabled` with a
-    /// `CommanderEligibilityRule` and NO damage threshold — has
+    /// A custom format shaped like Oathbreaker or Tiny Leaders —
+    /// `CommandZoneMode::Enabled` with that `CommanderEligibilityRule` — has
     /// `uses_commander: false` while still designating a decklist commander.
     /// Falling back to `uses_commander` would strand that commander in the
     /// library exactly the way the built-in formats did before this predicate
@@ -4967,16 +5171,14 @@ impl FormatConfig {
     /// - Direct copies from `rules.structural`: `starting_life`,
     ///   `min_players`, `max_players`, `deck_size`, `singleton`,
     ///   `range_of_influence`, `team_based`, `sideboard_policy`,
-    ///   `default_deck_copy_limit`.
+    ///   `default_deck_copy_limit`, and `poison_counter_threshold` (wrapped in
+    ///   `Some`).
     /// - `CommandZoneMode`-derived (CR 408.1 / CR 903.10a): `Disabled` gives
     ///   `command_zone: false`, `commander_damage_threshold: None`,
     ///   `uses_commander: false`. `Enabled` gives `command_zone: true`, the
-    ///   declared threshold unchanged, and `uses_commander:
-    ///   threshold.is_some()` — NOT unconditionally `true`, because a command
-    ///   zone without a commander-damage threshold is a real, supported
-    ///   format class (Tiny Leaders, Oathbreaker), and `uses_commander`'s own
-    ///   contract is `command_zone && commander_damage_threshold.is_some()`.
-    ///   `eligibility_rule` is not mirrored at all: `FormatConfig` has no
+    ///   declared threshold unchanged, and `uses_commander` from the
+    ///   eligibility rule's family (Tiny Leaders and Oathbreaker shapes stay
+    ///   `false`). `eligibility_rule` is not otherwise mirrored: `FormatConfig` has no
     ///   such field, and the commander-eligibility check reads it from
     ///   `custom_rules.structural` directly.
     /// - Fixed: `format`/`custom_rules` are set consistently (satisfying
@@ -4988,13 +5190,18 @@ impl FormatConfig {
     ///   orthogonal to format — apply `with_sandbox()` afterwards).
     pub fn for_custom_rules(rules: &CustomFormatRules) -> FormatConfig {
         let structural = &rules.structural;
-        let (command_zone, commander_damage_threshold) = match structural.command_zone_mode {
-            CommandZoneMode::Disabled => (false, None),
-            CommandZoneMode::Enabled {
-                commander_damage_threshold,
-                ..
-            } => (true, commander_damage_threshold),
-        };
+        let (command_zone, commander_damage_threshold, uses_commander) =
+            match structural.command_zone_mode {
+                CommandZoneMode::Disabled => (false, None, false),
+                CommandZoneMode::Enabled {
+                    commander_damage_threshold,
+                    eligibility_rule,
+                } => (
+                    true,
+                    commander_damage_threshold,
+                    eligibility_rule.uses_commander(),
+                ),
+            };
         FormatConfig {
             format: GameFormat::Custom(rules.id),
             starting_life: structural.starting_life,
@@ -5004,12 +5211,13 @@ impl FormatConfig {
             singleton: structural.singleton,
             command_zone,
             commander_damage_threshold,
+            // CR 704.5c: a custom format never takes the Two-Headed Giant
+            // shared-poison topology, so its individual threshold always exists.
+            poison_counter_threshold: Some(structural.poison_counter_threshold),
             range_of_influence: structural.range_of_influence.clone(),
             team_based: structural.team_based,
             archenemy_player: None,
-            // CR 903.10a / CR 704.6c: the commander-damage SBA exists only
-            // when a threshold does.
-            uses_commander: command_zone && commander_damage_threshold.is_some(),
+            uses_commander,
             supplies_fixed_deck: false,
             sideboard_policy: structural.sideboard_policy,
             default_deck_copy_limit: structural.default_deck_copy_limit,
@@ -5103,6 +5311,7 @@ mod tests {
             singleton: _,
             command_zone: _,
             commander_damage_threshold: _,
+            poison_counter_threshold: _,
             range_of_influence: _,
             team_based: _,
             archenemy_player: _,
@@ -5114,6 +5323,35 @@ mod tests {
             horde_ruleset: _,
             custom_rules: _,
         } = config;
+    }
+
+    /// V7: every built-in registry config passes its own poison gate, and the
+    /// formats with no individual poison threshold are exactly the Two-Headed
+    /// Giant family (CR 704.5c: "Ignore this rule in Two-Headed Giant games").
+    #[test]
+    fn registry_poison_counter_threshold_round_trips_and_is_none_only_for_two_headed_giant() {
+        for meta in GameFormat::registry() {
+            assert_eq!(
+                meta.format.default_poison_counter_threshold().is_none(),
+                meta.format.is_two_headed_giant_family(),
+                "{:?}",
+                meta.format
+            );
+            let resolved = FormatConfig::for_format(meta.format).unwrap();
+            for config in [&meta.default_config, &resolved] {
+                assert_eq!(
+                    config.poison_counter_threshold,
+                    meta.format.default_poison_counter_threshold(),
+                    "{:?}",
+                    meta.format
+                );
+                let json = serde_json::to_value(config).unwrap();
+                let restored: FormatConfig = serde_json::from_value(json).unwrap_or_else(|error| {
+                    panic!("{:?} must pass its own gate: {error}", meta.format)
+                });
+                assert_eq!(&restored, config);
+            }
+        }
     }
 
     /// V1 (Verification Matrix): `SelectedFormat`'s wire form is the bare
@@ -5298,7 +5536,97 @@ mod tests {
         assert_eq!(historic.starting_life, brawl.starting_life);
         assert!(historic.singleton);
         assert!(historic.command_zone);
-        assert_eq!(historic.commander_damage_threshold, Some(21));
+        assert_eq!(historic.commander_damage_threshold, None);
+        assert!(historic.uses_commander);
+    }
+
+    /// CR 903.12a + CR 903.12h: a Brawl-family payload is a Commander variant
+    /// with no commander-damage threshold, and the boundary rejects either
+    /// half being forged back.
+    #[test]
+    fn brawl_family_round_trips_without_a_commander_damage_threshold() {
+        let round_trip = |config: &FormatConfig| {
+            serde_json::from_value::<FormatConfig>(serde_json::to_value(config).unwrap())
+        };
+        for config in [FormatConfig::brawl(), FormatConfig::historic_brawl()] {
+            assert_eq!(round_trip(&config).unwrap(), config);
+
+            let mut stale = config.clone();
+            stale.commander_damage_threshold = Some(21);
+            assert!(round_trip(&stale).is_err(), "{:?}", config.format);
+
+            let mut forged = config.clone();
+            forged.uses_commander = false;
+            assert!(round_trip(&forged).is_err(), "{:?}", config.format);
+        }
+        let mut commander = FormatConfig::commander();
+        commander.uses_commander = false;
+        assert!(round_trip(&commander).is_err());
+    }
+
+    /// The built-in validator accepts every config the engine builds: each
+    /// registry default and each challenge deck's Horde config, whose
+    /// survivors decide its deck and commander axes.
+    #[test]
+    fn every_engine_built_config_round_trips() {
+        let round_trip = |config: &FormatConfig| {
+            serde_json::from_value::<FormatConfig>(serde_json::to_value(config).unwrap())
+                .map_err(|e| e.to_string())
+        };
+        let configs: Vec<FormatConfig> = ChallengeDeck::ALL
+            .iter()
+            .map(|deck| FormatConfig::horde(deck.default_ruleset()))
+            .chain(
+                GameFormat::registry()
+                    .into_iter()
+                    .map(|meta| meta.default_config),
+            )
+            .collect();
+        assert!(
+            configs
+                .iter()
+                .any(|c| c.format == GameFormat::Horde && c.uses_commander),
+            "reach-guard: some challenge deck seats Commander survivors"
+        );
+        for config in configs {
+            assert_eq!(
+                round_trip(&config).as_ref(),
+                Ok(&config),
+                "{:?} {:?}",
+                config.format,
+                config.horde_ruleset.as_ref().map(|r| r.challenge_deck),
+            );
+        }
+    }
+
+    /// A Horde payload is held to the config its own declared ruleset builds,
+    /// so each axis looser than that config is refused on that axis.
+    #[test]
+    fn horde_payload_looser_than_its_declared_ruleset_is_rejected() {
+        let rejection = |config: &FormatConfig| {
+            serde_json::from_value::<FormatConfig>(serde_json::to_value(config).unwrap())
+                .unwrap_err()
+                .to_string()
+        };
+        let sauron = FormatConfig::horde(ChallengeDeck::SauronHorde.default_ruleset());
+        assert!(
+            sauron.uses_commander,
+            "reach-guard: Sauron seats Commander survivors"
+        );
+
+        // Every deck/commander axis copied from the Cyberman config, keeping the Sauron ruleset.
+        let mut cyberman_axes = FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset());
+        cyberman_axes.horde_ruleset = sauron.horde_ruleset.clone();
+        cyberman_axes.uses_commander = true;
+        assert!(rejection(&cyberman_axes).contains("FormatConfig.deck_size"));
+
+        let mut no_threshold = sauron.clone();
+        no_threshold.commander_damage_threshold = None;
+        assert!(rejection(&no_threshold).contains("FormatConfig.commander_damage_threshold"));
+
+        let mut unlimited_copies = sauron.clone();
+        unlimited_copies.default_deck_copy_limit = DeckCopyLimit::Unlimited;
+        assert!(rejection(&unlimited_copies).contains("FormatConfig.default_deck_copy_limit"));
     }
 
     #[test]
@@ -5930,7 +6258,7 @@ mod tests {
     }
 
     /// `command_zone_holds_decklist_commander` is a strictly weaker condition
-    /// than `uses_commander` (commander damage implies a decklist commander,
+    /// than `uses_commander` (a Commander variant implies a decklist commander,
     /// never the reverse) and strictly stronger than `command_zone` (a zone
     /// can hold schemes or an emblem instead). Pinning both directions is what
     /// keeps a future variant from being added to only one of the three.
@@ -5943,7 +6271,7 @@ mod tests {
             if config.uses_commander {
                 assert!(
                     holds,
-                    "{:?}: commander damage (CR 903.10a) requires a decklist commander",
+                    "{:?}: a Commander variant (CR 903) requires a decklist commander",
                     meta.format
                 );
             }
@@ -5965,12 +6293,11 @@ mod tests {
     /// adding a variant to one side without the other fails here rather than
     /// silently starting a game one card short or one card long.
     /// A custom format shaped like Oathbreaker or Tiny Leaders — an enabled
-    /// command zone with an eligibility rule but NO commander-damage threshold
-    /// — still designates a decklist commander. `for_custom_rules` derives
-    /// `uses_commander` from the threshold alone, so reading that field would
-    /// answer `false` here and strand the commander in the library, which is
-    /// the same class of bug this predicate exists to prevent for the built-in
-    /// formats. Resolve Custom from `CommandZoneMode` instead.
+    /// command zone with a non-Commander eligibility rule
+    /// — still designates a decklist commander. Its `uses_commander` is
+    /// `false`, so reading that field would answer `false` here and strand the
+    /// commander in the library, which is the same class of bug this predicate
+    /// exists to prevent for the built-in formats. Resolve Custom from `CommandZoneMode` instead.
     #[test]
     fn custom_command_zone_without_a_damage_threshold_still_holds_a_decklist_commander() {
         use crate::types::custom_format::{
@@ -5992,6 +6319,7 @@ mod tests {
                     team_based: false,
                     sideboard_policy: SideboardPolicy::Forbidden,
                     default_deck_copy_limit: DeckCopyLimit::UpTo(1),
+                    poison_counter_threshold: INDIVIDUAL_POISON_LOSS_THRESHOLD,
                 },
                 legality: LegalityRules {
                     legal_sets: None,
@@ -6008,8 +6336,8 @@ mod tests {
             commander_damage_threshold: None,
             eligibility_rule: CommanderEligibilityRule::OathbreakerSignatureSpell,
         });
-        // PREMISE: this is genuinely the threshold-less shape, so the assertion
-        // below is about the predicate rather than a trivially true case.
+        // PREMISE: this shape's uses_commander is false, so the assertion below is
+        // about the predicate rather than a trivially true case.
         assert!(!oathbreaker_shaped.uses_commander);
         assert!(oathbreaker_shaped.command_zone);
         assert!(
@@ -6176,10 +6504,7 @@ mod tests {
     }
 
     #[test]
-    fn uses_commander_matches_default_config_and_threshold() {
-        // The `GameFormat::uses_commander()` predicate, the derived
-        // `FormatConfig::uses_commander` field, and the existence of a
-        // commander-damage threshold must all agree for every variant.
+    fn uses_commander_and_threshold_match_the_registry() {
         for meta in GameFormat::registry() {
             let expected = meta.format.uses_commander().unwrap();
             assert_eq!(
@@ -6187,10 +6512,11 @@ mod tests {
                 "{:?}: registry default disagrees with predicate",
                 meta.format
             );
+            // CR 704.6c applies to every Commander variant except Brawl (CR 903.12h).
             assert_eq!(
                 meta.default_config.commander_damage_threshold.is_some(),
-                expected,
-                "{:?}: commander_damage_threshold presence must match uses_commander",
+                expected && !matches!(meta.format, GameFormat::Brawl | GameFormat::HistoricBrawl),
+                "{:?}: commander_damage_threshold presence",
                 meta.format
             );
             // The derived `supplies_fixed_deck` field must agree with the

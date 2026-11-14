@@ -283,7 +283,7 @@ impl KeywordTriggerInstaller {
             // boundary for what `handle_unless_payment` + the
             // `expand_per_counter` pipeline can pay end-to-end today.
             // Installing the trigger for an unsupported base (Discard, Exile,
-            // EffectCost, etc.) would silently sacrifice the permanent every
+            // unsupported EffectCost shapes, etc.) would silently sacrifice the permanent every
             // upkeep because the payment falls through to `payment_failed =
             // true`, causing the unless-effect (Sacrifice) to always fire.
             // Pre-branch these cards had no trigger at all (silent no-op),
@@ -10223,7 +10223,7 @@ fn extracted_supersedes_base(existing: &Keyword, extracted: &Keyword) -> bool {
 /// applies them and then appends the authoritative parser-recovered keywords.
 /// Fallback: if the parser found zero occurrences of a keyword, no rule runs for
 /// it, so the single MTGJSON copy is preserved.
-pub(crate) fn merge_extracted_keywords(base: &mut Vec<Keyword>, extracted: Vec<Keyword>) {
+pub fn merge_extracted_keywords(base: &mut Vec<Keyword>, extracted: Vec<Keyword>) {
     for extracted_kw in &extracted {
         base.retain(|existing| !extracted_supersedes_base(existing, extracted_kw));
     }

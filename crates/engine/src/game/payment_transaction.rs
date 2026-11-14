@@ -6,6 +6,10 @@
 //! against its shadow. Every materialization starts from that base and runs the
 //! normal resolution/action pipeline; no second payment implementation lives
 //! here.
+//!
+//! A staged root is a fresh payment choice at `begin` and a latched re-entry on
+//! every replay (CR 118.12). An outside action that changes the base keeps the
+//! accepted prefix and its cursor in a hidden recovery checkpoint.
 
 use crate::game::effects;
 use crate::game::engine::{self, EngineError};
@@ -14,22 +18,34 @@ use crate::types::ability::{EffectError, ResolvedAbility};
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, GameState, ResolutionPaymentTransaction, ResolutionPaymentTranscriptEntry,
-    ResolvingTriggerContext,
+    ActionResult, GameState, PaymentRecoveryCheckpoint, ResolutionPaymentOrigin,
+    ResolutionPaymentTransaction, ResolutionPaymentTranscriptEntry, ResolvingTriggerContext,
+    WaitingFor,
 };
 use crate::types::log::GameLogEntry;
+use crate::types::player::PlayerId;
 
 #[derive(Debug)]
 enum ReplayOutcome {
     Paused {
         shadow: GameState,
+        /// Events emitted by the accepted prefix. Discarded on an ordinary
+        /// re-materialization (the next replay regenerates them), but published
+        /// when an outside action turns this paused prefix into the committed
+        /// base (CR 614.17a + CR 118.12).
+        events: Vec<GameEvent>,
+        log_entries: Vec<GameLogEntry>,
     },
     Completed {
         shadow: GameState,
         events: Vec<GameEvent>,
         log_entries: Vec<GameLogEntry>,
     },
-    Failed,
+    Failed {
+        /// The life-change failure the shadow recorded before the payment
+        /// failed ([`recorded_failure`]).
+        recorded_failure: Option<PlayerId>,
+    },
 }
 
 fn replay_error(error: EffectError) -> EngineError {
@@ -38,13 +54,24 @@ fn replay_error(error: EffectError) -> EngineError {
     ))
 }
 
-/// The transaction boundary owns only the Composite PayCost instruction. All
-/// outgoing chain edges stay on the durable root so the ordinary chain walker
-/// can resume them after the payment commits or aborts.
+/// The transaction boundary owns only the Composite PayCost instruction, already
+/// admitted by its condition. All outgoing chain edges stay on the durable root
+/// so the ordinary chain walker can resume them after the payment commits or
+/// aborts.
 fn payment_only_root(ability: &ResolvedAbility) -> ResolvedAbility {
     let mut payment = ability.clone();
     payment.sub_ability = None;
     payment.else_ability = None;
+    // CR 608.2c + CR 118.12: the chain walker evaluated this instruction's
+    // condition, in its own resolution context, before `pay::resolve` opened the
+    // transaction; that evaluation is the fresh one. The shadow re-materializes
+    // only the payment and must not ask again: at `begin` its depth-0 entry has
+    // reset the resolution-local state the condition may read, and on `replay`
+    // canonical state may have changed through an outside-transaction action
+    // such as another player's concession (CR 104.3a + CR 800.4a). A false
+    // verdict there would skip the payment and settle the choice as paid, or
+    // strand the recorded answers.
+    payment.condition = None;
     payment
 }
 
@@ -84,6 +111,7 @@ fn returned_to_base_waiting(
 /// The caller has not yet committed any payment mutation. The root is replayed
 /// on a shadow with the transient staging guard set, so the shadow uses the
 /// ordinary payment authority and cannot recursively create another descriptor.
+/// The root is judged fresh here, once; `replay` re-materializes it latched.
 pub(crate) fn begin(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -105,6 +133,7 @@ pub(crate) fn begin(
     // Keep the canonical state byte-for-byte at the pre-payment base.
     if shadow.cost_payment_failed_flag {
         *state = base;
+        record_failure(state, recorded_failure(&shadow));
         state.cost_payment_failed_flag = true;
         // No shadow was committed, so the ordinary chain walker must still
         // descend into the printed abort/independent continuation. A success
@@ -142,8 +171,10 @@ pub(crate) fn begin(
         transcript: Vec::new(),
         base_waiting_for: base.waiting_for.clone(),
         resolving_trigger_context,
+        recovered: None,
     };
     *state = base;
+    record_failure(state, recorded_failure(&shadow));
     state.payment_transaction = Some(Box::new(transaction));
     state.waiting_for = shadow.waiting_for;
     state.cost_payment_failed_flag = false;
@@ -152,41 +183,105 @@ pub(crate) fn begin(
     Ok(())
 }
 
+/// The life, player-counter or energy change a payment shadow could not
+/// represent in this action, if it recorded one.
+fn recorded_failure(shadow: &GameState) -> Option<PlayerId> {
+    shadow
+        .ingress_life_window
+        .and_then(|window| window.failed_player)
+}
+
+/// Record `failure` in `state`'s open ingress window, where the action boundary
+/// rejects it (a concession instead retires the payment). Every outcome of a
+/// payment shadow carries what it recorded: completed, paused or failed, the
+/// shadow's own state is discarded or replaces the live one, and a failure
+/// recorded in it must not be discarded with it. A shadow records a failure
+/// only inside an action's window (outside one there is no window and the
+/// change keeps its compatibility skip); `replay` reopens the shadow's window
+/// after the transcript answers only to hold such a failure.
+fn record_failure(state: &mut GameState, failure: Option<PlayerId>) {
+    let (Some(player), Some(window)) = (failure, state.ingress_life_window.as_mut()) else {
+        return;
+    };
+    window.failed_player.get_or_insert(player);
+}
+
 fn replay(
     state: &GameState,
     transaction: &ResolutionPaymentTransaction,
 ) -> Result<ReplayOutcome, EngineError> {
-    let mut shadow = state.clone();
-    shadow.payment_transaction = None;
+    // CR 614.17a + CR 118.12: a recovery checkpoint is the accepted prefix and
+    // its open cursor on the departure-adjusted base. Replaying the root from
+    // the canonical base again would re-execute work the player already
+    // completed, so the checkpoint is the authority while it exists.
+    let (mut shadow, mut buffered_events, mut buffered_log_entries, consumed) =
+        if let Some(checkpoint) = transaction.recovered.as_deref() {
+            if checkpoint.consumed > transaction.transcript.len() {
+                return Err(EngineError::InvalidAction(
+                    "recovery checkpoint consumed beyond its transcript".to_string(),
+                ));
+            }
+            let mut shadow = hydrated_checkpoint(state, checkpoint);
+            shadow.payment_transaction_replay = true;
+            restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
+            (
+                shadow,
+                checkpoint.events.clone(),
+                checkpoint.log_entries.clone(),
+                checkpoint.consumed.min(transaction.transcript.len()),
+            )
+        } else {
+            let mut shadow = state.clone();
+            shadow.payment_transaction = None;
+            shadow.payment_transaction_replay = true;
+            shadow.payment_transaction_just_handled = false;
+            shadow.cost_payment_failed_flag = false;
+            shadow.waiting_for = transaction.base_waiting_for.clone();
+            restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
+
+            let mut buffered = Vec::new();
+            let payment_root = payment_only_root(&transaction.root);
+            // CR 118.12 + CR 614.17a: `begin` judged the root's choice fresh; every
+            // replay re-materializes that choice against canonical state, which
+            // outside-transaction actions such as another player's concession
+            // (CR 104.3a + CR 800.4a) can change. Re-gating would unpay a choice
+            // already made, so the root pays through the latched entry. Each event
+            // is still clamped as it happens.
+            shadow.resolving_head_payment_origin = ResolutionPaymentOrigin::LatchedSuffix;
+            let root_outcome =
+                effects::resolve_ability_chain(&mut shadow, &payment_root, &mut buffered, 0);
+            shadow.resolving_head_payment_origin = ResolutionPaymentOrigin::FreshChoice;
+            root_outcome.map_err(replay_error)?;
+            restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
+            // Keep the replay guard live while transcript actions drain the
+            // suspended continuation. A remaining Composite must use the ordinary
+            // sequential shadow authority, never open a nested descriptor of its own.
+            shadow.payment_transaction_replay = true;
+
+            if shadow.cost_payment_failed_flag {
+                return Ok(ReplayOutcome::Failed {
+                    recorded_failure: recorded_failure(&shadow),
+                });
+            }
+
+            if !transaction.transcript.is_empty() {
+                // CR 603.2c + CR 603.3b: initial direct emissions have no ActionResult
+                // scan; collect them once while their claims and owners are live.
+                triggers::collect_paused_exit_triggers(&mut shadow, &buffered, 0);
+                // CR 603.2c: these coordinates name only the initial buffer.
+                // Recorded actions own distinct inner buffers, so the closed
+                // claims end here.
+                shadow.consumed_before_priority_trigger_events.clear();
+            }
+            (shadow, buffered, Vec::new(), 0usize)
+        };
     shadow.payment_transaction_replay = true;
-    shadow.payment_transaction_just_handled = false;
-    shadow.cost_payment_failed_flag = false;
-    shadow.waiting_for = transaction.base_waiting_for.clone();
-    restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
+    // Each transcript answer runs in an action boundary of its own, whose
+    // transient cleanup closes the window the prefix recorded in; a failure the
+    // prefix recorded is carried past them.
+    let prefix_failure = recorded_failure(&shadow);
 
-    let mut buffered_events = Vec::new();
-    let mut buffered_log_entries: Vec<GameLogEntry> = Vec::new();
-    let payment_root = payment_only_root(&transaction.root);
-    effects::resolve_ability_chain(&mut shadow, &payment_root, &mut buffered_events, 0)
-        .map_err(replay_error)?;
-    restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
-    // Keep the replay guard live while transcript actions drain the suspended
-    // continuation. A remaining Composite must use the ordinary sequential
-    // shadow authority, never open a nested descriptor of its own.
-    shadow.payment_transaction_replay = true;
-
-    if shadow.cost_payment_failed_flag {
-        return Ok(ReplayOutcome::Failed);
-    }
-
-    if !transaction.transcript.is_empty() {
-        collect_initial_payment_events(&mut shadow, &buffered_events);
-        // CR 603.2c: these coordinates name only the initial buffer. Recorded
-        // actions own distinct inner buffers, so the closed claims end here.
-        shadow.consumed_before_priority_trigger_events.clear();
-    }
-
-    for entry in &transaction.transcript {
+    for entry in transaction.transcript.iter().skip(consumed) {
         restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
         let result = engine::apply_admitted_recorded_action(
             &mut shadow,
@@ -197,13 +292,22 @@ fn replay(
         buffered_events.extend(result.events);
         buffered_log_entries.extend(result.log_entries);
         if shadow.cost_payment_failed_flag {
-            return Ok(ReplayOutcome::Failed);
+            return Ok(ReplayOutcome::Failed {
+                recorded_failure: prefix_failure,
+            });
         }
         shadow.payment_transaction_replay = true;
         restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
     }
 
     shadow.payment_transaction_replay = false;
+    if let Some(player) = prefix_failure {
+        shadow
+            .ingress_life_window
+            .get_or_insert_with(Default::default)
+            .failed_player
+            .get_or_insert(player);
+    }
 
     if returned_to_base_waiting(&shadow, &transaction.base_waiting_for) {
         Ok(ReplayOutcome::Completed {
@@ -212,34 +316,12 @@ fn replay(
             log_entries: buffered_log_entries,
         })
     } else {
-        Ok(ReplayOutcome::Paused { shadow })
+        Ok(ReplayOutcome::Paused {
+            shadow,
+            events: buffered_events,
+            log_entries: buffered_log_entries,
+        })
     }
-}
-
-/// CR 603.2c + CR 603.3b: initial direct emissions have no ActionResult scan.
-/// Collect them once while their claims and typed retention owners are live.
-fn collect_initial_payment_events(state: &mut GameState, events: &[GameEvent]) {
-    let mut retained = engine_priority::retained_logical_zone_events(state);
-    retained.extend(state.parked_entry_events().cloned());
-    retained.extend(engine_priority::retained_cost_events(state));
-    let claims = &state.consumed_before_priority_trigger_events;
-    let ordinary = triggers::filter_already_collected_trigger_events_from(state, events, 0, claims);
-    let delayed = triggers::filter_consumed_trigger_events_from(
-        events,
-        0,
-        triggers::TriggerCollectionRequester::Delayed,
-        claims,
-    );
-    let ordinary: Vec<_> = ordinary
-        .into_iter()
-        .filter(|event| !retained.contains(event))
-        .collect();
-    let delayed: Vec<_> = delayed
-        .into_iter()
-        .filter(|event| !retained.contains(event))
-        .collect();
-    triggers::collect_triggers_into_deferred(state, &ordinary);
-    triggers::collect_delayed_trigger_contexts_into_deferred(state, &delayed);
 }
 
 /// CR 608.2c + CR 117.3b + CR 603.3b: the canonical tail and all outer
@@ -274,6 +356,7 @@ fn settle_canonical_tail(
         completed,
     )?;
     crate::game::public_state::sync_waiting_for(state, &waiting_for);
+    retire_terminal_transaction(state);
     Ok(())
 }
 
@@ -338,8 +421,23 @@ pub(crate) fn apply_pending_action(
             action,
         });
 
-    match replay(state, &transaction)? {
-        ReplayOutcome::Failed => {
+    let outcome = replay(state, &transaction)?;
+    settle_replay_outcome(state, transaction, outcome)
+}
+
+/// Settle one materialization of the staged payment. Pause keeps the canonical
+/// base and stores `transaction` (with its transcript) and its current prompt.
+/// Completion swaps in the materialized shadow and returns the complete
+/// buffered event stream. Failure aborts the descriptor and restores its base
+/// without publishing any payment events.
+fn settle_replay_outcome(
+    state: &mut GameState,
+    transaction: ResolutionPaymentTransaction,
+    outcome: ReplayOutcome,
+) -> Result<ActionResult, EngineError> {
+    match outcome {
+        ReplayOutcome::Failed { recorded_failure } => {
+            record_failure(state, recorded_failure);
             let mut restored = state.clone();
             restored.payment_transaction = None;
             restored.payment_transaction_replay = false;
@@ -362,8 +460,22 @@ pub(crate) fn apply_pending_action(
                 state.waiting_for.clone(),
             ))
         }
-        ReplayOutcome::Paused { shadow, .. } => {
+        ReplayOutcome::Paused {
+            shadow,
+            events,
+            log_entries,
+        } => {
             let waiting_for = shadow.waiting_for.clone();
+            let shadow_failure = recorded_failure(&shadow);
+            let mut transaction = transaction;
+            if transaction.recovered.is_some() {
+                transaction.recovered = Some(Box::new(PaymentRecoveryCheckpoint {
+                    state: Box::new(checkpoint_state(&shadow)),
+                    events,
+                    log_entries,
+                    consumed: transaction.transcript.len(),
+                }));
+            }
             let mut projected = state.clone();
             projected.payment_transaction = Some(Box::new(transaction));
             projected.waiting_for = waiting_for.clone();
@@ -371,6 +483,7 @@ pub(crate) fn apply_pending_action(
             projected.payment_transaction_replay = false;
             projected.payment_transaction_just_handled = false;
             *state = projected;
+            record_failure(state, shadow_failure);
             Ok(ActionResult::applied(Vec::new(), waiting_for))
         }
         ReplayOutcome::Completed {
@@ -383,6 +496,9 @@ pub(crate) fn apply_pending_action(
             shadow.payment_transaction_just_handled = false;
             let carrier = shadow.resolving_stack_entry.as_ref().map(|entry| entry.id);
             let continuation_event_start = events.len();
+            // The runtime-only authorities (card DB, names, host stream,
+            // interaction binding, session) belong to the live state.
+            hydrate_runtime_authorities(&mut shadow, state);
             // The payment is committed. Continue the printed rider through the
             // ordinary chain walker, now outside the transaction, so a later
             // pause/failure cannot restore the pre-payment base.
@@ -401,10 +517,513 @@ pub(crate) fn apply_pending_action(
     }
 }
 
+/// CR 104.3a + CR 800.4a + CR 118.12: another player's concession is an action
+/// outside the transaction that changes the canonical base every replay starts
+/// from (their permanents leave, and the effects they generated end). The
+/// staged payment is re-materialized once on that base so the canonical prompt
+/// is the one the payment now actually waits on: a payment the new base lets
+/// complete without the pending answer commits (its rider continues), one still
+/// paused exposes its current prompt, and a failed one aborts with its printed
+/// continuation. The root stays latched on replay, so the departure never
+/// unpays a choice already made (CR 614.17a); each event is judged as it
+/// happens on the new base — e.g. a draw a can't-draw effect now forbids is no
+/// longer replaceable (CR 614.17c), so a Dredge choice offered before the
+/// departure is withdrawn. A replay the transcript can no longer follow keeps
+/// the existing descriptor.
+pub(crate) fn settle_after_outside_action(
+    state: &mut GameState,
+    pre_action: Option<&GameState>,
+    departing: PlayerId,
+) -> Result<Option<ActionResult>, EngineError> {
+    let Some(mut transaction) = state.payment_transaction.as_deref().cloned() else {
+        return Ok(None);
+    };
+
+    // A checkpoint parked on a prompt outside the checkpoint contract
+    // ([`departure_can_change_parked_prompt`]) is dropped: the payment
+    // re-materializes on the departed base below.
+    if transaction
+        .recovered
+        .as_deref()
+        .is_some_and(|checkpoint| departure_can_change_parked_prompt(&checkpoint.state))
+    {
+        transaction.recovered = None;
+        if let Some(live) = state.payment_transaction.as_deref_mut() {
+            live.recovered = None;
+        }
+    }
+
+    // CR 614.17a + CR 118.12: a live checkpoint already holds the accepted
+    // prefix and its cursor. Mirror this departure onto it; replaying the root
+    // from the canonical base would re-execute completed work.
+    if transaction.recovered.is_some() {
+        let checkpoint = transaction
+            .recovered
+            .as_deref()
+            .expect("the checkpoint was matched");
+        let mut shadow = hydrated_checkpoint(state, checkpoint);
+        shadow.payment_transaction_replay = true;
+        let mut events = checkpoint.events.clone();
+        let mut log_entries = checkpoint.log_entries.clone();
+        let mut mirrored = Vec::new();
+        crate::game::elimination::concede(&mut shadow, departing, &mut mirrored);
+        restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
+        // CR 104.3a: the checkpoint can only stay if it includes this departure.
+        // A parked draw that no longer settles on the departed shadow is a
+        // failed recovery; the caller's failed-recovery boundary retires the
+        // checkpoint instead of keeping one from before the departure.
+        resettle_parked_replacement_after_departure(&mut shadow, &mut events, &mut log_entries)?;
+        shadow.payment_transaction_replay = false;
+        return settle_recovered_outcome(state, transaction, shadow, events, log_entries).map(Some);
+    }
+
+    // CR 614.17a + CR 118.12: any concession can change the effects that made a
+    // synchronous leg or a recorded answer happen. Preserve the pre-departure
+    // prefix whenever the pre-action base is available, even when replaying the
+    // new base would succeed.
+    if let Some(pre_action) = pre_action {
+        if let Some(settled) =
+            settle_accepted_prefix_after_departure(state, pre_action, &transaction, departing)?
+        {
+            return Ok(Some(settled));
+        }
+    }
+
+    // No preserved prefix (no pre-action base, or a parked prompt outside the
+    // checkpoint contract): the departure-adjusted replay is the fallback. It
+    // re-materializes the payment on the departed base, where the cost
+    // authority derives each prompt afresh.
+    let outcome = match replay(state, &transaction) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            tracing::debug!(
+                ?error,
+                "a staged payment's transcript no longer replays after an outside action"
+            );
+            return Ok(None);
+        }
+    };
+    if let ReplayOutcome::Paused { shadow, .. } = &outcome {
+        if shadow.waiting_for == state.waiting_for {
+            return Ok(None);
+        }
+    }
+    settle_replay_outcome(state, transaction, outcome).map(Some)
+}
+
+/// CR 614.17a + CR 118.12: re-materialize the accepted prefix (including a
+/// synchronously paid leg) on the pre-action base, mirror the departure there,
+/// and either commit the completed payment or keep the prefix plus its exact
+/// open cursor as the recovery checkpoint.
+fn settle_accepted_prefix_after_departure(
+    state: &mut GameState,
+    pre_action: &GameState,
+    transaction: &ResolutionPaymentTransaction,
+    departing: PlayerId,
+) -> Result<Option<ActionResult>, EngineError> {
+    let Ok(ReplayOutcome::Paused {
+        mut shadow,
+        mut events,
+        mut log_entries,
+    }) = replay(pre_action, transaction)
+    else {
+        return Ok(None);
+    };
+    if departure_can_change_parked_prompt(&shadow) {
+        return Ok(None);
+    }
+    shadow.payment_transaction = None;
+    shadow.payment_transaction_replay = true;
+    shadow.payment_transaction_just_handled = false;
+    if transaction.transcript.is_empty() {
+        // CR 603.2: a synchronously paid prefix has no ActionResult scan, so its
+        // draw/other events must be collected here before the checkpoint parks.
+        triggers::collect_paused_exit_triggers(&mut shadow, &events, 0);
+        shadow.consumed_before_priority_trigger_events.clear();
+    }
+    let mut mirrored = Vec::new();
+    crate::game::elimination::concede(&mut shadow, departing, &mut mirrored);
+    restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
+    // A parked prompt that no longer settles on the departed prefix is a failed
+    // recovery, as on the checkpoint branch: the caller's failed-recovery
+    // boundary retires the payment instead of replaying on the changed base.
+    resettle_parked_replacement_after_departure(&mut shadow, &mut events, &mut log_entries)?;
+    shadow.payment_transaction_replay = false;
+    settle_recovered_outcome(state, transaction.clone(), shadow, events, log_entries).map(Some)
+}
+
+/// CR 614.17a + CR 118.12: commit a re-materialized prefix that reached the
+/// payment base, or store it (with its cursor) as the live checkpoint. The
+/// descriptor keeps its original root, so the printed rider and the payment's
+/// suffix authority stay attached to it.
+fn settle_recovered_outcome(
+    state: &mut GameState,
+    transaction: ResolutionPaymentTransaction,
+    shadow: GameState,
+    events: Vec<GameEvent>,
+    log_entries: Vec<GameLogEntry>,
+) -> Result<ActionResult, EngineError> {
+    // CR 118.12: a suffix the departure made unpayable fails the payment, as
+    // it does on an ordinary replay (`replay`): a failed shadow is neither a
+    // completed payment nor a prompt to keep, whatever wait it stopped at.
+    if shadow.cost_payment_failed_flag {
+        let mut failed = transaction;
+        failed.recovered = None;
+        return settle_replay_outcome(
+            state,
+            failed,
+            ReplayOutcome::Failed {
+                recorded_failure: recorded_failure(&shadow),
+            },
+        );
+    }
+    if returned_to_base_waiting(&shadow, &transaction.base_waiting_for) {
+        let mut completed = transaction;
+        completed.recovered = None;
+        return settle_replay_outcome(
+            state,
+            completed,
+            ReplayOutcome::Completed {
+                shadow,
+                events,
+                log_entries,
+            },
+        );
+    }
+    let mut paused = transaction;
+    paused.recovered = Some(Box::new(PaymentRecoveryCheckpoint {
+        state: Box::new(checkpoint_state(&shadow)),
+        events: events.clone(),
+        log_entries: log_entries.clone(),
+        consumed: paused.transcript.len(),
+    }));
+    settle_replay_outcome(
+        state,
+        paused,
+        ReplayOutcome::Paused {
+            shadow,
+            events,
+            log_entries,
+        },
+    )
+}
+
+/// The stored checkpoint never carries the descriptor, the transient replay
+/// flags or the storing action's ingress window.
+fn checkpoint_state(shadow: &GameState) -> GameState {
+    let mut checkpoint = shadow.clone();
+    checkpoint.payment_transaction = None;
+    checkpoint.payment_transaction_replay = false;
+    checkpoint.payment_transaction_just_handled = false;
+    checkpoint.ingress_life_window = None;
+    // CR 701.24a / CR 706.1a: a shuffle or roll sampled on the shadow advances its stream;
+    // stamp the serialized high-water so the recorded position travels with
+    // the checkpoint even when the resolver did not capture it explicitly.
+    let sampled = checkpoint.rng.get_word_pos();
+    if sampled > checkpoint.rng_word_pos {
+        checkpoint.rng_word_pos = sampled;
+    }
+    checkpoint
+}
+
+/// Adopt the live host's fresh entropy while keeping any advancement the
+/// checkpoint shadow already accepted on the same seed.
+fn adopt_host_stream(shadow: &mut GameState, live: &GameState) {
+    let shadow_seed = shadow.rng_seed;
+    let shadow_position = shadow.rng.get_word_pos();
+    shadow.rng = live.rng.clone();
+    shadow.rng_seed = live.rng_seed;
+    shadow.rng_word_pos = live.rng_word_pos;
+    if shadow_seed == live.rng_seed && shadow_position > shadow.rng.get_word_pos() {
+        shadow.rng.set_word_pos(shadow_position);
+        shadow.rng_word_pos = shadow_position;
+    }
+}
+
+/// CR 104.3a + CR 118.12: mirror an outside, submitter-scoped action onto the
+/// recovery checkpoint. The canonical state already carries it; without this,
+/// settling the checkpoint would roll the action back (a revoked debug
+/// capability, for example). The action's events were published canonically and
+/// are not duplicated into the checkpoint's buffer.
+pub(crate) fn mirror_outside_action(state: &mut GameState, actor: PlayerId, action: &GameAction) {
+    let Some(transaction) = state.payment_transaction.as_deref() else {
+        return;
+    };
+    let Some(checkpoint) = transaction.recovered.as_deref() else {
+        return;
+    };
+    let mut shadow = hydrated_checkpoint(state, checkpoint);
+    shadow.payment_transaction_replay = true;
+    // CR 402.3 + CR 118.12: a hand reorder names only the live canonical hand;
+    // the checkpoint also holds the accepted prefix's drawn cards. Preserve the
+    // player's canonical order and keep the extra cards in the hand.
+    if let GameAction::ReorderHand { order } = action {
+        let Some(player) = shadow.players.get(actor.0 as usize) else {
+            return;
+        };
+        let Some(canonical) = state.players.get(actor.0 as usize) else {
+            return;
+        };
+        let hand: Vec<crate::types::identifiers::ObjectId> = player.hand.iter().copied().collect();
+        let canonical_hand: std::collections::HashSet<_> = canonical.hand.iter().copied().collect();
+        let hand_set: std::collections::HashSet<_> = hand.iter().copied().collect();
+        let order_set: std::collections::HashSet<_> = order.iter().copied().collect();
+        // CR 402.3 + CR 118.12: the order names the canonical hand. The
+        // accepted prefix can have removed one of its cards (the checkpoint
+        // hand no longer holds it), so reorder the surviving IDs only and
+        // leave the hidden prefix cards in their own slots.
+        if order_set.len() != order.len()
+            || order
+                .iter()
+                .any(|id| !hand_set.contains(id) && !canonical_hand.contains(id))
+        {
+            return;
+        }
+        let surviving_order: Vec<_> = order
+            .iter()
+            .copied()
+            .filter(|id| hand_set.contains(id))
+            .collect();
+        let surviving_in_hand = hand.iter().filter(|id| order_set.contains(id)).count();
+        if surviving_order.len() != surviving_in_hand {
+            return;
+        }
+        let mut merged = hand.clone();
+        let mut ordered = surviving_order.iter();
+        for slot in &mut merged {
+            if order_set.contains(slot) {
+                *slot = *ordered.next().expect("counts match");
+            }
+        }
+        shadow.players[actor.0 as usize].hand = merged.into_iter().collect();
+    } else if engine::apply_admitted_recorded_action(&mut shadow, actor, actor, action.clone())
+        .is_err()
+    {
+        return;
+    }
+    shadow.payment_transaction_replay = false;
+    let mut updated = transaction.clone();
+    updated.recovered = Some(Box::new(PaymentRecoveryCheckpoint {
+        state: Box::new(checkpoint_state(&shadow)),
+        events: checkpoint.events.clone(),
+        log_entries: checkpoint.log_entries.clone(),
+        consumed: updated.transcript.len(),
+    }));
+    **state
+        .payment_transaction
+        .as_mut()
+        .expect("the descriptor is live") = updated;
+}
+
+/// CR 104.1 + CR 104.3a: a terminal game retires a parked payment descriptor;
+/// its prompt is never shown in sideboarding or the results view.
+pub(crate) fn retire_terminal_transaction(state: &mut GameState) {
+    if state.game_end.is_some() {
+        state.payment_transaction = None;
+        state.payment_transaction_replay = false;
+        state.payment_transaction_just_handled = false;
+    }
+}
+
+/// CR 104.3a + CR 800.4a + CR 400.7: whether the live recovery checkpoint, if
+/// any, can still execute after a departure: its seats are the canonical
+/// seats ([`checkpoint_seats_match`]) and its parked prompt names no object
+/// that left its zone (a departing owner's objects leave the game). The
+/// concession boundary keeps a recovery only when this holds; checked restore
+/// enforces the same two checks.
+pub(crate) fn checkpoint_describes_board(state: &GameState) -> bool {
+    checkpoint_seats_match(state)
+        && state
+            .payment_transaction
+            .as_deref()
+            .and_then(|transaction| transaction.recovered.as_deref())
+            .is_none_or(|checkpoint| {
+                crate::types::game_state::recovered_prompt_names_live_objects(&checkpoint.state)
+            })
+}
+
+/// CR 104.3a + CR 800.4a: whether the live recovery checkpoint, if any,
+/// describes the canonical seats: the same players with the same departures.
+/// A checkpoint taken before a departure cannot execute on the board after
+/// it. Checked restore and the concession boundary both enforce this.
+pub(crate) fn checkpoint_seats_match(state: &GameState) -> bool {
+    let Some(checkpoint) = state
+        .payment_transaction
+        .as_deref()
+        .and_then(|transaction| transaction.recovered.as_deref())
+    else {
+        return true;
+    };
+    let seats = |state: &GameState| {
+        state
+            .players
+            .iter()
+            .map(|player| (player.id, player.is_eliminated))
+            .collect::<Vec<_>>()
+    };
+    seats(&checkpoint.state) == seats(state)
+}
+
+/// The one preparation of a recovery checkpoint for execution: its persisted
+/// nested state without the descriptor or transient guards, with the live
+/// state's runtime authorities. Replay, the second-concession settlement, the
+/// outside-action mirror, the admission probe and checked restore all start
+/// from it.
+pub(crate) fn hydrated_checkpoint(
+    live: &GameState,
+    checkpoint: &PaymentRecoveryCheckpoint,
+) -> GameState {
+    let mut shadow = (*checkpoint.state).clone();
+    shadow.payment_transaction = None;
+    shadow.payment_transaction_replay = false;
+    shadow.payment_transaction_just_handled = false;
+    shadow.cost_payment_failed_flag = false;
+    hydrate_runtime_authorities(&mut shadow, live);
+    shadow
+}
+
+/// The one field list of runtime authorities a payment shadow takes from the
+/// live state, whether it starts from a recovery checkpoint or replaces the
+/// live state on settlement. These fields are `#[serde(skip)]` or session
+/// state, never part of the accepted payment.
+fn hydrate_runtime_authorities(shadow: &mut GameState, live: &GameState) {
+    shadow.card_db = live.card_db.clone();
+    shadow.card_face_registry = live.card_face_registry.clone();
+    shadow.meld_pair_registry = live.meld_pair_registry.clone();
+    shadow.booster_shelf = live.booster_shelf.clone();
+    shadow.all_card_names = live.all_card_names.clone();
+    shadow.log_player_names = live.log_player_names.clone();
+    // CR 701.24a + CR 706.1a + CR 118.12: the accepted prefix's outcomes (including any
+    // recorded shuffle permutation) are already in the shadow's state; the
+    // future stream belongs to the restored host, whose fresh reseed must not
+    // be overwritten by the checkpoint's older cursor. If the action consumed
+    // entropy on the same seed, keep the advanced position so the host does not
+    // replay those words.
+    adopt_host_stream(shadow, live);
+    shadow.interaction_session_id = live.interaction_session_id.clone();
+    shadow.interaction_generation = live.interaction_generation;
+    shadow.next_interaction_serial = live.next_interaction_serial.clone();
+    shadow.active_interaction_slots = live.active_interaction_slots.clone();
+    // Session/authority state is not part of the accepted payment: a restored
+    // or revoked capability decision belongs to the live session, not to the
+    // checkpoint snapshot.
+    shadow.debug_mode = live.debug_mode;
+    shadow.debug_permitted = live.debug_permitted.clone();
+    shadow.format_config = live.format_config.clone();
+    // The ingress window belongs to the live action: a player-resource change
+    // the shadow cannot represent is recorded where this action's boundary
+    // rejects it (a concession instead retires the payment and keeps the
+    // departure). A failure the shadow already recorded in this action, while
+    // replaying the accepted prefix, is kept; a checkpoint never carries one
+    // (`checkpoint_state`).
+    let recorded = shadow
+        .ingress_life_window
+        .and_then(|window| window.failed_player);
+    shadow.ingress_life_window = live.ingress_life_window.map(|mut window| {
+        window.failed_player = window.failed_player.or(recorded);
+        window
+    });
+}
+
+/// CR 614.17c + CR 616.1 + CR 800.4a: settle a parked replacement prompt the
+/// departure just changed, so the checkpoint never stores a prompt the game
+/// would no longer offer. A draw that can no longer happen settles as the
+/// no-replacement outcome — the draw is clamped and its payment resumes — for
+/// optional and mandatory ordering prompts alike. A prompt whose applicable
+/// replacements the departure changed (a candidate's source left the game, or
+/// an effect the departed player's permanent suppressed applies again) is
+/// answered by re-proposing the event, which offers exactly the replacements
+/// that now apply (`replacement::parked_prompt_is_stale`).
+fn resettle_parked_replacement_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    log_entries: &mut Vec<GameLogEntry>,
+) -> Result<(), EngineError> {
+    if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+        return Ok(());
+    }
+    let Some(pending) = state.pending_replacement.as_ref() else {
+        return Ok(());
+    };
+    if !crate::game::replacement::parked_prompt_is_stale(state, pending) {
+        return Ok(());
+    }
+    let Some(actor) = state.waiting_for.acting_players().first().copied() else {
+        return Ok(());
+    };
+    let result = engine::apply_admitted_recorded_action(
+        state,
+        actor,
+        actor,
+        GameAction::ChooseReplacement { index: 0 },
+    )?;
+    events.extend(result.events);
+    log_entries.extend(result.log_entries);
+    Ok(())
+}
+
+/// The checkpoint contract. A departure keeps a staged payment's accepted
+/// prefix on a checkpoint only while the prompt it is parked on is one another
+/// player's departure cannot change: a replacement choice (re-settled through
+/// the replacement authority) or a discard from the payer's own hand
+/// (CR 400.3: a hand holds only its owner's cards). Every other prompt is
+/// outside it. A selection among battlefield permanents or among cards in
+/// graveyards may list objects another player owns, or objects eligible only
+/// through an effect another player's departure ends (CR 800.4a), and no
+/// printed card reaches such a prompt in a staged payment: the five
+/// resolution-time `PayCost { Composite }` nodes in the card data are all
+/// `[Mana, PayLife]`. The guard routes everything outside the contract away
+/// from the checkpoint: the payment keeps its descriptor and transcript and
+/// re-materializes on the departed base, where the cost authority derives the
+/// prompt and its eligible objects afresh and a cost that can no longer be
+/// paid fails whole, as a replay of the transcript on that board finds it.
+fn departure_can_change_parked_prompt(shadow: &GameState) -> bool {
+    !matches!(
+        shadow.waiting_for,
+        WaitingFor::ReplacementChoice { .. } | WaitingFor::DiscardChoice { .. }
+    )
+}
+
+/// CR 104.3a: a concession must stand even when the staged payment's recovery or
+/// its printed rider fails. Retire the transaction and its prompt, and publish a
+/// valid priority boundary; the canonical departure stays.
+pub(crate) fn abandon_failed_recovery(state: &mut GameState) {
+    state.payment_transaction = None;
+    state.payment_transaction_replay = false;
+    state.payment_transaction_just_handled = false;
+    state.cost_payment_failed_flag = false;
+    state.pending_replacement = None;
+    if !matches!(
+        state.waiting_for,
+        WaitingFor::Priority { .. } | WaitingFor::GameOver { .. }
+    ) {
+        // CR 800.4j: never hand priority to the seat that just left.
+        let player = if state
+            .players
+            .get(state.active_player.0 as usize)
+            .is_some_and(|seat| seat.is_eliminated)
+        {
+            crate::game::players::next_player_in_turn_order(state, state.active_player)
+        } else {
+            state.active_player
+        };
+        state.waiting_for = WaitingFor::Priority { player };
+    }
+}
+
 /// Materialize the public shadow used by viewer projections, client wires, and
 /// legal-action enumeration. A replay failure fails closed to the untouched
 /// base rather than exposing a partially mutated shadow.
 pub(crate) fn project(state: &GameState) -> GameState {
+    // CR 104.1 + CR 104.3a: a terminal game has no live payment prompt; never
+    // project a stale one into sideboarding or the results view.
+    if state.game_end.is_some() {
+        let mut base = state.clone();
+        base.payment_transaction = None;
+        base.payment_transaction_replay = false;
+        base.payment_transaction_just_handled = false;
+        return base;
+    }
     let Some(transaction) = state.payment_transaction.as_ref() else {
         return state.clone();
     };
@@ -416,7 +1035,7 @@ pub(crate) fn project(state: &GameState) -> GameState {
             shadow.payment_transaction_just_handled = false;
             shadow
         }
-        Ok(ReplayOutcome::Failed) | Err(_) => {
+        Ok(ReplayOutcome::Failed { .. }) | Err(_) => {
             let mut base = state.clone();
             base.payment_transaction = None;
             base.payment_transaction_replay = false;
@@ -552,11 +1171,22 @@ pub(crate) fn owns_action(state: &GameState, action: &GameAction) -> bool {
         .copied()
         .unwrap_or(transaction.owner);
     let actor = crate::game::turn_control::authorized_submitter_for_player(state, semantic_owner);
-    let mut probe = project(state);
-    // The probe must exercise the ordinary WaitingFor/action authority on the
-    // materialized shadow, not recursively re-enter this transaction or create
-    // a nested descriptor. `project` has already cleared the transaction and
-    // transient guards while preserving the prompt's continuation payload.
+    // A recovery checkpoint is the materialized authority for actions already
+    // admitted outside the payment; probing the canonical base would reject an
+    // action whose cards were drawn into the hidden checkpoint.
+    let probe = match transaction.recovered.as_deref() {
+        Some(checkpoint) => hydrated_checkpoint(state, checkpoint),
+        None => project(state),
+    };
+    admits(probe, actor, action)
+}
+
+/// The admission authority for an answer to a materialized payment prompt: the
+/// ordinary `WaitingFor`/action reducer, run on a copy that cannot recursively
+/// re-enter this transaction or create a nested descriptor. Shared by
+/// [`owns_action`] and by checked restore of a recovery checkpoint, so a
+/// restored prompt is admitted exactly when its answer would be.
+pub(crate) fn admits(mut probe: GameState, actor: PlayerId, action: &GameAction) -> bool {
     probe.payment_transaction = None;
     probe.payment_transaction_replay = true;
     probe.payment_transaction_just_handled = false;
@@ -566,6 +1196,45 @@ pub(crate) fn owns_action(state: &GameState, action: &GameAction) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 104.3a + CR 118.12: a payment shadow runs in the live action's
+    /// ingress window, keeps a failure it already recorded in this action
+    /// (replaying the accepted prefix), and a stored checkpoint carries no
+    /// window, so a later action never inherits a stale failure.
+    #[test]
+    fn a_shadow_keeps_its_recorded_failure_in_the_live_ingress_window() {
+        use crate::types::game_state::IngressLifeWindow;
+
+        let mut live = GameState::new_two_player(7);
+        live.ingress_life_window = Some(IngressLifeWindow::default());
+        let mut shadow = live.clone();
+        shadow.ingress_life_window = Some(IngressLifeWindow {
+            failed_player: Some(PlayerId(0)),
+        });
+        hydrate_runtime_authorities(&mut shadow, &live);
+        assert_eq!(
+            shadow
+                .ingress_life_window
+                .and_then(|window| window.failed_player),
+            Some(PlayerId(0)),
+            "the failure recorded while replaying is kept"
+        );
+
+        let mut stale = live.clone();
+        stale.ingress_life_window = None;
+        hydrate_runtime_authorities(&mut stale, &live);
+        assert_eq!(
+            stale.ingress_life_window,
+            Some(IngressLifeWindow::default()),
+            "a shadow without a window runs in the live action's"
+        );
+
+        assert_eq!(
+            checkpoint_state(&shadow).ingress_life_window,
+            None,
+            "a checkpoint does not store the storing action's window"
+        );
+    }
     use crate::game::game_object::ObjectIncarnationRefExt;
 
     use crate::game::deck_loading::DeckEntry;
@@ -613,6 +1282,7 @@ mod tests {
                 player: crate::types::player::PlayerId(0),
             },
             resolving_trigger_context: None,
+            recovered: None,
         }));
         state.payment_transaction_replay = true;
         state.payment_transaction_just_handled = true;
@@ -661,6 +1331,80 @@ mod tests {
     }
 
     #[test]
+    fn a_recovery_checkpoint_round_trips_with_its_cursor() {
+        let mut state = GameState::new_two_player(7);
+        let mut checkpoint_state = GameState::new_two_player(7);
+        checkpoint_state.players[0].life = 11;
+        state.payment_transaction = Some(Box::new(ResolutionPaymentTransaction {
+            wire_version: 1,
+            owner: PlayerId(0),
+            root: Box::new(crate::types::ability::ResolvedAbility::new(
+                crate::types::ability::Effect::NoOp,
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )),
+            transcript: vec![ResolutionPaymentTranscriptEntry {
+                authenticated_actor: PlayerId(0),
+                semantic_owner: PlayerId(0),
+                action: GameAction::PassPriority,
+            }],
+            base_waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            resolving_trigger_context: None,
+            recovered: Some(Box::new(PaymentRecoveryCheckpoint {
+                state: Box::new(checkpoint_state),
+                events: Vec::new(),
+                log_entries: Vec::new(),
+                consumed: 1,
+            })),
+        }));
+        let value = serde_json::to_value(&state).expect("state serializes");
+        let restored: GameState = serde_json::from_value(value).expect("state restores");
+        let transaction = restored
+            .payment_transaction
+            .as_ref()
+            .expect("the descriptor survives");
+        let checkpoint = transaction
+            .recovered
+            .as_ref()
+            .expect("the recovery checkpoint survives");
+        assert_eq!(checkpoint.consumed, 1);
+        assert_eq!(checkpoint.state.players[0].life, 11);
+    }
+
+    #[test]
+    fn a_terminal_game_never_projects_a_parked_payment_prompt() {
+        let mut state = GameState::new_two_player(7);
+        state.game_end = Some(crate::types::game_state::GameEnd {
+            winner: Some(PlayerId(0)),
+        });
+        state.payment_transaction = Some(Box::new(ResolutionPaymentTransaction {
+            wire_version: 1,
+            owner: PlayerId(0),
+            root: Box::new(crate::types::ability::ResolvedAbility::new(
+                crate::types::ability::Effect::NoOp,
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )),
+            transcript: Vec::new(),
+            base_waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            resolving_trigger_context: None,
+            recovered: None,
+        }));
+        let projected = project(&state);
+        assert!(
+            projected.payment_transaction.is_none(),
+            "a terminal game must not project a parked payment"
+        );
+        assert_eq!(projected.waiting_for, state.waiting_for);
+    }
+
+    #[test]
     fn persisted_payment_transaction_rejects_out_of_range_owner_through_raw_and_trusted() {
         let mut state = GameState::new_two_player(7);
         state.payment_transaction = Some(Box::new(ResolutionPaymentTransaction {
@@ -686,6 +1430,7 @@ mod tests {
                 player: PlayerId(0),
             },
             resolving_trigger_context: None,
+            recovered: None,
         }));
 
         for mut wire in [
@@ -710,6 +1455,111 @@ mod tests {
                 .expect_err("restore must reject an out-of-range payment owner");
             assert!(error.to_string().contains("payment transaction is invalid"));
         }
+    }
+
+    #[test]
+    fn persisted_recovery_checkpoint_rejects_combat_damage_on_its_stack() {
+        let mut state = GameState::new_two_player(7);
+        let mut checkpoint_state = GameState::new_two_player(7);
+        checkpoint_state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        checkpoint_state
+            .stack
+            .push_back(crate::types::game_state::StackEntry {
+                id: crate::types::identifiers::ObjectId(1),
+                source_id: crate::types::identifiers::ObjectId(2),
+                controller: PlayerId(0),
+                kind: crate::types::game_state::StackEntryKind::CombatDamage {
+                    sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+                    assignments: Vec::new(),
+                },
+            });
+        state.payment_transaction = Some(Box::new(ResolutionPaymentTransaction {
+            wire_version: 1,
+            owner: PlayerId(0),
+            root: Box::new(crate::types::ability::ResolvedAbility::new(
+                crate::types::ability::Effect::NoOp,
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )),
+            transcript: Vec::new(),
+            base_waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            resolving_trigger_context: None,
+            recovered: Some(Box::new(PaymentRecoveryCheckpoint {
+                state: Box::new(checkpoint_state),
+                events: Vec::new(),
+                log_entries: Vec::new(),
+                consumed: 0,
+            })),
+        }));
+        let restored = serde_json::from_value::<PersistedGameState>(
+            serde_json::to_value(PersistedGameState::capture(state))
+                .expect("the trusted shape serializes"),
+        )
+        .expect("the wire shape remains decodable");
+        let error = restored
+            .into_game_state()
+            .expect_err("restore must reject combat damage in the checkpoint");
+        assert!(
+            error.to_string().contains("combat damage"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn persisted_recovery_checkpoint_rejects_a_cursor_beyond_its_transcript() {
+        let mut state = GameState::new_two_player(7);
+        let mut checkpoint_state = GameState::new_two_player(7);
+        checkpoint_state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.payment_transaction = Some(Box::new(ResolutionPaymentTransaction {
+            wire_version: 1,
+            owner: PlayerId(0),
+            root: Box::new(crate::types::ability::ResolvedAbility::new(
+                crate::types::ability::Effect::NoOp,
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )),
+            transcript: vec![ResolutionPaymentTranscriptEntry {
+                authenticated_actor: PlayerId(0),
+                semantic_owner: PlayerId(0),
+                action: GameAction::PassPriority,
+            }],
+            base_waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            resolving_trigger_context: None,
+            recovered: Some(Box::new(PaymentRecoveryCheckpoint {
+                state: Box::new(checkpoint_state),
+                events: Vec::new(),
+                log_entries: Vec::new(),
+                consumed: 2,
+            })),
+        }));
+        let restored = serde_json::from_value::<PersistedGameState>(
+            serde_json::to_value(PersistedGameState::capture(state))
+                .expect("the trusted shape serializes"),
+        )
+        .expect("the wire shape remains decodable");
+        let error = restored
+            .into_game_state()
+            .expect_err("restore must reject a checkpoint cursor beyond its transcript");
+        assert!(
+            error.to_string().contains("recovery checkpoint"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -839,6 +1689,7 @@ mod tests {
             transcript: Vec::new(),
             base_waiting_for: state.waiting_for.clone(),
             resolving_trigger_context: None,
+            recovered: None,
         }));
 
         let wire = serde_json::to_value(crate::game::derived_views::ClientGameStateRef::wrap(
@@ -1052,6 +1903,7 @@ mod tests {
             transcript: Vec::new(),
             base_waiting_for: state.waiting_for.clone(),
             resolving_trigger_context: None,
+            recovered: None,
         }));
         (state, hidden_card)
     }
@@ -2118,5 +2970,224 @@ mod tests {
             1,
             "the restored EventContextAmount drives the same life payment"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 608.2c + CR 118.12: the staged shadow re-materializes only the payment
+    // the chain walker already admitted; it never re-evaluates the root's
+    // condition.
+    // -----------------------------------------------------------------------
+
+    mod staged_root_condition {
+        use super::*;
+        use crate::game::scenario::{GameRunner, GameScenario, P0};
+        use crate::types::ability::{Comparator, QuantityRef};
+        use crate::types::game_state::WaitingFor;
+        use crate::types::phase::Phase;
+
+        /// Stinkweed Imp, verbatim Oracle text: Dredge 5 makes each of P0's draws a replacement choice.
+        const STINKWEED_IMP_ORACLE: &str = "Flying\n\
+            Whenever this creature deals combat damage to a creature, destroy that creature.\n\
+            Dredge 5 (If you would draw a card, you may mill five cards instead. If you do, \
+            return this card from your graveyard to your hand.)";
+
+        const LIBRARY: [&str; 12] = [
+            "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9", "L10", "L11", "L12",
+        ];
+
+        fn draw_cost() -> AbilityCost {
+            AbilityCost::EffectCost {
+                effect: Box::new(Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                }),
+            }
+        }
+
+        fn two_draw_payment(source: ObjectId) -> ResolvedAbility {
+            ResolvedAbility::new(
+                Effect::PayCost {
+                    cost: AbilityCost::Composite {
+                        costs: vec![draw_cost(), draw_cost()],
+                    },
+                    scale: None,
+                    payer: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                P0,
+            )
+        }
+
+        fn gain_life(source: ObjectId, amount: i32) -> ResolvedAbility {
+            ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: amount },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                P0,
+            )
+        }
+
+        fn opponents_at_least(count: i32) -> AbilityCondition {
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::Opponent,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: count },
+            }
+        }
+
+        fn hand_size(state: &GameState) -> usize {
+            state.players[P0.0 as usize].hand.len()
+        }
+
+        /// Three players, every library staged, Stinkweed Imp in P0's graveyard, layers evaluated.
+        fn three_player_dredge_board() -> (GameRunner, ObjectId) {
+            let mut scenario = GameScenario::new_n_player(3, 42);
+            scenario.at_phase(Phase::PreCombatMain);
+            for player in 0..3 {
+                scenario.with_library_top(PlayerId(player), &LIBRARY);
+            }
+            let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+            scenario
+                .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+                .from_oracle_text(STINKWEED_IMP_ORACLE);
+            let mut runner = scenario.build();
+            crate::game::layers::evaluate_layers(runner.state_mut());
+            (runner, source)
+        }
+
+        /// CR 608.2c + CR 118.12 + CR 104.3a + CR 800.4a: another player's concession falsifies the staged
+        /// root's own condition between `begin` and `replay`. The walker already admitted the instruction,
+        /// so the replayed payment still resumes and every recorded answer still applies.
+        ///
+        /// Revert probe: keeping `condition` in `payment_only_root` makes the replay skip the payment, so the
+        /// first decline is rejected ("replacement choice has no pending replacement") and the transaction
+        /// stays live.
+        #[test]
+        fn a_concession_that_falsifies_the_staged_roots_condition_does_not_wedge_the_payment() {
+            let (mut runner, source) = three_player_dredge_board();
+            let condition = opponents_at_least(2);
+            let mut root = two_draw_payment(source);
+            root.condition = Some(condition.clone());
+            root.sub_ability = Some(Box::new(gain_life(source, 3)));
+            let life_before = runner.life(P0);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+
+            effects::resolve_ability_chain(state, &root, &mut Vec::new(), 0).unwrap();
+            assert!(
+                state.payment_transaction.is_some(),
+                "the walker staged the payment"
+            );
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice { player, .. } if player == P0
+            ));
+            assert!(effects::evaluate_condition(&condition, state, &root));
+
+            let concession = engine::apply(
+                state,
+                PlayerId(2),
+                GameAction::Concede {
+                    player_id: PlayerId(2),
+                },
+            );
+            assert!(concession.is_ok(), "{concession:?}");
+            assert!(
+                !effects::evaluate_condition(&condition, state, &root),
+                "the concession flipped the condition's input on canonical state"
+            );
+            assert!(matches!(
+                project(state).waiting_for,
+                WaitingFor::ReplacementChoice { player, .. } if player == P0
+            ));
+
+            for leg in 1..=2 {
+                let decline = engine::apply(state, P0, GameAction::ChooseReplacement { index: 1 });
+                assert!(decline.is_ok(), "decline {leg}: {decline:?}");
+            }
+            assert_eq!(
+                hand_size(state),
+                hand_before + 2,
+                "both draw legs were paid"
+            );
+            assert!(!state.cost_payment_failed_flag);
+            assert!(state.payment_transaction.is_none());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+            assert_eq!(
+                runner.life(P0),
+                life_before + 3,
+                "the rider runs exactly once"
+            );
+        }
+
+        /// CR 608.2c: the walker still refuses a staged root whose condition is false from the start, before
+        /// `pay::resolve`, so no transaction opens.
+        #[test]
+        fn a_staged_root_whose_condition_is_false_never_opens_a_transaction() {
+            let (mut runner, source) = three_player_dredge_board();
+            let mut root = two_draw_payment(source);
+            root.condition = Some(opponents_at_least(3));
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            effects::resolve_ability_chain(state, &root, &mut Vec::new(), 0).unwrap();
+            assert!(state.payment_transaction.is_none());
+            assert_eq!(hand_size(state), hand_before);
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+        }
+
+        fn previous_amount_at_least(count: i32) -> AbilityCondition {
+            AbilityCondition::PreviousEffectAmount {
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: count },
+                channel: Default::default(),
+            }
+        }
+
+        /// GainLife 2 → PayCost{Composite[Draw 1, Draw 1]} (gated on the previous amount) → GainLife 7, by
+        /// P0 on an unrestricted two-player board. Returns (hand delta, life delta, transaction left).
+        fn resolve_gated_staged_payment(threshold: i32) -> (usize, i32, bool) {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_library_top(P0, &LIBRARY);
+            let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+            let mut runner = scenario.build();
+            let mut payment = two_draw_payment(source);
+            payment.condition = Some(previous_amount_at_least(threshold));
+            payment.sub_ability = Some(Box::new(gain_life(source, 7)));
+            let mut root = gain_life(source, 2);
+            root.sub_ability = Some(Box::new(payment));
+            let life_before = runner.life(P0);
+            let state = runner.state_mut();
+            let hand_before = hand_size(state);
+            effects::resolve_ability_chain(state, &root, &mut Vec::new(), 0).unwrap();
+            assert!(!state.cost_payment_failed_flag);
+            let hand_delta = hand_size(state) - hand_before;
+            let transaction_left = state.payment_transaction.is_some();
+            (hand_delta, runner.life(P0) - life_before, transaction_left)
+        }
+
+        /// CR 608.2c + CR 118.12: `begin`'s shadow resolves the payment at depth 0, where the resolution-local
+        /// state its condition reads has been reset. The walker's admission stands, so both legs are paid.
+        ///
+        /// Revert probe: keeping `condition` in `payment_only_root` makes the shadow skip the payment and
+        /// `begin` commit it as a synchronous success with nothing drawn (hand +0).
+        #[test]
+        fn a_staged_payment_honours_a_condition_read_from_the_previous_instruction() {
+            assert_eq!(
+                resolve_gated_staged_payment(1),
+                (2, 9, false),
+                "the admitted payment draws both legs, then the rider runs"
+            );
+            // Negative sibling: the walker refuses a false condition (2 < 5) and skips the payment's rider.
+            assert_eq!(resolve_gated_staged_payment(5), (0, 2, false));
+        }
     }
 }

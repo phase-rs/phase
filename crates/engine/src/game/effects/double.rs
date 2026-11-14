@@ -215,64 +215,32 @@ fn resolve_double_mana(
         return Ok(());
     };
 
-    // Collect the mana types and counts to add
-    let mana_to_add: Vec<(ManaType, usize)> = {
-        let player = state
-            .players
-            .iter()
-            .find(|p| p.id == player_id)
-            .ok_or(EffectError::PlayerNotFound)?;
-
-        if let Some(c) = color {
-            let mt = mana_color_to_type(c);
-            let count = player.mana_pool.count_color(mt);
-            if count > 0 {
-                vec![(mt, count)]
-            } else {
-                vec![]
-            }
-        } else {
-            // All colors
-            ManaColor::ALL
-                .iter()
-                .map(|c| {
-                    let mt = mana_color_to_type(c);
-                    (mt, player.mana_pool.count_color(mt))
-                })
-                .filter(|(_, count)| *count > 0)
-                .collect()
-        }
-    };
-
     // CR 701.10f: Add equal amount of each mana type
     if !state.players.iter().any(|p| p.id == player_id) {
         return Err(EffectError::PlayerNotFound);
     }
-
-    for (mana_type, count) in mana_to_add {
-        for _ in 0..count {
-            // CR 118.3a: stamp a pip id on pool entry so the unit can be pinned.
-            let _ = state.add_mana_to_pool(
-                player_id,
-                ManaUnit {
-                    color: mana_type,
-                    source_id: ability.source_id,
-                    pip_id: crate::types::mana::ManaPipId(0),
-                    supertype: None,
-                    source_could_produce_two_or_more_colors: false,
-                    restrictions: vec![],
-                    grants: vec![],
-                    expiry: None,
-                },
-            );
-
-            events.push(GameEvent::ManaAdded {
-                player_id,
-                mana_type,
+    for mana_type in doubled_pool_mana(state, player_id, color) {
+        // CR 118.3a: stamp a pip id on pool entry so the unit can be pinned.
+        let _ = state.add_mana_to_pool(
+            player_id,
+            ManaUnit {
+                color: mana_type,
                 source_id: ability.source_id,
-                tap_state: ManaTapState::NotFromTap,
-            });
-        }
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            },
+        );
+
+        events.push(GameEvent::ManaAdded {
+            player_id,
+            mana_type,
+            source_id: ability.source_id,
+            tap_state: ManaTapState::NotFromTap,
+        });
     }
 
     events.push(GameEvent::EffectResolved {
@@ -282,6 +250,45 @@ fn resolve_double_mana(
     });
 
     Ok(())
+}
+
+/// CR 701.10f + CR 106.1b: the mana a doubling of `player`'s pool adds — for
+/// each of the six mana types (or only `color`'s type), one `ManaType` per
+/// unit of that type the player already has. Restrictions are not copied
+/// (the added units are minted unrestricted; Doubling Cube ruling).
+pub(crate) fn doubled_pool_mana(
+    state: &GameState,
+    player: PlayerId,
+    color: Option<&ManaColor>,
+) -> Vec<ManaType> {
+    // CR 106.1b: "There are six types of mana: white, blue, black, red, green,
+    // and colorless." (`ManaColor::ALL` holds only the five colors.)
+    const MANA_TYPES: [ManaType; 6] = [
+        ManaType::White,
+        ManaType::Blue,
+        ManaType::Black,
+        ManaType::Red,
+        ManaType::Green,
+        ManaType::Colorless,
+    ];
+    let Some(pool) = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| &p.mana_pool)
+    else {
+        return Vec::new();
+    };
+    let types = match color {
+        Some(c) => vec![mana_color_to_type(c)],
+        None => MANA_TYPES.to_vec(),
+    };
+    // `count_color` counts every unit of the type whatever its restrictions, so
+    // restricted mana is doubled too; only the copies are unrestricted.
+    types
+        .into_iter()
+        .flat_map(|mana_type| std::iter::repeat_n(mana_type, pool.count_color(mana_type)))
+        .collect()
 }
 
 /// Resolve a player target from the ability.

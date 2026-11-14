@@ -74,12 +74,12 @@ pub fn resolve(
             ResolvedAbility::new(copy_effect, vec![], ability.source_id, ability.controller);
         crate::game::effects::token_copy::resolve(state, &copy_ability, events)?;
 
-        // CR 506.3e + CR 509.1g: each fresh copy is put onto the battlefield
-        // blocking the attacker it copied. `last_created_token_ids` holds exactly
-        // this attacker's single copy at this point in the loop.
+        // CR 506.3a + CR 707.2: an animated attacker's copy may be a noncreature.
+        // Track every created token for the delayed exile even if it can't block.
+        // CR 506.3e + CR 509.1g: eligible copies block their own original.
         for token_id in state.last_created_token_ids.clone() {
-            combat::place_blocking(state, token_id, attacker_id);
             all_created.push(token_id);
+            combat::place_blocking(state, token_id, attacker_id, events);
         }
     }
 

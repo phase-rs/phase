@@ -1139,12 +1139,6 @@ fn run_commander_game(options: CommanderGameOptions<'_>) -> CommanderGameResult 
 
     let mut state = build_commander_state(db, payload, players, seed);
     engine::game::engine::start_game(&mut state);
-    // CR 103.1: `start_game` picks the starting player with a seeded d20 contest
-    // per seat, so who is on the play is the ENGINE's decision and cannot be
-    // inferred from how the caller assigned the seats. Captured here because
-    // `active_player` advances with the turns, while `current_starting_player`
-    // is the durable record of the contest's winner.
-    let starting_player = state.current_starting_player;
 
     let ai_players: HashSet<PlayerId> = (0..players).map(PlayerId).collect();
     let mut ai_configs: HashMap<PlayerId, _> = HashMap::new();
@@ -1265,7 +1259,9 @@ fn run_commander_game(options: CommanderGameOptions<'_>) -> CommanderGameResult 
 
     CommanderGameResult {
         outcome,
-        starting_player,
+        // CR 103.1: the chooser's answer, made by the AI inside the loop, set the
+        // starting player; `current_starting_player` is its durable record.
+        starting_player: state.current_starting_player,
         turns: state.turn_number,
         candidate_survival_turn: ledger.survival_turn(candidate, state.turn_number),
         candidate_elimination_order: ledger.elimination_order(candidate),
@@ -1498,7 +1494,7 @@ struct DuelTally {
 
 impl DuelTally {
     /// Records one finished game. `deck0_seat` is the seat deck 0 occupied, and
-    /// `starting_player` is the seat the CR 103.1 contest actually chose.
+    /// `starting_player` is the seat the CR 103.1 chooser actually put on the play.
     fn record(&mut self, outcome: GameOutcome, deck0_seat: PlayerId, starting_player: PlayerId) {
         match outcome {
             GameOutcome::Decided(winner) if winner == deck0_seat => self.p0_wins += 1,
@@ -2829,41 +2825,47 @@ mod tests {
     }
 
     /// The engine really does decide this: a started two-seat Commander game
-    /// records a contest winner, and across seeds it is not a constant.
+    /// waits on a CR 103.1 chooser, and across seeds it is not a constant.
     #[test]
-    fn the_engine_selects_the_starting_player_from_the_seed() {
+    fn the_engine_selects_the_chooser_from_the_seed() {
         let db = fixture_db();
         let payload = fixture_duel_payload(&db);
-        let winners: HashSet<u8> = (0..40u64)
+        let choosers: HashSet<u8> = (0..40u64)
             .map(|seed| {
                 let mut state = build_commander_state(&db, &payload, DUEL_SEATS, seed);
                 engine::game::engine::start_game(&mut state);
-                state.current_starting_player.0
+                let WaitingFor::ChooseStartingPlayer { player, .. } = state.waiting_for else {
+                    panic!("the start rests at the CR 103.1 choice");
+                };
+                player.0
             })
             .collect();
         assert!(
-            winners.len() > 1,
-            "the CR 103.1 contest must vary with the seed, else reporting it \
-             would be no better than assuming it (got {winners:?})"
+            choosers.len() > 1,
+            "the CR 103.1 chooser must vary with the seed, else reporting it \
+             would be no better than assuming it (got {choosers:?})"
         );
         assert!(
-            winners.iter().all(|seat| *seat < DUEL_SEATS),
-            "a contest winner must be a real seat: {winners:?}"
+            choosers.iter().all(|seat| *seat < DUEL_SEATS),
+            "a chooser must be a real seat: {choosers:?}"
         );
     }
 
-    /// The same seed must pick the same starting seat, which is what makes the
+    /// The same seed must pick the same chooser, which is what makes the
     /// paired schedule a controlled swap rather than two unrelated games.
     #[test]
-    fn the_starting_player_is_reproducible_for_a_seed() {
+    fn the_chooser_is_reproducible_for_a_seed() {
         let db = fixture_db();
         let payload = fixture_duel_payload(&db);
-        let start = |seed: u64| {
+        let chooser = |seed: u64| {
             let mut state = build_commander_state(&db, &payload, DUEL_SEATS, seed);
             engine::game::engine::start_game(&mut state);
-            state.current_starting_player
+            let WaitingFor::ChooseStartingPlayer { player, .. } = state.waiting_for else {
+                panic!("the start rests at the CR 103.1 choice");
+            };
+            player
         };
-        assert_eq!(start(99), start(99));
+        assert_eq!(chooser(99), chooser(99));
     }
 
     #[test]

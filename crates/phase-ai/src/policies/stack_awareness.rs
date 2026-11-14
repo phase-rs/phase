@@ -1,4 +1,5 @@
 use engine::game::effects::stack_reach::{stack_entry_node_reach, NodeReach};
+use engine::game::effects::{bound_object_move_destination, is_selected_object_library_move};
 use engine::game::game_object::GameObject;
 use engine::game::keywords::protection_prevents_from;
 use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetRef};
@@ -260,6 +261,9 @@ pub(crate) fn assess_spell_impact(state: &GameState, entry: &StackEntry) -> f64 
                             .max(0) as f64
                             * 5.0
                     }
+                    // CR 608.2c: a selected-object library move (Chaos Warp)
+                    // moves its declared target, not a population.
+                    effect if is_selected_object_library_move(effect) => 0.0,
                     Effect::DestroyAll { .. }
                     | Effect::DamageAll { .. }
                     | Effect::ChangeZoneAll { .. } => 4.0,
@@ -376,11 +380,11 @@ pub(crate) fn removal_step(effect: &Effect) -> Option<RemovalStep> {
         Effect::Destroy { .. } => Some(RemovalStep::Destroy),
         Effect::Counter { .. } => Some(RemovalStep::Counter),
         Effect::Bounce { .. } => Some(RemovalStep::Bounce),
-        Effect::ChangeZone { destination, .. } => Some(RemovalStep::ChangeZone {
-            destination: *destination,
-        }),
         Effect::DealDamage { .. } => Some(RemovalStep::Damage),
-        _ => None,
+        // CR 608.2c: the engine's classification of a move of the object(s) a
+        // node acts on, the selected-object library move (Chaos Warp) included.
+        _ => bound_object_move_destination(effect)
+            .map(|destination| RemovalStep::ChangeZone { destination }),
     }
 }
 
@@ -579,6 +583,7 @@ mod tests {
     use super::*;
     use crate::config::AiConfig;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::game::scenario::{GameScenario, P0, P1};
     use engine::game::zones::create_object;
     use engine::types::ability::{
         BounceSelection, EffectKind, QuantityRef, ResolvedAbility, TargetFilter,
@@ -1070,6 +1075,8 @@ mod tests {
         );
     }
 
+    const CHAOS_WARP: &str = "The owner of target permanent shuffles it into their library, then reveals the top card of their library. If it's a permanent card, they put it onto the battlefield.";
+
     const SWALLOWED_BY_LEVIATHAN: &str = "Choose target spell. Surveil 2, then counter the chosen spell unless its controller pays {1} for each card in your graveyard. (To surveil 2, look at the top two cards of your library, then put any number of them into your graveyard and the rest on top of your library in any order.)";
     const BOON_OF_EREBOS: &str =
         "Target creature gets +2/+0 until end of turn. Regenerate it. You lose 2 life.";
@@ -1160,6 +1167,51 @@ mod tests {
         s.phase = Phase::PreCombatMain;
         s.waiting_for = WaitingFor::Priority { player: P0 };
         runner
+    }
+
+    /// CR 608.2c: Chaos Warp lowers to a `TargetOnly` declaration and a bound
+    /// `ChangeZoneAll` move. The removal walk reads that move through the
+    /// engine's shared classification and reach, so its live target is pending
+    /// removal into its owner's library, and the single-object move is not
+    /// valued as a board wipe.
+    #[test]
+    fn chaos_warp_on_the_stack_tucks_its_live_target() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let chaos_warp = scenario
+            .add_spell_to_hand_from_oracle(P1, "Chaos Warp", true, CHAOS_WARP)
+            .id();
+        let mut runner = main_phase_runner(scenario);
+        engine::game::engine::apply_as_current_for_simulation(
+            runner.state_mut(),
+            GameAction::PassPriority,
+        )
+        .expect("P0 passes priority");
+        runner.cast(chaos_warp).target_object(bear).commit();
+        let state = runner.state();
+        let entry = state.stack.back().expect("Chaos Warp").clone();
+        assert!(
+            chain_nodes(state, entry.id)
+                .iter()
+                .any(|node| matches!(node.effect, Effect::ChangeZoneAll { .. })),
+            "reach guard: the move is the bound ChangeZoneAll"
+        );
+        let steps: Vec<_> = removal_steps_acting_on(state, bear)
+            .into_iter()
+            .map(|(step, _)| step)
+            .collect();
+        assert_eq!(
+            steps,
+            vec![RemovalStep::ChangeZone {
+                destination: Zone::Library
+            }]
+        );
+        assert!(will_target_die_from_stack(state, bear));
+        assert!(
+            assess_spell_impact(state, &entry) < 4.0,
+            "a single declared target is not priced as a sweeper"
+        );
     }
 
     #[test]

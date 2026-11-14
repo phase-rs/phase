@@ -249,6 +249,21 @@ pub(crate) fn eliminate_players(
         None
     };
 
+    // CR 800.4a: a parked unless payment leaves with the players leaving: with
+    // the controller of the ability it settles, or with the payer of the legs
+    // or instructions still owed.
+    super::engine_payment_choices::retire_parked_unless_payment_of_departing_players(
+        state,
+        &leaving_set,
+    );
+    // CR 800.4a + CR 400.7: so does an accepted entry payment parked behind a
+    // leg's replacement choice, with the player who accepted it or the owner
+    // of the entering object.
+    super::engine_payment_choices::retire_parked_entry_payment_of_departing_players(
+        state,
+        &leaving_set,
+    );
+
     // CR 800.4a: elimination can remove frozen stack entries and a session's
     // canonical representative. Restore the pre-overlay preferences before
     // `do_eliminate` removes the departing player's own state, so teardown
@@ -418,6 +433,7 @@ pub(crate) fn eliminate_players(
                         trigger_event: None,
                         effect_description: None,
                         remaining: Vec::new(),
+                        repeat: None,
                     };
                     state.pending_player_scope_unless_payment = Some(pending);
                 } else {
@@ -765,7 +781,8 @@ pub(crate) fn eliminate_players(
 /// This is also the pregame-reconciliation seam for the prompts that precede
 /// mulligans: a departed companion chooser (CR 103.2b) is resumed at the walk
 /// cursor by `advance_companion_reveal`, and a departed agenda chooser (CR
-/// 103.2e) resumes at the agenda step.
+/// 103.2e) resumes at the agenda step. A departed CR 103.1 chooser passes the
+/// choice on (CR 800.4h), and a departed seat leaves the candidates.
 fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let alive: HashSet<PlayerId> = state
         .prepaid_mulligan_bottoms
@@ -823,6 +840,22 @@ fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // CR 103.2b precedes the CR 103.2e agenda step, so a departure here
             // resumes at the agenda step; the companion walk is already done.
             state.waiting_for = super::conspiracy::agenda_choices_or_mulligan(state, events);
+        }
+        // CR 800.4a + CR 103.1a: a departed seat is no longer a candidate to take
+        // the first turn. The candidates are re-derived from the living side
+        // representatives, so a shared-turn side whose representative left is
+        // still offered through a living member.
+        // CR 800.4h: a departed chooser's choice passes to the next player in turn order.
+        WaitingFor::ChooseStartingPlayer { player, .. } => {
+            let player = if players::is_alive(state, player) {
+                player
+            } else {
+                players::next_player_in_turn_order(state, player)
+            };
+            state.waiting_for = WaitingFor::ChooseStartingPlayer {
+                player,
+                candidates: super::topology::turn_representatives(state),
+            };
         }
         WaitingFor::OpeningHandBottomCards { pending, reason } => {
             let alive: Vec<_> = pending
@@ -1624,13 +1657,36 @@ fn do_eliminate(
                 .expect("eliminated search batch must own the active frame");
         }
     }
-    if state.pending_replacement.is_some() && leaving_is_latched_chooser {
+    // CR 800.4a + CR 121.6b + CR 614.17c: under a parked draw unless payment
+    // that outlives this departure, the choice the leaver was asked is their
+    // own draw inside the payer's draw sequence (a substitute: Notion Thief's
+    // "you draw a card"). It is kept for the concession's action boundary,
+    // which settles it through the replacement authority as a draw that can no
+    // longer happen (`engine::reconcile_parked_unless_payment_after_departure`):
+    // the sequences above it resume, so the payer's own remaining draws
+    // (Thought Reflection's second card) are not abandoned with the leaver's.
+    let settles_with_parked_payment = leaving_is_latched_chooser
+        && super::engine_payment_choices::departed_draw_settles_with_parked_payment(
+            state,
+            leaving_set,
+        );
+    if state.pending_replacement.is_some()
+        && leaving_is_latched_chooser
+        && !settles_with_parked_payment
+    {
         state.pending_replacement = None;
         // CR 800.4a: a paused frameless single-card discard belongs to the
         // abandoned choice of the leaving player; left behind it would go stale.
         state.pending_single_discard = None;
         state.replacement_may_cost_paused = false;
-        super::replacement::abandon_post_replacement_continuation(state);
+        // CR 121.6b: under a surviving parked draw payment the abandoned
+        // choice sat inside a substitute for one of the payer's draws, so only
+        // the leaver's part of the draw authority goes with it.
+        if super::engine_payment_choices::draw_payment_is_parked(state) {
+            super::replacement::abandon_departed_substitute_continuation(state, leaving_set);
+        } else {
+            super::replacement::abandon_post_replacement_continuation(state);
+        }
         super::turns::abandon_phase_begin_choice(state);
     }
 
@@ -1943,6 +1999,35 @@ fn abandon_source_bound_resolution_prompt(
         };
     if !abandon {
         return;
+    }
+
+    // CR 800.4a + CR 121.6b + CR 117.2e: under a parked draw unless payment that outlives
+    // this departure, the leaver's prompt is a choice inside a substitute for
+    // one of the payment's draws (Abundance's land-or-nonland, after Notion
+    // Thief made that draw the leaver's). Only the leaver's part of that
+    // substitute is abandoned: their draw instructions, the continuations
+    // they control and the one their choice deferred. The payer's own draw
+    // sequence and the resolution the payment settles are not the leaver's to
+    // abandon; they stay, and resume at the concession's action boundary
+    // (`engine::reconcile_parked_unless_payment_after_departure`).
+    if super::engine_payment_choices::draw_payment_is_parked(state)
+        && !selecting_resolution_sacrifice
+        && !parked_resolution_sacrifice
+    {
+        super::replacement::abandon_departed_substitute_continuation(state, leaving_set);
+        state.waiting_for = WaitingFor::Priority {
+            player: players::next_player(state, player),
+        };
+        return;
+    }
+
+    // CR 800.4a: the family is abandoned in dependency order. A draw still in
+    // flight above the abandoned choice (an interactive substitute asked it:
+    // the leaver's own Abundance, on a draw of a payment that left with them)
+    // is torn down before the continuation beneath it, which the carrier's
+    // abandonment expects on top.
+    if state.active_multi_draw_frame().is_some() {
+        super::replacement::abandon_post_replacement_continuation(state);
     }
 
     if selecting_resolution_sacrifice {
@@ -2276,14 +2361,22 @@ fn retire_finished_game_triggers(state: &mut GameState) {
 /// performed either). Work the resolution parked outside the stack
 /// (`retire_parked_resolution_work`) goes first, then its frames, then its carrier.
 ///
-/// Called only at the action boundary (`engine::settle_finished_game`, which every boundary
-/// that reconciles a terminal result reaches), after every resolver has unwound. `end_game`
-/// is not the place: a resolution reaches it mid-chain (CR 104.3e / CR 104.2b effects, the
-/// CR 104.4b draw inside a repeat) while its caller still owns its frames, and the same chain
-/// can park a further prompt after it. `game_end` is the authority, not `waiting_for`: a
-/// best-of-three match may already have replaced `GameOver` with its sideboarding prompt.
+/// Ordinary game ends enter at the action boundary (`engine::settle_finished_game`), after
+/// every resolver has unwound, with `game_end` as their authority. CR 117.2e: a resolver
+/// still owns its choices and frames while it runs. `end_game` is not the place: a resolution
+/// reaches it mid-chain (CR 104.2b effects, the CR 104.4b draw inside a repeat), and the same
+/// chain can park a further prompt after it. A best-of-three match may already have replaced
+/// `GameOver` with its sideboarding prompt; the wait is not the terminal authority.
+///
+/// An admitted trusted match forfeit enters at `match_flow::apply_trusted_match_forfeit`'s
+/// own synchronous terminal boundary, outside any active resolver. Its authority is
+/// `MatchPhase::Completed` together with `match_forfeit_result`: application-policy match
+/// completion, not a CR game loss, so it needs no manufactured `game_end`. Neither a wait
+/// nor a completed match phase alone authorizes this additional retirement path.
 pub(super) fn retire_finished_game_resolution(state: &mut GameState) {
-    if state.game_end.is_none() {
+    if state.game_end.is_none()
+        && !(state.match_phase == MatchPhase::Completed && state.match_forfeit_result.is_some())
+    {
         return;
     }
     // A resolving spell may already have completed its final part. Its queued
@@ -2509,6 +2602,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -2574,6 +2668,7 @@ mod tests {
             moved_count: None,
             face_down_profile: None,
             library_placement: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
             effect_kind: EffectKind::ChangeZone,
         }
@@ -2643,6 +2738,7 @@ mod tests {
                     attach_to: None,
                     performed_by: None,
                     library_placement: None,
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     exile_duration: None,
                     exile_controller: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -2663,6 +2759,7 @@ mod tests {
                     attach_to: None,
                     performed_by: None,
                     library_placement: None,
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     exile_duration: None,
                     exile_controller: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -4046,6 +4143,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -4191,6 +4289,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -4248,6 +4347,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -4297,6 +4397,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -4376,6 +4477,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
