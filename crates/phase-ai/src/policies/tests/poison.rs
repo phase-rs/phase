@@ -1952,6 +1952,32 @@ fn hexproof_opponent_is_not_a_lethal_target() {
     }
 }
 
+/// Valkmira, Protector's Shield: "Whenever you or another permanent you control becomes the target
+/// of a spell or ability an opponent controls, counter that spell or ability unless its controller
+/// pays {1}." Vraska's −9 still names the opponent, so its trigger withholds lethal, not the read.
+#[test]
+fn a_becomes_target_trigger_on_the_seat_withholds_the_lethal_read() {
+    for (valkmira, kind) in [
+        (false, "poison_clock_lethal"),
+        (true, "poison_clock_pressure"),
+    ] {
+        let (runner, ids) = vraska_board(threshold(9), &[(OPPONENT, 8)], |s| {
+            if valkmira {
+                s.add_real_card(
+                    OPPONENT,
+                    "Valkmira, Protector's Shield",
+                    Zone::Battlefield,
+                    shared_integration_card_db(),
+                );
+            }
+            Vec::new()
+        });
+        let candidate = activation_of(runner.state(), ids[0], loyalty(-9));
+        let (_, reason) = verdict_on(runner.state(), &candidate);
+        assert_eq!(reason.kind, kind, "valkmira {valkmira}");
+    }
+}
+
 /// Vraska's 0: "You draw a card and lose 1 life. Proliferate." At 1 life the AI hits 0 life as the
 /// opponent reaches nine poison, a draw (CR 104.4a), not a win; at 2 life it wins.
 #[test]
@@ -1964,8 +1990,8 @@ fn vraska_zero_is_lethal_only_when_the_ai_survives_it() {
         let state = runner.state();
         let (delta, reason) = verdict_on(state, &activation_of(state, ids[0], loyalty(0)));
         if life == 1 {
-            assert_ne!(reason.kind, "poison_clock_lethal");
-            assert!(delta <= crate::policies::registry::STRONG_MAX);
+            assert_eq!(reason.kind, "poison_clock_no_counters_to_proliferate");
+            assert_eq!(delta, 0.0);
         } else {
             assert_eq!(reason.kind, "poison_clock_lethal");
             assert_eq!(fact(&reason, "poison_added"), Some(1));
@@ -2416,4 +2442,59 @@ fn a_cost_choice_while_activating_withholds_the_lethal_read() {
         runner.act(action).unwrap();
     }
     assert!(!engine::game::players::is_alive(runner.state(), OPPONENT));
+}
+
+const THIRSTING_ROOTS: &str = "Choose one —\n• Search your library for a basic land card, reveal it, put it into your hand, then shuffle.\n• Proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)";
+
+/// Thirsting Roots and Cankerbloom ("{1}, Sacrifice this creature: Choose one — • Destroy target
+/// artifact. • Destroy target enchantment. • Proliferate.") at their mode choice: the proliferate
+/// mode is read with its mana paid automatically, however the cast or activation chose to pay.
+#[test]
+fn a_selected_mode_is_read_with_its_mana_paid_automatically() {
+    let config = config();
+    let context = ai_context(&config);
+    for payment_mode in [CastPaymentMode::Auto, CastPaymentMode::Manual] {
+        let (runner, ids) = board(FormatConfig::standard(), 2, &[(OPPONENT, 9)], |s| {
+            s.at_phase(Phase::PreCombatMain);
+            s.with_mana_pool(AI, floating(&[ManaType::Green; 2]));
+            let db = shared_integration_card_db();
+            vec![
+                s.add_spell_to_hand_from_oracle(AI, "Thirsting Roots", false, THIRSTING_ROOTS)
+                    .with_mana_cost(ManaCost::Cost {
+                        shards: vec![ManaCostShard::Green],
+                        generic: 0,
+                    })
+                    .id(),
+                s.add_real_card(AI, "Cankerbloom", Zone::Battlefield, db),
+            ]
+        });
+        let state = runner.state();
+        let cast = GameAction::CastSpell {
+            object_id: ids[0],
+            card_id: state.objects[&ids[0]].card_id,
+            targets: vec![],
+            payment_mode,
+        };
+        let activate = GameAction::ActivateAbility {
+            source_id: ids[1],
+            ability_index: state.objects[&ids[1]]
+                .abilities
+                .iter()
+                .position(|ability| ability.kind == AbilityKind::Activated)
+                .unwrap(),
+            payment_mode,
+        };
+        for (action, proliferate) in [(cast, 1), (activate, 2)] {
+            let mut state = state.clone();
+            let decision = mode_choice_after(&mut state, action);
+            let candidate = select_modes_candidate(vec![proliferate]);
+            let verdict =
+                PoisonClockPolicy.verdict(&ctx(&state, &candidate, &decision, &context, &config));
+            let (_, reason) = score_of(verdict);
+            assert_eq!(
+                reason.kind, "poison_clock_lethal",
+                "{payment_mode:?}, mode {proliferate}"
+            );
+        }
+    }
 }

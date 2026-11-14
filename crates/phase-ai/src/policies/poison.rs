@@ -217,7 +217,8 @@ fn printed_poison(abilities: &[&AbilityDefinition]) -> Option<u32> {
         })
 }
 
-/// An answer that never moves its prompt forward would otherwise loop forever.
+/// An answer that never moves its prompt forward would otherwise loop forever. It also caps the
+/// target tries in `settled_cast`.
 const CANDIDATE_DELIVERY_MAX_STEPS: usize = 64;
 
 /// CR 601.2i + CR 603.3 + CR 117.4: the board after the candidate, cast or activated on a copy
@@ -239,9 +240,24 @@ fn candidate_delivery(
         .and_then(|spell| board.stack.iter().position(|entry| entry.id == spell))
         .unwrap_or(board.stack.len());
     let mut action = action.clone();
-    if let GameAction::CastSpell { payment_mode, .. }
-    | GameAction::ActivateAbility { payment_mode, .. } = &mut action
-    {
+    let payment_mode = match (&mut action, &mut board.waiting_for) {
+        (
+            GameAction::CastSpell { payment_mode, .. }
+            | GameAction::ActivateAbility { payment_mode, .. },
+            _,
+        )
+        | (
+            _,
+            WaitingFor::AbilityModeChoice {
+                activation_payment_mode: payment_mode,
+                ..
+            },
+        ) => Some(payment_mode),
+        (_, waiting_for) => waiting_for
+            .pending_cast_mut()
+            .map(|pending| &mut pending.payment_mode),
+    };
+    if let Some(payment_mode) = payment_mode {
         *payment_mode = CastPaymentMode::Auto;
     }
     apply_as_current_for_simulation(&mut board, action).ok()?;
@@ -267,8 +283,8 @@ fn candidate_delivery(
 }
 
 /// CR 601.2c + CR 601.2i + CR 603.3: the cast stepped to priority with the candidate alone above
-/// `depth`, trying each of the AI's legal targets in turn (`chosen` first) on its own copy; None
-/// when no choice gets there.
+/// `depth`, trying each of the AI's legal targets in turn on its own copy, or only `chosen`
+/// where it is one; None when no choice gets there.
 fn settled_cast(
     board: GameState,
     ai_player: PlayerId,
@@ -293,7 +309,10 @@ fn settled_cast(
                 .iter()
                 .cloned()
                 .partition(|target| target == chosen);
-            seat.into_iter().chain(rest).find_map(|target| {
+            // The read answers whether this spell kills the seat, so wherever the seat is a legal
+            // target the clone chooses only the seat.
+            let tries = if seat.is_empty() { rest } else { seat };
+            tries.into_iter().find_map(|target| {
                 *steps = steps.checked_sub(1)?;
                 let mut attempt = board.clone();
                 let answer = GameAction::ChooseTarget {
