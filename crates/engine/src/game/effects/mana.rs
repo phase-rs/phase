@@ -1121,6 +1121,30 @@ pub(crate) fn object_colors_for_scope(
     .collect()
 }
 
+/// CR 105.1 + CR 105.2: union borrowed colors once, emitting the five colors
+/// in canonical WUBRG order; colorless contributes no member.
+pub(crate) fn distinct_colors<'a>(
+    colors: impl IntoIterator<Item = &'a ManaColor>,
+) -> Vec<ManaColor> {
+    let mut seen = 0u8;
+    for color in colors {
+        seen |= match color {
+            ManaColor::White => 1,
+            ManaColor::Blue => 2,
+            ManaColor::Black => 4,
+            ManaColor::Red => 8,
+            ManaColor::Green => 16,
+        };
+    }
+    let mut result = Vec::with_capacity(seen.count_ones() as usize);
+    for (index, color) in ManaColor::ALL.into_iter().enumerate() {
+        if seen & (1 << index) != 0 {
+            result.push(color);
+        }
+    }
+    result
+}
+
 pub(crate) fn distinct_colors_among_permanents(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
@@ -1135,30 +1159,13 @@ pub(crate) fn distinct_colors_among_permanents(
     let zone = filter
         .extract_in_zone()
         .unwrap_or(crate::types::zones::Zone::Battlefield);
-    let mut seen: std::collections::HashSet<crate::types::mana::ManaColor> =
-        std::collections::HashSet::new();
-    for &id in crate::game::targeting::zone_object_ids(state, zone).iter() {
-        if !matches_target_filter(state, id, filter, &filter_ctx) {
-            continue;
-        }
-        if let Some(obj) = state.objects.get(&id) {
-            for color in &obj.color {
-                seen.insert(*color);
-            }
-        }
-    }
-    // Stable order for determinism (WUBRG).
-    use crate::types::mana::ManaColor;
-    [
-        ManaColor::White,
-        ManaColor::Blue,
-        ManaColor::Black,
-        ManaColor::Red,
-        ManaColor::Green,
-    ]
-    .into_iter()
-    .filter(|c| seen.contains(c))
-    .collect()
+    distinct_colors(
+        crate::game::targeting::zone_object_ids(state, zone)
+            .iter()
+            .filter(|&&id| matches_target_filter(state, id, filter, &filter_ctx))
+            .filter_map(|id| state.objects.get(id))
+            .flat_map(|obj| obj.color.iter()),
+    )
 }
 
 /// CR 605.1a + CR 406.1 + CR 610.3: Resolve the legal `ManaType` set for a
@@ -1394,6 +1401,20 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn distinct_color_reduction_is_bounded_ordered_and_borrowed() {
+        assert!(distinct_colors(std::iter::empty()).is_empty());
+        let colors = [ManaColor::Red, ManaColor::White, ManaColor::Red];
+        assert_eq!(
+            distinct_colors(&colors),
+            vec![ManaColor::White, ManaColor::Red]
+        );
+        assert_eq!(
+            distinct_colors(ManaColor::ALL.iter().rev().chain(&ManaColor::ALL)),
+            ManaColor::ALL.to_vec()
+        );
+    }
 
     fn make_mana_ability(produced: ManaProduction) -> ResolvedAbility {
         ResolvedAbility::new(

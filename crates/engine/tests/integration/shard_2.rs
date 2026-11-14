@@ -261,6 +261,7 @@ mod consume_spirit_legal_targets;
 mod consuming_vapors_life_gain_5925;
 mod consuming_vapors_rebound;
 mod context_ref_slot_hygiene;
+mod controlled_color_protection_from_oracle_text;
 mod controls_commander_statics;
 mod converge_colors_spent_trigger_lifetime;
 mod coordinated_player_subjects;

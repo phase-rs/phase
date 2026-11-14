@@ -9836,7 +9836,7 @@ fn protection_target_reads_filter_population(
         | ProtectionTarget::ChosenCardName
         | ProtectionTarget::Everything
         | ProtectionTarget::FromPlayer(_)
-        // A color set (CR 702.16i) names colors, never an object population.
+        // A color set (CR 702.16i) carries no TargetFilter operand and does not read LastCreated.
         | ProtectionTarget::EachColor(_) => false,
     }
 }
