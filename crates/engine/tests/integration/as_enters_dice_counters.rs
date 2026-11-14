@@ -4083,8 +4083,10 @@ fn an_entry_with_no_roll_is_not_parked_at_a_counter_pause() {
     assert_eq!(parked_state_of(runner.state(), fanatic), None);
     assert_printed_chain(runner.state(), fanatic);
 
-    // (c) Kavu Titan, kicked: its chain places +1/+1 counters on itself, behind a
-    // head that is no roll, and the fold stays out of that placement.
+    // (c) Kavu Titan, kicked ("it enters with three +1/+1 counters on it and with
+    // trample"): no roll, so its counter step stays. CR 614.1c: the kicked three and
+    // Velocipede's one (mana value 2) are one entry placement, so Scales first gives
+    // (3 + 1 + 1) x 2 = 10, and the trample rides the entry.
     let (mut scenario, _) = gate_board();
     let titan = free_creature(&mut scenario, "Kavu Titan", 2, 2, KAVU_TITAN);
     scenario.with_mana_pool(P0, green(3));
@@ -4096,7 +4098,14 @@ fn an_entry_with_no_roll_is_not_parked_at_a_counter_pause() {
     pass_until_prompt(&mut runner, &mut events);
     assert_counter_prompt(runner.state());
     assert_eq!(parked_state_of(runner.state(), titan), None);
-    assert_printed_chain(runner.state(), titan);
+    settle_picking(&mut runner, &mut events, FirstPick::Scales);
+    assert_eq!(zone(runner.state(), titan), Zone::Battlefield);
+    assert_eq!(
+        plus_counters(runner.state(), titan),
+        10,
+        "one placement of four"
+    );
+    assert!(runner.state().objects[&titan].has_keyword(&Keyword::Trample));
 }
 
 /// V25. CR 122.1 + CR 614.5: each kind is its own placement, and Scales and
