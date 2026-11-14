@@ -2797,6 +2797,7 @@ fn fmt_core_type(ct: &CoreType) -> &'static str {
         CoreType::Conspiracy => "conspiracy",
         CoreType::Boss => "boss",
         CoreType::Event => "event",
+        CoreType::Vanguard => "vanguard",
     }
 }
 
@@ -8026,6 +8027,7 @@ pub fn compute_card_face_coverage(
     );
     check_shared_source_graveyard_slot(face, &mut missing);
     check_confirmed_misparse(face, &mut missing);
+    check_unrun_card_type(face, &mut missing);
     match entry_projection {
         EntryProjectionPolicy::Include => check_entry_projection(face, &mut missing),
         EntryProjectionPolicy::Exclude => {}
@@ -8093,6 +8095,19 @@ pub fn card_face_coverage_with_subtypes(
 /// gap computation with `analyze_coverage`.
 pub fn card_face_gaps(face: &CardFace) -> Vec<String> {
     card_face_coverage(face).gap_handlers()
+}
+
+/// The coverage label for a vanguard face (see [`check_unrun_card_type`]).
+pub const VANGUARD_RUNTIME_GAP: &str = "CardType:Vanguard";
+
+/// CR 313.2 + CR 313.4: a vanguard card stays in the command zone, and its
+/// abilities function only from there, in the Vanguard variant (CR 902), which
+/// the engine does not run. No game the engine runs holds the card, so none of
+/// its abilities can apply however completely its text parses.
+fn check_unrun_card_type(face: &CardFace, missing: &mut Vec<String>) {
+    if face.card_type.core_types.contains(&CoreType::Vanguard) {
+        missing.push(VANGUARD_RUNTIME_GAP.to_string());
+    }
 }
 
 /// Project export support metadata into the existing coverage-gap authority.
@@ -19331,6 +19346,60 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             .into_iter()
             .find(|card| card.card_name == card_name)
             .expect("coverage should include test card")
+    }
+
+    /// CR 313.2 + CR 313.4: a vanguard card's abilities function only from the
+    /// command zone of a Vanguard game, which the engine does not run. Mayael
+    /// the Anima Avatar's upkeep trigger parses completely, so the same parse on
+    /// a creature face is supported; on the printed vanguard face it is not,
+    /// and the only gap is the card type.
+    #[test]
+    fn a_fully_parsed_vanguard_face_is_unsupported_for_its_card_type() {
+        const MAYAEL: &str = "At the beginning of your upkeep, reveal the top card of your library. If it's a creature card with power 5 or greater, put it into your hand. Otherwise, you may put it on the bottom of your library.";
+        let face_of = |card_type: &str| {
+            let core_type: CoreType = card_type.parse().expect("a CR 205.2a card type");
+            let parsed = crate::parser::parse_oracle_text(
+                MAYAEL,
+                "Mayael the Anima Avatar",
+                &[],
+                &[card_type.to_string()],
+                &[],
+            );
+            let mut face = make_face();
+            face.name = "Mayael the Anima Avatar".to_string();
+            face.oracle_text = Some(MAYAEL.to_string());
+            face.card_type.core_types = vec![core_type];
+            face.triggers = parsed.triggers;
+            face
+        };
+
+        let creature = coverage_result_for_face(face_of("Creature"));
+        assert!(
+            creature.supported,
+            "reach guard: the trigger parses completely, gaps {:?}",
+            creature.gap_details
+        );
+
+        let vanguard_face = face_of("Vanguard");
+        assert!(
+            !vanguard_face.triggers.is_empty(),
+            "reach guard: the vanguard face keeps its parsed trigger"
+        );
+        let vanguard = coverage_result_for_face(vanguard_face.clone());
+        assert!(!vanguard.supported);
+        assert_eq!(
+            vanguard
+                .gap_details
+                .iter()
+                .map(|gap| gap.handler.as_str())
+                .collect::<Vec<_>>(),
+            vec![VANGUARD_RUNTIME_GAP]
+        );
+        // Deck validation shares the authority.
+        assert_eq!(
+            card_face_gaps(&vanguard_face),
+            vec![VANGUARD_RUNTIME_GAP.to_string()]
+        );
     }
 
     #[test]

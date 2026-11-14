@@ -5663,6 +5663,7 @@ fn core_type_code(core_type: CoreType) -> &'static str {
         CoreType::Conspiracy => "conspiracy",
         CoreType::Boss => "boss",
         CoreType::Event => "event",
+        CoreType::Vanguard => "vanguard",
     }
 }
 
