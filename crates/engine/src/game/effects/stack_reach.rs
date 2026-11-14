@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use crate::game::ability_utils::{
     apply_instead_swap, flatten_specified_targets_in_chain, validate_targets_in_chain,
 };
-use crate::game::functioning_abilities::active_replacements;
+use crate::game::functioning_abilities::{active_replacements, replacement_functions_in_zone};
 use crate::game::replacement::{find_applicable_replacements, replacement_registry};
 use crate::game::{stack, targeting};
 use crate::types::ability::{
@@ -15,6 +15,7 @@ use crate::types::ability::{
 };
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
 use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -490,28 +491,19 @@ fn instruction_writes(
         }),
         // CR 701.25a: surveil moves cards from its player's library to their
         // graveyard, where no replacement effect may apply to that move.
+        // CR 400.2 + CR 401.2: which cards those are is hidden, so the move is
+        // judged on public facts alone.
         Effect::Surveil { target, .. } => {
             // CR 608.2b: a declared player whose target was illegal is not affected.
             let Some(player) = super::resolve_player_for_context_ref(board, ability, target) else {
                 return Some(Written::default());
             };
-            let moves: Vec<ProposedEvent> = board
-                .players
-                .iter()
-                .filter(|candidate| candidate.id == player)
-                .flat_map(|candidate| board.library_of(candidate.id).iter())
-                .map(|id| {
-                    ProposedEvent::zone_change(
-                        *id,
-                        Zone::Library,
-                        Zone::Graveyard,
-                        Some(ability.source_id),
-                    )
-                })
+            let moves: Vec<ProposedEvent> = (!board.library_of(player).is_empty())
+                .then(|| hidden_library_move(Zone::Graveyard))
+                .into_iter()
                 .collect();
-            let replaced = moves.iter().any(|event| {
-                !find_applicable_replacements(board, event, replacement_registry()).is_empty()
-            }) || replacement_may_come_to_apply(board, &moves, before);
+            let replaced = hidden_library_move_may_be_replaced(board, player, Zone::Graveyard)
+                || replacement_may_come_to_apply(board, &moves, before);
             (!replaced).then(|| Written {
                 moved_from: vec![Zone::Library],
                 ..Written::changed()
@@ -684,9 +676,88 @@ fn replacement_may_apply(
     bound: &ResolvedAbility,
     acted_on: &[TargetRef],
 ) -> bool {
-    proposed_events(board, bound, acted_on)
-        .iter()
-        .any(|event| !find_applicable_replacements(board, event, replacement_registry()).is_empty())
+    let hidden_move_replaced =
+        non_mill_library_edge_destination(&bound.effect).is_some_and(|destination| {
+            acted_on.iter().any(|target| {
+                matches!(target, TargetRef::Player(player)
+                    if hidden_library_move_may_be_replaced(board, *player, destination))
+            })
+        });
+    hidden_move_replaced
+        || proposed_events(board, bound, acted_on).iter().any(|event| {
+            !find_applicable_replacements(board, event, replacement_registry()).is_empty()
+        })
+}
+
+/// CR 701.17a: where a `Mill` node moves cards off its player's library edge
+/// without milling them (a bottom-edge move, Cellar Door; Grenzo, Dungeon
+/// Warden; or a top-edge move to a zone other than the graveyard), the zone
+/// they go to.
+fn non_mill_library_edge_destination(effect: &Effect) -> Option<Zone> {
+    match effect {
+        Effect::Mill {
+            destination,
+            position,
+            ..
+        } if !super::mill::is_mill_move(*destination, position) => Some(*destination),
+        _ => None,
+    }
+}
+
+/// A move of an unnamed card from a library to `destination`. `ObjectId(0)`
+/// names no object: it stands for a card in a hidden zone, which no answer may
+/// tell apart (see `hidden_library_move_may_be_replaced`).
+fn hidden_library_move(destination: Zone) -> ProposedEvent {
+    ProposedEvent::zone_change(ObjectId(0), Zone::Library, destination, None)
+}
+
+/// CR 400.2 + CR 401.2 + CR 614.1: whether a replacement effect may apply to
+/// moving a card from `player`'s library to `destination`, where the library
+/// is a face-down pile in a hidden zone and so which card moves is not public.
+/// The answer reads only public facts (the library's size, the game's format,
+/// and the replacement effects of objects in public zones), so neither the
+/// order nor the membership of the pile can change it.
+///
+/// The moved card's characteristics are unknown, so any replacement that could
+/// apply to some card may apply. A definition is set aside only on facts that
+/// need no knowledge of that card: its event kind, its destination zone, and
+/// a `valid_card` that names its own host, which sits in a public zone and so
+/// is not the hidden card. The replacements of objects in hidden zones are not
+/// public. The moved card's own are among them, and one that declares no
+/// zones does not function from the library (CR 113.6), so the resolver does
+/// not admit it either. The exception is a card's own entry replacement
+/// (CR 614.12), so a move onto the battlefield is always answered as possibly
+/// replaced.
+fn hidden_library_move_may_be_replaced(
+    board: &GameState,
+    player: PlayerId,
+    destination: Zone,
+) -> bool {
+    if board.library_of(player).is_empty() {
+        return false;
+    }
+    match destination {
+        // CR 614.12: the moved card's own entry replacements apply as it
+        // enters, and those are hidden.
+        Zone::Battlefield => return true,
+        // CR 903.9b: a commander put into a hand or library may be put into
+        // the command zone instead; whether one is in the pile is not read.
+        Zone::Hand | Zone::Library if board.format_config.command_zone => return true,
+        _ => {}
+    }
+    let event = hidden_library_move(destination);
+    let registry = replacement_registry();
+    active_replacements(board).any(|(_, host, definition)| {
+        host.zone.is_public()
+            && replacement_functions_in_zone(host, definition)
+            && definition
+                .destination_zone
+                .is_none_or(|zone| zone == destination)
+            && !matches!(definition.valid_card, Some(TargetFilter::SelfRef))
+            && registry
+                .get(&definition.event)
+                .is_some_and(|handler| (handler.matcher)(&event, host.id, board))
+    })
 }
 
 /// The events `bound`'s resolver proposes to the replacement pipeline for what
@@ -802,36 +873,19 @@ fn proposed_events(
             .collect(),
         // CR 701.17a: only a top-edge move into a graveyard is a mill, so only it
         // proposes `Mill`. Any other edge (Cellar Door; Grenzo, Dungeon Warden)
-        // is an ordinary library→zone move whose card meets the per-card
-        // `Moved` replacements, as the resolver proposes it.
-        //
-        // CR 401.2 + CR 400.2: the library is a face-down pile in a hidden zone,
-        // so which card sits on that edge is not public. The projection stands
-        // for the moved card with every card of the pile: a replacement that
-        // could apply to any of them may apply to the move. The answer then
-        // depends only on the pile, never on which hidden card is on the edge.
+        // is an ordinary library→zone move of a hidden card, which
+        // `replacement_may_apply` judges through
+        // `hidden_library_move_may_be_replaced` rather than by naming a card.
         Effect::Mill {
             destination,
             position,
             ..
-        } => players
-            .flat_map(|player_id| {
-                if super::mill::is_mill_move(*destination, position) {
-                    vec![ProposedEvent::Mill {
-                        player_id,
-                        count: 1,
-                        destination: *destination,
-                        applied: Default::default(),
-                    }]
-                } else {
-                    board
-                        .library_of(player_id)
-                        .iter()
-                        .map(|&id| {
-                            ProposedEvent::zone_change(id, Zone::Library, *destination, source)
-                        })
-                        .collect()
-                }
+        } if super::mill::is_mill_move(*destination, position) => players
+            .map(|player_id| ProposedEvent::Mill {
+                player_id,
+                count: 1,
+                destination: *destination,
+                applied: Default::default(),
             })
             .collect(),
         Effect::PutCounter { counter_type, .. } | Effect::MultiplyCounter { counter_type, .. } => {

@@ -3521,6 +3521,77 @@ fn a_node_below_a_surveil_whose_cards_a_replacement_may_move_acts_on_nothing() {
     }
 }
 
+const DRYAD_MILITANT: &str = "({G/W} can be paid with either {G} or {W}.)\nIf an instant or sorcery card would be put into a graveyard from anywhere, exile it instead.";
+
+#[test]
+fn a_node_below_a_surveil_reads_no_hidden_library_card() {
+    // CR 400.2 + CR 401.2: the surveilled card is face down in the library, so
+    // whether Dryad Militant may exile it is judged without reading it. With
+    // Dryad Militant the damage below the surveil answers nothing whether the
+    // top card is an instant or not; without it the damage is answered either way.
+    for dryad in [false, true] {
+        for top_is_instant in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let aimed = scenario.add_creature(P0, "Aimed", 3, 3).id();
+            if dryad {
+                scenario.add_creature_from_oracle(P0, "Dryad Militant", 2, 1, DRYAD_MILITANT);
+            }
+            let mut runner = scenario.build();
+            let state = runner.state_mut();
+            let top = {
+                let card = CardId(state.next_object_id);
+                create_object(state, card, PlayerId(1), "Top".to_string(), Zone::Library)
+            };
+            if top_is_instant {
+                let object = state.objects.get_mut(&top).expect("the top card");
+                object.card_types.core_types.push(CoreType::Instant);
+                object.base_card_types = object.card_types.clone();
+            }
+            let source = spell_object(state, PlayerId(1));
+            let mut surveil = node(surveil_one(), Vec::new(), source);
+            surveil.sub_ability = Some(Box::new(node(
+                damage_one(),
+                vec![TargetRef::Object(aimed)],
+                source,
+            )));
+            let entry = push_spell(state, PlayerId(1), surveil);
+            let answer = reach(runner.state(), entry)
+                .last()
+                .expect("the damage node")
+                .2
+                .clone();
+            if dryad {
+                assert!(answer.is_empty(), "top is an instant: {top_is_instant}");
+            } else {
+                assert_eq!(
+                    answer,
+                    vec![TargetRef::Object(aimed)],
+                    "reach guard: without Dryad Militant the damage is answered, top is an instant: {top_is_instant}"
+                );
+            }
+            if !dryad {
+                continue;
+            }
+            // Engine agreement: Dryad Militant exiles the surveilled card only
+            // when it is an instant.
+            let mut runner = resolve_raw(runner.state().clone());
+            runner
+                .act(GameAction::SelectCards { cards: Vec::new() })
+                .expect("put the card into the graveyard");
+            assert_eq!(
+                runner.state().objects.get(&top).map(|o| o.zone),
+                Some(if top_is_instant {
+                    Zone::Exile
+                } else {
+                    Zone::Graveyard
+                }),
+                "top is an instant: {top_is_instant}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_destroy_below_a_regeneration_of_its_object_acts_on_nothing() {
     for regenerate in [false, true] {

@@ -653,3 +653,119 @@ fn cellar_door_stack_reach_is_invariant_to_the_hidden_bottom_card() {
         "which hidden card is on the bottom must not change stack reach"
     );
 }
+
+/// Verbatim printed Oracle text (Scryfall): a per-card graveyard redirect
+/// whose subject reads the moved card's card type.
+const DRYAD_MILITANT: &str = "({G/W} can be paid with either {G} or {W}.)\nIf an instant or sorcery card would be put into a graveyard from anywhere, exile it instead.";
+
+/// Where P1's three-card library holds an instant, if anywhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HiddenInstant {
+    Absent,
+    Bottom,
+    Middle,
+}
+
+/// Cellar Door on the stack targeting P1, whose three-card library holds an
+/// instant where `instant` says and fillers elsewhere, with Dryad Militant on
+/// P0's battlefield when `dryad`. Returns the runner, Cellar Door, and P1's
+/// bottom card.
+fn stage_hidden_library(dryad: bool, instant: HiddenInstant) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let cellar_door = scenario
+        .add_artifact_from_oracle(P0, "Cellar Door", CELLAR_DOOR)
+        .id();
+    if dryad {
+        scenario.add_creature_from_oracle(P0, "Dryad Militant", 2, 1, DRYAD_MILITANT);
+    }
+    // `add_*_to_library_top` seats each card at the top (CR 401.2), so the
+    // first card added ends up bottommost.
+    let slots = [HiddenInstant::Bottom, HiddenInstant::Middle];
+    let mut bottom = None;
+    for (index, slot) in slots.iter().enumerate() {
+        let id = if *slot == instant {
+            scenario.add_spell_to_library_top(P1, "Shock", true).id()
+        } else {
+            scenario.add_card_to_library_top(P1, &format!("{FILLER} {index}"))
+        };
+        bottom.get_or_insert(id);
+    }
+    scenario.add_card_to_library_top(P1, &format!("{FILLER} top"));
+    let mut runner = scenario.build();
+    announce_cellar_door(&mut runner, cellar_door, P1);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the activation must stop with the ability on the stack"
+    );
+    (runner, cellar_door, bottom.expect("a bottom card"))
+}
+
+/// CR 400.2 + CR 401.2 + CR 614.1: stack reach judges Cellar Door's hidden
+/// bottom-card move on public facts only. Dryad Militant may exile the moved
+/// card, since an instant may be on the bottom, so with it on the board the
+/// move answers nothing however the face-down pile is made up; without it the
+/// move acts on the chosen player whatever the pile holds.
+#[test]
+fn cellar_door_stack_reach_reads_no_hidden_library_membership() {
+    let layouts = [
+        HiddenInstant::Absent,
+        HiddenInstant::Bottom,
+        HiddenInstant::Middle,
+    ];
+    for dryad in [false, true] {
+        let expected = if dryad {
+            Vec::new()
+        } else {
+            vec![TargetRef::Player(P1)]
+        };
+        for instant in layouts {
+            let (runner, cellar_door, bottom) = stage_hidden_library(dryad, instant);
+            // Reach guard: the layouts really differ in the hidden pile.
+            let state = runner.state();
+            let instant_count = state.players[1]
+                .library
+                .iter()
+                .filter(|id| state.objects[*id].name == "Shock")
+                .count();
+            assert_eq!(
+                instant_count,
+                usize::from(instant != HiddenInstant::Absent),
+                "{instant:?}"
+            );
+            assert_eq!(
+                state.objects[&bottom].name == "Shock",
+                instant == HiddenInstant::Bottom,
+                "{instant:?}"
+            );
+            assert_eq!(
+                mill_node_reach(&runner, cellar_door),
+                expected,
+                "Dryad Militant {dryad}, hidden instant {instant:?}"
+            );
+        }
+    }
+
+    // Live controls: Dryad Militant really exiles a bottom instant, and an
+    // ordinary bottom card still reaches the graveyard beside it, so the
+    // conservative public answer covers both private outcomes.
+    for (instant, zone) in [
+        (HiddenInstant::Bottom, Zone::Exile),
+        (HiddenInstant::Absent, Zone::Graveyard),
+    ] {
+        let (mut runner, _, bottom) = stage_hidden_library(true, instant);
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().objects[&bottom].zone, zone, "{instant:?}");
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
