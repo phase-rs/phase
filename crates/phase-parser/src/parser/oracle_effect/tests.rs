@@ -100985,7 +100985,7 @@ fn self_named_damage_to_that_player_keeps_accepting_player_binding() {
 #[test]
 fn unless_damage_that_much_binds_to_primary_damage_amount() {
     let text = "Craig Boone deals damage equal to the number of quest counters on it to up to one target creature unless that creature's controller has Craig Boone deal that much damage to them.";
-    let def = parse_effect_chain(text, AbilityKind::Triggered);
+    let def = parse_effect_chain(text, AbilityKind::Spell);
     let primary_amount = match def.effect.as_ref() {
         Effect::DealDamage { amount, .. } => amount,
         other => panic!("expected primary DealDamage, got {other:?}"),
