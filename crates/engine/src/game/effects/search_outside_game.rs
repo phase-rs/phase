@@ -183,6 +183,7 @@ pub(crate) fn put_face_up_exile_into(
     let ctx = change_zone::ChangeZoneIterationCtx {
         source_id,
         controller,
+        performed_by: controller,
         origin: Some(Zone::Exile),
         destination,
         enter_transformed: false,
@@ -406,6 +407,7 @@ mod tests {
         );
         ability.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,

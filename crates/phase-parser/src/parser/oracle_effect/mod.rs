@@ -122,7 +122,7 @@ use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::{ClauseGapKind, OracleDiagnostic};
 use crate::types::ability::{
     effect_has_stack_target_declaration, effect_owns_resolution_zone_choice,
-    effect_parent_ref_slot_count, effect_refs_parent_target, effect_requires_parent_target_object,
+    effect_parent_ref_slot_count, effect_requires_parent_target_object,
     extract_target_filter_from_effect, instruction_object_reach, payer_is_declared_target,
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
     AttachCardinality, AttachSelection, AttackSubject, BounceSelection, CardPlayMode,
@@ -3656,6 +3656,7 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
     let exile_effect = AbilityDefinition::new(
         kind,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: TargetFilter::SelfRef,
@@ -3785,6 +3786,7 @@ pub fn leave_battlefield_exile_replacement() -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -4234,6 +4236,7 @@ fn parse_enter_from_zone_redirect_replacement(norm_lower: &str) -> Option<Effect
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: None,
                 destination,
                 target: TargetFilter::SelfRef,
@@ -6859,6 +6862,7 @@ fn try_parse_self_name_exile(
     let rest = TextPair::new(rest_orig, rest_lower);
     if rest.original.trim().eq_ignore_ascii_case(card_name) {
         return Some(parsed_clause(Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Exile,
             target: TargetFilter::SelfRef,
@@ -6921,6 +6925,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             other => other,
         };
         Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: mass_target,
@@ -6935,6 +6940,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
         }
     } else {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             // Creatures leave the battlefield; spells leave the stack (issue #4384).
             origin: None,
             destination: Zone::Exile,
@@ -7045,6 +7051,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     let return_effect = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Battlefield,
             target: TargetFilter::TriggeringSource,
@@ -9236,6 +9243,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
         sub_ability: Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
                 target: TargetFilter::Any,
@@ -14556,6 +14564,7 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<ParsedEffectClause> {
         clause.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::LastCreated,
@@ -18651,6 +18660,7 @@ fn build_aura_attach_clause(
     // The effect-chain assembler recognizes the typed nested anaphora and sets
     // that flag during ordinary lowering.
     let mut root = parsed_clause(Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: Some(Zone::Graveyard),
         destination: Zone::Battlefield,
         target: root_target,
@@ -19811,6 +19821,7 @@ fn parse_threshold_land_balance_ir(
     let delivery = AbilityDefinition::new(
         kind,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
             target: TargetFilter::ParentTarget,
@@ -20057,6 +20068,7 @@ fn parse_uneven_land_search_ir(
     let delivery = AbilityDefinition::new(
         kind,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Library),
             destination,
             target: TargetFilter::ParentTarget,
@@ -22350,6 +22362,7 @@ fn try_parse_put_one_exiled_card_into_hand(
     clause.sub_ability = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Exile),
             destination: Zone::Hand,
             target: TargetFilter::Any,
@@ -22397,6 +22410,7 @@ fn try_parse_return_opponent_choice_from_graveyard(text: &str) -> Option<ParsedE
     clause.sub_ability = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Hand,
             target: TargetFilter::Any,
@@ -25810,6 +25824,7 @@ fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<Pars
     // Routing the terminal node through the common constructor keeps compound
     // and single-subject forms on the same prospective-subject authority.
     let sub_effect = Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: None,
         destination: Zone::Library,
         target: second,
@@ -25840,6 +25855,7 @@ fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<Pars
 
     // Build ChangeZone for the first subject as the primary effect
     let primary_effect = Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: None,
         destination: Zone::Library,
         target: first,
@@ -27580,6 +27596,40 @@ fn parsed_clause_targets_self_ref(clause: &ParsedEffectClause) -> bool {
 }
 
 /// `reference` is consulted only when a player anaphor is actually rewritten.
+/// CR 608.2c + CR 400.3 + CR 108.3: after "return … to its owner's hand", a
+/// later "that player" / "their" in the same chain names that owner. The
+/// generic anaphor lowering reads such a player as the parent target's
+/// controller (or, in a trigger, the event's player); rebind every such player
+/// slot of the clause — the instruction's player, its performer, and the
+/// controller/owner scope of its object filter — to the parent target's owner.
+fn rebind_returned_objects_controller_to_owner(effect: &mut Effect) {
+    fn rebind(filter: &mut TargetFilter) {
+        match filter {
+            TargetFilter::ParentTargetController | TargetFilter::TriggeringPlayer => {
+                *filter = TargetFilter::ParentTargetOwner;
+            }
+            TargetFilter::Typed(typed) => {
+                if typed.controller == Some(ControllerRef::ParentTargetController) {
+                    typed.controller = Some(ControllerRef::ParentTargetOwner);
+                }
+                for prop in &mut typed.properties {
+                    if let FilterProp::Owned { controller } = prop {
+                        if *controller == ControllerRef::ParentTargetController {
+                            *controller = ControllerRef::ParentTargetOwner;
+                        }
+                    }
+                }
+            }
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter_mut().for_each(rebind);
+            }
+            TargetFilter::Not { filter } => rebind(filter),
+            _ => {}
+        }
+    }
+    each_target_filter_mut(effect, &mut rebind);
+}
+
 fn replace_player_anaphor(effect: &mut Effect, mut reference: impl FnMut() -> TargetFilter) {
     each_target_filter_mut(effect, &mut |filter| {
         if matches!(
@@ -29255,7 +29305,7 @@ fn selection_filter_excludes_anaphor_noun(noun: &AnaphorNoun, filter: &TargetFil
 /// CR 608.2c: whether any node of the clause reads its parent's target
 /// (`ParentTarget`, `ParentTargetController`, `ParentTargetOwner`, …).
 fn clause_refs_parent_target(clause: &ClauseIr) -> bool {
-    clause_nodes(clause).any(|(effect, _, _)| effect_refs_parent_target(effect))
+    clause_nodes(clause).any(|(effect, _, _)| effect_parent_ref_slot_count(effect) > 0)
 }
 
 /// CR 115.1 + CR 608.2b: a target the choice clause itself announces besides
@@ -29407,7 +29457,7 @@ fn intervening_object_could_be_anaphor(
         .collect();
     let reader_node = nodes
         .iter()
-        .rposition(|&(c, effect, _)| c == reader && effect_refs_parent_target(effect))
+        .rposition(|&(c, effect, _)| c == reader && effect_parent_ref_slot_count(effect) > 0)
         .unwrap_or(nodes.len());
     let mut after_choice = false;
     for &(c, effect, timing) in nodes.get(skipped_nodes..reader_node).unwrap_or_default() {
@@ -30628,6 +30678,19 @@ fn chain_has_prior_player_target_referent(clauses: &[ClauseIr]) -> bool {
     chain_prior_player_declaration(clauses).is_some()
 }
 
+/// CR 608.2c: the player the nearest earlier clause of the chain names, as the
+/// antecedent of a later "that player".
+enum PriorPlayerAntecedent<'a> {
+    /// CR 115.1: a clause that announced a player target ("target opponent
+    /// reveals …"), named through the chain's declared-player reference.
+    Declared(&'a ClauseIr),
+    /// CR 506.2 / CR 608.2c: a clause whose player is the defending player or
+    /// the player a per-player scope iterates ("defending player reveals …",
+    /// "each player reveals …"); it announces no target, so a later "that
+    /// player" names the same reference.
+    Reference(TargetFilter),
+}
+
 /// The nearest earlier clause that announces a player, reached only through
 /// clauses that read the same referent, name the controller ("you"), or announce an
 /// object of their own: none of them names another player (CR 608.2c). Each
@@ -30636,6 +30699,59 @@ fn chain_has_prior_player_target_referent(clauses: &[ClauseIr]) -> bool {
 /// clause follows; "that player" and "<object> that player controls" take
 /// players only and read the walk as is.
 fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
+    match chain_prior_player_antecedent(clauses)? {
+        PriorPlayerAntecedent::Declared(clause) => Some(clause),
+        PriorPlayerAntecedent::Reference(_) => None,
+    }
+}
+
+/// CR 608.2c: the defending-player or scoped-player reference of the nearest
+/// earlier player-naming clause, for a later "that player" whose chain
+/// announced no player target.
+fn chain_prior_player_reference(clauses: &[ClauseIr]) -> Option<TargetFilter> {
+    match chain_prior_player_antecedent(clauses)? {
+        PriorPlayerAntecedent::Reference(reference) => Some(reference),
+        PriorPlayerAntecedent::Declared(_) => None,
+    }
+}
+
+/// CR 506.2 + CR 608.2c: the one defending-player or scoped-player reference
+/// among the clause's own slots, the player it acts through when it announces
+/// none.
+fn clause_player_reference(effect: &Effect) -> Option<TargetFilter> {
+    let mut found: Option<TargetFilter> = None;
+    let mut ambiguous = false;
+    each_target_filter_mut(&mut effect.clone(), &mut |filter| {
+        if matches!(
+            filter,
+            TargetFilter::DefendingPlayer | TargetFilter::ScopedPlayer
+        ) {
+            match &found {
+                Some(seen) if seen != filter => ambiguous = true,
+                _ => found = Some(filter.clone()),
+            }
+        }
+    });
+    found.filter(|_| !ambiguous)
+}
+
+/// CR 608.2c: a clause that names no player other than the controller: the
+/// controller's own selection among cards the chain already showed ("You
+/// choose one of those cards", Taster of Wares) or a power/toughness change,
+/// which only a creature has (CR 208.1). A later "that player" reads past it.
+fn clause_names_no_other_player(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ChooseFromZone {
+            chooser: crate::types::ability::ZoneChoiceChooser::Controller,
+            ..
+        } | Effect::Pump { .. }
+    )
+}
+
+/// The shared walk behind `chain_prior_player_declaration` and
+/// `chain_prior_player_reference`.
+fn chain_prior_player_antecedent(clauses: &[ClauseIr]) -> Option<PriorPlayerAntecedent<'_>> {
     for prev in clauses.iter().rev() {
         if prev.condition.is_some() {
             return None;
@@ -30654,7 +30770,7 @@ fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
             continue;
         }
         if clause_announces_player(&prev.parsed.effect) {
-            return Some(prev);
+            return Some(PriorPlayerAntecedent::Declared(prev));
         }
         if matches!(
             prev.parsed.effect.target_filter(),
@@ -30665,10 +30781,13 @@ fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
                     | TargetFilter::Controller
             )
         ) || has_typed_target_widened(&prev.parsed.effect)
+            || clause_names_no_other_player(&prev.parsed.effect)
         {
             continue;
         }
-        return None;
+        // CR 506.2 + CR 608.2c: a clause that names its player through the
+        // defending-player or scoped-player reference ends the walk with it.
+        return clause_player_reference(&prev.parsed.effect).map(PriorPlayerAntecedent::Reference);
     }
     None
 }
@@ -31607,6 +31726,13 @@ fn lower_subject_predicate_ast_body(
                         }
                     }
                     sync_player_into_nested_shuffle_sub(&mut clause, &TargetFilter::ParentTarget);
+                    // CR 608.2c: the targeted subject performs the nested move;
+                    // inside the wrapper it is the parent target.
+                    stamp_subject_actor(
+                        &mut clause.effect,
+                        clause.sub_ability.as_deref_mut(),
+                        &TargetFilter::ParentTarget,
+                    );
                     let mut sub_ability =
                         AbilityDefinition::new(AbilityKind::Spell, clause.effect.clone());
                     sub_ability.sub_ability = clause.sub_ability;
@@ -31733,6 +31859,16 @@ fn lower_subject_predicate_ast_body(
                 }
             }
             inject_subject_target(&mut clause.effect, &subject, original_clause);
+            // CR 608.2c: the subject performs the zone moves its verb produced.
+            // A "that player" the chain later rebinds to its antecedent
+            // (`replace_player_anaphor`) carries the performer with it.
+            if let Some(player) = subject_player_reference(&subject) {
+                stamp_subject_actor(
+                    &mut clause.effect,
+                    clause.sub_ability.as_deref_mut(),
+                    &player,
+                );
+            }
             inject_subject_into_shared_token_sequence(&mut clause, &subject, original_clause);
             if let Some(subject_filter) = subject.target.as_ref().or(subject.affected.as_ref()) {
                 sync_player_into_nested_shuffle_sub(&mut clause, subject_filter);
@@ -33503,6 +33639,7 @@ fn lower_subject_exile_objects(
             });
     // CR 608.2f: the listed objects are exiled by one simultaneous action.
     let exile_all = Effect::ChangeZoneAll {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: None,
         destination: Zone::Exile,
         target: TargetFilter::TrackedSet {
@@ -33529,6 +33666,12 @@ fn lower_subject_exile_objects(
         target: owner_target.clone(),
     });
     clause.sub_ability = Some(Box::new(chain));
+    // CR 608.2c: the subject player exiles the listed objects.
+    stamp_subject_actor(
+        &mut clause.effect,
+        clause.sub_ability.as_deref_mut(),
+        &TargetFilter::DeclaredPlayer { group },
+    );
     clause
 }
 
@@ -33642,6 +33785,75 @@ fn bind_player_recipient_to_possessive_actor(effect: &mut Effect, actor: &Target
     }
 }
 
+/// CR 608.2c: the player a subject phrase names — its announced target, else
+/// the player it affects — or `None` when the subject names objects. The
+/// carried player is a player by construction, though `ParentTarget` can also
+/// name an object and so fails the shared predicate.
+fn subject_player_reference(subject: &SubjectPhraseAst) -> Option<TargetFilter> {
+    let filter = subject
+        .target
+        .clone()
+        .or_else(|| subject.affected.clone())?;
+    (target_filter_can_target_player(&filter)
+        || (subject.inherits_parent && filter == TargetFilter::ParentTarget))
+        .then_some(filter)
+}
+
+/// CR 608.2c: the player named as the grammatical subject of a conjugated
+/// zone-move verb ("that player exiles a card from their hand", "target player
+/// exiles all land cards from their graveyard") performs that move. Bind the
+/// parsed subject reference as the `actor` of every `ChangeZone` /
+/// `ChangeZoneAll` in the finished clause chain the subject governs: the root
+/// effect and its `sub_ability` chain, including each node's modes and else
+/// branch. An actor an inner clause already bound is left as is.
+///
+/// Only subject lowering calls this: the subject-predicate path, a subject
+/// carried to the next conjugated verb, and a subject's list of exiled
+/// objects. An imperative clause has no subject ("Exile target player's graveyard", "exile a nonland card from their
+/// library at random"), so its controller performs the move whatever player its
+/// filter names. A "you" subject is the default `Controller` actor and is not
+/// restated.
+fn stamp_subject_actor(
+    effect: &mut Effect,
+    sub_ability: Option<&mut AbilityDefinition>,
+    subject: &TargetFilter,
+) {
+    if matches!(subject, TargetFilter::Controller) {
+        return;
+    }
+    stamp_zone_move_actor(effect, subject);
+    // CR 603.12: a reflexive "when you do" ability is a separate ability with
+    // its own subject, so neither it nor what it registers is stamped; the
+    // shared walk prunes those below the first link (`OwnResolutionOnly`).
+    let Some(def) = sub_ability.filter(|def| {
+        !def.condition
+            .as_ref()
+            .is_some_and(AbilityCondition::has_when_you_do_marker)
+    }) else {
+        return;
+    };
+    let _ = crate::types::ability_visit::nodes_mut::visit_ability_def_scoped(
+        def,
+        crate::types::ability_visit::ResolutionScope::OwnResolutionOnly,
+        &mut |node| {
+            if let crate::types::ability_visit::DefinitionNodeMut::Ability(def) = node {
+                stamp_zone_move_actor(def.effect.as_mut(), subject);
+            }
+            std::ops::ControlFlow::Continue(())
+        },
+    );
+}
+
+fn stamp_zone_move_actor(effect: &mut Effect, subject: &TargetFilter) {
+    if let Effect::ChangeZone { actor, .. } | Effect::ChangeZoneAll { actor, .. } = effect {
+        if actor.is_controller() {
+            *actor = crate::types::ability::LibraryInstructionActor::Player {
+                player: subject.clone(),
+            };
+        }
+    }
+}
+
 fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, original_clause: &str) {
     // Issue #6965: no bound subject and no target means there is nothing to
     // rebind — return rather than fabricate a filter.
@@ -33675,10 +33887,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
             return;
         }
     }
-    // The carried player is a player by construction, though `ParentTarget` can
-    // also name an object and so fails the shared predicate.
-    let subject_names_player = target_filter_can_target_player(&subject_filter)
-        || (subject.inherits_parent && subject_filter == TargetFilter::ParentTarget);
+    let subject_names_player = subject_player_reference(subject).is_some();
     // CR 603.6 + CR 120.1: "that creature/permanent deals damage equal to
     // its power..." in an ETB trigger makes the triggering object, not the
     // trigger source permanent, the damage source. Keep the parsed damage
@@ -40802,6 +41011,7 @@ pub(crate) fn plural_library_shuffle_recall(lower: &str) -> bool {
 /// `Shuffle`, after every member has moved.
 fn rewrite_plural_library_recall_to_tracked_set(effect: &mut Effect) {
     if let Effect::ChangeZone {
+        actor,
         origin,
         destination: Zone::Library,
         target: TargetFilter::ParentTarget,
@@ -40809,6 +41019,9 @@ fn rewrite_plural_library_recall_to_tracked_set(effect: &mut Effect) {
     } = effect
     {
         *effect = Effect::ChangeZoneAll {
+            // CR 608.2c: the stamped subject ("they shuffle them into their
+            // library") survives the promotion to the tracked-set move.
+            actor: actor.clone(),
             origin: *origin,
             destination: Zone::Library,
             target: tracked_set_filter(),
@@ -41525,6 +41738,9 @@ pub fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mut Targe
         | Effect::Surveil { target, .. }
         | Effect::Dig { player: target, .. }
         | Effect::RevealTop { player: target, .. }
+        // CR 701.20a: the revealing player of "reveals cards … until" is the
+        // same player slot as `RevealTop`'s.
+        | Effect::RevealUntil { player: target, .. }
         | Effect::Manifest { target, .. }
         // CR 701.60a: Suspect acts on a target permanent; expose its filter so
         // anaphor rewrites (e.g. self-targeting "Otherwise, suspect it") reach it.
@@ -41538,15 +41754,21 @@ pub fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mut Targe
         // like the library owner, so an anaphor rewrite reaches both alike.
         Effect::ExileTop { player, actor, .. } => {
             f(player);
-            match actor {
-                crate::types::ability::LibraryInstructionActor::Controller
-                | crate::types::ability::LibraryInstructionActor::LibraryPlayer => {}
-                crate::types::ability::LibraryInstructionActor::Player { player } => f(player),
+            if let Some(performer) = actor.player_filter_mut() {
+                f(performer);
             }
         }
         Effect::PutCounter { target, .. } | Effect::RemoveCounter { target, .. } => f(target),
         Effect::GoadAll { target } => f(target),
-        Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => f(target),
+        // CR 608.2c: the move's named performer is rewritten with the moved
+        // objects, so a rebind of "that player" (a replaced draw's drawer, a
+        // scoped seat) reaches who performs the move as well as what moves.
+        Effect::ChangeZone { target, actor, .. } | Effect::ChangeZoneAll { target, actor, .. } => {
+            f(target);
+            if let Some(performer) = actor.player_filter_mut() {
+                f(performer);
+            }
+        }
         Effect::LoseLife {
             target: Some(target),
             ..
@@ -45523,6 +45745,7 @@ fn parse_for_each_attacker_copy_blocker_ir(
     let exile = AbilityDefinition::new(
         kind,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: TargetFilter::LastCreated,
@@ -45676,6 +45899,7 @@ fn parse_return_target_and_same_name_from_your_graveyard_ir(
         .clause(
             first_source,
             parsed_clause(Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Graveyard),
                 destination,
                 target,
@@ -45702,6 +45926,7 @@ fn parse_return_target_and_same_name_from_your_graveyard_ir(
         .clause(
             second_source,
             parsed_clause(Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Graveyard),
                 destination,
                 target: TargetFilter::Typed(TypedFilter::default().properties(vec![
@@ -46175,6 +46400,7 @@ fn parse_reciprocal_graveyard_choice_ir(text: &str, kind: AbilityKind) -> Option
     let mut tail = AbilityDefinition::new(
         kind,
         Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
             target: TargetFilter::TrackedSet {
@@ -50635,11 +50861,15 @@ fn parse_effect_chain_ir_body(
                     )
                 })
                 .flatten();
-            inject_subject_target(
-                &mut clause.effect,
-                &carried.subject_phrase(declared_player),
-                normalized_text,
-            );
+            let subject = carried.subject_phrase(declared_player);
+            inject_subject_target(&mut clause.effect, &subject, normalized_text);
+            if let Some(player) = subject_player_reference(&subject) {
+                stamp_subject_actor(
+                    &mut clause.effect,
+                    clause.sub_ability.as_deref_mut(),
+                    &player,
+                );
+            }
         }
         if nom_primitives::scan_contains(&text.to_lowercase(), "villainous choice") {
             if let (Effect::ChooseOneOf { chooser, .. }, Some(scope)) =
@@ -50946,6 +51176,35 @@ fn parse_effect_chain_ir_body(
                 )
                 .unwrap_or(TargetFilter::ParentTarget)
             });
+        } else if has_player_anaphoric_reference(&text_lower) {
+            // CR 506.2 + CR 608.2c: "defending player reveals the top card of
+            // their library. If it's a land card, that player puts it into
+            // their hand" (Goblin Guide), "each player reveals … that player
+            // puts it into their hand" (Conundrum Sphinx): with no announced
+            // target, "that player" names the reference the earlier clause
+            // acted through, not the trigger event's player.
+            if let Some(reference) = chain_prior_player_reference(builder.clauses()) {
+                replace_player_anaphor(&mut clause.effect, || reference.clone());
+            }
+        }
+        // CR 608.2c + CR 400.3: "Return target nonland permanent to its owner's
+        // hand, then that player exiles a card from their hand" (Ashiok,
+        // Nightmare Muse), "… Then that player discards a card" (Recoil): the
+        // only player the returning clause names is the permanent's OWNER, whose
+        // hand it goes to, so "that player" and "their" are the owner, not the
+        // permanent's controller.
+        if has_player_anaphoric_reference(&text_lower)
+            && builder.clauses().last().is_some_and(|prev| {
+                matches!(
+                    &prev.parsed.effect,
+                    Effect::Bounce {
+                        destination: None,
+                        ..
+                    }
+                )
+            })
+        {
+            rebind_returned_objects_controller_to_owner(&mut clause.effect);
         }
         // CR 608.2c + CR 115.1: "You look at the top two cards of THEIR library"
         // after a clause that announced a player target ("Target opponent looks
@@ -53038,6 +53297,7 @@ fn try_parse_put_zone_change_parts(
                 let random_order = scan_contains_phrase(after.lower, "in a random order");
                 return Some((
                     Effect::ChangeZoneAll {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         origin,
                         destination,
                         target,
@@ -53058,6 +53318,7 @@ fn try_parse_put_zone_change_parts(
             }
             return Some((
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     origin,
                     destination,
                     target,
@@ -55415,6 +55676,9 @@ pub mod test_helpers {
 
 #[cfg(test)]
 mod reveal_this_way_tests;
+
+#[cfg(test)]
+mod subject_actor_tests;
 
 #[cfg(test)]
 mod gendered_still_type_tests {

@@ -195,6 +195,7 @@ fn an_explicit_entry_counter_survives_a_face_down_entry() {
 
     let ability = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             destination: Zone::Battlefield,
             origin: Some(Zone::Hand),

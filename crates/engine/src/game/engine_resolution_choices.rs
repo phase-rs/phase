@@ -793,6 +793,7 @@ fn deliver_search_found_event(
 ) -> bool {
     let crate::types::proposed_event::ProposedEvent::SearchFound {
         object_id,
+        searcher,
         disposition,
         ..
     } = event
@@ -813,11 +814,18 @@ fn deliver_search_found_event(
     };
     let move_result = super::zone_pipeline::move_object(
         state,
+        // CR 608.2c: the searcher's exile records the searcher. No ownership
+        // input, as before: `performer` names nobody off Exile, and an exile
+        // never rebinds entry ownership.
         super::zone_pipeline::ZoneMoveRequest::effect(
             object_id,
             disposition.destination,
             disposition.source.object_id,
-        ),
+        )
+        .actors(super::zone_pipeline::MoveActors {
+            performed_by: disposition.performer(searcher),
+            ownership_actor: None,
+        }),
         events,
     );
     match move_result {
@@ -7015,6 +7023,7 @@ pub(super) fn handle_resolution_choice(
                 is_cost_payment,
                 enters_modified_if,
                 duration,
+                performed_by,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
@@ -7686,6 +7695,9 @@ pub(super) fn handle_resolution_choice(
                         let ctx = effects::change_zone::ChangeZoneIterationCtx {
                             source_id,
                             controller: player,
+                            // CR 608.2c: the performer resolved before the
+                            // pause; a save without it credits the chooser.
+                            performed_by: performed_by.unwrap_or(player),
                             origin: Some(origin),
                             destination: dest_zone,
                             enter_transformed,
@@ -7770,6 +7782,7 @@ pub(super) fn handle_resolution_choice(
                                         remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
+                                        performed_by: ctx.performed_by,
                                         // EffectZoneChoice can select across multiple
                                         // origins (for example, hand and graveyard).
                                         // The paused object's origin must not become
@@ -7849,6 +7862,7 @@ pub(super) fn handle_resolution_choice(
                                         remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
+                                        performed_by: ctx.performed_by,
                                         // EffectZoneChoice can select across multiple
                                         // origins (for example, hand and graveyard).
                                         // The paused object's origin must not become
@@ -8176,6 +8190,7 @@ pub(super) fn handle_resolution_choice(
                     let ctx = effects::change_zone::ChangeZoneIterationCtx {
                         source_id,
                         controller: player,
+                        performed_by: player,
                         origin: Some(zone),
                         destination: dest_zone,
                         enter_transformed,
@@ -8269,6 +8284,7 @@ pub(super) fn handle_resolution_choice(
                                         remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
+                                        performed_by: ctx.performed_by,
                                         origin: ctx.origin,
                                         destination: ctx.destination,
                                         enter_transformed: ctx.enter_transformed,
@@ -8321,6 +8337,7 @@ pub(super) fn handle_resolution_choice(
                                         remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
+                                        performed_by: ctx.performed_by,
                                         origin: ctx.origin,
                                         destination: ctx.destination,
                                         enter_transformed: ctx.enter_transformed,
@@ -13187,6 +13204,7 @@ mod tests {
         let execute = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination,
@@ -13283,6 +13301,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination,
@@ -13417,6 +13436,7 @@ mod tests {
         );
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Exile,
@@ -14096,6 +14116,7 @@ mod tests {
         );
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
@@ -14410,6 +14431,7 @@ mod tests {
         );
         let printed_destination = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
@@ -15380,6 +15402,7 @@ mod tests {
         ));
 
         let waiting = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards: vec![eligible],
             count: 1,
@@ -15492,6 +15515,7 @@ mod tests {
                 rider.set_optional_effect_performed_recursive(!pick);
                 state.park_ability_continuation(PendingContinuation::new(Box::new(rider), &state));
                 let waiting = WaitingFor::EffectZoneChoice {
+                    performed_by: None,
                     player: PlayerId(0),
                     cards: vec![eligible],
                     count: 1,
@@ -16109,6 +16133,7 @@ mod random_result_resolution_context_tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(origin),
                 destination,

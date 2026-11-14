@@ -326,6 +326,7 @@ fn opponent_library_bottom_order_prompts_owner_and_applies_submitted_order() {
 
     let ability = ResolvedAbility::new(
         Effect::ChangeZoneAll {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Library),
             destination: Zone::Library,
             target: TargetFilter::LastRevealed,

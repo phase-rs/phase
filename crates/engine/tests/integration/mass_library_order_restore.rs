@@ -82,6 +82,7 @@ fn real_single_owner_mass_library_order_state(
     }
     let ability = ResolvedAbility::new(
         Effect::ChangeZoneAll {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             origin: Some(origin),
             destination: Zone::Library,
             target,

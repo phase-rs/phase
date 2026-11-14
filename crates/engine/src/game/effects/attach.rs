@@ -1114,6 +1114,7 @@ fn park_resolution_attachment_choice(
     let mut operation = ability.clone();
     let tail = operation.sub_ability.take();
     let waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: ability.controller,
         cards,
         count: bounds.max,
@@ -2992,6 +2993,7 @@ mod tests {
         );
         ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
