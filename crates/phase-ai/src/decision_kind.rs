@@ -149,6 +149,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::ManifestDreadChoice { .. }
         | WaitingFor::BetweenGamesSideboard { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. }
         | WaitingFor::NamedChoice { .. }
         | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }

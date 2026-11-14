@@ -29263,19 +29263,6 @@ mod tests {
     /// payload and stamp `optional_player`, and the recipient authority must
     /// honour the stamp.
     ///
-    /// It lives HERE rather than beside either the parser test or the authority
-    /// it calls, because two independent source censuses pin
-    /// `optional_prompt_player` call sites and this is the only home neither
-    /// miscounts:
-    ///   * `f2c_the_cr_603_5_conjunct_set_has_one_production_assembler` scans the
-    ///     whole crate and excludes inline `#[cfg(test)]` module spans (this
-    ///     one) but not a `mod.rs`-declared `tests.rs`;
-    ///   * `the_cr_603_5_prompt_census_is_pinned_so_a_sixth_producer_is_a_counted_event`
-    ///     counts every code-half occurrence in `game/effects/mod.rs` with no
-    ///     test exclusion at all.
-    ///
-    /// Neither guard was weakened to place this test.
-    ///
     /// CR 603.7d fixes the delayed ability's controller as the caster, which is
     /// exactly why the pre-fix routing was wrong rather than coincidentally so.
     /// The matched negative below differs from the positive in exactly the stamp

@@ -1134,6 +1134,7 @@ fn enter_battlefield_with_etb(
         enter_tapped: Default::default(),
         enters_attacking: false,
         enter_with_counters: vec![],
+        enter_with_grants: vec![],
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,
@@ -1143,6 +1144,7 @@ fn enter_battlefield_with_etb(
         enter_with_choices: None,
         discard_frame: None,
         performed_by: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         applied: HashSet::new(),
     };
     // CR 306.5b + CR 310.4b + CR 614.1c: seed the intrinsic enters-with
