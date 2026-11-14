@@ -1733,6 +1733,22 @@ pub enum StaticMode {
     /// text — CR 702.170f itself has no land/nonland clause), exactly as
     /// `TopOfLibraryHasPlot` carries its grant scope.
     TopOfLibraryPlotPermission,
+    /// CR 601.2a + CR 116.2a + CR 611.2c: Resolution-created permission letting
+    /// the permission's holder play (`Play`: lands and spells) or cast (`Cast`:
+    /// spells only) cards from ANOTHER player's hand — Sen Triplets: "You may
+    /// play lands and cast spells from that player's hand this turn."
+    ///
+    /// Lives only on a player-scoped transient continuous effect: the TCE's
+    /// `controller` is the holder and its `affected` filter names the eligible
+    /// cards (in-hand, owned by the resolution-frozen player). CR 611.2c: the
+    /// effect modifies no characteristics, so the eligible set is re-read at
+    /// every cast/play attempt — a card that reaches that hand later in the
+    /// duration is covered. The caster pays the card's normal costs and
+    /// controls the spell (CR 601.2a); a land played this way is the holder's
+    /// land play (CR 305.2) and enters under the holder's control (CR 110.2).
+    HandPlayPermission {
+        play_mode: CardPlayMode,
+    },
     /// CR 601.2b + CR 118.9a: Static ability granting permission to cast matching
     /// spells without paying their mana costs. `Unlimited` = Omniscience,
     /// Tamiyo emblem, Dracogenesis. `OncePerTurn` = Zaffai and the Tempests.
@@ -2542,6 +2558,7 @@ pub enum StaticModeKind {
     TopOfLibraryCastPermission,
     TopOfLibraryHasPlot,
     TopOfLibraryPlotPermission,
+    HandPlayPermission,
     CastFromHandFree,
     ExileCastPermission,
     LinkedCollectionCounterPlayPermission,
@@ -2707,6 +2724,7 @@ impl StaticMode {
             }
             StaticMode::TopOfLibraryHasPlot => StaticModeKind::TopOfLibraryHasPlot,
             StaticMode::TopOfLibraryPlotPermission => StaticModeKind::TopOfLibraryPlotPermission,
+            StaticMode::HandPlayPermission { .. } => StaticModeKind::HandPlayPermission,
             StaticMode::CastFromHandFree { .. } => StaticModeKind::CastFromHandFree,
             StaticMode::ExileCastPermission { .. } => StaticModeKind::ExileCastPermission,
             StaticMode::LinkedCollectionCounterPlayPermission => {
@@ -2877,6 +2895,7 @@ impl StaticMode {
             | StaticMode::TopOfLibraryCastPermission { .. }
             | StaticMode::TopOfLibraryHasPlot
             | StaticMode::TopOfLibraryPlotPermission
+            | StaticMode::HandPlayPermission { .. }
             | StaticMode::CastFromHandFree { .. }
             | StaticMode::ExileCastPermission { .. }
             | StaticMode::CountersPersistAcrossZones { .. }
@@ -3102,6 +3121,7 @@ impl Hash for StaticMode {
                 play_mode.hash(state);
                 frequency.hash(state);
             }
+            StaticMode::HandPlayPermission { play_mode } => play_mode.hash(state),
             StaticMode::CastFromHandFree { frequency, origin } => {
                 frequency.hash(state);
                 origin.hash(state);
@@ -3261,6 +3281,7 @@ impl StaticMode {
             | StaticMode::TopOfLibraryCastPermission { .. }
             | StaticMode::TopOfLibraryHasPlot
             | StaticMode::TopOfLibraryPlotPermission
+            | StaticMode::HandPlayPermission { .. }
             | StaticMode::CastFromHandFree { .. }
             | StaticMode::ExileCastPermission { .. }
             | StaticMode::CountersPersistAcrossZones { .. }
@@ -3538,6 +3559,9 @@ impl fmt::Display for StaticMode {
             // the Display payload.
             StaticMode::TopOfLibraryHasPlot => write!(f, "TopOfLibraryHasPlot"),
             StaticMode::TopOfLibraryPlotPermission => write!(f, "TopOfLibraryPlotPermission"),
+            StaticMode::HandPlayPermission { play_mode } => {
+                write!(f, "HandPlayPermission({play_mode})")
+            }
             StaticMode::CastFromHandFree { frequency, origin } => {
                 if matches!(origin, CastFreeOrigin::Hand) {
                     write!(f, "CastFromHandFree({frequency})")
@@ -4108,6 +4132,14 @@ impl FromStr for StaticMode {
             // payload to parse.
             "TopOfLibraryHasPlot" => StaticMode::TopOfLibraryHasPlot,
             "TopOfLibraryPlotPermission" => StaticMode::TopOfLibraryPlotPermission,
+            s if s.starts_with("HandPlayPermission(") => s
+                .strip_prefix("HandPlayPermission(")
+                .and_then(|s| s.strip_suffix(')'))
+                .and_then(|mode| mode.parse().ok())
+                .map_or_else(
+                    || StaticMode::Other(s.to_string()),
+                    |play_mode| StaticMode::HandPlayPermission { play_mode },
+                ),
             "CastFromHandFree" => StaticMode::CastFromHandFree {
                 frequency: CastFrequency::Unlimited,
                 origin: CastFreeOrigin::Hand,
@@ -5018,6 +5050,13 @@ mod tests {
             // not Display (FromStr defaults `extra_cost` to None, mirroring
             // `TopOfLibraryCastPermission.alt_cost`). The payload round-trip is
             // covered by `serde_roundtrip` instead.
+            // Resolution-created other-hand permission (Sen Triplets).
+            StaticMode::HandPlayPermission {
+                play_mode: CardPlayMode::Play,
+            },
+            StaticMode::HandPlayPermission {
+                play_mode: CardPlayMode::Cast,
+            },
             // Cast-from-hand-free permissions (Omniscience; Zaffai).
             StaticMode::CastFromHandFree {
                 frequency: CastFrequency::Unlimited,

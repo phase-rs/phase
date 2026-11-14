@@ -1887,6 +1887,23 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                                     remainder_lower_for_loses.as_str(),
                                 )
                                 .is_ok();
+                        // CR 116.2a + CR 601.2a: "play lands and cast spells from
+                        // that player's hand" (Sen Triplets) is ONE permission over
+                        // one zone: the land and spell verbs share the "from <hand>"
+                        // source, so the " and " is internal to the instruction owned
+                        // by `try_parse_other_hand_play_permission`.
+                        let coordinated_hand_play_conjunct = all_consuming((
+                            opt(tag::<_, _, OracleError<'_>>("you may ")),
+                            tag("play lands"),
+                        ))
+                        .parse(before_lower.trim())
+                        .is_ok()
+                            && (
+                                tag::<_, _, OracleError<'_>>("cast spells"),
+                                tag(" from that player's hand"),
+                            )
+                                .parse(remainder_lower_for_loses.as_str())
+                                .is_ok();
                         let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
                         && !sacrifice_rest_remainder)
                         || is_inside_temporal_prefix(&before_lower)
@@ -1907,6 +1924,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || mass_exile_union_continuation
                         || loses_all_other_card_types_continuation
                         || shared_equal_to_quantity_conjunct
+                        || coordinated_hand_play_conjunct
                         || inside_prefix_comma_and_continuation;
                         if !suppress && starts_bare_and_clause(remainder_trimmed) {
                             push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
@@ -2780,6 +2798,10 @@ fn starts_prefix_clause(current_lower: &str) -> bool {
         // the body on the parsed condition) sees the comma, not the chunker.
         tag("during any turn "),
         tag("during a turn "),
+        // CR 611.2a: a bare leading "This turn, <effect>" duration (Sen
+        // Triplets). Anchored to the whole pre-comma chunk so a clause that only
+        // STARTS with "this turn" is not latched.
+        value("", (tag("this turn"), eof)),
     ))
     .parse(current_lower)
     .is_ok()
