@@ -353,21 +353,45 @@ fn hedron_blade_parses_colorless_threshold_unbatched() {
     assert_eq!(trigger.valid_card, Some(TargetFilter::AttachedTo));
 }
 
-/// Fail closed: every tail or subject this change does not model stays unparsed.
+/// Fail closed: every tail or subject this change does not model stays
+/// unparsed. Each line keeps exactly one trigger, `Unknown`, carrying the
+/// unmodelled condition (an empty result or a parsed mode both fail).
 #[test]
 fn unmodelled_threshold_shapes_stay_unparsed() {
-    for line in [
-        "Whenever this creature becomes blocked by exactly two creatures, it gains deathtouch until end of turn.",
-        "Whenever this creature becomes blocked by two or fewer creatures, it gains deathtouch until end of turn.",
-        "Whenever this creature becomes blocked by two or more creatures this turn, it gains deathtouch until end of turn.",
-        "Whenever one or more creatures you control become blocked by two or more creatures, draw a card.",
-        "Whenever a creature attacking one of your opponents dies, draw a card.",
-        "Whenever a creature attacking your opponents and/or planeswalkers they control becomes blocked, draw a card.",
+    for (line, condition_tail) in [
+        (
+            "Whenever this creature becomes blocked by exactly two creatures, it gains deathtouch until end of turn.",
+            "becomes blocked by exactly two creatures",
+        ),
+        (
+            "Whenever this creature becomes blocked by two or fewer creatures, it gains deathtouch until end of turn.",
+            "becomes blocked by two or fewer creatures",
+        ),
+        (
+            "Whenever this creature becomes blocked by two or more creatures this turn, it gains deathtouch until end of turn.",
+            "becomes blocked by two or more creatures this turn",
+        ),
+        (
+            "Whenever one or more creatures you control become blocked by two or more creatures, draw a card.",
+            "one or more creatures you control become blocked by two or more creatures",
+        ),
+        (
+            "Whenever a creature attacking one of your opponents dies, draw a card.",
+            "a creature attacking one of your opponents dies",
+        ),
+        (
+            "Whenever a creature attacking your opponents and/or planeswalkers they control becomes blocked, draw a card.",
+            "a creature attacking your opponents and/or planeswalkers they control becomes blocked",
+        ),
     ] {
         let triggers = parse_triggers(line);
+        assert_eq!(triggers.len(), 1, "{line} => {triggers:?}");
+        let TriggerMode::Unknown(fragment) = &triggers[0].mode else {
+            panic!("{line} parsed as {:?}", triggers[0].mode);
+        };
         assert!(
-            triggers.iter().all(|t| matches!(t.mode, TriggerMode::Unknown(_))),
-            "{line} => {triggers:?}"
+            fragment.ends_with(condition_tail),
+            "{line}: unparsed fragment {fragment:?}"
         );
     }
 }
