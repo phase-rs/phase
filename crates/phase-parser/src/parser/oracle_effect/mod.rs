@@ -35398,7 +35398,7 @@ fn strip_balanced_outer_quotes(s: &str) -> &str {
 /// `trigger_zones = [Zone::Command]`. Replaces (never extends) the zones the
 /// static-line parser declared for the same text on a permanent (for example
 /// `keyword_grant`'s CR 113.6 `[Battlefield]` on `CastWithKeyword`): an emblem
-/// exists only in the command zone (CR 114.1).
+/// is put into the command zone (CR 114.2) and is never a permanent (CR 114.5).
 fn declare_emblem_static_zones(statics: &mut [StaticDefinition]) {
     for static_def in statics {
         static_def.active_zones = vec![Zone::Command];
