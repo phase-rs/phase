@@ -4070,6 +4070,9 @@ fn score_candidates_core_for_root(
     }
 
     let prepared = prepare_payment_candidates(state, ctx.candidates.clone());
+    if let Some(seeds) = crate::policies::payment_surplus_seeds(state, &prepared) {
+        services.context.payment_surplus.seed(seeds);
+    }
     let prepared = services.validate_prepared_candidates(state, prepared);
     let gated = gate_prepared_candidates(
         state,

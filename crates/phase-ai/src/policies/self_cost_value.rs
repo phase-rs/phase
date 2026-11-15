@@ -81,10 +81,11 @@
 //! (CR 602.2b), and any spend permission (CR 609.4b) are not certified and stay
 //! neutral.
 
-use engine::ai_support::SurplusManaActivation;
-use engine::types::ability::AbilityTag;
+use engine::ai_support::{AppliedActivation, PaymentSurplusSeeds, SurplusManaActivation};
+use engine::types::ability::{AbilityDefinition, AbilityTag};
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
+use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
 use super::context::PolicyContext;
@@ -99,6 +100,7 @@ use super::self_cost::{
 use crate::cast_facts::mana_activation_ability;
 use crate::decision_kind::classify as classify_decision;
 use crate::features::DeckFeatures;
+use crate::planner::PreparedCandidate;
 
 /// At or above this priced self-cost, a trivial-benefit activation is a real
 /// loss and is rejected. Below it, a trivial-benefit activation is only
@@ -283,12 +285,47 @@ impl TacticalPolicy for SelfCostValuePolicy {
     }
 }
 
+/// The mana activation the payment arm prices: `action` activates a mana
+/// ability whose cost spends a self-resource.
+fn payment_arm_activation(
+    state: &GameState,
+    action: &GameAction,
+) -> Option<(ObjectId, AbilityDefinition)> {
+    mana_activation_ability(state, action)
+        .filter(|(_, ability)| ability.cost.as_ref().is_some_and(self_cost_in_scope))
+}
+
+/// The root's witnessed successors of the activations the payment arm prices,
+/// as certificate seeds, so the certificate reads each one instead of applying
+/// the activation again. `None` when the decision has none.
+pub(crate) fn payment_surplus_seeds(
+    state: &GameState,
+    prepared: &[PreparedCandidate],
+) -> Option<PaymentSurplusSeeds> {
+    let applied: Vec<_> = prepared
+        .iter()
+        .filter(|prepared| payment_arm_activation(state, &prepared.candidate.action).is_some())
+        .filter_map(|prepared| {
+            Some((
+                prepared.candidate.action.clone(),
+                AppliedActivation {
+                    state: prepared.payment_successor.clone()?,
+                    trace: prepared.payment_trace.clone()?,
+                },
+            ))
+        })
+        .collect();
+    (!applied.is_empty()).then(|| PaymentSurplusSeeds::new(state, applied))
+}
+
 /// The payment-step arm: a self-cost mana activation the engine certifies as
 /// surplus (`ai_support::PaymentSurplusDecision`) is rejected, provided the
 /// decision's pass — the finisher the certificate relies on — is itself an
 /// admissible (finite) row under `registry`. Everything else is neutral. The
 /// certificate's decision-level work (the finisher and the mana actions offered
-/// after it) is prepared once per decision on `AiContext::payment_surplus`.
+/// after it) is prepared once per decision on `AiContext::payment_surplus`,
+/// seeded with the activations the root already applied
+/// ([`payment_surplus_seeds`]).
 ///
 /// Each surplus activation is an independent softmax trial at every payment
 /// step, so this is the repeatable-candidate shape the module docs' law covers:
@@ -303,15 +340,11 @@ pub(crate) fn payment_surplus_verdict(
     if !ctx.at_root() {
         return neutral("self_cost_payment_surplus_na");
     }
-    let Some((source_id, ability)) = mana_activation_ability(ctx.state, &ctx.candidate.action)
+    let Some((source_id, ability)) = payment_arm_activation(ctx.state, &ctx.candidate.action)
     else {
         return neutral("self_cost_payment_surplus_na");
     };
-    let Some(cost) = ability
-        .cost
-        .as_ref()
-        .filter(|cost| self_cost_in_scope(cost))
-    else {
+    let Some(cost) = ability.cost.as_ref() else {
         return neutral("self_cost_payment_surplus_na");
     };
     let features = ctx
@@ -3797,6 +3830,36 @@ mod tests {
             &payment_surplus_verdict(&ctx, PolicyRegistry::shared()),
             "self_cost_payment_surplus_na",
         );
+    }
+
+    /// The production root path seeds the certificate with the activations its
+    /// payment witness already applied: one Easy `score_candidates` on the T1
+    /// decision makes one preparation, it was offered seeds, and the surplus
+    /// Ogre row is rejected.
+    #[test]
+    fn root_scoring_seeds_the_certificate_with_witnessed_activations() {
+        use crate::config::{create_config, AiDifficulty, Platform};
+        use crate::context::{PAYMENT_SURPLUS_PREPARATIONS, PAYMENT_SURPLUS_SEEDED_PREPARATIONS};
+
+        let (state, _, candidate) = saturated_payment_decision();
+        PAYMENT_SURPLUS_PREPARATIONS.with(|count| count.set(0));
+        PAYMENT_SURPLUS_SEEDED_PREPARATIONS.with(|count| count.set(0));
+        let scored = crate::search::score_candidates(
+            &state,
+            AI,
+            &create_config(AiDifficulty::Easy, Platform::Native),
+        );
+        assert_eq!(PAYMENT_SURPLUS_PREPARATIONS.with(std::cell::Cell::get), 1);
+        assert_eq!(
+            PAYMENT_SURPLUS_SEEDED_PREPARATIONS.with(std::cell::Cell::get),
+            1
+        );
+        let ogre = scored
+            .iter()
+            .find(|(action, _)| *action == candidate.action)
+            .map(|(_, score)| *score)
+            .expect("reach: the Ogre activation is scored");
+        assert_eq!(ogre, f64::NEG_INFINITY);
     }
 
     /// The arm prepares the certificate's decision-level work once per

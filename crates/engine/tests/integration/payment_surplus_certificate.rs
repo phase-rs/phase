@@ -13,10 +13,12 @@
 
 use engine::ai_support::{
     finalizes_in_one_step, surplus_mana_activation, surplus_mana_activation_with_counters,
-    units_spend_equivalent, PaymentSurplusDecision, SurplusCertificateCounters,
-    SurplusManaActivation, SurplusNotCertified,
+    units_spend_equivalent, witness_payment_continuations, AppliedActivation,
+    PaymentSurplusDecision, PaymentSurplusSeeds, SurplusCertificateCounters, SurplusManaActivation,
+    SurplusNotCertified, WitnessedStepTrace,
 };
 use engine::game::casting::activated_ability_definitions;
+use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::mana_sources::activatable_mana_actions_for_player;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
@@ -216,9 +218,204 @@ fn certificate_direct_apply_counts() {
     );
     assert_eq!((saturated.applies, saturated.offer_enumerations), (3, 1));
 
+    // Seeded with the root witness's successor, the certificate reads the
+    // activation instead of applying it: the finisher and the finisher after.
+    let state = runner.state();
+    let mut seeded = SurplusCertificateCounters::default();
+    let decision = PaymentSurplusDecision::prepare_with_counters(
+        state,
+        Some(witnessed_seed(state, &ogre_activation(ogre))),
+        &mut seeded,
+    );
+    assert_eq!(
+        decision.certify_with_counters(state, &ogre_activation(ogre), &mut seeded),
+        Surplus
+    );
+    assert_eq!((seeded.applies, seeded.offer_enumerations), (2, 1));
+
     let mut pass = SurplusCertificateCounters::default();
     surplus_mana_activation_with_counters(runner.state(), &GameAction::PassPriority, &mut pass);
     assert_eq!((pass.applies, pass.offer_enumerations), (0, 0));
+}
+
+/// The root payment witness's accepted successor of `activation`, as a
+/// certificate seed. Reach: the witness accepts it, and its step is the one a
+/// fresh simulation apply takes — the same events, deferred-trigger queue
+/// length before, payment step, pool and deferred queue after.
+fn witnessed_seed(state: &GameState, activation: &GameAction) -> PaymentSurplusSeeds {
+    let accepted = witness_payment_continuations(state, std::slice::from_ref(activation))
+        .successors
+        .into_iter()
+        .next()
+        .flatten()
+        .unwrap_or_else(|| panic!("reach: the root witness accepts {activation:?}"));
+    let mut fresh = state.clone();
+    let deferred_triggers_before = fresh.deferred_triggers.len();
+    let result = apply_as_current_for_simulation(&mut fresh, activation.clone())
+        .expect("a fresh apply of the activation succeeds");
+    assert_eq!(
+        accepted.trace,
+        WitnessedStepTrace {
+            events: result.events,
+            deferred_triggers_before,
+        },
+        "the witnessed step trace is a fresh apply's"
+    );
+    assert_eq!(accepted.state.waiting_for, fresh.waiting_for);
+    assert_eq!(
+        accepted.state.deferred_triggers.len(),
+        fresh.deferred_triggers.len()
+    );
+    for (witnessed, fresh) in accepted.state.players.iter().zip(&fresh.players) {
+        assert_eq!(
+            witnessed.mana_pool.units().collect::<Vec<_>>(),
+            fresh.mana_pool.units().collect::<Vec<_>>(),
+            "the witnessed pool is a fresh apply's"
+        );
+    }
+    PaymentSurplusSeeds::new(
+        state,
+        vec![(
+            activation.clone(),
+            AppliedActivation {
+                state: accepted.state,
+                trace: accepted.trace,
+            },
+        )],
+    )
+}
+
+/// Seeded and unseeded certificates agree — with each other and the one-shot —
+/// and the seed replaces exactly the activation's apply whenever the
+/// certificate reaches that step (`seed_saves`).
+fn assert_seeded_agrees(
+    state: &GameState,
+    activation: &GameAction,
+    expected: SurplusManaActivation,
+    seed_saves: usize,
+) {
+    let mut unseeded_work = SurplusCertificateCounters::default();
+    let unseeded = PaymentSurplusDecision::prepare_with_counters(state, None, &mut unseeded_work)
+        .certify_with_counters(state, activation, &mut unseeded_work);
+    let mut seeded_work = SurplusCertificateCounters::default();
+    let seeded = PaymentSurplusDecision::prepare_with_counters(
+        state,
+        Some(witnessed_seed(state, activation)),
+        &mut seeded_work,
+    )
+    .certify_with_counters(state, activation, &mut seeded_work);
+    assert_eq!(unseeded, expected, "unseeded {activation:?}");
+    assert_eq!(seeded, expected, "seeded {activation:?}");
+    assert_eq!(surplus_mana_activation(state, activation), expected);
+    assert_eq!(
+        unseeded_work.applies - seeded_work.applies,
+        seed_saves,
+        "{activation:?}"
+    );
+}
+
+/// The seeded and unseeded certificates give identical verdicts across the
+/// refusal classes the activation step feeds: the CR 603.2 trigger check
+/// (Vilis), a colour choice (Blood Celebrant), deferral (Q7), finisher
+/// divergence (Nivmagus) and Surplus, for both the `ActivateAbility` and the
+/// indexed `TapLandForMana` forms.
+#[test]
+fn seeded_and_unseeded_certificates_agree() {
+    let (runner, ogre) = saturated_unsubstantiate(|_| {});
+    assert_seeded_agrees(runner.state(), &ogre_activation(ogre), Surplus, 1);
+
+    let (runner, ogre) = saturated_unsubstantiate(|sc| {
+        sc.with_library_top(P0, &LIBRARY);
+        sc.add_creature(P0, "Vilis, Broker of Blood", 8, 8)
+            .from_oracle_text_with_keywords(&["Flying"], VILIS);
+    });
+    assert_seeded_agrees(
+        runner.state(),
+        &ogre_activation(ogre),
+        NotCertified(SurplusNotCertified::QueuesTrigger),
+        1,
+    );
+
+    let (runner, celebrant) = celebrant_board();
+    assert_seeded_agrees(
+        runner.state(),
+        &celebrant,
+        NotCertified(SurplusNotCertified::NotSingleUnitReturn),
+        1,
+    );
+
+    let (runner, islet) = islet_board();
+    assert_seeded_agrees(runner.state(), &islet, Surplus, 1);
+
+    for (hand, expected) in [
+        (
+            NivmagusHand::Alone,
+            NotCertified(SurplusNotCertified::FinisherDiverges),
+        ),
+        (NivmagusHand::WithLightningBolt, Surplus),
+    ] {
+        let (runner, ogre) = nivmagus_board(hand);
+        assert_seeded_agrees(runner.state(), &ogre_activation(ogre), expected, 1);
+    }
+
+    for (sacrifice, expected, seed_saves) in [
+        (
+            HarrowSacrifice::Ruins,
+            NotCertified(SurplusNotCertified::DeferralUnavailable),
+            0,
+        ),
+        (HarrowSacrifice::Wastes, Surplus, 1),
+    ] {
+        let board = refractor_harrow_board(sacrifice);
+        let b_red = GameAction::ActivateAbility {
+            source_id: board.refractor_b,
+            ability_index: board.ruins_red_index,
+            payment_mode: CastPaymentMode::Auto,
+        };
+        assert_seeded_agrees(board.runner.state(), &b_red, expected, seed_saves);
+    }
+}
+
+/// The certificate reads the seed rather than applying the activation: a seed
+/// whose successor isn't the activation's (the decision's own state, with no
+/// new unit) changes the verdict. Seeds made for another decision are dropped.
+#[test]
+fn certificate_reads_the_seeded_successor() {
+    let (runner, ogre) = saturated_unsubstantiate(|_| {});
+    let state = runner.state();
+    let misread = PaymentSurplusSeeds::new(
+        state,
+        vec![(
+            ogre_activation(ogre),
+            AppliedActivation {
+                state: state.clone(),
+                trace: WitnessedStepTrace {
+                    events: Vec::new(),
+                    deferred_triggers_before: state.deferred_triggers.len(),
+                },
+            },
+        )],
+    );
+    assert_eq!(
+        PaymentSurplusDecision::prepare_seeded(state, misread)
+            .certify(state, &ogre_activation(ogre)),
+        NotCertified(SurplusNotCertified::NotSingleUnitReturn)
+    );
+
+    let mut later = GameRunner::from_state(state.clone());
+    act(&mut later, ogre_activation(ogre));
+    let foreign = witnessed_seed(state, &ogre_activation(ogre));
+    let mut work = SurplusCertificateCounters::default();
+    let decision =
+        PaymentSurplusDecision::prepare_with_counters(later.state(), Some(foreign), &mut work);
+    assert_eq!(
+        decision.certify_with_counters(later.state(), &ogre_activation(ogre), &mut work),
+        Surplus
+    );
+    assert_eq!(
+        work.applies, 3,
+        "a seed for another decision is dropped, so the activation is applied"
+    );
 }
 
 /// A prepared decision does the finisher and the offered-mana-action
@@ -233,7 +430,7 @@ fn prepared_decision_does_the_finisher_work_once() {
     let state = runner.state();
 
     let mut preparation = SurplusCertificateCounters::default();
-    let decision = PaymentSurplusDecision::prepare_with_counters(state, &mut preparation);
+    let decision = PaymentSurplusDecision::prepare_with_counters(state, None, &mut preparation);
     assert_eq!(
         (preparation.applies, preparation.offer_enumerations),
         (1, 1)
@@ -504,10 +701,9 @@ fn omnath_unspent_mana_reader_refuses_the_certificate() {
     );
 }
 
-/// T8 (refusal control): Blood Celebrant's mana opens a colour choice, so the
-/// activation doesn't return to the payment step with one new unit.
-#[test]
-fn blood_celebrant_colour_choice_is_not_a_single_unit_return() {
+/// The T8 board: the Island and a Swamp pay Unsubstantiate's {1}{U}. Returns
+/// Blood Celebrant's mana action.
+fn celebrant_board() -> (GameRunner, GameAction) {
     let mut sc = GameScenario::new();
     sc.at_phase(Phase::PreCombatMain);
     let bears = sc.add_creature(P1, "Grizzly Bears", 2, 2).id();
@@ -535,6 +731,14 @@ fn blood_celebrant_colour_choice_is_not_a_single_unit_return() {
     );
     produce(&mut runner, &[(island, None), (swamps[0], None)]);
     let activation = mana_action(runner.state(), celebrant, None);
+    (runner, activation)
+}
+
+/// T8 (refusal control): Blood Celebrant's mana opens a colour choice, so the
+/// activation doesn't return to the payment step with one new unit.
+#[test]
+fn blood_celebrant_colour_choice_is_not_a_single_unit_return() {
+    let (runner, activation) = celebrant_board();
     assert_eq!(
         certificate(&runner, &activation),
         NotCertified(SurplusNotCertified::NotSingleUnitReturn)
@@ -602,11 +806,9 @@ fn islet_blue_for_suntouched_myr_is_unsaturated() {
     );
 }
 
-/// T7: two Fiery Islets each tapped for {R} (pinned). Their units are
-/// spend-equivalent once both are tapped — the state the finisher spends from —
-/// so the second {R} is a surplus.
-#[test]
-fn second_fiery_islet_red_is_surplus() {
+/// The T7 board: the Island and the first Fiery Islet's {R} (pinned by the
+/// payment step) pay Words of Wisdom. Returns the second Islet's {R} action.
+fn islet_board() -> (GameRunner, GameAction) {
     let mut sc = GameScenario::new();
     sc.at_phase(Phase::PreCombatMain);
     sc.with_library_top(P0, &LIBRARY);
@@ -628,6 +830,15 @@ fn second_fiery_islet_red_is_surplus() {
         matches!(&second, GameAction::TapLandForMana { selection } if selection.ability_index.is_some()),
         "reach: the Islet's costed ability is an indexed TapLandForMana: {second:?}"
     );
+    (runner, second)
+}
+
+/// T7: two Fiery Islets each tapped for {R} (pinned). Their units are
+/// spend-equivalent once both are tapped — the state the finisher spends from —
+/// so the second {R} is a surplus.
+#[test]
+fn second_fiery_islet_red_is_surplus() {
+    let (runner, second) = islet_board();
     assert_eq!(certificate(&runner, &second), Surplus);
 }
 
@@ -777,7 +988,16 @@ fn chromatic_orrery_permission_refuses_an_all_red_pool() {
     );
 }
 
-fn nivmagus_board(with_bolt: bool) -> (GameRunner, ObjectId) {
+/// What else P0 holds on the Nivmagus board.
+#[derive(Clone, Copy)]
+enum NivmagusHand {
+    /// Nivmagus Elemental is the only card in hand.
+    Alone,
+    /// Lightning Bolt's {R} demand joins it.
+    WithLightningBolt,
+}
+
+fn nivmagus_board(hand: NivmagusHand) -> (GameRunner, ObjectId) {
     let mut sc = GameScenario::new();
     sc.at_phase(Phase::PreCombatMain);
     let island = sc.add_basic_land(P0, ManaColor::Blue);
@@ -786,9 +1006,12 @@ fn nivmagus_board(with_bolt: bool) -> (GameRunner, ObjectId) {
         .add_creature_to_hand_from_oracle(P0, "Nivmagus Elemental", 1, 2, NIVMAGUS_ELEMENTAL)
         .with_mana_cost(cost(vec![ManaCostShard::BlueRed], 0))
         .id();
-    if with_bolt {
-        sc.add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, LIGHTNING_BOLT)
-            .with_mana_cost(cost(vec![ManaCostShard::Red], 0));
+    match hand {
+        NivmagusHand::Alone => {}
+        NivmagusHand::WithLightningBolt => {
+            sc.add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, LIGHTNING_BOLT)
+                .with_mana_cost(cost(vec![ManaCostShard::Red], 0));
+        }
     }
     let mut runner = sc.build();
     cast_to_payment(&mut runner, nivmagus, Answers::default());
@@ -803,7 +1026,7 @@ fn nivmagus_board(with_bolt: bool) -> (GameRunner, ObjectId) {
 /// while capacity (1) is already met.
 #[test]
 fn nivmagus_hybrid_flip_refuses_as_finisher_divergence() {
-    let (runner, ogre) = nivmagus_board(false);
+    let (runner, ogre) = nivmagus_board(NivmagusHand::Alone);
     assert_eq!(
         certificate(&runner, &ogre_activation(ogre)),
         NotCertified(SurplusNotCertified::FinisherDiverges)
@@ -814,7 +1037,7 @@ fn nivmagus_hybrid_flip_refuses_as_finisher_divergence() {
 /// both finishers, so the extra red is a surplus.
 #[test]
 fn nivmagus_with_bolt_in_hand_keeps_the_finisher() {
-    let (runner, ogre) = nivmagus_board(true);
+    let (runner, ogre) = nivmagus_board(NivmagusHand::WithLightningBolt);
     assert_eq!(certificate(&runner, &ogre_activation(ogre)), Surplus);
 }
 

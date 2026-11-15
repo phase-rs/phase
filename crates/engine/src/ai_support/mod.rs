@@ -77,7 +77,7 @@ pub use payment_continuation::{
     witness_payment_continuations, witness_targeted_cast_offer, AcceptedPaymentSuccessor,
     PaymentContinuationBatch, PaymentContinuationBatchStatus, PaymentContinuationIndeterminate,
     PaymentContinuationRoot, PaymentContinuationState, PaymentContinuationStep,
-    PaymentContinuationUnsupported, TargetedCastVerdict, TargetedCastWitness,
+    PaymentContinuationUnsupported, TargetedCastVerdict, TargetedCastWitness, WitnessedStepTrace,
     PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS, PAYMENT_CONTINUATION_MAX_ROOTS,
     TARGETED_CAST_OFFER_MAX_REDUCER_ATTEMPTS,
 };
@@ -86,7 +86,8 @@ pub use payment_continuation::{
     witness_payment_continuations_with_counters, PaymentContinuationWitnessCounters,
 };
 pub use payment_surplus::{
-    surplus_mana_activation, PaymentSurplusDecision, SurplusManaActivation, SurplusNotCertified,
+    surplus_mana_activation, AppliedActivation, PaymentSurplusDecision, PaymentSurplusSeeds,
+    SurplusManaActivation, SurplusNotCertified,
 };
 #[cfg(feature = "test-support")]
 pub use payment_surplus::{

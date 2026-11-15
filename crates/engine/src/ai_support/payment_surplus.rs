@@ -19,15 +19,19 @@
 //! Work: the decision's half ([`PaymentSurplusDecision::prepare`]) is one
 //! direct reducer application (the finisher) plus one enumeration of the mana
 //! actions the payer is offered afterwards; each activation adds at most two
-//! direct applications. Those counts are direct applications, not total work:
+//! direct applications, or one when it is seeded with the successor the root's
+//! payment-continuation witness already applied. Those counts are direct
+//! applications, not total work:
 //! the enumeration runs a readiness simulation for every costed mana source the
 //! payer controls, so a caller certifying every activation of one decision
 //! prepares it once.
 
+use std::borrow::Cow;
+
 use crate::ai_support::activates_mana_ability;
 use crate::ai_support::payment_continuation::{
     classify_payment_continuation, finalizes_in_one_step, PaymentContinuationRoot,
-    PaymentContinuationState,
+    PaymentContinuationState, WitnessedStepTrace,
 };
 use crate::game::casting::{
     activated_ability_definitions, cast_payment_mana_spend_permission, mana_spent_source_snapshot,
@@ -161,7 +165,7 @@ fn one_shot(
     let (spell_id, payer) = carrier(state)?;
     mana_activation(state, activation)?;
     let prepared = prepare(state, spell_id, payer, on_work)?;
-    certify_prepared(state, &prepared, activation, on_work)
+    certify_prepared(state, &prepared, activation, None, on_work)
 }
 
 /// The decision-level half of the certificate: the carrier, the finisher's
@@ -169,11 +173,45 @@ fn one_shot(
 /// is offered in S0. It depends only on the payment decision, so a caller
 /// certifying every activation offered at that decision prepares it once —
 /// one reducer application and one offered-mana-action enumeration — and each
-/// [`Self::certify`] adds at most two direct applications.
+/// [`Self::certify`] adds at most two direct applications: one when the
+/// activation was seeded already applied ([`Self::prepare_seeded`]).
 #[derive(Debug, Clone)]
 pub struct PaymentSurplusDecision {
     binding: DecisionBinding,
     prepared: Result<PreparedPayment, SurplusNotCertified>,
+    /// Activations already applied to a copy of the decision's state.
+    applied: Vec<(GameAction, AppliedActivation)>,
+}
+
+/// A mana activation already applied to a copy of a payment decision's state,
+/// with that reducer step's trace, so [`PaymentSurplusDecision::certify`] reads
+/// it instead of applying the activation again. The root's payment-continuation
+/// witness keeps one for every candidate it accepts
+/// (`AcceptedPaymentSuccessor`).
+#[derive(Debug, Clone)]
+pub struct AppliedActivation {
+    pub state: GameState,
+    pub trace: WitnessedStepTrace,
+}
+
+/// Already-applied activations for one payment decision, bound to that
+/// decision the same way a preparation is: [`PaymentSurplusDecision::prepare_seeded`]
+/// attaches them only to a preparation of the same decision.
+#[derive(Debug, Clone)]
+pub struct PaymentSurplusSeeds {
+    binding: DecisionBinding,
+    applied: Vec<(GameAction, AppliedActivation)>,
+}
+
+impl PaymentSurplusSeeds {
+    /// `applied` pairs each action with the result of applying it, through
+    /// the simulation reducer, to a copy of `state`.
+    pub fn new(state: &GameState, applied: Vec<(GameAction, AppliedActivation)>) -> Self {
+        Self {
+            binding: DecisionBinding::capture(state),
+            applied,
+        }
+    }
 }
 
 /// The finisher-side facts every activation of one decision is certified against.
@@ -218,22 +256,39 @@ impl DecisionBinding {
 impl PaymentSurplusDecision {
     /// Prepare `state`'s payment decision (see the type docs).
     pub fn prepare(state: &GameState) -> Self {
-        Self::prepare_counting(state, &mut |_| {})
+        Self::prepare_counting(state, None, &mut |_| {})
+    }
+
+    /// [`Self::prepare`], keeping `seeds` when they were made for the same
+    /// decision; otherwise they are dropped and every activation is applied.
+    pub fn prepare_seeded(state: &GameState, seeds: PaymentSurplusSeeds) -> Self {
+        Self::prepare_counting(state, Some(seeds), &mut |_| {})
     }
 
     #[cfg(feature = "test-support")]
     pub fn prepare_with_counters(
         state: &GameState,
+        seeds: Option<PaymentSurplusSeeds>,
         counters: &mut SurplusCertificateCounters,
     ) -> Self {
-        Self::prepare_counting(state, &mut |work| counters.record(work))
+        Self::prepare_counting(state, seeds, &mut |work| counters.record(work))
     }
 
-    fn prepare_counting(state: &GameState, on_work: &mut dyn FnMut(Work)) -> Self {
+    fn prepare_counting(
+        state: &GameState,
+        seeds: Option<PaymentSurplusSeeds>,
+        on_work: &mut dyn FnMut(Work),
+    ) -> Self {
+        let binding = DecisionBinding::capture(state);
+        let applied = seeds
+            .filter(|seeds| seeds.binding == binding)
+            .map(|seeds| seeds.applied)
+            .unwrap_or_default();
         Self {
-            binding: DecisionBinding::capture(state),
+            binding,
             prepared: carrier(state)
                 .and_then(|(spell_id, payer)| prepare(state, spell_id, payer, on_work)),
+            applied,
         }
     }
 
@@ -275,7 +330,11 @@ impl PaymentSurplusDecision {
         }
         mana_activation(state, activation)?;
         let prepared = self.prepared.as_ref().map_err(|reason| *reason)?;
-        certify_prepared(state, prepared, activation, on_work)
+        let applied = self
+            .applied
+            .iter()
+            .find_map(|(action, applied)| (action == activation).then_some(applied));
+        certify_prepared(state, prepared, activation, applied, on_work)
     }
 }
 
@@ -350,12 +409,13 @@ fn prepare(
 }
 
 /// The activation's steps against a prepared decision: deferral, the
-/// activation itself, saturation, and the finisher after it. At most two
-/// reducer applications.
+/// activation itself (read from `applied` when it was already applied),
+/// saturation, and the finisher after it. At most two reducer applications.
 fn certify_prepared(
     state: &GameState,
     prepared: &PreparedPayment,
     activation: &GameAction,
+    applied: Option<&AppliedActivation>,
     on_work: &mut dyn FnMut(Work),
 ) -> Result<(), SurplusNotCertified> {
     use SurplusNotCertified as Refused;
@@ -366,17 +426,30 @@ fn certify_prepared(
         return Err(Refused::DeferralUnavailable);
     }
 
-    // The activation itself.
-    on_work(Work::Apply);
-    let mut activated = state.clone();
-    let deferred_before = activated.deferred_triggers.len();
-    let result = apply_as_current_for_simulation(&mut activated, activation.clone())
-        .map_err(|_| Refused::NotSingleUnitReturn)?;
+    // The activation itself. A seeded successor is cloned, because the
+    // trigger check below collects into the state it reads.
+    let (mut activated, trace) = match applied {
+        Some(applied) => (applied.state.clone(), Cow::Borrowed(&applied.trace)),
+        None => {
+            on_work(Work::Apply);
+            let mut activated = state.clone();
+            let deferred_triggers_before = activated.deferred_triggers.len();
+            let result = apply_as_current_for_simulation(&mut activated, activation.clone())
+                .map_err(|_| Refused::NotSingleUnitReturn)?;
+            (
+                activated,
+                Cow::Owned(WitnessedStepTrace {
+                    events: result.events,
+                    deferred_triggers_before,
+                }),
+            )
+        }
+    };
     // CR 603.2: a non-mana trigger of the activation is its own value.
     if simulated_action_would_queue_non_mana_trigger(
         &mut activated,
-        deferred_before,
-        &result.events,
+        trace.deferred_triggers_before,
+        &trace.events,
     ) {
         return Err(Refused::QueuesTrigger);
     }

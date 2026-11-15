@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
-use engine::ai_support::PaymentSurplusDecision;
+use engine::ai_support::{PaymentSurplusDecision, PaymentSurplusSeeds};
 use engine::game::DeckEntry;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
@@ -48,26 +48,44 @@ pub struct AiContext {
 
 /// One root decision's [`PaymentSurplusDecision`]: the finisher and the
 /// offered-mana-action enumeration every activation offered at a payment step
-/// is certified against, prepared on first use. `PlannerServices` builds an
-/// `AiContext` per root decision; the preparation's own binding
+/// is certified against, prepared on first use, with the activations the root
+/// already applied ([`Self::seed`]). `PlannerServices` builds an `AiContext`
+/// per root decision; the preparation's own binding
 /// (`PaymentSurplusDecision::prepared_for`) re-prepares for any other state,
-/// so an entry is never read for a decision it wasn't made for. A clone starts
-/// empty.
+/// so an entry is never read for a decision it wasn't made for, and seeds
+/// attach only to the decision they were made for. A clone starts empty.
 #[derive(Default)]
-pub(crate) struct PaymentSurplusMemo(Mutex<Option<Arc<PaymentSurplusDecision>>>);
+pub(crate) struct PaymentSurplusMemo(Mutex<PaymentSurplusSlot>);
+
+#[derive(Default)]
+struct PaymentSurplusSlot {
+    decision: Option<Arc<PaymentSurplusDecision>>,
+    seeds: Option<PaymentSurplusSeeds>,
+}
 
 #[cfg(test)]
 thread_local! {
     /// Test witness: payment-surplus preparations made on this thread.
     pub(crate) static PAYMENT_SURPLUS_PREPARATIONS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    /// Test witness: preparations on this thread that were offered seeds.
+    pub(crate) static PAYMENT_SURPLUS_SEEDED_PREPARATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 impl PaymentSurplusMemo {
+    /// Offer the next preparation the root's already-applied activations.
+    pub(crate) fn seed(&self, seeds: PaymentSurplusSeeds) {
+        let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        slot.decision = None;
+        slot.seeds = Some(seeds);
+    }
+
     /// `state`'s prepared payment decision.
     pub(crate) fn decision(&self, state: &GameState) -> Arc<PaymentSurplusDecision> {
         let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(decision) = slot
+            .decision
             .as_ref()
             .filter(|decision| decision.prepared_for(state))
         {
@@ -75,8 +93,15 @@ impl PaymentSurplusMemo {
         }
         #[cfg(test)]
         PAYMENT_SURPLUS_PREPARATIONS.with(|count| count.set(count.get() + 1));
-        let decision = Arc::new(PaymentSurplusDecision::prepare(state));
-        *slot = Some(Arc::clone(&decision));
+        let decision = Arc::new(match slot.seeds.take() {
+            Some(seeds) => {
+                #[cfg(test)]
+                PAYMENT_SURPLUS_SEEDED_PREPARATIONS.with(|count| count.set(count.get() + 1));
+                PaymentSurplusDecision::prepare_seeded(state, seeds)
+            }
+            None => PaymentSurplusDecision::prepare(state),
+        });
+        slot.decision = Some(Arc::clone(&decision));
         decision
     }
 }
