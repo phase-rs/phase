@@ -4018,6 +4018,7 @@ fn own_exile_cast_permission(state: &GameState, obj: &GameObject, player: Player
                     frequency: CastFrequency::Unlimited,
                     extra_cost: None,
                     enters_with_counter: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     graveyard_destination_replacement: None,
                     required_cast_keyword: None,
                     pool: GraveyardPermissionPool::OwnGraveyard,
@@ -4637,51 +4638,65 @@ pub(super) fn selected_exile_alt_cost_permission_enters_with_counter(
     )
 }
 
-// CR 122.1 + CR 614.1c + CR 607.1: read the enters-with counter rider carried by
-// the STATIC cast permission (`GraveyardCastPermission` / `ExileCastPermission`)
-// that authorized this cast. The authorizing source is embedded in
-// `casting_variant` (`GraveyardPermission`/`ExilePermission { source }`) rather
-// than re-derivable from zone — by the `finalize_cast` seam the cast object is
+// CR 122.1 + CR 614.1c + CR 614.1d + CR 607.1: read the entry riders (the
+// enters-with counter, and the enters-tapped rider) carried by the STATIC cast
+// permission (`GraveyardCastPermission` / `ExileCastPermission`) that authorized
+// this cast. The authorizing source is embedded in `casting_variant`
+// (`GraveyardPermission`/`ExilePermission { source }`) rather than
+// re-derivable from zone — by the `finalize_cast` seam the cast object is
 // already on the stack, so the zone-scan resolvers can no longer be called for
 // it. The source permanent never changes zone during the cast, so reading its
-// `active_static_definitions` is safe (CR 607.1: the enters-with rider is linked
-// to the "cast a spell this way" permission on that same object).
+// `active_static_definitions` is safe (CR 607.1: the rider is linked to the
+// "cast a spell this way" permission on that same object).
 //
-// Assumes at most one counter-bearing cast permission per source — true for every
-// printed card today (Noctis / Intrepid / Leonardo each carry exactly one); if a
-// future card stacks two, `find_map` takes the first. See the field docs on
-// `StaticMode::{Graveyard,Exile}CastPermission.enters_with_counter`.
-pub(super) fn selected_static_permission_enters_with_counter(
+// Consulted only for a cast with no announcement latch; a latched cast reads
+// its riders from the latch (CR 601.2a + the Intrepid Paleontologist / Edgar,
+// Master Machinist rulings: the source need not stay under your control).
+//
+// Assumes at most one rider-bearing cast permission per source — true for every
+// printed card today (Noctis / Intrepid / Leonardo / Edgar each carry exactly
+// one); if a future card stacks two, `find_map` takes the first. See the field
+// docs on `StaticMode::{Graveyard,Exile}CastPermission.enters_with_counter` and
+// `StaticMode::GraveyardCastPermission.enter_tapped`.
+pub(super) fn selected_static_permission_entry_riders(
     state: &GameState,
     player: PlayerId,
     casting_variant: &crate::types::game_state::CastingVariant,
-) -> Option<crate::types::counter::CounterType> {
+) -> CastPermissionEntryRiders {
     use crate::types::game_state::CastingVariant;
     let (source, from_graveyard) = match casting_variant {
         CastingVariant::GraveyardPermission { source, .. } => (*source, true),
         CastingVariant::ExilePermission { source, .. } => (*source, false),
-        _ => return None,
+        _ => return CastPermissionEntryRiders::default(),
     };
     let source_obj = state.objects.get(&source);
-    fn permission_counter(def: &StaticDefinition) -> Option<crate::types::counter::CounterType> {
-        match &def.mode {
+    fn permission_riders(def: &StaticDefinition) -> Option<CastPermissionEntryRiders> {
+        let riders = match &def.mode {
             StaticMode::GraveyardCastPermission {
                 enters_with_counter,
+                enter_tapped,
                 ..
-            }
-            | StaticMode::ExileCastPermission {
+            } => CastPermissionEntryRiders {
+                counter: enters_with_counter.clone(),
+                enter_tapped: *enter_tapped,
+            },
+            StaticMode::ExileCastPermission {
                 enters_with_counter,
                 ..
-            } => enters_with_counter.clone(),
-            _ => None,
-        }
+            } => CastPermissionEntryRiders {
+                counter: enters_with_counter.clone(),
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            },
+            _ => return None,
+        };
+        (!riders.is_empty()).then_some(riders)
     }
     // Existing path (unchanged for BB3 separate-battlefield-source cards): the
     // permission still functions in zone on a source that never left the
     // battlefield during the cast.
     source_obj
         .and_then(|source_obj| {
-            active_static_definitions(state, source_obj).find_map(permission_counter)
+            active_static_definitions(state, source_obj).find_map(permission_riders)
         })
         // CR 601.3 + CR 607.1 + CR 113.6b: self-granting-permission fallback.
         // A self-granting source (Undead Sprinter — Gravecrawler shape) IS the
@@ -4689,17 +4704,17 @@ pub(super) fn selected_static_permission_enters_with_counter(
         // longer "functions in zone" (CR 113.6b) and the primary functioning-
         // abilities scan yields None. The permission that AUTHORIZED this cast
         // (CR 601.3, embedded in `casting_variant`) is a committed fact, and its
-        // enters-with rider is CR 607.1-linked to it, so read the rider directly
-        // from the printed definition — bypassing the now-zone-blocked gate.
-        // Additive: fires only when the primary path is None, so BB3 cards
-        // (Noctis / Leonardo / Intrepid) stay byte-identical. (CR 614.1c: the
-        // rider is a replacement effect applied as the object enters.)
+        // rider is CR 607.1-linked to it, so read the rider directly from the
+        // printed definition — bypassing the now-zone-blocked gate. Additive:
+        // fires only when the primary path is None, so BB3 cards (Noctis /
+        // Leonardo / Intrepid) stay byte-identical. (CR 614.1c: the rider is a
+        // replacement effect applied as the object enters.)
         .or_else(|| {
             source_obj.and_then(|source_obj| {
                 source_obj
                     .static_definitions
                     .iter_all()
-                    .find_map(permission_counter)
+                    .find_map(permission_riders)
             })
         })
         // CR 611.2a + CR 614.1c: a RESOLUTION-CREATED graveyard permission ("Until
@@ -4716,8 +4731,28 @@ pub(super) fn selected_static_permission_enters_with_counter(
             }
             transient_graveyard_permission_sources(state, player, Some(CardPlayMode::Cast))
                 .find(|candidate| candidate.source_id == source)
-                .and_then(|candidate| candidate.enters_with_counter.clone())
+                .map(|candidate| CastPermissionEntryRiders {
+                    counter: candidate.enters_with_counter.clone(),
+                    enter_tapped: candidate.enter_tapped,
+                })
+                .filter(|riders| !riders.is_empty())
         })
+        .unwrap_or_default()
+}
+
+/// CR 614.1c + CR 614.1d: the entry riders a static cast permission links to
+/// the spell cast through it ("If you cast a spell this way, that <permanent>
+/// enters with a [counter] counter on it" / "… enters tapped").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct CastPermissionEntryRiders {
+    pub(super) counter: Option<crate::types::counter::CounterType>,
+    pub(super) enter_tapped: crate::types::zones::EtbTapState,
+}
+
+impl CastPermissionEntryRiders {
+    fn is_empty(&self) -> bool {
+        self.counter.is_none() && self.enter_tapped.is_unspecified()
+    }
 }
 
 // CR 205.1b + CR 613.1d: read the enters-with type-grant rider ("… is a [type]
@@ -5592,9 +5627,13 @@ struct GraveyardPermissionSource<'a> {
     extra_cost: &'a Option<crate::types::statics::CastExtraCost>,
     /// CR 122.1 + CR 607.1: Optional "if you cast a spell this way, that creature
     /// enters with a [counter] counter on it" rider (Leonardo, Noctis). Applied at
-    /// the `finalize_cast` seam by `selected_static_permission_enters_with_counter`;
+    /// the `finalize_cast` seam by `selected_static_permission_entry_riders`;
     /// carried here so permission selection can see every rider a choice brings.
     enters_with_counter: &'a Option<crate::types::counter::CounterType>,
+    /// CR 614.1d + CR 607.1c: Optional "if you cast a spell this way, that
+    /// artifact enters tapped" rider (Edgar, Master Machinist). Latched at
+    /// announcement and written onto the spell at finalization.
+    enter_tapped: crate::types::zones::EtbTapState,
     /// CR 118.9b: the casting method this permission requires ("using its
     /// blitz ability"), or `None` when it leaves the method open, including the
     /// printed cost.
@@ -5852,7 +5891,7 @@ fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePer
                     ref extra_cost,
                     grantee,
                     // enters-with counter is read at the finalize_cast seam via
-                    // `selected_static_permission_enters_with_counter`, not here.
+                    // `selected_static_permission_entry_riders`, not here.
                     ..
                 } => {
                     // CR 406.6 + CR 607.1: "you may …" grants only the source's
@@ -6276,6 +6315,7 @@ fn graveyard_permission_sources(
                         // Applied at the finalize_cast seam from the cast's
                         // latched terms; carried here so the menu shows it.
                         ref enters_with_counter,
+                        enter_tapped,
                         required_cast_keyword,
                         pool,
                         cast_limit,
@@ -6306,6 +6346,7 @@ fn graveyard_permission_sources(
                                 graveyard_destination_replacement,
                                 extra_cost,
                                 enters_with_counter,
+                                enter_tapped,
                                 required_cast_keyword,
                                 pool,
                                 cast_limit,
@@ -6412,6 +6453,7 @@ fn transient_graveyard_permission_sources(
                         graveyard_destination_replacement,
                         ref extra_cost,
                         ref enters_with_counter,
+                        enter_tapped,
                         required_cast_keyword,
                         pool,
                         cast_limit,
@@ -6463,6 +6505,7 @@ fn transient_graveyard_permission_sources(
                             graveyard_destination_replacement,
                             extra_cost,
                             enters_with_counter,
+                            enter_tapped,
                             required_cast_keyword,
                             pool,
                             cast_limit,
@@ -6732,6 +6775,7 @@ impl GraveyardCastAuthority {
                 permission: source.permission,
                 extra_cost: source.extra_cost.clone(),
                 enters_with_counter: source.enters_with_counter.clone(),
+                enter_tapped: source.enter_tapped,
                 cast_limit: source.cast_limit,
                 mana_spend_permission: source.mana_spend_permission,
                 enters_modifications: source.enters_modifications.clone(),
